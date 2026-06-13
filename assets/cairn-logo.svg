@@ -1,0 +1,20 @@
+<svg width="340" height="286" viewBox="86 162 340 286" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Cairn">
+  <defs>
+    <linearGradient id="ember" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFB36B"/>
+      <stop offset="1" stop-color="#FB923C"/>
+    </linearGradient>
+  </defs>
+
+  <!-- ground shadow -->
+  <ellipse cx="256" cy="402" rx="148" ry="22" fill="#000000" opacity="0.18"/>
+
+  <!-- stacked stones (a cairn) -->
+  <ellipse cx="256" cy="360" rx="150" ry="46" fill="#6B7689"/>
+  <ellipse cx="244" cy="300" rx="120" ry="40" fill="#8A94A6"/>
+  <ellipse cx="268" cy="250" rx="92"  ry="34" fill="#AEB8C6"/>
+
+  <!-- ember "trail blaze" cap stone -->
+  <ellipse cx="256" cy="204" rx="58" ry="30" fill="url(#ember)"/>
+  <ellipse cx="252" cy="197" rx="38" ry="12" fill="#FFFFFF" opacity="0.20"/>
+</svg>

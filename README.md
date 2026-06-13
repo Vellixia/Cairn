@@ -1,6 +1,8 @@
 <div align="center">
 
-# 🪨 Cairn
+<img src="assets/cairn-logo.svg" alt="Cairn" width="116" />
+
+# Cairn
 
 ### The open-source context & reliability layer for AI agents
 
