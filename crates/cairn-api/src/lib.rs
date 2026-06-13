@@ -19,6 +19,7 @@ use cairn_core::{Config, Memory, NewMemory};
 use cairn_guard::{Guard, VerifyReport};
 use cairn_memory::{MemoryEngine, ScoredMemory};
 use cairn_store::Store;
+use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
@@ -55,7 +56,6 @@ impl AppState {
 
 pub fn router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(index))
         .route("/api/health", get(health))
         .route("/api/stats", get(stats))
         .route("/api/context/read", get(read))
@@ -65,6 +65,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/wakeup", get(wakeup))
         .route("/api/guard/verify", post(verify))
+        .fallback(static_handler)
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -75,11 +76,50 @@ pub async fn serve(addr: SocketAddr, state: AppState) -> std::io::Result<()> {
     axum::serve(listener, router(state)).await
 }
 
-// ---- handlers ----------------------------------------------------------------------------------
+/// The web UI (landing + control plane), embedded from the Next.js static export. In dev builds
+/// rust-embed reads it from disk; in release it is baked into the binary. If the export is absent
+/// (UI not built), requests fall back to the lightweight built-in page.
+#[derive(RustEmbed)]
+#[folder = "../../web/out"]
+struct WebAssets;
 
-async fn index() -> Html<&'static str> {
-    Html(ui::INDEX_HTML)
+async fn static_handler(uri: axum::http::Uri) -> Response {
+    let path = uri.path().trim_start_matches('/');
+    let key = if path.is_empty() {
+        "index.html".to_string()
+    } else if WebAssets::get(path).is_some() {
+        path.to_string()
+    } else if WebAssets::get(&format!("{path}.html")).is_some() {
+        format!("{path}.html")
+    } else {
+        "index.html".to_string()
+    };
+    match WebAssets::get(&key) {
+        Some(file) => (
+            [(axum::http::header::CONTENT_TYPE, content_type(&key))],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => Html(ui::INDEX_HTML).into_response(),
+    }
 }
+
+fn content_type(path: &str) -> &'static str {
+    match path.rsplit('.').next() {
+        Some("html") => "text/html; charset=utf-8",
+        Some("js") => "text/javascript; charset=utf-8",
+        Some("css") => "text/css; charset=utf-8",
+        Some("json") | Some("map") => "application/json",
+        Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
+        Some("woff2") => "font/woff2",
+        Some("txt") => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+// ---- handlers ----------------------------------------------------------------------------------
 
 async fn health() -> Json<Value> {
     Json(json!({
@@ -204,5 +244,26 @@ impl From<cairn_core::Error> for ApiError {
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         ApiError(code, e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_type_maps_common_extensions() {
+        assert_eq!(content_type("dir/index.html"), "text/html; charset=utf-8");
+        assert_eq!(
+            content_type("_next/main.js"),
+            "text/javascript; charset=utf-8"
+        );
+        assert!(content_type("noext").contains("octet-stream"));
+    }
+
+    #[tokio::test]
+    async fn root_serves_ok() {
+        let resp = static_handler("/".parse().unwrap()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }
