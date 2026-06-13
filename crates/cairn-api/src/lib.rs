@@ -92,14 +92,14 @@ async fn static_handler(uri: axum::http::Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
     let key = if path.is_empty() {
         "index.html".to_string()
-    } else if WebAssets::get(path).is_some() {
+    } else if <WebAssets as RustEmbed>::get(path).is_some() {
         path.to_string()
-    } else if WebAssets::get(&format!("{path}.html")).is_some() {
+    } else if <WebAssets as RustEmbed>::get(&format!("{path}.html")).is_some() {
         format!("{path}.html")
     } else {
         "index.html".to_string()
     };
-    match WebAssets::get(&key) {
+    match <WebAssets as RustEmbed>::get(&key) {
         Some(file) => (
             [(axum::http::header::CONTENT_TYPE, content_type(&key))],
             file.data.into_owned(),
