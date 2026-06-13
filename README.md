@@ -66,6 +66,13 @@ cargo run -p cairn-cli -- serve
 # server + API on http://127.0.0.1:7777
 ```
 
+The landing page + operational control plane live in `web/` (Next.js, static-exported so the
+binary can embed it):
+
+```sh
+cd web && npm install && npm run dev   # http://localhost:3000 (talks to the API on :7777)
+```
+
 ## Connect an agent (MCP)
 
 Cairn speaks the Model Context Protocol over stdio — point any MCP-capable agent at `cairn mcp`.

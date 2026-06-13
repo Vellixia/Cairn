@@ -1,0 +1,13 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply bg-ink text-offwhite font-sans antialiased;
+  background-image: radial-gradient(1200px 600px at 70% -10%, #16202b 0%, #0b0f14 55%);
+  background-attachment: fixed;
+}
