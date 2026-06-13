@@ -38,31 +38,31 @@ impl MemoryEngine {
     }
 
     /// Recall the most relevant memories for a query.
+    ///
+    /// Ranked with BM25 over the memory corpus (real IR relevance, not keyword overlap), blended
+    /// with light recency and importance signals so ties resolve sensibly.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>> {
-        let terms: Vec<String> = query
-            .to_lowercase()
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
+        let mems = self.store.all_memories()?;
+        if mems.is_empty() {
+            return Ok(Vec::new());
+        }
         let now = Utc::now();
 
-        let mut scored: Vec<ScoredMemory> = self
-            .store
-            .all_memories()?
+        let docs: Vec<Vec<String>> = mems
+            .iter()
+            .map(|m| tokenize(&format!("{} {}", m.content, m.concepts.join(" "))))
+            .collect();
+        let bm25 = Bm25::new(&docs);
+        let q_terms = tokenize(query);
+
+        let mut scored: Vec<ScoredMemory> = mems
             .into_iter()
-            .map(|m| {
-                let haystack = format!(
-                    "{} {}",
-                    m.content.to_lowercase(),
-                    m.concepts.join(" ").to_lowercase()
-                );
-                let overlap = terms
-                    .iter()
-                    .filter(|t| haystack.contains(t.as_str()))
-                    .count() as f32;
+            .enumerate()
+            .map(|(i, m)| {
+                let relevance = bm25.score(i, &q_terms);
                 let age_days = ((now - m.created_at).num_seconds() as f32 / 86_400.0).max(0.0);
                 let recency = 1.0 / (1.0 + age_days);
-                let score = overlap * 2.0 + m.importance + recency * 0.5;
+                let score = relevance + 0.3 * m.importance + 0.2 * recency;
                 ScoredMemory { memory: m, score }
             })
             .collect();
@@ -108,6 +108,82 @@ fn priority(m: &Memory, now: chrono::DateTime<Utc>) -> f32 {
     let age_days = ((now - m.created_at).num_seconds() as f32 / 86_400.0).max(0.0);
     let recency = 1.0 / (1.0 + age_days);
     kind_weight + m.importance + recency * 0.5
+}
+
+/// Lowercase, alphanumeric tokenizer (tokens of length >= 2).
+fn tokenize(text: &str) -> Vec<String> {
+    text.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// A compact BM25 ranker over an in-memory corpus.
+struct Bm25 {
+    doc_len: Vec<f32>,
+    avgdl: f32,
+    df: std::collections::HashMap<String, usize>,
+    tf: Vec<std::collections::HashMap<String, usize>>,
+    n: usize,
+}
+
+impl Bm25 {
+    const K1: f32 = 1.2;
+    const B: f32 = 0.75;
+
+    fn new(docs: &[Vec<String>]) -> Self {
+        let n = docs.len();
+        let mut df: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        let mut tf = Vec::with_capacity(n);
+        let mut doc_len = Vec::with_capacity(n);
+        for doc in docs {
+            let mut counts: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for tok in doc {
+                *counts.entry(tok.clone()).or_insert(0) += 1;
+            }
+            for tok in counts.keys() {
+                *df.entry(tok.clone()).or_insert(0) += 1;
+            }
+            doc_len.push(doc.len() as f32);
+            tf.push(counts);
+        }
+        let avgdl = if n == 0 {
+            0.0
+        } else {
+            doc_len.iter().sum::<f32>() / n as f32
+        };
+        Self {
+            doc_len,
+            avgdl,
+            df,
+            tf,
+            n,
+        }
+    }
+
+    fn idf(&self, term: &str) -> f32 {
+        let df = *self.df.get(term).unwrap_or(&0) as f32;
+        (1.0 + (self.n as f32 - df + 0.5) / (df + 0.5)).ln()
+    }
+
+    fn score(&self, doc: usize, q_terms: &[String]) -> f32 {
+        if self.avgdl == 0.0 {
+            return 0.0;
+        }
+        let dl = self.doc_len[doc];
+        let mut s = 0.0;
+        for term in q_terms {
+            let tf = *self.tf[doc].get(term).unwrap_or(&0) as f32;
+            if tf == 0.0 {
+                continue;
+            }
+            let denom = tf + Self::K1 * (1.0 - Self::B + Self::B * dl / self.avgdl);
+            s += self.idf(term) * (tf * (Self::K1 + 1.0)) / denom;
+        }
+        s
+    }
 }
 
 #[cfg(test)]

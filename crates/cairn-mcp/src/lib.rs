@@ -7,6 +7,7 @@
 //!
 //! Tools exposed: `read`, `expand`, `remember`, `recall`, `wakeup`.
 
+use cairn_assemble::Assembler;
 use cairn_context::{ContextEngine, ReadMode};
 use cairn_core::{Config, NewMemory, Result};
 use cairn_guard::Guard;
@@ -22,16 +23,19 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 pub struct McpServer {
     ctx: Arc<ContextEngine>,
     guard: Arc<Guard>,
+    asm: Arc<Assembler>,
     mem: Arc<MemoryEngine>,
 }
 
 impl McpServer {
     pub fn new(cfg: &Config) -> Result<Self> {
         let store = Arc::new(Store::open(cfg)?);
+        let mem = Arc::new(MemoryEngine::new(store.clone()));
         Ok(Self {
             ctx: Arc::new(ContextEngine::new(store.clone())),
             guard: Arc::new(Guard::new(store.clone())),
-            mem: Arc::new(MemoryEngine::new(store)),
+            asm: Arc::new(Assembler::new(mem.clone())),
+            mem,
         })
     }
 
@@ -178,6 +182,15 @@ impl McpServer {
                 }
                 Ok(out)
             }
+            "assemble" => {
+                let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
+                let budget = args.get("budget").and_then(Value::as_u64).unwrap_or(2000) as usize;
+                let r = self
+                    .asm
+                    .assemble(query, budget)
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&r).map_err(|e| e.to_string())
+            }
             "verify" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
                 let content = str_arg(args.get("content")).ok_or("missing 'content'")?;
@@ -237,6 +250,18 @@ fn tool_defs() -> Value {
                 "properties": {
                     "query": { "type": "string" },
                     "limit": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "assemble",
+            "description": "Assemble a lean, edge-ordered working set for a query under a token budget — the anti-context-rot context block. Reports what was included and dropped (dropped items remain recoverable via recall).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "budget": { "type": "integer", "minimum": 1, "description": "Token budget (default 2000)." }
                 },
                 "required": ["query"]
             }

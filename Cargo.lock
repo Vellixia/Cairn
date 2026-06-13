@@ -198,6 +198,7 @@ name = "cairn-api"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "cairn-assemble",
  "cairn-context",
  "cairn-core",
  "cairn-guard",
@@ -208,6 +209,17 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
+]
+
+[[package]]
+name = "cairn-assemble"
+version = "0.1.0"
+dependencies = [
+ "cairn-core",
+ "cairn-memory",
+ "cairn-store",
+ "serde",
+ "tempfile",
 ]
 
 [[package]]
@@ -264,6 +276,7 @@ dependencies = [
 name = "cairn-mcp"
 version = "0.1.0"
 dependencies = [
+ "cairn-assemble",
  "cairn-context",
  "cairn-core",
  "cairn-guard",

@@ -12,6 +12,7 @@ cairn-store.workspace = true
 cairn-context.workspace = true
 cairn-memory.workspace = true
 cairn-guard.workspace = true
+cairn-assemble.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]

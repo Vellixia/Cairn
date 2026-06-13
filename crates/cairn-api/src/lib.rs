@@ -13,6 +13,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use cairn_assemble::{Assembler, AssemblyReport};
 use cairn_context::{ContextEngine, ReadMode, ReadResult};
 use cairn_core::{Config, Memory, NewMemory};
 use cairn_guard::{Guard, VerifyReport};
@@ -32,6 +33,7 @@ pub struct AppState {
     pub ctx: Arc<ContextEngine>,
     pub mem: Arc<MemoryEngine>,
     pub guard: Arc<Guard>,
+    pub asm: Arc<Assembler>,
 }
 
 impl AppState {
@@ -40,11 +42,13 @@ impl AppState {
         let ctx = Arc::new(ContextEngine::new(store.clone()));
         let mem = Arc::new(MemoryEngine::new(store.clone()));
         let guard = Arc::new(Guard::new(store.clone()));
+        let asm = Arc::new(Assembler::new(mem.clone()));
         Ok(Self {
             store,
             ctx,
             mem,
             guard,
+            asm,
         })
     }
 }
@@ -56,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/stats", get(stats))
         .route("/api/context/read", get(read))
         .route("/api/context/expand", get(expand))
+        .route("/api/context/assemble", get(assemble))
         .route("/api/memory", post(remember))
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/wakeup", get(wakeup))
@@ -163,6 +168,20 @@ async fn verify(
     Json(b): Json<VerifyBody>,
 ) -> Result<Json<VerifyReport>, ApiError> {
     Ok(Json(s.guard.verify_edit(Path::new(&b.path), &b.content)?))
+}
+
+#[derive(Deserialize)]
+struct AssembleQuery {
+    q: String,
+    #[serde(default)]
+    budget: Option<usize>,
+}
+
+async fn assemble(
+    State(s): State<AppState>,
+    Query(q): Query<AssembleQuery>,
+) -> Result<Json<AssemblyReport>, ApiError> {
+    Ok(Json(s.asm.assemble(&q.q, q.budget.unwrap_or(2000))?))
 }
 
 // ---- error plumbing ----------------------------------------------------------------------------
