@@ -129,6 +129,15 @@ impl ContextEngine {
         let hash = self.store.blobs().put(&bytes)?;
         let lines = content.lines().count();
 
+        // Record this version as the agent's edit baseline so the PostToolUse guard can later
+        // detect silent corruption (a large unreplaced deletion vs. what was read).
+        let canonical = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| key.clone());
+        let _ = self
+            .store
+            .record_file_version(&canonical, &hash.0, lines as i64);
+
         let prev = cache.get(&key).map(|e| e.content.clone());
 
         let result = match (&prev, mode) {

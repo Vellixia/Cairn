@@ -1,9 +1,16 @@
-//! SQLite-backed structured store (memories, …) plus access to the blob store.
+//! The structured store.
+//!
+//! `Store` is a backend-agnostic facade: it dispatches to a `StoreBackend` implementation (SQLite
+//! today; a HelixDB backend next, per the plan) and owns the content-addressed [`BlobStore`] that
+//! holds full-fidelity originals. Keeping the public `Store` API stable means swapping the backend
+//! never churns the engines, API, MCP, or CLI — and tests/CI run against the embedded SQLite
+//! backend with no external service.
 
 use crate::blob::BlobStore;
 use cairn_core::{Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
+use std::path::Path;
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -14,21 +21,114 @@ fn stor<E: std::fmt::Display>(e: E) -> Error {
 
 const SELECT_COLS: &str = "id,kind,tier,content,content_hash,concepts,files,session_id,importance,access_count,created_at,updated_at";
 
+/// The structured-storage operations Cairn needs from a backend. Implemented by [`SqliteBackend`]
+/// today; a HelixDB backend implements the same surface so [`Store`] can dispatch to either.
+trait StoreBackend: Send + Sync {
+    fn insert_memory(&self, m: &Memory) -> Result<()>;
+    fn get_memory(&self, id: &str) -> Result<Option<Memory>>;
+    fn find_memory_by_content_hash(&self, hash: &str) -> Result<Option<Memory>>;
+    fn all_memories(&self) -> Result<Vec<Memory>>;
+    fn touch_memory(&self, id: &str) -> Result<()>;
+    fn count_memories(&self) -> Result<i64>;
+    fn upsert_memory(&self, m: &Memory) -> Result<bool>;
+    fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>>;
+    fn create_token(&self, name: &str) -> Result<DeviceToken>;
+    fn validate_token(&self, token: &str) -> Result<bool>;
+    fn revoke_token(&self, token: &str) -> Result<bool>;
+    fn list_tokens(&self) -> Result<Vec<DeviceToken>>;
+    fn count_tokens(&self) -> Result<i64>;
+    fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>>;
+    fn set_last_sync(&self, server: &str, when: DateTime<Utc>) -> Result<()>;
+    fn record_file_version(&self, path: &str, content_hash: &str, lines: i64) -> Result<()>;
+    fn latest_file_version(&self, path: &str) -> Result<Option<(String, i64)>>;
+}
+
+/// The structured store plus the content-addressed blob store. Backend-agnostic public API.
 pub struct Store {
-    conn: Mutex<Connection>,
+    backend: Box<dyn StoreBackend>,
     blobs: BlobStore,
 }
 
 impl Store {
-    /// Open (and migrate) the database described by `cfg`.
+    /// Open (and migrate) the store described by `cfg`. SQLite is the current backend.
     pub fn open(cfg: &Config) -> Result<Self> {
-        let conn = Connection::open(cfg.db_path()).map_err(stor)?;
-        let store = Self {
-            conn: Mutex::new(conn),
+        let backend = Box::new(SqliteBackend::open(&cfg.db_path())?);
+        Ok(Self {
+            backend,
             blobs: BlobStore::new(cfg.blobs_dir()),
+        })
+    }
+
+    pub fn blobs(&self) -> &BlobStore {
+        &self.blobs
+    }
+
+    pub fn insert_memory(&self, m: &Memory) -> Result<()> {
+        self.backend.insert_memory(m)
+    }
+    pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
+        self.backend.get_memory(id)
+    }
+    pub fn find_memory_by_content_hash(&self, hash: &str) -> Result<Option<Memory>> {
+        self.backend.find_memory_by_content_hash(hash)
+    }
+    pub fn all_memories(&self) -> Result<Vec<Memory>> {
+        self.backend.all_memories()
+    }
+    pub fn touch_memory(&self, id: &str) -> Result<()> {
+        self.backend.touch_memory(id)
+    }
+    pub fn count_memories(&self) -> Result<i64> {
+        self.backend.count_memories()
+    }
+    pub fn upsert_memory(&self, m: &Memory) -> Result<bool> {
+        self.backend.upsert_memory(m)
+    }
+    pub fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>> {
+        self.backend.memories_since(since)
+    }
+    pub fn create_token(&self, name: &str) -> Result<DeviceToken> {
+        self.backend.create_token(name)
+    }
+    pub fn validate_token(&self, token: &str) -> Result<bool> {
+        self.backend.validate_token(token)
+    }
+    pub fn revoke_token(&self, token: &str) -> Result<bool> {
+        self.backend.revoke_token(token)
+    }
+    pub fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
+        self.backend.list_tokens()
+    }
+    pub fn count_tokens(&self) -> Result<i64> {
+        self.backend.count_tokens()
+    }
+    pub fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>> {
+        self.backend.get_last_sync(server)
+    }
+    pub fn set_last_sync(&self, server: &str, when: DateTime<Utc>) -> Result<()> {
+        self.backend.set_last_sync(server, when)
+    }
+    pub fn record_file_version(&self, path: &str, content_hash: &str, lines: i64) -> Result<()> {
+        self.backend.record_file_version(path, content_hash, lines)
+    }
+    pub fn latest_file_version(&self, path: &str) -> Result<Option<(String, i64)>> {
+        self.backend.latest_file_version(path)
+    }
+}
+
+/// Embedded SQLite backend — the default; zero external services, ideal for dev/tests/CI.
+struct SqliteBackend {
+    conn: Mutex<Connection>,
+}
+
+impl SqliteBackend {
+    fn open(path: &Path) -> Result<Self> {
+        let conn = Connection::open(path).map_err(stor)?;
+        let backend = Self {
+            conn: Mutex::new(conn),
         };
-        store.migrate()?;
-        Ok(store)
+        backend.migrate()?;
+        Ok(backend)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -58,17 +158,21 @@ impl Store {
             CREATE TABLE IF NOT EXISTS sync_state (
                 server TEXT PRIMARY KEY,
                 last_sync TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS file_versions (
+                path TEXT PRIMARY KEY,
+                content_hash TEXT NOT NULL,
+                lines INTEGER NOT NULL,
+                updated_at TEXT NOT NULL
             );",
         )
         .map_err(stor)?;
         Ok(())
     }
+}
 
-    pub fn blobs(&self) -> &BlobStore {
-        &self.blobs
-    }
-
-    pub fn insert_memory(&self, m: &Memory) -> Result<()> {
+impl StoreBackend for SqliteBackend {
+    fn insert_memory(&self, m: &Memory) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let hash = ContentHash::of_str(&m.content);
         conn.execute(
@@ -93,7 +197,7 @@ impl Store {
         Ok(())
     }
 
-    pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
+    fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
         let conn = self.conn.lock().unwrap();
         let sql = format!("SELECT {SELECT_COLS} FROM memories WHERE id=?1");
         let mut stmt = conn.prepare(&sql).map_err(stor)?;
@@ -102,7 +206,7 @@ impl Store {
             .map_err(stor)
     }
 
-    pub fn find_memory_by_content_hash(&self, hash: &str) -> Result<Option<Memory>> {
+    fn find_memory_by_content_hash(&self, hash: &str) -> Result<Option<Memory>> {
         let conn = self.conn.lock().unwrap();
         let sql = format!("SELECT {SELECT_COLS} FROM memories WHERE content_hash=?1 LIMIT 1");
         let mut stmt = conn.prepare(&sql).map_err(stor)?;
@@ -111,7 +215,7 @@ impl Store {
             .map_err(stor)
     }
 
-    pub fn all_memories(&self) -> Result<Vec<Memory>> {
+    fn all_memories(&self) -> Result<Vec<Memory>> {
         let conn = self.conn.lock().unwrap();
         let sql = format!("SELECT {SELECT_COLS} FROM memories ORDER BY created_at DESC");
         let mut stmt = conn.prepare(&sql).map_err(stor)?;
@@ -123,7 +227,7 @@ impl Store {
         Ok(out)
     }
 
-    pub fn touch_memory(&self, id: &str) -> Result<()> {
+    fn touch_memory(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE memories SET access_count = access_count + 1, updated_at = ?2 WHERE id = ?1",
@@ -133,15 +237,13 @@ impl Store {
         Ok(())
     }
 
-    pub fn count_memories(&self) -> Result<i64> {
+    fn count_memories(&self) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
             .map_err(stor)
     }
 
-    /// Insert or update by id, keeping the newer version (last-write-wins on `updated_at`).
-    /// Returns whether the row was written (false = an equal-or-newer row already existed).
-    pub fn upsert_memory(&self, m: &Memory) -> Result<bool> {
+    fn upsert_memory(&self, m: &Memory) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let existing: Option<String> = conn
             .query_row(
@@ -179,8 +281,7 @@ impl Store {
         Ok(true)
     }
 
-    /// Memories changed strictly after `since` (for sync), oldest first.
-    pub fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>> {
+    fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>> {
         let conn = self.conn.lock().unwrap();
         let sql = format!(
             "SELECT {SELECT_COLS} FROM memories WHERE updated_at > ?1 ORDER BY updated_at ASC"
@@ -196,9 +297,7 @@ impl Store {
         Ok(out)
     }
 
-    // ---- device tokens -------------------------------------------------------------------------
-
-    pub fn create_token(&self, name: &str) -> Result<DeviceToken> {
+    fn create_token(&self, name: &str) -> Result<DeviceToken> {
         let conn = self.conn.lock().unwrap();
         let token = format!("cairn_{}", Uuid::new_v4().simple());
         let created_at = Utc::now();
@@ -214,7 +313,7 @@ impl Store {
         })
     }
 
-    pub fn validate_token(&self, token: &str) -> Result<bool> {
+    fn validate_token(&self, token: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let found: Option<i64> = conn
             .query_row(
@@ -227,7 +326,7 @@ impl Store {
         Ok(found.is_some())
     }
 
-    pub fn revoke_token(&self, token: &str) -> Result<bool> {
+    fn revoke_token(&self, token: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         let n = conn
             .execute("DELETE FROM device_tokens WHERE token=?1", params![token])
@@ -235,7 +334,7 @@ impl Store {
         Ok(n > 0)
     }
 
-    pub fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
+    fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare("SELECT token,name,created_at FROM device_tokens ORDER BY created_at ASC")
@@ -257,15 +356,13 @@ impl Store {
         Ok(out)
     }
 
-    pub fn count_tokens(&self) -> Result<i64> {
+    fn count_tokens(&self) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
         conn.query_row("SELECT COUNT(*) FROM device_tokens", [], |r| r.get(0))
             .map_err(stor)
     }
 
-    // ---- sync state ----------------------------------------------------------------------------
-
-    pub fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>> {
+    fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>> {
         let conn = self.conn.lock().unwrap();
         let ts_str: Option<String> = conn
             .query_row(
@@ -278,7 +375,7 @@ impl Store {
         Ok(ts_str.map(|s| parse_ts(&s)))
     }
 
-    pub fn set_last_sync(&self, server: &str, when: DateTime<Utc>) -> Result<()> {
+    fn set_last_sync(&self, server: &str, when: DateTime<Utc>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "INSERT INTO sync_state (server,last_sync) VALUES (?1,?2)
@@ -287,6 +384,28 @@ impl Store {
         )
         .map_err(stor)?;
         Ok(())
+    }
+
+    fn record_file_version(&self, path: &str, content_hash: &str, lines: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO file_versions (path,content_hash,lines,updated_at) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, lines=excluded.lines, updated_at=excluded.updated_at",
+            params![path, content_hash, lines, ts(Utc::now())],
+        )
+        .map_err(stor)?;
+        Ok(())
+    }
+
+    fn latest_file_version(&self, path: &str) -> Result<Option<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT content_hash, lines FROM file_versions WHERE path=?1",
+            params![path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(stor)
     }
 }
 
@@ -401,5 +520,17 @@ mod tests {
         s.set_last_sync("https://x", now).unwrap();
         let got = s.get_last_sync("https://x").unwrap().unwrap();
         assert!((got - now).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn file_version_roundtrips_and_upserts() {
+        let (s, _d) = store();
+        assert!(s.latest_file_version("/x.rs").unwrap().is_none());
+        s.record_file_version("/x.rs", "abc123", 42).unwrap();
+        let (hash, lines) = s.latest_file_version("/x.rs").unwrap().unwrap();
+        assert_eq!(hash, "abc123");
+        assert_eq!(lines, 42);
+        s.record_file_version("/x.rs", "def456", 10).unwrap();
+        assert_eq!(s.latest_file_version("/x.rs").unwrap().unwrap().0, "def456");
     }
 }
