@@ -1,9 +1,11 @@
 //! The memory engine: persist what matters and surface it again across sessions.
 //!
-//! Dedup on exact content; recall ranked by BM25 over the corpus, blended with recency and
-//! importance. Vector/graph hybrid retrieval and 4-tier consolidation build on this foundation.
+//! Dedup on exact content; recall ranked by BM25 over the corpus, blended with Ebbinghaus
+//! retention (memories decay unless reinforced) and importance. Consolidation moves memories
+//! across the four tiers (working → episodic → semantic → procedural). Vector/graph hybrid
+//! retrieval builds on this foundation.
 
-use cairn_core::{ContentHash, Memory, MemoryKind, NewMemory, Result};
+use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, Result};
 use cairn_store::Store;
 use chrono::Utc;
 use serde::Serialize;
@@ -60,8 +62,8 @@ impl MemoryEngine {
             .map(|(i, m)| {
                 let relevance = bm25.score(i, &q_terms);
                 let age_days = ((now - m.created_at).num_seconds() as f32 / 86_400.0).max(0.0);
-                let recency = 1.0 / (1.0 + age_days);
-                let score = relevance + 0.3 * m.importance + 0.2 * recency;
+                let ret = retention(age_days, m.access_count, m.importance);
+                let score = relevance + 0.3 * m.importance + 0.4 * ret;
                 ScoredMemory { memory: m, score }
             })
             .collect();
@@ -93,6 +95,28 @@ impl MemoryEngine {
         all.truncate(limit);
         Ok(all)
     }
+
+    /// Fetch a memory by id.
+    pub fn get(&self, id: &str) -> Result<Option<Memory>> {
+        self.store.get_memory(id)
+    }
+
+    /// Consolidate memory across the four tiers (working → episodic → semantic → procedural),
+    /// the way human memory turns transient experience into durable knowledge. Returns how many
+    /// memories were promoted. Idempotent: a memory only advances when it meets the next bar.
+    pub fn consolidate(&self) -> Result<usize> {
+        let mut promoted = 0;
+        for mut m in self.store.all_memories()? {
+            if let Some(tier) = next_tier(&m) {
+                m.tier = tier;
+                m.updated_at = Utc::now();
+                if self.store.upsert_memory(&m)? {
+                    promoted += 1;
+                }
+            }
+        }
+        Ok(promoted)
+    }
 }
 
 fn priority(m: &Memory, now: chrono::DateTime<Utc>) -> f32 {
@@ -105,8 +129,33 @@ fn priority(m: &Memory, now: chrono::DateTime<Utc>) -> f32 {
         MemoryKind::Note => 0.3,
     };
     let age_days = ((now - m.created_at).num_seconds() as f32 / 86_400.0).max(0.0);
-    let recency = 1.0 / (1.0 + age_days);
-    kind_weight + m.importance + recency * 0.5
+    kind_weight + m.importance + retention(age_days, m.access_count, m.importance) * 0.5
+}
+
+/// Ebbinghaus-style retention in `[0, 1]`: how strongly a memory is held right now. Stability
+/// grows with repeated access and importance, so reinforced/important memories decay slowly while
+/// untouched ones fade. A fresh memory (age 0) returns ~1.0.
+fn retention(age_days: f32, access_count: i64, importance: f32) -> f32 {
+    let stability = 1.0 + 0.5 * access_count.max(0) as f32 + 2.0 * importance.clamp(0.0, 1.0);
+    (-age_days.max(0.0) / (5.0 * stability)).exp()
+}
+
+/// The tier a memory should advance to on consolidation, or `None` if it stays put. Working
+/// memories survive their session into episodic; reinforced episodic memories (accessed again)
+/// become durable — facts/decisions/preferences become semantic knowledge, and gotchas (hard-won
+/// "avoid X" lessons) become procedural.
+fn next_tier(m: &Memory) -> Option<MemoryTier> {
+    match m.tier {
+        MemoryTier::Working => Some(MemoryTier::Episodic),
+        MemoryTier::Episodic if m.access_count >= 2 => match m.kind {
+            MemoryKind::Fact | MemoryKind::Decision | MemoryKind::Preference => {
+                Some(MemoryTier::Semantic)
+            }
+            MemoryKind::Gotcha => Some(MemoryTier::Procedural),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Lowercase, alphanumeric tokenizer (tokens of length >= 2).
@@ -188,7 +237,7 @@ impl Bm25 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::{Config, MemoryKind};
+    use cairn_core::{Config, MemoryKind, MemoryTier};
     use cairn_store::Store;
 
     fn engine() -> (MemoryEngine, tempfile::TempDir) {
@@ -238,5 +287,50 @@ mod tests {
         .unwrap();
         let w = mem.wakeup(5).unwrap();
         assert_eq!(w[0].kind, MemoryKind::Decision);
+    }
+
+    #[test]
+    fn retention_rewards_reinforcement_and_penalizes_age() {
+        assert!(retention(0.0, 0, 0.5) > 0.99);
+        let stale = retention(30.0, 0, 0.1);
+        let reinforced = retention(30.0, 8, 0.9);
+        assert!(
+            reinforced > stale,
+            "reinforced should retain more than stale"
+        );
+        assert!(stale < 0.5, "an old untouched memory should have faded");
+    }
+
+    #[test]
+    fn consolidate_promotes_across_tiers() {
+        let (mem, _d) = engine();
+
+        // A working note consolidates into episodic.
+        let note = mem
+            .remember(NewMemory::new("a transient working note"))
+            .unwrap();
+        assert_eq!(note.tier, MemoryTier::Working);
+        assert_eq!(mem.consolidate().unwrap(), 1);
+        assert_eq!(
+            mem.get(&note.id).unwrap().unwrap().tier,
+            MemoryTier::Episodic
+        );
+
+        // A reinforced fact (accessed twice) advances episodic -> semantic.
+        let fact = mem
+            .remember(NewMemory {
+                content: "rust uses ownership for memory safety".into(),
+                kind: Some(MemoryKind::Fact),
+                ..Default::default()
+            })
+            .unwrap();
+        mem.consolidate().unwrap(); // working -> episodic
+        mem.recall("rust ownership memory", 10).unwrap();
+        mem.recall("rust ownership memory", 10).unwrap();
+        mem.consolidate().unwrap(); // episodic + accessed -> semantic
+        assert_eq!(
+            mem.get(&fact.id).unwrap().unwrap().tier,
+            MemoryTier::Semantic
+        );
     }
 }

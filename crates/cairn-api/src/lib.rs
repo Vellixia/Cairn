@@ -66,6 +66,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory", post(remember))
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/wakeup", get(wakeup))
+        .route("/api/memory/consolidate", post(consolidate_memory))
         .route("/api/guard/verify", post(verify))
         .route("/api/sync/pull", get(sync_pull))
         .route("/api/sync/push", post(sync_push))
@@ -200,6 +201,10 @@ async fn wakeup(
     Query(q): Query<WakeupQuery>,
 ) -> Result<Json<Vec<Memory>>, ApiError> {
     Ok(Json(s.mem.wakeup(q.limit.unwrap_or(12))?))
+}
+
+async fn consolidate_memory(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
+    Ok(Json(json!({ "promoted": s.mem.consolidate()? })))
 }
 
 #[derive(Deserialize)]

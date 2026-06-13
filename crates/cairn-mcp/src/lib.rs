@@ -182,6 +182,10 @@ impl McpServer {
                 }
                 Ok(out)
             }
+            "consolidate" => {
+                let n = self.mem.consolidate().map_err(|e| e.to_string())?;
+                Ok(format!("consolidated memory: {n} promoted across tiers"))
+            }
             "assemble" => {
                 let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
                 let budget = args.get("budget").and_then(Value::as_u64).unwrap_or(2000) as usize;
@@ -273,6 +277,11 @@ fn tool_defs() -> Value {
                 "type": "object",
                 "properties": { "limit": { "type": "integer", "minimum": 1 } }
             }
+        },
+        {
+            "name": "consolidate",
+            "description": "Consolidate memory across the four tiers (working → episodic → semantic → procedural). Run at session end to turn transient notes into durable knowledge.",
+            "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "verify",
