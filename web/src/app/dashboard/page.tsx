@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import Logo from "@/components/Logo";
 import {
@@ -12,9 +12,14 @@ import {
   type ScoredMemory,
   type Memory,
   type ReadResult,
+  type Checkpoint,
+  type RollbackReport,
+  type Sanitized,
+  type Sensitivity,
+  type ShareExport,
 } from "@/lib/api";
 
-const TABS = ["Overview", "Memory", "Context", "Devices"] as const;
+const TABS = ["Overview", "Memory", "Context", "Reliability", "Preferences", "Share", "Devices"] as const;
 type Tab = (typeof TABS)[number];
 
 export default function Dashboard() {
@@ -35,7 +40,7 @@ export default function Dashboard() {
       </header>
 
       <div className="mx-auto max-w-5xl px-5 py-8">
-        <nav className="mb-7 flex gap-1 border-b border-line">
+        <nav className="mb-7 flex flex-wrap gap-1 border-b border-line">
           {TABS.map((t) => (
             <button
               key={t}
@@ -52,6 +57,9 @@ export default function Dashboard() {
         {tab === "Overview" && <Overview />}
         {tab === "Memory" && <MemoryPanel />}
         {tab === "Context" && <ContextPanel />}
+        {tab === "Reliability" && <ReliabilityPanel />}
+        {tab === "Preferences" && <PreferencesPanel />}
+        {tab === "Share" && <SharePanel />}
         {tab === "Devices" && <DevicesPanel />}
       </div>
     </div>
@@ -67,6 +75,15 @@ function Card({ title, children }: { title: string; children: React.ReactNode })
   );
 }
 
+function Row({ k, v }: { k: string; v: string }) {
+  return (
+    <div className="flex justify-between border-b border-dashed border-line py-1.5 last:border-0">
+      <span className="text-slate">{k}</span>
+      <span className="font-mono text-teal">{v}</span>
+    </div>
+  );
+}
+
 function OfflineHint() {
   return (
     <p className="text-sm text-slate">
@@ -75,6 +92,10 @@ function OfflineHint() {
     </p>
   );
 }
+
+const btnPrimary = "rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206]";
+const btnGhost = "rounded-lg border border-line px-4 py-2 text-sm font-semibold hover:border-slate";
+const inputCls = "w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-slate";
 
 function Overview() {
   const [health, setHealth] = useState<Health | null>(null);
@@ -100,6 +121,9 @@ function Overview() {
             <Row k="Status" v={health?.status ?? "…"} />
             <Row k="Version" v={health ? `v${health.version}` : "…"} />
             <Row k="Memories" v={stats ? String(stats.memories) : "…"} />
+            <Row k="Checkpoints" v={stats?.checkpoints != null ? String(stats.checkpoints) : "…"} />
+            <Row k="Preferences" v={stats?.preferences != null ? String(stats.preferences) : "…"} />
+            <Row k="Task anchor" v={stats?.anchor ? "set" : "none"} />
           </dl>
         )}
       </Card>
@@ -114,21 +138,19 @@ function Overview() {
               ),
             )}
           </div>
+          {stats?.anchor && (
+            <p className="mt-4 text-sm">
+              <span className="text-slate">Current task: </span>
+              <span className="text-offwhite">{stats.anchor}</span>
+            </p>
+          )}
           <p className="mt-4 text-sm text-slate">
-            This is the thin-slice build: Memory and Context are live. Reliability guardrails,
-            preference learning, and collective knowledge arrive in later phases.
+            Memory, no-loss context, edit guardrails, preference learning, and privacy-first
+            sanitization are live. Vectors + graph (HelixDB) and the federated collective-knowledge
+            pool are next.
           </p>
         </Card>
       </div>
-    </div>
-  );
-}
-
-function Row({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="flex justify-between border-b border-dashed border-line py-1.5 last:border-0">
-      <span className="text-slate">{k}</span>
-      <span className="font-mono text-teal">{v}</span>
     </div>
   );
 }
@@ -167,9 +189,9 @@ function MemoryPanel() {
           onChange={(e) => setContent(e.target.value)}
           rows={4}
           placeholder="e.g. We chose SQLite + a content-hash blob store so compression stays lossless."
-          className="w-full rounded-lg border border-line bg-surface2 p-3 text-sm outline-none focus:border-slate"
+          className={inputCls}
         />
-        <button onClick={remember} className="mt-2 rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206]">
+        <button onClick={remember} className={`mt-2 ${btnPrimary}`}>
           Remember
         </button>
         {note && <p className="mt-2 text-xs text-teal">{note}</p>}
@@ -182,9 +204,9 @@ function MemoryPanel() {
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && recall()}
             placeholder="search your memory…"
-            className="w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-slate"
+            className={inputCls}
           />
-          <button onClick={recall} className="rounded-lg border border-line px-4 py-2 text-sm font-semibold">
+          <button onClick={recall} className={btnGhost}>
             Recall
           </button>
         </div>
@@ -195,6 +217,7 @@ function MemoryPanel() {
               {h.memory.content}
               <div className="mt-1 text-xs text-slate">
                 <span className="text-ember">{h.score.toFixed(2)}</span> · {h.memory.kind} · {h.memory.tier}
+                {h.memory.concepts?.length > 0 && <> · {h.memory.concepts.join(", ")}</>}
               </div>
             </div>
           ))}
@@ -206,6 +229,7 @@ function MemoryPanel() {
 
 function ContextPanel() {
   const [path, setPath] = useState("README.md");
+  const [mode, setMode] = useState("auto");
   const [result, setResult] = useState<ReadResult | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [err, setErr] = useState("");
@@ -213,7 +237,11 @@ function ContextPanel() {
   async function read() {
     setExpanded(null);
     try {
-      setResult(await getJSON<ReadResult>(`/api/context/read?path=${encodeURIComponent(path)}`));
+      setResult(
+        await getJSON<ReadResult>(
+          `/api/context/read?path=${encodeURIComponent(path)}&mode=${encodeURIComponent(mode)}`,
+        ),
+      );
       setErr("");
     } catch (e) {
       setErr(String(e));
@@ -232,16 +260,26 @@ function ContextPanel() {
   }
 
   return (
-    <Card title="Context inspector — read cache + lossless expand">
-      <div className="flex gap-2">
+    <Card title="Context inspector — cache · AST outline · lossless expand">
+      <div className="flex flex-wrap gap-2">
         <input
           value={path}
           onChange={(e) => setPath(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && read()}
-          placeholder="path relative to the server, e.g. README.md"
-          className="w-full rounded-lg border border-line bg-surface2 px-3 py-2 font-mono text-sm outline-none focus:border-slate"
+          placeholder="path relative to the server, e.g. crates/cairn-core/src/model.rs"
+          className={`${inputCls} flex-1 font-mono`}
         />
-        <button onClick={read} className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206]">
+        <select
+          value={mode}
+          onChange={(e) => setMode(e.target.value)}
+          className="rounded-lg border border-line bg-surface2 px-3 py-2 text-sm"
+        >
+          <option value="auto">auto</option>
+          <option value="full">full</option>
+          <option value="signatures">signatures</option>
+          <option value="map">map</option>
+        </select>
+        <button onClick={read} className={btnPrimary}>
           Read
         </button>
       </div>
@@ -255,7 +293,7 @@ function ContextPanel() {
             <Row k="handle" v={result.handle} />
           </div>
           <p className="text-xs text-slate">{result.note}</p>
-          <button onClick={expand} className="rounded-lg border border-line px-4 py-2 text-sm font-semibold">
+          <button onClick={expand} className={btnGhost}>
             Expand → recover byte-identical original
           </button>
           <pre className="max-h-80 overflow-auto rounded-lg border border-line bg-surface2 p-3 font-mono text-xs text-[#cdd5e0]">
@@ -264,6 +302,262 @@ function ContextPanel() {
         </div>
       )}
     </Card>
+  );
+}
+
+function ReliabilityPanel() {
+  const [anchor, setAnchor] = useState("");
+  const [goal, setGoal] = useState("");
+  const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
+  const [label, setLabel] = useState("");
+  const [note, setNote] = useState("");
+  const [err, setErr] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      const a = await getJSON<{ anchor: string | null }>("/api/guard/anchor");
+      setAnchor(a.anchor ?? "");
+      setCheckpoints(await getJSON<Checkpoint[]>("/api/guard/checkpoints"));
+      setErr("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function setTaskAnchor() {
+    if (!goal.trim()) return;
+    try {
+      await postJSON("/api/guard/anchor", { goal });
+      setAnchor(goal);
+      setGoal("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+  async function createCheckpoint() {
+    try {
+      const q = label.trim() ? `?label=${encodeURIComponent(label.trim())}` : "";
+      const cp = await postJSON<Checkpoint>(`/api/guard/checkpoint${q}`, {});
+      setNote(`checkpoint ${cp.id.slice(0, 8)} · ${cp.files} files tracked`);
+      setLabel("");
+      load();
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+  async function rollback(id: string) {
+    try {
+      const r = await postJSON<RollbackReport>(`/api/guard/rollback?id=${encodeURIComponent(id)}`, {});
+      setNote(`rolled back ${id.slice(0, 8)} · ${r.restored.length} restored, ${r.skipped.length} skipped`);
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <Card title="Task anchor — the goal re-injected each session">
+        {anchor ? (
+          <p className="mb-3 rounded-lg border border-line bg-surface2 px-3 py-2 text-sm text-offwhite">{anchor}</p>
+        ) : (
+          <p className="mb-3 text-sm text-slate">No anchor set.</p>
+        )}
+        <div className="flex gap-2">
+          <input
+            value={goal}
+            onChange={(e) => setGoal(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && setTaskAnchor()}
+            placeholder="e.g. Ship the HelixDB backend behind the store seam"
+            className={inputCls}
+          />
+          <button onClick={setTaskAnchor} className={btnPrimary}>
+            Set
+          </button>
+        </div>
+      </Card>
+
+      <Card title="Checkpoints — snapshot & roll back tracked files">
+        <div className="flex gap-2">
+          <input
+            value={label}
+            onChange={(e) => setLabel(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && createCheckpoint()}
+            placeholder="label (optional)"
+            className={inputCls}
+          />
+          <button onClick={createCheckpoint} className={btnPrimary}>
+            Checkpoint
+          </button>
+        </div>
+        {note && <p className="mt-2 text-xs text-teal">{note}</p>}
+        {err && <p className="mt-2 text-xs text-ember">{err}</p>}
+        <div className="mt-3 space-y-2">
+          {checkpoints.length === 0 && <p className="text-sm text-slate">No checkpoints yet.</p>}
+          {checkpoints.map((c) => (
+            <div
+              key={c.id}
+              className="flex items-center justify-between rounded-lg border border-line bg-surface2 px-3 py-2 text-sm"
+            >
+              <div>
+                <span className="text-offwhite">{c.label}</span>
+                <div className="text-xs text-slate">
+                  {c.id.slice(0, 8)} · {c.files} files · {new Date(c.created_at).toLocaleString()}
+                </div>
+              </div>
+              <button onClick={() => rollback(c.id)} className={btnGhost}>
+                Rollback
+              </button>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function PreferencesPanel() {
+  const [prefs, setPrefs] = useState<Memory[]>([]);
+  const [rule, setRule] = useState("");
+  const [err, setErr] = useState("");
+
+  const load = useCallback(async () => {
+    try {
+      setPrefs(await getJSON<Memory[]>("/api/profile"));
+      setErr("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  }, []);
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function add() {
+    if (!rule.trim()) return;
+    try {
+      await postJSON<Memory>("/api/profile", { rule });
+      setRule("");
+      load();
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  return (
+    <Card title="Preferences — how you like to work, injected into every session">
+      <div className="flex gap-2">
+        <input
+          value={rule}
+          onChange={(e) => setRule(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && add()}
+          placeholder="e.g. always use ripgrep instead of grep"
+          className={inputCls}
+        />
+        <button onClick={add} className={btnPrimary}>
+          Add
+        </button>
+      </div>
+      {err && <p className="mt-2 text-xs text-ember">{err}</p>}
+      <div className="mt-3 space-y-2">
+        {prefs.length === 0 && <p className="text-sm text-slate">No preferences recorded yet.</p>}
+        {prefs.map((p) => (
+          <div key={p.id} className="rounded-lg border border-line bg-surface2 px-3 py-2 text-sm text-offwhite">
+            {p.content}
+          </div>
+        ))}
+      </div>
+    </Card>
+  );
+}
+
+function SensitivityBadge({ level }: { level: Sensitivity }) {
+  const map: Record<Sensitivity, string> = {
+    shareable: "border-teal text-teal",
+    needs_review: "border-ember text-ember",
+    private: "border-[#f87171] text-[#f87171]",
+  };
+  return (
+    <span className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${map[level]}`}>
+      {level.replace("_", " ")}
+    </span>
+  );
+}
+
+function SharePanel() {
+  const [text, setText] = useState("");
+  const [result, setResult] = useState<Sanitized | null>(null);
+  const [bundle, setBundle] = useState<ShareExport | null>(null);
+  const [err, setErr] = useState("");
+
+  async function scan() {
+    if (!text.trim()) return;
+    try {
+      setResult(await postJSON<Sanitized>("/api/share/sanitize", { text }));
+      setErr("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+  async function exportBundle() {
+    try {
+      setBundle(await getJSON<ShareExport>("/api/share/export"));
+      setErr("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
+  return (
+    <div className="grid gap-4 md:grid-cols-2">
+      <Card title="Sanitize — redact secrets/PII before sharing or logging">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={5}
+          placeholder="Paste anything — a log line, a config snippet, a note — and Cairn will redact secrets and classify it."
+          className={`${inputCls} font-mono`}
+        />
+        <button onClick={scan} className={`mt-2 ${btnPrimary}`}>
+          Scan
+        </button>
+        {err && <p className="mt-2 text-xs text-ember">{err}</p>}
+        {result && (
+          <div className="mt-3 space-y-2">
+            <div className="flex items-center gap-2 text-sm">
+              <SensitivityBadge level={result.sensitivity} />
+              <span className="text-slate">{result.findings.length} redaction(s)</span>
+            </div>
+            <pre className="max-h-60 overflow-auto whitespace-pre-wrap rounded-lg border border-line bg-surface2 p-3 font-mono text-xs text-[#cdd5e0]">
+              {result.text}
+            </pre>
+          </div>
+        )}
+      </Card>
+
+      <Card title="Collective knowledge — export a shareable bundle">
+        <p className="mb-3 text-sm text-slate">
+          Sanitize every memory, withhold anything private, and produce a bundle safe to pool with
+          others.
+        </p>
+        <button onClick={exportBundle} className={btnPrimary}>
+          Build shareable bundle
+        </button>
+        {bundle && (
+          <dl className="mt-3 space-y-2 text-sm">
+            <Row k="Total scanned" v={String(bundle.total)} />
+            <Row k="Shareable" v={String(bundle.shared)} />
+            <Row k="Needs review" v={String(bundle.needs_review)} />
+            <Row k="Withheld (private)" v={String(bundle.withheld)} />
+          </dl>
+        )}
+        <p className="mt-3 text-xs text-slate">
+          On the receiving machine: <span className="font-mono">cairn import --share bundle.json</span>.
+        </p>
+      </Card>
+    </div>
   );
 }
 
@@ -282,12 +576,14 @@ function DevicesPanel() {
         </code>
         <p className="mt-3 text-xs text-slate">
           Last-write-wins. Prefer offline? <span className="font-mono">cairn export dump.json</span>{" "}
-          / <span className="font-mono">cairn import dump.json</span>. One-command install + QR
-          pairing is on the roadmap.
+          / <span className="font-mono">cairn import dump.json</span>.
         </p>
       </Card>
       <Card title="Connect an agent (MCP)">
-        <p className="mb-3 text-sm text-slate">Point any MCP-capable agent at Cairn:</p>
+        <p className="mb-3 text-sm text-slate">
+          Run <span className="font-mono text-ember">cairn install --all</span> to auto-detect and wire
+          up every agent (Claude Code, Cursor, VS Code, Windsurf), or add it by hand:
+        </p>
         <pre className="rounded-lg border border-line bg-surface2 p-3 font-mono text-xs text-[#cdd5e0]">{`{
   "mcpServers": {
     "cairn": { "command": "cairn", "args": ["mcp"] }
