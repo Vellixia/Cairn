@@ -25,6 +25,16 @@ pub enum Risk {
     Danger,
 }
 
+impl Risk {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Risk::Ok => "ok",
+            Risk::Warn => "warn",
+            Risk::Danger => "danger",
+        }
+    }
+}
+
 /// The outcome of verifying an edit.
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyReport {
@@ -62,6 +72,20 @@ pub struct RollbackReport {
     pub checkpoint_id: String,
     pub restored: Vec<String>,
     pub skipped: Vec<String>,
+}
+
+/// A rolling reliability score (0–100) derived from recent guardrail outcomes — the headline number
+/// for the "stay reliable" pillar. Clean edits keep it high; warnings shave it, dangers and
+/// rollbacks pull it down.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReliabilityReport {
+    pub score: u8,
+    /// How many verify outcomes were considered.
+    pub samples: usize,
+    pub ok: usize,
+    pub warn: usize,
+    pub danger: usize,
+    pub rollbacks: usize,
 }
 
 pub struct Guard {
@@ -191,12 +215,63 @@ impl Guard {
                 _ => skipped.push(path),
             }
         }
+        self.store
+            .record_guard_event(&now_ts(), "rollback", "na", checkpoint_id)?;
         Ok(RollbackReport {
             checkpoint_id: checkpoint_id.to_string(),
             restored,
             skipped,
         })
     }
+
+    /// Record a verification outcome into the guard event log (feeds the reliability score).
+    pub fn note_verify(&self, report: &VerifyReport) -> Result<()> {
+        self.store
+            .record_guard_event(&now_ts(), "verify", report.risk.as_str(), &report.path)
+    }
+
+    /// Compute a rolling reliability score (0–100) from the most recent guard events. Each clean
+    /// verify counts full, a warning counts half, a danger counts zero; rollbacks (damage that had
+    /// to be undone) apply an additional penalty. With no history yet, the slate is clean (100).
+    pub fn reliability(&self) -> Result<ReliabilityReport> {
+        const WINDOW: usize = 100;
+        let events = self.store.recent_guard_events(WINDOW)?;
+        let (mut ok, mut warn, mut danger, mut rollbacks) = (0usize, 0usize, 0usize, 0usize);
+        for (kind, risk, _path, _ts) in &events {
+            match kind.as_str() {
+                "verify" => match risk.as_str() {
+                    "ok" => ok += 1,
+                    "warn" => warn += 1,
+                    "danger" => danger += 1,
+                    _ => {}
+                },
+                "rollback" => rollbacks += 1,
+                _ => {}
+            }
+        }
+        let samples = ok + warn + danger;
+        // Verifies set the base (clean slate when there are none); rollbacks always shave it.
+        let base = if samples == 0 {
+            1.0
+        } else {
+            (ok as f64 + 0.5 * warn as f64) / samples as f64
+        };
+        let penalty = (0.05 * rollbacks as f64).min(0.3);
+        let score = ((base - penalty).clamp(0.0, 1.0) * 100.0).round() as u8;
+        Ok(ReliabilityReport {
+            score,
+            samples,
+            ok,
+            warn,
+            danger,
+            rollbacks,
+        })
+    }
+}
+
+/// Current timestamp, fixed-width millis (matches the store's timestamp format).
+fn now_ts() -> String {
+    Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
 /// Diff `baseline` → `new_content` and judge the risk of a large, unreplaced deletion.
@@ -369,5 +444,62 @@ mod tests {
             std::fs::read_to_string(&f).unwrap(),
             "original content\nline2\n"
         );
+    }
+
+    fn verify_report(path: &str, risk: Risk) -> VerifyReport {
+        VerifyReport {
+            path: path.into(),
+            baseline_hash: None,
+            baseline_lines: 0,
+            new_lines: 0,
+            added: 0,
+            removed: 0,
+            removed_ratio: 0.0,
+            risk,
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn reliability_score_reflects_recent_outcomes() {
+        let (g, _dir) = guard();
+
+        // No history → clean slate.
+        let r0 = g.reliability().unwrap();
+        assert_eq!(r0.score, 100);
+        assert_eq!(r0.samples, 0);
+
+        for _ in 0..7 {
+            g.note_verify(&verify_report("a.rs", Risk::Ok)).unwrap();
+        }
+        g.note_verify(&verify_report("b.rs", Risk::Warn)).unwrap();
+        g.note_verify(&verify_report("c.rs", Risk::Danger)).unwrap();
+
+        let r = g.reliability().unwrap();
+        assert_eq!((r.samples, r.ok, r.warn, r.danger), (9, 7, 1, 1));
+        // base = (7 + 0.5) / 9 ≈ 0.833 → 83
+        assert_eq!(r.score, 83);
+        assert_eq!(r.rollbacks, 0);
+    }
+
+    #[test]
+    fn rollback_is_recorded_and_penalizes_reliability() {
+        let (g, dir) = guard();
+        let f = dir.path().join("f.txt");
+        std::fs::write(&f, "a\nb\n").unwrap();
+        let key = std::fs::canonicalize(&f)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let hash = g.store.blobs().put(&std::fs::read(&f).unwrap()).unwrap();
+        g.store.record_file_version(&key, &hash.0, 2).unwrap();
+        let cp = g.checkpoint("cp").unwrap();
+        g.rollback(&cp.id).unwrap();
+
+        let r = g.reliability().unwrap();
+        assert_eq!(r.rollbacks, 1);
+        assert_eq!(r.samples, 0);
+        // One rollback, no verifies: 100 − 5 penalty = 95.
+        assert_eq!(r.score, 95);
     }
 }

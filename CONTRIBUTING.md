@@ -43,7 +43,7 @@ cargo test --workspace
 | `cairn-context` | cached reads · AST signature outlines · byte-identical `expand` |
 | `cairn-memory` | remember · BM25 recall · wakeup · decay · 4-tier consolidation |
 | `cairn-assemble` | token-budgeted, edge-ordered context assembler |
-| `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback |
+| `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback · reliability score |
 | `cairn-shell` | RTK-style command-output compression (lossless via `expand`) |
 | `cairn-profile` | preference learning |
 | `cairn-share` | privacy-first sanitization (redact secrets/PII before sharing) |

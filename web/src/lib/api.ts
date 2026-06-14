@@ -23,11 +23,20 @@ export interface Health {
   name: string;
   version: string;
 }
+export interface Reliability {
+  score: number;
+  samples: number;
+  ok: number;
+  warn: number;
+  danger: number;
+  rollbacks: number;
+}
 export interface Stats {
   memories: number;
   checkpoints?: number;
   preferences?: number;
   anchor?: string | null;
+  reliability?: Reliability;
 }
 export interface Checkpoint {
   id: string;

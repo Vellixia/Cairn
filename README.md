@@ -62,7 +62,7 @@ This repo is a Cargo workspace:
 | `cairn-context` | cached reads · AST signature outlines (Rust/Python/JS/TS/Go) · byte-identical `expand` |
 | `cairn-memory` | remember · BM25 recall · wakeup · Ebbinghaus decay · 4-tier consolidation |
 | `cairn-assemble` | token-budgeted, edge-ordered context assembler (anti-rot) |
-| `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback |
+| `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback · reliability score |
 | `cairn-shell` | RTK-style command-output compression (lossless via `expand`) |
 | `cairn-profile` | preference learning — inject how you work |
 | `cairn-share` | privacy-first sanitization — redact secrets/PII, classify shareable/review/private |

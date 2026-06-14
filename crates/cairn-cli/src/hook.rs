@@ -95,6 +95,8 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
                     .and_then(Value::as_str)
                 {
                     if let Some(report) = state.guard.verify_against_baseline(Path::new(file))? {
+                        // Record the outcome (clean or not) so the reliability score reflects it.
+                        let _ = state.guard.note_verify(&report);
                         if !report.is_clean() {
                             let ctx = format!(
                                 "⚠ Cairn guard ({:?}): {}. The pre-edit original is retained — recover it with Cairn `expand {}` if this was unintended.",

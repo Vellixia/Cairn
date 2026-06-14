@@ -50,6 +50,9 @@ trait StoreBackend: Send + Sync {
     fn get_checkpoint(&self, id: &str) -> Result<Option<(String, String, String)>>;
     /// `(id, label, created_at)`, newest first.
     fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>>;
+    fn record_guard_event(&self, ts: &str, kind: &str, risk: &str, path: &str) -> Result<()>;
+    /// `(kind, risk, path, ts)`, newest first.
+    fn recent_guard_events(&self, limit: usize) -> Result<Vec<(String, String, String, String)>>;
 }
 
 /// The structured store plus the content-addressed blob store. Backend-agnostic public API.
@@ -147,6 +150,15 @@ impl Store {
     pub fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>> {
         self.backend.list_checkpoints()
     }
+    pub fn record_guard_event(&self, ts: &str, kind: &str, risk: &str, path: &str) -> Result<()> {
+        self.backend.record_guard_event(ts, kind, risk, path)
+    }
+    pub fn recent_guard_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<(String, String, String, String)>> {
+        self.backend.recent_guard_events(limit)
+    }
 }
 
 /// Embedded SQLite backend — the default; zero external services, ideal for dev/tests/CI.
@@ -207,6 +219,13 @@ impl SqliteBackend {
                 label TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 files TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS guard_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                risk TEXT NOT NULL,
+                path TEXT NOT NULL
             );",
         )
         .map_err(stor)?;
@@ -520,6 +539,33 @@ impl StoreBackend for SqliteBackend {
             .map_err(stor)?;
         let rows = stmt
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(stor)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(stor)?);
+        }
+        Ok(out)
+    }
+
+    fn record_guard_event(&self, ts: &str, kind: &str, risk: &str, path: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO guard_events (ts,kind,risk,path) VALUES (?1,?2,?3,?4)",
+            params![ts, kind, risk, path],
+        )
+        .map_err(stor)?;
+        Ok(())
+    }
+
+    fn recent_guard_events(&self, limit: usize) -> Result<Vec<(String, String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT kind, risk, path, ts FROM guard_events ORDER BY id DESC LIMIT ?1")
+            .map_err(stor)?;
+        let rows = stmt
+            .query_map(params![limit as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
             .map_err(stor)?;
         let mut out = Vec::new();
         for r in rows {

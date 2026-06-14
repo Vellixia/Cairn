@@ -17,6 +17,7 @@ import {
   type Sanitized,
   type Sensitivity,
   type ShareExport,
+  type Reliability,
 } from "@/lib/api";
 
 const TABS = ["Overview", "Memory", "Context", "Reliability", "Preferences", "Share", "Devices"] as const;
@@ -123,6 +124,7 @@ function Overview() {
             <Row k="Memories" v={stats ? String(stats.memories) : "…"} />
             <Row k="Checkpoints" v={stats?.checkpoints != null ? String(stats.checkpoints) : "…"} />
             <Row k="Preferences" v={stats?.preferences != null ? String(stats.preferences) : "…"} />
+            <Row k="Reliability" v={stats?.reliability ? `${stats.reliability.score}/100` : "…"} />
             <Row k="Task anchor" v={stats?.anchor ? "set" : "none"} />
           </dl>
         )}
@@ -308,6 +310,7 @@ function ContextPanel() {
 function ReliabilityPanel() {
   const [anchor, setAnchor] = useState("");
   const [goal, setGoal] = useState("");
+  const [rel, setRel] = useState<Reliability | null>(null);
   const [checkpoints, setCheckpoints] = useState<Checkpoint[]>([]);
   const [label, setLabel] = useState("");
   const [note, setNote] = useState("");
@@ -318,6 +321,7 @@ function ReliabilityPanel() {
       const a = await getJSON<{ anchor: string | null }>("/api/guard/anchor");
       setAnchor(a.anchor ?? "");
       setCheckpoints(await getJSON<Checkpoint[]>("/api/guard/checkpoints"));
+      setRel((await getJSON<Stats>("/api/stats")).reliability ?? null);
       setErr("");
     } catch (e) {
       setErr(String(e));
@@ -357,8 +361,29 @@ function ReliabilityPanel() {
     }
   }
 
+  const scoreColor = !rel ? "text-slate" : rel.score >= 80 ? "text-teal" : rel.score >= 50 ? "text-ember" : "text-[#f87171]";
+
   return (
     <div className="grid gap-4 md:grid-cols-2">
+      {rel && (
+        <div className="md:col-span-2">
+          <Card title="Reliability — the stay-reliable pillar, scored from recent guard outcomes">
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
+              <div className={`text-4xl font-bold ${scoreColor}`}>
+                {rel.score}
+                <span className="text-lg text-slate">/100</span>
+              </div>
+              <div className="text-sm text-slate">
+                {rel.samples} edit{rel.samples === 1 ? "" : "s"} verified ·{" "}
+                <span className="text-teal">{rel.ok} ok</span> ·{" "}
+                <span className="text-ember">{rel.warn} warn</span> ·{" "}
+                <span className="text-[#f87171]">{rel.danger} danger</span> · {rel.rollbacks} rollback
+                {rel.rollbacks === 1 ? "" : "s"}
+              </div>
+            </div>
+          </Card>
+        </div>
+      )}
       <Card title="Task anchor — the goal re-injected each session">
         {anchor ? (
           <p className="mb-3 rounded-lg border border-line bg-surface2 px-3 py-2 text-sm text-offwhite">{anchor}</p>

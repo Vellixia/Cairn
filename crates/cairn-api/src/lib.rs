@@ -161,6 +161,7 @@ async fn stats(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
         "checkpoints": s.guard.list_checkpoints()?.len(),
         "preferences": s.profile.preferences()?.len(),
         "anchor": s.guard.anchor()?,
+        "reliability": s.guard.reliability()?,
     })))
 }
 
@@ -242,7 +243,9 @@ async fn verify(
     State(s): State<AppState>,
     Json(b): Json<VerifyBody>,
 ) -> Result<Json<VerifyReport>, ApiError> {
-    Ok(Json(s.guard.verify_edit(Path::new(&b.path), &b.content)?))
+    let report = s.guard.verify_edit(Path::new(&b.path), &b.content)?;
+    let _ = s.guard.note_verify(&report);
+    Ok(Json(report))
 }
 
 async fn get_anchor(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
@@ -625,5 +628,29 @@ mod tests {
         let hits = dst.mem.recall("ripgrep", 5).unwrap();
         assert!(hits.iter().any(|h| h.memory.content.contains("ripgrep")));
         assert_eq!(hits[0].memory.session_id.as_deref(), Some("shared"));
+    }
+
+    #[tokio::test]
+    async fn stats_surfaces_reliability_after_a_verify() {
+        let (state, dir) = test_state();
+        let f = dir.path().join("f.txt");
+        let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&f, &original).unwrap();
+
+        // A gutting edit recorded through the verify endpoint shows up as a danger.
+        let _ = verify(
+            State(state.clone()),
+            Json(VerifyBody {
+                path: f.to_string_lossy().into_owned(),
+                content: "x\n".into(),
+            }),
+        )
+        .await
+        .unwrap();
+
+        let st = stats(State(state.clone())).await.unwrap().0;
+        assert_eq!(st["reliability"]["danger"], 1);
+        assert!(st["reliability"]["samples"].as_u64().unwrap() >= 1);
+        assert_eq!(st["reliability"]["score"], 0);
     }
 }
