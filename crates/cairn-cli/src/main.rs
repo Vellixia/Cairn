@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand};
 
 mod hook;
 mod install;
+mod pool;
 mod sync;
 
 #[derive(Parser)]
@@ -110,6 +111,24 @@ enum Cmd {
     /// Sync memory with another Cairn server (last-write-wins).
     Sync {
         /// Server base URL, e.g. http://192.168.1.10:7777
+        #[arg(long)]
+        server: String,
+        /// Device token for the remote server (if it requires auth).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Contribute your shareable knowledge to a server's collective pool (sanitized first).
+    Contribute {
+        /// Pool server base URL, e.g. http://pool.example.com:7777
+        #[arg(long)]
+        server: String,
+        /// Device token for the remote server (if it requires auth).
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Pull a server's collective pool into your local memory.
+    Pull {
+        /// Pool server base URL.
         #[arg(long)]
         server: String,
         /// Device token for the remote server (if it requires auth).
@@ -310,6 +329,14 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Sync { server, token } => {
             let state = AppState::new(&cfg)?;
             sync::run(&state.store, &server, token.as_deref())?;
+        }
+        Cmd::Contribute { server, token } => {
+            let state = AppState::new(&cfg)?;
+            pool::contribute(&state.store, &server, token.as_deref())?;
+        }
+        Cmd::Pull { server, token } => {
+            let state = AppState::new(&cfg)?;
+            pool::pull(&state.mem, &server, token.as_deref())?;
         }
         Cmd::Export { path, share } => {
             let state = AppState::new(&cfg)?;

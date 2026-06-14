@@ -248,6 +248,7 @@ dependencies = [
  "cairn-api",
  "cairn-core",
  "cairn-mcp",
+ "cairn-memory",
  "cairn-share",
  "cairn-store",
  "chrono",

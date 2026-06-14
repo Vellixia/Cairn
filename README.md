@@ -49,9 +49,9 @@ time**. Cairn fixes that.
 ## Status
 
 🚧 Active development — the engine is functional today (memory, no-loss compression, context
-assembly, edit guardrails, shell compression, preference learning, privacy-first sanitization,
-multi-device sync). Vectors + graph (HelixDB) and the federated collective-knowledge pool are next;
-see [the design plan](docs/PLAN.md).
+assembly, edit guardrails + reliability score, shell compression, preference learning,
+privacy-first sanitization, a federated collective-knowledge pool, and multi-device sync). Vectors
++ graph (HelixDB) are next; see [the design plan](docs/PLAN.md).
 
 This repo is a Cargo workspace:
 
@@ -150,6 +150,7 @@ The `cairn` binary:
 | `cairn export <file>` · `cairn import <file>` | move memory between machines offline |
 | `cairn export --share <file>` | export a sanitized, shareable bundle (secrets/PII redacted, private memories withheld) |
 | `cairn import --share <file>` | ingest a shared bundle (tagged `shared`, deduplicated against existing) |
+| `cairn contribute --server <url>` · `cairn pull --server <url>` | federate sanitized knowledge with a shared pool |
 | `cairn doctor` | verify the local setup |
 
 ## Multi-device & sync

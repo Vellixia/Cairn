@@ -88,6 +88,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/share/sanitize", post(sanitize_text))
         .route("/api/share/export", get(share_export))
         .route("/api/share/import", post(share_import))
+        .route("/api/pool/contribute", post(pool_contribute))
+        .route("/api/pool", get(pool_list))
         .route("/api/sync/pull", get(sync_pull))
         .route("/api/sync/push", post(sync_push))
         .fallback(static_handler)
@@ -379,6 +381,48 @@ async fn share_import(
     Ok(Json(json!({ "ingested": total })))
 }
 
+/// Accept a contribution into this server's shared pool. The server re-sanitizes every memory
+/// itself (defense-in-depth — a client's redaction is never trusted) and rejects anything that
+/// still contains a hard secret; the rest is stored under `pool` provenance, deduplicated.
+async fn pool_contribute(
+    State(s): State<AppState>,
+    Json(bundle): Json<cairn_share::ShareBundle>,
+) -> Result<Json<Value>, ApiError> {
+    let mut accepted = 0usize;
+    let mut rejected = 0usize;
+    for sm in bundle.memories {
+        let scan = s.san.sanitize(&sm.content);
+        if scan.sensitivity == cairn_share::Sensitivity::Private {
+            rejected += 1;
+            continue;
+        }
+        let mut nm = NewMemory::new(scan.text);
+        nm.kind = Some(sm.kind);
+        nm.concepts = sm.concepts.iter().map(|c| s.san.sanitize(c).text).collect();
+        nm.session_id = Some("pool".to_string());
+        s.mem.remember(nm)?;
+        accepted += 1;
+    }
+    Ok(Json(json!({ "accepted": accepted, "rejected": rejected })))
+}
+
+/// Serve this server's shared pool as a sanitized bundle others can pull.
+async fn pool_list(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
+    let memories: Vec<_> = s
+        .store
+        .all_memories()?
+        .into_iter()
+        .filter(|m| m.session_id.as_deref() == Some("pool"))
+        .map(|m| s.san.sanitize_memory(&m))
+        .collect();
+    Ok(Json(json!({
+        "schema": cairn_share::ShareBundle::SCHEMA,
+        "version": 1,
+        "count": memories.len(),
+        "memories": memories,
+    })))
+}
+
 // ---- sync + auth -------------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -652,5 +696,42 @@ mod tests {
         assert_eq!(st["reliability"]["danger"], 1);
         assert!(st["reliability"]["samples"].as_u64().unwrap() >= 1);
         assert_eq!(st["reliability"]["score"], 0);
+    }
+
+    #[tokio::test]
+    async fn pool_contribute_re_sanitizes_and_pull_serves_clean() {
+        let (state, _dir) = test_state();
+
+        fn shareable(content: &str) -> cairn_share::ShareableMemory {
+            cairn_share::ShareableMemory {
+                kind: cairn_core::MemoryKind::Note,
+                content: content.into(),
+                concepts: vec![],
+                sensitivity: cairn_share::Sensitivity::Shareable,
+                redactions: 0,
+            }
+        }
+
+        // A buggy/malicious client sends one clean memory and one with a raw, unredacted secret it
+        // falsely marked shareable. The server re-sanitizes and must reject the latter.
+        let leaked = format!("token = sk_{}_{}", "live", "abcdefghijklmnop12345678");
+        let bundle = cairn_share::ShareBundle {
+            schema: cairn_share::ShareBundle::SCHEMA.into(),
+            version: 1,
+            memories: vec![shareable("use BM25 for recall ranking"), shareable(&leaked)],
+        };
+
+        let res = pool_contribute(State(state.clone()), Json(bundle))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(res["accepted"], 1);
+        assert_eq!(res["rejected"], 1);
+
+        let pool = pool_list(State(state.clone())).await.unwrap().0;
+        assert_eq!(pool["count"], 1);
+        let serialized = serde_json::to_string(&pool).unwrap();
+        assert!(serialized.contains("BM25"));
+        assert!(!serialized.contains("abcdefghijklmnop12345678"));
     }
 }
