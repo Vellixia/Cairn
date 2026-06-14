@@ -53,6 +53,9 @@ trait StoreBackend: Send + Sync {
     fn record_guard_event(&self, ts: &str, kind: &str, risk: &str, path: &str) -> Result<()>;
     /// `(kind, risk, path, ts)`, newest first.
     fn recent_guard_events(&self, limit: usize) -> Result<Vec<(String, String, String, String)>>;
+    fn create_pairing(&self, code: &str, token: &str, name: &str, expires_at: &str) -> Result<()>;
+    /// Atomically claim a non-expired code (single-use): returns `(token, name)` and removes it.
+    fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>>;
 }
 
 /// The structured store plus the content-addressed blob store. Backend-agnostic public API.
@@ -159,6 +162,18 @@ impl Store {
     ) -> Result<Vec<(String, String, String, String)>> {
         self.backend.recent_guard_events(limit)
     }
+    pub fn create_pairing(
+        &self,
+        code: &str,
+        token: &str,
+        name: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        self.backend.create_pairing(code, token, name, expires_at)
+    }
+    pub fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>> {
+        self.backend.claim_pairing(code, now)
+    }
 }
 
 /// Embedded SQLite backend — the default; zero external services, ideal for dev/tests/CI.
@@ -226,6 +241,12 @@ impl SqliteBackend {
                 kind TEXT NOT NULL,
                 risk TEXT NOT NULL,
                 path TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS pairing_codes (
+                code TEXT PRIMARY KEY,
+                token TEXT NOT NULL,
+                name TEXT NOT NULL,
+                expires_at TEXT NOT NULL
             );",
         )
         .map_err(stor)?;
@@ -573,6 +594,34 @@ impl StoreBackend for SqliteBackend {
         }
         Ok(out)
     }
+
+    fn create_pairing(&self, code: &str, token: &str, name: &str, expires_at: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO pairing_codes (code,token,name,expires_at) VALUES (?1,?2,?3,?4)",
+            params![code, token, name, expires_at],
+        )
+        .map_err(stor)?;
+        Ok(())
+    }
+
+    fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>> {
+        // Single connection under a mutex, so select-then-delete is effectively atomic.
+        let conn = self.conn.lock().unwrap();
+        let found: Option<(String, String)> = conn
+            .query_row(
+                "SELECT token, name FROM pairing_codes WHERE code=?1 AND expires_at > ?2",
+                params![code, now],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(stor)?;
+        if found.is_some() {
+            conn.execute("DELETE FROM pairing_codes WHERE code=?1", params![code])
+                .map_err(stor)?;
+        }
+        Ok(found)
+    }
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
@@ -711,5 +760,30 @@ mod tests {
         assert_eq!(lines, 42);
         s.record_file_version("/x.rs", "def456", 10).unwrap();
         assert_eq!(s.latest_file_version("/x.rs").unwrap().unwrap().0, "def456");
+    }
+
+    #[test]
+    fn pairing_code_claims_once_and_respects_expiry() {
+        let (s, _d) = store();
+        // A live code claims exactly once, returning its token + device name.
+        s.create_pairing("ABCD2345", "tok-1", "laptop", "2999-01-01T00:00:00.000Z")
+            .unwrap();
+        let claimed = s
+            .claim_pairing("ABCD2345", "2026-01-01T00:00:00.000Z")
+            .unwrap();
+        assert_eq!(claimed, Some(("tok-1".to_string(), "laptop".to_string())));
+        // Single-use: a second claim finds nothing.
+        assert!(s
+            .claim_pairing("ABCD2345", "2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .is_none());
+
+        // An expired code never claims (RFC3339 strings compare lexicographically).
+        s.create_pairing("EXPIRED1", "tok-2", "phone", "2000-01-01T00:00:00.000Z")
+            .unwrap();
+        assert!(s
+            .claim_pairing("EXPIRED1", "2026-01-01T00:00:00.000Z")
+            .unwrap()
+            .is_none());
     }
 }

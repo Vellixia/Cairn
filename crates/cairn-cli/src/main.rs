@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 mod bench;
 mod hook;
 mod install;
+mod pair;
 mod pool;
 mod sync;
 mod update;
@@ -80,8 +81,15 @@ enum Cmd {
     Doctor,
     /// Measure the token savings Cairn gives on a codebase (AST outlines, re-reads, shell compress).
     Bench { path: Option<PathBuf> },
-    /// Pair this device with a Cairn server using a code from the web UI. (coming soon)
-    Pair { code: String },
+    /// Pair this device with a Cairn server using a code from the host.
+    Pair {
+        code: String,
+        /// Server base URL, e.g. http://192.168.1.10:7777
+        #[arg(long)]
+        server: String,
+    },
+    /// Generate a pairing code on this host for a new device to claim.
+    PairCode { name: Option<String> },
     /// Configure an agent (or --all detected agents) to use this server.
     Install {
         /// Agent name: claude-code, cursor, vscode, windsurf. Omit (with --all) to auto-detect.
@@ -273,7 +281,14 @@ async fn main() -> anyhow::Result<()> {
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             bench::run(&state, &root)?;
         }
-        Cmd::Pair { code } => coming_soon(&format!("pairing this device with code {code}")),
+        Cmd::Pair { code, server } => {
+            let state = AppState::new(&cfg)?;
+            pair::claim(&state, &server, &code)?;
+        }
+        Cmd::PairCode { name } => {
+            let state = AppState::new(&cfg)?;
+            pair::generate(&state, name.as_deref())?;
+        }
         Cmd::Install { agent, all } => install::run(agent.as_deref(), all)?,
         Cmd::Login { server } => coming_soon(&format!(
             "logging in to {}",

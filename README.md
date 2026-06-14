@@ -159,6 +159,7 @@ The `cairn` binary:
 | `cairn anchor <goal>` | set the current task goal (re-injected at session start) |
 | `cairn checkpoint [label]` · `cairn rollback <id>` · `cairn checkpoints` | snapshot / restore tracked files |
 | `cairn token create <name>` · `cairn sync --server <url> --token <t>` | device tokens · multi-device sync |
+| `cairn pair-code [name]` · `cairn pair <code> --server <url>` | onboard a new device with a short code (no token copying) |
 | `cairn export <file>` · `cairn import <file>` | move memory between machines offline |
 | `cairn export --share <file>` | export a sanitized, shareable bundle (secrets/PII redacted, private memories withheld) |
 | `cairn import --share <file>` | ingest a shared bundle (tagged `shared`, deduplicated against existing) |
@@ -174,8 +175,14 @@ Run one Cairn server for all your devices, or keep a server per device and sync 
 - **Tokens:** `cairn token create <name>` prints a device token. Once any token exists, `/api/*`
   requires `Authorization: Bearer <token>` (the web UI and `/api/health` stay open). Local-only
   setups need no tokens.
+- **Pairing:** on the host run `cairn pair-code` (or click *Generate pairing code* in the
+  dashboard) for a short, single-use code; on the new device run
+  `cairn pair <code> --server http://host:7777`. It claims a device token (no long secret to copy),
+  stores it, and runs the first sync. The claim endpoint is the only open `/api/*` route — the
+  short-lived code is the credential.
 - **Sync:** `cairn sync --server http://host:7777 --token <token>` pulls remote changes then
-  pushes local ones (last-write-wins on `updated_at`).
+  pushes local ones (last-write-wins on `updated_at`). After pairing, the token is remembered, so
+  `cairn sync --server http://host:7777` alone works.
 - **Offline move:** `cairn export dump.json` / `cairn import dump.json` copies memory between
   machines with no network.
 

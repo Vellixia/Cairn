@@ -11,6 +11,9 @@ use serde_json::{json, Value};
 
 pub fn run(store: &Store, server: &str, token: Option<&str>) -> Result<()> {
     let server = server.trim_end_matches('/');
+    // Fall back to a token stored at pairing time, so `cairn sync --server <url>` just works.
+    let stored = store.get_meta(&format!("device_token:{server}"))?;
+    let token = token.or(stored.as_deref());
     let since = store.get_last_sync(server)?;
 
     // ---- pull remote changes ----

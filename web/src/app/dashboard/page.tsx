@@ -662,9 +662,46 @@ cairn pull --server ${API_BASE}`}</pre>
 }
 
 function DevicesPanel() {
+  const [pairing, setPairing] = useState<{ code: string; name: string; expires_at: string } | null>(
+    null,
+  );
+  const [err, setErr] = useState("");
+
+  async function newCode() {
+    try {
+      setPairing(
+        await postJSON<{ code: string; name: string; expires_at: string }>("/api/pair/new", {
+          name: "device",
+        }),
+      );
+      setErr("");
+    } catch (e) {
+      setErr(String(e));
+    }
+  }
+
   return (
     <div className="grid gap-4">
-      <Card title="Add a device">
+      <Card title="Pair a new device">
+        <p className="mb-3 text-sm text-slate">
+          Generate a short code, then on the new device run{" "}
+          <span className="font-mono">cairn pair &lt;code&gt; --server {API_BASE}</span>. No long
+          tokens to copy.
+        </p>
+        <button onClick={newCode} className={btnPrimary}>
+          Generate pairing code
+        </button>
+        {err && <p className="mt-2 text-xs text-ember">{err}</p>}
+        {pairing && (
+          <div className="mt-3 rounded-lg border border-line bg-surface2 px-4 py-3 text-center">
+            <div className="font-mono text-3xl font-bold tracking-[0.3em] text-ember">
+              {pairing.code}
+            </div>
+            <div className="mt-1 text-xs text-slate">valid 10 minutes · single use</div>
+          </div>
+        )}
+      </Card>
+      <Card title="Add a device manually">
         <p className="mb-3 text-sm text-slate">
           Create a device token on this server, then sync another machine against it:
         </p>

@@ -90,6 +90,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/share/import", post(share_import))
         .route("/api/pool/contribute", post(pool_contribute))
         .route("/api/pool", get(pool_list))
+        .route("/api/pair/new", post(pair_new))
+        .route("/api/pair/claim", post(pair_claim))
         .route("/api/sync/pull", get(sync_pull))
         .route("/api/sync/push", post(sync_push))
         .fallback(static_handler)
@@ -423,6 +425,70 @@ async fn pool_list(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
     })))
 }
 
+/// Generate a short, unambiguous pairing code (~40 bits of entropy): 8 chars, no 0/O/1/I/L.
+pub fn pairing_code() -> String {
+    const ALPHA: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    let mut acc = 0u64;
+    for &b in &bytes[..5] {
+        acc = (acc << 8) | b as u64;
+    }
+    (0..8)
+        .map(|i| ALPHA[((acc >> (35 - i * 5)) & 0x1f) as usize] as char)
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct PairNewBody {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+/// Mint a device token and a short-lived pairing code for it (authed). A new device claims the code
+/// to receive the token, so long secrets never have to be copied around.
+async fn pair_new(
+    State(s): State<AppState>,
+    Json(b): Json<PairNewBody>,
+) -> Result<Json<Value>, ApiError> {
+    let name = b
+        .name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| "device".to_string());
+    let token = s.store.create_token(&name)?;
+    let code = pairing_code();
+    let expires = (Utc::now() + chrono::Duration::minutes(10))
+        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    s.store
+        .create_pairing(&code, &token.token, &name, &expires)?;
+    Ok(Json(
+        json!({ "code": code, "name": name, "expires_at": expires }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PairClaimBody {
+    code: String,
+}
+
+/// Claim a pairing code (open endpoint): returns the device token if the code is valid, unexpired,
+/// and unclaimed. Single-use.
+async fn pair_claim(
+    State(s): State<AppState>,
+    Json(b): Json<PairClaimBody>,
+) -> Result<Json<Value>, ApiError> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    match s
+        .store
+        .claim_pairing(b.code.trim().to_uppercase().as_str(), &now)?
+    {
+        Some((token, name)) => Ok(Json(json!({ "token": token, "name": name }))),
+        None => Err(ApiError(
+            StatusCode::NOT_FOUND,
+            "invalid or expired pairing code".into(),
+        )),
+    }
+}
+
 // ---- sync + auth -------------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -472,7 +538,10 @@ async fn sync_push(
 /// a valid device token *once any token has been created* (so local-only setups stay friction-free).
 async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
-    let needs_auth = path.starts_with("/api/") && path != "/api/health";
+    // `/api/pair/claim` is open: a brand-new device has no token yet — the short-lived,
+    // single-use pairing code is its credential.
+    let needs_auth =
+        path.starts_with("/api/") && path != "/api/health" && path != "/api/pair/claim";
     if needs_auth {
         match s.store.count_tokens() {
             Ok(0) => {}
@@ -733,5 +802,43 @@ mod tests {
         let serialized = serde_json::to_string(&pool).unwrap();
         assert!(serialized.contains("BM25"));
         assert!(!serialized.contains("abcdefghijklmnop12345678"));
+    }
+
+    #[tokio::test]
+    async fn pair_new_then_claim_yields_a_valid_token_once() {
+        let (state, _dir) = test_state();
+
+        // The host mints a pairing code.
+        let created = pair_new(
+            State(state.clone()),
+            Json(PairNewBody {
+                name: Some("laptop".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let code = created["code"].as_str().unwrap().to_string();
+        assert_eq!(created["name"], "laptop");
+        assert_eq!(code.len(), 8);
+
+        // The new device claims it → a real, valid device token.
+        let claimed = pair_claim(
+            State(state.clone()),
+            Json(PairClaimBody { code: code.clone() }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(claimed["name"], "laptop");
+        let token = claimed["token"].as_str().unwrap();
+        assert!(state.store.validate_token(token).unwrap());
+
+        // Single-use: a second claim is a 404.
+        let err = pair_claim(State(state.clone()), Json(PairClaimBody { code }))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 }
