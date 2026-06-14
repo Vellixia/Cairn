@@ -110,6 +110,11 @@ server **and** the lifecycle hooks into `.mcp.json` and `.claude/settings.json`:
 relevant context and learns preferences; `PostToolUse` guards edits against silent corruption;
 `SessionEnd` consolidates memory.
 
+Using another editor? `cairn install cursor`, `cairn install vscode`, and `cairn install windsurf`
+each wire up the MCP server in that agent's own config format (MCP only — they have no hook
+system). Or run **`cairn install --all`** to auto-detect every agent present and configure each.
+Every install is non-destructive and idempotent.
+
 To do it by hand: run `claude mcp add cairn -- cairn mcp`, or add an `.mcp.json`:
 
 ```json
@@ -132,7 +137,7 @@ The `cairn` binary:
 |---|---|
 | `cairn serve` | start the server + embedded web UI (`http://127.0.0.1:7777`) |
 | `cairn mcp` | run the MCP server over stdio (for agents) |
-| `cairn install claude-code` | wire up MCP + lifecycle hooks for Claude Code |
+| `cairn install [agent]` · `cairn install --all` | wire up MCP (+ hooks for Claude Code); `--all` auto-detects |
 | `cairn run -- <cmd>` | run a command, print **compressed** output (full output retained) |
 | `cairn remember <text>` · `cairn recall <query>` | store / search memory |
 | `cairn prefer <rule>` | record a standing preference (e.g. `cairn prefer always use ripgrep`) |

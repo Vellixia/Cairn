@@ -77,9 +77,9 @@ enum Cmd {
     Doctor,
     /// Pair this device with a Cairn server using a code from the web UI. (coming soon)
     Pair { code: String },
-    /// Configure an agent (or --all detected agents) to use this server. (coming soon)
+    /// Configure an agent (or --all detected agents) to use this server.
     Install {
-        /// Agent name, e.g. claude-code, codex, cursor. Omit with --all.
+        /// Agent name: claude-code, cursor, vscode, windsurf. Omit (with --all) to auto-detect.
         agent: Option<String>,
         /// Configure every detected agent.
         #[arg(long)]
