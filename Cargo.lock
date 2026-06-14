@@ -246,6 +246,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cairn-api",
+ "cairn-context",
  "cairn-core",
  "cairn-mcp",
  "cairn-memory",

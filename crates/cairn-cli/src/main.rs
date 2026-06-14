@@ -11,6 +11,7 @@ use cairn_api::AppState;
 use cairn_core::{Config, NewMemory};
 use clap::{Parser, Subcommand};
 
+mod bench;
 mod hook;
 mod install;
 mod pool;
@@ -76,6 +77,8 @@ enum Cmd {
     Stats,
     /// Verify the local setup.
     Doctor,
+    /// Measure the token savings Cairn gives on a codebase (AST outlines, re-reads, shell compress).
+    Bench { path: Option<PathBuf> },
     /// Pair this device with a Cairn server using a code from the web UI. (coming soon)
     Pair { code: String },
     /// Configure an agent (or --all detected agents) to use this server.
@@ -262,6 +265,12 @@ async fn main() -> anyhow::Result<()> {
             println!("  data dir : {}", cfg.data_dir().display());
             println!("  database : {}", cfg.db_path().display());
             println!("  blobs    : {}", cfg.blobs_dir().display());
+        }
+        Cmd::Bench { path } => {
+            let state = AppState::new(&cfg)?;
+            let root = path
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+            bench::run(&state, &root)?;
         }
         Cmd::Pair { code } => coming_soon(&format!("pairing this device with code {code}")),
         Cmd::Install { agent, all } => install::run(agent.as_deref(), all)?,
