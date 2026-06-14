@@ -15,6 +15,7 @@ cairn-core.workspace = true
 cairn-store.workspace = true
 cairn-api.workspace = true
 cairn-mcp.workspace = true
+cairn-share.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true

@@ -49,8 +49,9 @@ time**. Cairn fixes that.
 ## Status
 
 🚧 Active development — the engine is functional today (memory, no-loss compression, context
-assembly, edit guardrails, shell compression, preference learning, multi-device sync). Vectors +
-graph (HelixDB) and collective knowledge are next; see [the design plan](docs/PLAN.md).
+assembly, edit guardrails, shell compression, preference learning, privacy-first sanitization,
+multi-device sync). Vectors + graph (HelixDB) and the federated collective-knowledge pool are next;
+see [the design plan](docs/PLAN.md).
 
 This repo is a Cargo workspace:
 
@@ -64,6 +65,7 @@ This repo is a Cargo workspace:
 | `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback |
 | `cairn-shell` | RTK-style command-output compression (lossless via `expand`) |
 | `cairn-profile` | preference learning — inject how you work |
+| `cairn-share` | privacy-first sanitization — redact secrets/PII, classify shareable/review/private |
 | `cairn-mcp` | MCP server (stdio) |
 | `cairn-api` | axum REST API + embedded web UI |
 | `cairn-cli` | the `cairn` binary (serve, mcp, run, hook, install, …) |
@@ -145,6 +147,7 @@ The `cairn` binary:
 | `cairn checkpoint [label]` · `cairn rollback <id>` · `cairn checkpoints` | snapshot / restore tracked files |
 | `cairn token create <name>` · `cairn sync --server <url> --token <t>` | device tokens · multi-device sync |
 | `cairn export <file>` · `cairn import <file>` | move memory between machines offline |
+| `cairn export --share <file>` | export a sanitized, shareable bundle (secrets/PII redacted, private memories withheld) |
 | `cairn doctor` | verify the local setup |
 
 ## Multi-device & sync

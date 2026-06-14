@@ -247,6 +247,7 @@ dependencies = [
  "cairn-api",
  "cairn-core",
  "cairn-mcp",
+ "cairn-share",
  "cairn-store",
  "chrono",
  "clap",
@@ -337,6 +338,15 @@ dependencies = [
  "cairn-memory",
  "cairn-store",
  "tempfile",
+]
+
+[[package]]
+name = "cairn-share"
+version = "0.1.0"
+dependencies = [
+ "cairn-core",
+ "regex",
+ "serde",
 ]
 
 [[package]]

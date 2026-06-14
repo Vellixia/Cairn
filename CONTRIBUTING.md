@@ -46,6 +46,7 @@ cargo test --workspace
 | `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback |
 | `cairn-shell` | RTK-style command-output compression (lossless via `expand`) |
 | `cairn-profile` | preference learning |
+| `cairn-share` | privacy-first sanitization (redact secrets/PII before sharing) |
 | `cairn-api` | axum REST API + embedded web UI |
 | `cairn-mcp` | MCP server (stdio) |
 | `cairn-cli` | the `cairn` binary (serve, mcp, run, hook, install, …) |

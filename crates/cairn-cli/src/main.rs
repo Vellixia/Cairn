@@ -117,7 +117,12 @@ enum Cmd {
         token: Option<String>,
     },
     /// Export all memories as JSON (to a file, or stdout if omitted).
-    Export { path: Option<PathBuf> },
+    Export {
+        path: Option<PathBuf>,
+        /// Sanitize for sharing: redact secrets/PII and drop memories that contain hard secrets.
+        #[arg(long)]
+        share: bool,
+    },
     /// Import memories from a JSON file (last-write-wins).
     Import { path: PathBuf },
 }
@@ -301,14 +306,23 @@ async fn main() -> anyhow::Result<()> {
             let state = AppState::new(&cfg)?;
             sync::run(&state.store, &server, token.as_deref())?;
         }
-        Cmd::Export { path } => {
+        Cmd::Export { path, share } => {
             let state = AppState::new(&cfg)?;
             let mems = state.store.all_memories()?;
-            let json = serde_json::to_string_pretty(&mems)?;
+            let json = if share {
+                build_share_bundle(&mems)?
+            } else {
+                serde_json::to_string_pretty(&mems)?
+            };
             match path {
                 Some(p) => {
                     std::fs::write(&p, json)?;
-                    println!("exported {} memories to {}", mems.len(), p.display());
+                    let what = if share {
+                        "shareable memories"
+                    } else {
+                        "memories"
+                    };
+                    println!("exported {what} to {}", p.display());
                 }
                 None => println!("{json}"),
             }
@@ -329,7 +343,72 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Build a privacy-first share bundle: redact secrets/PII from every memory, withhold any that
+/// still classify as Private, and summarize what happened on stderr.
+fn build_share_bundle(mems: &[cairn_core::Memory]) -> anyhow::Result<String> {
+    use cairn_share::Sensitivity;
+    let san = cairn_share::Sanitizer::new();
+    let mut shareable = Vec::new();
+    let mut withheld = 0usize;
+    let mut needs_review = 0usize;
+    for m in mems {
+        let sm = san.sanitize_memory(m);
+        match sm.sensitivity {
+            Sensitivity::Private => withheld += 1,
+            Sensitivity::NeedsReview => {
+                needs_review += 1;
+                shareable.push(sm);
+            }
+            Sensitivity::Shareable => shareable.push(sm),
+        }
+    }
+    let shared = shareable.len();
+    let bundle = serde_json::json!({
+        "schema": "cairn-share-bundle",
+        "version": 1,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "memories": shareable,
+    });
+    eprintln!(
+        "[cairn share: {} scanned \u{2192} {shared} shareable ({needs_review} need review), {withheld} withheld as private]",
+        mems.len()
+    );
+    Ok(serde_json::to_string_pretty(&bundle)?)
+}
+
 /// Friendly placeholder for commands whose full behavior arrives in a later phase.
 fn coming_soon(what: &str) {
     println!("cairn: {what} — coming soon in a later build.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cairn_core::NewMemory;
+
+    #[test]
+    fn share_bundle_redacts_pii_and_withholds_hard_secrets() {
+        let clean = NewMemory::new("use BM25 for recall ranking").into_memory();
+        let pii =
+            NewMemory::new("reach the team at ops@example.com about the rollout").into_memory();
+        // Assembled from fragments so the repo stores no verbatim credential (push protection).
+        let leak = format!(
+            "api_key = sk-ant-{}",
+            "api03-abcdefghijklmnopqrstuvwxyz0123"
+        );
+        let secret = NewMemory::new(&leak).into_memory();
+
+        let json = build_share_bundle(&[clean, pii, secret]).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mems = v["memories"].as_array().unwrap();
+
+        // The hard-secret memory is withheld entirely; the clean + PII ones remain.
+        assert_eq!(mems.len(), 2);
+        // PII memory is present but its email is redacted.
+        assert!(json.contains("[redacted:email]"));
+        assert!(!json.contains("ops@example.com"));
+        // The withheld secret's body never appears anywhere in the bundle.
+        assert!(!json.contains("abcdefghijklmnopqrstuvwxyz0123"));
+        assert_eq!(v["schema"], "cairn-share-bundle");
+    }
 }
