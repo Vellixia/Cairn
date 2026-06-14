@@ -287,9 +287,12 @@ version = "0.1.0"
 dependencies = [
  "cairn-core",
  "cairn-store",
+ "chrono",
  "serde",
+ "serde_json",
  "similar",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

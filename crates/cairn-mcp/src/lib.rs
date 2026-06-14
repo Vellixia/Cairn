@@ -189,6 +189,23 @@ impl McpServer {
                 }
                 Ok(out)
             }
+            "checkpoint" => {
+                let label = str_arg(args.get("label")).unwrap_or("checkpoint");
+                let cp = self.guard.checkpoint(label).map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "checkpoint {} created ({} files tracked)",
+                    cp.id, cp.files
+                ))
+            }
+            "rollback" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                let r = self.guard.rollback(id).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&r).map_err(|e| e.to_string())
+            }
+            "checkpoints" => {
+                let cps = self.guard.list_checkpoints().map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&cps).map_err(|e| e.to_string())
+            }
             "anchor" => match str_arg(args.get("goal")) {
                 Some(goal) => {
                     self.guard.set_anchor(goal).map_err(|e| e.to_string())?;
@@ -317,6 +334,25 @@ fn tool_defs() -> Value {
                 "type": "object",
                 "properties": { "limit": { "type": "integer", "minimum": 1 } }
             }
+        },
+        {
+            "name": "checkpoint",
+            "description": "Snapshot the files Cairn has tracked (those read through Cairn) so you can roll back to this state. Optional `label`.",
+            "inputSchema": { "type": "object", "properties": { "label": { "type": "string" } } }
+        },
+        {
+            "name": "rollback",
+            "description": "Restore every tracked file to a checkpoint's state from the blob store (undo agent damage). Requires the checkpoint `id`.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "checkpoints",
+            "description": "List checkpoints (newest first) with their ids.",
+            "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "anchor",

@@ -10,10 +10,12 @@
 
 use cairn_core::{ContentHash, Result};
 use cairn_store::Store;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use similar::{ChangeTag, TextDiff};
 use std::path::Path;
 use std::sync::Arc;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -43,6 +45,23 @@ impl VerifyReport {
     pub fn is_clean(&self) -> bool {
         matches!(self.risk, Risk::Ok)
     }
+}
+
+/// A snapshot of the tracked file state you can roll back to.
+#[derive(Debug, Clone, Serialize)]
+pub struct Checkpoint {
+    pub id: String,
+    pub label: String,
+    pub created_at: DateTime<Utc>,
+    pub files: usize,
+}
+
+/// The outcome of rolling back to a checkpoint.
+#[derive(Debug, Clone, Serialize)]
+pub struct RollbackReport {
+    pub checkpoint_id: String,
+    pub restored: Vec<String>,
+    pub skipped: Vec<String>,
 }
 
 pub struct Guard {
@@ -104,6 +123,79 @@ impl Guard {
     /// The current task anchor, if one is set.
     pub fn anchor(&self) -> Result<Option<String>> {
         self.store.get_meta("task_anchor")
+    }
+
+    /// Snapshot the files Cairn has tracked (path → content hash) as a named checkpoint.
+    pub fn checkpoint(&self, label: &str) -> Result<Checkpoint> {
+        let map: std::collections::BTreeMap<String, String> = self
+            .store
+            .all_file_versions()?
+            .into_iter()
+            .map(|(path, hash, _lines)| (path, hash))
+            .collect();
+        let id = Uuid::new_v4().simple().to_string();
+        let created_at = Utc::now();
+        let files = map.len();
+        self.store.insert_checkpoint(
+            &id,
+            label,
+            &created_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            &serde_json::to_string(&map)?,
+        )?;
+        Ok(Checkpoint {
+            id,
+            label: label.to_string(),
+            created_at,
+            files,
+        })
+    }
+
+    /// List checkpoints, newest first.
+    pub fn list_checkpoints(&self) -> Result<Vec<Checkpoint>> {
+        let mut out = Vec::new();
+        for (id, label, created) in self.store.list_checkpoints()? {
+            let files = self
+                .store
+                .get_checkpoint(&id)?
+                .and_then(|(_, _, j)| {
+                    serde_json::from_str::<std::collections::BTreeMap<String, String>>(&j).ok()
+                })
+                .map(|m| m.len())
+                .unwrap_or(0);
+            out.push(Checkpoint {
+                id,
+                label,
+                created_at: DateTime::parse_from_rfc3339(&created)
+                    .map(|d| d.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now()),
+                files,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Roll back to a checkpoint, restoring each tracked file's content from the blob store.
+    pub fn rollback(&self, checkpoint_id: &str) -> Result<RollbackReport> {
+        let (_, _, files_json) = self
+            .store
+            .get_checkpoint(checkpoint_id)?
+            .ok_or_else(|| cairn_core::Error::NotFound(format!("checkpoint {checkpoint_id}")))?;
+        let map: std::collections::BTreeMap<String, String> = serde_json::from_str(&files_json)?;
+        let mut restored = Vec::new();
+        let mut skipped = Vec::new();
+        for (path, hash) in map {
+            match self.store.blobs().get(&ContentHash(hash))? {
+                Some(bytes) if std::fs::write(std::path::Path::new(&path), &bytes).is_ok() => {
+                    restored.push(path)
+                }
+                _ => skipped.push(path),
+            }
+        }
+        Ok(RollbackReport {
+            checkpoint_id: checkpoint_id.to_string(),
+            restored,
+            skipped,
+        })
     }
 }
 
@@ -247,5 +339,35 @@ mod tests {
         assert!(g.anchor().unwrap().is_none());
         g.set_anchor("  ship Cairn v0.2  ").unwrap();
         assert_eq!(g.anchor().unwrap().unwrap(), "ship Cairn v0.2");
+    }
+
+    #[test]
+    fn checkpoint_and_rollback_restores_files() {
+        let (g, dir) = guard();
+        let f = dir.path().join("f.txt");
+        std::fs::write(&f, "original content\nline2\n").unwrap();
+
+        // Simulate Cairn having read the file: retain the bytes + record the version.
+        let key = std::fs::canonicalize(&f)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let bytes = std::fs::read(&f).unwrap();
+        let hash = g.store.blobs().put(&bytes).unwrap();
+        g.store.record_file_version(&key, &hash.0, 2).unwrap();
+
+        let cp = g.checkpoint("before edits").unwrap();
+        assert_eq!(cp.files, 1);
+        assert_eq!(g.list_checkpoints().unwrap().len(), 1);
+
+        // The agent guts the file, then we roll back.
+        std::fs::write(&f, "gutted\n").unwrap();
+        let report = g.rollback(&cp.id).unwrap();
+        assert_eq!(report.restored.len(), 1);
+        assert!(report.skipped.is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&f).unwrap(),
+            "original content\nline2\n"
+        );
     }
 }

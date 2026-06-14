@@ -43,6 +43,13 @@ trait StoreBackend: Send + Sync {
     fn latest_file_version(&self, path: &str) -> Result<Option<(String, i64)>>;
     fn set_meta(&self, key: &str, value: &str) -> Result<()>;
     fn get_meta(&self, key: &str) -> Result<Option<String>>;
+    fn all_file_versions(&self) -> Result<Vec<(String, String, i64)>>;
+    fn insert_checkpoint(&self, id: &str, label: &str, created_at: &str, files: &str)
+        -> Result<()>;
+    /// `(label, created_at, files_json)`.
+    fn get_checkpoint(&self, id: &str) -> Result<Option<(String, String, String)>>;
+    /// `(id, label, created_at)`, newest first.
+    fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>>;
 }
 
 /// The structured store plus the content-addressed blob store. Backend-agnostic public API.
@@ -122,6 +129,24 @@ impl Store {
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {
         self.backend.get_meta(key)
     }
+    pub fn all_file_versions(&self) -> Result<Vec<(String, String, i64)>> {
+        self.backend.all_file_versions()
+    }
+    pub fn insert_checkpoint(
+        &self,
+        id: &str,
+        label: &str,
+        created_at: &str,
+        files: &str,
+    ) -> Result<()> {
+        self.backend.insert_checkpoint(id, label, created_at, files)
+    }
+    pub fn get_checkpoint(&self, id: &str) -> Result<Option<(String, String, String)>> {
+        self.backend.get_checkpoint(id)
+    }
+    pub fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>> {
+        self.backend.list_checkpoints()
+    }
 }
 
 /// Embedded SQLite backend — the default; zero external services, ideal for dev/tests/CI.
@@ -176,6 +201,12 @@ impl SqliteBackend {
             CREATE TABLE IF NOT EXISTS meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS checkpoints (
+                id TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                files TEXT NOT NULL
             );",
         )
         .map_err(stor)?;
@@ -438,6 +469,63 @@ impl StoreBackend for SqliteBackend {
         })
         .optional()
         .map_err(stor)
+    }
+
+    fn all_file_versions(&self) -> Result<Vec<(String, String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, content_hash, lines FROM file_versions")
+            .map_err(stor)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(stor)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(stor)?);
+        }
+        Ok(out)
+    }
+
+    fn insert_checkpoint(
+        &self,
+        id: &str,
+        label: &str,
+        created_at: &str,
+        files: &str,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO checkpoints (id,label,created_at,files) VALUES (?1,?2,?3,?4)",
+            params![id, label, created_at, files],
+        )
+        .map_err(stor)?;
+        Ok(())
+    }
+
+    fn get_checkpoint(&self, id: &str) -> Result<Option<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        conn.query_row(
+            "SELECT label, created_at, files FROM checkpoints WHERE id=?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(stor)
+    }
+
+    fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT id, label, created_at FROM checkpoints ORDER BY created_at DESC")
+            .map_err(stor)?;
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(stor)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r.map_err(stor)?);
+        }
+        Ok(out)
     }
 }
 

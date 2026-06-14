@@ -62,6 +62,15 @@ enum Cmd {
         #[arg(trailing_var_arg = true, num_args = 1..)]
         goal: Vec<String>,
     },
+    /// Snapshot tracked files so you can roll back later.
+    Checkpoint {
+        #[arg(trailing_var_arg = true, num_args = 0..)]
+        label: Vec<String>,
+    },
+    /// Roll back tracked files to a checkpoint (undo damage).
+    Rollback { id: String },
+    /// List checkpoints (newest first).
+    Checkpoints,
     /// Show basic stats.
     Stats,
     /// Verify the local setup.
@@ -181,6 +190,38 @@ async fn main() -> anyhow::Result<()> {
             let goal = goal.join(" ");
             state.guard.set_anchor(&goal)?;
             println!("task anchor set: {goal}");
+        }
+        Cmd::Checkpoint { label } => {
+            let state = AppState::new(&cfg)?;
+            let label = if label.is_empty() {
+                "checkpoint".to_string()
+            } else {
+                label.join(" ")
+            };
+            let cp = state.guard.checkpoint(&label)?;
+            println!("checkpoint {} created ({} files tracked)", cp.id, cp.files);
+        }
+        Cmd::Rollback { id } => {
+            let state = AppState::new(&cfg)?;
+            let r = state.guard.rollback(&id)?;
+            println!(
+                "rolled back {}: {} restored, {} skipped",
+                id,
+                r.restored.len(),
+                r.skipped.len()
+            );
+        }
+        Cmd::Checkpoints => {
+            let state = AppState::new(&cfg)?;
+            for cp in state.guard.list_checkpoints()? {
+                println!(
+                    "{}  {}  ({} files)  {}",
+                    cp.id,
+                    cp.created_at.to_rfc3339(),
+                    cp.files,
+                    cp.label
+                );
+            }
         }
         Cmd::Stats => {
             let state = AppState::new(&cfg)?;

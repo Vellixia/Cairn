@@ -10,7 +10,10 @@ repository.workspace = true
 cairn-core.workspace = true
 cairn-store.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 similar.workspace = true
+chrono.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
