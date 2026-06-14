@@ -12,6 +12,7 @@ use cairn_context::{ContextEngine, ReadMode};
 use cairn_core::{Config, NewMemory, Result};
 use cairn_guard::Guard;
 use cairn_memory::MemoryEngine;
+use cairn_profile::Profile;
 use cairn_shell::ShellCompressor;
 use cairn_store::Store;
 use serde_json::{json, Value};
@@ -26,6 +27,7 @@ pub struct McpServer {
     guard: Arc<Guard>,
     asm: Arc<Assembler>,
     shell: Arc<ShellCompressor>,
+    profile: Arc<Profile>,
     mem: Arc<MemoryEngine>,
 }
 
@@ -38,6 +40,7 @@ impl McpServer {
             guard: Arc::new(Guard::new(store.clone())),
             asm: Arc::new(Assembler::new(mem.clone())),
             shell: Arc::new(ShellCompressor::new(store.clone())),
+            profile: Arc::new(Profile::new(mem.clone())),
             mem,
         })
     }
@@ -185,6 +188,19 @@ impl McpServer {
                 }
                 Ok(out)
             }
+            "prefer" => {
+                let rule = str_arg(args.get("rule")).ok_or("missing 'rule'")?;
+                let m = self.profile.prefer(rule).map_err(|e| e.to_string())?;
+                Ok(format!("noted preference: {}", m.content))
+            }
+            "profile" => {
+                let block = self.profile.block().map_err(|e| e.to_string())?;
+                if block.is_empty() {
+                    Ok("(no preferences recorded yet)".into())
+                } else {
+                    Ok(block)
+                }
+            }
             "compress" => {
                 let command = str_arg(args.get("command")).ok_or("missing 'command'")?;
                 let output = str_arg(args.get("output")).ok_or("missing 'output'")?;
@@ -289,6 +305,20 @@ fn tool_defs() -> Value {
                 "type": "object",
                 "properties": { "limit": { "type": "integer", "minimum": 1 } }
             }
+        },
+        {
+            "name": "prefer",
+            "description": "Record a standing user preference (preferred stack, style, do/don'ts). Injected at session start so any model honors how you work.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "rule": { "type": "string" } },
+                "required": ["rule"]
+            }
+        },
+        {
+            "name": "profile",
+            "description": "Show the user's recorded preferences (the profile block).",
+            "inputSchema": { "type": "object", "properties": {} }
         },
         {
             "name": "compress",

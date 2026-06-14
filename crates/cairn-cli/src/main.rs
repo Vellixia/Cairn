@@ -52,6 +52,11 @@ enum Cmd {
         #[arg(long, default_value_t = 12)]
         limit: usize,
     },
+    /// Record a standing preference (e.g. `cairn prefer always use ripgrep`).
+    Prefer {
+        #[arg(trailing_var_arg = true, num_args = 1..)]
+        rule: Vec<String>,
+    },
     /// Show basic stats.
     Stats,
     /// Verify the local setup.
@@ -160,6 +165,11 @@ async fn main() -> anyhow::Result<()> {
             for m in state.mem.wakeup(limit)? {
                 println!("· ({}) {}", m.kind.as_str(), m.content);
             }
+        }
+        Cmd::Prefer { rule } => {
+            let state = AppState::new(&cfg)?;
+            let m = state.profile.prefer(&rule.join(" "))?;
+            println!("noted preference: {}", m.content);
         }
         Cmd::Stats => {
             let state = AppState::new(&cfg)?;

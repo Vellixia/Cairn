@@ -19,6 +19,7 @@ use cairn_context::{ContextEngine, ReadMode, ReadResult};
 use cairn_core::{Config, Memory, NewMemory};
 use cairn_guard::{Guard, VerifyReport};
 use cairn_memory::{MemoryEngine, ScoredMemory};
+use cairn_profile::Profile;
 use cairn_shell::{Compressed, ShellCompressor};
 use cairn_store::Store;
 use chrono::{DateTime, Utc};
@@ -39,6 +40,7 @@ pub struct AppState {
     pub guard: Arc<Guard>,
     pub asm: Arc<Assembler>,
     pub shell: Arc<ShellCompressor>,
+    pub profile: Arc<Profile>,
 }
 
 impl AppState {
@@ -49,6 +51,7 @@ impl AppState {
         let guard = Arc::new(Guard::new(store.clone()));
         let asm = Arc::new(Assembler::new(mem.clone()));
         let shell = Arc::new(ShellCompressor::new(store.clone()));
+        let profile = Arc::new(Profile::new(mem.clone()));
         Ok(Self {
             store,
             ctx,
@@ -56,6 +59,7 @@ impl AppState {
             guard,
             asm,
             shell,
+            profile,
         })
     }
 }
@@ -73,6 +77,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/consolidate", post(consolidate_memory))
         .route("/api/guard/verify", post(verify))
         .route("/api/shell/compress", post(shell_compress))
+        .route("/api/profile", get(get_profile).post(post_prefer))
         .route("/api/sync/pull", get(sync_pull))
         .route("/api/sync/push", post(sync_push))
         .fallback(static_handler)
@@ -250,6 +255,22 @@ async fn shell_compress(
     Json(b): Json<ShellCompressBody>,
 ) -> Result<Json<Compressed>, ApiError> {
     Ok(Json(s.shell.compress(&b.command, &b.output)?))
+}
+
+async fn get_profile(State(s): State<AppState>) -> Result<Json<Vec<Memory>>, ApiError> {
+    Ok(Json(s.profile.preferences()?))
+}
+
+#[derive(Deserialize)]
+struct PreferBody {
+    rule: String,
+}
+
+async fn post_prefer(
+    State(s): State<AppState>,
+    Json(b): Json<PreferBody>,
+) -> Result<Json<Memory>, ApiError> {
+    Ok(Json(s.profile.prefer(&b.rule)?))
 }
 
 // ---- sync + auth -------------------------------------------------------------------------------

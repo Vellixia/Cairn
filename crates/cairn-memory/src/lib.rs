@@ -101,6 +101,13 @@ impl MemoryEngine {
         self.store.get_memory(id)
     }
 
+    /// All memories of a given kind, newest first.
+    pub fn by_kind(&self, kind: MemoryKind) -> Result<Vec<Memory>> {
+        let mut all = self.store.all_memories()?;
+        all.retain(|m| m.kind == kind);
+        Ok(all)
+    }
+
     /// Consolidate memory across the four tiers (working → episodic → semantic → procedural),
     /// the way human memory turns transient experience into durable knowledge. Returns how many
     /// memories were promoted. Idempotent: a memory only advances when it meets the next bar.

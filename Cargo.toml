@@ -8,6 +8,7 @@ members = [
     "crates/cairn-guard",
     "crates/cairn-assemble",
     "crates/cairn-shell",
+    "crates/cairn-profile",
     "crates/cairn-api",
     "crates/cairn-mcp",
     "crates/cairn-cli",
@@ -30,6 +31,7 @@ cairn-memory = { path = "crates/cairn-memory" }
 cairn-guard = { path = "crates/cairn-guard" }
 cairn-assemble = { path = "crates/cairn-assemble" }
 cairn-shell = { path = "crates/cairn-shell" }
+cairn-profile = { path = "crates/cairn-profile" }
 cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
 

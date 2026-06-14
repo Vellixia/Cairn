@@ -215,6 +215,7 @@ dependencies = [
  "cairn-core",
  "cairn-guard",
  "cairn-memory",
+ "cairn-profile",
  "cairn-shell",
  "cairn-store",
  "chrono",
@@ -300,6 +301,7 @@ dependencies = [
  "cairn-core",
  "cairn-guard",
  "cairn-memory",
+ "cairn-profile",
  "cairn-shell",
  "cairn-store",
  "serde_json",
@@ -314,6 +316,16 @@ dependencies = [
  "cairn-store",
  "chrono",
  "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "cairn-profile"
+version = "0.1.0"
+dependencies = [
+ "cairn-core",
+ "cairn-memory",
+ "cairn-store",
  "tempfile",
 ]
 

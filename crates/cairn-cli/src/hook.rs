@@ -3,9 +3,10 @@
 //! Claude Code invokes the configured command with a JSON payload on stdin and reads JSON on
 //! stdout. We use that to make Cairn work automatically:
 //!
-//! - `SessionStart` injects wakeup memory as additionalContext (never start cold). It also fires
-//!   after a compaction (`source: "compact"`), so memory survives compaction.
-//! - `UserPromptSubmit` injects an assembled, budgeted context block and records the prompt as episodic memory.
+//! - `SessionStart` injects your preferences + wakeup memory as additionalContext (never start
+//!   cold). It also fires after a compaction (`source: "compact"`), so memory survives compaction.
+//! - `UserPromptSubmit` injects an assembled, budgeted context block, records the prompt as
+//!   episodic memory, and learns standing preferences stated in it.
 //! - `PostToolUse` (Edit/Write) runs the silent-corruption guard against the version Cairn recorded
 //!   when the file was read, warning if a large unreplaced deletion slipped in.
 //! - `SessionEnd` consolidates the session's memory across tiers.
@@ -35,15 +36,29 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
 
     match event {
         "SessionStart" => {
-            let mems = state.mem.wakeup(12)?;
-            if mems.is_empty() {
-                return Ok(());
+            let mut ctx = String::new();
+            let prof = state.profile.block()?;
+            if !prof.is_empty() {
+                ctx.push_str(&prof);
+                ctx.push('\n');
             }
-            let mut ctx = String::from("Cairn memory — what you already know here:\n");
-            for m in mems {
-                ctx.push_str(&format!("- ({}) {}\n", m.kind.as_str(), m.content));
+            // Preferences are already shown in the profile block above; list the rest.
+            let lines: Vec<String> = state
+                .mem
+                .wakeup(12)?
+                .into_iter()
+                .filter(|m| m.kind != MemoryKind::Preference)
+                .map(|m| format!("- ({}) {}\n", m.kind.as_str(), m.content))
+                .collect();
+            if !lines.is_empty() {
+                ctx.push_str("Cairn memory — what you already know here:\n");
+                for l in lines {
+                    ctx.push_str(&l);
+                }
             }
-            emit(event, &ctx);
+            if !ctx.is_empty() {
+                emit(event, &ctx);
+            }
         }
         "UserPromptSubmit" => {
             let prompt = payload.get("prompt").and_then(Value::as_str).unwrap_or("");
@@ -62,6 +77,8 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
             nm.tier = Some(MemoryTier::Episodic);
             nm.importance = Some(0.3);
             let _ = state.mem.remember(nm);
+            // Learn standing preferences stated in the prompt ("always use X", …).
+            let _ = state.profile.capture_from_prompt(prompt);
         }
         "PostToolUse" => {
             let tool = payload
