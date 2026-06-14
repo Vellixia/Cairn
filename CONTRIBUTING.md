@@ -40,7 +40,7 @@ cargo test --workspace
 |---|---|
 | `cairn-core` | domain types, hashing, config |
 | `cairn-store` | pluggable backend (SQLite today) + content-hash blob store |
-| `cairn-context` | cached reads + byte-identical `expand` |
+| `cairn-context` | cached reads · AST signature outlines · byte-identical `expand` |
 | `cairn-memory` | remember · BM25 recall · wakeup · decay · 4-tier consolidation |
 | `cairn-assemble` | token-budgeted, edge-ordered context assembler |
 | `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback |

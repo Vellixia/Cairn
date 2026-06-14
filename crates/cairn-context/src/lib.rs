@@ -16,21 +16,34 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-/// How to render a file. (More modes — map/signatures/density — arrive with the AST work.)
+mod outline;
+
+/// How to render a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReadMode {
-    /// Let the engine decide (cache-aware).
+    /// Let the engine decide (cache-aware: full first read, diff on change, tiny view if unchanged).
     Auto,
     /// Always return the whole file (still cached + retained).
     Full,
+    /// AST signature outline — top-level items and their members, bodies elided (huge token saver).
+    Signatures,
+    /// Like `Signatures`, with each item prefixed by its start line number.
+    Map,
 }
 
 impl ReadMode {
     pub fn parse(s: Option<&str>) -> Self {
         match s {
             Some("full") => ReadMode::Full,
+            Some("signatures") | Some("sig") | Some("signature") => ReadMode::Signatures,
+            Some("map") | Some("outline") => ReadMode::Map,
             _ => ReadMode::Auto,
         }
+    }
+
+    /// Whether this mode renders the file's structure rather than its content.
+    fn is_structural(self) -> bool {
+        matches!(self, ReadMode::Signatures | ReadMode::Map)
     }
 }
 
@@ -44,6 +57,8 @@ pub enum ReadStatus {
     Cached,
     /// Changed since last read: only the diff is returned.
     Diff,
+    /// A structural view: the file's signature outline (`signatures`/`map` modes).
+    Outline,
 }
 
 /// The result handed back for a read.
@@ -99,8 +114,9 @@ impl ContextEngine {
 
         let mut cache = self.cache.lock().unwrap();
 
-        // Re-read killer: unchanged file + not forced full -> tiny view.
-        if mode != ReadMode::Full {
+        // Re-read killer: only Auto takes the cheap "unchanged" shortcut. Full and the structural
+        // modes always read fresh (structural views are cheap to recompute and that's the point).
+        if mode == ReadMode::Auto {
             if let Some(entry) = cache.get(&key) {
                 if entry.mtime_ns == mtime_ns {
                     let note = format!(
@@ -138,6 +154,41 @@ impl ContextEngine {
             .store
             .record_file_version(&canonical, &hash.0, lines as i64);
 
+        // Structural (AST) views: render the file as just its signatures. Falls through to a full
+        // read for unsupported languages or unparseable input.
+        if mode.is_structural() {
+            if let Some(o) = outline::outline(path, &content, mode == ReadMode::Map) {
+                let est = estimate_tokens(&o.text);
+                let note = format!(
+                    "{} signature outline ({} items); `expand {}` for the full {lines} lines",
+                    o.lang,
+                    o.items,
+                    hash.short()
+                );
+                let result = ReadResult {
+                    path: key.clone(),
+                    hash: hash.0.clone(),
+                    handle: hash.short().to_string(),
+                    status: ReadStatus::Outline,
+                    lines,
+                    bytes: content.len(),
+                    view: o.text,
+                    note,
+                    est_tokens: est,
+                };
+                cache.insert(
+                    key,
+                    CacheEntry {
+                        mtime_ns,
+                        hash,
+                        content,
+                        lines,
+                    },
+                );
+                return Ok(result);
+            }
+        }
+
         let prev = cache.get(&key).map(|e| e.content.clone());
 
         let result = match (&prev, mode) {
@@ -160,7 +211,11 @@ impl ContextEngine {
                 }
             }
             _ => {
-                let note = format!("full file; {lines} lines; handle {}", hash.short());
+                let mut note = format!("full file; {lines} lines; handle {}", hash.short());
+                // Point the agent at the cheaper structural view when one is available.
+                if lines > 40 && outline::supported(path) {
+                    note.push_str("; try mode=signatures for a structural outline");
+                }
                 ReadResult {
                     path: key.clone(),
                     hash: hash.0.clone(),
@@ -286,5 +341,51 @@ mod tests {
         // Both versions' originals are retained — nothing is ever lost.
         assert_eq!(eng.expand(&r1.hash).unwrap().unwrap(), original);
         assert_eq!(eng.expand(&r3.hash).unwrap().unwrap(), changed);
+    }
+
+    #[test]
+    fn signatures_mode_outlines_rust_and_stays_lossless() {
+        let (eng, dir) = engine();
+        let file = dir.path().join("widget.rs");
+        let src = "\
+pub struct Widget { pub id: u32, pub name: String }
+
+impl Widget {
+    pub fn new(id: u32) -> Self {
+        let name = format!(\"w{id}\");
+        Self { id, name }
+    }
+}
+
+pub fn build() -> Widget { Widget::new(1) }
+";
+        std::fs::write(&file, src).unwrap();
+
+        let r = eng.read(&file, ReadMode::Signatures).unwrap();
+        assert_eq!(r.status, ReadStatus::Outline);
+        // The API surface is there...
+        assert!(r.view.contains("pub struct Widget"));
+        assert!(r.view.contains("impl Widget"));
+        assert!(r.view.contains("pub fn new(id: u32) -> Self"));
+        assert!(r.view.contains("pub fn build() -> Widget"));
+        // ...the bodies are not.
+        assert!(!r.view.contains("format!"));
+        assert!(!r.view.contains("Widget::new(1)"));
+        // Outline is cheaper than the full file, and the original is still recoverable.
+        assert!(r.est_tokens < estimate_tokens(src));
+        assert_eq!(eng.expand(&r.hash).unwrap().unwrap(), src);
+    }
+
+    #[test]
+    fn structural_mode_falls_back_to_full_for_non_code() {
+        let (eng, dir) = engine();
+        let file = dir.path().join("notes.txt");
+        let body = "plain prose, no code here\nsecond line\n";
+        std::fs::write(&file, body).unwrap();
+
+        // Unsupported language → graceful fall-through to a full read.
+        let r = eng.read(&file, ReadMode::Signatures).unwrap();
+        assert_eq!(r.status, ReadStatus::Full);
+        assert_eq!(r.view, body);
     }
 }

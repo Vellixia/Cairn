@@ -58,7 +58,7 @@ This repo is a Cargo workspace:
 |---|---|
 | `cairn-core` | shared domain types, hashing, config |
 | `cairn-store` | pluggable backend (SQLite today) + content-hash blob store |
-| `cairn-context` | cached file reads + byte-identical `expand` (the re-read killer) |
+| `cairn-context` | cached reads · AST signature outlines · byte-identical `expand` (the re-read killer) |
 | `cairn-memory` | remember · BM25 recall · wakeup · Ebbinghaus decay · 4-tier consolidation |
 | `cairn-assemble` | token-budgeted, edge-ordered context assembler (anti-rot) |
 | `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback |

@@ -275,7 +275,7 @@ fn tool_defs() -> Value {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path to read." },
-                    "mode": { "type": "string", "enum": ["auto", "full"], "description": "auto (cache-aware) or full." }
+                    "mode": { "type": "string", "enum": ["auto", "full", "signatures", "map"], "description": "auto (cache-aware), full, signatures (AST outline — bodies elided), or map (outline + line numbers). For code files, signatures/map cost a fraction of the tokens; recover the full file with expand." }
                 },
                 "required": ["path"]
             }
