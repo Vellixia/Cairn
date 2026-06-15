@@ -58,6 +58,8 @@ pub(crate) struct HelixBackend {
     client: Client,
     rt: tokio::runtime::Runtime,
     embed: Box<dyn Embedder>,
+    /// Prefix applied to every node label, so instances/tests can share one server safely.
+    ns: String,
 }
 
 impl HelixBackend {
@@ -71,9 +73,20 @@ impl HelixBackend {
             .build()
             .map_err(|e| Error::Storage(format!("helix runtime: {e}")))?;
         let embed = cairn_embed::from_config(&cfg.embed)?;
-        let backend = Self { client, rt, embed };
+        let ns = cfg.helix_ns.clone().unwrap_or_else(|| "cairn_".to_string());
+        let backend = Self {
+            client,
+            rt,
+            embed,
+            ns,
+        };
         backend.wait_ready()?;
         Ok(backend)
+    }
+
+    /// The on-server label for a base entity name (namespaced).
+    fn label(&self, base: &str) -> String {
+        format!("{}{}", self.ns, base)
     }
 
     /// Ensure indexes, retrying for a while so a freshly started server (e.g. the Docker stack
@@ -119,33 +132,36 @@ impl HelixBackend {
         let batch = write_batch()
             .var_as(
                 "vi",
-                g().create_vector_index_nodes(MEMORY, "embedding", None::<String>),
+                g().create_vector_index_nodes(self.label(MEMORY), "embedding", None::<String>),
             )
             .returning(["vi"]);
         self.run(DynamicQueryRequest::write(batch))?;
         Ok(())
     }
 
-    /// Insert a node of `label` with `props`.
+    /// Insert a node of base label `label` (namespaced) with `props`.
     fn add_node(&self, label: &str, props: Vec<(String, PropertyInput)>) -> Result<()> {
         let batch = write_batch()
-            .var_as("n", g().add_n(label, props))
+            .var_as("n", g().add_n(self.label(label), props))
             .returning(["n"]);
         self.run(DynamicQueryRequest::write(batch))?;
         Ok(())
     }
 
-    /// Read every node of `label`, projecting `cols`. Rows are returned in insertion order.
+    /// Read every node of base label `label`, projecting `cols`. Rows are in insertion order.
     fn read_rows(&self, label: &str, cols: &[&str]) -> Result<Vec<Map<String, Value>>> {
         let projection: Vec<String> = cols.iter().map(|c| c.to_string()).collect();
         let batch = read_batch()
-            .var_as("rows", g().n_with_label(label).values(projection))
+            .var_as(
+                "rows",
+                g().n_with_label(self.label(label)).values(projection),
+            )
             .returning(["rows"]);
         let resp = self.run(DynamicQueryRequest::read(batch))?;
         Ok(rows_of(&resp, "rows"))
     }
 
-    /// Read nodes of `label` where `prop == val`, projecting `cols` (server-side filter).
+    /// Read nodes of base label `label` where `prop == val`, projecting `cols` (server-side filter).
     fn read_where(
         &self,
         label: &str,
@@ -157,21 +173,27 @@ impl HelixBackend {
         let batch = read_batch()
             .var_as(
                 "rows",
-                g().n_with_label_where(label, SourcePredicate::eq(prop, val.to_string()))
-                    .values(projection),
+                g().n_with_label_where(
+                    self.label(label),
+                    SourcePredicate::eq(prop, val.to_string()),
+                )
+                .values(projection),
             )
             .returning(["rows"]);
         let resp = self.run(DynamicQueryRequest::read(batch))?;
         Ok(rows_of(&resp, "rows"))
     }
 
-    /// Delete every node of `label` where `prop == val`.
+    /// Delete every node of base label `label` where `prop == val`.
     fn drop_where(&self, label: &str, prop: &str, val: &str) -> Result<()> {
         let batch = write_batch()
             .var_as(
                 "d",
-                g().n_with_label_where(label, SourcePredicate::eq(prop, val.to_string()))
-                    .drop(),
+                g().n_with_label_where(
+                    self.label(label),
+                    SourcePredicate::eq(prop, val.to_string()),
+                )
+                .drop(),
             )
             .returning(["d"]);
         self.run(DynamicQueryRequest::write(batch))?;
@@ -249,9 +271,12 @@ impl StoreBackend for HelixBackend {
         let batch = write_batch()
             .var_as(
                 "u",
-                g().n_with_label_where(MEMORY, SourcePredicate::eq("id", id.to_string()))
-                    .set_property("access_count", next)
-                    .set_property("updated_at", ts(Utc::now())),
+                g().n_with_label_where(
+                    self.label(MEMORY),
+                    SourcePredicate::eq("id", id.to_string()),
+                )
+                .set_property("access_count", next)
+                .set_property("updated_at", ts(Utc::now())),
             )
             .returning(["u"]);
         self.run(DynamicQueryRequest::write(batch))?;
@@ -288,7 +313,7 @@ impl StoreBackend for HelixBackend {
         let batch = read_batch()
             .var_as(
                 "ranked",
-                g().vector_search_nodes(MEMORY, "embedding", qvec, k, None)
+                g().vector_search_nodes(self.label(MEMORY), "embedding", qvec, k, None)
                     .values(projection),
             )
             .returning(["ranked"]);
@@ -620,6 +645,8 @@ mod live {
             host: "127.0.0.1".into(),
             port: 7777,
             helix_url: Some(url.clone()),
+            // Unique namespace per backend so concurrent tests never collide on the shared server.
+            helix_ns: Some(format!("test_{}_", uuid_simple())),
             default_server: None,
             embed: EmbedConfig {
                 provider: "ollama".into(),

@@ -29,8 +29,11 @@ pub struct Config {
     pub host: String,
     /// Serve bind port (`CAIRN_PORT`, default `7777`).
     pub port: u16,
-    /// HelixDB server URL (`CAIRN_HELIX_URL`). `None` = embedded, in-process Helix under `data_dir`.
+    /// HelixDB server URL (`CAIRN_HELIX_URL`).
     pub helix_url: Option<String>,
+    /// Label-namespace prefix for the HelixDB backend (`CAIRN_HELIX_NS`). Lets multiple Cairn
+    /// instances — or isolated tests — share one Helix server without colliding. Default `cairn_`.
+    pub helix_ns: Option<String>,
     /// Default remote Cairn server for `sync` / `pull` / `contribute` (`CAIRN_SERVER`).
     pub default_server: Option<String>,
     /// Embedding settings.
@@ -52,6 +55,7 @@ impl Config {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777),
             helix_url: env_str("CAIRN_HELIX_URL"),
+            helix_ns: env_str("CAIRN_HELIX_NS"),
             default_server: env_str("CAIRN_SERVER"),
             embed: EmbedConfig {
                 provider: env_str("CAIRN_EMBED_PROVIDER").unwrap_or_else(|| "local".to_string()),
