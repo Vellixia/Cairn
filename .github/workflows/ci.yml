@@ -30,8 +30,9 @@ jobs:
 
       - name: Create HelixDB bucket
         run: |
-          docker run --rm --network host minio/mc alias set local http://localhost:9000 minioadmin minioadmin
-          docker run --rm --network host minio/mc mb local/helix-db
+          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc && chmod +x /tmp/mc
+          /tmp/mc alias set local http://localhost:9000 minioadmin minioadmin
+          /tmp/mc mb local/helix-db
 
       - name: Start HelixDB
         run: |
