@@ -1,28 +1,16 @@
 //! The structured store.
 //!
-//! `Store` is a backend-agnostic facade: it dispatches to a `StoreBackend` implementation (SQLite
-//! today; a HelixDB backend next, per the plan) and owns the content-addressed [`BlobStore`] that
-//! holds full-fidelity originals. Keeping the public `Store` API stable means swapping the backend
-//! never churns the engines, API, MCP, or CLI — and tests/CI run against the embedded SQLite
-//! backend with no external service.
+//! `Store` is a thin facade over a [`StoreBackend`] — Cairn's [`HelixBackend`](crate::helix) — plus
+//! the content-addressed [`BlobStore`] that holds full-fidelity originals. Keeping the public
+//! `Store` API stable means the backend never churns the engines, API, MCP, or CLI.
 
 use crate::blob::BlobStore;
-use cairn_core::{Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, Result};
+use cairn_core::{Config, DeviceToken, Error, Memory, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
-use std::path::Path;
-use std::sync::Mutex;
 use uuid::Uuid;
 
-/// Map any storage-backend error into the shared error type.
-fn stor<E: std::fmt::Display>(e: E) -> Error {
-    Error::Storage(e.to_string())
-}
-
-const SELECT_COLS: &str = "id,kind,tier,content,content_hash,concepts,files,session_id,importance,access_count,created_at,updated_at";
-
-/// The structured-storage operations Cairn needs from a backend. Implemented by [`SqliteBackend`]
-/// today; a HelixDB backend implements the same surface so [`Store`] can dispatch to either.
+/// The structured-storage operations Cairn needs from a backend, implemented by
+/// [`HelixBackend`](crate::helix::HelixBackend).
 pub(crate) trait StoreBackend: Send + Sync {
     fn insert_memory(&self, m: &Memory) -> Result<()>;
     fn get_memory(&self, id: &str) -> Result<Option<Memory>>;
@@ -71,13 +59,19 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (and migrate) the store described by `cfg`. Uses HelixDB when `CAIRN_HELIX_URL` is set
-    /// (`cfg.helix_url`), otherwise the embedded SQLite backend.
+    /// Open the store described by `cfg`. Cairn uses **HelixDB** as its datastore, so
+    /// `CAIRN_HELIX_URL` (`cfg.helix_url`) must be set; the bundled `docker compose` stack provides
+    /// one. The content-addressed blob store lives under the data dir.
     pub fn open(cfg: &Config) -> Result<Self> {
-        let backend: Box<dyn StoreBackend> = match &cfg.helix_url {
-            Some(url) => Box::new(crate::helix::HelixBackend::connect(url, cfg)?),
-            None => Box::new(SqliteBackend::open(&cfg.db_path())?),
-        };
+        let url = cfg.helix_url.as_deref().ok_or_else(|| {
+            Error::Invalid(
+                "CAIRN_HELIX_URL is required — Cairn stores data in HelixDB. Run the docker compose \
+                 stack (which starts one) or point CAIRN_HELIX_URL at a HelixDB server."
+                    .into(),
+            )
+        })?;
+        let backend: Box<dyn StoreBackend> =
+            Box::new(crate::helix::HelixBackend::connect(url, cfg)?);
         Ok(Self {
             backend,
             blobs: BlobStore::new(cfg.blobs_dir()),
@@ -231,497 +225,16 @@ impl Store {
     }
 }
 
-/// Embedded SQLite backend — the default; zero external services, ideal for dev/tests/CI.
-struct SqliteBackend {
-    conn: Mutex<Connection>,
-}
-
-impl SqliteBackend {
-    fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path).map_err(stor)?;
-        let backend = Self {
-            conn: Mutex::new(conn),
-        };
-        backend.migrate()?;
-        Ok(backend)
-    }
-
-    fn migrate(&self) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS memories (
-                id           TEXT PRIMARY KEY,
-                kind         TEXT NOT NULL,
-                tier         TEXT NOT NULL,
-                content      TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                concepts     TEXT NOT NULL,
-                files        TEXT NOT NULL,
-                session_id   TEXT,
-                importance   REAL NOT NULL,
-                access_count INTEGER NOT NULL DEFAULT 0,
-                created_at   TEXT NOT NULL,
-                updated_at   TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_memories_hash ON memories(content_hash);
-            CREATE INDEX IF NOT EXISTS idx_memories_created ON memories(created_at);
-            CREATE TABLE IF NOT EXISTS device_tokens (
-                token TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS sync_state (
-                server TEXT PRIMARY KEY,
-                last_sync TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS file_versions (
-                path TEXT PRIMARY KEY,
-                content_hash TEXT NOT NULL,
-                lines INTEGER NOT NULL,
-                updated_at TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS checkpoints (
-                id TEXT PRIMARY KEY,
-                label TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                files TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS guard_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts TEXT NOT NULL,
-                kind TEXT NOT NULL,
-                risk TEXT NOT NULL,
-                path TEXT NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS pairing_codes (
-                code TEXT PRIMARY KEY,
-                token TEXT NOT NULL,
-                name TEXT NOT NULL,
-                expires_at TEXT NOT NULL
-            );",
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-}
-
-impl StoreBackend for SqliteBackend {
-    fn insert_memory(&self, m: &Memory) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        let hash = ContentHash::of_str(&m.content);
-        conn.execute(
-            "INSERT INTO memories (id,kind,tier,content,content_hash,concepts,files,session_id,importance,access_count,created_at,updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![
-                m.id,
-                m.kind.as_str(),
-                m.tier.as_str(),
-                m.content,
-                hash.as_str(),
-                serde_json::to_string(&m.concepts)?,
-                serde_json::to_string(&m.files)?,
-                m.session_id,
-                m.importance,
-                m.access_count,
-                ts(m.created_at),
-                ts(m.updated_at),
-            ],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
-        let conn = self.conn.lock().unwrap();
-        let sql = format!("SELECT {SELECT_COLS} FROM memories WHERE id=?1");
-        let mut stmt = conn.prepare(&sql).map_err(stor)?;
-        stmt.query_row(params![id], row_to_memory)
-            .optional()
-            .map_err(stor)
-    }
-
-    fn find_memory_by_content_hash(&self, hash: &str) -> Result<Option<Memory>> {
-        let conn = self.conn.lock().unwrap();
-        let sql = format!("SELECT {SELECT_COLS} FROM memories WHERE content_hash=?1 LIMIT 1");
-        let mut stmt = conn.prepare(&sql).map_err(stor)?;
-        stmt.query_row(params![hash], row_to_memory)
-            .optional()
-            .map_err(stor)
-    }
-
-    fn all_memories(&self) -> Result<Vec<Memory>> {
-        let conn = self.conn.lock().unwrap();
-        let sql = format!("SELECT {SELECT_COLS} FROM memories ORDER BY created_at DESC");
-        let mut stmt = conn.prepare(&sql).map_err(stor)?;
-        let rows = stmt.query_map([], row_to_memory).map_err(stor)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(stor)?);
-        }
-        Ok(out)
-    }
-
-    fn touch_memory(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE memories SET access_count = access_count + 1, updated_at = ?2 WHERE id = ?1",
-            params![id, ts(Utc::now())],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn count_memories(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
-            .map_err(stor)
-    }
-
-    fn upsert_memory(&self, m: &Memory) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let existing: Option<String> = conn
-            .query_row(
-                "SELECT updated_at FROM memories WHERE id=?1",
-                params![m.id],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(stor)?;
-        if let Some(existing_ts) = existing {
-            if m.updated_at < parse_ts(&existing_ts) {
-                return Ok(false);
-            }
-        }
-        let hash = ContentHash::of_str(&m.content);
-        conn.execute(
-            "INSERT OR REPLACE INTO memories (id,kind,tier,content,content_hash,concepts,files,session_id,importance,access_count,created_at,updated_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![
-                m.id,
-                m.kind.as_str(),
-                m.tier.as_str(),
-                m.content,
-                hash.as_str(),
-                serde_json::to_string(&m.concepts)?,
-                serde_json::to_string(&m.files)?,
-                m.session_id,
-                m.importance,
-                m.access_count,
-                ts(m.created_at),
-                ts(m.updated_at),
-            ],
-        )
-        .map_err(stor)?;
-        Ok(true)
-    }
-
-    fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>> {
-        let conn = self.conn.lock().unwrap();
-        let sql = format!(
-            "SELECT {SELECT_COLS} FROM memories WHERE updated_at > ?1 ORDER BY updated_at ASC"
-        );
-        let mut stmt = conn.prepare(&sql).map_err(stor)?;
-        let rows = stmt
-            .query_map(params![ts(since)], row_to_memory)
-            .map_err(stor)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(stor)?);
-        }
-        Ok(out)
-    }
-
-    fn create_token(&self, name: &str) -> Result<DeviceToken> {
-        let conn = self.conn.lock().unwrap();
-        let token = format!("cairn_{}", Uuid::new_v4().simple());
-        let created_at = Utc::now();
-        conn.execute(
-            "INSERT INTO device_tokens (token,name,created_at) VALUES (?1,?2,?3)",
-            params![token, name, ts(created_at)],
-        )
-        .map_err(stor)?;
-        Ok(DeviceToken {
-            token,
-            name: name.to_string(),
-            created_at,
-        })
-    }
-
-    fn validate_token(&self, token: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let found: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM device_tokens WHERE token=?1",
-                params![token],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(stor)?;
-        Ok(found.is_some())
-    }
-
-    fn revoke_token(&self, token: &str) -> Result<bool> {
-        let conn = self.conn.lock().unwrap();
-        let n = conn
-            .execute("DELETE FROM device_tokens WHERE token=?1", params![token])
-            .map_err(stor)?;
-        Ok(n > 0)
-    }
-
-    fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT token,name,created_at FROM device_tokens ORDER BY created_at ASC")
-            .map_err(stor)?;
-        let rows = stmt
-            .query_map([], |row| {
-                let created: String = row.get("created_at")?;
-                Ok(DeviceToken {
-                    token: row.get("token")?,
-                    name: row.get("name")?,
-                    created_at: parse_ts(&created),
-                })
-            })
-            .map_err(stor)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(stor)?);
-        }
-        Ok(out)
-    }
-
-    fn count_tokens(&self) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT COUNT(*) FROM device_tokens", [], |r| r.get(0))
-            .map_err(stor)
-    }
-
-    fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>> {
-        let conn = self.conn.lock().unwrap();
-        let ts_str: Option<String> = conn
-            .query_row(
-                "SELECT last_sync FROM sync_state WHERE server=?1",
-                params![server],
-                |r| r.get(0),
-            )
-            .optional()
-            .map_err(stor)?;
-        Ok(ts_str.map(|s| parse_ts(&s)))
-    }
-
-    fn set_last_sync(&self, server: &str, when: DateTime<Utc>) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO sync_state (server,last_sync) VALUES (?1,?2)
-             ON CONFLICT(server) DO UPDATE SET last_sync=excluded.last_sync",
-            params![server, ts(when)],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn record_file_version(&self, path: &str, content_hash: &str, lines: i64) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO file_versions (path,content_hash,lines,updated_at) VALUES (?1,?2,?3,?4)
-             ON CONFLICT(path) DO UPDATE SET content_hash=excluded.content_hash, lines=excluded.lines, updated_at=excluded.updated_at",
-            params![path, content_hash, lines, ts(Utc::now())],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn latest_file_version(&self, path: &str) -> Result<Option<(String, i64)>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT content_hash, lines FROM file_versions WHERE path=?1",
-            params![path],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
-        .optional()
-        .map_err(stor)
-    }
-
-    fn set_meta(&self, key: &str, value: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO meta (key,value) VALUES (?1,?2)
-             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![key, value],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn get_meta(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row("SELECT value FROM meta WHERE key=?1", params![key], |r| {
-            r.get(0)
-        })
-        .optional()
-        .map_err(stor)
-    }
-
-    fn all_file_versions(&self) -> Result<Vec<(String, String, i64)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT path, content_hash, lines FROM file_versions")
-            .map_err(stor)?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(stor)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(stor)?);
-        }
-        Ok(out)
-    }
-
-    fn insert_checkpoint(
-        &self,
-        id: &str,
-        label: &str,
-        created_at: &str,
-        files: &str,
-    ) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO checkpoints (id,label,created_at,files) VALUES (?1,?2,?3,?4)",
-            params![id, label, created_at, files],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn get_checkpoint(&self, id: &str) -> Result<Option<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
-        conn.query_row(
-            "SELECT label, created_at, files FROM checkpoints WHERE id=?1",
-            params![id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
-        .optional()
-        .map_err(stor)
-    }
-
-    fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT id, label, created_at FROM checkpoints ORDER BY created_at DESC")
-            .map_err(stor)?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
-            .map_err(stor)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(stor)?);
-        }
-        Ok(out)
-    }
-
-    fn record_guard_event(&self, ts: &str, kind: &str, risk: &str, path: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO guard_events (ts,kind,risk,path) VALUES (?1,?2,?3,?4)",
-            params![ts, kind, risk, path],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn recent_guard_events(&self, limit: usize) -> Result<Vec<(String, String, String, String)>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare("SELECT kind, risk, path, ts FROM guard_events ORDER BY id DESC LIMIT ?1")
-            .map_err(stor)?;
-        let rows = stmt
-            .query_map(params![limit as i64], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-            })
-            .map_err(stor)?;
-        let mut out = Vec::new();
-        for r in rows {
-            out.push(r.map_err(stor)?);
-        }
-        Ok(out)
-    }
-
-    fn create_pairing(&self, code: &str, token: &str, name: &str, expires_at: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT OR REPLACE INTO pairing_codes (code,token,name,expires_at) VALUES (?1,?2,?3,?4)",
-            params![code, token, name, expires_at],
-        )
-        .map_err(stor)?;
-        Ok(())
-    }
-
-    fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>> {
-        // Single connection under a mutex, so select-then-delete is effectively atomic.
-        let conn = self.conn.lock().unwrap();
-        let found: Option<(String, String)> = conn
-            .query_row(
-                "SELECT token, name FROM pairing_codes WHERE code=?1 AND expires_at > ?2",
-                params![code, now],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()
-            .map_err(stor)?;
-        if found.is_some() {
-            conn.execute("DELETE FROM pairing_codes WHERE code=?1", params![code])
-                .map_err(stor)?;
-        }
-        Ok(found)
-    }
-}
-
-fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
-    let kind: String = row.get("kind")?;
-    let tier: String = row.get("tier")?;
-    let concepts: String = row.get("concepts")?;
-    let files: String = row.get("files")?;
-    let created: String = row.get("created_at")?;
-    let updated: String = row.get("updated_at")?;
-    Ok(Memory {
-        id: row.get("id")?,
-        kind: kind.parse().unwrap_or(MemoryKind::Note),
-        tier: tier.parse().unwrap_or(MemoryTier::Working),
-        content: row.get("content")?,
-        concepts: serde_json::from_str(&concepts).unwrap_or_default(),
-        files: serde_json::from_str(&files).unwrap_or_default(),
-        session_id: row.get("session_id")?,
-        importance: row.get("importance")?,
-        access_count: row.get("access_count")?,
-        created_at: parse_ts(&created),
-        updated_at: parse_ts(&updated),
-    })
-}
-
-fn parse_ts(s: &str) -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339(s)
-        .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
-}
-
-/// Fixed-width, lexicographically-sortable RFC 3339 (millis + `Z`) so SQL string comparisons on
-/// timestamps match chronological order.
-fn ts(dt: DateTime<Utc>) -> String {
-    dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_core::{MemoryKind, MemoryTier};
     use chrono::Duration;
 
-    fn store() -> (Store, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        (Store::open(&cfg).unwrap(), dir)
+    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these); otherwise an isolated
+    /// Helix-backed store.
+    fn store() -> Option<Store> {
+        Store::open_for_test()
     }
 
     fn mem(id: &str, content: &str, updated: DateTime<Utc>) -> Memory {
@@ -742,7 +255,7 @@ mod tests {
 
     #[test]
     fn tokens_create_validate_revoke() {
-        let (s, _d) = store();
+        let Some(s) = store() else { return };
         assert_eq!(s.count_tokens().unwrap(), 0);
         let t = s.create_token("laptop").unwrap();
         assert!(s.validate_token(&t.token).unwrap());
@@ -754,7 +267,7 @@ mod tests {
 
     #[test]
     fn upsert_is_last_write_wins() {
-        let (s, _d) = store();
+        let Some(s) = store() else { return };
         let t0 = Utc::now();
         assert!(s.upsert_memory(&mem("x", "old", t0)).unwrap());
         // An older write must be ignored.
@@ -771,7 +284,7 @@ mod tests {
 
     #[test]
     fn memories_since_filters_by_time() {
-        let (s, _d) = store();
+        let Some(s) = store() else { return };
         let t0 = Utc::now();
         s.upsert_memory(&mem("a", "a", t0 - Duration::seconds(60)))
             .unwrap();
@@ -784,7 +297,7 @@ mod tests {
 
     #[test]
     fn last_sync_roundtrips() {
-        let (s, _d) = store();
+        let Some(s) = store() else { return };
         assert!(s.get_last_sync("https://x").unwrap().is_none());
         let now = Utc::now();
         s.set_last_sync("https://x", now).unwrap();
@@ -794,7 +307,7 @@ mod tests {
 
     #[test]
     fn meta_roundtrips_and_overwrites() {
-        let (s, _d) = store();
+        let Some(s) = store() else { return };
         assert!(s.get_meta("task_anchor").unwrap().is_none());
         s.set_meta("task_anchor", "ship the release").unwrap();
         assert_eq!(
@@ -807,7 +320,7 @@ mod tests {
 
     #[test]
     fn file_version_roundtrips_and_upserts() {
-        let (s, _d) = store();
+        let Some(s) = store() else { return };
         assert!(s.latest_file_version("/x.rs").unwrap().is_none());
         s.record_file_version("/x.rs", "abc123", 42).unwrap();
         let (hash, lines) = s.latest_file_version("/x.rs").unwrap().unwrap();
@@ -819,7 +332,7 @@ mod tests {
 
     #[test]
     fn pairing_code_claims_once_and_respects_expiry() {
-        let (s, _d) = store();
+        let Some(s) = store() else { return };
         // A live code claims exactly once, returning its token + device name.
         s.create_pairing("ABCD2345", "tok-1", "laptop", "2999-01-01T00:00:00.000Z")
             .unwrap();

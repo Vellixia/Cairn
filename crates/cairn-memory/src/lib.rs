@@ -294,7 +294,7 @@ impl Bm25 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::{Config, MemoryKind, MemoryTier};
+    use cairn_core::{MemoryKind, MemoryTier};
     use cairn_store::Store;
 
     /// An engine backed by an isolated Helix store, or `None` when `CAIRN_HELIX_URL` is unset
