@@ -235,6 +235,32 @@ impl StoreBackend for HelixBackend {
             .collect())
     }
 
+    fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
+        let qvec = self.embed.embed_one(query)?;
+        let projection: Vec<String> = MEM_COLS.iter().map(|c| c.to_string()).collect();
+        // HNSW kNN, then project the memory columns — ordering (closest first) survives `.values`.
+        let batch = read_batch()
+            .var_as(
+                "ranked",
+                g().vector_search_nodes(MEMORY, "embedding", qvec, k, None)
+                    .values(projection),
+            )
+            .returning(["ranked"]);
+        let resp = self.run(DynamicQueryRequest::read(batch))?;
+        let rows = resp
+            .get("ranked")
+            .and_then(|r| r.get("properties"))
+            .and_then(|p| p.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let mems = rows
+            .iter()
+            .filter_map(|v| v.as_object())
+            .map(memory_from_props)
+            .collect();
+        Ok(Some(mems))
+    }
+
     fn create_token(&self, name: &str) -> Result<DeviceToken> {
         let token = DeviceToken {
             token: format!("ct_{}", uuid_simple()),

@@ -32,6 +32,12 @@ pub(crate) trait StoreBackend: Send + Sync {
     fn count_memories(&self) -> Result<i64>;
     fn upsert_memory(&self, m: &Memory) -> Result<bool>;
     fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>>;
+    /// Semantic (vector) recall, newest-relevant first, if the backend has an embedding index.
+    /// `Ok(None)` means the backend has no vectors — callers fall back to lexical ranking.
+    fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
+        let _ = (query, k);
+        Ok(None)
+    }
     fn create_token(&self, name: &str) -> Result<DeviceToken>;
     fn validate_token(&self, token: &str) -> Result<bool>;
     fn revoke_token(&self, token: &str) -> Result<bool>;
@@ -93,6 +99,10 @@ impl Store {
     }
     pub fn all_memories(&self) -> Result<Vec<Memory>> {
         self.backend.all_memories()
+    }
+    /// Vector recall (HNSW) when the backend has embeddings; `Ok(None)` on lexical-only backends.
+    pub fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
+        self.backend.semantic_recall(query, k)
     }
     pub fn touch_memory(&self, id: &str) -> Result<()> {
         self.backend.touch_memory(id)

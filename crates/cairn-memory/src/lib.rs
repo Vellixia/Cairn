@@ -7,8 +7,9 @@
 
 use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, Result};
 use cairn_store::Store;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A recall hit with its relevance score.
@@ -40,8 +41,10 @@ impl MemoryEngine {
 
     /// Recall the most relevant memories for a query.
     ///
-    /// Ranked with BM25 over the memory corpus (real IR relevance, not keyword overlap), blended
-    /// with light recency and importance signals so ties resolve sensibly.
+    /// **Hybrid retrieval:** lexical relevance (BM25 over the corpus) and, when the backend has a
+    /// vector index, semantic relevance (HNSW kNN) are fused with Reciprocal Rank Fusion — a
+    /// scale-free combination of the two rankings. Importance and Ebbinghaus recency break ties.
+    /// On a lexical-only backend (`semantic_recall` → `None`) this degrades to pure BM25.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>> {
         let mems = self.store.all_memories()?;
         if mems.is_empty() {
@@ -49,21 +52,34 @@ impl MemoryEngine {
         }
         let now = Utc::now();
 
+        // Lexical ranking (BM25 over content + concepts).
         let docs: Vec<Vec<String>> = mems
             .iter()
             .map(|m| tokenize(&format!("{} {}", m.content, m.concepts.join(" "))))
             .collect();
         let bm25 = Bm25::new(&docs);
         let q_terms = tokenize(query);
+        let bm25_scores: Vec<f32> = (0..mems.len()).map(|i| bm25.score(i, &q_terms)).collect();
+        let bm25_rank = ranks_desc(&bm25_scores);
+
+        // Semantic ranking (vector kNN) as id → rank, when the backend supports it.
+        let sem_rank: HashMap<String, usize> = self
+            .store
+            .semantic_recall(query, limit.max(SEMANTIC_K))?
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .map(|(rank, m)| (m.id, rank))
+            .collect();
 
         let mut scored: Vec<ScoredMemory> = mems
             .into_iter()
             .enumerate()
             .map(|(i, m)| {
-                let relevance = bm25.score(i, &q_terms);
-                let age_days = ((now - m.created_at).num_seconds() as f32 / 86_400.0).max(0.0);
-                let ret = retention(age_days, m.access_count, m.importance);
-                let score = relevance + 0.3 * m.importance + 0.4 * ret;
+                let mut score = rrf(bm25_rank[i]);
+                if let Some(&r) = sem_rank.get(&m.id) {
+                    score += rrf(r);
+                }
                 ScoredMemory { memory: m, score }
             })
             .collect();
@@ -72,6 +88,11 @@ impl MemoryEngine {
             b.score
                 .partial_cmp(&a.score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    tiebreak(&b.memory, now)
+                        .partial_cmp(&tiebreak(&a.memory, now))
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
         });
         scored.truncate(limit);
 
@@ -145,6 +166,35 @@ fn priority(m: &Memory, now: chrono::DateTime<Utc>) -> f32 {
 fn retention(age_days: f32, access_count: i64, importance: f32) -> f32 {
     let stability = 1.0 + 0.5 * access_count.max(0) as f32 + 2.0 * importance.clamp(0.0, 1.0);
     (-age_days.max(0.0) / (5.0 * stability)).exp()
+}
+
+/// How many semantic candidates to pull from the vector index when fusing (>= the recall limit).
+const SEMANTIC_K: usize = 50;
+
+/// Reciprocal-rank-fusion contribution of a 0-based rank (the standard `k = 60`).
+fn rrf(rank: usize) -> f32 {
+    1.0 / (60.0 + rank as f32)
+}
+
+/// Dense 0-based ranks (highest score = rank 0) for a score vector, by index.
+fn ranks_desc(scores: &[f32]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..scores.len()).collect();
+    order.sort_by(|&a, &b| {
+        scores[b]
+            .partial_cmp(&scores[a])
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut rank = vec![0usize; scores.len()];
+    for (r, &i) in order.iter().enumerate() {
+        rank[i] = r;
+    }
+    rank
+}
+
+/// Importance + Ebbinghaus recency, used only to break fusion-score ties.
+fn tiebreak(m: &Memory, now: DateTime<Utc>) -> f32 {
+    let age_days = ((now - m.created_at).num_seconds() as f32 / 86_400.0).max(0.0);
+    0.3 * m.importance + 0.4 * retention(age_days, m.access_count, m.importance)
 }
 
 /// The tier a memory should advance to on consolidation, or `None` if it stays put. Working
@@ -279,6 +329,14 @@ mod tests {
         let hits = mem.recall("sqlite blob storage", 10).unwrap();
         assert!(!hits.is_empty());
         assert!(hits[0].memory.content.contains("sqlite"));
+    }
+
+    #[test]
+    fn ranks_desc_assigns_dense_positions() {
+        // Highest score gets rank 0; ranks are by index.
+        assert_eq!(ranks_desc(&[0.1, 0.9, 0.5]), vec![2, 0, 1]);
+        // RRF is strictly decreasing in rank, so a better rank always fuses higher.
+        assert!(rrf(0) > rrf(1) && rrf(1) > rrf(5));
     }
 
     #[test]
