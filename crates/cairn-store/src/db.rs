@@ -27,8 +27,9 @@ pub(crate) trait StoreBackend: Send + Sync {
         Ok(None)
     }
     fn create_token(&self, name: &str) -> Result<DeviceToken>;
-    fn validate_token(&self, token: &str) -> Result<bool>;
-    fn revoke_token(&self, token: &str) -> Result<bool>;
+    /// Check whether a token id is valid (exists and has not been revoked).
+    fn validate_token_id(&self, token_id: &str) -> Result<bool>;
+    fn revoke_token(&self, token_id: &str) -> Result<bool>;
     fn list_tokens(&self) -> Result<Vec<DeviceToken>>;
     fn count_tokens(&self) -> Result<i64>;
     fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>>;
@@ -113,11 +114,11 @@ impl Store {
     pub fn create_token(&self, name: &str) -> Result<DeviceToken> {
         self.backend.create_token(name)
     }
-    pub fn validate_token(&self, token: &str) -> Result<bool> {
-        self.backend.validate_token(token)
+    pub fn validate_token_id(&self, token_id: &str) -> Result<bool> {
+        self.backend.validate_token_id(token_id)
     }
-    pub fn revoke_token(&self, token: &str) -> Result<bool> {
-        self.backend.revoke_token(token)
+    pub fn revoke_token(&self, token_id: &str) -> Result<bool> {
+        self.backend.revoke_token(token_id)
     }
     pub fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
         self.backend.list_tokens()
@@ -213,6 +214,7 @@ impl Store {
             helix_url: Some(url),
             helix_ns: Some(format!("t{id}_")),
             default_server: None,
+            secret_key: Some(b"test-secret-key-must-be-32-bytes!!".to_vec()),
             embed: cairn_core::EmbedConfig {
                 provider: "hashing".into(),
                 model: None,
@@ -258,11 +260,11 @@ mod tests {
         let Some(s) = store() else { return };
         assert_eq!(s.count_tokens().unwrap(), 0);
         let t = s.create_token("laptop").unwrap();
-        assert!(s.validate_token(&t.token).unwrap());
-        assert!(!s.validate_token("nope").unwrap());
+        assert!(s.validate_token_id(&t.id).unwrap());
+        assert!(!s.validate_token_id("nope").unwrap());
         assert_eq!(s.count_tokens().unwrap(), 1);
-        assert!(s.revoke_token(&t.token).unwrap());
-        assert!(!s.validate_token(&t.token).unwrap());
+        assert!(s.revoke_token(&t.id).unwrap());
+        assert!(!s.validate_token_id(&t.id).unwrap());
     }
 
     #[test]

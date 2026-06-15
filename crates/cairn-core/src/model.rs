@@ -149,9 +149,25 @@ impl NewMemory {
 }
 
 /// A per-device access token for authenticating to a Cairn server.
+/// `id` is the token identifier (stored in the backend). `token` is the opaque bearer value
+/// (a signed JWT) returned to the user once, only at creation time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeviceToken {
-    pub token: String,
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     pub name: String,
     pub created_at: DateTime<Utc>,
+}
+
+impl DeviceToken {
+    /// Metadata-only token (used by list/revoke flows that must never re-emit the bearer).
+    pub fn meta(id: String, name: String, created_at: DateTime<Utc>) -> Self {
+        Self {
+            id,
+            token: None,
+            name,
+            created_at,
+        }
+    }
 }

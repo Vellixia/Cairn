@@ -36,6 +36,8 @@ pub struct Config {
     pub helix_ns: Option<String>,
     /// Default remote Cairn server for `sync` / `pull` / `contribute` (`CAIRN_SERVER`).
     pub default_server: Option<String>,
+    /// HMAC secret used to sign device-token JWTs (`CAIRN_SECRET_KEY`).
+    pub secret_key: Option<Vec<u8>>,
     /// Embedding settings.
     pub embed: EmbedConfig,
 }
@@ -57,6 +59,7 @@ impl Config {
             helix_url: env_str("CAIRN_HELIX_URL"),
             helix_ns: env_str("CAIRN_HELIX_NS"),
             default_server: env_str("CAIRN_SERVER"),
+            secret_key: env_str("CAIRN_SECRET_KEY").map(|s| s.into_bytes()),
             embed: EmbedConfig {
                 provider: env_str("CAIRN_EMBED_PROVIDER").unwrap_or_else(|| "local".to_string()),
                 model: env_str("CAIRN_EMBED_MODEL"),

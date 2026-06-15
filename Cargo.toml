@@ -61,6 +61,7 @@ tempfile = "3"
 rust-embed = "8"
 ureq = { version = "2", features = ["json"] }
 dotenvy = "0.15"
+jsonwebtoken = "9"
 
 [profile.release]
 opt-level = 3

@@ -4,8 +4,10 @@
 //! and guard (verify, anchor, checkpoint/rollback) engines over REST, and serves the embedded
 //! Next.js control plane — with a built-in fallback page when the UI hasn't been built.
 
+mod auth;
 mod ui;
 
+use crate::auth::{extract_bearer, TokenSigner};
 use axum::{
     extract::{Query, Request, State},
     http::StatusCode,
@@ -42,6 +44,7 @@ pub struct AppState {
     pub shell: Arc<ShellCompressor>,
     pub profile: Arc<Profile>,
     pub san: Arc<cairn_share::Sanitizer>,
+    signer: Option<Arc<TokenSigner>>,
 }
 
 impl AppState {
@@ -54,6 +57,11 @@ impl AppState {
         let shell = Arc::new(ShellCompressor::new(store.clone()));
         let profile = Arc::new(Profile::new(mem.clone()));
         let san = Arc::new(cairn_share::Sanitizer::new());
+        let signer = cfg.secret_key.as_ref().map(|k| {
+            Arc::new(
+                TokenSigner::new(k.clone()).expect("CAIRN_SECRET_KEY must be non-empty for auth"),
+            )
+        });
         Ok(Self {
             store,
             ctx,
@@ -63,7 +71,30 @@ impl AppState {
             shell,
             profile,
             san,
+            signer,
         })
+    }
+
+    /// Issue a signed JWT for a newly created token id/name. Panics if no secret is configured.
+    pub fn sign_token(&self, id: &str, name: &str) -> String {
+        self.signer
+            .as_ref()
+            .expect("CAIRN_SECRET_KEY is required to sign device tokens")
+            .mint(id, name)
+    }
+
+    /// Decode a bearer JWT into its token id. Returns None if no secret is configured or the token
+    /// is invalid/missing.
+    pub fn verify_bearer(&self, bearer: &str) -> Option<String> {
+        self.signer.as_ref()?.verify(bearer).ok()
+    }
+
+    /// Revoke the token identified by a bearer JWT. Returns Ok(false) if the JWT is invalid.
+    pub fn revoke_bearer(&self, bearer: &str) -> cairn_core::Result<bool> {
+        let Some(jti) = self.verify_bearer(bearer) else {
+            return Ok(false);
+        };
+        self.store.revoke_token(&jti)
     }
 }
 
@@ -458,10 +489,10 @@ async fn pair_new(
     let code = pairing_code();
     let expires = (Utc::now() + chrono::Duration::minutes(10))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    s.store
-        .create_pairing(&code, &token.token, &name, &expires)?;
+    s.store.create_pairing(&code, &token.id, &name, &expires)?;
+    let bearer = s.sign_token(&token.id, &name);
     Ok(Json(
-        json!({ "code": code, "name": name, "expires_at": expires }),
+        json!({ "code": code, "name": name, "expires_at": expires, "token": bearer }),
     ))
 }
 
@@ -481,7 +512,10 @@ async fn pair_claim(
         .store
         .claim_pairing(b.code.trim().to_uppercase().as_str(), &now)?
     {
-        Some((token, name)) => Ok(Json(json!({ "token": token, "name": name }))),
+        Some((token_id, name)) => {
+            let bearer = s.sign_token(&token_id, &name);
+            Ok(Json(json!({ "token": bearer, "name": name })))
+        }
         None => Err(ApiError(
             StatusCode::NOT_FOUND,
             "invalid or expired pairing code".into(),
@@ -550,8 +584,9 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
                     .headers()
                     .get(axum::http::header::AUTHORIZATION)
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .map(|t| s.store.validate_token(t).unwrap_or(false))
+                    .and_then(extract_bearer)
+                    .and_then(|bearer| s.verify_bearer(bearer))
+                    .map(|jti| s.store.validate_token_id(&jti).unwrap_or(false))
                     .unwrap_or(false);
                 if !ok {
                     return (
@@ -850,7 +885,10 @@ mod tests {
         .0;
         assert_eq!(claimed["name"], "laptop");
         let token = claimed["token"].as_str().unwrap();
-        assert!(state.store.validate_token(token).unwrap());
+        let jti = state
+            .verify_bearer(token)
+            .expect("claimed token is a valid JWT");
+        assert!(state.store.validate_token_id(&jti).unwrap());
 
         // Single-use: a second claim is a 404.
         let err = pair_claim(State(state.clone()), Json(PairClaimBody { code }))

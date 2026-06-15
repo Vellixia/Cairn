@@ -330,15 +330,17 @@ impl StoreBackend for HelixBackend {
     }
 
     fn create_token(&self, name: &str) -> Result<DeviceToken> {
+        let id = uuid_simple();
         let token = DeviceToken {
-            token: format!("ct_{}", uuid_simple()),
+            id: id.clone(),
+            token: None,
             name: name.to_string(),
             created_at: Utc::now(),
         };
         self.add_node(
             "Token",
             vec![
-                ("token".into(), token.token.clone().into()),
+                ("id".into(), id.into()),
                 ("name".into(), token.name.clone().into()),
                 ("created_at".into(), ts(token.created_at).into()),
             ],
@@ -346,36 +348,38 @@ impl StoreBackend for HelixBackend {
         Ok(token)
     }
 
-    fn validate_token(&self, token: &str) -> Result<bool> {
+    fn validate_token_id(&self, token_id: &str) -> Result<bool> {
         Ok(!self
-            .read_where("Token", "token", token, &["token"])?
+            .read_where("Token", "id", token_id, &["id"])?
             .is_empty())
     }
 
-    fn revoke_token(&self, token: &str) -> Result<bool> {
+    fn revoke_token(&self, token_id: &str) -> Result<bool> {
         let existed = !self
-            .read_where("Token", "token", token, &["token"])?
+            .read_where("Token", "id", token_id, &["id"])?
             .is_empty();
         if existed {
-            self.drop_where("Token", "token", token)?;
+            self.drop_where("Token", "id", token_id)?;
         }
         Ok(existed)
     }
 
     fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
         Ok(self
-            .read_rows("Token", &["token", "name", "created_at"])?
+            .read_rows("Token", &["id", "name", "created_at"])?
             .iter()
-            .map(|r| DeviceToken {
-                token: get_str(r, "token"),
-                name: get_str(r, "name"),
-                created_at: parse_ts(&get_str(r, "created_at")),
+            .map(|r| {
+                DeviceToken::meta(
+                    get_str(r, "id"),
+                    get_str(r, "name"),
+                    parse_ts(&get_str(r, "created_at")),
+                )
             })
             .collect())
     }
 
     fn count_tokens(&self) -> Result<i64> {
-        Ok(self.read_rows("Token", &["token"])?.len() as i64)
+        Ok(self.read_rows("Token", &["id"])?.len() as i64)
     }
 
     fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>> {
@@ -686,24 +690,24 @@ mod live {
         let Some(be) = backend() else { return };
         let before = be.count_tokens().expect("count");
         let tok = be.create_token("test-device").expect("create_token");
-        assert!(be.validate_token(&tok.token).expect("validate"));
+        assert!(be.validate_token_id(&tok.id).expect("validate"));
         assert!(be
             .list_tokens()
             .expect("list")
             .iter()
-            .any(|t| t.token == tok.token && t.name == "test-device"));
+            .any(|t| t.id == tok.id && t.name == "test-device"));
         assert!(be.count_tokens().expect("count after") > before);
 
         // Revocation: a label-scoped delete removes exactly this token.
         assert!(
-            be.revoke_token(&tok.token).expect("revoke"),
+            be.revoke_token(&tok.id).expect("revoke"),
             "first revoke reports removed"
         );
         assert!(!be
-            .validate_token(&tok.token)
+            .validate_token_id(&tok.id)
             .expect("validate after revoke"));
         assert!(
-            !be.revoke_token(&tok.token).expect("revoke again"),
+            !be.revoke_token(&tok.id).expect("revoke again"),
             "second revoke is a no-op"
         );
     }

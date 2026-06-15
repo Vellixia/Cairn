@@ -20,7 +20,7 @@ pub fn generate(state: &AppState, name: Option<&str>) -> Result<()> {
     let expires = (Utc::now() + Duration::minutes(10)).to_rfc3339_opts(SecondsFormat::Millis, true);
     state
         .store
-        .create_pairing(&code, &token.token, name, &expires)?;
+        .create_pairing(&code, &token.id, name, &expires)?;
 
     println!("Pairing code for '{name}':  {code}");
     println!("On the new device, run:");

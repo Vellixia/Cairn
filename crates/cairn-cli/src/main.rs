@@ -368,8 +368,10 @@ async fn main() -> anyhow::Result<()> {
             let state = AppState::new(&cfg)?;
             match action {
                 TokenCmd::Create { name } => {
-                    let t = state.store.create_token(&name)?;
-                    println!("{}", t.token);
+                    let mut t = state.store.create_token(&name)?;
+                    let bearer = state.sign_token(&t.id, &t.name);
+                    t.token = Some(bearer);
+                    println!("{}", t.token.as_ref().unwrap());
                     eprintln!(
                         "created token for '{}'. /api access now requires a device token.",
                         t.name
@@ -377,11 +379,11 @@ async fn main() -> anyhow::Result<()> {
                 }
                 TokenCmd::List => {
                     for t in state.store.list_tokens()? {
-                        println!("{}  {}  {}", t.token, t.name, t.created_at.to_rfc3339());
+                        println!("{}  {}  {}", t.id, t.name, t.created_at.to_rfc3339());
                     }
                 }
                 TokenCmd::Revoke { token } => {
-                    if state.store.revoke_token(&token)? {
+                    if state.revoke_bearer(&token)? {
                         println!("revoked");
                     } else {
                         println!("no such token");
