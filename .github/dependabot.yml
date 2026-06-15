@@ -1,0 +1,20 @@
+# Dependabot: keep GitHub Actions on this repo pinned to a current SHA.
+# release.yml pins every action to a full commit SHA, with the floating tag in
+# a trailing comment. Dependabot rewrites both atomically when a new tag lands.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Group all action bumps into a single PR per schedule so reviewers only
+    # deal with one digestable change a week, not a flood.
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+    labels:
+      - "dependencies"
+      - "github-actions"
