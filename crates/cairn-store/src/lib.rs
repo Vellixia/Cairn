@@ -4,6 +4,7 @@
 
 mod blob;
 mod db;
+mod helix;
 
 pub use blob::BlobStore;
 pub use db::Store;

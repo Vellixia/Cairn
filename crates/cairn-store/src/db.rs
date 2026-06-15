@@ -23,7 +23,7 @@ const SELECT_COLS: &str = "id,kind,tier,content,content_hash,concepts,files,sess
 
 /// The structured-storage operations Cairn needs from a backend. Implemented by [`SqliteBackend`]
 /// today; a HelixDB backend implements the same surface so [`Store`] can dispatch to either.
-trait StoreBackend: Send + Sync {
+pub(crate) trait StoreBackend: Send + Sync {
     fn insert_memory(&self, m: &Memory) -> Result<()>;
     fn get_memory(&self, id: &str) -> Result<Option<Memory>>;
     fn find_memory_by_content_hash(&self, hash: &str) -> Result<Option<Memory>>;
@@ -65,9 +65,13 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open (and migrate) the store described by `cfg`. SQLite is the current backend.
+    /// Open (and migrate) the store described by `cfg`. Uses HelixDB when `CAIRN_HELIX_URL` is set
+    /// (`cfg.helix_url`), otherwise the embedded SQLite backend.
     pub fn open(cfg: &Config) -> Result<Self> {
-        let backend = Box::new(SqliteBackend::open(&cfg.db_path())?);
+        let backend: Box<dyn StoreBackend> = match &cfg.helix_url {
+            Some(url) => Box::new(crate::helix::HelixBackend::connect(url, cfg)?),
+            None => Box::new(SqliteBackend::open(&cfg.db_path())?),
+        };
         Ok(Self {
             backend,
             blobs: BlobStore::new(cfg.blobs_dir()),
