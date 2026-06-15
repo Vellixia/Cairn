@@ -497,3 +497,65 @@ fn memory_from_props(m: &Map<String, Value>) -> Memory {
         updated_at: parse_ts(&get_str(m, "updated_at")),
     }
 }
+
+#[cfg(test)]
+mod live {
+    //! Integration tests against a real HelixDB server. Gated on `CAIRN_HELIX_URL` and `#[ignore]`d,
+    //! so the normal suite never touches the network. Run explicitly with, e.g.:
+    //! `CAIRN_HELIX_URL=http://host:6969 cargo test -p cairn-store -- --ignored live::`
+    use super::*;
+    use cairn_core::EmbedConfig;
+
+    fn backend() -> Option<HelixBackend> {
+        let url = std::env::var("CAIRN_HELIX_URL").ok()?;
+        // `ollama` builds without a network call, so connect + index setup work without an
+        // embedding model — enough to exercise the read/write machinery (meta, tokens).
+        let cfg = Config {
+            data_dir: std::env::temp_dir(),
+            host: "127.0.0.1".into(),
+            port: 7777,
+            helix_url: Some(url.clone()),
+            default_server: None,
+            embed: EmbedConfig {
+                provider: "ollama".into(),
+                model: None,
+                url: None,
+                api_key: None,
+            },
+        };
+        Some(HelixBackend::connect(&url, &cfg).expect("connect to live HelixDB"))
+    }
+
+    #[test]
+    #[ignore = "requires a live HelixDB server (set CAIRN_HELIX_URL)"]
+    fn meta_roundtrips() {
+        let Some(be) = backend() else { return };
+        let key = format!("cairn_test_meta_{}", uuid_simple());
+        be.set_meta(&key, "hello-helix").expect("set_meta");
+        assert_eq!(
+            be.get_meta(&key).expect("get_meta").as_deref(),
+            Some("hello-helix")
+        );
+        // Last-write-wins on read.
+        be.set_meta(&key, "updated").expect("set_meta 2");
+        assert_eq!(
+            be.get_meta(&key).expect("get_meta 2").as_deref(),
+            Some("updated")
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a live HelixDB server (set CAIRN_HELIX_URL)"]
+    fn tokens_roundtrip() {
+        let Some(be) = backend() else { return };
+        let before = be.count_tokens().expect("count");
+        let tok = be.create_token("test-device").expect("create_token");
+        assert!(be.validate_token(&tok.token).expect("validate"));
+        assert!(be
+            .list_tokens()
+            .expect("list")
+            .iter()
+            .any(|t| t.token == tok.token && t.name == "test-device"));
+        assert!(be.count_tokens().expect("count after") > before);
+    }
+}
