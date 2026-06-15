@@ -735,4 +735,61 @@ mod live {
         // Clean up the expired code we left behind.
         let _ = be.drop_where("Pairing", "code", &code);
     }
+
+    /// The full memory path through the public `Store` facade + `open_for_test` harness: insert
+    /// (with a real embedding), get, count (isolated namespace), touch, upsert (last-writer-wins),
+    /// and vector recall via the hashing embedder.
+    #[test]
+    #[ignore = "requires a live HelixDB server (set CAIRN_HELIX_URL)"]
+    fn memory_roundtrip_via_store() {
+        let Some(store) = crate::Store::open_for_test() else {
+            return;
+        };
+        let mut m = Memory {
+            id: uuid_simple(),
+            kind: MemoryKind::Decision,
+            tier: MemoryTier::Working,
+            content: "use helix for the cairn vector store".into(),
+            concepts: vec!["helix".into(), "store".into()],
+            files: vec![],
+            session_id: None,
+            importance: 0.7,
+            access_count: 0,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        store.insert_memory(&m).expect("insert");
+
+        // Isolated namespace: this is the only memory present.
+        assert_eq!(store.count_memories().expect("count"), 1);
+        let got = store.get_memory(&m.id).expect("get").expect("present");
+        assert_eq!(got.content, m.content);
+        assert_eq!(got.concepts, m.concepts);
+
+        // touch bumps access_count in place.
+        store.touch_memory(&m.id).expect("touch");
+        assert_eq!(
+            store.get_memory(&m.id).expect("get2").unwrap().access_count,
+            1
+        );
+
+        // Vector recall (hashing embedder) surfaces the memory for a lexically-similar query.
+        let hits = store
+            .semantic_recall("helix vector store for cairn", 5)
+            .expect("recall")
+            .expect("backend has vectors");
+        assert!(hits.iter().any(|x| x.id == m.id));
+
+        // upsert is last-writer-wins: an older copy is rejected, a newer one replaces.
+        m.updated_at = got.updated_at - chrono::Duration::minutes(5);
+        assert!(!store.upsert_memory(&m).expect("stale upsert"));
+        m.updated_at = Utc::now();
+        m.content = "use helix for cairn vectors and graph".into();
+        assert!(store.upsert_memory(&m).expect("fresh upsert"));
+        assert_eq!(store.count_memories().expect("count3"), 1); // replaced, not duplicated
+        assert_eq!(
+            store.get_memory(&m.id).expect("get3").unwrap().content,
+            m.content
+        );
+    }
 }

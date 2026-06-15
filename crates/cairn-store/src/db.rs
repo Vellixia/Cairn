@@ -188,6 +188,37 @@ impl Store {
     pub fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>> {
         self.backend.claim_pairing(code, now)
     }
+
+    /// Open an **isolated** store for tests against a HelixDB server.
+    ///
+    /// Returns `None` when `CAIRN_HELIX_URL` is unset, so the offline suite simply skips
+    /// Helix-backed tests; when it *is* set but the server can't be reached, this panics so CI
+    /// surfaces the failure rather than skipping silently. Each call gets a fresh label namespace
+    /// (so concurrent tests never collide on the shared server) and the dependency-free `hashing`
+    /// embedder (no model download, no network).
+    #[doc(hidden)]
+    pub fn open_for_test() -> Option<Self> {
+        let url = std::env::var("CAIRN_HELIX_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())?;
+        let id = Uuid::new_v4().simple().to_string();
+        let cfg = Config {
+            data_dir: std::env::temp_dir().join(format!("cairn-test-{id}")),
+            host: "127.0.0.1".into(),
+            port: 7777,
+            helix_url: Some(url),
+            helix_ns: Some(format!("t{id}_")),
+            default_server: None,
+            embed: cairn_core::EmbedConfig {
+                provider: "hashing".into(),
+                model: None,
+                url: None,
+                api_key: None,
+            },
+        };
+        std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
+        Some(Self::open(&cfg).expect("CAIRN_HELIX_URL is set but opening the Helix store failed"))
+    }
 }
 
 /// Embedded SQLite backend — the default; zero external services, ideal for dev/tests/CI.
