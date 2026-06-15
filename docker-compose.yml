@@ -1,36 +1,84 @@
-# Cairn server — one command to self-host:  docker compose up
-# Configure by copying .env.example to .env (embeddings, HelixDB URL, etc.).
+# Cairn — self-host the whole stack with one command:  docker compose up -d
+#
+#   minio        S3-compatible storage that HelixDB persists to (so data survives restarts)
+#   minio-init   one-shot: creates the `helix-db` bucket, then exits
+#   helix        HelixDB graph + vector datastore — Cairn's backend
+#   cairn        the Cairn server + dashboard            ->  http://localhost:7777
+#   helix host   the HelixDB query API (direct access)   ->  http://localhost:6969
+#
+# Configure by copying .env.example to .env (embeddings, ports, credentials). Everything below has
+# sensible defaults, so a bare `docker compose up` works out of the box.
+name: cairn
+
 services:
+  minio:
+    image: minio/minio:latest
+    container_name: cairn-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - helix-minio:/data
+    restart: unless-stopped
+
+  # Create the bucket HelixDB writes to, then exit. Retries until MinIO accepts connections.
+  minio-init:
+    image: minio/mc:latest
+    container_name: cairn-minio-init
+    depends_on:
+      - minio
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin}; do
+        echo 'waiting for minio...'; sleep 1;
+      done &&
+      mc mb --ignore-existing local/helix-db &&
+      echo 'helix-db bucket ready'"
+    restart: "no"
+
+  helix:
+    image: ghcr.io/helixdb/enterprise-dev:latest
+    container_name: cairn-helix
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      S3_BUCKET: helix-db
+      S3_REGION: us-east-1
+      DB_PATH: db/
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_ENDPOINT: http://minio:9000
+      AWS_ALLOW_HTTP: "true"
+    ports:
+      - "${HELIX_PORT:-6969}:8080" # host:container — the HelixDB API listens on 8080 inside
+    restart: unless-stopped
+
   cairn:
-    build: .
+    build:
+      context: .
+      # Build with in-process local embeddings (all-MiniLM-L6-v2) so the default provider works.
+      args:
+        CAIRN_FEATURES: embed-local
     image: cairn:dev
     container_name: cairn
-    # CAIRN_* settings (optional). The Docker CMD already binds 0.0.0.0:7777 on /data.
+    depends_on:
+      - helix
+    environment:
+      CAIRN_HOST: 0.0.0.0
+      CAIRN_PORT: "7777"
+      # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
+      CAIRN_HELIX_URL: http://helix:8080
     env_file:
       - path: .env
         required: false
     ports:
-      - "7777:7777"
+      - "${CAIRN_PORT:-7777}:7777"
     volumes:
       - cairn-data:/data
     restart: unless-stopped
-    # To point Cairn at the HelixDB service below instead of the embedded store, set in .env:
-    #   CAIRN_HELIX_URL=http://helix:6969
-    # then uncomment `depends_on` and the `helix` service.
-    # depends_on:
-    #   - helix
-
-  # HelixDB graph + vector datastore — wired up in the HelixDB integration phase
-  # (image/run model finalized via a live spike before this is enabled).
-  # helix:
-  #   image: <helixdb-image>
-  #   container_name: cairn-helix
-  #   ports:
-  #     - "6969:6969"
-  #   volumes:
-  #     - helix-data:/data
-  #   restart: unless-stopped
 
 volumes:
   cairn-data:
-  # helix-data:
+  helix-minio:

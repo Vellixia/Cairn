@@ -71,8 +71,27 @@ impl HelixBackend {
             .map_err(|e| Error::Storage(format!("helix runtime: {e}")))?;
         let embed = cairn_embed::from_config(&cfg.embed)?;
         let backend = Self { client, rt, embed };
-        backend.ensure_indexes()?;
+        backend.wait_ready()?;
         Ok(backend)
+    }
+
+    /// Ensure indexes, retrying for a while so a freshly started server (e.g. the Docker stack
+    /// coming up alongside Cairn) is given time to accept connections before we give up.
+    fn wait_ready(&self) -> Result<()> {
+        const ATTEMPTS: u32 = 30;
+        let mut last: Option<Error> = None;
+        for i in 0..ATTEMPTS {
+            match self.ensure_indexes() {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    last = Some(e);
+                    if i + 1 < ATTEMPTS {
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            }
+        }
+        Err(last.unwrap_or_else(|| Error::Storage("helix: server did not become ready".into())))
     }
 
     /// Run `fut` to completion on the backend's runtime from a scoped OS thread (runtime-nesting

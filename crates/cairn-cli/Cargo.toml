@@ -10,6 +10,12 @@ repository.workspace = true
 name = "cairn"
 path = "src/main.rs"
 
+[features]
+default = []
+# Build the binary with in-process local embeddings (all-MiniLM-L6-v2). Enabled in the Docker and
+# release builds so `CAIRN_EMBED_PROVIDER=local` (the default) works out of the box.
+embed-local = ["cairn-store/local"]
+
 [dependencies]
 cairn-core.workspace = true
 cairn-store.workspace = true
