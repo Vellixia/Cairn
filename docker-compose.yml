@@ -11,13 +11,40 @@
 name: cairn
 
 services:
+  # Startup guard: refuse to bring up the MinIO stack if credentials are missing or still set
+  # to the well-known `minioadmin/minioadmin` defaults. Keeps compose from silently booting an
+  # insecure server when `.env` is empty.
+  minio-guard:
+    image: alpine:3.19
+    container_name: cairn-minio-guard
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        : "$${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set in .env (see .env.example)}"
+        : "$${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env (see .env.example)}"
+        case "$${MINIO_ROOT_USER}" in minioadmin)
+          echo "FATAL: MINIO_ROOT_USER is the insecure default 'minioadmin'." >&2
+          echo "       Set a strong value in .env (see .env.example)." >&2
+          exit 1 ;;
+        esac
+        case "$${MINIO_ROOT_PASSWORD}" in minioadmin|"")
+          echo "FATAL: MINIO_ROOT_PASSWORD is empty or the insecure default 'minioadmin'." >&2
+          echo "       Set a strong value in .env (see .env.example)." >&2
+          exit 1 ;;
+        esac
+        echo "minio credentials OK"
+
   minio:
     image: minio/minio:latest
     container_name: cairn-minio
     command: server /data --console-address ":9001"
+    depends_on:
+      minio-guard:
+        condition: service_completed_successfully
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes:
       - helix-minio:/data
     restart: unless-stopped
@@ -28,9 +55,10 @@ services:
     container_name: cairn-minio-init
     depends_on:
       - minio
-    entrypoint: >
+    entrypoint: >-
       /bin/sh -c "
-      until mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin}; do
+      : '$${MINIO_ROOT_USER:?}' && : '$${MINIO_ROOT_PASSWORD:?}';
+      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
         echo 'waiting for minio...'; sleep 1;
       done &&
       mc mb --ignore-existing local/helix-db &&
@@ -47,8 +75,8 @@ services:
       S3_BUCKET: helix-db
       S3_REGION: us-east-1
       DB_PATH: db/
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
       AWS_ENDPOINT: http://minio:9000
       AWS_ALLOW_HTTP: "true"
     ports:
