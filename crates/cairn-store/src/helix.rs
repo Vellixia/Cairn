@@ -1,10 +1,10 @@
 //! The HelixDB backend.
 //!
-//! [`HelixBackend`] implements the same [`StoreBackend`](crate::db::StoreBackend) surface as the
-//! embedded SQLite backend, but persists to a HelixDB server (an OLTP graph + vector database)
-//! over its REST query API via the `helix-db` crate. It is selected when `CAIRN_HELIX_URL` is set
-//! (`Config::helix_url`); otherwise Cairn uses SQLite, so the workspace test suite — which sets no
-//! such URL — keeps running with no external service.
+//! [`HelixBackend`] is Cairn's [`StoreBackend`](crate::db::StoreBackend): it persists to a HelixDB
+//! server (an OLTP graph + vector database) over its REST query API via the `helix-db` crate.
+//! `CAIRN_HELIX_URL` (`Config::helix_url`) names the server. The workspace tests use
+//! `Store::open_for_test`, which skips when that env var is unset (so offline `cargo test` stays
+//! green) and otherwise runs against a live server in an isolated label namespace.
 //!
 //! ## Sync ↔ async bridge
 //! `StoreBackend` is synchronous; the `helix-db` client is async (tokio). Each call hops onto a

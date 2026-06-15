@@ -62,17 +62,17 @@ All of it is lossless — the full original is retained and one `expand` away.
 
 🚧 Active development — the engine is functional today (memory, no-loss compression, context
 assembly, edit guardrails + reliability score, shell compression, preference learning,
-privacy-first sanitization, a federated collective-knowledge pool, and multi-device sync). A
-**HelixDB backend** (graph + vectors) is now available opt-in via `CAIRN_HELIX_URL` — the bundled
-`docker compose` stack runs it for you — with native HNSW semantic recall being wired in; the
-zero-config SQLite store stays the default. See [the design plan](docs/PLAN.md).
+privacy-first sanitization, a federated collective-knowledge pool, and multi-device sync).
+**HelixDB** (graph + vectors) is Cairn's datastore, with hybrid recall — HNSW vector search fused
+with BM25. Point `CAIRN_HELIX_URL` at a HelixDB server, or use the bundled `docker compose` stack,
+which runs one for you. See [the design plan](docs/PLAN.md).
 
 This repo is a Cargo workspace:
 
 | Crate | Role |
 |---|---|
 | `cairn-core` | shared domain types, hashing, config |
-| `cairn-store` | pluggable backend (SQLite default · HelixDB graph+vector opt-in) + content-hash blob store |
+| `cairn-store` | HelixDB graph+vector store (the `StoreBackend`) + content-hash blob store |
 | `cairn-context` | cached reads · AST signature outlines (11 languages) · byte-identical `expand` |
 | `cairn-memory` | remember · BM25 recall · wakeup · Ebbinghaus decay · 4-tier consolidation |
 | `cairn-assemble` | token-budgeted, edge-ordered context assembler (anti-rot) |
@@ -93,12 +93,16 @@ curl -fsSL https://raw.githubusercontent.com/Vellixia/cairn/main/scripts/install
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/Vellixia/cairn/main/scripts/install.ps1 | iex
 
-# Docker
-docker run -p 7777:7777 -v cairn:/data ghcr.io/vellixia/cairn    # or: docker compose up
+# Docker — the full stack (Cairn + HelixDB), the easiest path
+docker compose up -d
 
 # From source
 cargo install --git https://github.com/Vellixia/cairn cairn-cli
 ```
+
+Cairn stores its data in **HelixDB**, so `cairn serve` needs `CAIRN_HELIX_URL` set (or use the
+`docker compose` stack above, which starts one and wires it up). See
+[Self-host with Docker](#self-host-with-docker).
 
 Then run `cairn serve` and open <http://127.0.0.1:7777>.
 
@@ -146,9 +150,8 @@ memory works with no API key; for a leaner image build with `--build-arg CAIRN_F
 a hosted `CAIRN_EMBED_PROVIDER`. Tune host ports and storage credentials in `.env` (`HELIX_PORT`,
 `CAIRN_PORT`, `MINIO_ROOT_USER`, `MINIO_ROOT_PASSWORD`).
 
-Prefer zero dependencies? Skip Helix entirely — plain `cairn serve` (or
-`docker run -p 7777:7777 -v cairn:/data ghcr.io/vellixia/cairn`) uses the built-in store and needs
-no external service.
+Already running HelixDB elsewhere? Skip the bundled services and point Cairn at it —
+`CAIRN_HELIX_URL=http://your-helix:6969 cairn serve` — instead of `docker compose up`.
 
 ## Configuration (`.env`)
 
@@ -160,13 +163,15 @@ Settings resolve **CLI flag > environment / `.env` > default**. Copy `.env.examp
 | `CAIRN_DATA_DIR` | data directory (default: OS data dir; `/data` in Docker) |
 | `CAIRN_HOST` · `CAIRN_PORT` | serve bind address (default `127.0.0.1:7777`) |
 | `CAIRN_SERVER` | default server URL for `sync` / `pull` / `contribute` |
-| `CAIRN_HELIX_URL` | HelixDB server URL (unset = built-in SQLite store; the Docker stack sets this for you) |
+| `CAIRN_HELIX_URL` | HelixDB server URL — **required** (the `docker compose` stack sets it for you) |
 | `CAIRN_EMBED_PROVIDER` · `_MODEL` · `_URL` · `_API_KEY` | embedding model (default: local `all-MiniLM-L6-v2`) |
 
 ## Quickstart (dev)
 
 ```sh
-cargo run -p cairn-cli -- serve
+# Cairn needs a HelixDB — start just that service, or point at any HelixDB server.
+docker compose up -d helix
+CAIRN_HELIX_URL=http://localhost:6969 cargo run -p cairn-cli -- serve
 # server + API on http://127.0.0.1:7777
 ```
 
