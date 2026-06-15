@@ -297,16 +297,15 @@ mod tests {
     use cairn_core::{Config, MemoryKind, MemoryTier};
     use cairn_store::Store;
 
-    fn engine() -> (MemoryEngine, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        let store = Arc::new(Store::open(&cfg).unwrap());
-        (MemoryEngine::new(store), dir)
+    /// An engine backed by an isolated Helix store, or `None` when `CAIRN_HELIX_URL` is unset
+    /// (offline runs skip these integration tests; CI sets the URL and runs them for real).
+    fn engine() -> Option<MemoryEngine> {
+        Some(MemoryEngine::new(Arc::new(Store::open_for_test()?)))
     }
 
     #[test]
     fn identical_content_dedups() {
-        let (mem, _d) = engine();
+        let Some(mem) = engine() else { return };
         let a = mem
             .remember(NewMemory::new("use sqlite for storage"))
             .unwrap();
@@ -321,7 +320,7 @@ mod tests {
 
     #[test]
     fn recall_ranks_relevant_first() {
-        let (mem, _d) = engine();
+        let Some(mem) = engine() else { return };
         mem.remember(NewMemory::new("use sqlite plus a content-hash blob store"))
             .unwrap();
         mem.remember(NewMemory::new("the weather today is sunny"))
@@ -341,7 +340,7 @@ mod tests {
 
     #[test]
     fn wakeup_prioritizes_decisions() {
-        let (mem, _d) = engine();
+        let Some(mem) = engine() else { return };
         mem.remember(NewMemory::new("a passing note")).unwrap();
         mem.remember(NewMemory {
             content: "decided to build the engine in Rust".into(),
@@ -368,7 +367,7 @@ mod tests {
 
     #[test]
     fn consolidate_promotes_across_tiers() {
-        let (mem, _d) = engine();
+        let Some(mem) = engine() else { return };
 
         // A working note consolidates into episodic.
         let note = mem
