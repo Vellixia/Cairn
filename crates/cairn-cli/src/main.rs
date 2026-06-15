@@ -211,8 +211,18 @@ async fn main() -> anyhow::Result<()> {
             let addr: SocketAddr = format!("{host}:{port}")
                 .parse()
                 .with_context(|| format!("invalid address {host}:{port}"))?;
-            println!("🪨  Cairn serving on http://{addr}");
+            let scheme = if cfg.tls.is_some() { "https" } else { "http" };
+            println!("🪨  Cairn serving on {scheme}://{addr}");
             println!("    data dir: {}", cfg.data_dir().display());
+            if cfg.tls.is_some() {
+                println!("    TLS: enabled (CAIRN_TLS_CERT / CAIRN_TLS_KEY)");
+            } else if !cfg.is_loopback_host() {
+                anyhow::bail!(
+                    "refusing to serve on non-loopback address {addr} without TLS. \
+                     Set CAIRN_TLS_CERT and CAIRN_TLS_KEY to a PEM cert+key pair, or \
+                     bind to 127.0.0.1/localhost for local-only dev."
+                );
+            }
             cairn_api::serve(addr, state).await?;
         }
         Cmd::Remember { content } => {

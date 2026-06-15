@@ -215,6 +215,7 @@ impl Store {
             helix_ns: Some(format!("t{id}_")),
             default_server: None,
             secret_key: Some(b"test-secret-key-must-be-32-bytes!!".to_vec()),
+            tls: None,
             embed: cairn_core::EmbedConfig {
                 provider: "hashing".into(),
                 model: None,

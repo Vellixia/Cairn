@@ -18,7 +18,7 @@ use axum::{
 };
 use cairn_assemble::{Assembler, AssemblyReport};
 use cairn_context::{ContextEngine, ReadMode, ReadResult};
-use cairn_core::{Config, Memory, NewMemory};
+use cairn_core::{Config, Memory, NewMemory, TlsConfig};
 use cairn_guard::{Checkpoint, Guard, RollbackReport, VerifyReport};
 use cairn_memory::{MemoryEngine, ScoredMemory};
 use cairn_profile::Profile;
@@ -29,7 +29,7 @@ use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 
@@ -44,6 +44,9 @@ pub struct AppState {
     pub shell: Arc<ShellCompressor>,
     pub profile: Arc<Profile>,
     pub san: Arc<cairn_share::Sanitizer>,
+    /// TLS material for HTTPS serve (cert + key paths). `None` means plain HTTP; the API layer
+    /// will then refuse to start on a non-loopback bind.
+    pub tls: Option<TlsConfig>,
     signer: Option<Arc<TokenSigner>>,
 }
 
@@ -71,6 +74,7 @@ impl AppState {
             shell,
             profile,
             san,
+            tls: cfg.tls.clone(),
             signer,
         })
     }
@@ -132,9 +136,65 @@ pub fn router(state: AppState) -> Router {
 }
 
 /// Bind and serve until shutdown.
-pub async fn serve(addr: SocketAddr, state: AppState) -> std::io::Result<()> {
+///
+/// TLS posture is driven by the bind address and the optional `tls` material on the
+/// [`AppState::config_view`]:
+///
+/// - **Loopback bind, no TLS** → plain HTTP (dev-friendly default).
+/// - **Non-loopback bind, no TLS** → refuses to start; the caller surfaces an error explaining
+///   that network exposure requires `CAIRN_TLS_CERT` + `CAIRN_TLS_KEY`.
+/// - **TLS material present** → serves HTTPS via `axum-server` (rustls).
+pub async fn serve(addr: SocketAddr, mut state: AppState) -> std::io::Result<()> {
+    if let Some(tls) = state.tls.take() {
+        return serve_https(addr, state, tls.cert, tls.key).await;
+    }
+    // No TLS material. We need to look at the bind address: if it's a loopback address we allow
+    // plain HTTP for local dev, otherwise we refuse — it's never safe to expose this API over
+    // HTTP on a network.
+    if !is_loopback_addr(addr) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!(
+                "refusing to serve HTTP on non-loopback address {addr}: \
+                 Cairn's API is authenticated and must not travel in cleartext over a network. \
+                 Set CAIRN_TLS_CERT and CAIRN_TLS_KEY to a PEM cert+key pair (e.g. via \
+                 `mkcert` or a reverse proxy) and re-run, or bind to 127.0.0.1/localhost."
+            ),
+        ));
+    }
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, router(state)).await
+}
+
+async fn serve_https(
+    addr: SocketAddr,
+    state: AppState,
+    cert: PathBuf,
+    key: PathBuf,
+) -> std::io::Result<()> {
+    use axum_server::tls_rustls::RustlsConfig;
+    let rustls = RustlsConfig::from_pem_file(&cert, &key)
+        .await
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "failed to load TLS material from {} / {}: {e}",
+                    cert.display(),
+                    key.display()
+                ),
+            )
+        })?;
+    let app = router(state);
+    axum_server::bind_rustls(addr, rustls)
+        .serve(app.into_make_service())
+        .await
+}
+
+/// True if `addr` resolves to a loopback interface (v4 or v6).
+fn is_loopback_addr(addr: SocketAddr) -> bool {
+    addr.ip().is_loopback()
 }
 
 /// The web UI (landing + control plane), embedded from the Next.js static export. In dev builds

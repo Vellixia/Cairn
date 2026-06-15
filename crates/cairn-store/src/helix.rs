@@ -656,6 +656,8 @@ mod live {
             // Unique namespace per backend so concurrent tests never collide on the shared server.
             helix_ns: Some(format!("test_{}_", uuid_simple())),
             default_server: None,
+            secret_key: None,
+            tls: None,
             embed: EmbedConfig {
                 provider: "ollama".into(),
                 model: None,
