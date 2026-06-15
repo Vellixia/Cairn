@@ -159,7 +159,6 @@ fn truncate_head_tail(lines: &[String], limit: usize, head: usize, tail: usize) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::Config;
 
     #[test]
     fn cargo_test_keeps_failures_drops_passes() {
@@ -202,9 +201,10 @@ mod tests {
 
     #[test]
     fn compress_retains_original_for_recovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        let store = Arc::new(Store::open(&cfg).unwrap());
+        let Some(store) = Store::open_for_test() else {
+            return;
+        };
+        let store = Arc::new(store);
         let sc = ShellCompressor::new(store.clone());
 
         let mut out = String::new();

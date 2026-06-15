@@ -181,7 +181,6 @@ fn sample_shell_output() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::Config;
     use cairn_store::Store;
     use std::sync::Arc;
 
@@ -202,8 +201,10 @@ mod tests {
         let files = collect_code_files(dir.path(), 100);
         assert_eq!(files.len(), 1, "target/ must be skipped");
 
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        let ctx = ContextEngine::new(Arc::new(Store::open(&cfg).unwrap()));
+        let Some(store) = Store::open_for_test() else {
+            return;
+        };
+        let ctx = ContextEngine::new(Arc::new(store));
         let b = bench_outline(&ctx, &files).unwrap();
         assert_eq!(b.files, 1);
         assert!(b.lean_tokens < b.full_tokens, "outline must be cheaper");

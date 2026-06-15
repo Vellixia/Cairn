@@ -279,20 +279,20 @@ fn estimate_tokens(s: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::Config;
     use cairn_store::Store;
     use std::time::{Duration, SystemTime};
 
-    fn engine() -> (ContextEngine, tempfile::TempDir) {
+    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these). The temp dir is a scratch
+    /// workspace for the test's files (separate from the store).
+    fn engine() -> Option<(ContextEngine, tempfile::TempDir)> {
+        let store = Arc::new(Store::open_for_test()?);
         let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        let store = Arc::new(Store::open(&cfg).unwrap());
-        (ContextEngine::new(store), dir)
+        Some((ContextEngine::new(store), dir))
     }
 
     #[test]
     fn cached_reread_is_cheap_diff_works_and_expand_is_lossless() {
-        let (eng, dir) = engine();
+        let Some((eng, dir)) = engine() else { return };
         let file = dir.path().join("big.txt");
         let original: String = (0..1000)
             .map(|i| format!("line {i}: lorem ipsum dolor sit amet\n"))
@@ -345,7 +345,7 @@ mod tests {
 
     #[test]
     fn signatures_mode_outlines_rust_and_stays_lossless() {
-        let (eng, dir) = engine();
+        let Some((eng, dir)) = engine() else { return };
         let file = dir.path().join("widget.rs");
         let src = "\
 pub struct Widget { pub id: u32, pub name: String }
@@ -378,7 +378,7 @@ pub fn build() -> Widget { Widget::new(1) }
 
     #[test]
     fn structural_mode_falls_back_to_full_for_non_code() {
-        let (eng, dir) = engine();
+        let Some((eng, dir)) = engine() else { return };
         let file = dir.path().join("notes.txt");
         let body = "plain prose, no code here\nsecond line\n";
         std::fs::write(&file, body).unwrap();

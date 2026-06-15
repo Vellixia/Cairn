@@ -138,20 +138,18 @@ fn preview(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::Config;
     use cairn_core::NewMemory;
     use cairn_store::Store;
 
-    fn setup() -> (Assembler, Arc<MemoryEngine>, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        let mem = Arc::new(MemoryEngine::new(Arc::new(Store::open(&cfg).unwrap())));
-        (Assembler::new(mem.clone()), mem, dir)
+    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these integration tests).
+    fn setup() -> Option<(Assembler, Arc<MemoryEngine>)> {
+        let mem = Arc::new(MemoryEngine::new(Arc::new(Store::open_for_test()?)));
+        Some((Assembler::new(mem.clone()), mem))
     }
 
     #[test]
     fn respects_budget_and_reports_dropped() {
-        let (a, mem, _d) = setup();
+        let Some((a, mem)) = setup() else { return };
         for i in 0..20 {
             mem.remember(NewMemory::new(format!(
                 "memory item number {i} about sqlite storage and blobs"
@@ -170,7 +168,7 @@ mod tests {
 
     #[test]
     fn best_item_sits_at_an_edge() {
-        let (a, mem, _d) = setup();
+        let Some((a, mem)) = setup() else { return };
         mem.remember(NewMemory::new("the unique keyword zephyrium lives here"))
             .unwrap();
         for i in 0..6 {

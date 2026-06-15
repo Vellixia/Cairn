@@ -617,15 +617,19 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    fn test_state() -> (AppState, tempfile::TempDir) {
+    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these). The temp dir is a scratch
+    /// workspace for the test's files (separate from the store).
+    fn test_state() -> Option<(AppState, tempfile::TempDir)> {
+        let cfg = cairn_store::Store::test_config()?;
         let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        (AppState::new(&cfg).unwrap(), dir)
+        Some((AppState::new(&cfg).unwrap(), dir))
     }
 
     #[tokio::test]
     async fn guard_checkpoint_rollback_endpoints_restore_a_tracked_file() {
-        let (state, dir) = test_state();
+        let Some((state, dir)) = test_state() else {
+            return;
+        };
         let file = dir.path().join("work.txt");
         std::fs::write(&file, "original\n").unwrap();
         // Track the file by reading it through the context engine (records a baseline version).
@@ -675,7 +679,9 @@ mod tests {
 
     #[tokio::test]
     async fn anchor_endpoints_round_trip() {
-        let (state, _dir) = test_state();
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
         let set = post_anchor(
             State(state.clone()),
             Json(AnchorBody {
@@ -692,7 +698,9 @@ mod tests {
 
     #[tokio::test]
     async fn share_endpoints_sanitize_text_and_withhold_private_memories() {
-        let (state, _dir) = test_state();
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
         state
             .mem
             .remember(NewMemory::new("prefer ripgrep over grep"))
@@ -720,7 +728,9 @@ mod tests {
 
     #[tokio::test]
     async fn share_export_then_import_round_trips_into_a_fresh_instance() {
-        let (src, _d1) = test_state();
+        let Some((src, _d1)) = test_state() else {
+            return;
+        };
         src.mem
             .remember(NewMemory::new("prefer ripgrep over grep"))
             .unwrap();
@@ -730,7 +740,9 @@ mod tests {
         let bundle: cairn_share::ShareBundle = serde_json::from_value(exported).unwrap();
 
         // Import into a brand-new instance.
-        let (dst, _d2) = test_state();
+        let Some((dst, _d2)) = test_state() else {
+            return;
+        };
         let res = share_import(State(dst.clone()), Json(bundle))
             .await
             .unwrap()
@@ -745,7 +757,9 @@ mod tests {
 
     #[tokio::test]
     async fn stats_surfaces_reliability_after_a_verify() {
-        let (state, dir) = test_state();
+        let Some((state, dir)) = test_state() else {
+            return;
+        };
         let f = dir.path().join("f.txt");
         let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
         std::fs::write(&f, &original).unwrap();
@@ -769,7 +783,9 @@ mod tests {
 
     #[tokio::test]
     async fn pool_contribute_re_sanitizes_and_pull_serves_clean() {
-        let (state, _dir) = test_state();
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
 
         fn shareable(content: &str) -> cairn_share::ShareableMemory {
             cairn_share::ShareableMemory {
@@ -806,7 +822,9 @@ mod tests {
 
     #[tokio::test]
     async fn pair_new_then_claim_yields_a_valid_token_once() {
-        let (state, _dir) = test_state();
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
 
         // The host mints a pairing code.
         let created = pair_new(

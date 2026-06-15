@@ -340,12 +340,12 @@ fn assess(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::Config;
-
-    fn guard() -> (Guard, tempfile::TempDir) {
+    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these). The returned temp dir is a
+    /// scratch workspace for the test's files (separate from the store).
+    fn guard() -> Option<(Guard, tempfile::TempDir)> {
+        let store = Store::open_for_test()?;
         let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        (Guard::new(Arc::new(Store::open(&cfg).unwrap())), dir)
+        Some((Guard::new(Arc::new(store)), dir))
     }
 
     fn hundred_lines() -> String {
@@ -354,7 +354,7 @@ mod tests {
 
     #[test]
     fn flags_large_unreplaced_deletion() {
-        let (g, dir) = guard();
+        let Some((g, dir)) = guard() else { return };
         let f = dir.path().join("f.txt");
         std::fs::write(&f, hundred_lines()).unwrap();
         let report = g.verify_edit(&f, "line 0\n").unwrap();
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn small_append_is_ok() {
-        let (g, dir) = guard();
+        let Some((g, dir)) = guard() else { return };
         let f = dir.path().join("f.txt");
         let original = hundred_lines();
         std::fs::write(&f, &original).unwrap();
@@ -375,7 +375,7 @@ mod tests {
 
     #[test]
     fn new_file_is_ok_with_no_baseline() {
-        let (g, dir) = guard();
+        let Some((g, dir)) = guard() else { return };
         let f = dir.path().join("new.txt");
         let report = g.verify_edit(&f, "hello\nworld\n").unwrap();
         assert_eq!(report.risk, Risk::Ok);
@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn verify_against_baseline_flags_post_read_corruption() {
-        let (g, dir) = guard();
+        let Some((g, dir)) = guard() else { return };
         let f = dir.path().join("f.txt");
         std::fs::write(&f, hundred_lines()).unwrap();
 
@@ -410,7 +410,7 @@ mod tests {
 
     #[test]
     fn anchor_set_and_get() {
-        let (g, _dir) = guard();
+        let Some((g, _dir)) = guard() else { return };
         assert!(g.anchor().unwrap().is_none());
         g.set_anchor("  ship Cairn v0.2  ").unwrap();
         assert_eq!(g.anchor().unwrap().unwrap(), "ship Cairn v0.2");
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn checkpoint_and_rollback_restores_files() {
-        let (g, dir) = guard();
+        let Some((g, dir)) = guard() else { return };
         let f = dir.path().join("f.txt");
         std::fs::write(&f, "original content\nline2\n").unwrap();
 
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn reliability_score_reflects_recent_outcomes() {
-        let (g, _dir) = guard();
+        let Some((g, _dir)) = guard() else { return };
 
         // No history → clean slate.
         let r0 = g.reliability().unwrap();
@@ -484,7 +484,7 @@ mod tests {
 
     #[test]
     fn rollback_is_recorded_and_penalizes_reliability() {
-        let (g, dir) = guard();
+        let Some((g, dir)) = guard() else { return };
         let f = dir.path().join("f.txt");
         std::fs::write(&f, "a\nb\n").unwrap();
         let key = std::fs::canonicalize(&f)

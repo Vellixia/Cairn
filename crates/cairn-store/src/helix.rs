@@ -8,10 +8,11 @@
 //!
 //! ## Sync ↔ async bridge
 //! `StoreBackend` is synchronous; the `helix-db` client is async (tokio). Each call hops onto a
-//! dedicated [`tokio::runtime::Runtime`] owned by the backend. We `block_on` from a *scoped OS
-//! thread* (not the caller's thread) so this is safe whether the caller is plain sync (tests) or
-//! already inside a `#[tokio::main]` runtime (the server) — the latter would otherwise panic with
-//! "Cannot start a runtime from within a runtime".
+//! process-wide shared [`tokio::runtime::Runtime`] and `block_on`s from a *scoped OS thread* (not
+//! the caller's thread), so this is safe whether the caller is plain sync (tests) or already inside
+//! a `#[tokio::main]` runtime (the server) — the latter would otherwise panic with "Cannot start a
+//! runtime from within a runtime". The runtime is shared (never dropped) so a backend can be
+//! created and dropped inside an async context without the "drop a runtime in async" panic.
 //!
 //! ## Data model
 //! Memories are `Memory` nodes carrying their columns plus a `embedding` vector property (HNSW
@@ -53,10 +54,22 @@ const MEM_COLS: &[&str] = &[
     "updated_at",
 ];
 
+/// A process-wide tokio runtime that drives the async Helix client. Shared (and never dropped) so
+/// that a `HelixBackend` can be created and dropped inside an async context (axum, `#[tokio::test]`)
+/// without panicking — owning a `Runtime` and dropping it from async code is not allowed.
+fn shared_runtime() -> &'static tokio::runtime::Runtime {
+    static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("build shared tokio runtime")
+    })
+}
+
 /// A HelixDB-backed structured store.
 pub(crate) struct HelixBackend {
     client: Client,
-    rt: tokio::runtime::Runtime,
     embed: Box<dyn Embedder>,
     /// Prefix applied to every node label, so instances/tests can share one server safely.
     ns: String,
@@ -68,18 +81,9 @@ impl HelixBackend {
     pub(crate) fn connect(url: &str, cfg: &Config) -> Result<Self> {
         let client = Client::new(Some(url))
             .map_err(|e| Error::Storage(format!("helix connect to {url}: {e}")))?;
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| Error::Storage(format!("helix runtime: {e}")))?;
         let embed = cairn_embed::from_config(&cfg.embed)?;
         let ns = cfg.helix_ns.clone().unwrap_or_else(|| "cairn_".to_string());
-        let backend = Self {
-            client,
-            rt,
-            embed,
-            ns,
-        };
+        let backend = Self { client, embed, ns };
         backend.wait_ready()?;
         Ok(backend)
     }
@@ -115,7 +119,7 @@ impl HelixBackend {
         F: Future + Send,
         F::Output: Send,
     {
-        let rt = &self.rt;
+        let rt = shared_runtime();
         std::thread::scope(|s| s.spawn(move || rt.block_on(fut)).join().unwrap())
     }
 

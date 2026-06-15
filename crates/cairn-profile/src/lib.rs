@@ -93,14 +93,12 @@ fn detect_preferences(prompt: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::Config;
     use cairn_store::Store;
 
-    fn profile() -> (Profile, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        let mem = Arc::new(MemoryEngine::new(Arc::new(Store::open(&cfg).unwrap())));
-        (Profile::new(mem), dir)
+    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these integration tests).
+    fn profile() -> Option<Profile> {
+        let mem = Arc::new(MemoryEngine::new(Arc::new(Store::open_for_test()?)));
+        Some(Profile::new(mem))
     }
 
     #[test]
@@ -116,7 +114,7 @@ mod tests {
 
     #[test]
     fn prefer_lists_and_blocks_with_dedup() {
-        let (p, _d) = profile();
+        let Some(p) = profile() else { return };
         p.prefer("always use 4-space indentation").unwrap();
         p.prefer("prefer using axum for HTTP").unwrap();
         p.prefer("always use 4-space indentation").unwrap(); // dedup
@@ -129,7 +127,7 @@ mod tests {
 
     #[test]
     fn capture_from_prompt_stores_directives() {
-        let (p, _d) = profile();
+        let Some(p) = profile() else { return };
         let captured = p.capture_from_prompt("always use tabs not spaces").unwrap();
         assert_eq!(captured.len(), 1);
         assert_eq!(p.preferences().unwrap().len(), 1);

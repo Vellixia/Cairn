@@ -442,17 +442,16 @@ fn err(id: Option<Value>, code: i64, message: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cairn_core::Config;
 
-    fn server() -> (McpServer, tempfile::TempDir) {
-        let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::resolve(Some(dir.path().join("data"))).unwrap();
-        (McpServer::new(&cfg).unwrap(), dir)
+    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these integration tests).
+    fn server() -> Option<McpServer> {
+        let cfg = cairn_store::Store::test_config()?;
+        Some(McpServer::new(&cfg).unwrap())
     }
 
     #[test]
     fn initialize_echoes_version_and_lists_tools() {
-        let (s, _d) = server();
+        let Some(s) = server() else { return };
         let init = s
             .handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}))
             .unwrap();
@@ -469,7 +468,7 @@ mod tests {
 
     #[test]
     fn remember_then_recall_via_tools_call() {
-        let (s, _d) = server();
+        let Some(s) = server() else { return };
         s.handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
             "name":"remember","arguments":{"content":"cairn uses sqlite plus a blob store","kind":"decision"}}}))
             .unwrap();
@@ -485,7 +484,7 @@ mod tests {
 
     #[test]
     fn notifications_get_no_reply() {
-        let (s, _d) = server();
+        let Some(s) = server() else { return };
         assert!(s
             .handle(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}))
             .is_none());
@@ -493,7 +492,7 @@ mod tests {
 
     #[test]
     fn sanitize_tool_redacts_and_classifies() {
-        let (s, _d) = server();
+        let Some(s) = server() else { return };
         // Assembled at runtime so the repo stores no verbatim credential (push protection).
         let token = format!("ghp_{}", "0123456789abcdefghijklmnopqrstuvwxyz");
         let resp = s

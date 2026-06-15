@@ -198,6 +198,16 @@ impl Store {
     /// embedder (no model download, no network).
     #[doc(hidden)]
     pub fn open_for_test() -> Option<Self> {
+        let cfg = Self::test_config()?;
+        Some(Self::open(&cfg).expect("CAIRN_HELIX_URL is set but opening the Helix store failed"))
+    }
+
+    /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) — a fresh label
+    /// namespace + the `hashing` embedder, pointed at `CAIRN_HELIX_URL`. `None` when that is unset.
+    /// Components built from a `Config` (the API/MCP servers) use this directly in their tests.
+    /// Data/blob dirs are created so the store opens cleanly.
+    #[doc(hidden)]
+    pub fn test_config() -> Option<Config> {
         let url = std::env::var("CAIRN_HELIX_URL")
             .ok()
             .filter(|s| !s.trim().is_empty())?;
@@ -217,7 +227,7 @@ impl Store {
             },
         };
         std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
-        Some(Self::open(&cfg).expect("CAIRN_HELIX_URL is set but opening the Helix store failed"))
+        Some(cfg)
     }
 }
 
