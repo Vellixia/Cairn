@@ -155,8 +155,12 @@ Already running HelixDB elsewhere? Skip the bundled services and point Cairn at 
 
 ## Configuration (`.env`)
 
-Settings resolve **CLI flag > environment / `.env` > default**. Copy `.env.example` to a project
-`.env` or a machine-global `~/.config/cairn/.env` ("global cairn", applies to every project):
+Settings resolve **CLI flag > real env > project `.env` > global `.env` > built-in default**.
+`cairn-cli` loads both `.env` files at startup via `dotenvy` (see
+`crates/cairn-cli/src/main.rs`); `dotenvy` only fills variables that are not already set, so a
+real env var always wins over a project `.env`, and a project `.env` always wins over the global
+one. Copy `.env.example` to a project `.env` or to a machine-global
+`~/.config/cairn/.env` ("global cairn", applies to every project on this device):
 
 | Variable | What |
 |---|---|
@@ -164,7 +168,11 @@ Settings resolve **CLI flag > environment / `.env` > default**. Copy `.env.examp
 | `CAIRN_HOST` · `CAIRN_PORT` | serve bind address (default `127.0.0.1:7777`) |
 | `CAIRN_SERVER` | default server URL for `sync` / `pull` / `contribute` |
 | `CAIRN_HELIX_URL` | HelixDB server URL — **required** (the `docker compose` stack sets it for you) |
+| `CAIRN_HELIX_NS` | label-namespace prefix on the Helix backend; isolates multiple Cairn instances (default `cairn_`) |
 | `CAIRN_EMBED_PROVIDER` · `_MODEL` · `_URL` · `_API_KEY` | embedding model (default: local `all-MiniLM-L6-v2`) |
+| `GITHUB_TOKEN` · `CAIRN_GITHUB_TOKEN` | optional. Lifts the GitHub API rate limit for `cairn update` (`CAIRN_GITHUB_TOKEN` wins if both are set) |
+| `HELIX_PORT` · `MINIO_ROOT_USER` · `MINIO_ROOT_PASSWORD` | (compose only) host Helix port and MinIO credentials |
+| `CAIRN_REPO` · `CAIRN_INSTALL_DIR` | (install script only) override the GitHub repo to install from and the install location |
 
 ## Quickstart (dev)
 

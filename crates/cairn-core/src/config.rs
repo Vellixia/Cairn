@@ -1,9 +1,21 @@
 //! Runtime configuration and on-disk layout.
 //!
-//! Settings resolve with precedence **CLI flag > environment (incl. `.env`) > default**. A
-//! machine-global `.env` in the OS config dir lets you configure embeddings/Helix once for every
-//! project on the device ("global cairn"); a project `.env` overrides it; real environment
-//! variables override both. The CLI loads those `.env` files at startup (see [`global_env_path`]).
+//! Settings resolve with precedence (highest → lowest):
+//!
+//! 1. **CLI flag** — e.g. `--host`, `--port`, `--data-dir`.
+//! 2. **Real environment variable** — whatever the parent shell already exported.
+//! 3. **Project `.env`** — `<repo>/.env` (or the `environment:` block in `docker-compose.yml`).
+//! 4. **Global `.env`** — `~/.config/cairn/.env` on Linux,
+//!    `$XDG_CONFIG_HOME/cairn/.env` elsewhere, `%APPDATA%\\cairn\\.env` on Windows
+//!    (see [`global_env_path`]).
+//! 5. **Built-in default** — the hard-coded fallback inside [`Config::resolve`].
+//!
+//! The split between CLI / core is intentional: the core crate reads raw `std::env::var`, and the
+//! `cairn-cli` binary loads both `.env` files at startup via `dotenvy` (see
+//! `crates/cairn-cli/src/main.rs`). `dotenvy` only fills variables that are not already set, so
+//! real env always wins over a project `.env`, and a project `.env` always wins over the global
+//! one. A machine-global `.env` lets you configure embeddings/Helix once for every project on the
+//! device ("global cairn").
 
 use std::path::{Path, PathBuf};
 
