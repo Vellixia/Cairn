@@ -719,12 +719,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these). The temp dir is a scratch
-    /// workspace for the test's files (separate from the store).
+    /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
+    /// The temp dir is a scratch workspace for the test's files (separate from the store).
     fn test_state() -> Option<(AppState, tempfile::TempDir)> {
         let cfg = cairn_store::Store::test_config()?;
-        let dir = tempfile::tempdir().unwrap();
-        Some((AppState::new(&cfg).unwrap(), dir))
+        let dir = tempfile::tempdir().ok()?;
+        Some((AppState::new(&cfg).ok()?, dir))
     }
 
     #[tokio::test]

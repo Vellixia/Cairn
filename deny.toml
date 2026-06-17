@@ -21,6 +21,22 @@ skip = [
     { name = "getrandom", version = "0.x" },
     { name = "webpki-roots", version = "0.x" },
     { name = "tower-http", version = "0.x" },
+    # Duplicate versions from tree-sitter / windows / platform crates
+    { name = "core-foundation", version = "0.x" },
+    { name = "r-efi", version = "5.x" },
+    { name = "thiserror", version = "1.x" },
+    { name = "thiserror-impl", version = "1.x" },
+    { name = "ureq", version = "2.x" },
+    { name = "windows-sys", version = "0.x" },
+    { name = "windows-targets", version = "0.x" },
+    { name = "windows_aarch64_gnullvm", version = "0.x" },
+    { name = "windows_aarch64_msvc", version = "0.x" },
+    { name = "windows_i686_gnu", version = "0.x" },
+    { name = "windows_i686_msvc", version = "0.x" },
+    { name = "windows_x86_64_gnu", version = "0.x" },
+    { name = "windows_x86_64_gnullvm", version = "0.x" },
+    { name = "windows_x86_64_msvc", version = "0.x" },
+    { name = "wit-bindgen", version = "0.x" },
 ]
 
 [sources]

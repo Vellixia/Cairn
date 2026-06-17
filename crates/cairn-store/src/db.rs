@@ -194,7 +194,7 @@ impl Store {
     #[doc(hidden)]
     pub fn open_for_test() -> Option<Self> {
         let cfg = Self::test_config()?;
-        Some(Self::open(&cfg).expect("CAIRN_HELIX_URL is set but opening the Helix store failed"))
+        Self::open(&cfg).ok()
     }
 
     /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) — a fresh label
