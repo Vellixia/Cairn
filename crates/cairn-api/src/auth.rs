@@ -61,6 +61,10 @@ impl TokenSigner {
     pub fn verify(&self, token: &str) -> Result<String, AuthError> {
         let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
         validation.leeway = 60; // tolerate 60s clock skew
+        // Device tokens are long-lived: we validate the signature and `iat`, but do not require an
+        // `exp` claim (revocation is handled by deleting the metadata record).
+        validation.validate_exp = false;
+        validation.required_spec_claims.remove("exp");
         let decoded = jsonwebtoken::decode::<Claims>(
             token,
             &jsonwebtoken::DecodingKey::from_secret(&self.secret),

@@ -20,6 +20,16 @@ pub struct EmbedConfig {
     pub api_key: Option<String>,
 }
 
+/// TLS material for HTTPS serve. Both `cert` and `key` must be present to enable TLS; partial
+/// configuration (e.g. cert without key) is rejected by the API layer at startup.
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// PEM-encoded TLS certificate chain (`CAIRN_TLS_CERT`).
+    pub cert: PathBuf,
+    /// PEM-encoded TLS private key (`CAIRN_TLS_KEY`).
+    pub key: PathBuf,
+}
+
 /// Where Cairn keeps its data and how it's reached. Defaults to the OS data dir
 /// (`~/.local/share/cairn`, `%APPDATA%\cairn`, …); overridable via flags and env (`CAIRN_*`).
 #[derive(Debug, Clone)]
@@ -38,6 +48,13 @@ pub struct Config {
     pub default_server: Option<String>,
     /// HMAC secret used to sign device-token JWTs (`CAIRN_SECRET_KEY`).
     pub secret_key: Option<Vec<u8>>,
+    /// Optional TLS material for HTTPS serve (`CAIRN_TLS_CERT` + `CAIRN_TLS_KEY`).
+    ///
+    /// Network-exposed serve (`host` other than `127.0.0.1` / `localhost` / `::1`) requires this
+    /// to be set; the API layer will refuse to start over plain HTTP on a non-loopback bind.
+    pub tls: Option<TlsConfig>,
+    /// Optional project/workspace root used by context engines (`CAIRN_WORKSPACE_ROOT`).
+    pub workspace_root: Option<PathBuf>,
     /// Embedding settings.
     pub embed: EmbedConfig,
 }
@@ -60,6 +77,18 @@ impl Config {
             helix_ns: env_str("CAIRN_HELIX_NS"),
             default_server: env_str("CAIRN_SERVER"),
             secret_key: env_str("CAIRN_SECRET_KEY").map(|s| s.into_bytes()),
+            tls: match (env_path("CAIRN_TLS_CERT"), env_path("CAIRN_TLS_KEY")) {
+                (Some(cert), Some(key)) => Some(TlsConfig { cert, key }),
+                (None, None) => None,
+                // Partial TLS config is almost always a misconfiguration that would later fail
+                // obscurely at handshake time. Surface it loudly here so it can't be missed.
+                _ => {
+                    return Err(crate::Error::Invalid(
+                        "CAIRN_TLS_CERT and CAIRN_TLS_KEY must be set together".into(),
+                    ));
+                }
+            },
+            workspace_root: env_path("CAIRN_WORKSPACE_ROOT"),
             embed: EmbedConfig {
                 provider: env_str("CAIRN_EMBED_PROVIDER").unwrap_or_else(|| "local".to_string()),
                 model: env_str("CAIRN_EMBED_MODEL"),
@@ -78,6 +107,22 @@ impl Config {
 
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// True if the configured serve bind host is a loopback address (`127.0.0.1`, `::1`, or
+    /// `localhost`). Used by the API layer to gate TLS enforcement: non-loopback binds MUST serve
+    /// HTTPS, loopback binds are still allowed to serve plain HTTP for local dev.
+    pub fn is_loopback_host(&self) -> bool {
+        let h = self.host.trim();
+        if h.eq_ignore_ascii_case("localhost") {
+            return true;
+        }
+        if let Ok(ip) = h.parse::<std::net::IpAddr>() {
+            return ip.is_loopback();
+        }
+        // If the host is a DNS name we can't prove loopback-ness — assume non-loopback so the
+        // safe-by-default TLS gate kicks in.
+        false
     }
 }
 
@@ -102,5 +147,46 @@ fn default_data_dir() -> PathBuf {
         dirs.data_dir().to_path_buf()
     } else {
         PathBuf::from(".cairn")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with_host(host: &str) -> Config {
+        Config {
+            host: host.to_string(),
+            // The rest of these fields are not relevant to is_loopback_host(); populate with
+            // placeholders so the struct literal stays exhaustive.
+            data_dir: std::env::temp_dir(),
+            port: 7777,
+            helix_url: None,
+            helix_ns: None,
+            default_server: None,
+            secret_key: None,
+            tls: None,
+            workspace_root: None,
+            embed: EmbedConfig {
+                provider: "local".into(),
+                model: None,
+                url: None,
+                api_key: None,
+            },
+        }
+    }
+
+    #[test]
+    fn loopback_hosts_are_recognised() {
+        for host in ["127.0.0.1", "::1", "localhost", "LOCALHOST", "  127.0.0.1  "] {
+            assert!(cfg_with_host(host).is_loopback_host(), "{host} should be loopback");
+        }
+    }
+
+    #[test]
+    fn non_loopback_hosts_are_rejected() {
+        for host in ["0.0.0.0", "192.168.1.5", "10.0.0.1", "cairn.example.com", ""] {
+            assert!(!cfg_with_host(host).is_loopback_host(), "{host} should NOT be loopback");
+        }
     }
 }

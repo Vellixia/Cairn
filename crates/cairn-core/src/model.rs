@@ -99,6 +99,8 @@ pub struct Memory {
     pub session_id: Option<String>,
     pub importance: f32,
     pub access_count: i64,
+    #[serde(default)]
+    pub suspicious: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -119,6 +121,8 @@ pub struct NewMemory {
     pub session_id: Option<String>,
     #[serde(default)]
     pub importance: Option<f32>,
+    #[serde(default)]
+    pub suspicious: Option<bool>,
 }
 
 impl NewMemory {
@@ -142,6 +146,7 @@ impl NewMemory {
             session_id: self.session_id,
             importance: self.importance.unwrap_or(0.5).clamp(0.0, 1.0),
             access_count: 0,
+            suspicious: self.suspicious.unwrap_or(false),
             created_at: now,
             updated_at: now,
         }

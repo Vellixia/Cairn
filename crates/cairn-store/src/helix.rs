@@ -50,6 +50,7 @@ const MEM_COLS: &[&str] = &[
     "session_id",
     "importance",
     "access_count",
+    "suspicious",
     "created_at",
     "updated_at",
 ];
@@ -237,6 +238,7 @@ impl StoreBackend for HelixBackend {
             ),
             ("importance".into(), (m.importance as f64).into()),
             ("access_count".into(), m.access_count.into()),
+            ("suspicious".into(), m.suspicious.into()),
             ("created_at".into(), ts(m.created_at).into()),
             ("updated_at".into(), ts(m.updated_at).into()),
             ("embedding".into(), embedding.into()),
@@ -612,6 +614,10 @@ fn get_f64(m: &Map<String, Value>, k: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn get_bool(m: &Map<String, Value>, k: &str) -> bool {
+    m.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// Reconstruct a [`Memory`] from a projected property row.
 fn memory_from_props(m: &Map<String, Value>) -> Memory {
     let concepts: Vec<String> = serde_json::from_str(&get_str(m, "concepts")).unwrap_or_default();
@@ -631,6 +637,7 @@ fn memory_from_props(m: &Map<String, Value>) -> Memory {
         },
         importance: get_f64(m, "importance") as f32,
         access_count: get_i64(m, "access_count"),
+        suspicious: get_bool(m, "suspicious"),
         created_at: parse_ts(&get_str(m, "created_at")),
         updated_at: parse_ts(&get_str(m, "updated_at")),
     }
@@ -656,6 +663,9 @@ mod live {
             // Unique namespace per backend so concurrent tests never collide on the shared server.
             helix_ns: Some(format!("test_{}_", uuid_simple())),
             default_server: None,
+            secret_key: None,
+            tls: None,
+            workspace_root: None,
             embed: EmbedConfig {
                 provider: "ollama".into(),
                 model: None,
@@ -763,6 +773,7 @@ mod live {
             session_id: None,
             importance: 0.7,
             access_count: 0,
+            suspicious: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

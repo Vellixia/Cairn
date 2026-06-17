@@ -38,7 +38,10 @@ impl McpServer {
         let store = Arc::new(Store::open(cfg)?);
         let mem = Arc::new(MemoryEngine::new(store.clone()));
         Ok(Self {
-            ctx: Arc::new(ContextEngine::new(store.clone())),
+            ctx: Arc::new(ContextEngine::new_with_root(
+                store.clone(),
+                cfg.workspace_root.clone(),
+            )),
             guard: Arc::new(Guard::new(store.clone())),
             asm: Arc::new(Assembler::new(mem.clone())),
             shell: Arc::new(ShellCompressor::new(store.clone())),
@@ -119,6 +122,9 @@ impl McpServer {
             .unwrap_or_else(|| json!({}));
         match self.dispatch(name, &args) {
             Ok(text) => ok(id, json!({ "content": [{ "type": "text", "text": text }] })),
+            Err(msg) if msg.contains("escapes workspace root") => {
+                err(id, -32602, &format!("workspace root violation: {msg}"))
+            }
             Err(msg) => ok(
                 id,
                 json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true }),
@@ -126,15 +132,22 @@ impl McpServer {
         }
     }
 
+    /// Confine a tool-supplied path to the workspace root, returning a JSON-RPC-friendly error
+    /// string if it escapes. This is the MCP-layer gate; the same check is also enforced inside
+    /// the context engine.
+    fn resolve_tool_path(&self, raw: &str) -> std::result::Result<std::path::PathBuf, String> {
+        self.ctx
+            .resolve_path(std::path::Path::new(raw))
+            .map_err(|e| e.to_string())
+    }
+
     fn dispatch(&self, name: &str, args: &Value) -> std::result::Result<String, String> {
         match name {
             "read" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
+                let resolved = self.resolve_tool_path(path)?;
                 let mode = ReadMode::parse(str_arg(args.get("mode")));
-                let r = self
-                    .ctx
-                    .read(std::path::Path::new(path), mode)
-                    .map_err(|e| e.to_string())?;
+                let r = self.ctx.read(&resolved, mode).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&r).map_err(|e| e.to_string())
             }
             "expand" => {
@@ -257,9 +270,10 @@ impl McpServer {
             "verify" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
                 let content = str_arg(args.get("content")).ok_or("missing 'content'")?;
+                let resolved = self.resolve_tool_path(path)?;
                 let r = self
                     .guard
-                    .verify_edit(std::path::Path::new(path), content)
+                    .verify_edit(&resolved, content)
                     .map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&r).map_err(|e| e.to_string())
             }
