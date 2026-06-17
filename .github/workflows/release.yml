@@ -58,8 +58,52 @@ jobs:
           archive: cairn-$target
           token: ${{ secrets.GITHUB_TOKEN }}
 
+  # Aggregate the per-target archives into a single SHA256SUMS file and upload it as a release
+  # asset. The install scripts download this file alongside the archive and abort on mismatch.
+  # Re-runs are safe: `gh release upload` is idempotent (--clobber overwrites the existing asset).
+  checksums:
+    name: SHA256SUMS
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir assets \
+            --pattern 'cairn-*.tar.gz' \
+            --pattern 'cairn-*.zip'
+      - name: Generate SHA256SUMS
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          # GNU sha256sum emits "<hex>  <filename>"; strip the leading "./" so the filenames in
+          # the manifest match what `gh release download` produces (e.g. "cairn-x86_64-….tar.gz").
+          : > SHA256SUMS
+          find . -maxdepth 1 -type f \( -name 'cairn-*.tar.gz' -o -name 'cairn-*.zip' \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum -- \
+            | sed 's|  \./|  |' >> SHA256SUMS
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
+      - name: Upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            assets/SHA256SUMS
+
   docker:
     name: docker image (ghcr)
+    needs: checksums
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,8 +111,8 @@ jobs:
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
         uses: docker/metadata-action@v5
         with:
