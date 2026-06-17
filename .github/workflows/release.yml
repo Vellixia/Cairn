@@ -130,3 +130,87 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # Download the uploaded archives, compute SHA-256 digests, and publish a checksum file.
+  # The base64-encoded checksum file is the subject list for the SLSA provenance generator.
+  collect-digests:
+    name: collect artifact digests
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      base64-subjects: ${{ steps.subjects.outputs.base64-subjects }}
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir assets
+      - id: subjects
+        name: Generate base64 subjects for SLSA
+        working-directory: assets
+        run: |
+          cat /dev/null > SHA256SUMS.txt
+          for f in cairn-*.tar.gz cairn-*.zip; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
+          b64=$(base64 -w0 SHA256SUMS.txt)
+          echo "base64-subjects=$b64" >> "$GITHUB_OUTPUT"
+      - name: Upload SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: assets
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber SHA256SUMS.txt
+
+  # SLSA Level 3 provenance attestation for the release archives.
+  provenance:
+    name: generate SLSA provenance
+    needs: collect-digests
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.collect-digests.outputs.base64-subjects }}
+      provenance-name: cairn.intoto.jsonl
+      upload-assets: true
+
+  # Keyless Sigstore / cosign signatures for each release archive.
+  sign-artifacts:
+    name: cosign sign release artifacts
+    needs: collect-digests
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: sigstore/cosign-installer@v3
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir assets
+      - name: Sign release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: assets
+        run: |
+          for f in cairn-*.{tar.gz,zip}; do
+            [ -f "$f" ] || continue
+            cosign sign-blob --yes \
+              --output-signature="$f.sig" \
+              --output-certificate="$f.cert" \
+              "$f"
+          done
+      - name: Upload signatures to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: assets
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber *.sig *.cert
