@@ -13,6 +13,15 @@ unmaintained = "workspace"
 multiple-versions = "deny"
 wildcards = "warn"
 highlight = "all"
+skip = [
+    # Transitive duplicates from different major versions of upstream crates
+    { name = "memchr", version = "2.x" },
+    { name = "serde_json", version = "1.x" },
+    { name = "serde_core", version = "1.x" },
+    { name = "getrandom", version = "0.x" },
+    { name = "webpki-roots", version = "0.x" },
+    { name = "tower-http", version = "0.x" },
+]
 
 [sources]
 unknown-registry = "deny"

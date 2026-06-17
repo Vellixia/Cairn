@@ -190,15 +190,33 @@ mod tests {
 
     #[test]
     fn loopback_hosts_are_recognised() {
-        for host in ["127.0.0.1", "::1", "localhost", "LOCALHOST", "  127.0.0.1  "] {
-            assert!(cfg_with_host(host).is_loopback_host(), "{host} should be loopback");
+        for host in [
+            "127.0.0.1",
+            "::1",
+            "localhost",
+            "LOCALHOST",
+            "  127.0.0.1  ",
+        ] {
+            assert!(
+                cfg_with_host(host).is_loopback_host(),
+                "{host} should be loopback"
+            );
         }
     }
 
     #[test]
     fn non_loopback_hosts_are_rejected() {
-        for host in ["0.0.0.0", "192.168.1.5", "10.0.0.1", "cairn.example.com", ""] {
-            assert!(!cfg_with_host(host).is_loopback_host(), "{host} should NOT be loopback");
+        for host in [
+            "0.0.0.0",
+            "192.168.1.5",
+            "10.0.0.1",
+            "cairn.example.com",
+            "",
+        ] {
+            assert!(
+                !cfg_with_host(host).is_loopback_host(),
+                "{host} should NOT be loopback"
+            );
         }
     }
 }
