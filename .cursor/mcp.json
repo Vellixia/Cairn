@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "cairn": {
+      "args": [
+        "mcp"
+      ],
+      "command": "cairn-cli"
+    }
+  }
+}

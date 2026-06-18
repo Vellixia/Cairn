@@ -62,6 +62,7 @@ pub enum SecretKind {
     StripeKey,
     OpenAiKey,
     AnthropicKey,
+    GenericSecret,
     Jwt,
     NamedSecret,
     BearerToken,
@@ -83,6 +84,7 @@ impl SecretKind {
             SecretKind::StripeKey => "[redacted:stripe_key]",
             SecretKind::OpenAiKey => "[redacted:openai_key]",
             SecretKind::AnthropicKey => "[redacted:anthropic_key]",
+            SecretKind::GenericSecret => "[redacted:secret]",
             SecretKind::Jwt => "[redacted:jwt]",
             SecretKind::NamedSecret => "[redacted:secret]",
             SecretKind::BearerToken => "[redacted:token]",
@@ -219,6 +221,7 @@ impl Sanitizer {
             ),
             (SecretKind::AnthropicKey, r"sk-ant-[A-Za-z0-9_-]{20,}", 0),
             (SecretKind::OpenAiKey, r"sk-(?:proj-)?[A-Za-z0-9_-]{20,}", 0),
+            (SecretKind::GenericSecret, r"sk-[A-Za-z0-9_-]{16,}", 0),
             (SecretKind::AwsKey, r"AKIA[0-9A-Z]{16}", 0),
             (
                 SecretKind::GithubToken,
