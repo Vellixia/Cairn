@@ -106,6 +106,8 @@ services:
       # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
       CAIRN_HELIX_URL: http://helix:8080
       CAIRN_INSECURE: "1"
+      # Mount the host project so cairn read/verify/checkpoint tools can access local files.
+      CAIRN_WORKSPACE_ROOT: /workspace
     env_file:
       - path: .env
         required: false
@@ -113,6 +115,8 @@ services:
       - "${CAIRN_PORT:-7777}:7777"
     volumes:
       - cairn-data:/data
+      # Read-only mount of the host project directory for file tools (read/verify/checkpoint).
+      - "${CAIRN_WORKSPACE_HOST:-.}:/workspace:ro"
     restart: unless-stopped
 
 volumes:

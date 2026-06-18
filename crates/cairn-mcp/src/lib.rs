@@ -463,7 +463,12 @@ fn err(id: Option<Value>, code: i64, message: &str) -> Value {
 pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
     if let Some(server) = cfg.default_server.as_deref() {
         let token = std::env::var("CAIRN_TOKEN").ok();
-        RemoteProxy::new(server, token).serve_stdio()
+        let mut proxy = RemoteProxy::new(server, token);
+        // Use the configured workspace root (or cwd) as the host project dir for path rewriting.
+        if let Some(root) = &cfg.workspace_root {
+            proxy.host_workspace = root.clone();
+        }
+        proxy.serve_stdio()
     } else {
         McpServer::new(cfg)
             .map_err(|e| std::io::Error::other(e.to_string()))?
@@ -472,9 +477,17 @@ pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
 }
 
 /// An MCP stdio server that forwards tool calls to a remote Cairn HTTP API.
+///
+/// File-local tools (`read`, `verify`, `checkpoint`, `rollback`) get their `path` argument
+/// rewritten: if the path is absolute and inside the proxy's current working directory, it is
+/// made relative to that directory before forwarding. The remote server has its
+/// `CAIRN_WORKSPACE_ROOT` pointed at the mounted project, so relative paths resolve correctly
+/// inside the container.
 pub struct RemoteProxy {
     server: String,
     token: Option<String>,
+    /// The host directory where `cairn-cli mcp` was launched (the project root from the agent).
+    host_workspace: std::path::PathBuf,
 }
 
 impl RemoteProxy {
@@ -482,6 +495,7 @@ impl RemoteProxy {
         Self {
             server: server.trim_end_matches('/').to_string(),
             token,
+            host_workspace: std::env::current_dir().unwrap_or_default(),
         }
     }
 
@@ -554,7 +568,15 @@ impl RemoteProxy {
         let Some(params) = params else {
             return err(id, -32602, "missing params");
         };
-        match self.post("/api/tools/call", params) {
+        // For file-local tools, rewrite absolute host paths to workspace-relative paths so the
+        // remote server (which has the project mounted at its workspace root) can find them.
+        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        let rewritten = if matches!(name, "read" | "verify" | "checkpoint" | "rollback") {
+            self.rewrite_file_path(params)
+        } else {
+            params.clone()
+        };
+        match self.post("/api/tools/call", &rewritten) {
             Ok(v) => ok(id, v),
             Err(e) => {
                 let msg = format!("tool call failed: {e}");
@@ -564,6 +586,26 @@ impl RemoteProxy {
                 )
             }
         }
+    }
+
+    /// If `params.arguments.path` is an absolute path inside `host_workspace`, replace it with
+    /// the workspace-relative form. Returns a cloned params Value with the rewritten path.
+    fn rewrite_file_path(&self, params: &Value) -> Value {
+        let mut out = params.clone();
+        if let Some(args) = out.get_mut("arguments").and_then(|v| v.as_object_mut()) {
+            if let Some(path_val) = args.get("path").and_then(Value::as_str) {
+                let p = std::path::Path::new(path_val);
+                if p.is_absolute() {
+                    if let Ok(rel) = p.strip_prefix(&self.host_workspace) {
+                        args.insert(
+                            "path".into(),
+                            Value::String(rel.to_string_lossy().into_owned()),
+                        );
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn get(&self, path: &str) -> std::result::Result<Value, String> {
