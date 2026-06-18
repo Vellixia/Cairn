@@ -1,33 +1,33 @@
-//! The `cairn` binary.
+//! The `cairn-cli` binary.
 //!
-//! `cairn serve` starts the server + embedded web UI. The other subcommands operate directly on
-//! the local store so you can poke at the engine without a running server (handy for tests).
+//! `cairn-cli` connects AI agents to a Cairn server and runs local tools against the local store.
+//! When `CAIRN_HELIX_URL` is set it talks to a local HelixDB; when `CAIRN_SERVER` is set it proxies
+//! through the remote Cairn HTTP API.
 
-use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::Context;
-use cairn_api::AppState;
 use cairn_core::{Config, NewMemory};
 use clap::{Parser, Subcommand};
 
 mod bench;
 mod hook;
-mod install;
 mod pair;
 mod pool;
 mod rules;
+mod setup;
 mod sync;
 mod update;
 
 #[derive(Parser)]
 #[command(
-    name = "cairn",
+    name = "cairn-cli",
     version,
-    about = "The context & reliability layer for AI agents"
+    about = "Cairn client — connect AI agents to a Cairn server"
 )]
 struct Cli {
-    /// Override the data directory (defaults to the OS data dir; use /data in Docker).
+    /// Override the data directory (defaults to the OS data dir).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
 
@@ -37,15 +37,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Start the Cairn server (HTTP API + web control plane).
-    Serve {
-        /// Bind host (default 127.0.0.1, or `CAIRN_HOST`).
-        #[arg(long)]
-        host: Option<String>,
-        /// Bind port (default 7777, or `CAIRN_PORT`).
-        #[arg(long)]
-        port: Option<u16>,
-    },
     /// Store a memory.
     Remember { content: String },
     /// Recall memories matching a query.
@@ -59,7 +50,7 @@ enum Cmd {
         #[arg(long, default_value_t = 12)]
         limit: usize,
     },
-    /// Record a standing preference (e.g. `cairn prefer always use ripgrep`).
+    /// Record a standing preference (e.g. `cairn-cli prefer always use ripgrep`).
     Prefer {
         #[arg(trailing_var_arg = true, num_args = 1..)]
         rule: Vec<String>,
@@ -82,7 +73,7 @@ enum Cmd {
     Stats,
     /// Verify the local setup.
     Doctor,
-    /// Measure the token savings Cairn gives on a codebase (AST outlines, re-reads, shell compress).
+    /// Measure the token savings Cairn gives on a codebase.
     Bench { path: Option<PathBuf> },
     /// Pair this device with a Cairn server using a code from the host.
     Pair {
@@ -91,19 +82,23 @@ enum Cmd {
         #[arg(long)]
         server: String,
     },
-    /// Generate a pairing code on this host for a new device to claim.
-    PairCode { name: Option<String> },
-    /// Configure an agent (or --all detected agents) to use this server.
-    Install {
-        /// Agent name: claude-code, cursor, vscode, windsurf. Omit (with --all) to auto-detect.
+    /// Configure an agent (or --all detected agents) to use a Cairn server.
+    Setup {
+        /// Agent name: claude-code, cursor, vscode, windsurf, opencode. Omit (with --all) to auto-detect.
         agent: Option<String>,
         /// Configure every detected agent.
         #[arg(long)]
         all: bool,
+        /// Remote Cairn server URL (defaults to `CAIRN_SERVER`).
+        #[arg(long)]
+        server: Option<String>,
+        /// Device token for the remote server (defaults to `CAIRN_TOKEN`).
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Write per-agent instruction files that tell the model to use Cairn's tools.
     Rules {
-        /// Agent: claude-code, cursor, vscode, windsurf, agents. Omit with --all.
+        /// Agent: claude-code, cursor, vscode, windsurf, opencode, agents. Omit with --all.
         agent: Option<String>,
         /// Write rules for every supported agent.
         #[arg(long)]
@@ -114,23 +109,18 @@ enum Cmd {
         /// Server URL.
         server: Option<String>,
     },
-    /// Update the cairn binary in place to the latest GitHub release.
+    /// Update the cairn-cli binary in place to the latest GitHub release.
     Update,
-    /// Run the MCP server over stdio (point your agent's MCP config at `cairn mcp`).
+    /// Run the MCP server over stdio (point your agent's MCP config at `cairn-cli mcp`).
     Mcp,
     /// Run a command and print compressed output; the full output is retained and recoverable.
     Run {
-        /// The command to run, e.g. `cairn run -- cargo test`.
+        /// The command to run, e.g. `cairn-cli run -- cargo test`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
         command: Vec<String>,
     },
     /// Internal: handle a Claude Code lifecycle hook event (reads JSON on stdin).
     Hook { event: String },
-    /// Manage device tokens for authenticating other devices to this server.
-    Token {
-        #[command(subcommand)]
-        action: TokenCmd,
-    },
     /// Sync memory with another Cairn server (last-write-wins).
     Sync {
         /// Server base URL, e.g. http://192.168.1.10:7777
@@ -174,26 +164,37 @@ enum Cmd {
     },
 }
 
-#[derive(Subcommand)]
-enum TokenCmd {
-    /// Create a token for a device (prints the token to stdout).
-    Create { name: String },
-    /// List device tokens.
-    List,
-    /// Revoke a device token.
-    Revoke { token: String },
+pub struct State {
+    pub store: Arc<cairn_store::Store>,
+    pub mem: Arc<cairn_memory::MemoryEngine>,
+    pub guard: Arc<cairn_guard::Guard>,
+    pub asm: Arc<cairn_assemble::Assembler>,
+    pub shell: Arc<cairn_shell::ShellCompressor>,
+    pub profile: Arc<cairn_profile::Profile>,
+}
+
+impl State {
+    fn open(cfg: &Config) -> anyhow::Result<Self> {
+        let store = Arc::new(cairn_store::Store::open(cfg)?);
+        let mem = Arc::new(cairn_memory::MemoryEngine::new(store.clone()));
+        Ok(Self {
+            store: store.clone(),
+            mem: mem.clone(),
+            guard: Arc::new(cairn_guard::Guard::new(store.clone())),
+            asm: Arc::new(cairn_assemble::Assembler::new(mem.clone())),
+            shell: Arc::new(cairn_shell::ShellCompressor::new(store.clone())),
+            profile: Arc::new(cairn_profile::Profile::new(mem)),
+        })
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Load .env before anything reads env: project ./.env first (never overrides real env), then
-    // the machine-global ~/.config/cairn/.env (never overrides project or real env).
     let _ = dotenvy::dotenv();
     if let Some(global) = cairn_core::config::global_env_path() {
         let _ = dotenvy::from_path(&global);
     }
 
-    // Log to stderr so `cairn mcp` keeps stdout clean for the JSON-RPC protocol.
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -204,30 +205,9 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::resolve(cli.data_dir).context("resolving data dir")?;
 
     match cli.cmd {
-        Cmd::Serve { host, port } => {
-            let state = AppState::new(&cfg)?;
-            let host = host.unwrap_or_else(|| cfg.host.clone());
-            let port = port.unwrap_or(cfg.port);
-            let addr: SocketAddr = format!("{host}:{port}")
-                .parse()
-                .with_context(|| format!("invalid address {host}:{port}"))?;
-            let scheme = if cfg.tls.is_some() { "https" } else { "http" };
-            println!("🪨  Cairn serving on {scheme}://{addr}");
-            println!("    data dir: {}", cfg.data_dir().display());
-            if cfg.tls.is_some() {
-                println!("    TLS: enabled (CAIRN_TLS_CERT / CAIRN_TLS_KEY)");
-            } else if !cfg.is_loopback_host() {
-                anyhow::bail!(
-                    "refusing to serve on non-loopback address {addr} without TLS. \
-                     Set CAIRN_TLS_CERT and CAIRN_TLS_KEY to a PEM cert+key pair, or \
-                     bind to 127.0.0.1/localhost for local-only dev."
-                );
-            }
-            cairn_api::serve(addr, state).await?;
-        }
         Cmd::Remember { content } => {
-            let state = AppState::new(&cfg)?;
-            let m = state.mem.remember(NewMemory::new(content))?;
+            let s = State::open(&cfg)?;
+            let m = s.mem.remember(NewMemory::new(content))?;
             println!(
                 "remembered {} ({}/{})",
                 &m.id[..8],
@@ -236,8 +216,8 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Cmd::Recall { query, limit } => {
-            let state = AppState::new(&cfg)?;
-            let hits = state.mem.recall(&query, limit)?;
+            let s = State::open(&cfg)?;
+            let hits = s.mem.recall(&query, limit)?;
             if hits.is_empty() {
                 println!("(no matches)");
             }
@@ -246,14 +226,14 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Wakeup { limit } => {
-            let state = AppState::new(&cfg)?;
-            for m in state.mem.wakeup(limit)? {
+            let s = State::open(&cfg)?;
+            for m in s.mem.wakeup(limit)? {
                 println!("· ({}) {}", m.kind.as_str(), m.content);
             }
         }
         Cmd::Prefer { rule } => {
-            let state = AppState::new(&cfg)?;
-            let m = state.profile.prefer(&rule.join(" "))?;
+            let s = State::open(&cfg)?;
+            let m = s.profile.prefer(&rule.join(" "))?;
             if m.suspicious {
                 println!("noted preference (flagged suspicious): {}", m.content);
             } else {
@@ -261,24 +241,24 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Anchor { goal } => {
-            let state = AppState::new(&cfg)?;
+            let s = State::open(&cfg)?;
             let goal = goal.join(" ");
-            state.guard.set_anchor(&goal)?;
+            s.guard.set_anchor(&goal)?;
             println!("task anchor set: {goal}");
         }
         Cmd::Checkpoint { label } => {
-            let state = AppState::new(&cfg)?;
+            let s = State::open(&cfg)?;
             let label = if label.is_empty() {
                 "checkpoint".to_string()
             } else {
                 label.join(" ")
             };
-            let cp = state.guard.checkpoint(&label)?;
+            let cp = s.guard.checkpoint(&label)?;
             println!("checkpoint {} created ({} files tracked)", cp.id, cp.files);
         }
         Cmd::Rollback { id } => {
-            let state = AppState::new(&cfg)?;
-            let r = state.guard.rollback(&id)?;
+            let s = State::open(&cfg)?;
+            let r = s.guard.rollback(&id)?;
             println!(
                 "rolled back {}: {} restored, {} skipped",
                 id,
@@ -287,8 +267,8 @@ async fn main() -> anyhow::Result<()> {
             );
         }
         Cmd::Checkpoints => {
-            let state = AppState::new(&cfg)?;
-            for cp in state.guard.list_checkpoints()? {
+            let s = State::open(&cfg)?;
+            for cp in s.guard.list_checkpoints()? {
                 println!(
                     "{}  {}  ({} files)  {}",
                     cp.id,
@@ -299,11 +279,11 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Stats => {
-            let state = AppState::new(&cfg)?;
-            println!("memories: {}", state.store.count_memories()?);
+            let s = State::open(&cfg)?;
+            println!("memories: {}", s.store.count_memories()?);
         }
         Cmd::Doctor => {
-            println!("cairn doctor");
+            println!("cairn-cli doctor");
             println!("  data dir     : {}", cfg.data_dir().display());
             println!("  blobs        : {}", cfg.blobs_dir().display());
             println!(
@@ -312,64 +292,71 @@ async fn main() -> anyhow::Result<()> {
                     .as_deref()
                     .unwrap_or("(not set — CAIRN_HELIX_URL required)")
             );
+            println!(
+                "  server       : {}",
+                cfg.default_server
+                    .as_deref()
+                    .unwrap_or("(not set — CAIRN_SERVER optional)")
+            );
             println!("  embed        : {}", cfg.embed.provider);
-            match AppState::new(&cfg) {
-                Ok(state) => {
-                    let n = state.store.count_memories()?;
+            match State::open(&cfg) {
+                Ok(s) => {
+                    let n = s.store.count_memories()?;
                     println!("  helix        : ok");
                     println!("  memories     : {n}");
-                    println!("cairn doctor: ok");
+                    println!("cairn-cli doctor: ok");
                 }
                 Err(e) => {
                     println!("  helix        : FAILED — {e}");
-                    anyhow::bail!("cairn doctor: setup incomplete");
+                    anyhow::bail!("cairn-cli doctor: setup incomplete");
                 }
             }
         }
         Cmd::Bench { path } => {
-            let state = AppState::new(&cfg)?;
+            let s = State::open(&cfg)?;
             let root = path
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            bench::run(&state, &root)?;
+            bench::run(&s, &root)?;
         }
         Cmd::Pair { code, server } => {
-            let state = AppState::new(&cfg)?;
-            pair::claim(&state, &server, &code)?;
+            let s = State::open(&cfg)?;
+            pair::claim(&s, &server, &code)?;
         }
-        Cmd::PairCode { name } => {
-            let state = AppState::new(&cfg)?;
-            pair::generate(&state, name.as_deref())?;
-        }
-        Cmd::Install { agent, all } => install::run(agent.as_deref(), all)?,
+        Cmd::Setup {
+            agent,
+            all,
+            server,
+            token,
+        } => setup::run(agent.as_deref(), all, server.as_deref(), token.as_deref())?,
         Cmd::Rules { agent, all } => rules::run(agent.as_deref(), all)?,
-        Cmd::Login { server } => coming_soon(&format!(
-            "logging in to {}",
-            server.as_deref().unwrap_or("<server>")
-        )),
+        Cmd::Login { server } => coming_soon(
+            &format!(
+                "logging in to {}",
+                server.as_deref().unwrap_or("<server>")
+            )
+        ),
         Cmd::Update => update::run()?,
         Cmd::Mcp => {
-            // No stdout banner here: stdout is the MCP channel.
-            let server = cairn_mcp::McpServer::new(&cfg)?;
-            server.serve_stdio()?;
+            cairn_mcp::serve_stdio(&cfg)?;
         }
         Cmd::Run { command } => {
             if command.is_empty() {
-                anyhow::bail!("usage: cairn run -- <command>");
+                anyhow::bail!("usage: cairn-cli run -- <command>");
             }
-            let state = AppState::new(&cfg)?;
+            let s = State::open(&cfg)?;
             let output = std::process::Command::new(&command[0])
                 .args(&command[1..])
                 .output()
                 .with_context(|| format!("running `{}`", command.join(" ")))?;
             let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
             combined.push_str(&String::from_utf8_lossy(&output.stderr));
-            let c = state.shell.compress(&command.join(" "), &combined)?;
+            let c = s.shell.compress(&command.join(" "), &combined)?;
             print!("{}", c.output);
             if !c.output.ends_with('\n') {
                 println!();
             }
             eprintln!(
-                "[cairn: {} → {} lines, {:.0}% saved · recover full output with `expand {}`]",
+                "[cairn-cli: {} → {} lines, {:.0}% saved · recover full output with `expand {}`]",
                 c.original_lines,
                 c.compressed_lines,
                 c.saved_ratio * 100.0,
@@ -378,48 +365,21 @@ async fn main() -> anyhow::Result<()> {
             std::process::exit(output.status.code().unwrap_or(0));
         }
         Cmd::Hook { event } => hook::run(&cfg, &event)?,
-        Cmd::Token { action } => {
-            let state = AppState::new(&cfg)?;
-            match action {
-                TokenCmd::Create { name } => {
-                    let mut t = state.store.create_token(&name)?;
-                    let bearer = state.sign_token(&t.id, &t.name);
-                    t.token = Some(bearer);
-                    println!("{}", t.token.as_ref().unwrap());
-                    eprintln!(
-                        "created token for '{}'. /api access now requires a device token.",
-                        t.name
-                    );
-                }
-                TokenCmd::List => {
-                    for t in state.store.list_tokens()? {
-                        println!("{}  {}  {}", t.id, t.name, t.created_at.to_rfc3339());
-                    }
-                }
-                TokenCmd::Revoke { token } => {
-                    if state.revoke_bearer(&token)? {
-                        println!("revoked");
-                    } else {
-                        println!("no such token");
-                    }
-                }
-            }
-        }
         Cmd::Sync { server, token } => {
-            let state = AppState::new(&cfg)?;
-            sync::run(&state.store, &server, token.as_deref())?;
+            let s = State::open(&cfg)?;
+            sync::run(&s.store, &server, token.as_deref())?;
         }
         Cmd::Contribute { server, token } => {
-            let state = AppState::new(&cfg)?;
-            pool::contribute(&state.store, &server, token.as_deref())?;
+            let s = State::open(&cfg)?;
+            pool::contribute(&s.store, &server, token.as_deref())?;
         }
         Cmd::Pull { server, token } => {
-            let state = AppState::new(&cfg)?;
-            pool::pull(&state.mem, &server, token.as_deref())?;
+            let s = State::open(&cfg)?;
+            pool::pull(&s.mem, &server, token.as_deref())?;
         }
         Cmd::Export { path, share } => {
-            let state = AppState::new(&cfg)?;
-            let mems = state.store.all_memories()?;
+            let s = State::open(&cfg)?;
+            let mems = s.store.all_memories()?;
             let json = if share {
                 build_share_bundle(&mems)?
             } else {
@@ -439,21 +399,21 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Cmd::Import { path, share } => {
-            let state = AppState::new(&cfg)?;
+            let s = State::open(&cfg)?;
             let text = std::fs::read_to_string(&path)?;
             if share {
                 let bundle: cairn_share::ShareBundle = serde_json::from_str(&text)?;
                 let news = bundle.into_new_memories();
                 let total = news.len();
                 for nm in news {
-                    state.mem.remember(nm)?;
+                    s.mem.remember(nm)?;
                 }
                 println!("ingested {total} shared memories (deduplicated against existing)");
             } else {
                 let mems: Vec<cairn_core::Memory> = serde_json::from_str(&text)?;
                 let mut applied = 0usize;
                 for m in &mems {
-                    if state.store.upsert_memory(m)? {
+                    if s.store.upsert_memory(m)? {
                         applied += 1;
                     }
                 }
@@ -464,21 +424,18 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Build a privacy-first share bundle: redact secrets/PII from every memory, withhold any that
-/// still classify as Private, and summarize what happened on stderr.
 fn build_share_bundle(mems: &[cairn_core::Memory]) -> anyhow::Result<String> {
     let san = cairn_share::Sanitizer::new();
     let (bundle, stats) = san.bundle(mems);
     eprintln!(
-        "[cairn share: {} scanned \u{2192} {} shareable ({} need review), {} withheld as private]",
+        "[cairn share: {} scanned → {} shareable ({} need review), {} withheld as private]",
         stats.total, stats.shared, stats.needs_review, stats.withheld
     );
     Ok(serde_json::to_string_pretty(&bundle)?)
 }
 
-/// Friendly placeholder for commands whose full behavior arrives in a later phase.
 fn coming_soon(what: &str) {
-    println!("cairn: {what} — coming soon in a later build.");
+    println!("cairn-cli: {what} — coming soon in a later build.");
 }
 
 #[cfg(test)]
@@ -491,7 +448,6 @@ mod tests {
         let clean = NewMemory::new("use BM25 for recall ranking").into_memory();
         let pii =
             NewMemory::new("reach the team at ops@example.com about the rollout").into_memory();
-        // Assembled from fragments so the repo stores no verbatim credential (push protection).
         let leak = format!(
             "api_key = sk-ant-{}",
             "api03-abcdefghijklmnopqrstuvwxyz0123"
@@ -502,12 +458,9 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
         let mems = v["memories"].as_array().unwrap();
 
-        // The hard-secret memory is withheld entirely; the clean + PII ones remain.
         assert_eq!(mems.len(), 2);
-        // PII memory is present but its email is redacted.
         assert!(json.contains("[redacted:email]"));
         assert!(!json.contains("ops@example.com"));
-        // The withheld secret's body never appears anywhere in the bundle.
         assert!(!json.contains("abcdefghijklmnopqrstuvwxyz0123"));
         assert_eq!(v["schema"], "cairn-share-bundle");
     }

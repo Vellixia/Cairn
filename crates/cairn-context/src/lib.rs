@@ -555,6 +555,7 @@ pub fn build() -> Widget { Widget::new(1) }
     }
 
     #[test]
+    #[cfg(unix)]
     fn rooted_read_rejects_symlink_escape() {
         let Some((eng, dir)) = rooted_engine() else {
             return;
@@ -583,7 +584,13 @@ pub fn build() -> Widget { Widget::new(1) }
 
         // Relative inside root resolves to an absolute path under root.
         let resolved = resolve_within_root(Some(root), Path::new("file.txt")).unwrap();
-        assert!(resolved.starts_with(root));
+        let canonical_root = std::fs::canonicalize(root).unwrap();
+        assert!(
+            resolved.starts_with(&canonical_root),
+            "resolved {:?} should start with {:?}",
+            resolved,
+            canonical_root
+        );
 
         // Absolute outside root is rejected.
         let outside_dir = tempfile::tempdir().unwrap();

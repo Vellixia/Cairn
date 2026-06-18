@@ -17,6 +17,9 @@ services:
   minio-guard:
     image: alpine:3.19
     container_name: cairn-minio-guard
+    env_file:
+      - path: .env
+        required: true
     entrypoint: ["sh", "-c"]
     command:
       - |
@@ -53,6 +56,9 @@ services:
   minio-init:
     image: minio/mc:latest
     container_name: cairn-minio-init
+    env_file:
+      - path: .env
+        required: true
     depends_on:
       - minio
     entrypoint: >-
@@ -91,6 +97,7 @@ services:
         CAIRN_FEATURES: embed-local
     image: cairn:dev
     container_name: cairn
+    user: "0"
     depends_on:
       - helix
     environment:
@@ -98,6 +105,7 @@ services:
       CAIRN_PORT: "7777"
       # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
       CAIRN_HELIX_URL: http://helix:8080
+      CAIRN_INSECURE: "1"
     env_file:
       - path: .env
         required: false

@@ -9,6 +9,7 @@ set -eu
 
 REPO="${CAIRN_REPO:-Vellixia/Cairn}"
 BIN="cairn"
+CLI_BIN="cairn-cli"
 INSTALL_DIR="${CAIRN_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${CAIRN_VERSION:-latest}"
 BASE_URL="https://github.com/$REPO/releases"
@@ -107,7 +108,7 @@ install_binary() {
     if ! curl -fsSL "$archive_url" -o "$tmp/$archive_name" 2>/dev/null; then
         if command -v cargo >/dev/null 2>&1; then
             warn "No prebuilt release found; building from source with cargo…"
-            cargo install --git "https://github.com/$REPO" cairn-cli
+            cargo install --git "https://github.com/$REPO" cairn-server cairn-cli
             return 0
         fi
         err "no prebuilt binary available for $target and cargo is not installed"
@@ -139,7 +140,8 @@ install_binary() {
 
     tar -xzf "$tmp/$archive_name" -C "$tmp"
     mv "$tmp/$BIN" "$INSTALL_DIR/$BIN"
-    chmod +x "$INSTALL_DIR/$BIN"
+    mv "$tmp/$CLI_BIN" "$INSTALL_DIR/$CLI_BIN"
+    chmod +x "$INSTALL_DIR/$BIN" "$INSTALL_DIR/$CLI_BIN"
 }
 
 install_binary
@@ -148,12 +150,13 @@ case ":$PATH:" in
     *) say "Add $INSTALL_DIR to your PATH to use \`cairn\` everywhere." ;;
 esac
 
-# Optional: `... | sh -s -- pair CODE` pairs the device, then wires up local agents.
-if [ "${1:-}" = "pair" ] && [ -n "${2:-}" ]; then
+# Optional: `... | sh -s -- pair CODE SERVER` pairs the device, then wires up local agents.
+if [ "${1:-}" = "pair" ] && [ -n "${2:-}" ] && [ -n "${3:-}" ]; then
     say "Pairing this device…"
-    "$INSTALL_DIR/$BIN" pair "$2" || err "pairing failed"
+    "$INSTALL_DIR/$CLI_BIN" pair "$2" --server "$3" || err "pairing failed"
     say "Configuring installed agents…"
-    "$INSTALL_DIR/$BIN" install --all || true
+    "$INSTALL_DIR/$CLI_BIN" setup --all --server "$3" || true
 fi
 
 say "Done. Start the server with:  cairn serve"
+say "Configure agents with:        cairn-cli setup <agent> --server <url>"

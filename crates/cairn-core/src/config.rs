@@ -20,7 +20,7 @@
 use std::path::{Path, PathBuf};
 
 /// Embedding-model settings (used to vectorize memories for Helix's vector search).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmbedConfig {
     /// `local` (default), `openai`, or `ollama`.
     pub provider: String,
@@ -30,6 +30,17 @@ pub struct EmbedConfig {
     pub url: Option<String>,
     /// API key for hosted providers.
     pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for EmbedConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmbedConfig")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("url", &self.url)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
 }
 
 /// TLS material for HTTPS serve. Both `cert` and `key` must be present to enable TLS; partial
@@ -53,6 +64,9 @@ pub struct Config {
     pub port: u16,
     /// HelixDB server URL (`CAIRN_HELIX_URL`).
     pub helix_url: Option<String>,
+    /// HelixDB bearer API key (`CAIRN_HELIX_TOKEN`). Sent as `Authorization: Bearer <token>` on
+    /// every HelixDB request. Optional — HelixDB instances without auth don't need it.
+    pub helix_token: Option<String>,
     /// Label-namespace prefix for the HelixDB backend (`CAIRN_HELIX_NS`). Lets multiple Cairn
     /// instances — or isolated tests — share one Helix server without colliding. Default `cairn_`.
     pub helix_ns: Option<String>,
@@ -63,10 +77,18 @@ pub struct Config {
     /// Optional TLS material for HTTPS serve (`CAIRN_TLS_CERT` + `CAIRN_TLS_KEY`).
     ///
     /// Network-exposed serve (`host` other than `127.0.0.1` / `localhost` / `::1`) requires this
-    /// to be set; the API layer will refuse to start over plain HTTP on a non-loopback bind.
+    /// to be set unless `CAIRN_INSECURE=1` is also set; the API layer will refuse to start over
+    /// plain HTTP on a non-loopback bind.
     pub tls: Option<TlsConfig>,
+    /// When `true`, allow plain HTTP on a non-loopback bind (`CAIRN_INSECURE=1`). Intended only
+    /// for local/private Docker Compose setups where TLS is handled by a reverse proxy or is
+    /// genuinely unnecessary.
+    pub insecure: bool,
     /// Optional project/workspace root used by context engines (`CAIRN_WORKSPACE_ROOT`).
     pub workspace_root: Option<PathBuf>,
+    /// Allowed CORS origins (`CAIRN_CORS_ORIGINS`, comma-separated). Empty means same-origin only;
+    /// `"*"` means permissive (with a startup warning). Default: empty.
+    pub cors_origins: Vec<String>,
     /// Embedding settings.
     pub embed: EmbedConfig,
 }
@@ -86,6 +108,7 @@ impl Config {
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777),
             helix_url: env_str("CAIRN_HELIX_URL"),
+            helix_token: env_str("CAIRN_HELIX_TOKEN"),
             helix_ns: env_str("CAIRN_HELIX_NS"),
             default_server: env_str("CAIRN_SERVER"),
             secret_key: env_str("CAIRN_SECRET_KEY").map(|s| s.into_bytes()),
@@ -100,7 +123,16 @@ impl Config {
                     ));
                 }
             },
+            insecure: env_bool("CAIRN_INSECURE"),
             workspace_root: env_path("CAIRN_WORKSPACE_ROOT"),
+            cors_origins: env_str("CAIRN_CORS_ORIGINS")
+                .map(|s| {
+                    s.split(',')
+                        .map(|o| o.trim().to_string())
+                        .filter(|o| !o.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
             embed: EmbedConfig {
                 provider: env_str("CAIRN_EMBED_PROVIDER").unwrap_or_else(|| "local".to_string()),
                 model: env_str("CAIRN_EMBED_MODEL"),
@@ -150,6 +182,13 @@ fn env_str(key: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn env_bool(key: &str) -> bool {
+    std::env::var(key)
+        .ok()
+        .map(|s| matches!(s.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
 fn env_path(key: &str) -> Option<PathBuf> {
     env_str(key).map(PathBuf::from)
 }
@@ -174,11 +213,14 @@ mod tests {
             data_dir: std::env::temp_dir(),
             port: 7777,
             helix_url: None,
+            helix_token: None,
             helix_ns: None,
             default_server: None,
             secret_key: None,
             tls: None,
+            insecure: false,
             workspace_root: None,
+            cors_origins: vec![],
             embed: EmbedConfig {
                 provider: "local".into(),
                 model: None,
@@ -218,5 +260,19 @@ mod tests {
                 "{host} should NOT be loopback"
             );
         }
+    }
+
+    #[test]
+    fn embed_config_debug_redacts_api_key() {
+        let cfg = EmbedConfig {
+            provider: "openai".into(),
+            model: Some("text-embedding-3-small".into()),
+            url: Some("https://api.openai.com".into()),
+            api_key: Some("sk-super-secret-key-12345".into()),
+        };
+        let debug = format!("{:?}", cfg);
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("sk-super-secret-key-12345"));
+        assert!(debug.contains("openai"));
     }
 }

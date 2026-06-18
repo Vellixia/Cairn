@@ -1,9 +1,9 @@
-//! `cairn update` — replace the running binary with the latest GitHub release.
+//! `cairn-cli update` — replace the running binary with the latest GitHub release.
 //!
 //! Backed by the well-tested `self_update` crate (ureq + rustls backend), which picks the release
 //! asset matching this platform's target triple (the release workflow names them
 //! `cairn-<target>.tar.gz`/`.zip`), verifies and extracts it, and atomically swaps the running
-//! executable.
+//! executable. The combined archive contains both `cairn` and `cairn-cli`; this updates `cairn-cli`.
 
 use anyhow::{Context, Result};
 
@@ -14,7 +14,7 @@ pub fn run() -> Result<()> {
     builder
         .repo_owner("Vellixia")
         .repo_name("Cairn")
-        .bin_name("cairn")
+        .bin_name("cairn-cli")
         .current_version(current)
         .show_download_progress(true);
 
@@ -37,10 +37,10 @@ pub fn run() -> Result<()> {
         )?;
 
     if status.updated() {
-        println!("cairn updated {current} → {}", status.version());
+        println!("cairn-cli updated {current} → {}", status.version());
         println!("Re-run your command to use the new version.");
     } else {
-        println!("cairn is already up to date ({current}).");
+        println!("cairn-cli is already up to date ({current}).");
     }
     Ok(())
 }

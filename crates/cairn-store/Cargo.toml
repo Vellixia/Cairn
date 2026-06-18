@@ -21,6 +21,8 @@ chrono.workspace = true
 uuid.workspace = true
 tokio.workspace = true
 helix-db.workspace = true
+url.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

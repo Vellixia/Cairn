@@ -80,8 +80,21 @@ impl HelixBackend {
     /// Connect to the HelixDB server at `url`, build the embedder from `cfg`, and ensure the
     /// memory vector index exists.
     pub(crate) fn connect(url: &str, cfg: &Config) -> Result<Self> {
+        if url.starts_with("http://") {
+            let is_loopback = url.contains("127.0.0.1")
+                || url.contains("localhost")
+                || url.contains("[::1]");
+            if !is_loopback {
+                tracing::warn!(
+                    "HelixDB URL is plain HTTP ({}) — credentials travel in cleartext. \
+                     Use https:// or a loopback address.",
+                    redact_url(url)
+                );
+            }
+        }
         let client = Client::new(Some(url))
-            .map_err(|e| Error::Storage(format!("helix connect to {url}: {e}")))?;
+            .map_err(|e| Error::Storage(format!("helix connect to {}: {e}", redact_url(url))))?;
+        let client = client.with_api_key(cfg.helix_token.as_deref());
         let embed = cairn_embed::from_config(&cfg.embed)?;
         let ns = cfg.helix_ns.clone().unwrap_or_else(|| "cairn_".to_string());
         let backend = Self { client, embed, ns };
@@ -337,6 +350,9 @@ impl StoreBackend for HelixBackend {
             id: id.clone(),
             token: None,
             name: name.to_string(),
+            scope: cairn_core::TokenScope::Write,
+            expires_at: None,
+            last_used_at: None,
             created_at: Utc::now(),
         };
         self.add_node(
@@ -344,6 +360,7 @@ impl StoreBackend for HelixBackend {
             vec![
                 ("id".into(), id.into()),
                 ("name".into(), token.name.clone().into()),
+                ("scope".into(), token.scope.as_str().to_string().into()),
                 ("created_at".into(), ts(token.created_at).into()),
             ],
         )?;
@@ -368,14 +385,18 @@ impl StoreBackend for HelixBackend {
 
     fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
         Ok(self
-            .read_rows("Token", &["id", "name", "created_at"])?
+            .read_rows("Token", &["id", "name", "scope", "created_at"])?
             .iter()
             .map(|r| {
-                DeviceToken::meta(
+                let mut t = DeviceToken::meta(
                     get_str(r, "id"),
                     get_str(r, "name"),
                     parse_ts(&get_str(r, "created_at")),
-                )
+                );
+                t.scope = get_str(r, "scope")
+                    .parse()
+                    .unwrap_or(cairn_core::TokenScope::Write);
+                t
             })
             .collect())
     }
@@ -579,6 +600,19 @@ fn ts(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Strip userinfo (user:pass@) from a URL for safe logging.
+fn redact_url(url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        if parsed.username() != "" || parsed.password().is_some() {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+        }
+        parsed.to_string()
+    } else {
+        url.to_string()
+    }
+}
+
 fn parse_ts(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
@@ -660,12 +694,15 @@ mod live {
             host: "127.0.0.1".into(),
             port: 7777,
             helix_url: Some(url.clone()),
+            helix_token: None,
             // Unique namespace per backend so concurrent tests never collide on the shared server.
             helix_ns: Some(format!("test_{}_", uuid_simple())),
             default_server: None,
             secret_key: None,
             tls: None,
+            insecure: false,
             workspace_root: None,
+            cors_origins: vec![],
             embed: EmbedConfig {
                 provider: "ollama".into(),
                 model: None,

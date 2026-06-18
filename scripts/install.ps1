@@ -13,6 +13,8 @@ $BaseUrl    = "https://github.com/$Repo/releases"
 $target     = 'x86_64-pc-windows-msvc'
 $archive    = "cairn-$target.zip"
 $sumsName   = 'SHA256SUMS'
+$Bin        = 'cairn'
+$CliBin     = 'cairn-cli'
 
 function Write-Step($msg)  { Write-Host "› $msg" -ForegroundColor Cyan }
 function Write-Warn($msg)  { Write-Host "⚠ $msg" -ForegroundColor Yellow }
@@ -69,7 +71,7 @@ try {
 } catch {
     if (Get-Command cargo -ErrorAction SilentlyContinue) {
         Write-Host "No prebuilt release found; building from source with cargo…"
-        cargo install --git "https://github.com/$Repo" cairn-cli
+        cargo install --git "https://github.com/$Repo" cairn-server cairn-cli
         return
     }
     Fail "No prebuilt binary available for $target and cargo is not installed."
@@ -104,6 +106,9 @@ Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
 Remove-Item $zipPath -Force
 if (Test-Path $sumsPath) { Remove-Item $sumsPath -Force }
 
+if (-not (Test-Path (Join-Path $InstallDir "$Bin.exe"))) { Fail "Archive did not contain $Bin.exe" }
+if (-not (Test-Path (Join-Path $InstallDir "$CliBin.exe"))) { Fail "Archive did not contain $CliBin.exe" }
+
 # Add to the user PATH if missing.
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
 if ($userPath -notlike "*$InstallDir*") {
@@ -112,3 +117,4 @@ if ($userPath -notlike "*$InstallDir*") {
 }
 
 Write-Host "Done. Start the server with:  cairn serve"
+Write-Host "Configure agents with:        cairn-cli setup <agent> --server <url>"

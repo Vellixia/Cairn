@@ -14,6 +14,7 @@ members = [
     "crates/cairn-api",
     "crates/cairn-mcp",
     "crates/cairn-cli",
+    "crates/cairn-server",
 ]
 
 [workspace.package]
@@ -38,6 +39,8 @@ cairn-share = { path = "crates/cairn-share" }
 cairn-embed = { path = "crates/cairn-embed" }
 cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
+cairn-cli = { path = "crates/cairn-cli" }
+cairn-server = { path = "crates/cairn-server" }
 
 # Pinned to specific minor versions via tilde (~major.minor) so CI can fail
 # loudly via `cargo build --locked` if Cargo.lock drifts outside that minor.
@@ -55,7 +58,7 @@ similar = "~2.7"
 tokio = { version = "~1.52", features = ["full"] }
 axum = "~0.7"
 tower = "~0.5"
-tower-http = { version = "~0.5", features = ["fs", "cors", "trace"] }
+tower-http = { version = "~0.5", features = ["fs", "cors", "trace", "limit"] }
 clap = { version = "~4.6", features = ["derive"] }
 tracing = "~0.1"
 tracing-subscriber = { version = "~0.3", features = ["env-filter"] }
@@ -67,6 +70,7 @@ jsonwebtoken = "~9.3"
 regex = "~1.12"
 helix-db = "~2.0"
 self_update = { version = "~0.44", default-features = false, features = ["ureq", "rustls", "archive-tar", "compression-flate2", "archive-zip", "compression-zip-deflate"] }
+url = "~2.5"
 
 [profile.release]
 opt-level = 3

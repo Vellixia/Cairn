@@ -48,7 +48,7 @@ time**. Cairn fixes that.
 
 ## Proof
 
-Run **`cairn bench`** on your own repo to see the savings. Measured on Cairn's own `crates/` (25 files):
+Run **`cairn-cli bench`** on your own repo to see the savings. Measured on Cairn's own `crates/` (25 files):
 
 | Mechanism | Before | After | Saved |
 |---|---|---|---|
@@ -80,9 +80,10 @@ This repo is a Cargo workspace:
 | `cairn-shell` | RTK-style command-output compression (lossless via `expand`) |
 | `cairn-profile` | preference learning — inject how you work |
 | `cairn-share` | privacy-first sanitization — redact secrets/PII, classify shareable/review/private |
-| `cairn-mcp` | MCP server (stdio) |
+| `cairn-mcp` | MCP server (stdio) — local HelixDB or remote HTTP proxy |
 | `cairn-api` | axum REST API + embedded web UI |
-| `cairn-cli` | the `cairn` binary (serve, mcp, run, hook, install, …) |
+| `cairn-server` | the `cairn` binary (serve, token, pair-code) |
+| `cairn-cli` | the `cairn-cli` binary (setup, mcp, run, hook, sync, …) |
 
 ## Install
 
@@ -97,20 +98,20 @@ irm https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.ps1 | 
 docker compose up -d
 
 # From source
-cargo install --git https://github.com/Vellixia/Cairn cairn-cli
+cargo install --git https://github.com/Vellixia/Cairn cairn-server cairn-cli
 ```
 
 Cairn stores its data in **HelixDB**, so `cairn serve` needs `CAIRN_HELIX_URL` set (or use the
 `docker compose` stack above, which starts one and wires it up). See
 [Self-host with Docker](#self-host-with-docker).
 
-Then run `cairn serve` and open <http://127.0.0.1:7777>.
+Then run `cairn serve` and open <http://127.0.0.1:7777>. The `cairn` binary is the server; `cairn-cli` is the client that connects agents and runs local tools.
 
 ## Topology: one server, many devices
 
 Cairn is **server + clients**. Run one Cairn server where it's always reachable (a home server,
-NAS, VPS, or `docker compose up`); each personal device runs the same `cairn` binary locally (its
-own store, MCP, and hooks) and **pairs/syncs to the server's URL**.
+NAS, VPS, or `docker compose up`); each personal device runs `cairn-cli` (its own store, MCP, and
+hooks) and **pairs/syncs to the server's URL**.
 
 ```sh
 # On the server — expose it on the network and note its URL, e.g. http://192.168.1.10:7777
@@ -118,8 +119,8 @@ cairn serve --host 0.0.0.0           # or set CAIRN_HOST=0.0.0.0 in .env
 cairn pair-code                      # prints a short, single-use pairing code
 
 # On a personal device — point it at the server once
-cairn pair <code> --server http://192.168.1.10:7777
-# now `cairn sync --server http://192.168.1.10:7777` (or just `cairn sync` if CAIRN_SERVER is set)
+cairn-cli pair <code> --server http://192.168.1.10:7777
+# now `cairn-cli sync --server http://192.168.1.10:7777` (or just `cairn-cli sync` if CAIRN_SERVER is set)
 ```
 
 The **dashboard works at the server's URL out of the box** — open `http://192.168.1.10:7777` and the
@@ -131,11 +132,11 @@ The recommended production setup is the bundled stack — one command brings up 
 persistent **HelixDB**:
 
 ```sh
-cp .env.example .env        # optional — the defaults work as-is
+cp .env.example .env        # REQUIRED — MinIO credentials must be set (see .env.example)
 docker compose up -d        # builds Cairn, pulls HelixDB + MinIO, wires them together
 ```
 
-Four services come up:
+Five services come up:
 
 | Service | Role | Address |
 |---|---|---|
@@ -143,6 +144,7 @@ Four services come up:
 | `helix` | HelixDB graph + vector datastore (Cairn's backend) | <http://localhost:6969> |
 | `minio` | S3 storage HelixDB persists to (survives restarts) | <http://localhost:9001> (console) |
 | `minio-init` | one-shot: creates HelixDB's bucket, then exits | — |
+| `minio-guard` | one-shot: refuses to boot if MinIO credentials are missing or insecure | — |
 
 Cairn reaches Helix over the compose network (`CAIRN_HELIX_URL=http://helix:8080`, set for you).
 The Cairn image is built with in-process **local embeddings** (`all-MiniLM-L6-v2`), so semantic
@@ -169,6 +171,10 @@ one. Copy `.env.example` to a project `.env` or to a machine-global
 | `CAIRN_SERVER` | default server URL for `sync` / `pull` / `contribute` |
 | `CAIRN_HELIX_URL` | HelixDB server URL — **required** (the `docker compose` stack sets it for you) |
 | `CAIRN_HELIX_NS` | label-namespace prefix on the Helix backend; isolates multiple Cairn instances (default `cairn_`) |
+| `CAIRN_SECRET_KEY` | 32+ byte HS256 key for signing device-token JWTs — **required** for production |
+| `CAIRN_TLS_CERT` · `CAIRN_TLS_KEY` | PEM cert+key for HTTPS — **required** when binding to a non-loopback address |
+| `CAIRN_WORKSPACE_ROOT` | restrict file reads/writes to this directory (path traversal guard) |
+| `CAIRN_CORS_ORIGINS` | comma-separated allowed CORS origins (default: same-origin only) |
 | `CAIRN_EMBED_PROVIDER` · `_MODEL` · `_URL` · `_API_KEY` | embedding model (default: local `all-MiniLM-L6-v2`) |
 | `GITHUB_TOKEN` · `CAIRN_GITHUB_TOKEN` | optional. Lifts the GitHub API rate limit for `cairn update` (`CAIRN_GITHUB_TOKEN` wins if both are set) |
 | `HELIX_PORT` · `MINIO_ROOT_USER` · `MINIO_ROOT_PASSWORD` | (compose only) host Helix port and MinIO credentials |
@@ -179,7 +185,7 @@ one. Copy `.env.example` to a project `.env` or to a machine-global
 ```sh
 # Cairn needs a HelixDB — start just that service, or point at any HelixDB server.
 docker compose up -d helix
-CAIRN_HELIX_URL=http://localhost:6969 cargo run -p cairn-cli -- serve
+CAIRN_HELIX_URL=http://localhost:6969 cargo run -p cairn-server -- serve
 # server + API on http://127.0.0.1:7777
 ```
 
@@ -192,30 +198,54 @@ cd web && npm install && npm run dev   # http://localhost:3000 (talks to the API
 
 ## Connect an agent (MCP)
 
-Cairn speaks the Model Context Protocol over stdio — point any MCP-capable agent at `cairn mcp`.
+Cairn speaks the Model Context Protocol over stdio — point any MCP-capable agent at
+`cairn-cli mcp`.
 
-The fastest path is **`cairn install claude-code`**, which non-destructively wires up the MCP
+The fastest path is **`cairn-cli setup claude-code`**, which non-destructively wires up the MCP
 server **and** the lifecycle hooks into `.mcp.json` and `.claude/settings.json`:
 `SessionStart` injects your preferences + memory + current task; `UserPromptSubmit` assembles
 relevant context and learns preferences; `PostToolUse` guards edits against silent corruption;
 `SessionEnd` consolidates memory.
 
-**Claude Code — one-step plugin:** instead of `cairn install`, run `/plugin marketplace add
+**Claude Code — one-step plugin:** instead of `cairn-cli setup`, run `/plugin marketplace add
 Vellixia/Cairn` then `/plugin install cairn@cairn` to bundle the MCP server, all four lifecycle
 hooks, slash commands (`/cairn:recall`, `/cairn:remember`, `/cairn:sanitize`, `/cairn:bench`), and
-usage guidance in a single install. (Install the `cairn` binary first.)
+usage guidance in a single install. (Install the `cairn` and `cairn-cli` binaries first.)
 
-Using another editor? `cairn install cursor`, `cairn install vscode`, and `cairn install windsurf`
-each wire up the MCP server in that agent's own config format (MCP only — they have no hook
-system). Or run **`cairn install --all`** to auto-detect every agent present and configure each.
-Every install is non-destructive and idempotent.
+Using another editor? `cairn-cli setup cursor`, `cairn-cli setup vscode`, `cairn-cli setup windsurf`,
+and `cairn-cli setup opencode` each wire up the MCP server in that agent's own config format
+(MCP only — they have no hook system). Or run **`cairn-cli setup --all`** to auto-detect every
+agent present and configure each. Every setup is non-destructive and idempotent.
 
-To do it by hand: run `claude mcp add cairn -- cairn mcp`, or add an `.mcp.json`:
+To connect to a remote server, pass `--server` and `--token`:
+
+```sh
+cairn-cli setup claude-code --server http://192.168.1.10:7777 --token <token>
+```
+
+This writes an MCP config that sets `CAIRN_SERVER` and `CAIRN_TOKEN` in the MCP server's
+environment, so `cairn-cli mcp` runs in remote-proxy mode (no local HelixDB needed on the device).
+
+To do it by hand: run `claude mcp add cairn -- cairn-cli mcp`, or add an `.mcp.json`:
 
 ```json
 {
   "mcpServers": {
-    "cairn": { "command": "cairn", "args": ["mcp"] }
+    "cairn": { "command": "cairn-cli", "args": ["mcp"] }
+  }
+}
+```
+
+For a remote server by hand:
+
+```json
+{
+  "mcpServers": {
+    "cairn": {
+      "command": "cairn-cli",
+      "args": ["mcp"],
+      "env": { "CAIRN_SERVER": "http://192.168.1.10:7777", "CAIRN_TOKEN": "<token>" }
+    }
   }
 }
 ```
@@ -227,45 +257,56 @@ During dev, use `cargo run -p cairn-cli -- mcp` as the command.
 
 ## Commands
 
-The `cairn` binary:
+The `cairn` binary (server):
 
 | Command | What it does |
 |---|---|
 | `cairn serve` | start the server + embedded web UI (`http://127.0.0.1:7777`) |
-| `cairn mcp` | run the MCP server over stdio (for agents) |
-| `cairn install [agent]` · `cairn install --all` | wire up MCP + an instructions file (+ hooks for Claude Code); `--all` auto-detects |
-| `cairn rules [agent]` · `cairn rules --all` | (re)write the per-agent instructions that tell the model to use Cairn's tools |
-| `cairn run -- <cmd>` | run a command, print **compressed** output (full output retained) |
-| `cairn remember <text>` · `cairn recall <query>` | store / search memory |
-| `cairn prefer <rule>` | record a standing preference (e.g. `cairn prefer always use ripgrep`) |
-| `cairn anchor <goal>` | set the current task goal (re-injected at session start) |
-| `cairn checkpoint [label]` · `cairn rollback <id>` · `cairn checkpoints` | snapshot / restore tracked files |
-| `cairn token create <name>` · `cairn sync --server <url> --token <t>` | device tokens · multi-device sync |
-| `cairn pair-code [name]` · `cairn pair <code> --server <url>` | onboard a new device with a short code (no token copying) |
-| `cairn export <file>` · `cairn import <file>` | move memory between machines offline |
-| `cairn export --share <file>` | export a sanitized, shareable bundle (secrets/PII redacted, private memories withheld) |
-| `cairn import --share <file>` | ingest a shared bundle (tagged `shared`, deduplicated against existing) |
-| `cairn contribute --server <url>` · `cairn pull --server <url>` | federate sanitized knowledge with a shared pool |
-| `cairn bench [path]` | measure the token savings on a codebase (outlines, re-reads, shell) |
-| `cairn update` | self-update the binary to the latest GitHub release |
-| `cairn doctor` | verify the local setup |
+| `cairn token create <name>` | create a signed JWT device token (requires `CAIRN_SECRET_KEY`) |
+| `cairn token list` · `cairn token revoke <token>` | manage device tokens |
+| `cairn pair-code [name]` | generate a short, single-use pairing code for a new device |
+| `cairn doctor` | verify the server-side setup |
+
+The `cairn-cli` binary (client):
+
+| Command | What it does |
+|---|---|
+| `cairn-cli mcp` | run the MCP server over stdio (local HelixDB or remote proxy via `CAIRN_SERVER`) |
+| `cairn-cli setup [agent]` · `cairn-cli setup --all` | wire up MCP + instructions file (+ hooks for Claude Code); `--all` auto-detects |
+| `cairn-cli setup --server <url> --token <t>` | configure agents to talk to a remote Cairn server |
+| `cairn-cli rules [agent]` · `cairn-cli rules --all` | (re)write per-agent instructions that tell the model to use Cairn's tools |
+| `cairn-cli run -- <cmd>` | run a command, print **compressed** output (full output retained) |
+| `cairn-cli remember <text>` · `cairn-cli recall <query>` | store / search memory |
+| `cairn-cli prefer <rule>` | record a standing preference (e.g. `cairn-cli prefer always use ripgrep`) |
+| `cairn-cli anchor <goal>` | set the current task goal (re-injected at session start) |
+| `cairn-cli checkpoint [label]` · `cairn-cli rollback <id>` · `cairn-cli checkpoints` | snapshot / restore tracked files |
+| `cairn-cli sync --server <url> --token <t>` | multi-device sync (last-write-wins) |
+| `cairn-cli pair <code> --server <url>` | onboard this device with a short code (no token copying) |
+| `cairn-cli export <file>` · `cairn-cli import <file>` | move memory between machines offline |
+| `cairn-cli export --share <file>` | export a sanitized, shareable bundle |
+| `cairn-cli import --share <file>` | ingest a shared bundle |
+| `cairn-cli contribute --server <url>` · `cairn-cli pull --server <url>` | federate sanitized knowledge with a shared pool |
+| `cairn-cli bench [path]` | measure the token savings on a codebase |
+| `cairn-cli update` | self-update the binaries to the latest GitHub release |
+| `cairn-cli doctor` | verify the local setup |
 
 ## Multi-device & sync
 
 Run one Cairn server for all your devices, or keep a server per device and sync between them.
 
-- **Tokens:** `cairn token create <name>` prints a device token. Once any token exists, `/api/*`
-  requires `Authorization: Bearer <token>` (the web UI and `/api/health` stay open). Local-only
-  setups need no tokens.
+- **Tokens:** `cairn token create <name>` prints a signed JWT device token (requires `CAIRN_SECRET_KEY`).
+  Once any token exists, `/api/*` requires `Authorization: Bearer <token>` (the web UI and `/api/health` stay open).
+  The bearer value is never stored — only the token id and metadata are persisted. Local-only
+  setups on loopback need no tokens.
 - **Pairing:** on the host run `cairn pair-code` (or click *Generate pairing code* in the
   dashboard) for a short, single-use code; on the new device run
-  `cairn pair <code> --server http://host:7777`. It claims a device token (no long secret to copy),
+  `cairn-cli pair <code> --server http://host:7777`. It claims a device token (no long secret to copy),
   stores it, and runs the first sync. The claim endpoint is the only open `/api/*` route — the
   short-lived code is the credential.
-- **Sync:** `cairn sync --server http://host:7777 --token <token>` pulls remote changes then
+- **Sync:** `cairn-cli sync --server http://host:7777 --token <token>` pulls remote changes then
   pushes local ones (last-write-wins on `updated_at`). After pairing, the token is remembered, so
-  `cairn sync --server http://host:7777` alone works.
-- **Offline move:** `cairn export dump.json` / `cairn import dump.json` copies memory between
+  `cairn-cli sync --server http://host:7777` alone works.
+- **Offline move:** `cairn-cli export dump.json` / `cairn-cli import dump.json` copies memory between
   machines with no network.
 
 ## License

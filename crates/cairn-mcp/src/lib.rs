@@ -141,7 +141,11 @@ impl McpServer {
             .map_err(|e| e.to_string())
     }
 
-    fn dispatch(&self, name: &str, args: &Value) -> std::result::Result<String, String> {
+    /// Dispatch a single tool call. Public so the HTTP API can expose the same tool surface.
+    pub fn dispatch(&self,
+        name: &str,
+        args: &Value,
+    ) -> std::result::Result<String, String> {
         match name {
             "read" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
@@ -287,7 +291,8 @@ impl McpServer {
     }
 }
 
-fn tool_defs() -> Value {
+/// Tool definitions exposed by this MCP server. Public so the HTTP API can mirror them.
+pub fn tool_defs() -> Value {
     json!([
         {
             "name": "read",
@@ -451,6 +456,135 @@ fn ok(id: Option<Value>, result: Value) -> Value {
 
 fn err(id: Option<Value>, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// Start the right MCP backend for the current environment. If `CAIRN_SERVER` is set, the MCP
+/// server forwards tool calls to that remote Cairn HTTP API; otherwise it opens the local store.
+pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
+    if let Some(server) = cfg.default_server.as_deref() {
+        let token = std::env::var("CAIRN_TOKEN").ok();
+        RemoteProxy::new(server, token).serve_stdio()
+    } else {
+        McpServer::new(cfg)
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .serve_stdio()
+    }
+}
+
+/// An MCP stdio server that forwards tool calls to a remote Cairn HTTP API.
+pub struct RemoteProxy {
+    server: String,
+    token: Option<String>,
+}
+
+impl RemoteProxy {
+    pub fn new(server: &str, token: Option<String>) -> Self {
+        Self {
+            server: server.trim_end_matches('/').to_string(),
+            token,
+        }
+    }
+
+    pub fn serve_stdio(&self) -> std::io::Result<()> {
+        let stdin = std::io::stdin();
+        let mut stdout = std::io::stdout();
+        let mut locked = stdin.lock();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if locked.read_line(&mut line)? == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let req: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("cairn-mcp: ignoring unparseable message: {e}");
+                    continue;
+                }
+            };
+            if let Some(resp) = self.handle(&req) {
+                stdout.write_all(serde_json::to_string(&resp)?.as_bytes())?;
+                stdout.write_all(b"\n")?;
+                stdout.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle(&self, req: &Value) -> Option<Value> {
+        let id = req.get("id").cloned();
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+        match method {
+            "initialize" => {
+                let ver = req
+                    .get("params")
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(PROTOCOL_VERSION)
+                    .to_string();
+                Some(ok(
+                    id,
+                    json!({
+                        "protocolVersion": ver,
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "cairn-cli", "version": env!("CARGO_PKG_VERSION") }
+                    }),
+                ))
+            }
+            "notifications/initialized" | "initialized" => None,
+            "ping" => Some(ok(id, json!({}))),
+            "tools/list" => Some(self.list_tools(id)),
+            "tools/call" => Some(self.call_tool(id, req.get("params"))),
+            other => id.map(|id| err(Some(id), -32601, &format!("method not found: {other}"))),
+        }
+    }
+
+    fn list_tools(&self, id: Option<Value>) -> Value {
+        match self.get("/api/tools/list") {
+            Ok(v) => ok(id, v),
+            Err(e) => err(id, -32603, &format!("failed to list tools: {e}")),
+        }
+    }
+
+    fn call_tool(&self, id: Option<Value>, params: Option<&Value>) -> Value {
+        let Some(params) = params else {
+            return err(id, -32602, "missing params");
+        };
+        match self.post("/api/tools/call", params) {
+            Ok(v) => ok(id, v),
+            Err(e) => {
+                let msg = format!("tool call failed: {e}");
+                ok(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                )
+            }
+        }
+    }
+
+    fn get(&self, path: &str) -> std::result::Result<Value, String> {
+        let url = format!("{}{path}", self.server);
+        let mut req = ureq::get(&url);
+        if let Some(t) = &self.token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let resp = req.call().map_err(|e| e.to_string())?;
+        resp.into_json().map_err(|e| e.to_string())
+    }
+
+    fn post(&self, path: &str, body: &Value) -> std::result::Result<Value, String> {
+        let url = format!("{}{path}", self.server);
+        let mut req = ureq::post(&url);
+        if let Some(t) = &self.token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let resp = req.send_json(body).map_err(|e| e.to_string())?;
+        resp.into_json().map_err(|e| e.to_string())
+    }
 }
 
 #[cfg(test)]

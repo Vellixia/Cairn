@@ -16,6 +16,7 @@ cairn-assemble.workspace = true
 cairn-shell.workspace = true
 cairn-profile.workspace = true
 cairn-share.workspace = true
+cairn-mcp.workspace = true
 serde.workspace = true
 uuid.workspace = true
 serde_json.workspace = true

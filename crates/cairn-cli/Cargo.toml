@@ -1,13 +1,13 @@
 [package]
 name = "cairn-cli"
-description = "The Cairn command-line interface (the `cairn` binary)."
+description = "The Cairn client CLI (the `cairn-cli` binary). Connects agents and runs local tools."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
 [[bin]]
-name = "cairn"
+name = "cairn-cli"
 path = "src/main.rs"
 
 [features]
@@ -21,7 +21,10 @@ cairn-core.workspace = true
 cairn-store.workspace = true
 cairn-context.workspace = true
 cairn-memory.workspace = true
-cairn-api.workspace = true
+cairn-guard.workspace = true
+cairn-assemble.workspace = true
+cairn-shell.workspace = true
+cairn-profile.workspace = true
 cairn-mcp.workspace = true
 cairn-share.workspace = true
 clap.workspace = true

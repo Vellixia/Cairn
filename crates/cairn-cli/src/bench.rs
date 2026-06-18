@@ -5,7 +5,7 @@
 //! one is lossless — the full original is always one `expand` away.
 
 use anyhow::Result;
-use cairn_api::AppState;
+use crate::State;
 use cairn_context::{ContextEngine, ReadMode, ReadStatus};
 use std::path::{Path, PathBuf};
 
@@ -43,7 +43,7 @@ impl OutlineBench {
     }
 }
 
-pub fn run(state: &AppState, root: &Path) -> Result<()> {
+pub fn run(state: &State, root: &Path) -> Result<()> {
     println!("Cairn bench — measured on {}\n", root.display());
 
     let files = collect_code_files(root, 800);
