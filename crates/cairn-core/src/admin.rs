@@ -15,16 +15,11 @@ use crate::Result;
 
 /// Coarse role. Today Cairn has exactly one role — `Admin` — and device tokens. Kept as an enum so
 /// we can extend later (read-only web viewer, etc.) without a schema migration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AdminRole {
+    #[default]
     Admin,
-}
-
-impl Default for AdminRole {
-    fn default() -> Self {
-        AdminRole::Admin
-    }
 }
 
 /// The persistent admin record. Stored at the `admin` meta key.

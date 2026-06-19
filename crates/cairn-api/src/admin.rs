@@ -63,6 +63,7 @@ impl AuditLog {
 }
 
 /// Wire-level admin record for the API. Never includes the password hash.
+#[allow(dead_code)] // exposed for the future /api/auth/me-with-record endpoint
 #[derive(Debug, Serialize)]
 pub struct AdminView {
     pub username: String,
@@ -121,6 +122,7 @@ pub fn load_admin(state: &AppState) -> cairn_core::Result<Option<AdminRecord>> {
 
 /// Persist (or rotate) the admin record. For first-run setup use
 /// [`Store::set_meta_if_absent`](cairn_store::Store::set_meta_if_absent) directly.
+#[allow(dead_code)] // reserved for the future `cairn-server admin password` HTTP surface
 pub fn save_admin(state: &AppState, rec: &AdminRecord) -> cairn_core::Result<()> {
     let json = serde_json::to_string(rec)?;
     state.store.set_meta(ADMIN_META_KEY, &json)?;

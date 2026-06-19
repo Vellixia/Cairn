@@ -204,7 +204,6 @@ pub async fn create_pair_code(
 mod pair_code {
     use super::*;
     use rand::seq::SliceRandom;
-    use rand::Rng;
 
     const CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L
 
