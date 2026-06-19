@@ -4,8 +4,8 @@
 //! as structure), the re-read killer (cached unchanged reads), and shell-output compression. Every
 //! one is lossless — the full original is always one `expand` away.
 
-use anyhow::Result;
 use crate::State;
+use anyhow::Result;
 use cairn_context::{ContextEngine, ReadMode, ReadStatus};
 use std::path::{Path, PathBuf};
 

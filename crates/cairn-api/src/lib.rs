@@ -194,10 +194,8 @@ fn build_cors(origins: &[String]) -> CorsLayer {
         tracing::warn!("CORS is set to permissive (*) — any origin can make authenticated requests. Set CAIRN_CORS_ORIGINS to specific origins for production.");
         return CorsLayer::permissive();
     }
-    let allowed: Vec<axum::http::HeaderValue> = origins
-        .iter()
-        .filter_map(|o| o.parse().ok())
-        .collect();
+    let allowed: Vec<axum::http::HeaderValue> =
+        origins.iter().filter_map(|o| o.parse().ok()).collect();
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(allowed))
         .allow_methods(AllowMethods::list(vec![
@@ -270,9 +268,7 @@ async fn serve_https(
             )
         })?;
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
-    axum_server::bind_rustls(addr, rustls)
-        .serve(app)
-        .await
+    axum_server::bind_rustls(addr, rustls).serve(app).await
 }
 
 /// True if `addr` resolves to a loopback interface (v4 or v6).
@@ -736,9 +732,12 @@ async fn tools_call(
     State(s): State<AppState>,
     Json(b): Json<ToolCallBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mcp = cairn_mcp::McpServer::new(&s.cfg).map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mcp = cairn_mcp::McpServer::new(&s.cfg)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     match mcp.dispatch(&b.name, &b.arguments) {
-        Ok(text) => Ok(Json(json!({ "content": [{ "type": "text", "text": text }] }))),
+        Ok(text) => Ok(Json(
+            json!({ "content": [{ "type": "text", "text": text }] }),
+        )),
         Err(msg) => Ok(Json(
             json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true }),
         )),

@@ -11,7 +11,14 @@ use std::fs;
 use std::path::Path;
 
 /// Agents we can write rules for (`agents` = a generic AGENTS.md).
-const KNOWN: &[&str] = &["claude-code", "cursor", "vscode", "windsurf", "opencode", "agents"];
+const KNOWN: &[&str] = &[
+    "claude-code",
+    "cursor",
+    "vscode",
+    "windsurf",
+    "opencode",
+    "agents",
+];
 
 const BEGIN: &str = "<!-- BEGIN CAIRN (managed by `cairn rules`) -->";
 const END: &str = "<!-- END CAIRN -->";

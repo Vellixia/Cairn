@@ -329,12 +329,10 @@ async fn main() -> anyhow::Result<()> {
             token,
         } => setup::run(agent.as_deref(), all, server.as_deref(), token.as_deref())?,
         Cmd::Rules { agent, all } => rules::run(agent.as_deref(), all)?,
-        Cmd::Login { server } => coming_soon(
-            &format!(
-                "logging in to {}",
-                server.as_deref().unwrap_or("<server>")
-            )
-        ),
+        Cmd::Login { server } => coming_soon(&format!(
+            "logging in to {}",
+            server.as_deref().unwrap_or("<server>")
+        )),
         Cmd::Update => update::run()?,
         Cmd::Mcp => {
             cairn_mcp::serve_stdio(&cfg)?;

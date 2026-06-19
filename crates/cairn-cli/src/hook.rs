@@ -13,8 +13,8 @@
 //!
 //! Hooks must never break the agent: any internal error is logged to stderr and we still exit 0.
 
-use anyhow::Result;
 use crate::State;
+use anyhow::Result;
 use cairn_core::{Config, MemoryKind, MemoryTier, NewMemory};
 use serde_json::{json, Value};
 use std::io::Read;

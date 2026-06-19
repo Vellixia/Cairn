@@ -81,9 +81,8 @@ impl HelixBackend {
     /// memory vector index exists.
     pub(crate) fn connect(url: &str, cfg: &Config) -> Result<Self> {
         if url.starts_with("http://") {
-            let is_loopback = url.contains("127.0.0.1")
-                || url.contains("localhost")
-                || url.contains("[::1]");
+            let is_loopback =
+                url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]");
             if !is_loopback {
                 tracing::warn!(
                     "HelixDB URL is plain HTTP ({}) — credentials travel in cleartext. \

@@ -25,7 +25,12 @@ use std::path::{Path, PathBuf};
 
 const KNOWN: &[&str] = &["claude-code", "cursor", "vscode", "windsurf", "opencode"];
 
-pub fn run(agent: Option<&str>, all: bool, server: Option<&str>, token: Option<&str>) -> Result<()> {
+pub fn run(
+    agent: Option<&str>,
+    all: bool,
+    server: Option<&str>,
+    token: Option<&str>,
+) -> Result<()> {
     let project = std::env::current_dir()?;
     let home = home_dir();
 
@@ -136,10 +141,11 @@ fn opencode_config_path() -> PathBuf {
     let config_home = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .unwrap_or_else(|| {
-            home_dir().unwrap_or_else(|| PathBuf::from("."))
-        });
-    config_home.join(".config").join("opencode").join("opencode.json")
+        .unwrap_or_else(|| home_dir().unwrap_or_else(|| PathBuf::from(".")));
+    config_home
+        .join(".config")
+        .join("opencode")
+        .join("opencode.json")
 }
 
 fn install_opencode(server: Option<&str>, token: Option<&str>) -> Result<()> {
@@ -214,7 +220,12 @@ fn install_mcp_only(
     Ok(())
 }
 
-fn merge_mcp_server(path: &Path, schema_key: &str, server: Option<&str>, token: Option<&str>) -> Result<()> {
+fn merge_mcp_server(
+    path: &Path,
+    schema_key: &str,
+    server: Option<&str>,
+    token: Option<&str>,
+) -> Result<()> {
     let mut obj = read_object(path)?;
     let servers = obj
         .entry(schema_key)
@@ -390,12 +401,7 @@ mod tests {
         let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
         fs::create_dir_all(cfg.parent().unwrap()).unwrap();
 
-        install_opencode_with_path(
-            Some("http://example.com:7777"),
-            Some("tok-123"),
-            &cfg,
-        )
-        .unwrap();
+        install_opencode_with_path(Some("http://example.com:7777"), Some("tok-123"), &cfg).unwrap();
 
         let v = read_json(&cfg);
         assert_eq!(v["mcp"]["cairn"]["command"][0], "cairn-cli");

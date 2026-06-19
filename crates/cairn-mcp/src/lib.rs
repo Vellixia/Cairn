@@ -142,10 +142,7 @@ impl McpServer {
     }
 
     /// Dispatch a single tool call. Public so the HTTP API can expose the same tool surface.
-    pub fn dispatch(&self,
-        name: &str,
-        args: &Value,
-    ) -> std::result::Result<String, String> {
+    pub fn dispatch(&self, name: &str, args: &Value) -> std::result::Result<String, String> {
         match name {
             "read" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
