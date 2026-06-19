@@ -6,6 +6,7 @@
 
 mod auth;
 mod rate_limit;
+mod session;
 mod ui;
 
 use crate::auth::{extract_bearer, TokenInfo, TokenSigner};
