@@ -138,6 +138,10 @@ services:
       CAIRN_PORT: "7777"
       # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
       CAIRN_HELIX_URL: http://helix:8080
+      # CAIRN_INSECURE=1 is intentional for the local-dev compose stack: the Cairn API is
+      # authenticated and must not travel in cleartext over a public network. For production
+      # deployments, run `cairn serve` directly with CAIRN_TLS_CERT + CAIRN_TLS_KEY, or place a
+      # reverse proxy in front. See docs/ARCHITECTURE.md for the recommended topology.
       CAIRN_INSECURE: "1"
       # Mount the host project so cairn read/verify/checkpoint tools can access local files.
       CAIRN_WORKSPACE_ROOT: /workspace
@@ -145,7 +149,10 @@ services:
       - path: .env
         required: false
     ports:
-      - "${CAIRN_PORT:-7777}:7777"
+      # Bind to loopback by default so the cleartext HTTP port is not reachable from the LAN.
+      # Override with `-p "0.0.0.0:${CAIRN_PORT:-7777}:7777"` if you intentionally want LAN
+      # exposure (and only on a trusted network, with CAIRN_INSECURE=1 acknowledged).
+      - "127.0.0.1:${CAIRN_PORT:-7777}:7777"
     volumes:
       - cairn-data:/data
       # Read-only mount of the host project directory for file tools (read/verify/checkpoint).
