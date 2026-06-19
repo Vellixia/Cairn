@@ -2,7 +2,7 @@
 
 All notable changes to Cairn are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [Unreleased] — P0–P3 Security & Build Hardening
+## [0.3.0] — 2026-06-19 — P0–P3 Security & Build Hardening
 
 ### Breaking changes
 
