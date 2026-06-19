@@ -112,7 +112,8 @@ impl SessionSigner {
         let bytes = URL_SAFE_NO_PAD
             .decode(body.as_bytes())
             .map_err(|_| SessionError::Malformed)?;
-        let payload: SessionPayload = serde_json::from_slice(&bytes).map_err(SessionError::Decode)?;
+        let payload: SessionPayload =
+            serde_json::from_slice(&bytes).map_err(SessionError::Decode)?;
         if payload.is_expired() {
             return Err(SessionError::Expired);
         }
@@ -122,7 +123,10 @@ impl SessionSigner {
                 current: current_generation,
             });
         }
-        Ok(VerifiedSession { payload, fresh: true })
+        Ok(VerifiedSession {
+            payload,
+            fresh: true,
+        })
     }
 
     fn mac(&self, body: &str) -> String {
@@ -165,9 +169,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 /// applied consistently and can be tweaked in one place.
 pub fn build_set_cookie(value: &str, ttl: Duration, secure: bool) -> String {
     let max_age = ttl.as_secs();
-    let mut s = format!(
-        "{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"
-    );
+    let mut s =
+        format!("{COOKIE_NAME}={value}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}");
     if secure {
         s.push_str("; Secure");
     }
@@ -216,7 +219,11 @@ mod tests {
     #[test]
     fn tampered_cookie_is_rejected() {
         let s = signer();
-        let cookie = s.sign(&SessionPayload::new("admin".into(), 1, Duration::from_secs(60)));
+        let cookie = s.sign(&SessionPayload::new(
+            "admin".into(),
+            1,
+            Duration::from_secs(60),
+        ));
         let mut bad = cookie.clone();
         let last = bad.pop().unwrap();
         bad.push(if last == '0' { '1' } else { '0' });
@@ -236,17 +243,27 @@ mod tests {
     #[test]
     fn generation_mismatch_is_rejected() {
         let s = signer();
-        let cookie = s.sign(&SessionPayload::new("admin".into(), 1, Duration::from_secs(60)));
+        let cookie = s.sign(&SessionPayload::new(
+            "admin".into(),
+            1,
+            Duration::from_secs(60),
+        ));
         assert!(matches!(
             s.verify(&cookie, 2),
-            Err(SessionError::GenerationMismatch { cookie: 1, current: 2 })
+            Err(SessionError::GenerationMismatch {
+                cookie: 1,
+                current: 2
+            })
         ));
     }
 
     #[test]
     fn malformed_cookie_is_rejected() {
         let s = signer();
-        assert!(matches!(s.verify("not-a-cookie", 1), Err(SessionError::Malformed)));
+        assert!(matches!(
+            s.verify("not-a-cookie", 1),
+            Err(SessionError::Malformed)
+        ));
     }
 
     #[test]

@@ -230,10 +230,14 @@ mod admin {
         if io::stdin().is_terminal() {
             // Best-effort echo suppression. On Windows there's no portable raw-mode API in std,
             // so we just read and emit a newline after — adequate for the admin recovery flow.
-            io::stdin().read_line(&mut s).context("reading password from stdin")?;
+            io::stdin()
+                .read_line(&mut s)
+                .context("reading password from stdin")?;
             eprintln!();
         } else {
-            io::stdin().read_to_string(&mut s).context("reading password from stdin")?;
+            io::stdin()
+                .read_to_string(&mut s)
+                .context("reading password from stdin")?;
         }
         let trimmed = s.trim().to_string();
         if trimmed.len() < 8 {

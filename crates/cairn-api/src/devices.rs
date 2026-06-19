@@ -76,10 +76,7 @@ pub struct IssuedPairCode {
     pub expires_at: DateTime<Utc>,
 }
 
-pub async fn list_tokens(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn list_tokens(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(resp) = require_admin(&state, &headers).await {
         return resp;
     }
@@ -155,7 +152,9 @@ pub async fn revoke_token(
     };
     match state.store.revoke_token(&id) {
         Ok(true) => {
-            state.audit_log.record("token_revoked", &rec.username, id.clone());
+            state
+                .audit_log
+                .record("token_revoked", &rec.username, id.clone());
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Ok(false) => (
@@ -222,12 +221,9 @@ mod pair_code {
         let expires_at = Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64);
         // Store the token id (not the bearer) — `pair_claim` signs a fresh JWT at claim time, same
         // pattern as the existing `/api/pair/new` flow.
-        state.store.create_pairing(
-            &code,
-            &token.id,
-            name,
-            &expires_at.to_rfc3339(),
-        )?;
+        state
+            .store
+            .create_pairing(&code, &token.id, name, &expires_at.to_rfc3339())?;
         Ok((code, expires_at))
     }
 }

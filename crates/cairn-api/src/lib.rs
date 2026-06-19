@@ -15,8 +15,8 @@ mod ui;
 pub use admin::ADMIN_META_KEY;
 
 use crate::admin::{self as admin_mod, auth_status, list_audit, login, logout, me, setup};
-use crate::devices::{create_pair_code, create_token, list_tokens, revoke_token};
 use crate::auth::{extract_bearer, TokenInfo, TokenSigner};
+use crate::devices::{create_pair_code, create_token, list_tokens, revoke_token};
 use crate::rate_limit::RateLimiter;
 use crate::session::{extract_cookie as extract_session_cookie, SessionSigner};
 use axum::{
@@ -89,7 +89,10 @@ impl AppState {
                 TokenSigner::new(k.clone()).expect("CAIRN_SECRET_KEY must be non-empty for auth"),
             )
         });
-        let session_signer = cfg.secret_key.as_ref().map(|k| Arc::new(SessionSigner::new(k.clone())));
+        let session_signer = cfg
+            .secret_key
+            .as_ref()
+            .map(|k| Arc::new(SessionSigner::new(k.clone())));
         Ok(Self {
             store,
             ctx,
@@ -857,7 +860,9 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
 
     // 4. Loopback fallback — only when there are no device tokens AND no admin.
     let token_count = s.store.count_tokens().unwrap_or(0);
-    let admin_exists = admin_mod::load_admin(&s).map(|r| r.is_some()).unwrap_or(false);
+    let admin_exists = admin_mod::load_admin(&s)
+        .map(|r| r.is_some())
+        .unwrap_or(false);
     if token_count == 0 && !admin_exists {
         let is_local = req
             .extensions()
@@ -904,8 +909,8 @@ fn verify_bearer_auth(s: &AppState, req: &Request, method: &str, path: &str) -> 
         .and_then(|v| v.to_str().ok())
         .and_then(extract_bearer)?;
     let info = s.verify_bearer(bearer)?;
-    let allowed = info.scope.allows(method, path)
-        && s.store.validate_token_id(&info.id).unwrap_or(false);
+    let allowed =
+        info.scope.allows(method, path) && s.store.validate_token_id(&info.id).unwrap_or(false);
     Some(allowed)
 }
 

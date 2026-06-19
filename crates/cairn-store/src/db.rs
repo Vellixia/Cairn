@@ -142,7 +142,7 @@ impl Store {
     pub fn latest_file_version(&self, path: &str) -> Result<Option<(String, i64)>> {
         self.backend.latest_file_version(path)
     }
-    pub     fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.backend.set_meta(key, value)
     }
     pub fn get_meta(&self, key: &str) -> Result<Option<String>> {

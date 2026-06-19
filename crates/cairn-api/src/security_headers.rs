@@ -52,13 +52,19 @@ mod tests {
         let app = Router::new()
             .route("/", get(hello))
             .layer(from_fn(security_headers));
-        let resp = app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap()).await.unwrap();
+        let resp = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
         assert_eq!(resp.headers().get("x-frame-options").unwrap(), "DENY");
         assert_eq!(
             resp.headers().get("x-content-type-options").unwrap(),
             "nosniff"
         );
-        assert_eq!(resp.headers().get("referrer-policy").unwrap(), "no-referrer");
+        assert_eq!(
+            resp.headers().get("referrer-policy").unwrap(),
+            "no-referrer"
+        );
         assert_eq!(
             resp.headers().get("permissions-policy").unwrap(),
             "clipboard-write=(self)"

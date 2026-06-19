@@ -6,9 +6,7 @@
 //! in-memory [`AuditLog`] is best-effort — restart loses it — which keeps the surface small and
 //! avoids a HelixDB schema migration for 0.4.0.
 
-use crate::session::{
-    build_clear_cookie, build_set_cookie, extract_cookie, SessionPayload,
-};
+use crate::session::{build_clear_cookie, build_set_cookie, extract_cookie, SessionPayload};
 use crate::AppState;
 use axum::{
     extract::State,
@@ -55,7 +53,12 @@ impl AuditLog {
     }
 
     pub fn snapshot(&self) -> Vec<AuditEvent> {
-        self.inner.lock().expect("audit log mutex").iter().cloned().collect()
+        self.inner
+            .lock()
+            .expect("audit log mutex")
+            .iter()
+            .cloned()
+            .collect()
     }
 }
 
@@ -162,10 +165,7 @@ pub async fn auth_status(State(state): State<AppState>) -> Response {
 
 /// POST `/api/auth/login` — accepts username + password, verifies against the stored admin
 /// record, and on success returns the session cookie + a JSON body.
-pub async fn login(
-    State(state): State<AppState>,
-    Json(req): Json<LoginRequest>,
-) -> Response {
+pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Response {
     if req.username.is_empty() || req.password.is_empty() {
         return (
             StatusCode::BAD_REQUEST,
@@ -206,11 +206,9 @@ pub async fn login(
         Err(e) => return error_response(&format!("verify: {e}")),
     };
     if !ok {
-        state.audit_log.record(
-            "login_failed",
-            &req.username,
-            "bad password".to_string(),
-        );
+        state
+            .audit_log
+            .record("login_failed", &req.username, "bad password".to_string());
         return (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid credentials"})),
@@ -218,7 +216,9 @@ pub async fn login(
             .into_response();
     }
     // Success.
-    state.audit_log.record("login_ok", &rec.username, String::new());
+    state
+        .audit_log
+        .record("login_ok", &rec.username, String::new());
     let payload = mint_session(&state, &rec);
     let Some(signer) = state.session_signer.as_ref() else {
         return error_response("CAIRN_SECRET_KEY is required for cookie sessions");
@@ -310,10 +310,7 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
 }
 
 /// POST `/api/auth/setup` — first-run wizard. Refuses if an admin already exists (409).
-pub async fn setup(
-    State(state): State<AppState>,
-    Json(req): Json<SetupRequest>,
-) -> Response {
+pub async fn setup(State(state): State<AppState>, Json(req): Json<SetupRequest>) -> Response {
     if req.username.trim().is_empty() || req.password.len() < 8 {
         return (
             StatusCode::BAD_REQUEST,
@@ -328,7 +325,10 @@ pub async fn setup(
         Err(e) => return error_response(&format!("hash: {e}")),
     };
     let rec = AdminRecord::new(req.username.trim().to_string(), hash);
-    match state.store.set_meta_if_absent(ADMIN_META_KEY, &serde_json::to_string(&rec).unwrap()) {
+    match state
+        .store
+        .set_meta_if_absent(ADMIN_META_KEY, &serde_json::to_string(&rec).unwrap())
+    {
         Ok(true) => {}
         Ok(false) => {
             return (
@@ -339,7 +339,9 @@ pub async fn setup(
         }
         Err(e) => return error_response(&format!("persist: {e}")),
     }
-    state.audit_log.record("setup", &rec.username, String::new());
+    state
+        .audit_log
+        .record("setup", &rec.username, String::new());
     let payload = mint_session(&state, &rec);
     let Some(signer) = state.session_signer.as_ref() else {
         return error_response("CAIRN_SECRET_KEY is required for cookie sessions");
@@ -358,10 +360,7 @@ pub async fn setup(
 }
 
 /// GET `/api/devices/audit` — admin-only. Returns the in-memory audit log.
-pub async fn list_audit(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn list_audit(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match require_admin(&state, &headers).await {
         Ok(_) => {}
         Err(resp) => return resp,
@@ -372,8 +371,7 @@ pub async fn list_audit(
 /// Returns the admin record iff the request's cookie or bearer is a valid admin session. Used by
 /// the devices endpoints (task 7) and `/api/auth/me` callers that need more than just `me`.
 pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<AdminRecord, Response> {
-    let Some(rec) = load_admin(state)
-        .map_err(|e| error_response(&format!("load admin: {e}")))?
+    let Some(rec) = load_admin(state).map_err(|e| error_response(&format!("load admin: {e}")))?
     else {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -381,7 +379,8 @@ pub async fn require_admin(state: &AppState, headers: &HeaderMap) -> Result<Admi
         )
             .into_response());
     };
-    if let Some(cookie) = extract_cookie(headers.get(header::COOKIE).and_then(|v| v.to_str().ok())) {
+    if let Some(cookie) = extract_cookie(headers.get(header::COOKIE).and_then(|v| v.to_str().ok()))
+    {
         if let Some(signer) = state.session_signer.as_ref() {
             if signer.verify(cookie, rec.generation).is_ok() {
                 return Ok(rec);
@@ -433,7 +432,10 @@ mod tests {
 
     #[test]
     fn setup_request_validates_minimum_length() {
-        let r = SetupRequest { username: "".into(), password: "short".into() };
+        let r = SetupRequest {
+            username: "".into(),
+            password: "short".into(),
+        };
         assert!(r.username.trim().is_empty());
         assert!(r.password.len() < 8);
     }
