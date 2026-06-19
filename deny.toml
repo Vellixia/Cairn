@@ -8,6 +8,20 @@ feature-depth = 1
 [advisories]
 yanked = "deny"
 unmaintained = "workspace"
+# Each ignore below is a transitive dependency we can't easily upgrade without breaking the
+# workspace's pinned minor-version policy. The advisory database entry is linked in each line.
+ignore = [
+    # RUSTSEC-2024-0436 — `paste`: unmaintained; transitive via rust-embed 8.x.
+    # Replacement requires rust-embed 9.x which would bump our workspace minor pin.
+    "RUSTSEC-2024-0436",
+    # RUSTSEC-2025-0119 — `number_prefix`: unmaintained; transitive via indicatif / human-panic.
+    # No maintained fork upstream; deprecation warning is acceptable for an internal CLI dep.
+    "RUSTSEC-2025-0119",
+    # RUSTSEC-2025-0134 — `rustls-pemfile`: unmaintained; transitive via axum-server 0.7.x.
+    # axum-server has not bumped to a maintained fork yet; we re-evaluate at the next workspace
+    # bump. Risk is bounded — rustls-pemfile only reads PEM files at startup.
+    "RUSTSEC-2025-0134",
+]
 
 [bans]
 multiple-versions = "deny"
