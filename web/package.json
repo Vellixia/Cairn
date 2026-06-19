@@ -2,17 +2,19 @@
   "name": "cairn-web",
   "private": true,
   "version": "0.4.0",
-  "description": "Cairn landing page + operational control plane.",
+  "description": "Cairn dashboard — admin console, sidebar layout, ⌘K, toast system.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "next": "^14.2.35",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "swr": "^2.2.5"
   },
   "devDependencies": {
     "@types/node": "20.14.10",
