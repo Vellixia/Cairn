@@ -40,3 +40,75 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run build
+
+  # End-to-end smoke: spin up the Docker stack, hit /api/health, mint a token, call
+  # /api/tools/list, assert the response is the expected {"tools":[...]} shape. This is
+  # the regression guard for the bare-array /api/tools/list bug that cost a day to diagnose
+  # (an MCP client that requires the {"tools":[...]} envelope silently fails to load any
+  # tools if the server returns a bare array). Runs in parallel with the rust job.
+  ci-smoke:
+    name: ci smoke (compose up + tools/list shape)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Non-default MinIO creds (the minio-guard refuses the insecure `minioadmin` default at
+    # startup). Fixed secret key so we can mint a token from the host. Env is set here, not in
+    # a checked-in .env file, so secrets never land in the repo.
+    env:
+      MINIO_ROOT_USER: cairn-ci-minio-user
+      MINIO_ROOT_PASSWORD: cairn-ci-minio-password-32-chars-long
+      CAIRN_SECRET_KEY: ci-smoke-test-secret-key-32-bytes-long!!
+      CAIRN_INSECURE: "1"
+      CAIRN_EMBED_PROVIDER: hashing
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build cairn image
+        run: docker compose build cairn
+      - name: Bring up the stack
+        run: docker compose up -d
+      - name: Wait for cairn /api/health
+        run: |
+          for i in $(seq 1 60); do
+            if curl -fsS http://localhost:7777/api/health >/dev/null 2>&1; then
+              echo "cairn healthy after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::cairn did not become healthy within 60s"
+          docker compose logs cairn
+          exit 1
+      - name: Mint a device token
+        id: mint
+        # cairn token create writes the JWT to stdout; we capture it for later curl calls.
+        run: |
+          TOKEN=$(docker exec cairn /usr/local/bin/cairn token create --scope admin ci-smoke 2>/dev/null | head -1)
+          if [ -z "$TOKEN" ]; then
+            echo "::error::failed to mint token"
+            docker compose logs cairn
+            exit 1
+          fi
+          echo "token=***" >&2
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+      - name: Assert /api/tools/list shape is {"tools":[...]}
+        # The bare-array regression was: returning a JSON array instead of the envelope object
+        # wrapped under "tools". OpenCode (and other MCP clients) silently fall back to zero
+        # tools. We fail the build if the envelope is missing or "tools" is not an array.
+        env:
+          TOKEN: ${{ steps.mint.outputs.token }}
+        run: |
+          BODY=$(curl -fsS -H "Authorization: Bearer $TOKEN" http://localhost:7777/api/tools/list)
+          echo "response: $BODY"
+          if ! echo "$BODY" | python3 -c "import json,sys; d=json.load(sys.stdin); assert isinstance(d, dict) and 'tools' in d and isinstance(d['tools'], list), 'envelope missing or wrong shape: '+repr(list(d.keys()) if isinstance(d, dict) else type(d).__name__)"; then
+            echo "::error::tools/list response is missing the {\"tools\": [...]} envelope"
+            exit 1
+          fi
+          COUNT=$(echo "$BODY" | python3 -c "import json,sys; print(len(json.load(sys.stdin)['tools']))")
+          echo "tools count: $COUNT"
+          if [ "$COUNT" -lt 5 ]; then
+            echo "::error::expected at least 5 tools, got $COUNT"
+            exit 1
+          fi
+      - name: Tear down
+        if: always()
+        run: docker compose down -v || true
+
