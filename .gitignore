@@ -5,8 +5,7 @@
 # Node / web
 /web/node_modules
 /web/.next
-/web/out/*
-!/web/out/.gitkeep
+/web/out/_next/static/**/*.js.map
 /web/dist
 
 # Cairn runtime data
