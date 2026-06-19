@@ -35,11 +35,21 @@ gantt
     Pool contribute pull           :done, p3b, 2026-04-01, 30d
     Full 4-tier consolidation      :active, p3c, 2026-04-15, 60d
     Hybrid search BM25 vec graph   :p3d, 2026-05-01, 60d
-    Health checks in Compose       :p3e, 2026-05-01, 30d
-    CI smoke test                  :p3f, 2026-05-01, 30d
+    Health checks in Compose       :done, p3e, 2026-06-19, 1d
+    CI smoke test                  :done, p3f, 2026-06-19, 1d
     LongMemEval benchmarks         :p3g, 2026-05-15, 60d
     One-click deploy templates     :p3h, 2026-06-01, 45d
     Multi-platform release binaries :p3i, 2026-06-01, 45d
+    Slim image + model SHA pin     :done, p3j, 2026-06-19, 1d
+
+    section Phase 4 — Distribution
+    OpenCode README quickstart     :active, p4a, 2026-06-19, 1d
+    Multi-platform release         :p4b, 2026-06-20, 45d
+    Homebrew tap                   :p4c, 2026-07-01, 7d
+    One-click deploy               :p4d, 2026-07-01, 14d
+    Non-root Docker volume init    :p4e, 2026-07-01, 3d
+    LongMemEval/LoCoMo benchmarks  :p4f, 2026-07-01, 30d
+    Task-success horizon benchmark :p4g, 2026-07-15, 30d
 ```
 
 ---
@@ -109,29 +119,57 @@ gantt
 
 ---
 
-## Phase 3 — Collective + Federation + Depth (next)
+## Phase 3 — Collective + Federation + Depth
+
+### Done
 
 | Item | Status | Notes |
 |---|---|---|
 | `cairn-share`: export/import sanitized bundles | Done | Redacts PII, withholds hard secrets |
-| `cairn-share`: pool contribute/pull | Done | Federated sanitized knowledge |
+| `cairn-share`: pool contribute/pull | Done | Federated sanitized knowledge (admin-scoped token required) |
+| Health checks in Docker Compose | Done | minio/helix/cairn all `service_healthy`; `depends_on: service_healthy`; minio-init bounded retry |
+| CI smoke test (compose + API) | Done | `ci-smoke` job asserted `{"tools":[...]}` envelope + ≥5 tools. **Superseded** by the 56-test live suite; removed from CI. |
+
+### In progress / partial
+
+| Item | Status | Notes |
+|---|---|---|
 | Full 4-tier consolidation/decay | Partial | Consolidation implemented, decay tuning ongoing |
-| Property graph + impact analysis | Not started | Planned as `cairn-graph` or in `cairn-context` |
-| Hybrid search (BM25 + vector + graph, RRF) | Partial | BM25 done, HNSW vectors via HelixDB, graph not yet |
-| Rerank + MMR diversity | Not started | Post-retrieval quality improvements |
+| Hybrid search (BM25 + vector + graph, RRF) | Partial | BM25 done, HNSW vectors via HelixDB, **graph leg next** |
+| Federation (signed packs, trust/scopes) | Partial | Share/pool exists, full federation protocol TBD |
+
+### Backlog
+
+| Item | Status | Notes |
+|---|---|---|
+| Property graph + impact analysis | Not started | Feeds the graph leg of hybrid search; planned as `cairn-graph` or in `cairn-context` |
+| Rerank + MMR diversity | Not started | Post-retrieval quality improvements; high-leverage, small change |
 | Offline-first sync (automerge CRDT) | Not started | Currently last-write-wins |
 | E2E encryption for sync | Not started | Optional, for privacy-sensitive setups |
-| Federation (signed packs, trust/scopes) | Partial | Share/pool exists, full federation protocol TBD |
 | Collective voting/provenance/decay | Not started | Community governance for shared knowledge |
-| Health checks in Docker Compose | Not started | Currently `depends_on` only waits for start |
-| Non-root Docker volume init | Not started | Currently `user: "0"` workaround |
-| CI smoke test (compose + API) | Not started | Prevent regressions like bare-array tools/list bug |
-| LongMemEval / LoCoMo benchmarks | Not started | Standard recall benchmarks |
-| Task-success lift at increasing horizons | Not started | Drift/reliability benchmark |
-| Full README update (two-binary flow) | Partial | Updated but needs OpenCode quickstart section |
-| One-click deploy (Fly/Railway/Render) | Not started | Deploy templates |
-| Multi-platform release binaries | Not started | musl, mac arm/x86, windows |
-| Homebrew tap | Not started | `brew install cairn` |
+
+### Hardening & DX (audit-driven)
+
+| Item | Status | Notes |
+|---|---|---|
+| Slim default Docker image; `embed-local` opt-in | Done | Default `CAIRN_FEATURES=""`; opt back in with `--build-arg CAIRN_FEATURES=embed-local`. Closes audit M-12. |
+| Local model SHA-256 verification | Done | `CAIRN_EMBED_FASTEMBED_SHA256` pin; constant-time compare; logs actual hash at WARN when no pin set. Closes audit M-9. |
+
+---
+
+## Phase 4 — Distribution
+
+The product is feature-complete enough to install and use. The remaining work is **getting it onto every machine people use** — distribution channels, install paths, and the benchmarks that turn the engineering into marketing.
+
+| Item | Status | Notes |
+|---|---|---|
+| OpenCode README quickstart | Partial | OpenCode integration is verified end-to-end (remember/recall/sanitize/read), but the README still needs a one-screen "set up OpenCode in 4 commands" section that mirrors the live test |
+| Multi-platform release binaries | Not started | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`; upload + `SHA256SUMS` per release |
+| Homebrew tap | Not started | `Vellixia/homebrew-tap`; formula points at the GitHub release, verifies `SHA256SUMS`; `brew install cairn` |
+| One-click deploy (Fly / Railway / Render) | Not started | `render.yaml` + `fly.toml` templates; "Deploy to…" buttons in README |
+| Non-root Docker volume init | Not started | Currently `user: "0"` workaround. Proper init container or capability grant so the runtime can drop to `cairn` uid 10001 |
+| LongMemEval / LoCoMo benchmarks | Not started | Standard recall benchmarks; publish numbers in `docs/BENCHMARKS.md` |
+| Task-success lift at increasing horizons | Not started | Synthetic drift benchmark; cite the architecture justification in `docs/PLAN.md` |
 
 ---
 
@@ -140,9 +178,11 @@ gantt
 | Milestone | Status |
 |---|---|
 | Fresh clone builds (`cargo check --workspace`) | Passed |
-| `cargo test --workspace` (103+ tests) | Passed |
+| `cargo test --workspace` (111+ tests) | Passed |
 | `cargo clippy --workspace -- -D warnings` | Passed |
 | `docker compose up -d` from clean checkout | Passed |
+| Docker compose health checks (all 3 services `healthy`) | Passed (verified live) |
+| 56-test end-to-end live suite (memory/context/guard/profile/shell/assembly/sanitize/sync/share/api/setup/bench/path-rewrite) | Passed (verified live) |
 | `cairn-cli bench` shows 90%+ savings | Passed |
 | OpenCode MCP: remember/recall/wakeup/sanitize | Passed (verified live) |
 | OpenCode MCP: read (remote proxy with workspace mount) | Passed (verified live) |
