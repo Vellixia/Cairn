@@ -156,6 +156,5 @@ gantt
 
 - [Plan](PLAN.md) — product vision and phases
 - [Architecture](ARCHITECTURE.md) — how it works today
-- [Decisions](DECISIONS.md) — why we chose what we chose
 - [Benchmarks](BENCHMARKS.md) — measured numbers
 - [Audit Report](audits/REPORT.md) — security findings with fix status

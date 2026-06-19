@@ -340,6 +340,5 @@ single static Rust binary — **no Node/Python/runtime** to install.
 
 - [Architecture](ARCHITECTURE.md) — how the code is structured today (crate graph, data flow, tool surface)
 - [Roadmap](ROADMAP.md) — what's done, what's in progress, what's next
-- [Decisions](DECISIONS.md) — key architecture decisions and their rationale
 - [Benchmarks](BENCHMARKS.md) — methodology + measured numbers + targets
 - [Audit Report](audits/REPORT.md) — security audit with fix-status tracking

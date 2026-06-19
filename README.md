@@ -159,7 +159,6 @@ what's done and what's next.
 | [Plan](docs/PLAN.md) | Product vision, problem analysis, core principles |
 | [Architecture](docs/ARCHITECTURE.md) | Crate graph, MCP tools, API endpoints, Docker, config, CLI commands, multi-device sync |
 | [Roadmap](docs/ROADMAP.md) | Development status — done, in progress, next |
-| [Decisions](docs/DECISIONS.md) | Architecture decision records (ADRs) |
 | [Benchmarks](docs/BENCHMARKS.md) | Token savings methodology + measured results |
 | [Audit Report](docs/audits/REPORT.md) | Security audit with fix-status tracking |
 

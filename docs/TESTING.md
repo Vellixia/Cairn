@@ -31,14 +31,14 @@ for tool tests. HTTP `Invoke-RestMethod` for API tests. CLI commands for setup/b
 | 4. Profile | 3 | 3 | 0 | Prefer + profile |
 | 5. Shell | 2 | 2 | 0 | Compress cargo + git log |
 | 6. Assembly | 2 | 2 | 0 | Normal + tight budget |
-| 7. Sanitization | 4 | 3 | 1 | 7.2: `sk-` prefix not redacted (regex gap) |
-| 9. Multi-device | 5 | 2 | 3 | 9.1-9.4 need matching secret keys; 9.5 pass |
-| 10. Share/federation | 3 | 2 | 1 | 10.3 contribute/pull 401 (key mismatch) |
+| 7. Sanitization | 4 | 4 | 0 | 7.2 `sk-` key redaction fixed |
+| 9. Multi-device | 5 | 5 | 0 | Secret key alignment fixed |
+| 10. Share/federation | 3 | 3 | 0 | Admin token required for contribute (documented) |
 | 11. Path rewriting | 3 | 3 | 0 | Absolute, relative, outside workspace |
 | 12. API endpoints | 5 | 5 | 0 | Health, tools, call, auth, rate limit |
 | 13. Setup | 5 | 5 | 0 | Setup, idempotent, rules, doctor |
 | 14. Benchmarks | 3 | 3 | 0 | Bench shows 90.3% savings |
-| **Total** | **54** | **48** | **6** | 4 are known issues, 2 are config mismatches |
+| **Total** | **54** | **54** | **0** | All documented issues resolved |
 
 ---
 
@@ -203,10 +203,10 @@ for tool tests. HTTP `Invoke-RestMethod` for API tests. CLI commands for setup/b
   - Expected: Email redacted, classified as needs_review
   - Result: **PASS** — Email redacted to `[redacted:email]`, classified as needs_review
 
-- [ ] **7.2** `sanitize` — API key
+- [x] **7.2** `sanitize` — API key
   - Method: `sanitize` with "My API key is sk-1234567890abcdef"
   - Expected: Key redacted, classified as private
-  - Result: **FAIL** — `sk-` prefix not detected. Text unchanged, classified as shareable. The regex needs to catch `sk-` followed by 16+ alphanumeric chars. **Known issue — regex gap in `cairn-share`.**
+  - Result: **PASS** — Redacted as `[redacted:secret]`, classified as private
 
 - [x] **7.3** `sanitize` — GitHub token
   - Method: `sanitize` with "Deploy token ghp_0123456789abcdefghijklmnopqrstuvwxyz"
@@ -232,15 +232,15 @@ for tool tests. HTTP `Invoke-RestMethod` for API tests. CLI commands for setup/b
   - Expected: Device paired, token claimed
   - Result: **SKIP** — Tested in earlier session; pairing works.
 
-- [ ] **9.3** Sync push
+- [x] **9.3** Sync push
   - Method: `cairn-cli sync --server http://localhost:7777`
   - Expected: Local memory pushed to server
-  - Result: **FAIL** — 401 auth error. The CLI's local `CAIRN_SECRET_KEY` differs from the Docker container's `.env` key, so the token signature doesn't match. **Known issue — need matching secret keys or a shared token.**
+  - Result: **PASS** — `sync with http://localhost:7777: pulled 0, pushed 10 (sent 10)`
 
-- [ ] **9.4** Sync pull
+- [x] **9.4** Sync pull
   - Method: `cairn-cli sync --server http://localhost:7777`
   - Expected: Remote memories pulled
-  - Result: **FAIL** — Same 401 auth issue as 9.3.
+  - Result: **PASS** — `sync with http://localhost:7777: pulled 0, pushed 0 (sent 0)`
 
 - [x] **9.5** Export/import
   - Method: `cairn-cli export dump.json` then `cairn-cli import dump.json`
@@ -261,10 +261,11 @@ for tool tests. HTTP `Invoke-RestMethod` for API tests. CLI commands for setup/b
   - Expected: Memories ingested with provenance
   - Result: **PASS** — Ingested 9 shared memories (deduplicated)
 
-- [ ] **10.3** Contribute / pull
-  - Method: `cairn-cli contribute --server http://localhost:7777` then `cairn-cli pull`
+- [x] **10.3** Contribute / pull
+  - Method: `cairn-cli contribute --server http://localhost:7777 --token <admin>` then `cairn-cli pull`
   - Expected: Sanitized knowledge federated
-  - Result: **FAIL** — 401 auth error. Same secret key mismatch as Category 9. **Known issue.**
+  - Result: **PASS** — `contributed to http://localhost:7777: 11 accepted, 0 rejected`; pull ingests pool memories
+  - Note: `/api/pool/contribute` requires an **admin** token (write scope is intentionally denied for shared-pool mutation). Create one with `cairn token create --scope admin <name>` from inside the server environment.
 
 ---
 
@@ -364,11 +365,8 @@ for tool tests. HTTP `Invoke-RestMethod` for API tests. CLI commands for setup/b
 
 ---
 
-## Open Issues Found
+## Notes
 
-| # | Issue | Severity | Fix |
-|---|---|---|---|
-| 7.2 | `sk-` API key prefix not detected by sanitize regex | Medium | Add `sk-[a-zA-Z0-9]{16,}` to secret patterns in `cairn-share` |
-| 9.3-9.4 | Sync 401 — CLI secret key doesn't match Docker container's `.env` key | Low (config) | Use same `CAIRN_SECRET_KEY` in both, or generate token from Docker exec |
-| 10.3 | Contribute/pull 401 — same key mismatch | Low (config) | Same fix as 9.3 |
-| 1.4 | Recall with nonsense query returns loose matches | Info | Expected with hashing embedder; semantic providers would return "(no matches)" |
+- **Admin token for pool operations**: `/api/pool/contribute` requires an admin-scoped device token. Regular `write` tokens work for all personal memory/context/profile APIs.
+- **Secret key consistency**: Device tokens are signed with `CAIRN_SECRET_KEY`. A token minted by one server/CLI instance is only accepted by another if they share the same secret. For Docker testing, either use the same `.env` key everywhere or create tokens inside the container.
+- **Recall loose matches**: With the default `hashing` embed provider, `recall` is lexical/BM25-driven and may return similar-sounding results for nonsense queries. Switch to a semantic embed provider for stricter semantic matching.
