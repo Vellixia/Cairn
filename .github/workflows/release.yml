@@ -49,7 +49,11 @@ jobs:
       - name: Build web UI (embedded into the binary)
         working-directory: web
         run: npm ci && npm run build
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # dtolnay/rust-toolchain only ships a single `v1` tag (no per-version tags). Pinning to the
+      # v1 commit SHA prevents a compromised tag from silently re-routing the action; the action
+      # itself dispatches on the `channel` input (`stable` by default) so the SHA is only a
+      # supply-chain guarantee, not a version pin. The Rust channel is governed by rust-toolchain.toml.
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           targets: ${{ matrix.target }}
       # Builds --release, archives the `cairn` binary as cairn-<target>.tar.gz (or .zip on
@@ -74,7 +78,7 @@ jobs:
     needs: binaries
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Download all release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -178,7 +182,7 @@ jobs:
       actions: read
       id-token: write
       contents: write
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@f7dd8c54c2067bafc12ca7a55595d5ee9b75204a # v2.1.0
     with:
       base64-subjects: ${{ needs.collect-digests.outputs.base64-subjects }}
       provenance-name: cairn.intoto.jsonl
@@ -193,7 +197,7 @@ jobs:
       id-token: write
       contents: write
     steps:
-      - uses: sigstore/cosign-installer@v3
+      - uses: sigstore/cosign-installer@3454372f43399081ed03b604cb2d021dabca52bb # v3.8.2
       - name: Download release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
