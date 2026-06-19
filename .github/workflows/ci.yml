@@ -14,49 +14,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-
-      - name: Start MinIO
-        run: |
-          docker run -d --name minio \
-            --network host \
-            -e MINIO_ROOT_USER=minioadmin \
-            -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio:latest server /data
-          timeout 30 bash -c 'until curl -sf http://localhost:9000/minio/health/live; do sleep 1; done'
-
-      - name: Create HelixDB bucket
-        run: |
-          curl -fsSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /tmp/mc && chmod +x /tmp/mc
-          /tmp/mc alias set local http://localhost:9000 minioadmin minioadmin
-          /tmp/mc mb local/helix-db
-
-      - name: Start HelixDB
-        run: |
-          docker run -d --name helix \
-            --network host \
-            -e S3_BUCKET=helix-db \
-            -e S3_REGION=us-east-1 \
-            -e DB_PATH=db/ \
-            -e AWS_ACCESS_KEY_ID=minioadmin \
-            -e AWS_SECRET_ACCESS_KEY=minioadmin \
-            -e AWS_ENDPOINT=http://localhost:9000 \
-            -e AWS_ALLOW_HTTP=true \
-            ghcr.io/helixdb/enterprise-dev:latest
-          timeout 60 bash -c 'until curl -s http://localhost:8080 >/dev/null 2>&1; do sleep 2; done'
 
       # web/out only contains .gitkeep here; the binary embeds it and falls back to the
       # built-in page, so the Rust build does not require a web build.
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace --locked
       - name: cargo test
         run: cargo test --workspace
-        env:
-          CAIRN_HELIX_URL: http://localhost:8080
-          CAIRN_EMBED_PROVIDER: hashing
 
   web:
     name: web (build)

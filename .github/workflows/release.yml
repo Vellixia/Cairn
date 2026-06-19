@@ -8,6 +8,9 @@ permissions:
   contents: write
   packages: write
 
+# All third-party actions use the latest immutable release tag (v* form) so version bumps
+# are easy to read and audit. Dependabot (see .github/dependabot.yml) opens PRs to roll
+# these forward when new tags land.
 jobs:
   # Create the GitHub Release first so the matrix upload jobs have somewhere to attach assets.
   create-release:
@@ -45,32 +48,81 @@ jobs:
       - name: Build web UI (embedded into the binary)
         working-directory: web
         run: npm ci && npm run build
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@v1
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
       # Builds --release, archives the `cairn` binary as cairn-<target>.tar.gz (or .zip on
       # Windows) — matching the install-script names — and uploads to the release created above.
-      - name: Build and upload release binary
+      - name: Build and upload release binaries
         uses: taiki-e/upload-rust-binary-action@v1
         with:
-          bin: cairn
+          # Pack both binaries into one archive per target. The action supports a
+          # comma-separated `bin` list and the install scripts extract both files
+          # from the same tarball. Archive name remains `cairn-$target` so existing
+          # SHA256SUMS filenames and install paths are unchanged.
+          bin: cairn,cairn-cli
           target: ${{ matrix.target }}
           archive: cairn-$target
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  docker:
-    name: docker image (ghcr)
+  # Aggregate the per-target archives into a single SHA256SUMS file and upload it as a release
+  # asset. The install scripts download this file alongside the archive and abort on mismatch.
+  # Re-runs are safe: `gh release upload` is idempotent (--clobber overwrites the existing asset).
+  checksums:
+    name: SHA256SUMS
+    needs: binaries
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - name: Download all release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          gh release download "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir assets \
+            --pattern 'cairn-*.tar.gz' \
+            --pattern 'cairn-*.zip'
+      - name: Generate SHA256SUMS
+        working-directory: assets
+        run: |
+          set -euo pipefail
+          # GNU sha256sum emits "<hex>  "; strip the leading "./" so the filenames in
+          # the manifest match what `gh release download` produces (e.g. "cairn-x86_64-….tar.gz").
+          : > SHA256SUMS
+          find . -maxdepth 1 -type f \( -name 'cairn-*.tar.gz' -o -name 'cairn-*.zip' \) -print0 \
+            | sort -z \
+            | xargs -0 sha256sum -- \
+            | sed 's|  \./|  |' >> SHA256SUMS
+          echo "----- SHA256SUMS -----"
+          cat SHA256SUMS
+      - name: Upload SHA256SUMS
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber \
+            assets/SHA256SUMS
+
+  docker:
+    name: docker image (ghcr)
+    needs: checksums
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/vellixia/cairn
           tags: |
@@ -82,3 +134,87 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+  # Download the uploaded archives, compute SHA-256 digests, and publish a checksum file.
+  # The base64-encoded checksum file is the subject list for the SLSA provenance generator.
+  collect-digests:
+    name: collect artifact digests
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      base64-subjects: ${{ steps.subjects.outputs.base64-subjects }}
+    steps:
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir assets
+      - id: subjects
+        name: Generate base64 subjects for SLSA
+        working-directory: assets
+        run: |
+          cat /dev/null > SHA256SUMS.txt
+          for f in cairn-*.tar.gz cairn-*.zip; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" >> SHA256SUMS.txt
+          done
+          b64=$(base64 -w0 SHA256SUMS.txt)
+          echo "base64-subjects=$b64" >> "$GITHUB_OUTPUT"
+      - name: Upload SHA256SUMS.txt
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: assets
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber SHA256SUMS.txt
+
+  # SLSA Level 3 provenance attestation for the release archives.
+  provenance:
+    name: generate SLSA provenance
+    needs: collect-digests
+    permissions:
+      actions: read
+      id-token: write
+      contents: write
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_generic_slsa3.yml@v2.1.0
+    with:
+      base64-subjects: ${{ needs.collect-digests.outputs.base64-subjects }}
+      provenance-name: cairn.intoto.jsonl
+      upload-assets: true
+
+  # Keyless Sigstore / cosign signatures for each release archive.
+  sign-artifacts:
+    name: cosign sign release artifacts
+    needs: collect-digests
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - uses: sigstore/cosign-installer@v3.10.1
+      - name: Download release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p assets
+          gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --dir assets
+      - name: Sign release artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: assets
+        run: |
+          for f in cairn-*.{tar.gz,zip}; do
+            [ -f "$f" ] || continue
+            cosign sign-blob --yes \
+              --output-signature="$f.sig" \
+              --output-certificate="$f.cert" \
+              "$f"
+          done
+      - name: Upload signatures to release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        working-directory: assets
+        run: |
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber *.sig *.cert

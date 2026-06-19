@@ -4,8 +4,12 @@
 //! and guard (verify, anchor, checkpoint/rollback) engines over REST, and serves the embedded
 //! Next.js control plane — with a built-in fallback page when the UI hasn't been built.
 
+mod auth;
+mod rate_limit;
 mod ui;
 
+use crate::auth::{extract_bearer, TokenInfo, TokenSigner};
+use crate::rate_limit::RateLimiter;
 use axum::{
     extract::{Query, Request, State},
     http::StatusCode,
@@ -16,7 +20,7 @@ use axum::{
 };
 use cairn_assemble::{Assembler, AssemblyReport};
 use cairn_context::{ContextEngine, ReadMode, ReadResult};
-use cairn_core::{Config, Memory, NewMemory};
+use cairn_core::{Config, Memory, NewMemory, TlsConfig};
 use cairn_guard::{Checkpoint, Guard, RollbackReport, VerifyReport};
 use cairn_memory::{MemoryEngine, ScoredMemory};
 use cairn_profile::Profile;
@@ -27,9 +31,10 @@ use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
+use tower_http::limit::RequestBodyLimitLayer;
 
 /// Shared application state, cheaply cloneable (everything behind `Arc`).
 #[derive(Clone)]
@@ -42,18 +47,35 @@ pub struct AppState {
     pub shell: Arc<ShellCompressor>,
     pub profile: Arc<Profile>,
     pub san: Arc<cairn_share::Sanitizer>,
+    /// Config used to create this state, kept so the MCP-over-HTTP bridge can spawn an
+    /// `cairn_mcp::McpServer` without reopening everything by hand.
+    pub cfg: Config,
+    pub tls: Option<TlsConfig>,
+    pub insecure: bool,
+    pub cors_origins: Vec<String>,
+    pub rate_limiter: RateLimiter,
+    pub pair_rate_limiter: RateLimiter,
+    signer: Option<Arc<TokenSigner>>,
 }
 
 impl AppState {
     pub fn new(cfg: &Config) -> cairn_core::Result<Self> {
         let store = Arc::new(Store::open(cfg)?);
-        let ctx = Arc::new(ContextEngine::new(store.clone()));
+        let ctx = Arc::new(ContextEngine::new_with_root(
+            store.clone(),
+            cfg.workspace_root.clone(),
+        ));
         let mem = Arc::new(MemoryEngine::new(store.clone()));
         let guard = Arc::new(Guard::new(store.clone()));
         let asm = Arc::new(Assembler::new(mem.clone()));
         let shell = Arc::new(ShellCompressor::new(store.clone()));
         let profile = Arc::new(Profile::new(mem.clone()));
         let san = Arc::new(cairn_share::Sanitizer::new());
+        let signer = cfg.secret_key.as_ref().map(|k| {
+            Arc::new(
+                TokenSigner::new(k.clone()).expect("CAIRN_SECRET_KEY must be non-empty for auth"),
+            )
+        });
         Ok(Self {
             store,
             ctx,
@@ -63,11 +85,48 @@ impl AppState {
             shell,
             profile,
             san,
+            cfg: cfg.clone(),
+            tls: cfg.tls.clone(),
+            insecure: cfg.insecure,
+            cors_origins: cfg.cors_origins.clone(),
+            rate_limiter: RateLimiter::new(60, std::time::Duration::from_secs(60)),
+            pair_rate_limiter: RateLimiter::new(5, std::time::Duration::from_secs(60)),
+            signer,
         })
+    }
+
+    /// Issue a signed JWT for a newly created token id/name. Panics if no secret is configured.
+    pub fn sign_token(
+        &self,
+        id: &str,
+        name: &str,
+        scope: cairn_core::TokenScope,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> String {
+        self.signer
+            .as_ref()
+            .expect("CAIRN_SECRET_KEY is required to sign device tokens")
+            .mint(id, name, scope, expires_at)
+    }
+
+    /// Decode a bearer JWT into its token id + scope. Returns None if no secret is configured or
+    /// the token is invalid/missing.
+    pub fn verify_bearer(&self, bearer: &str) -> Option<TokenInfo> {
+        self.signer.as_ref()?.verify(bearer).ok()
+    }
+
+    /// Revoke the token identified by a bearer JWT. Returns Ok(false) if the JWT is invalid.
+    pub fn revoke_bearer(&self, bearer: &str) -> cairn_core::Result<bool> {
+        let Some(info) = self.verify_bearer(bearer) else {
+            return Ok(false);
+        };
+        self.store.revoke_token(&info.id)
     }
 }
 
 pub fn router(state: AppState) -> Router {
+    let cors = build_cors(&state.cors_origins);
+    let pair_limiter = state.pair_rate_limiter.clone();
     Router::new()
         .route("/api/health", get(health))
         .route("/api/stats", get(stats))
@@ -90,20 +149,151 @@ pub fn router(state: AppState) -> Router {
         .route("/api/share/import", post(share_import))
         .route("/api/pool/contribute", post(pool_contribute))
         .route("/api/pool", get(pool_list))
+        .route("/api/tools/list", get(tools_list))
+        .route("/api/tools/call", post(tools_call))
         .route("/api/pair/new", post(pair_new))
-        .route("/api/pair/claim", post(pair_claim))
+        .route(
+            "/api/pair/claim",
+            post(pair_claim).layer(axum::middleware::from_fn_with_state(
+                pair_limiter,
+                rate_limit::rate_limit_middleware,
+            )),
+        )
         .route("/api/sync/pull", get(sync_pull))
         .route("/api/sync/push", post(sync_push))
         .fallback(static_handler)
+        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .layer(middleware::from_fn_with_state(
+            state.rate_limiter.clone(),
+            rate_limit::rate_limit_middleware,
+        ))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         .with_state(state)
 }
 
+/// Build a CORS layer from the configured origins. Empty origins means same-origin only (no
+/// cross-origin requests allowed). Specific origins are allowlisted explicitly.
+///
+/// `["*"]` is rejected outright: the Cairn API is fully authenticated, and a wildcard origin
+/// combined with credentialed requests is the dangerous combo that CORS specifically defends
+/// against. Users who actually want full permissive behavior must opt in by listing every
+/// trusted origin explicitly.
+fn build_cors(origins: &[String]) -> CorsLayer {
+    if origins.is_empty() {
+        // Same-origin only: no cross-origin requests allowed. The browser enforces this by
+        // default when no CORS headers are present, so we return a restrictive layer.
+        return CorsLayer::new()
+            .allow_methods(AllowMethods::list(vec![
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::OPTIONS,
+            ]))
+            .allow_headers(AllowHeaders::list(vec![
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ]));
+    }
+    if origins.iter().any(|o| o == "*") {
+        // Hard fail. Use tracing::error so it shows up in any alerting that's watching for
+        // ERROR-level events. We still return a restrictive layer so a misconfigured server
+        // doesn't accidentally open itself up.
+        tracing::error!(
+            "CAIRN_CORS_ORIGINS contains '*' — wildcard origin rejected. The Cairn API is \
+             authenticated; list explicit origins instead (e.g. CAIRN_CORS_ORIGINS=https://app.example.com). \
+             Falling back to same-origin-only CORS."
+        );
+        return CorsLayer::new()
+            .allow_methods(AllowMethods::list(vec![
+                axum::http::Method::GET,
+                axum::http::Method::POST,
+                axum::http::Method::OPTIONS,
+            ]))
+            .allow_headers(AllowHeaders::list(vec![
+                axum::http::header::AUTHORIZATION,
+                axum::http::header::CONTENT_TYPE,
+            ]));
+    }
+    let allowed: Vec<axum::http::HeaderValue> =
+        origins.iter().filter_map(|o| o.parse().ok()).collect();
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(allowed))
+        .allow_methods(AllowMethods::list(vec![
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::OPTIONS,
+        ]))
+        .allow_headers(AllowHeaders::list(vec![
+            axum::http::header::AUTHORIZATION,
+            axum::http::header::CONTENT_TYPE,
+        ]))
+}
+
 /// Bind and serve until shutdown.
-pub async fn serve(addr: SocketAddr, state: AppState) -> std::io::Result<()> {
+///
+/// TLS posture is driven by the bind address and the optional `tls` material on the
+/// [`AppState::config_view`]:
+///
+/// - **Loopback bind, no TLS** → plain HTTP (dev-friendly default).
+/// - **Non-loopback bind, no TLS** → refuses to start; the caller surfaces an error explaining
+///   that network exposure requires `CAIRN_TLS_CERT` + `CAIRN_TLS_KEY`.
+/// - **TLS material present** → serves HTTPS via `axum-server` (rustls).
+pub async fn serve(addr: SocketAddr, mut state: AppState) -> std::io::Result<()> {
+    if let Some(tls) = state.tls.take() {
+        return serve_https(addr, state, tls.cert, tls.key).await;
+    }
+    // No TLS material. We need to look at the bind address: if it's a loopback address we allow
+    // plain HTTP for local dev, otherwise we refuse unless `CAIRN_INSECURE=1` was explicitly set.
+    if !is_loopback_addr(addr) && !state.insecure {
+        return Err(std::io::Error::other(format!(
+            "refusing to serve HTTP on non-loopback address {addr}: \
+             Cairn's API is authenticated and must not travel in cleartext over a network. \
+             Set CAIRN_TLS_CERT and CAIRN_TLS_KEY to a PEM cert+key pair (e.g. via \
+             `mkcert` or a reverse proxy), bind to 127.0.0.1/localhost, or set \
+             CAIRN_INSECURE=1 if this is a trusted local/private network."
+        )));
+    }
+
+    if state.insecure && !is_loopback_addr(addr) {
+        tracing::warn!(
+            "CAIRN_INSECURE=1: serving plain HTTP on {addr}. Do not use this on a public network."
+        );
+    }
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, router(state)).await
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+}
+
+async fn serve_https(
+    addr: SocketAddr,
+    state: AppState,
+    cert: PathBuf,
+    key: PathBuf,
+) -> std::io::Result<()> {
+    use axum_server::tls_rustls::RustlsConfig;
+    let rustls = RustlsConfig::from_pem_file(&cert, &key)
+        .await
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "failed to load TLS material from {} / {}: {e}",
+                    cert.display(),
+                    key.display()
+                ),
+            )
+        })?;
+    let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
+    axum_server::bind_rustls(addr, rustls).serve(app).await
+}
+
+/// True if `addr` resolves to a loopback interface (v4 or v6).
+fn is_loopback_addr(addr: SocketAddr) -> bool {
+    addr.ip().is_loopback()
 }
 
 /// The web UI (landing + control plane), embedded from the Next.js static export. In dev builds
@@ -201,8 +391,13 @@ async fn expand(
 
 async fn remember(
     State(s): State<AppState>,
-    Json(input): Json<NewMemory>,
+    Json(mut input): Json<NewMemory>,
 ) -> Result<Json<Memory>, ApiError> {
+    // Strip injected preference delimiter blocks so memory content cannot smuggle itself back
+    // into the preference pipeline as a model directive.
+    input.content = cairn_profile::strip_preference_blocks(&input.content);
+    input.suspicious =
+        Some(input.suspicious.unwrap_or(false) || cairn_profile::is_suspicious(&input.content));
     Ok(Json(s.mem.remember(input)?))
 }
 
@@ -265,8 +460,10 @@ async fn post_anchor(
     State(s): State<AppState>,
     Json(b): Json<AnchorBody>,
 ) -> Result<Json<Value>, ApiError> {
-    s.guard.set_anchor(&b.goal)?;
-    Ok(Json(json!({ "anchor": b.goal })))
+    let meta = s.guard.set_anchor(&b.goal)?;
+    Ok(Json(
+        json!({ "anchor": meta.goal, "suspicious": meta.suspicious }),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -458,10 +655,10 @@ async fn pair_new(
     let code = pairing_code();
     let expires = (Utc::now() + chrono::Duration::minutes(10))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    s.store
-        .create_pairing(&code, &token.token, &name, &expires)?;
+    s.store.create_pairing(&code, &token.id, &name, &expires)?;
+    let bearer = s.sign_token(&token.id, &name, cairn_core::TokenScope::Write, None);
     Ok(Json(
-        json!({ "code": code, "name": name, "expires_at": expires }),
+        json!({ "code": code, "name": name, "expires_at": expires, "token": bearer }),
     ))
 }
 
@@ -481,11 +678,17 @@ async fn pair_claim(
         .store
         .claim_pairing(b.code.trim().to_uppercase().as_str(), &now)?
     {
-        Some((token, name)) => Ok(Json(json!({ "token": token, "name": name }))),
-        None => Err(ApiError(
-            StatusCode::NOT_FOUND,
-            "invalid or expired pairing code".into(),
-        )),
+        Some((token_id, name)) => {
+            let bearer = s.sign_token(&token_id, &name, cairn_core::TokenScope::Write, None);
+            Ok(Json(json!({ "token": bearer, "name": name })))
+        }
+        None => {
+            tracing::warn!(code = %b.code, "failed pairing claim attempt (invalid or expired code)");
+            Err(ApiError(
+                StatusCode::NOT_FOUND,
+                "invalid or expired pairing code".into(),
+            ))
+        }
     }
 }
 
@@ -534,8 +737,36 @@ async fn sync_push(
     ))
 }
 
+async fn tools_list(State(_s): State<AppState>) -> Json<Value> {
+    Json(json!({ "tools": cairn_mcp::tool_defs() }))
+}
+
+#[derive(Deserialize)]
+struct ToolCallBody {
+    name: String,
+    #[serde(default)]
+    arguments: Value,
+}
+
+async fn tools_call(
+    State(s): State<AppState>,
+    Json(b): Json<ToolCallBody>,
+) -> Result<Json<Value>, ApiError> {
+    let mcp = cairn_mcp::McpServer::new(&s.cfg)
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    match mcp.dispatch(&b.name, &b.arguments) {
+        Ok(text) => Ok(Json(
+            json!({ "content": [{ "type": "text", "text": text }] }),
+        )),
+        Err(msg) => Ok(Json(
+            json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true }),
+        )),
+    }
+}
+
 /// Bearer-token auth. The web UI and `/api/health` are always open; other `/api/*` routes require
-/// a valid device token *once any token has been created* (so local-only setups stay friction-free).
+/// a valid device token *once any token has been created*. When no tokens exist, only loopback
+/// (local) requests are allowed — remote API access without any device token is never safe.
 async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
     // `/api/pair/claim` is open: a brand-new device has no token yet — the short-lived,
@@ -544,14 +775,35 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
         path.starts_with("/api/") && path != "/api/health" && path != "/api/pair/claim";
     if needs_auth {
         match s.store.count_tokens() {
-            Ok(0) => {}
+            Ok(0) => {
+                // No tokens configured — require the request to be local (loopback).
+                // Remote API access without any device token is never safe.
+                let is_local = req
+                    .extensions()
+                    .get::<axum::extract::ConnectInfo<SocketAddr>>()
+                    .map(|ci| ci.0.ip().is_loopback())
+                    .unwrap_or(false);
+                if !is_local {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        Json(json!({ "error": "no device tokens configured; create one with `cairn token create` or access from localhost" })),
+                    )
+                        .into_response();
+                }
+            }
             Ok(_) => {
                 let ok = req
                     .headers()
                     .get(axum::http::header::AUTHORIZATION)
                     .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.strip_prefix("Bearer "))
-                    .map(|t| s.store.validate_token(t).unwrap_or(false))
+                    .and_then(extract_bearer)
+                    .and_then(|bearer| s.verify_bearer(bearer))
+                    .map(|info| {
+                        let method = req.method().as_str();
+                        let path = req.uri().path();
+                        info.scope.allows(method, path)
+                            && s.store.validate_token_id(&info.id).unwrap_or(false)
+                    })
                     .unwrap_or(false);
                 if !ok {
                     return (
@@ -617,12 +869,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these). The temp dir is a scratch
-    /// workspace for the test's files (separate from the store).
+    /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
+    /// The temp dir is a scratch workspace for the test's files (separate from the store).
     fn test_state() -> Option<(AppState, tempfile::TempDir)> {
         let cfg = cairn_store::Store::test_config()?;
-        let dir = tempfile::tempdir().unwrap();
-        Some((AppState::new(&cfg).unwrap(), dir))
+        let dir = tempfile::tempdir().ok()?;
+        Some((AppState::new(&cfg).ok()?, dir))
     }
 
     #[tokio::test]
@@ -850,7 +1102,10 @@ mod tests {
         .0;
         assert_eq!(claimed["name"], "laptop");
         let token = claimed["token"].as_str().unwrap();
-        assert!(state.store.validate_token(token).unwrap());
+        let info = state
+            .verify_bearer(token)
+            .expect("claimed token is a valid JWT");
+        assert!(state.store.validate_token_id(&info.id).unwrap());
 
         // Single-use: a second claim is a 404.
         let err = pair_claim(State(state.clone()), Json(PairClaimBody { code }))
@@ -858,5 +1113,89 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.0, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn tools_list_and_call_expose_mcp_surface_over_http() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+
+        let list = tools_list(State(state.clone())).await.0;
+        let tools = list["tools"].as_array().unwrap();
+        assert!(tools.iter().any(|t| t["name"] == "remember"));
+        assert!(tools.iter().any(|t| t["name"] == "recall"));
+
+        let called = tools_call(
+            State(state.clone()),
+            Json(ToolCallBody {
+                name: "remember".into(),
+                arguments: json!({"content": "cairn exposes mcp tools over http", "kind": "decision"}),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let text = called["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("remembered"));
+
+        let recalled = tools_call(
+            State(state.clone()),
+            Json(ToolCallBody {
+                name: "recall".into(),
+                arguments: json!({"query": "mcp http", "limit": 5}),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let text = recalled["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("mcp"), "recall text was: {text}");
+    }
+
+    #[test]
+    fn build_cors_rejects_wildcard_origin() {
+        // A bare "*" must not produce a permissive layer. We assert that the returned layer's
+        // allow_origin is NOT `AllowOrigin::any()` (the permissive wildcard marker).
+        let layer = build_cors(&["*".to_string()]);
+        // AllowOrigin doesn't expose PartialEq, so we format-and-stringify instead: a permissive
+        // layer renders as `*` in its Debug output; a restricted layer renders the origin list.
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any") && !dbg.contains('*'),
+            "wildcard CORS must not produce a permissive layer; got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn build_cors_rejects_wildcard_in_list() {
+        // Even if "*" is one entry among many, reject and fall back to restrictive. A user
+        // passing ["https://app.example.com", "*"] gets the same protection as ["*"] alone.
+        let layer = build_cors(&["https://app.example.com".to_string(), "*".to_string()]);
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "mixed list containing '*' must not produce a permissive layer; got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn build_cors_accepts_explicit_origin_list() {
+        let layer = build_cors(&["https://app.example.com".to_string()]);
+        let dbg = format!("{:?}", layer);
+        assert!(
+            dbg.contains("https://app.example.com"),
+            "explicit origin should appear in layer debug; got: {dbg}"
+        );
+    }
+
+    #[test]
+    fn build_cors_empty_yields_restrictive() {
+        let layer = build_cors(&[]);
+        let dbg = format!("{:?}", layer);
+        assert!(
+            !dbg.contains("Any"),
+            "empty origin list must not produce a permissive layer; got: {dbg}"
+        );
     }
 }

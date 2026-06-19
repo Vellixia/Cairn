@@ -50,6 +50,7 @@ const MEM_COLS: &[&str] = &[
     "session_id",
     "importance",
     "access_count",
+    "suspicious",
     "created_at",
     "updated_at",
 ];
@@ -79,8 +80,20 @@ impl HelixBackend {
     /// Connect to the HelixDB server at `url`, build the embedder from `cfg`, and ensure the
     /// memory vector index exists.
     pub(crate) fn connect(url: &str, cfg: &Config) -> Result<Self> {
+        if url.starts_with("http://") {
+            let is_loopback =
+                url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]");
+            if !is_loopback {
+                tracing::warn!(
+                    "HelixDB URL is plain HTTP ({}) — credentials travel in cleartext. \
+                     Use https:// or a loopback address.",
+                    redact_url(url)
+                );
+            }
+        }
         let client = Client::new(Some(url))
-            .map_err(|e| Error::Storage(format!("helix connect to {url}: {e}")))?;
+            .map_err(|e| Error::Storage(format!("helix connect to {}: {e}", redact_url(url))))?;
+        let client = client.with_api_key(cfg.helix_token.as_deref());
         let embed = cairn_embed::from_config(&cfg.embed)?;
         let ns = cfg.helix_ns.clone().unwrap_or_else(|| "cairn_".to_string());
         let backend = Self { client, embed, ns };
@@ -237,6 +250,7 @@ impl StoreBackend for HelixBackend {
             ),
             ("importance".into(), (m.importance as f64).into()),
             ("access_count".into(), m.access_count.into()),
+            ("suspicious".into(), m.suspicious.into()),
             ("created_at".into(), ts(m.created_at).into()),
             ("updated_at".into(), ts(m.updated_at).into()),
             ("embedding".into(), embedding.into()),
@@ -330,52 +344,64 @@ impl StoreBackend for HelixBackend {
     }
 
     fn create_token(&self, name: &str) -> Result<DeviceToken> {
+        let id = uuid_simple();
         let token = DeviceToken {
-            token: format!("ct_{}", uuid_simple()),
+            id: id.clone(),
+            token: None,
             name: name.to_string(),
+            scope: cairn_core::TokenScope::Write,
+            expires_at: None,
+            last_used_at: None,
             created_at: Utc::now(),
         };
         self.add_node(
             "Token",
             vec![
-                ("token".into(), token.token.clone().into()),
+                ("id".into(), id.into()),
                 ("name".into(), token.name.clone().into()),
+                ("scope".into(), token.scope.as_str().to_string().into()),
                 ("created_at".into(), ts(token.created_at).into()),
             ],
         )?;
         Ok(token)
     }
 
-    fn validate_token(&self, token: &str) -> Result<bool> {
+    fn validate_token_id(&self, token_id: &str) -> Result<bool> {
         Ok(!self
-            .read_where("Token", "token", token, &["token"])?
+            .read_where("Token", "id", token_id, &["id"])?
             .is_empty())
     }
 
-    fn revoke_token(&self, token: &str) -> Result<bool> {
+    fn revoke_token(&self, token_id: &str) -> Result<bool> {
         let existed = !self
-            .read_where("Token", "token", token, &["token"])?
+            .read_where("Token", "id", token_id, &["id"])?
             .is_empty();
         if existed {
-            self.drop_where("Token", "token", token)?;
+            self.drop_where("Token", "id", token_id)?;
         }
         Ok(existed)
     }
 
     fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
         Ok(self
-            .read_rows("Token", &["token", "name", "created_at"])?
+            .read_rows("Token", &["id", "name", "scope", "created_at"])?
             .iter()
-            .map(|r| DeviceToken {
-                token: get_str(r, "token"),
-                name: get_str(r, "name"),
-                created_at: parse_ts(&get_str(r, "created_at")),
+            .map(|r| {
+                let mut t = DeviceToken::meta(
+                    get_str(r, "id"),
+                    get_str(r, "name"),
+                    parse_ts(&get_str(r, "created_at")),
+                );
+                t.scope = get_str(r, "scope")
+                    .parse()
+                    .unwrap_or(cairn_core::TokenScope::Write);
+                t
             })
             .collect())
     }
 
     fn count_tokens(&self) -> Result<i64> {
-        Ok(self.read_rows("Token", &["token"])?.len() as i64)
+        Ok(self.read_rows("Token", &["id"])?.len() as i64)
     }
 
     fn get_last_sync(&self, server: &str) -> Result<Option<DateTime<Utc>>> {
@@ -573,6 +599,19 @@ fn ts(dt: DateTime<Utc>) -> String {
     dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
+/// Strip userinfo (user:pass@) from a URL for safe logging.
+fn redact_url(url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(url) {
+        if parsed.username() != "" || parsed.password().is_some() {
+            let _ = parsed.set_username("");
+            let _ = parsed.set_password(None);
+        }
+        parsed.to_string()
+    } else {
+        url.to_string()
+    }
+}
+
 fn parse_ts(s: &str) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
@@ -608,6 +647,10 @@ fn get_f64(m: &Map<String, Value>, k: &str) -> f64 {
         .unwrap_or(0.0)
 }
 
+fn get_bool(m: &Map<String, Value>, k: &str) -> bool {
+    m.get(k).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
 /// Reconstruct a [`Memory`] from a projected property row.
 fn memory_from_props(m: &Map<String, Value>) -> Memory {
     let concepts: Vec<String> = serde_json::from_str(&get_str(m, "concepts")).unwrap_or_default();
@@ -627,6 +670,7 @@ fn memory_from_props(m: &Map<String, Value>) -> Memory {
         },
         importance: get_f64(m, "importance") as f32,
         access_count: get_i64(m, "access_count"),
+        suspicious: get_bool(m, "suspicious"),
         created_at: parse_ts(&get_str(m, "created_at")),
         updated_at: parse_ts(&get_str(m, "updated_at")),
     }
@@ -649,9 +693,15 @@ mod live {
             host: "127.0.0.1".into(),
             port: 7777,
             helix_url: Some(url.clone()),
+            helix_token: None,
             // Unique namespace per backend so concurrent tests never collide on the shared server.
             helix_ns: Some(format!("test_{}_", uuid_simple())),
             default_server: None,
+            secret_key: None,
+            tls: None,
+            insecure: false,
+            workspace_root: None,
+            cors_origins: vec![],
             embed: EmbedConfig {
                 provider: "ollama".into(),
                 model: None,
@@ -686,24 +736,24 @@ mod live {
         let Some(be) = backend() else { return };
         let before = be.count_tokens().expect("count");
         let tok = be.create_token("test-device").expect("create_token");
-        assert!(be.validate_token(&tok.token).expect("validate"));
+        assert!(be.validate_token_id(&tok.id).expect("validate"));
         assert!(be
             .list_tokens()
             .expect("list")
             .iter()
-            .any(|t| t.token == tok.token && t.name == "test-device"));
+            .any(|t| t.id == tok.id && t.name == "test-device"));
         assert!(be.count_tokens().expect("count after") > before);
 
         // Revocation: a label-scoped delete removes exactly this token.
         assert!(
-            be.revoke_token(&tok.token).expect("revoke"),
+            be.revoke_token(&tok.id).expect("revoke"),
             "first revoke reports removed"
         );
         assert!(!be
-            .validate_token(&tok.token)
+            .validate_token_id(&tok.id)
             .expect("validate after revoke"));
         assert!(
-            !be.revoke_token(&tok.token).expect("revoke again"),
+            !be.revoke_token(&tok.id).expect("revoke again"),
             "second revoke is a no-op"
         );
     }
@@ -759,6 +809,7 @@ mod live {
             session_id: None,
             importance: 0.7,
             access_count: 0,
+            suspicious: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

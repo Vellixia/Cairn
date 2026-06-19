@@ -13,8 +13,8 @@
 //!
 //! Hooks must never break the agent: any internal error is logged to stderr and we still exit 0.
 
+use crate::State;
 use anyhow::Result;
-use cairn_api::AppState;
 use cairn_core::{Config, MemoryKind, MemoryTier, NewMemory};
 use serde_json::{json, Value};
 use std::io::Read;
@@ -32,7 +32,7 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(input.trim()).unwrap_or(Value::Null);
 
-    let state = AppState::new(cfg)?;
+    let state = State::open(cfg)?;
 
     match event {
         "SessionStart" => {

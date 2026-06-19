@@ -1,5 +1,6 @@
 //! The shared error type for Cairn.
 
+use std::path::PathBuf;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -23,6 +24,9 @@ pub enum Error {
 
     #[error("{0}")]
     Other(String),
+
+    #[error("path escapes workspace root: {0}")]
+    WorkspaceEscape(PathBuf),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

@@ -38,7 +38,10 @@ impl McpServer {
         let store = Arc::new(Store::open(cfg)?);
         let mem = Arc::new(MemoryEngine::new(store.clone()));
         Ok(Self {
-            ctx: Arc::new(ContextEngine::new(store.clone())),
+            ctx: Arc::new(ContextEngine::new_with_root(
+                store.clone(),
+                cfg.workspace_root.clone(),
+            )),
             guard: Arc::new(Guard::new(store.clone())),
             asm: Arc::new(Assembler::new(mem.clone())),
             shell: Arc::new(ShellCompressor::new(store.clone())),
@@ -119,6 +122,9 @@ impl McpServer {
             .unwrap_or_else(|| json!({}));
         match self.dispatch(name, &args) {
             Ok(text) => ok(id, json!({ "content": [{ "type": "text", "text": text }] })),
+            Err(msg) if msg.contains("escapes workspace root") => {
+                err(id, -32602, &format!("workspace root violation: {msg}"))
+            }
             Err(msg) => ok(
                 id,
                 json!({ "content": [{ "type": "text", "text": format!("error: {msg}") }], "isError": true }),
@@ -126,15 +132,23 @@ impl McpServer {
         }
     }
 
-    fn dispatch(&self, name: &str, args: &Value) -> std::result::Result<String, String> {
+    /// Confine a tool-supplied path to the workspace root, returning a JSON-RPC-friendly error
+    /// string if it escapes. This is the MCP-layer gate; the same check is also enforced inside
+    /// the context engine.
+    fn resolve_tool_path(&self, raw: &str) -> std::result::Result<std::path::PathBuf, String> {
+        self.ctx
+            .resolve_path(std::path::Path::new(raw))
+            .map_err(|e| e.to_string())
+    }
+
+    /// Dispatch a single tool call. Public so the HTTP API can expose the same tool surface.
+    pub fn dispatch(&self, name: &str, args: &Value) -> std::result::Result<String, String> {
         match name {
             "read" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
+                let resolved = self.resolve_tool_path(path)?;
                 let mode = ReadMode::parse(str_arg(args.get("mode")));
-                let r = self
-                    .ctx
-                    .read(std::path::Path::new(path), mode)
-                    .map_err(|e| e.to_string())?;
+                let r = self.ctx.read(&resolved, mode).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&r).map_err(|e| e.to_string())
             }
             "expand" => {
@@ -257,9 +271,10 @@ impl McpServer {
             "verify" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
                 let content = str_arg(args.get("content")).ok_or("missing 'content'")?;
+                let resolved = self.resolve_tool_path(path)?;
                 let r = self
                     .guard
-                    .verify_edit(std::path::Path::new(path), content)
+                    .verify_edit(&resolved, content)
                     .map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&r).map_err(|e| e.to_string())
             }
@@ -273,7 +288,8 @@ impl McpServer {
     }
 }
 
-fn tool_defs() -> Value {
+/// Tool definitions exposed by this MCP server. Public so the HTTP API can mirror them.
+pub fn tool_defs() -> Value {
     json!([
         {
             "name": "read",
@@ -439,14 +455,185 @@ fn err(id: Option<Value>, code: i64, message: &str) -> Value {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
 }
 
+/// Start the right MCP backend for the current environment. If `CAIRN_SERVER` is set, the MCP
+/// server forwards tool calls to that remote Cairn HTTP API; otherwise it opens the local store.
+pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
+    if let Some(server) = cfg.default_server.as_deref() {
+        let token = std::env::var("CAIRN_TOKEN").ok();
+        let mut proxy = RemoteProxy::new(server, token);
+        // Use the configured workspace root (or cwd) as the host project dir for path rewriting.
+        if let Some(root) = &cfg.workspace_root {
+            proxy.host_workspace = root.clone();
+        }
+        proxy.serve_stdio()
+    } else {
+        McpServer::new(cfg)
+            .map_err(|e| std::io::Error::other(e.to_string()))?
+            .serve_stdio()
+    }
+}
+
+/// An MCP stdio server that forwards tool calls to a remote Cairn HTTP API.
+///
+/// File-local tools (`read`, `verify`, `checkpoint`, `rollback`) get their `path` argument
+/// rewritten: if the path is absolute and inside the proxy's current working directory, it is
+/// made relative to that directory before forwarding. The remote server has its
+/// `CAIRN_WORKSPACE_ROOT` pointed at the mounted project, so relative paths resolve correctly
+/// inside the container.
+pub struct RemoteProxy {
+    server: String,
+    token: Option<String>,
+    /// The host directory where `cairn-cli mcp` was launched (the project root from the agent).
+    host_workspace: std::path::PathBuf,
+}
+
+impl RemoteProxy {
+    pub fn new(server: &str, token: Option<String>) -> Self {
+        Self {
+            server: server.trim_end_matches('/').to_string(),
+            token,
+            host_workspace: std::env::current_dir().unwrap_or_default(),
+        }
+    }
+
+    pub fn serve_stdio(&self) -> std::io::Result<()> {
+        let stdin = std::io::stdin();
+        let mut stdout = std::io::stdout();
+        let mut locked = stdin.lock();
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if locked.read_line(&mut line)? == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let req: Value = match serde_json::from_str(trimmed) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("cairn-mcp: ignoring unparseable message: {e}");
+                    continue;
+                }
+            };
+            if let Some(resp) = self.handle(&req) {
+                stdout.write_all(serde_json::to_string(&resp)?.as_bytes())?;
+                stdout.write_all(b"\n")?;
+                stdout.flush()?;
+            }
+        }
+        Ok(())
+    }
+
+    fn handle(&self, req: &Value) -> Option<Value> {
+        let id = req.get("id").cloned();
+        let method = req.get("method").and_then(Value::as_str).unwrap_or("");
+        match method {
+            "initialize" => {
+                let ver = req
+                    .get("params")
+                    .and_then(|p| p.get("protocolVersion"))
+                    .and_then(Value::as_str)
+                    .unwrap_or(PROTOCOL_VERSION)
+                    .to_string();
+                Some(ok(
+                    id,
+                    json!({
+                        "protocolVersion": ver,
+                        "capabilities": { "tools": {} },
+                        "serverInfo": { "name": "cairn-cli", "version": env!("CARGO_PKG_VERSION") }
+                    }),
+                ))
+            }
+            "notifications/initialized" | "initialized" => None,
+            "ping" => Some(ok(id, json!({}))),
+            "tools/list" => Some(self.list_tools(id)),
+            "tools/call" => Some(self.call_tool(id, req.get("params"))),
+            other => id.map(|id| err(Some(id), -32601, &format!("method not found: {other}"))),
+        }
+    }
+
+    fn list_tools(&self, id: Option<Value>) -> Value {
+        match self.get("/api/tools/list") {
+            Ok(v) => ok(id, v),
+            Err(e) => err(id, -32603, &format!("failed to list tools: {e}")),
+        }
+    }
+
+    fn call_tool(&self, id: Option<Value>, params: Option<&Value>) -> Value {
+        let Some(params) = params else {
+            return err(id, -32602, "missing params");
+        };
+        // For file-local tools, rewrite absolute host paths to workspace-relative paths so the
+        // remote server (which has the project mounted at its workspace root) can find them.
+        let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+        let rewritten = if matches!(name, "read" | "verify" | "checkpoint" | "rollback") {
+            self.rewrite_file_path(params)
+        } else {
+            params.clone()
+        };
+        match self.post("/api/tools/call", &rewritten) {
+            Ok(v) => ok(id, v),
+            Err(e) => {
+                let msg = format!("tool call failed: {e}");
+                ok(
+                    id,
+                    json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                )
+            }
+        }
+    }
+
+    /// If `params.arguments.path` is an absolute path inside `host_workspace`, replace it with
+    /// the workspace-relative form. Returns a cloned params Value with the rewritten path.
+    fn rewrite_file_path(&self, params: &Value) -> Value {
+        let mut out = params.clone();
+        if let Some(args) = out.get_mut("arguments").and_then(|v| v.as_object_mut()) {
+            if let Some(path_val) = args.get("path").and_then(Value::as_str) {
+                let p = std::path::Path::new(path_val);
+                if p.is_absolute() {
+                    if let Ok(rel) = p.strip_prefix(&self.host_workspace) {
+                        args.insert(
+                            "path".into(),
+                            Value::String(rel.to_string_lossy().into_owned()),
+                        );
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn get(&self, path: &str) -> std::result::Result<Value, String> {
+        let url = format!("{}{path}", self.server);
+        let mut req = ureq::get(&url);
+        if let Some(t) = &self.token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let resp = req.call().map_err(|e| e.to_string())?;
+        resp.into_json().map_err(|e| e.to_string())
+    }
+
+    fn post(&self, path: &str, body: &Value) -> std::result::Result<Value, String> {
+        let url = format!("{}{path}", self.server);
+        let mut req = ureq::post(&url);
+        if let Some(t) = &self.token {
+            req = req.set("Authorization", &format!("Bearer {t}"));
+        }
+        let resp = req.send_json(body).map_err(|e| e.to_string())?;
+        resp.into_json().map_err(|e| e.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these integration tests).
+    /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
     fn server() -> Option<McpServer> {
         let cfg = cairn_store::Store::test_config()?;
-        Some(McpServer::new(&cfg).unwrap())
+        McpServer::new(&cfg).ok()
     }
 
     #[test]

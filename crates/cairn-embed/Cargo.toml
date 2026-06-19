@@ -17,4 +17,6 @@ local = ["dep:fastembed"]
 cairn-core.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
-fastembed = { version = "4", optional = true }
+sha2.workspace = true
+fastembed = { version = "4.0", optional = true }
+tracing.workspace = true

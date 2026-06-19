@@ -9,11 +9,11 @@
 //! addressed by content hash. So whatever compact view the agent gets, the original is one
 //! [`ContextEngine::expand`] call away — byte-identical.
 
-use cairn_core::{ContentHash, Result};
+use cairn_core::{ContentHash, Error, Result};
 use cairn_store::Store;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 mod outline;
@@ -90,21 +90,64 @@ struct CacheEntry {
 
 pub struct ContextEngine {
     store: Arc<Store>,
+    root: Option<PathBuf>,
     cache: Mutex<HashMap<String, CacheEntry>>,
 }
 
 impl ContextEngine {
     pub fn new(store: Arc<Store>) -> Self {
+        Self::new_with_root(store, None)
+    }
+
+    pub fn new_with_root(store: Arc<Store>, root: Option<PathBuf>) -> Self {
         Self {
             store,
+            root,
             cache: Mutex::new(HashMap::new()),
         }
     }
 
+    /// Canonicalize `path` and ensure it stays inside the configured workspace root.
+    /// Symlinks are resolved; attempts to escape with `..`, absolute paths outside the root, or
+    /// symlinks pointing outside the root return [`cairn_core::Error::WorkspaceEscape`].
+    pub fn resolve_path(&self, path: &Path) -> Result<PathBuf> {
+        resolve_within_root(self.root.as_deref(), path)
+    }
+
+    /// Write `content` to `path` after confining it to the workspace root. The new content is
+    /// retained in the blob store and recorded as the current file version.
+    pub fn write(&self, path: &Path, content: &str) -> Result<()> {
+        let path = self.resolve_path(path)?;
+        let bytes = content.as_bytes();
+        let hash = self.store.blobs().put(bytes)?;
+        std::fs::write(&path, bytes)?;
+        let lines = content.lines().count();
+        let key = path.to_string_lossy().into_owned();
+        let _ = self.store.record_file_version(&key, &hash.0, lines as i64);
+        // Update the read cache so later reads see the new state without a fresh disk hit.
+        let mtime_ns = std::fs::metadata(&path)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        self.cache.lock().unwrap().insert(
+            key,
+            CacheEntry {
+                mtime_ns,
+                hash,
+                content: content.to_string(),
+                lines,
+            },
+        );
+        Ok(())
+    }
+
     /// Read a file, applying the cache / diff / retention logic above.
     pub fn read(&self, path: &Path, mode: ReadMode) -> Result<ReadResult> {
+        let path = self.resolve_path(path)?;
         let key = path.to_string_lossy().to_string();
-        let meta = std::fs::metadata(path)?;
+        let meta = std::fs::metadata(&path)?;
         let mtime_ns = meta
             .modified()
             .ok()
@@ -140,14 +183,14 @@ impl ContextEngine {
         }
 
         // Read fresh and retain the exact original (no context loss).
-        let bytes = std::fs::read(path)?;
+        let bytes = std::fs::read(&path)?;
         let content = String::from_utf8_lossy(&bytes).into_owned();
         let hash = self.store.blobs().put(&bytes)?;
         let lines = content.lines().count();
 
         // Record this version as the agent's edit baseline so the PostToolUse guard can later
         // detect silent corruption (a large unreplaced deletion vs. what was read).
-        let canonical = std::fs::canonicalize(path)
+        let canonical = std::fs::canonicalize(&path)
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|_| key.clone());
         let _ = self
@@ -157,7 +200,7 @@ impl ContextEngine {
         // Structural (AST) views: render the file as just its signatures. Falls through to a full
         // read for unsupported languages or unparseable input.
         if mode.is_structural() {
-            if let Some(o) = outline::outline(path, &content, mode == ReadMode::Map) {
+            if let Some(o) = outline::outline(&path, &content, mode == ReadMode::Map) {
                 let est = estimate_tokens(&o.text);
                 let note = format!(
                     "{} signature outline ({} items); `expand {}` for the full {lines} lines",
@@ -213,7 +256,7 @@ impl ContextEngine {
             _ => {
                 let mut note = format!("full file; {lines} lines; handle {}", hash.short());
                 // Point the agent at the cheaper structural view when one is available.
-                if lines > 40 && outline::supported(path) {
+                if lines > 40 && outline::supported(&path) {
                     note.push_str("; try mode=signatures for a structural outline");
                 }
                 ReadResult {
@@ -249,6 +292,65 @@ impl ContextEngine {
         let ch = ContentHash(hash.to_string());
         self.store.blobs().get_str(&ch)
     }
+}
+
+/// Resolve `path` against an optional workspace root, rejecting anything that escapes.
+///
+/// - If no root is configured, the path is canonicalized normally.
+/// - If a root is configured, relative paths are joined to it, absolute paths are checked against
+///   it, and `..` components and symlinks that resolve outside the root are rejected.
+fn resolve_within_root(root: Option<&Path>, path: &Path) -> Result<PathBuf> {
+    if let Some(root) = root {
+        let root = canonical_or_normalized(root)?;
+        let candidate = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            root.join(path)
+        };
+        let resolved = if candidate.exists() {
+            std::fs::canonicalize(&candidate)?
+        } else {
+            normalize_path(&candidate)
+        };
+        if resolved.starts_with(&root) {
+            Ok(resolved)
+        } else {
+            Err(Error::WorkspaceEscape(resolved))
+        }
+    } else if path.exists() {
+        std::fs::canonicalize(path).map_err(Into::into)
+    } else {
+        // No root is configured; accept the path as-given (canonicalization may fail for new files).
+        Ok(path.to_path_buf())
+    }
+}
+
+/// Canonicalize a path if it exists, otherwise return a normalized absolute form.
+fn canonical_or_normalized(path: &Path) -> Result<PathBuf> {
+    if path.exists() {
+        std::fs::canonicalize(path).map_err(Into::into)
+    } else {
+        let mut base = std::env::current_dir()?;
+        if path.is_absolute() {
+            base = PathBuf::new();
+        }
+        Ok(normalize_path(&base.join(path)))
+    }
+}
+
+/// Collapse `.` and `..` components without touching the filesystem.
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => out.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+        }
+    }
+    out
 }
 
 /// A compact diff: only added/removed lines (prefixed `+`/`-`), equal lines omitted.
@@ -387,5 +489,128 @@ pub fn build() -> Widget { Widget::new(1) }
         let r = eng.read(&file, ReadMode::Signatures).unwrap();
         assert_eq!(r.status, ReadStatus::Full);
         assert_eq!(r.view, body);
+    }
+
+    /// A workspace-rooted engine, skipped when Helix is offline.
+    fn rooted_engine() -> Option<(ContextEngine, tempfile::TempDir)> {
+        let store = Arc::new(Store::open_for_test()?);
+        let dir = tempfile::tempdir().unwrap();
+        Some((
+            ContextEngine::new_with_root(store, Some(dir.path().to_path_buf())),
+            dir,
+        ))
+    }
+
+    #[test]
+    fn rooted_read_allows_inside_and_rejects_outside() {
+        let Some((eng, dir)) = rooted_engine() else {
+            return;
+        };
+        let inside = dir.path().join("inside.txt");
+        std::fs::write(&inside, "ok").unwrap();
+
+        assert!(
+            eng.read(&inside, ReadMode::Full).is_ok(),
+            "path inside root should be allowed"
+        );
+
+        let outside = tempfile::tempdir().unwrap().path().join("outside.txt");
+        std::fs::write(&outside, "secret").unwrap();
+        let err = eng
+            .read(&outside, ReadMode::Full)
+            .expect_err("absolute outside path must be rejected");
+        assert!(
+            err.to_string().contains("escapes workspace root"),
+            "was: {err}"
+        );
+
+        let traversal = dir.path().join("../escape_attempt.txt");
+        let err = eng
+            .read(&traversal, ReadMode::Full)
+            .expect_err("../ traversal must be rejected");
+        assert!(
+            err.to_string().contains("escapes workspace root"),
+            "was: {err}"
+        );
+    }
+
+    #[test]
+    fn rooted_write_allows_inside_and_rejects_traversal() {
+        let Some((eng, dir)) = rooted_engine() else {
+            return;
+        };
+        let inside = dir.path().join("new.txt");
+        eng.write(&inside, "hello\n")
+            .expect("write inside root should succeed");
+        assert_eq!(std::fs::read_to_string(&inside).unwrap(), "hello\n");
+
+        let traversal = dir.path().join("../../escape.txt");
+        let err = eng
+            .write(&traversal, "x")
+            .expect_err("../ traversal must be rejected");
+        assert!(
+            err.to_string().contains("escapes workspace root"),
+            "was: {err}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rooted_read_rejects_symlink_escape() {
+        let Some((eng, dir)) = rooted_engine() else {
+            return;
+        };
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().join("target.txt");
+        std::fs::write(&outside, "escaped").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+        let err = eng
+            .read(&link, ReadMode::Full)
+            .expect_err("symlink escaping root must be rejected");
+        assert!(
+            err.to_string().contains("escapes workspace root"),
+            "was: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_within_root_unit_tests() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("file.txt");
+        std::fs::write(&file, "x").unwrap();
+
+        // Relative inside root resolves to an absolute path under root.
+        let resolved = resolve_within_root(Some(root), Path::new("file.txt")).unwrap();
+        let canonical_root = std::fs::canonicalize(root).unwrap();
+        assert!(
+            resolved.starts_with(&canonical_root),
+            "resolved {:?} should start with {:?}",
+            resolved,
+            canonical_root
+        );
+
+        // Absolute outside root is rejected.
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().join("outside.txt");
+        std::fs::write(&outside, "y").unwrap();
+        let err = resolve_within_root(Some(root), &outside).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes workspace root"),
+            "was: {err}"
+        );
+
+        // Traversal via .. is rejected even when the target does not exist.
+        let err = resolve_within_root(Some(root), Path::new("../nope.txt")).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes workspace root"),
+            "was: {err}"
+        );
+
+        // No root configured: normal canonicalization.
+        let resolved = resolve_within_root(None, &file).unwrap();
+        assert!(resolved.exists());
     }
 }

@@ -38,7 +38,6 @@ follows benefits (**collective knowledge**); each session leaves a marker the ne
   multi-agent orchestration in v1 — see Scope.)
 - **Hero:** *all of it* — five pillars, unified. Umbrella message: "the context & reliability
   layer." Punch line: "make any model smart."
-- **First milestone:** brand + landing + dashboard **and** live server + sync, in parallel.
 - **Name:** Cairn (backups: Mnemo, Marrow).
 
 ---
@@ -48,6 +47,42 @@ follows benefits (**collective knowledge**); each session leaves a marker the ne
 **The throughline: the bottleneck is the *context fed to the model* and the *drift over time* —
 not the model's IQ.** That is exactly the gap Cairn fills, and why "make a dumb model smart" is
 achievable. Failures group into five classes:
+
+```mermaid
+graph TD
+    Root["Agent failures"]
+
+    A["A. Context window"]
+    B["B. Long-horizon"]
+    C["C. Continuity"]
+    D["D. Knowledge"]
+    E["E. Multi-agent"]
+
+    Root --> A
+    Root --> B
+    Root --> C
+    Root --> D
+    Root --> E
+
+    A --> A1["context rot"]
+    A --> A2["lost-in-the-middle"]
+    A --> A3["lossy compaction"]
+
+    B --> B1["error compounding"]
+    B --> B2["silent corruption"]
+    B --> B3["drift"]
+
+    C --> C1["cross-session amnesia"]
+    C --> C2["cross-device silos"]
+    C --> C3["re-reading files"]
+
+    D --> D1["weak models lack context"]
+    D --> D2["knowledge siloed per user"]
+    D --> D3["memory-only tools"]
+
+    E --> E1["coordination failures"]
+    E --> E2["scoped out of v1"]
+```
 
 **A. Context-window failures (architectural — bigger windows don't help):**
 - **Context rot** — Chroma tested 18 frontier models; *all* degrade as input grows, even on
@@ -95,6 +130,43 @@ multi-agent. → Cairn targets **single-agent reliability first**; shared-contex
 
 ## Product Vision — five pillars
 
+```mermaid
+graph TD
+    Root["Cairn — 5 pillars"]
+
+    Remember["Remember"]
+    Compress["Compress"]
+    Assemble["Assemble"]
+    Reliable["Reliable"]
+    Smarter["Smarter together"]
+
+    Root --> Remember
+    Root --> Compress
+    Root --> Assemble
+    Root --> Reliable
+    Root --> Smarter
+
+    Remember --> R1["cross-session memory"]
+    Remember --> R2["cross-device sync"]
+    Remember --> R3["decisions + rationale"]
+
+    Compress --> C1["file reads — AST"]
+    Compress --> C2["shell output"]
+    Compress --> C3["lossless via expand"]
+
+    Assemble --> A1["token-budgeted"]
+    Assemble --> A2["edge-ordered"]
+    Assemble --> A3["anti-context-rot"]
+
+    Reliable --> Re1["verify vs originals"]
+    Reliable --> Re2["drift detection"]
+    Reliable --> Re3["checkpoint / rollback"]
+
+    Smarter --> S1["preference learning"]
+    Smarter --> S2["collective knowledge"]
+    Smarter --> S3["opt-in federation"]
+```
+
 1. **Remember** — never start cold; decisions/tasks/rationale persist across sessions, devices, agents.
 2. **Compress without loss** — files, shell output, responses shrink in the window, stay fully recoverable.
 3. **Assemble lean context** — fight context rot: feed less, higher-signal, well-ordered context.
@@ -105,10 +177,6 @@ multi-agent. → Cairn targets **single-agent reliability first**; shared-contex
 **Differentiation / moat:** most agent-memory tools are memory-only, cloud/library, Python.
 Cairn unifies **memory + no-loss compression + anti-rot assembly + active reliability + collective
 federation** as one self-hostable **Rust** binary. The *integration* is the moat.
-
-**Benchmark plan (publish, honestly, as targets→measured):** LongMemEval + LoCoMo (recall),
-token-reduction on a standard session (target 60–90%), **byte-identical** expand/recover,
-task-success lift at increasing horizons (drift), all in CI.
 
 ---
 
@@ -125,119 +193,47 @@ task-success lift at increasing horizons (drift), all in CI.
 
 ---
 
-## Architecture
-
-```
- Devices/Agents (Claude Code, Codex, OpenCode, Cursor, Windsurf, Gemini CLI...)
-   │  one MCP endpoint (stdio shim OR HTTP) + per-device token
-   │  + lifecycle hooks (SessionStart, Pre/PostToolUse, PreCompact, SessionEnd)
-   ▼
- ┌──────────────────────── Cairn server (one Rust binary) ─────────────────────────┐
- │ cairn-mcp (curated ~26 tools)        cairn-api (axum REST+WS, auth, tokens)      │
- │ ┌─────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌──────────┐┌──────────────┐ │
- │ │ context ││ shell  ││ memory ││ profile││ guard  ││collective││    sync      │ │
- │ │ read +  ││100+ cmd││4 tiers,││ learns ││ verify ││ opt-in,  ││ offline-first│ │
- │ │ cache + ││compress││ decay, ││ user   ││ drift, ││ sanitized││ CRDT, E2E    │ │
- │ │ ASSEMBLE││+recover││ dedup  ││ prefs  ││re-anchor││federate ││              │ │
- │ └────┬────┘└───┬────┘└───┬────┘└───┬────┘└───┬────┘└────┬─────┘└──────┬───────┘ │
- │      └ search (BM25+vector+graph, RRF+rerank+MMR) ─ graph (property+temporal) ┘ │
- │      blob-store: full-fidelity originals (content-hash) ── EXPAND/RECOVER any view│
- │      cairn-store: SQLite+sqlite-vec (local) │ Postgres+pgvector (server)          │
- └───────────────────────────────────────────────────────────────────────────────────┘
-   ▲ web dashboard + landing (Next.js, embedded via rust-embed)   ▲ federation: signed,
-   ▼ browser                                                      ▼ sanitized knowledge packs
-```
-
-### Cargo workspace (crates)
-
-- `cairn-core` — domain types, config, errors; memory/context/profile/knowledge/reliability model.
-- `cairn-store` — storage + **full-fidelity blob store** (content-hash originals). SQLite +
-  `sqlite-vec` (local); Postgres + `pgvector` (server); `sqlx`.
-- `cairn-context` — read modes, content-hash+mtime **cache** (~13-tok re-reads, diff-only after
-  edits), **tree-sitter** AST, optional response-style compressor (caveman, opt-in), and the
-  **Context Assembler** (below).
-- `cairn-shell` — rtk-style command-output compression (100+ filters); originals to blob store → **recover**.
-- `cairn-memory` — 4 tiers, consolidation + Ebbinghaus decay + eviction, SHA-256 dedup, contradiction detection.
-- `cairn-profile` — **preference/behavior learning** (stack, style, libs, do/don'ts, corrections,
-  tone); injected at session start + relevant moments. *(The "make dumb models smart" engine.)*
-- `cairn-guard` — **active guardrails** (below): verification vs originals, drift detection,
-  re-anchoring, checkpoints, reliability scoring.
-- `cairn-collective` — opt-in shared knowledge: distilled, **sanitized** units; private/team/
-  public pools; consent-gated publish; trust/voting/provenance/decay; **federation + signed packs**.
-- `cairn-search` — hybrid retrieval (`tantivy` BM25 + vector + graph), RRF + rerank + **MMR**
-  diversity; recall fuses memory + profile + collective with provenance.
-- `cairn-graph` — property graph (imports/calls/exports/type-refs → impact) + temporal knowledge graph.
-- `cairn-embed` — pluggable embeddings (local `fastembed`/ONNX default + OpenAI/Gemini/Voyage/
-  Cohere/Ollama); **secret-strip before embed/share.**
-- `cairn-mcp` — unified MCP server (`rmcp`), stdio + streamable HTTP, one curated ~26-tool namespace.
-- `cairn-api` — `axum` REST + WS; auth (`argon2` accounts, `jsonwebtoken` device tokens), HMAC, TLS.
-- `cairn-sync` — offline-first multi-device sync (`automerge` CRDT), optional E2E encryption.
-- `cairn-hooks` — hook adapters + `cairn hook <event>` entrypoint.
-- `cairn-cli` / `cairn-server` — `cairn` binary: `serve`, `init`, `pair`, `login`,
-  `install <agent>` / `install --all` (auto-detect agents), `add-device`, `doctor`, `update`,
-  `watch` (TUI, `ratatui`), `sync`, `share`/`pull`, `verify`, `anchor`.
-
----
-
-## Two new subsystems (the depth the user asked for)
-
-### Context Assembler (anti-context-rot) — `cairn-context`
-Given a query + token budget, build the working set: **retrieve** candidates (memory + code +
-profile + collective via hybrid search) → **rank** (RRF + rerank) → **de-dup + diversify** (MMR)
-→ **pack** under budget → **order for position** (critical/high-signal at the start *and* end,
-support in the middle) with structured headers/tags for navigability. Everything compressed is
-`expand`-able. Emits an **assembly report** (what's in, what's dropped, why) for the dashboard.
-Directly attacks A (context rot, lost-in-the-middle).
-
-### Active Guardrails — `cairn-guard`
-- **Ground-truth verification:** before accepting an agent edit/write, diff it against the
-  retained original (blob store); flag unexpected deletions/large rewrites (catch the silent 25%
-  corruption). Optionally gate on confirmation.
-- **Anchor:** capture the task goal/spec at start; periodically check the session's trajectory
-  against it; on divergence, **re-inject** the spec + key decisions (re-anchor).
-- **Drift/contradiction:** detect statements that contradict stored decisions/facts (graph +
-  embedding signals); surface and resolve.
-- **Checkpoints:** snapshot working state at intervals / before risky ops; allow rollback/re-anchor.
-- **Reliability score:** per-session signals surfaced in the dashboard.
-Techniques: deterministic content-hash diffing (cheap), embedding-similarity drift signals,
-rule checks against the knowledge graph, optional LLM-as-judge for semantic verification.
-Directly attacks B (drift, corruption, reliability).
-
----
-
 ## Compression/assembly layers (all recoverable)
+
+```mermaid
+flowchart LR
+    subgraph Input["Sources"]
+        Files["Files<br/>read"]
+        Shell["Shell output<br/>compress"]
+        Mem["Memory recall"]
+        Prompt["Prompt query"]
+    end
+
+    subgraph Compress["Cairn compression"]
+        AST["AST outline<br/>cairn-context"]
+        Filter["Filter/group/dedup<br/>cairn-shell"]
+        Tiers["4-tier recall<br/>cairn-memory"]
+        Asm["Assembler<br/>cairn-assemble"]
+    end
+
+    Blob["Blob Store<br/>content-hash<br/>full fidelity"]
+    Agent["Agent context window<br/>compressed view + handles"]
+
+    Files --> AST --> Agent
+    Shell --> Filter --> Agent
+    Mem --> Tiers --> Agent
+    Prompt --> Asm --> Agent
+
+    AST -.->|"retain original"| Blob
+    Filter -.->|"retain original"| Blob
+    Tiers -.->|"retain full record"| Blob
+    Asm -.->|"retain dropped items"| Blob
+
+    Agent -.->|"expand / recover"| Blob
+```
 
 | Layer | Reference | Crate | Recover via |
 |---|---|---|---|
 | File reads | lean-ctx modes + cache | `cairn-context` | `expand` (blob store) |
 | Shell/tool output | rtk filter/group/dedup | `cairn-shell` | `recover` (tee→blob store) |
 | Model responses | caveman style (opt-in) | `cairn-context` | original retained |
-| Memory recall | agentmemory tiers + RRF | `cairn-memory`/`search` | full record on expand |
+| Memory recall | agentmemory tiers + RRF | `cairn-memory` | full record on expand |
 | Working set | Context Assembler | `cairn-context` | `expand` any dropped item |
-
----
-
-## Unified MCP tools (curated ~26)
-
-- **Context:** `read`, `assemble`, `search`, `tree`, `shell`, `graph`, `impact`, `diff`, `expand`, `recover`.
-- **Memory:** `remember`, `recall`, `forget`, `timeline`, `consolidate`, `wakeup` (~400-tok bootstrap).
-- **Profile:** `profile_get`, `profile_set`, `prefer`.
-- **Guard:** `anchor` (set/recall goal), `verify`, `checkpoint`, `reliability`.
-- **Collective:** `share`, `pull`, `knowledge_search`, `vote`.
-- **Session/devices/admin:** `session_save/load`, `handoff`, `devices`, `sync_status`, `budget`, `health`, `audit`.
-
----
-
-## Hooks (agent lifecycle)
-
-`cairn install <agent>` wires each agent to call `cairn hook <event>`:
-- `SessionStart` → `wakeup` + `anchor`: inject relevant memory, **profile prefs**, top collective knowledge, and the task goal.
-- `UserPromptSubmit` → `assemble` context for the prompt (lean, ordered).
-- `PreToolUse(Read/Grep/Shell)` → serve compressed/cached view, not full output.
-- `PostToolUse(Edit/Write)` → `verify` vs original (guard); capture observation (dedup + secret-strip); detect preferences/corrections.
-- periodic / long-session → drift check + `checkpoint`; re-anchor on divergence.
-- `PreCompact` → re-inject anchor + critical facts so compaction can't drop them.
-- `SessionEnd`/`SubagentStop` → consolidate; offer to `share` sanitized learnings.
 
 ---
 
@@ -264,31 +260,24 @@ command palette** to search memory/code/sessions/collective and run actions), da
 
 - **Setup wizard (first run):** create account → pick embedding provider → **Add Device**
   (copy-paste installer + QR/pairing code) → **Connect Agents** (one-click per detected agent) →
-  green health check. New user productive in minutes. *(ties directly to Install & Onboarding.)*
+  green health check.
 - **Devices & Agents (install hub):** every device + which agents are configured on each, live
   connection status, **generate install command / pairing code / QR**, mint/revoke tokens, remove a device.
 - **Memory workspace (editable):** search; **create / edit / pin / delete** memories; mark
   important; resolve contradictions; view+edit rationale; promote working→semantic; bulk actions.
-- **Profile editor:** view / approve / edit learned preferences + do/don't rules; add rules by
-  hand; toggle which are active; correction history.
+- **Profile editor:** view / approve / edit learned preferences + do/don't rules.
 - **Assembler playground (inspector):** type a query + token budget → see exactly what context
-  Cairn would feed (in order), what it drops and **why**, the token count; tune the budget;
-  `expand` any item. Debug what the agent actually sees — genuinely useful day to day.
-- **Reliability center:** review drift events, verification flags, **silent-corruption catches**;
-  **approve / reject** flagged edits; **roll back to a checkpoint**; set/adjust the task anchor.
+  Cairn would feed, what it drops and **why**, the token count; `expand` any item.
+- **Reliability center:** review drift events, verification flags; **approve / reject** flagged
+  edits; **roll back to a checkpoint**; set/adjust the task anchor.
 - **Collective / Federation manager:** browse/search the pool; **publish** with sanitization
-  **diff preview** + consent; **pull** packs; subscribe to federated servers; manage trust; vote;
-  unshare/revoke.
+  **diff preview** + consent; **pull** packs; subscribe to federated servers.
 - **Savings & recover:** tokens/$ saved, signed savings ledger, and **expand/recover any
-  compressed artifact** (proves no-loss) — for trust + debugging.
+  compressed artifact** — for trust + debugging.
 - **Sessions:** live stream + replay; jump from a session to its memories/decisions; **Resume
   task** (re-inject the anchor + assembled context into a fresh session on any device).
 - **Settings:** embedding provider + keys, budgets/SLOs, roles, privacy/sanitization rules, auth,
   backup / export / import.
-- **Overview:** tokens/$ saved, recall/cache hit-rate, reliability score, "smartness lift", active
-  devices, recent activity — every tile links straight into the actionable views above.
-- *(Stretch)* **Playground chat:** a minimal in-browser chat that runs against your assembled
-  context + memory, to demo the "smartness lift" without an external agent.
 
 ---
 
@@ -299,114 +288,35 @@ single static Rust binary — **no Node/Python/runtime** to install.
 
 **1. Server (once — home server / NAS / Pi / VPS):**
 - One-liner: `curl -fsSL https://cairn.sh/install.sh | sh` · Windows: `irm https://cairn.sh/install.ps1 | iex`.
-- Or Docker: `docker run -p 7777:7777 -v cairn:/data ghcr.io/cairn/cairn` · or `docker compose up`.
+- Or Docker: `docker compose up -d`.
 - Or one-click: Fly / Railway / Render deploy buttons.
 - `cairn serve` starts the server **+ embedded web UI**, and prints the URL + a first-run admin link.
 
 **2. Each device (the "easy on every device" part) — Tailscale / `gh`-style pairing:**
 - In the web UI, click **Add Device** → it shows a copy-paste one-liner with a short-lived
-  pairing code (and a **QR code** for mobile), e.g.:
-  `curl -fsSL https://cairn.sh/i | sh -s -- pair CAIRN-7Q3X`
+  pairing code (and a **QR code** for mobile).
 - That command **installs the binary, pairs the device** to your server (device-code flow — no
-  manual token juggling), then runs **`cairn install --all`** to **auto-detect installed agents**
+  manual token juggling), then runs **`cairn-cli setup --all`** to **auto-detect installed agents**
   (Claude Code, Codex, OpenCode, Cursor, Windsurf, Cline, Gemini CLI, Copilot…) and write their
   **hook + MCP config** to point at your server.
-- Manual paths exist too: `cairn login <server-url>`, `cairn install <agent>`, `cairn pair <code>`,
-  `cairn doctor` (verifies hooks + MCP + connectivity).
+- Manual paths exist too: `cairn-cli pair <code>`, `cairn-cli setup <agent>`, `cairn-cli doctor`.
 
 **3. Connectivity (self-host reality):** default LAN; for remote devices, recommend
-**Tailscale/VPN** (zero-config, private) or an optional TLS reverse proxy; an optional relay can
-come later. The web UI detects the situation and shows the right URL/QR per device.
+  **Tailscale/VPN** (zero-config, private) or an optional TLS reverse proxy. The web UI detects
+  the situation and shows the right URL/QR per device.
 
-**4. Updates:** `cairn update` self-updates the binary; the server flags when an update is available.
-
----
-
-## Landing Page
-
-1. **Hero** — *"Make any model smart."* Pain→product; **one-command install**; agent logos.
-2. **The problem** — the five failure classes (with the "it's the context, not the IQ" insight).
-3. **No context lost** — lossless-by-retention, with a live expand/recover demo.
-4. **Less, not more** — the Context Assembler vs context rot.
-5. **Stay reliable** — guardrails: verify vs originals, drift detection, re-anchor (the 25% catch).
-6. **Five pillars** — Remember · Compress · Assemble · Reliable · Smarter together.
-7. **Collective knowledge** — opt-in, sanitized, federated; "every traveler adds a stone."
-8. **Proof** — benchmark targets (LongMemEval/LoCoMo, token %, recover fidelity, horizon reliability).
-9. **Self-host / OSS — install in one command** — `curl … | sh`, single Rust binary, "runs on a
-   Pi"; **Add-Device pairing** (copy-paste + QR) and `cairn install --all` auto-configures every
-   detected agent; Docker + one-click templates; federation.
-10. **Privacy/security** + **CTA** (install + docs + GitHub).
+**4. Updates:** `cairn-cli update` self-updates the binary; the server flags when an update is available.
 
 ---
 
 ## Open-source & community
 
-- **License:** **Apache-2.0** for the core (permissive, max adoption, matches rtk). *(Alt: AGPL
-  if you later want to stop closed SaaS forks of a hosted collective.)*
+- **License:** **Apache-2.0** for the core (permissive, max adoption, matches rtk).
 - **Repo:** monorepo — Cargo workspace + `/web` (Next.js) + `/docs`.
 - **Install:** one-command shell installer + Homebrew/cargo + prebuilt binaries (musl, mac
-  arm/x86, windows); `cairn install <agent>` auto-configs 15+ agents (hooks + MCP).
+  arm/x86, windows); `cairn-cli setup <agent>` auto-configs agents (hooks + MCP).
 - **Project files:** README, CONTRIBUTING, SECURITY.md + threat model, governance, Discord/community.
 - **CI:** `cargo test`/`clippy`/`fmt`, web build, docker build, multi-platform release, **benchmark CI**.
-
----
-
-## Tech Stack
-
-- **Engine (Rust):** `tokio`, `axum`, `sqlx` (SQLite+Postgres), `sqlite-vec`/`pgvector`,
-  `tantivy`, `tree-sitter`(+grammars), `fastembed`, `rmcp` (MCP), `ratatui`, `automerge`,
-  `argon2`+`jsonwebtoken`, `rust-embed`.
-- **UI (one Next.js app: landing + dashboard):** Next.js App Router + Tailwind + shadcn/ui,
-  Recharts, Cytoscape/react-force-graph; talks to `cairn-api`; built static + embedded in binary.
-- **Packaging:** musl static binary, distroless Docker, `docker compose` (+ Postgres/pgvector),
-  Fly/Railway/Render templates.
-
----
-
-## Build Phases (parallel tracks — each ships a thin slice first)
-
-**Phase 0 — Scaffold:** monorepo (Cargo workspace + Next.js + docker compose) + CI; brand tokens
-(name/logo/palette/fonts) → Tailwind theme; README + license.
-
-**Phase 1 — Thin vertical slice, both tracks:**
-- *Engine:* `cairn-context` (read modes + cache + **Assembler** + **expand**) + `cairn-shell`
-  (compress + **recover**) + `cairn-memory`/`search` minimal (`remember`/`recall`/`wakeup`) →
-  via `cairn-mcp` (stdio) + `cairn-api`. Prove: re-read killer, lean assembly, byte-identical recover.
-- *Product:* brand identity → landing live → **web control plane** shell: Setup wizard +
-  **Add-Device / Connect-Agent install hub**, Assembler playground, and Context/Memory views with
-  a working expand/recover demo, wired to `cairn-api` (sample data until endpoints land).
-
-**Phase 2 — Server, sync, smart + guard:** auth + device tokens; `cairn-sync` reconcile;
-`cairn-profile` (preference learning); **`cairn-guard`** (verify vs original, drift, re-anchor,
-checkpoints); Docker server; **one-line installer + device-code pairing + `cairn install --all`
-auto-detect + `cairn doctor`** + hooks bundle. Verify 2 devices share memory+profile; verify a
-corrupted edit is flagged.
-
-**Phase 3 — Collective + federation + depth:** `cairn-collective` (sanitize→consent→share→pull→
-vote), signed packs + federation; full 4-tier consolidation/decay; property graph + impact;
-hybrid rerank; budgets/SLOs; **benchmarks (LongMemEval/LoCoMo/token/horizon)**; docs; one-click deploy.
-
----
-
-## Verification
-
-- **No-loss (headline):** compress a 1000-line file + a 200-line failing-test output → window
-  cost −70–90% → `expand`/`recover` returns the **byte-identical** original.
-- **Anti-rot:** `assemble` under a tight budget puts the goal + key decisions at the edges; show
-  the assembly report; confirm dropped items are `expand`-able.
-- **Re-read killer:** unchanged file re-read → ~13 tokens; edit then re-read → diff-only.
-- **Reliability/guard:** make an agent edit that deletes unrelated content → `verify` flags it;
-  drift from the task goal → re-anchor fires; checkpoint rollback works.
-- **Memory + smart:** fact saved in session A recalled in fresh session B; with a small model,
-  profile + collective injection changes output to honor learned preferences vs. baseline.
-- **Collective + privacy:** `share` → sanitization strips secrets/PII (diff preview) → another
-  account `pull`s with provenance → `unshare` revokes; federation pulls only signed packs.
-- **Multi-device:** memory/profile on one container recalled on another after sync; revoke token cuts access.
-- **Install/onboarding:** on a clean machine, the **Add-Device one-liner** installs the binary,
-  pairs to the server (device-code), and `cairn install --all` configures a detected agent;
-  `cairn doctor` is green; that agent's next session hits Cairn (wakeup fires).
-- **UI/packaging/bench:** dashboard click-through on live server; Lighthouse on landing;
-  `docker compose up` from clean checkout; benchmark CI emits LongMemEval/LoCoMo/token numbers.
 
 ---
 
@@ -423,3 +333,12 @@ hybrid rerank; budgets/SLOs; **benchmarks (LongMemEval/LoCoMo/token/horizon)**; 
 - **Crowded memory market:** differentiate via the *integration* (memory + no-loss + assembly +
   guardrails + federation) and publish honest benchmarks; don't claim numbers until measured.
 - **Naming/domain:** finalize Cairn vs. backups and secure a domain + the GitHub org before launch copy.
+
+---
+
+## See also
+
+- [Architecture](ARCHITECTURE.md) — how the code is structured today (crate graph, data flow, tool surface)
+- [Roadmap](ROADMAP.md) — what's done, what's in progress, what's next
+- [Benchmarks](BENCHMARKS.md) — methodology + measured numbers + targets
+- [Audit Report](audits/REPORT.md) — security audit with fix-status tracking

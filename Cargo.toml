@@ -14,6 +14,7 @@ members = [
     "crates/cairn-api",
     "crates/cairn-mcp",
     "crates/cairn-cli",
+    "crates/cairn-server",
 ]
 
 [workspace.package]
@@ -38,29 +39,38 @@ cairn-share = { path = "crates/cairn-share" }
 cairn-embed = { path = "crates/cairn-embed" }
 cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
+cairn-cli = { path = "crates/cairn-cli" }
+cairn-server = { path = "crates/cairn-server" }
 
-# shared third-party deps
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-thiserror = "2"
-anyhow = "1"
-chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
-hex = "0.4"
-uuid = { version = "1", features = ["v4", "serde"] }
-directories = "5"
-similar = "2"
-tokio = { version = "1", features = ["full"] }
-axum = "0.7"
-tower = "0.5"
-tower-http = { version = "0.5", features = ["fs", "cors", "trace"] }
-clap = { version = "4", features = ["derive"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tempfile = "3"
-rust-embed = "8"
-ureq = { version = "2", features = ["json"] }
-dotenvy = "0.15"
+# Pinned to specific minor versions via tilde (~major.minor) so CI can fail
+# loudly via `cargo build --locked` if Cargo.lock drifts outside that minor.
+# Tilde syntax constrains to >=MAJOR.MINOR.0, <MAJOR.(MINOR+1).0.
+serde = { version = "~1.0", features = ["derive"] }
+serde_json = "~1.0"
+thiserror = "~2.0"
+anyhow = "~1.0"
+chrono = { version = "~0.4", features = ["serde"] }
+sha2 = "~0.10"
+hex = "~0.4"
+uuid = { version = "~1.23", features = ["v4", "serde"] }
+directories = "~5.0"
+similar = "~2.7"
+tokio = { version = "~1.52", features = ["full"] }
+axum = "~0.7"
+tower = "~0.5"
+tower-http = { version = "~0.5", features = ["fs", "cors", "trace", "limit"] }
+clap = { version = "~4.6", features = ["derive"] }
+tracing = "~0.1"
+tracing-subscriber = { version = "~0.3", features = ["env-filter"] }
+tempfile = "~3.27"
+rust-embed = "~8.11"
+ureq = { version = "~2.12", features = ["json"] }
+dotenvy = "~0.15"
+jsonwebtoken = "~9.3"
+regex = "~1.12"
+helix-db = "~2.0"
+self_update = { version = "~0.44", default-features = false, features = ["ureq", "rustls", "archive-tar", "compression-flate2", "archive-zip", "compression-zip-deflate"] }
+url = "~2.5"
 
 [profile.release]
 opt-level = 3

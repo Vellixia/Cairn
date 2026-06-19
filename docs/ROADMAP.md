@@ -1,0 +1,200 @@
+# Roadmap
+
+Status tracker for Cairn development. Mapped to the phases defined in [PLAN.md](PLAN.md).
+
+```mermaid
+gantt
+    title Cairn Development Phases
+    dateFormat 2026-01-01
+    axisFormat %b
+
+    section Phase 0 — Scaffold
+    Cargo workspace + crates       :done, p0a, 2026-01-01, 30d
+    Next.js web app                :done, p0b, 2026-01-01, 30d
+    Docker Compose stack           :done, p0c, 2026-01-01, 30d
+    CI pipeline                    :done, p0d, 2026-01-01, 30d
+
+    section Phase 1 — Thin Slice
+    Context read + cache + expand  :done, p1a, 2026-02-01, 45d
+    Memory remember + recall       :done, p1b, 2026-02-01, 45d
+    Shell compress + recover       :done, p1c, 2026-02-01, 45d
+    MCP server stdio               :done, p1d, 2026-02-01, 45d
+    REST API + web UI              :done, p1e, 2026-02-01, 45d
+    Bench command                  :done, p1f, 2026-02-01, 45d
+
+    section Phase 2 — Server + Guard
+    JWT device tokens              :done, p2a, 2026-03-01, 60d
+    Guard verify + anchor + cp     :done, p2b, 2026-03-01, 60d
+    Profile preference learning    :done, p2c, 2026-03-01, 60d
+    Binary split + setup           :done, p2d, 2026-03-01, 60d
+    OpenCode MCP integration       :done, p2e, 2026-03-01, 60d
+    Security hardening P0-P2       :done, p2f, 2026-03-01, 60d
+
+    section Phase 3 — Collective
+    Export import sanitized bundles :done, p3a, 2026-04-01, 30d
+    Pool contribute pull           :done, p3b, 2026-04-01, 30d
+    Full 4-tier consolidation      :active, p3c, 2026-04-15, 60d
+    Hybrid search BM25 vec graph   :p3d, 2026-05-01, 60d
+    Health checks in Compose       :done, p3e, 2026-06-19, 1d
+    CI smoke test                  :done, p3f, 2026-06-19, 1d
+    LongMemEval benchmarks         :p3g, 2026-05-15, 60d
+    One-click deploy templates     :p3h, 2026-06-01, 45d
+    Multi-platform release binaries :p3i, 2026-06-01, 45d
+    Slim image + model SHA pin     :done, p3j, 2026-06-19, 1d
+
+    section Phase 4 — Distribution
+    OpenCode README quickstart     :active, p4a, 2026-06-19, 1d
+    Multi-platform release         :p4b, 2026-06-20, 45d
+    Homebrew tap                   :p4c, 2026-07-01, 7d
+    One-click deploy               :p4d, 2026-07-01, 14d
+    Non-root Docker volume init    :p4e, 2026-07-01, 3d
+    LongMemEval/LoCoMo benchmarks  :p4f, 2026-07-01, 30d
+    Task-success horizon benchmark :p4g, 2026-07-15, 30d
+```
+
+---
+
+## Phase 0 — Scaffold
+
+| Item | Status | Notes |
+|---|---|---|
+| Cargo workspace + crate structure | Done | 14 crates |
+| Next.js web app (landing + dashboard) | Done | Static export, embedded via rust-embed |
+| Docker Compose stack (Cairn + HelixDB + MinIO) | Done | `docker compose up -d` |
+| CI pipeline (test/clippy/fmt) | Done | GitHub Actions |
+| Brand identity (name/logo/palette) | Done | Cairn — 3-stone cairn, ember accent |
+
+---
+
+## Phase 1 — Thin Vertical Slice
+
+| Item | Status | Notes |
+|---|---|---|
+| `cairn-context`: read modes + cache + expand | Done | 4 modes (auto/full/signatures/map), ~13-tok re-reads |
+| `cairn-context`: tree-sitter AST outlines | Done | 11 languages (Rust, Python, JS, TS, Go, C, C++, Java, C#, Ruby, Bash) |
+| `cairn-shell`: compress + recover | Done | RTK-style filter/group/dedup, lossless via blob store |
+| `cairn-memory`: remember/recall/wakeup | Done | 4-tier, BM25 lexical recall, Ebbinghaus decay |
+| `cairn-assemble`: token-budgeted context assembly | Done | Edge-ordered, reports dropped items |
+| `cairn-mcp`: MCP server over stdio | Done | 16 tools, local + remote proxy modes |
+| `cairn-api`: REST API | Done | 27 endpoints, embedded web UI |
+| `cairn-cli`: `bench` command | Done | Measures token savings on a codebase |
+| Web UI: landing page | Done | Next.js static export |
+| Web UI: dashboard shell | Done | Overview, memory, context views |
+
+---
+
+## Phase 2 — Server, Sync, Smart + Guard
+
+| Item | Status | Notes |
+|---|---|---|
+| Signed device tokens (JWT + HMAC) | Done | HS256, `CAIRN_SECRET_KEY` |
+| Token scopes (admin/write/read) | Done | Parsed from JWT claims |
+| Token expiration | Done | Optional `--expires` days |
+| `cairn-guard`: verify vs original | Done | Content-hash diff, flags large deletions |
+| `cairn-guard`: task anchor | Done | Set/read, re-injected at session start |
+| `cairn-guard`: checkpoint/rollback | Done | Snapshot tracked files, restore on demand |
+| `cairn-guard`: reliability score | Done | Per-session, reflects recent outcomes |
+| `cairn-profile`: preference learning | Done | `prefer`/`profile` tools, injected at session start |
+| `cairn-share`: sanitization | Done | Secret/PII redaction, classification, diff preview |
+| Multi-device sync (pull/push) | Done | Last-write-wins on `updated_at` |
+| Pairing codes (device-code flow) | Done | Short, single-use, rate-limited |
+| Binary split (`cairn` server + `cairn-cli` client) | Done | Two binaries, clear separation |
+| `cairn-cli setup <agent>` | Done | Claude Code, Cursor, VS Code, Windsurf, OpenCode |
+| `cairn-cli setup --all` (auto-detect) | Done | Detects from project/home markers |
+| Lifecycle hooks (Claude Code) | Done | SessionStart/UserPromptSubmit/PostToolUse/SessionEnd |
+| Remote proxy MCP mode | Done | `CAIRN_SERVER` + `CAIRN_TOKEN`, no local HelixDB |
+| Path rewriting for remote file tools | Done | Host → workspace-relative, mounted at `/workspace` |
+| OpenCode MCP integration | Done | Config at `~/.config/opencode/opencode.json`, verified end-to-end |
+| TLS gate | Done | Refuses HTTP on non-loopback unless `CAIRN_INSECURE=1` or TLS set |
+| `CAIRN_INSECURE` escape hatch | Done | For local Docker dev with plain HTTP |
+| Workspace root boundary | Done | `CAIRN_WORKSPACE_ROOT`, path traversal rejected |
+| Install script checksums | Done | SHA256SUMS verification |
+| MinIO credential guard | Done | Refuses insecure defaults |
+| CORS allow-list | Done | `CAIRN_CORS_ORIGINS`, default same-origin |
+| Rate limiting | Done | 60/min API, 5/min pairing |
+| Dependency pinning (tilde) | Done | `~major.minor`, `cargo build --locked` |
+| `cargo audit` + `cargo deny` in CI | Done | Blocks on advisories/duplicates |
+| SLSA + Sigstore signing | Done | Release binaries signed |
+| Pinned GitHub Actions (SHA) | Done | Supply-chain hardening |
+
+---
+
+## Phase 3 — Collective + Federation + Depth
+
+### Done
+
+| Item | Status | Notes |
+|---|---|---|
+| `cairn-share`: export/import sanitized bundles | Done | Redacts PII, withholds hard secrets |
+| `cairn-share`: pool contribute/pull | Done | Federated sanitized knowledge (admin-scoped token required) |
+| Health checks in Docker Compose | Done | minio/helix/cairn all `service_healthy`; `depends_on: service_healthy`; minio-init bounded retry |
+| CI smoke test (compose + API) | Done | `ci-smoke` job asserted `{"tools":[...]}` envelope + ≥5 tools. **Superseded** by the 54-test live suite (see `docs/TESTING.md`); removed from CI. |
+
+### In progress / partial
+
+| Item | Status | Notes |
+|---|---|---|
+| Full 4-tier consolidation/decay | Partial | Consolidation implemented, decay tuning ongoing |
+| Hybrid search (BM25 + vector + graph, RRF) | Partial | BM25 done, HNSW vectors via HelixDB, **graph leg next** |
+| Federation (signed packs, trust/scopes) | Partial | Share/pool exists, full federation protocol TBD |
+
+### Backlog
+
+| Item | Status | Notes |
+|---|---|---|
+| Property graph + impact analysis | Not started | Feeds the graph leg of hybrid search; planned as `cairn-graph` or in `cairn-context` |
+| Rerank + MMR diversity | Not started | Post-retrieval quality improvements; high-leverage, small change |
+| Offline-first sync (automerge CRDT) | Not started | Currently last-write-wins |
+| E2E encryption for sync | Not started | Optional, for privacy-sensitive setups |
+| Collective voting/provenance/decay | Not started | Community governance for shared knowledge |
+
+### Hardening & DX (audit-driven)
+
+| Item | Status | Notes |
+|---|---|---|
+| Slim default Docker image; `embed-local` opt-in | Done | Default `CAIRN_FEATURES=""`; opt back in with `--build-arg CAIRN_FEATURES=embed-local`. Closes audit M-12. |
+| Local model SHA-256 verification | Done | `CAIRN_EMBED_FASTEMBED_SHA256` pin; constant-time compare; logs actual hash at WARN when no pin set. Closes audit M-9. |
+
+---
+
+## Phase 4 — Distribution
+
+The product is feature-complete enough to install and use. The remaining work is **getting it onto every machine people use** — distribution channels, install paths, and the benchmarks that turn the engineering into marketing.
+
+| Item | Status | Notes |
+|---|---|---|
+| OpenCode README quickstart | Partial | OpenCode integration is verified end-to-end (remember/recall/sanitize/read), but the README still needs a one-screen "set up OpenCode in 4 commands" section that mirrors the live test |
+| Multi-platform release binaries | Not started | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`; upload + `SHA256SUMS` per release |
+| Homebrew tap | Not started | `Vellixia/homebrew-tap`; formula points at the GitHub release, verifies `SHA256SUMS`; `brew install cairn` |
+| One-click deploy (Fly / Railway / Render) | Not started | `render.yaml` + `fly.toml` templates; "Deploy to…" buttons in README |
+| Non-root Docker volume init | Not started | Currently `user: "0"` workaround. Proper init container or capability grant so the runtime can drop to `cairn` uid 10001 |
+| LongMemEval / LoCoMo benchmarks | Not started | Standard recall benchmarks; publish numbers in `docs/BENCHMARKS.md` |
+| Task-success lift at increasing horizons | Not started | Synthetic drift benchmark; cite the architecture justification in `docs/PLAN.md` |
+
+---
+
+## Verification Milestones
+
+| Milestone | Status |
+|---|---|
+| Fresh clone builds (`cargo check --workspace`) | Passed |
+| `cargo test --workspace` (118 tests, 5 ignored) | Passed |
+| `cargo clippy --workspace -- -D warnings` | Passed |
+| `docker compose up -d` from clean checkout | Passed |
+| Docker compose health checks (all 3 services `healthy`) | Passed (verified live) |
+| 54-test end-to-end live suite (memory/context/guard/profile/shell/assembly/sanitize/sync/share/api/setup/bench/path-rewrite) | Passed (verified live) — see `docs/TESTING.md` |
+| `cairn-cli bench` shows 90%+ savings | Passed |
+| OpenCode MCP: remember/recall/wakeup/sanitize | Passed (verified live) |
+| OpenCode MCP: read (remote proxy with workspace mount) | Passed (verified live) |
+| Multi-device: memory on one device recalled on another | Passed (via sync) |
+| Edit verification: corrupted edit flagged | Passed (guard tests) |
+| Checkpoint/rollback | Passed (guard tests) |
+
+---
+
+## See also
+
+- [Plan](PLAN.md) — product vision and phases
+- [Architecture](ARCHITECTURE.md) — how it works today
+- [Benchmarks](BENCHMARKS.md) — measured numbers
+- [Audit Report](audits/REPORT.md) — security findings with fix status

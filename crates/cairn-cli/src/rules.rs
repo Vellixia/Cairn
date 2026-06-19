@@ -11,7 +11,14 @@ use std::fs;
 use std::path::Path;
 
 /// Agents we can write rules for (`agents` = a generic AGENTS.md).
-const KNOWN: &[&str] = &["claude-code", "cursor", "vscode", "windsurf", "agents"];
+const KNOWN: &[&str] = &[
+    "claude-code",
+    "cursor",
+    "vscode",
+    "windsurf",
+    "opencode",
+    "agents",
+];
 
 const BEGIN: &str = "<!-- BEGIN CAIRN (managed by `cairn rules`) -->";
 const END: &str = "<!-- END CAIRN -->";
@@ -60,6 +67,7 @@ pub fn canonical(name: &str) -> Option<&'static str> {
         "cursor" => Some("cursor"),
         "vscode" | "code" | "vs-code" | "copilot" => Some("vscode"),
         "windsurf" | "codeium" => Some("windsurf"),
+        "opencode" | "oc" => Some("opencode"),
         "agents" | "generic" => Some("agents"),
         _ => None,
     }
@@ -77,7 +85,7 @@ pub fn write_for(id: &str, project: &Path) -> Result<()> {
             managed(&p)?;
             p
         }
-        "agents" => {
+        "agents" | "opencode" => {
             managed(&project.join("AGENTS.md"))?;
             project.join("AGENTS.md")
         }

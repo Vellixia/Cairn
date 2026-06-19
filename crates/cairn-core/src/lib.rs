@@ -8,7 +8,7 @@ pub mod error;
 pub mod hash;
 pub mod model;
 
-pub use config::{Config, EmbedConfig};
+pub use config::{Config, EmbedConfig, TlsConfig};
 pub use error::{Error, Result};
 pub use hash::ContentHash;
-pub use model::{DeviceToken, Memory, MemoryKind, MemoryTier, NewMemory};
+pub use model::{DeviceToken, Memory, MemoryKind, MemoryTier, NewMemory, TokenScope};

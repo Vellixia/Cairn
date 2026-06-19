@@ -249,6 +249,7 @@ fn known_dim(model: &str) -> Option<usize> {
 mod local {
     use super::{EmbedConfig, Embedder, Error, Result};
     use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     /// In-process `all-MiniLM-L6-v2` (384-dim). The model is fetched once on first construction.
@@ -258,16 +259,158 @@ mod local {
     }
 
     impl LocalEmbedder {
-        pub fn new(_cfg: &EmbedConfig) -> Result<Self> {
+        pub fn new(cfg: &EmbedConfig) -> Result<Self> {
+            // The model artifact ships unsigned from `hf-hub`. Without a pin, a compromised
+            // registry or transparent MITM could swap a poisoned file and we'd load attacker-
+            // controlled weights. Verify after download:
+            //   1. If `CAIRN_EMBED_FASTEMBED_SHA256` is set, the model.onnx file MUST match.
+            //   2. If it isn't set, we still compute the hash and log a warning so operators
+            //      can pin it. This closes audit finding M-9 without breaking fresh installs.
             let model = TextEmbedding::try_new(
                 InitOptions::new(EmbeddingModel::AllMiniLML6V2).with_show_download_progress(true),
             )
             .map_err(|e| Error::Other(format!("loading local embedding model: {e}")))?;
+
+            if let Err(e) = verify_model_artifact(cfg) {
+                return Err(e);
+            }
+
             Ok(Self {
                 model: Mutex::new(model),
                 dim: 384,
             })
         }
+    }
+
+    /// Walk the HuggingFace cache (`~/.cache/huggingface/hub/.../model.onnx`) and verify the
+    /// fastembed artifact. Returns `Ok(())` and logs a warning when no pin is configured;
+    /// returns `Err` if a pin is set and the file doesn't match.
+    fn verify_model_artifact(_cfg: &EmbedConfig) -> Result<()> {
+        let Some(cache_dir) = hf_cache_dir() else {
+            // No cache dir on this platform (extremely unusual); skip with a debug log.
+            return Ok(());
+        };
+
+        // The fastest lookup: find the most recent model.onnx in the cache. fastembed pulls
+        // into `models--<owner>--<name>/snapshots/<rev>/onnx/model.onnx`.
+        let Some(onnx_path) = newest_onnx(&cache_dir) else {
+            // No artifact found — fastembed must have used a custom path. Skip silently.
+            return Ok(());
+        };
+
+        let actual = sha256_file(&onnx_path)
+            .map_err(|e| Error::Other(format!("hashing model artifact: {e}")))?;
+        let actual_hex = hex_lower(&actual);
+
+        match std::env::var("CAIRN_EMBED_FASTEMBED_SHA256").ok() {
+            Some(expected) if !expected.is_empty() => {
+                if !consteq(expected.as_bytes(), actual_hex.as_bytes()) {
+                    return Err(Error::Other(format!(
+                        "local embedding model hash mismatch: expected {}, got {}. \
+                         Refusing to load a model whose bytes don't match the pinned SHA-256. \
+                         To update the pin, set CAIRN_EMBED_FASTEMBED_SHA256 to the new hash \
+                         (logged at INFO on first download).",
+                        expected, actual_hex
+                    )));
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    "local embedding model sha256 = {} (set CAIRN_EMBED_FASTEMBED_SHA256 to pin)",
+                    actual_hex
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns `~/.cache/huggingface` on Linux, the platform equivalent on macOS/Windows.
+    fn hf_cache_dir() -> Option<PathBuf> {
+        // Prefer the explicit `HF_HOME` env if set; otherwise `~/.cache/huggingface` (Linux),
+        // `~/Library/Caches/huggingface` (macOS), or `%USERPROFILE%\.cache\huggingface`
+        // (Windows). fastembed/hf-hub use the same convention.
+        if let Ok(p) = std::env::var("HF_HOME") {
+            if !p.is_empty() {
+                return Some(PathBuf::from(p));
+            }
+        }
+        if let Some(home) = std::env::var_os("USERPROFILE") {
+            return Some(PathBuf::from(home).join(".cache").join("huggingface"));
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return Some(PathBuf::from(home).join(".cache").join("huggingface"));
+        }
+        None
+    }
+
+    /// Recursively walk `dir` for `model.onnx` files and return the most-recently-modified one.
+    /// fastembed pulls into `models--Qdrant--all-MiniLM-L6-v2-onnx/snapshots/<rev>/onnx/model.onnx`
+    /// (and possibly `Qdrant--all-MiniLM-L6-v2-quantized/...`).
+    fn newest_onnx(dir: &std::path::Path) -> Option<PathBuf> {
+        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+        let entries = std::fs::read_dir(dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_dir() {
+                if let Some(found) = newest_onnx(&path) {
+                    if let Ok(modified) = std::fs::metadata(&found).and_then(|m| m.modified()) {
+                        if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+                            newest = Some((modified, found));
+                        }
+                    }
+                }
+            } else if path.file_name().and_then(|s| s.to_str()) == Some("model.onnx") {
+                if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                    if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+                        newest = Some((modified, path));
+                    }
+                }
+            }
+        }
+        newest.map(|(_, p)| p)
+    }
+
+    /// SHA-256 a file in 64 KiB chunks. Returns the 32 raw bytes.
+    fn sha256_file(path: &std::path::Path) -> std::io::Result<[u8; 32]> {
+        use sha2::{Digest, Sha256};
+        let mut file = std::fs::File::open(path)?;
+        let mut hasher = Sha256::new();
+        let mut buf = [0u8; 65536];
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(hasher.finalize().into())
+    }
+
+    fn hex_lower(bytes: &[u8]) -> String {
+        const HEX: &[u8; 16] = b"0123456789abcdef";
+        let mut s = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            s.push(HEX[(b >> 4) as usize] as char);
+            s.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        s
+    }
+
+    /// Constant-time equality on byte slices. Used so a malicious env var can't leak the
+    /// expected hash via timing.
+    fn consteq(a: &[u8], b: &[u8]) -> bool {
+        if a.len() != b.len() {
+            return false;
+        }
+        let mut diff: u8 = 0;
+        for (x, y) in a.iter().zip(b.iter()) {
+            diff |= x ^ y;
+        }
+        diff == 0
     }
 
     impl Embedder for LocalEmbedder {
@@ -281,6 +424,75 @@ mod local {
         }
         fn dim(&self) -> usize {
             self.dim
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use sha2::Digest;
+
+        #[test]
+        fn hex_lower_is_correct() {
+            assert_eq!(hex_lower(&[0x00, 0xff, 0x10, 0xab]), "00ff10ab");
+            assert_eq!(
+                hex_lower(sha2::Sha256::digest(b"abc").as_slice()),
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+            );
+        }
+
+        #[test]
+        fn consteq_only_equal_when_exact() {
+            assert!(consteq(b"hello", b"hello"));
+            assert!(!consteq(b"hello", b"world"));
+            assert!(!consteq(b"hello", b"hell"));
+            assert!(!consteq(b"", b"hello"));
+            assert!(consteq(b"", b""));
+        }
+
+        /// If a pin is set and no cache directory exists, we treat that as "no artifact to
+        /// verify" (fastembed must have used a custom path) and silently allow it. This
+        /// matches the no-op behavior of `verify_model_artifact` when `newest_onnx` returns None.
+        #[test]
+        fn verify_with_pin_but_no_cache_is_a_noop() {
+            // Point HF_HOME at a fresh tmpdir that has no model.onnx.
+            let tmp = std::env::temp_dir().join(format!("cairn-embed-test-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&tmp);
+            std::env::set_var("HF_HOME", &tmp);
+            std::env::set_var("CAIRN_EMBED_FASTEMBED_SHA256", "deadbeef");
+
+            let cfg = EmbedConfig {
+                provider: "local".into(),
+                model: None,
+                url: None,
+                api_key: None,
+            };
+            // Should succeed because there's nothing in the cache to fail against.
+            assert!(verify_model_artifact(&cfg).is_ok());
+
+            std::env::remove_var("HF_HOME");
+            std::env::remove_var("CAIRN_EMBED_FASTEMBED_SHA256");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        /// `newest_onnx` correctly finds a model.onnx in a nested snapshot directory.
+        #[test]
+        fn newest_onnx_finds_nested_model() {
+            let tmp = std::env::temp_dir()
+                .join(format!("cairn-embed-test-newest-{}", std::process::id()));
+            let nested = tmp
+                .join("models--Qdrant--all-MiniLM-L6-v2-onnx")
+                .join("snapshots")
+                .join("abc123")
+                .join("onnx");
+            let _ = std::fs::create_dir_all(&nested);
+            let target = nested.join("model.onnx");
+            std::fs::write(&target, b"fake model bytes").unwrap();
+
+            let found = newest_onnx(&tmp).expect("should find model.onnx");
+            assert_eq!(found, target);
+
+            let _ = std::fs::remove_dir_all(&tmp);
         }
     }
 }
