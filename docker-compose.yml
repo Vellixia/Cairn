@@ -51,8 +51,18 @@ services:
     volumes:
       - helix-minio:/data
     restart: unless-stopped
+    # Readiness gate: MinIO must answer its /minio/health/live endpoint before dependents
+    # start. Without this, helix and minio-init can race the S3 listener on cold starts.
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
 
   # Create the bucket HelixDB writes to, then exit. Retries until MinIO accepts connections.
+  # We pin this on the minio `service_healthy` condition so the bucket always exists before
+  # helix tries to read or write against it.
   minio-init:
     image: minio/mc:latest
     container_name: cairn-minio-init
@@ -60,15 +70,26 @@ services:
       - path: .env
         required: true
     depends_on:
-      - minio
-    entrypoint: >-
-      /bin/sh -c "
-      : '$${MINIO_ROOT_USER:?}' && : '$${MINIO_ROOT_PASSWORD:?}';
-      until mc alias set local http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
-        echo 'waiting for minio...'; sleep 1;
-      done &&
-      mc mb --ignore-existing local/helix-db &&
-      echo 'helix-db bucket ready'"
+      minio:
+        condition: service_healthy
+    entrypoint: ["sh", "-c"]
+    # Single-line shell: the `until` block must live entirely in one command string because
+    # YAML folded scalars can collapse newlines in a way that breaks the loop's `done` keyword.
+    # The retry bound (30) is generous enough to ride out MinIO's cold-start latency.
+    command:
+      - >-
+        i=0;
+        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" 2>/dev/null; do
+          i=$$((i+1));
+          if [ $$i -ge 30 ]; then
+            echo "minio-init: giving up after 30 attempts" >&2;
+            exit 1;
+          fi;
+          echo "minio-init: waiting for minio (attempt $$i/30)...";
+          sleep 1;
+        done &&
+        mc mb --ignore-existing local/helix-db &&
+        echo "helix-db bucket ready"
     restart: "no"
 
   helix:
@@ -88,18 +109,30 @@ services:
     ports:
       - "${HELIX_PORT:-6969}:8080" # host:container — the HelixDB API listens on 8080 inside
     restart: unless-stopped
+    # Readiness gate: the HelixDB gateway must be accepting TCP on 8080 before cairn starts.
+    # The helix image is minimal — no wget/curl/busybox/nc — so we use the shell's built-in
+    # /dev/tcp pseudo-device. Any exit code 0 means the listener is up; non-zero means down.
+    # The wider interval + retry window tolerates cold-start cache warm (~1-2s of post-listener work).
+    healthcheck:
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 30s
 
   cairn:
     build:
       context: .
-      # Build with in-process local embeddings (all-MiniLM-L6-v2) so the default provider works.
+      # Slim default build: no in-process local embeddings (avoids pulling fastembed/ort/aws-lc-sys).
+      # Opt back into the heavier image with:  docker build --build-arg CAIRN_FEATURES=embed-local .
       args:
-        CAIRN_FEATURES: embed-local
+        CAIRN_FEATURES: ""
     image: cairn:dev
     container_name: cairn
     user: "0"
     depends_on:
-      - helix
+      helix:
+        condition: service_healthy
     environment:
       CAIRN_HOST: 0.0.0.0
       CAIRN_PORT: "7777"
@@ -118,6 +151,14 @@ services:
       # Read-only mount of the host project directory for file tools (read/verify/checkpoint).
       - "${CAIRN_WORKSPACE_HOST:-.}:/workspace:ro"
     restart: unless-stopped
+    # Readiness gate: the cairn server's own /api/health endpoint. Useful for the CI smoke job
+    # and for any sidecar that wants to wait for cairn to be live.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:7777/api/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
 
 volumes:
   cairn-data:

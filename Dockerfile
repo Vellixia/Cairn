@@ -26,9 +26,10 @@ RUN if [ -n "$CAIRN_FEATURES" ]; then \
 # ---- runtime -----------------------------------------------------------------
 FROM debian:bookworm-slim
 # ca-certificates: TLS for hosted providers / model downloads. libgomp1: OpenMP runtime that the
-# ONNX Runtime (local embeddings) links against.
+# ONNX Runtime (local embeddings) links against. wget: the cairn healthcheck in docker-compose.yml
+# uses `wget -q` to probe /api/health.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates libgomp1 \
+    && apt-get install -y --no-install-recommends ca-certificates libgomp1 wget \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home cairn
 COPY --from=builder /app/target/release/cairn /usr/local/bin/cairn
