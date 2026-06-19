@@ -128,7 +128,7 @@ gantt
 | `cairn-share`: export/import sanitized bundles | Done | Redacts PII, withholds hard secrets |
 | `cairn-share`: pool contribute/pull | Done | Federated sanitized knowledge (admin-scoped token required) |
 | Health checks in Docker Compose | Done | minio/helix/cairn all `service_healthy`; `depends_on: service_healthy`; minio-init bounded retry |
-| CI smoke test (compose + API) | Done | `ci-smoke` job asserted `{"tools":[...]}` envelope + ≥5 tools. **Superseded** by the 56-test live suite; removed from CI. |
+| CI smoke test (compose + API) | Done | `ci-smoke` job asserted `{"tools":[...]}` envelope + ≥5 tools. **Superseded** by the 54-test live suite (see `docs/TESTING.md`); removed from CI. |
 
 ### In progress / partial
 
@@ -178,11 +178,11 @@ The product is feature-complete enough to install and use. The remaining work is
 | Milestone | Status |
 |---|---|
 | Fresh clone builds (`cargo check --workspace`) | Passed |
-| `cargo test --workspace` (111+ tests) | Passed |
+| `cargo test --workspace` (118 tests, 5 ignored) | Passed |
 | `cargo clippy --workspace -- -D warnings` | Passed |
 | `docker compose up -d` from clean checkout | Passed |
 | Docker compose health checks (all 3 services `healthy`) | Passed (verified live) |
-| 56-test end-to-end live suite (memory/context/guard/profile/shell/assembly/sanitize/sync/share/api/setup/bench/path-rewrite) | Passed (verified live) |
+| 54-test end-to-end live suite (memory/context/guard/profile/shell/assembly/sanitize/sync/share/api/setup/bench/path-rewrite) | Passed (verified live) — see `docs/TESTING.md` |
 | `cairn-cli bench` shows 90%+ savings | Passed |
 | OpenCode MCP: remember/recall/wakeup/sanitize | Passed (verified live) |
 | OpenCode MCP: read (remote proxy with workspace mount) | Passed (verified live) |

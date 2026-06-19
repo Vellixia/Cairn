@@ -31,7 +31,7 @@ massively increases compile time and binary size.
 | **Medium** | `docker-compose.yml` exposes no `HEALTHCHECK` or dependency readiness beyond `depends_on`; MinIO Helix write failures can race. |
 | **Low** | `.env.example` is incomplete (does not document `CAIRN_EMBED_API_KEY`, `CAIRN_HELIX_NS`, `CAIRN_GITHUB_TOKEN`, etc.). |
 | **Low** | CI `rust` job runs with `--network host` MinIO/Helix, which differs from the compose network model and can mask port/env bugs. |
-| **Info** | 87 tests pass with `CAIRN_EMBED_PROVIDER=hashing`; 5 tests are ignored because they require a live HelixDB. |
+| **Info** | 87 tests pass with `CAIRN_EMBED_PROVIDER=hashing` (pre-P0–P3 hardening baseline); current `cargo test --workspace` reports 118 passed + 5 ignored. |
 
 ---
 

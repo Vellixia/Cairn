@@ -67,7 +67,7 @@ cd web && npm install && npm run dev   # :3000 → API on :7777
 | `CONTRIBUTING.md` | Dev setup, PR checklist, workspace layout |
 | `docs/ARCHITECTURE.md` | Full crate graph, MCP tools, API endpoints, Docker, config, CLI |
 | `docs/DECISIONS.md` | Architecture decision records |
-| `docs/TESTING.md` | End-to-end test coverage (54 tests) |
+| `docs/TESTING.md` | End-to-end live-suite coverage (54 integration tests; cargo test --workspace reports 118 passed + 5 ignored) |
 | `docs/ROADMAP.md` | Development status and phases |
 | `docs/BENCHMARKS.md` | Token savings benchmarks |
 
