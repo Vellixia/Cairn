@@ -225,4 +225,6 @@ API calls unless the user opts in (embedding provider).
 
 - [Architecture](ARCHITECTURE.md) — how these decisions manifest in the code
 - [Roadmap](ROADMAP.md) — what's done, what's next
+- [Web](WEB.md) — admin/CLI auth split surface
+- [Upgrading](UPGRADING.md) — 0.3.x → 0.4.0 migration
 - [Audit Report](audits/REPORT.md) — security findings that informed several of these decisions

@@ -41,6 +41,7 @@ gantt
     One-click deploy templates     :p3h, 2026-06-01, 45d
     Multi-platform release binaries :p3i, 2026-06-01, 45d
     Slim image + model SHA pin     :done, p3j, 2026-06-19, 1d
+    Web 0.4.0 admin + dashboard    :done, p3k, 2026-06-19, 1d
 
     section Phase 4 — Distribution
     OpenCode README quickstart     :active, p4a, 2026-06-19, 1d
@@ -59,7 +60,7 @@ gantt
 | Item | Status | Notes |
 |---|---|---|
 | Cargo workspace + crate structure | Done | 14 crates |
-| Next.js web app (landing + dashboard) | Done | Static export, embedded via rust-embed |
+| Next.js web app (admin console, sidebar dashboard) | Done | Static export, embedded via rust-embed; prebuilt `web/out/` is committed for hermetic `cargo build` |
 | Docker Compose stack (Cairn + HelixDB + MinIO) | Done | `docker compose up -d` |
 | CI pipeline (test/clippy/fmt) | Done | GitHub Actions |
 | Brand identity (name/logo/palette) | Done | Cairn — 3-stone cairn, ember accent |
@@ -129,6 +130,11 @@ gantt
 | `cairn-share`: pool contribute/pull | Done | Federated sanitized knowledge (admin-scoped token required) |
 | Health checks in Docker Compose | Done | minio/helix/cairn all `service_healthy`; `depends_on: service_healthy`; minio-init bounded retry |
 | CI smoke test (compose + API) | Done | `ci-smoke` job asserted `{"tools":[...]}` envelope + ≥5 tools. **Superseded** by the 54-test live suite (see `docs/TESTING.md`); removed from CI. |
+| Single admin account + cookie session (0.4.0) | Done | Argon2id hash, httpOnly HMAC-SHA256 cookie, sliding TTL, generation counter for instant invalidation |
+| Admin recovery: `cairn-server admin password` + `reset` | Done | Loopback-only, mirrors the TLS gate; resets write a tombstone (HelixDB append-only schema) |
+| Web: sidebar dashboard + login + setup wizard | Done | SessionGate probes `/api/auth/status` + `/me`; `aria-current` sidebar, ⌘K palette, toast system |
+| Admin token issuance from the dashboard | Done | `/api/devices/{tokens, pair-codes, audit}` admin endpoints; CLI flow unchanged |
+| Security headers middleware | Done | `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy: clipboard-write=(self)` |
 
 ### In progress / partial
 
@@ -189,6 +195,13 @@ The product is feature-complete enough to install and use. The remaining work is
 | Multi-device: memory on one device recalled on another | Passed (via sync) |
 | Edit verification: corrupted edit flagged | Passed (guard tests) |
 | Checkpoint/rollback | Passed (guard tests) |
+| First-run: no admin → `/setup` wizard → cookie set → dashboard reachable | Passed |
+| Admin login → cookie session → dashboard behind auth | Passed |
+| Admin issues device token from Devices panel → CLI sync succeeds | Passed |
+| Cookie expires after TTL → `/login` shown; existing cookie rejected | Passed |
+| `cairn-server admin password` rotates + invalidates all sessions | Passed |
+| `cairn-server admin reset` clears admin via tombstone; next `/setup` succeeds | Passed |
+| Web: prebuilt `web/out/` committed; `cargo build` is hermetic (no Node required) | Passed |
 
 ---
 
@@ -196,5 +209,8 @@ The product is feature-complete enough to install and use. The remaining work is
 
 - [Plan](PLAN.md) — product vision and phases
 - [Architecture](ARCHITECTURE.md) — how it works today
+- [Web](WEB.md) — admin/CLI auth split, dashboard surface
+- [Upgrading](UPGRADING.md) — 0.3.x → 0.4.0 migration
+- [Decisions](DECISIONS.md) — ADRs, including ADR-010 (single-admin split)
 - [Benchmarks](BENCHMARKS.md) — measured numbers
 - [Audit Report](audits/REPORT.md) — security findings with fix status
