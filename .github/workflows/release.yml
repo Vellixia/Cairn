@@ -207,14 +207,13 @@ jobs:
         run: |
           for f in cairn-*.{tar.gz,zip}; do
             [ -f "$f" ] || continue
-            cosign sign-blob --yes \
-              --output-signature="$f.sig" \
-              --output-certificate="$f.cert" \
-              "$f"
+            # cosign v3 dropped --output-signature/--output-certificate in favor of
+            # a single --bundle file containing the signature + certificate.
+            cosign sign-blob --yes --bundle "$f.bundle" "$f"
           done
       - name: Upload signatures to release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         working-directory: assets
         run: |
-          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber *.sig *.cert
+          gh release upload "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --clobber *.bundle
