@@ -1,68 +1,104 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getJSON, postJSON } from "@/lib/api";
-import { pushToast } from "@/lib/hooks";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { useAnchorQuery, useSetAnchorMutation } from "@/lib/queries";
+import { anchorSchema, type AnchorInput } from "@/lib/forms/schemas";
 
 export default function AnchorPage() {
-  const [anchor, setAnchor] = useState<string | null>(null);
-  const [goal, setGoal] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    getJSON<{ anchor: string | null }>("/api/guard/anchor")
-      .then((r) => setAnchor(r.anchor))
-      .catch(() => {});
-  }, []);
-
-  async function save() {
-    if (!goal.trim()) return;
-    setBusy(true);
+  const anchor = useAnchorQuery();
+  const setAnchor = useSetAnchorMutation();
+  const form = useForm<AnchorInput>({
+    resolver: zodResolver(anchorSchema),
+    defaultValues: { goal: anchor.data?.anchor ?? "" },
+  });
+  async function onSubmit(values: AnchorInput) {
     try {
-      await postJSON("/api/guard/anchor", { goal });
-      setAnchor(goal);
-      setGoal("");
-      pushToast("Anchor set", "success");
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Failed", "error");
-    } finally {
-      setBusy(false);
+      await setAnchor.mutateAsync(values);
+      form.reset({ goal: values.goal });
+      anchor.refetch();
+    } catch {
+      /* toast handled */
     }
   }
-
   return (
     <div className="space-y-6 max-w-2xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Task anchor</h1>
-        <p className="mt-1 text-sm text-slate">
-          The goal re-injected at every session start. If you set one, you stop having to
-          re-explain the task every time.
+        <p className="mt-1 text-sm text-muted-foreground">
+          The goal re-injected at every session start. If you set one, you stop
+          having to re-explain the task every time.
         </p>
       </header>
-
-      <section className="rounded-xl border border-line bg-surface p-5 space-y-3">
-        {anchor ? (
-          <p className="rounded-md border border-line bg-surface2 px-3 py-2 text-sm text-offwhite">{anchor}</p>
-        ) : (
-          <p className="text-sm text-slate">No anchor set.</p>
-        )}
-        <div className="flex gap-2">
-          <input
-            value={goal}
-            onChange={(e) => setGoal(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") save(); }}
-            placeholder='e.g. "Ship the HelixDB backend behind the store seam"'
-            className="flex-1 rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-ember"
-          />
-          <button
-            onClick={save}
-            disabled={busy}
-            className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206] disabled:opacity-50"
+      <Card>
+        <CardHeader>
+          <CardTitle>Current anchor</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {anchor.data?.anchor ? (
+            <p className="rounded-md border border-line bg-secondary px-3 py-2 text-sm">
+              {anchor.data.anchor}
+            </p>
+          ) : (
+            <p className="text-sm text-muted-foreground">No anchor set.</p>
+          )}
+        </CardContent>
+      </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>Set or update</CardTitle>
+          <CardDescription>Plain text, no formatting.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            id="form-anchor-page"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="flex gap-2"
           >
-            {anchor ? "Update" : "Set"}
-          </button>
-        </div>
-      </section>
+            <FieldGroup className="flex flex-1 flex-row gap-2">
+              <Controller
+                name="goal"
+                control={form.control}
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid} className="flex-1">
+                    <FieldLabel htmlFor="form-anchor-page-goal" className="sr-only">
+                      Goal
+                    </FieldLabel>
+                    <Input
+                      {...field}
+                      id="form-anchor-page-goal"
+                      aria-invalid={fieldState.invalid}
+                      placeholder='e.g. "Ship the HelixDB backend behind the store seam"'
+                    />
+                    {fieldState.invalid && (
+                      <FieldError errors={[fieldState.error]} />
+                    )}
+                  </Field>
+                )}
+              />
+              <Button type="submit" form="form-anchor-page" disabled={setAnchor.isPending}>
+                {anchor.data?.anchor ? "Update" : "Set"}
+              </Button>
+            </FieldGroup>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }

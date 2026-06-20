@@ -1,28 +1,60 @@
 "use client";
 
 import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Textarea } from "@/components/ui/textarea";
+import { assembleSchema, type AssembleInput } from "@/lib/forms/schemas";
 import { postJSON } from "@/lib/api";
-import { pushToast } from "@/lib/hooks";
+import { toast } from "sonner";
 
 export default function AssemblePage() {
-  const [paths, setPaths] = useState("");
-  const [budget, setBudget] = useState(4000);
+  const form = useForm<AssembleInput>({
+    resolver: zodResolver(assembleSchema),
+    defaultValues: { paths: "crates/cairn-core/src/lib.rs crates/cairn-api/src/lib.rs README.md", budget: 4000 },
+  });
   const [view, setView] = useState<string | null>(null);
-  const [reportJson, setReportJson] = useState<string | null>(null);
+  const [report, setReport] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
 
-  async function run() {
-    const ps = paths.split(/\s+/).filter(Boolean);
-    if (ps.length === 0) return;
+  async function onSubmit(values: AssembleInput) {
+    const paths = values.paths.split(/\s+/).filter(Boolean);
+    if (paths.length === 0) {
+      toast.error("Add at least one path.");
+      return;
+    }
+    setBusy(true);
     try {
-      const qs = ps.map((p) => `path=${encodeURIComponent(p)}`).join("&");
+      const qs = paths
+        .map((p) => `path=${encodeURIComponent(p)}`)
+        .join("&");
       const r = await postJSON<{ view: string; report?: unknown }>(
-        `/api/context/assemble?${qs}&budget=${budget}`,
+        `/api/context/assemble?${qs}&budget=${values.budget}`,
         {},
       );
       setView(r.view);
-      setReportJson(r.report ? JSON.stringify(r.report, null, 2) : null);
+      setReport(r.report ? JSON.stringify(r.report, null, 2) : null);
     } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Assemble failed", "error");
+      toast.error(e instanceof Error ? e.message : "Assemble failed");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -30,50 +62,94 @@ export default function AssemblePage() {
     <div className="space-y-6 max-w-4xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Assemble</h1>
-        <p className="mt-1 text-sm text-slate">
+        <p className="mt-1 text-sm text-muted-foreground">
           Pack several files into a token budget. Edge-ordered, reports dropped items.
         </p>
       </header>
 
-      <section className="rounded-xl border border-line bg-surface p-5 space-y-3">
-        <label className="block">
-          <span className="block text-xs uppercase tracking-wider text-slate mb-1">Paths (whitespace-separated)</span>
-          <textarea
-            value={paths}
-            onChange={(e) => setPaths(e.target.value)}
-            rows={3}
-            placeholder="crates/cairn-core/src/lib.rs crates/cairn-api/src/lib.rs README.md"
-            className="w-full rounded-lg border border-line bg-surface2 px-3 py-2 font-mono text-sm outline-none focus:border-ember"
-          />
-        </label>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-sm">
-            <span className="text-slate">Budget (tokens)</span>
-            <input
-              type="number"
-              value={budget}
-              onChange={(e) => setBudget(parseInt(e.target.value, 10) || 1000)}
-              className="w-28 rounded-lg border border-line bg-surface2 px-3 py-1.5 text-sm outline-none focus:border-ember"
-            />
-          </label>
-          <button onClick={run} className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206]">
-            Assemble
-          </button>
-        </div>
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Inputs</CardTitle>
+          <CardDescription>
+            One path per token (whitespace-separated).
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            id="form-assemble"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="space-y-3"
+          >
+            <FieldGroup>
+              <Controller
+                name="paths"
+                control={form.control}
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="form-assemble-paths">Paths</FieldLabel>
+                    <Textarea
+                      {...field}
+                      id="form-assemble-paths"
+                      aria-invalid={fieldState.invalid}
+                      rows={3}
+                      className="font-mono"
+                      placeholder="crates/cairn-core/src/lib.rs crates/cairn-api/src/lib.rs README.md"
+                    />
+                    {fieldState.invalid && (
+                      <FieldError errors={[fieldState.error]} />
+                    )}
+                  </Field>
+                )}
+              />
+              <Controller
+                name="budget"
+                control={form.control}
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="form-assemble-budget">Budget (tokens)</FieldLabel>
+                    <Input
+                      {...field}
+                      id="form-assemble-budget"
+                      aria-invalid={fieldState.invalid}
+                      type="number"
+                      className="w-36"
+                      onChange={(e) => field.onChange(e.target.value)}
+                    />
+                    {fieldState.invalid && (
+                      <FieldError errors={[fieldState.error]} />
+                    )}
+                  </Field>
+                )}
+              />
+              <Field>
+                <Button type="submit" form="form-assemble" disabled={busy}>
+                  {busy ? "Assembling…" : "Assemble"}
+                </Button>
+              </Field>
+            </FieldGroup>
+          </form>
+        </CardContent>
+      </Card>
 
       {view && (
-        <section className="rounded-xl border border-line bg-surface p-5 space-y-2">
-          <h2 className="text-xs uppercase tracking-[0.08em] text-slate">Output</h2>
-          <pre className="max-h-[28rem] overflow-auto rounded-lg border border-line bg-surface2 p-3 font-mono text-xs text-[#cdd5e0] whitespace-pre-wrap">
-            {view}
-          </pre>
-          {reportJson && (
-            <pre className="rounded-md border border-line bg-surface2 p-2 font-mono text-[11px] text-slate overflow-x-auto">
-              {reportJson}
-            </pre>
-          )}
-        </section>
+        <Card>
+          <CardHeader>
+            <CardTitle>Output</CardTitle>
+            <CardDescription>
+              Files included up to the token budget, with dropped files reported.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            <ScrollArea className="h-[28rem] rounded-lg border border-line bg-secondary">
+              <pre className="whitespace-pre-wrap p-3 font-mono text-xs">{view}</pre>
+            </ScrollArea>
+            {report && (
+              <pre className="rounded-md border border-line bg-secondary p-2 font-mono text-[11px] text-muted-foreground overflow-x-auto">
+                {report}
+              </pre>
+            )}
+          </CardContent>
+        </Card>
       )}
     </div>
   );

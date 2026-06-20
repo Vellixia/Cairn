@@ -1,16 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Sidebar } from "@/components/Sidebar";
-import { SessionGate, useMe } from "@/components/SessionGate";
-import { ToastTray } from "@/components/Toast";
+import { SessionGate } from "@/components/SessionGate";
+import { CairnSidebar } from "@/components/Sidebar";
+import { Topbar } from "@/components/Topbar";
+import { CommandPalette } from "@/components/CommandPalette";
 import { Shortcuts } from "@/components/Shortcuts";
-import type { Me } from "@/lib/api";
 
 /**
  * Dashboard shell. Wraps everything in <SessionGate>, which probes auth + redirects unauth'd
- * users to /login. Renders the sidebar (collapsible below md), a sticky topbar, and the active
- * section via `children`.
+ * users to /login. Renders the sidebar (flat, non-collapsible) + sticky topbar + the active
+ * section via `children`. The command palette and shortcuts modal are mounted here so they're
+ * available on every dashboard page.
  */
 export default function DashboardLayout({
   children,
@@ -19,44 +19,17 @@ export default function DashboardLayout({
 }) {
   return (
     <SessionGate>
-      <DashboardShell>{children}</DashboardShell>
+      <div className="min-h-screen flex">
+        <CairnSidebar />
+        <div className="flex-1 flex min-w-0 flex-col">
+          <Topbar />
+          <main className="flex-1 px-5 py-6 md:px-8 md:py-8 max-w-[1400px] w-full mx-auto">
+            {children}
+          </main>
+        </div>
+      </div>
+      <CommandPalette />
+      <Shortcuts />
     </SessionGate>
   );
-}
-
-function DashboardShell({ children }: { children: React.ReactNode }) {
-  const me = useMe();
-  return (
-    <div className="min-h-screen flex">
-      <Sidebar />
-      <div className="flex-1 flex min-w-0 flex-col">
-        {me && <TopbarBootstrap me={me} />}
-        <main className="flex-1 px-5 py-6 md:px-8 md:py-8 max-w-[1400px] w-full mx-auto">
-          {children}
-        </main>
-      </div>
-      <ToastTray />
-      <Shortcuts />
-      <CommandPaletteBootstrap />
-    </div>
-  );
-}
-
-function TopbarBootstrap({ me }: { me: Me }) {
-  // Lazy import to avoid bundling the Topbar's polling in the SessionGate path.
-  const [Topbar, setTopbar] = useState<React.ComponentType<{ me: Me }> | null>(null);
-  useEffect(() => {
-    import("@/components/Topbar").then((m) => setTopbar(() => m.Topbar));
-  }, []);
-  if (!Topbar) return <div className="h-14 border-b border-line" />;
-  return <Topbar me={me} />;
-}
-
-function CommandPaletteBootstrap() {
-  const [Palette, setPalette] = useState<React.ComponentType | null>(null);
-  useEffect(() => {
-    import("@/components/CommandPalette").then((m) => setPalette(() => m.CommandPalette));
-  }, []);
-  if (!Palette) return null;
-  return <Palette />;
 }

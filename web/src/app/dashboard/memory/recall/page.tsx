@@ -1,78 +1,128 @@
 "use client";
 
 import { useState } from "react";
-import { getJSON, type ScoredMemory } from "@/lib/api";
-import { pushToast } from "@/lib/hooks";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import { Item, ItemContent, ItemTitle, ItemDescription } from "@/components/ui/item";
+import { useRecallQuery } from "@/lib/queries";
+import { recallSchema, type RecallInput } from "@/lib/forms/schemas";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
 
 export default function RecallPage() {
-  const [q, setQ] = useState("");
-  const [hits, setHits] = useState<ScoredMemory[] | null>(null);
-  const [busy, setBusy] = useState(false);
+  const form = useForm<RecallInput>({
+    resolver: zodResolver(recallSchema),
+    defaultValues: { q: "" },
+  });
+  const [submitted, setSubmitted] = useState("");
+  const query = useRecallQuery(submitted);
 
-  async function recall() {
-    setBusy(true);
-    try {
-      const r = await getJSON<ScoredMemory[]>(
-        `/api/memory/recall?limit=20&q=${encodeURIComponent(q)}`,
-      );
-      setHits(r);
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Recall failed", "error");
-    } finally {
-      setBusy(false);
-    }
+  function onSubmit(values: RecallInput) {
+    setSubmitted(values.q);
   }
 
   return (
     <div className="space-y-6 max-w-3xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Recall</h1>
-        <p className="mt-1 text-sm text-slate">
+        <p className="mt-1 text-sm text-muted-foreground">
           BM25 lexical recall with semantic fallback when embeddings are enabled.
         </p>
       </header>
 
-      <section className="rounded-xl border border-line bg-surface p-5">
-        <div className="flex gap-2">
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") recall(); }}
-            placeholder='e.g. "why SQLite"'
-            className="flex-1 rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-ember"
-          />
-          <button
-            onClick={recall}
-            disabled={busy}
-            className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206] disabled:opacity-50"
+      <Card>
+        <CardHeader>
+          <CardTitle>Search</CardTitle>
+          <CardDescription>Submit a query to score memories against.</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            id="form-recall"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="flex gap-2"
           >
-            {busy ? "…" : "Recall"}
-          </button>
-        </div>
-      </section>
+            <FieldGroup className="flex flex-1 flex-row gap-2">
+              <Controller
+                name="q"
+                control={form.control}
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid} className="flex-1">
+                    <FieldLabel htmlFor="form-recall-q" className="sr-only">
+                      Query
+                    </FieldLabel>
+                    <Input
+                      {...field}
+                      id="form-recall-q"
+                      aria-invalid={fieldState.invalid}
+                      placeholder='e.g. "why SQLite"'
+                    />
+                    {fieldState.invalid && (
+                      <FieldError errors={[fieldState.error]} />
+                    )}
+                  </Field>
+                )}
+              />
+              <Button type="submit" form="form-recall">
+                Recall
+              </Button>
+            </FieldGroup>
+          </form>
+        </CardContent>
+      </Card>
 
-      <section className="rounded-xl border border-line bg-surface p-5">
-        <h2 className="mb-3 text-xs uppercase tracking-[0.08em] text-slate">Results</h2>
-        {hits === null && (
-          <p className="text-sm text-slate">Search to see results.</p>
-        )}
-        {hits !== null && hits.length === 0 && (
-          <p className="text-sm text-slate">No matches yet.</p>
-        )}
-        {hits !== null && hits.length > 0 && (
-          <ul className="space-y-2">
-            {hits.map((h) => (
-              <li key={h.memory.id} className="rounded-lg border border-line bg-surface2 px-3 py-2 text-sm">
-                {h.memory.content}
-                <div className="mt-1 text-[11px] text-slate">
-                  <span className="text-ember font-mono">{h.score.toFixed(2)}</span> · {h.memory.kind} · {h.memory.tier}
-                  {h.memory.concepts?.length > 0 && <> · {h.memory.concepts.join(", ")}</>}
-                </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Results</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {submitted === "" ? (
+            <p className="text-sm text-muted-foreground">Search to see results.</p>
+          ) : query.isLoading ? (
+            <div className="space-y-2">
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+            </div>
+          ) : query.data && query.data.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No matches yet.</p>
+          ) : query.data ? (
+            <ul className="space-y-2">
+              {query.data.map((h) => (
+                <Item key={h.memory.id} variant="outline" size="sm">
+                  <ItemContent>
+                    <ItemTitle className="line-clamp-3">{h.memory.content}</ItemTitle>
+                    <ItemDescription>
+                      <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
+                        {h.score.toFixed(2)}
+                      </Badge>
+                      {h.memory.kind} · {h.memory.tier}
+                      {h.memory.concepts?.length > 0
+                        ? ` · ${h.memory.concepts.join(", ")}`
+                        : ""}
+                    </ItemDescription>
+                  </ItemContent>
+                </Item>
+              ))}
+            </ul>
+          ) : null}
+        </CardContent>
+      </Card>
     </div>
   );
 }

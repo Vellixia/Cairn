@@ -1,191 +1,325 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
-import { useQuery, pushToast } from "@/lib/hooks";
-import { type Health, type Stats, type Memory, type AuditEvent } from "@/lib/api";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import { Item, ItemContent, ItemTitle, ItemDescription } from "@/components/ui/item";
+import {
+  useAnchorQuery,
+  useSetAnchorMutation,
+  useStatsQuery,
+  useWakeupQuery,
+  useDevicesAuditQuery,
+} from "@/lib/queries";
+import { anchorSchema, type AnchorInput } from "@/lib/forms/schemas";
 
 export default function DashboardOverviewPage() {
-  const health = useQuery<Health>("/api/health", { pollMs: 15_000 });
-  const stats = useQuery<Stats>("/api/stats", { pollMs: 10_000 });
-  const memories = useQuery<Memory[]>("/api/memory/wakeup?limit=5", { pollMs: 30_000 });
-  const audit = useQuery<AuditEvent[]>("/api/devices/audit", { pollMs: 30_000 });
-
+  const stats = useStatsQuery();
+  const memories = useWakeupQuery(5);
+  const audit = useDevicesAuditQuery();
+  const anchor = useAnchorQuery();
   const rel = stats.data?.reliability;
+
   const scoreColor =
-    !rel ? "text-slate" :
-    rel.score >= 80 ? "text-teal" :
-    rel.score >= 50 ? "text-ember" :
-    "text-[#f87171]";
+    !rel
+      ? "text-muted-foreground"
+      : rel.score >= 80
+      ? "text-emerald-500"
+      : rel.score >= 50
+      ? "text-amber-500"
+      : "text-destructive";
 
   return (
     <div className="space-y-6">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Overview</h1>
-        <p className="mt-1 text-sm text-slate">
+        <p className="mt-1 text-sm text-muted-foreground">
           Server health, reliability, recent memory, and the last few admin actions.
         </p>
       </header>
 
       <section className="grid gap-4 md:grid-cols-3">
-        <Card title="Server" loading={health.loading}>
-          <Row k="Status" v={health.data?.status ?? (health.error ? "offline" : "…")} />
-          <Row k="Version" v={health.data ? `v${health.data.version}` : "…"} />
-          <Row k="Memories" v={stats.data ? String(stats.data.memories) : "…"} />
-          <Row k="Checkpoints" v={stats.data?.checkpoints != null ? String(stats.data.checkpoints) : "…"} />
-          <Row k="Preferences" v={stats.data?.preferences != null ? String(stats.data.preferences) : "…"} />
-          <Row k="Anchor" v={stats.data?.anchor ? `"${stats.data.anchor}"` : "none"} />
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground font-normal">
+              Server
+            </CardTitle>
+            {stats.isLoading && <Skeleton className="h-3 w-8" />}
+          </CardHeader>
+          <CardContent className="space-y-1.5 text-sm">
+            <Stat k="Status" v={stats.data ? "ok" : "…"} />
+            <Stat k="Memories" v={stats.data ? String(stats.data.memories) : "…"} />
+            <Stat
+              k="Checkpoints"
+              v={
+                stats.data?.checkpoints != null
+                  ? String(stats.data.checkpoints)
+                  : "…"
+              }
+            />
+            <Stat
+              k="Preferences"
+              v={
+                stats.data?.preferences != null
+                  ? String(stats.data.preferences)
+                  : "…"
+              }
+            />
+            <Stat
+              k="Anchor"
+              v={stats.data?.anchor ? `"${stats.data.anchor}"` : "none"}
+            />
+          </CardContent>
         </Card>
 
-        <Card title="Reliability" loading={stats.loading}>
-          {rel ? (
-            <>
-              <div className={`text-4xl font-bold ${scoreColor}`}>
-                {rel.score}
-                <span className="text-base text-slate">/100</span>
-              </div>
-              <p className="mt-1 text-xs text-slate">
-                {rel.samples} edit{rel.samples === 1 ? "" : "s"} ·{" "}
-                <span className="text-teal">{rel.ok} ok</span> ·{" "}
-                <span className="text-ember">{rel.warn} warn</span> ·{" "}
-                <span className="text-[#f87171]">{rel.danger} danger</span> · {rel.rollbacks} rollback{rel.rollbacks === 1 ? "" : "s"}
-              </p>
-            </>
-          ) : (
-            <p className="text-sm text-slate">No edit history yet.</p>
-          )}
+        <Card>
+          <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+            <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground font-normal">
+              Reliability
+            </CardTitle>
+            {stats.isLoading && <Skeleton className="h-3 w-8" />}
+          </CardHeader>
+          <CardContent>
+            {rel ? (
+              <>
+                <div className={`text-4xl font-bold ${scoreColor}`}>
+                  {rel.score}
+                  <span className="text-base text-muted-foreground">/100</span>
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {rel.samples} edit{rel.samples === 1 ? "" : "s"} ·{" "}
+                  <span className="text-emerald-500">{rel.ok} ok</span> ·{" "}
+                  <span className="text-amber-500">{rel.warn} warn</span> ·{" "}
+                  <span className="text-destructive">{rel.danger} danger</span> ·{" "}
+                  {rel.rollbacks} rollback
+                  {rel.rollbacks === 1 ? "" : "s"}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-muted-foreground">No edit history yet.</p>
+            )}
+          </CardContent>
         </Card>
 
-        <Card title="Quick actions">
-          <div className="grid grid-cols-2 gap-2">
-            <Link href="/dashboard/memory" className={btnCls}>Remember</Link>
-            <Link href="/dashboard/memory/recall" className={btnCls}>Recall</Link>
-            <Link href="/dashboard/share/sanitize" className={btnCls}>Sanitize</Link>
-            <Link href="/dashboard/devices" className={btnCls}>Issue token</Link>
-          </div>
-          <p className="mt-3 text-[11px] text-slate">
-            ⌘K opens the command palette. <kbd className="font-mono">?</kbd> shows shortcuts.
-          </p>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground font-normal">
+              Quick actions
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-2 gap-2">
+              <Button asChild variant="outline" size="sm">
+                <Link href="/dashboard/memory">Remember</Link>
+              </Button>
+              <Button asChild variant="outline" size="sm">
+                <Link href="/dashboard/memory/recall">Recall</Link>
+              </Button>
+              <Button asChild variant="outline" size="sm">
+                <Link href="/dashboard/share/sanitize">Sanitize</Link>
+              </Button>
+              <Button asChild variant="outline" size="sm">
+                <Link href="/dashboard/devices">Issue token</Link>
+              </Button>
+            </div>
+            <p className="mt-3 text-[11px] text-muted-foreground">
+              ⌘K opens the command palette. <code>?</code> shows shortcuts.
+            </p>
+          </CardContent>
         </Card>
       </section>
 
       <section className="grid gap-4 lg:grid-cols-2">
-        <Card title="Recent memory" loading={memories.loading}>
-          {memories.data && memories.data.length === 0 && (
-            <p className="text-sm text-slate">No memories yet. Try Remember above.</p>
-          )}
-          {memories.data && memories.data.length > 0 && (
-            <ul className="space-y-1.5">
-              {memories.data.slice(0, 5).map((m) => (
-                <li key={m.id} className="rounded-md bg-surface2 px-3 py-2 text-sm">
-                  {m.content}
-                  <div className="mt-0.5 text-[11px] text-slate">
-                    <span className="text-ember font-mono">{m.kind}</span> · {m.tier} · {new Date(m.created_at).toLocaleString()}
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground font-normal">
+              Recent memory
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {memories.isLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+                <Skeleton className="h-12 w-full" />
+              </div>
+            ) : memories.data && memories.data.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No memories yet.</p>
+            ) : memories.data ? (
+              <ul className="space-y-1.5">
+                {memories.data.slice(0, 5).map((m) => (
+                  <Item key={m.id} variant="outline" size="sm">
+                    <ItemContent>
+                      <ItemTitle className="line-clamp-2">{m.content}</ItemTitle>
+                      <ItemDescription>
+                        <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
+                          {m.kind}
+                        </Badge>
+                        {m.tier} · {new Date(m.created_at).toLocaleString()}
+                      </ItemDescription>
+                    </ItemContent>
+                  </Item>
+                ))}
+              </ul>
+            ) : null}
+          </CardContent>
         </Card>
 
-        <Card title="Recent admin events" loading={audit.loading}>
-          {audit.data && audit.data.length === 0 && (
-            <p className="text-sm text-slate">No events recorded yet.</p>
-          )}
-          {audit.data && audit.data.length > 0 && (
-            <ul className="space-y-1.5 text-sm">
-              {audit.data.slice(0, 8).map((e, i) => (
-                <li key={i} className="flex items-baseline gap-3 rounded-md bg-surface2 px-3 py-1.5">
-                  <span className={`font-mono text-[11px] uppercase tracking-wider ${
-                    e.kind.startsWith("login_failed") || e.kind === "token_revoked"
-                      ? "text-[#f87171]"
-                      : "text-teal"
-                  }`}>
-                    {e.kind}
-                  </span>
-                  <span className="flex-1 text-slate truncate">{e.detail}</span>
-                  <span className="text-[11px] text-slate">{relativeTime(e.ts)}</span>
-                </li>
-              ))}
-            </ul>
-          )}
-          <p className="mt-2 text-[11px] text-slate">In-memory ring buffer; lost on restart.</p>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground font-normal">
+              Recent admin events
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {audit.isLoading ? (
+              <div className="space-y-2">
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
+                <Skeleton className="h-8 w-full" />
+              </div>
+            ) : audit.data && audit.data.length === 0 ? (
+              <p className="text-sm text-muted-foreground">No events recorded yet.</p>
+            ) : audit.data ? (
+              <ul className="space-y-1.5 text-sm">
+                {audit.data.slice(0, 8).map((e, i) => {
+                  const isError =
+                    e.kind.startsWith("login_failed") || e.kind === "token_revoked";
+                  const isOk = e.kind.startsWith("login_ok") || e.kind === "setup";
+                  return (
+                    <li
+                      key={i}
+                      className="flex items-baseline gap-3 rounded-md border border-line px-3 py-1.5"
+                    >
+                      <Badge
+                        variant={isError ? "destructive" : isOk ? "secondary" : "outline"}
+                        className="font-mono text-[10px] uppercase tracking-wider"
+                      >
+                        {e.kind}
+                      </Badge>
+                      <span className="flex-1 text-muted-foreground truncate">
+                        {e.detail}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground">
+                        {relativeTime(e.ts)}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            ) : null}
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              In-memory ring buffer; lost on restart.
+            </p>
+          </CardContent>
         </Card>
       </section>
 
-      <section>
-        <Card title="Set a task anchor">
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-xs uppercase tracking-wider text-muted-foreground font-normal">
+            Set a task anchor
+          </CardTitle>
+        </CardHeader>
+        <CardContent>
           <AnchorEditor
-            current={stats.data?.anchor ?? null}
-            onSaved={() => stats.refetch()}
+            current={anchor.data?.anchor ?? null}
+            onSaved={() => {
+              anchor.refetch();
+              stats.refetch();
+            }}
           />
-        </Card>
-      </section>
+        </CardContent>
+      </Card>
     </div>
   );
 }
 
-const btnCls =
-  "rounded-lg border border-line bg-surface2 px-3 py-2 text-sm hover:bg-surface text-center";
-
-function Card({ title, children, loading }: { title: string; children: React.ReactNode; loading?: boolean }) {
-  return (
-    <div className="rounded-xl border border-line bg-surface p-5">
-      <h2 className="mb-3 text-xs uppercase tracking-[0.08em] text-slate flex items-center gap-2">
-        {title}
-        {loading && <span className="cairn-skeleton h-3 w-8 inline-block" />}
-      </h2>
-      {children}
-    </div>
-  );
-}
-
-function Row({ k, v }: { k: string; v: string }) {
+function Stat({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex justify-between border-b border-dashed border-line py-1.5 text-sm last:border-0">
-      <span className="text-slate">{k}</span>
+      <span className="text-muted-foreground">{k}</span>
       <span className="font-mono text-teal truncate max-w-[60%]">{v}</span>
     </div>
   );
 }
 
-function AnchorEditor({ current, onSaved }: { current: string | null; onSaved: () => void }) {
-  const [goal, setGoal] = useState(current ?? "");
-  const [busy, setBusy] = useState(false);
-  async function save() {
-    if (!goal.trim()) return;
-    setBusy(true);
+function AnchorEditor({
+  current,
+  onSaved,
+}: {
+  current: string | null;
+  onSaved: () => void;
+}) {
+  const setAnchor = useSetAnchorMutation();
+  const form = useForm<AnchorInput>({
+    resolver: zodResolver(anchorSchema),
+    defaultValues: { goal: current ?? "" },
+  });
+  async function onSubmit(values: AnchorInput) {
     try {
-      const { postJSON } = await import("@/lib/api");
-      await postJSON("/api/guard/anchor", { goal });
-      pushToast("Anchor set", "success");
+      await setAnchor.mutateAsync(values);
+      form.reset({ goal: values.goal });
       onSaved();
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Failed to set anchor", "error");
-    } finally {
-      setBusy(false);
+    } catch {
+      /* toast handled in mutation */
     }
   }
   return (
     <div className="space-y-2">
       {current && (
-        <p className="rounded-md border border-line bg-surface2 px-3 py-2 text-sm text-offwhite">{current}</p>
+        <p className="rounded-md border border-line bg-secondary px-3 py-2 text-sm">
+          {current}
+        </p>
       )}
-      <div className="flex gap-2">
-        <input
-          value={goal}
-          onChange={(e) => setGoal(e.target.value)}
-          placeholder='e.g. "Ship the HelixDB backend behind the store seam"'
-          className="flex-1 rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-ember"
-        />
-        <button
-          onClick={save}
-          disabled={busy}
-          className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206] disabled:opacity-50"
-        >
-          {current ? "Update" : "Set"}
-        </button>
-      </div>
+      <form
+        id="form-anchor"
+        onSubmit={form.handleSubmit(onSubmit)}
+        className="flex gap-2"
+      >
+        <FieldGroup className="flex-1 flex-row gap-2">
+          <Controller
+            name="goal"
+            control={form.control}
+            render={({ field, fieldState }) => (
+              <Field data-invalid={fieldState.invalid} className="flex-1">
+                <FieldLabel htmlFor="form-anchor-goal" className="sr-only">
+                  Goal
+                </FieldLabel>
+                <Input
+                  {...field}
+                  id="form-anchor-goal"
+                  aria-invalid={fieldState.invalid}
+                  placeholder='e.g. "Ship the HelixDB backend behind the store seam"'
+                />
+                {fieldState.invalid && (
+                  <FieldError errors={[fieldState.error]} />
+                )}
+              </Field>
+            )}
+          />
+          <Button type="submit" form="form-anchor" disabled={setAnchor.isPending}>
+            {current ? "Update" : "Set"}
+          </Button>
+        </FieldGroup>
+      </form>
     </div>
   );
 }

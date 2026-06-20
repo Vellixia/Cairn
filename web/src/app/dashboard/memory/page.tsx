@@ -1,60 +1,103 @@
 "use client";
 
-import { useState } from "react";
-import { postJSON, type Memory, type ScoredMemory } from "@/lib/api";
-import { pushToast } from "@/lib/hooks";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Textarea } from "@/components/ui/textarea";
+import { useRememberMutation } from "@/lib/queries";
+import { rememberSchema, type RememberInput } from "@/lib/forms/schemas";
 
 export default function MemoryPage() {
-  const [content, setContent] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function remember() {
-    if (!content.trim()) return;
-    setBusy(true);
+  const remember = useRememberMutation();
+  const form = useForm<RememberInput>({
+    resolver: zodResolver(rememberSchema),
+    defaultValues: { content: "" },
+  });
+  async function onSubmit(values: RememberInput) {
     try {
-      const m = await postJSON<Memory>("/api/memory", { content });
-      pushToast(`stored ${m.kind}/${m.tier} · ${m.id.slice(0, 8)}`, "success");
-      setContent("");
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Failed to store memory", "error");
-    } finally {
-      setBusy(false);
+      await remember.mutateAsync(values);
+      form.reset({ content: "" });
+    } catch {
+      /* toast handled in mutation */
     }
   }
-
   return (
     <div className="space-y-6 max-w-3xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Memories</h1>
-        <p className="mt-1 text-sm text-slate">
+        <p className="mt-1 text-sm text-muted-foreground">
           Store a memory. Every memory is content-hashed, deduped, and given a tier
           (working / long-term / archive).
         </p>
       </header>
-
-      <section className="rounded-xl border border-line bg-surface p-5">
-        <h2 className="mb-3 text-xs uppercase tracking-[0.08em] text-slate">Remember</h2>
-        <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          rows={4}
-          placeholder="e.g. We chose SQLite + a content-hash blob store so compression stays lossless."
-          className="w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-ember"
-        />
-        <button
-          onClick={remember}
-          disabled={busy}
-          className="mt-3 rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206] disabled:opacity-50"
-        >
-          {busy ? "Storing…" : "Remember"}
-        </button>
-      </section>
-
-      <p className="text-sm text-slate">
-        To recall or wakeup, use the sidebar. Every remembered note is also picked up by
-        Recall (BM25) and the dashboard Overview's recent-memory panel.
-      </p>
+      <Card>
+        <CardHeader>
+          <CardTitle>Remember</CardTitle>
+          <CardDescription>
+            Content you want surfaced in future sessions.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            id="form-remember"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="space-y-3"
+          >
+            <FieldGroup>
+              <Controller
+                name="content"
+                control={form.control}
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid}>
+                    <FieldLabel htmlFor="form-remember-content" className="sr-only">
+                      Content
+                    </FieldLabel>
+                    <Textarea
+                      {...field}
+                      id="form-remember-content"
+                      aria-invalid={fieldState.invalid}
+                      rows={4}
+                      placeholder="e.g. We chose SQLite + a content-hash blob store so compression stays lossless."
+                    />
+                    <FieldDescription>
+                      To recall or wakeup, use the sidebar. Every remembered note is
+                      also picked up by Recall (BM25) and the dashboard Overview's
+                      recent-memory panel.
+                    </FieldDescription>
+                    {fieldState.invalid && (
+                      <FieldError errors={[fieldState.error]} />
+                    )}
+                  </Field>
+                )}
+              />
+              <Field>
+                <Button
+                  type="submit"
+                  form="form-remember"
+                  disabled={remember.isPending}
+                >
+                  {remember.isPending ? "Storing…" : "Remember"}
+                </Button>
+              </Field>
+            </FieldGroup>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }
-

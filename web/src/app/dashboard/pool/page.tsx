@@ -1,90 +1,119 @@
 "use client";
 
-import { useState } from "react";
-import { useQuery, pushToast } from "@/lib/hooks";
-import { getJSON, postJSON, type Pool, type ShareExport, type Sensitivity } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import { Item, ItemContent, ItemTitle, ItemDescription } from "@/components/ui/item";
+import { usePoolQuery, usePublishPoolMutation } from "@/lib/queries";
 
-const BADGE: Record<Sensitivity, string> = {
-  shareable: "border-teal text-teal",
-  needs_review: "border-ember text-ember",
-  private: "border-[#f87171] text-[#f87171]",
+const SENSITIVITY: Record<
+  "shareable" | "needs_review" | "private",
+  "default" | "secondary" | "destructive"
+> = {
+  shareable: "default",
+  needs_review: "secondary",
+  private: "destructive",
 };
 
 export default function PoolPage() {
-  const pool = useQuery<Pool>("/api/pool");
-  const [busy, setBusy] = useState(false);
-
-  async function publish() {
-    setBusy(true);
-    try {
-      const bundle = await getJSON<ShareExport>("/api/share/export");
-      const res = await postJSON<{ accepted: number; rejected: number }>(
-        "/api/pool/contribute",
-        bundle,
-      );
-      pushToast(`Published · ${res.accepted} accepted, ${res.rejected} rejected`, "success");
-      pool.refetch();
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Publish failed", "error");
-    } finally {
-      setBusy(false);
-    }
-  }
+  const pool = usePoolQuery();
+  const publish = usePublishPoolMutation();
 
   return (
     <div className="space-y-6 max-w-3xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Pool</h1>
-        <p className="mt-1 text-sm text-slate">
-          The collective, sanitized knowledge this server shares with other Cairn servers.
+        <p className="mt-1 text-sm text-muted-foreground">
+          The collective, sanitized knowledge this server shares with other
+          Cairn servers.
         </p>
       </header>
 
-      <section className="rounded-xl border border-line bg-surface p-5 space-y-3">
-        <div className="flex items-center gap-3">
-          <button
-            onClick={publish}
-            disabled={busy}
-            className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206] disabled:opacity-50"
-          >
-            {busy ? "…" : "Publish my shareable memories"}
-          </button>
-          {pool.data && <span className="text-sm text-slate">{pool.data.count} in pool</span>}
-        </div>
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>Publish</CardTitle>
+          <CardDescription>
+            Snapshot your shareable memories into the local pool, then federate.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center gap-3">
+            <Button onClick={() => publish.mutate()} disabled={publish.isPending}>
+              {publish.isPending
+                ? "Publishing…"
+                : "Publish my shareable memories"}
+            </Button>
+            {pool.data && (
+              <span className="text-sm text-muted-foreground">
+                {pool.data.count} in pool
+              </span>
+            )}
+          </div>
+        </CardContent>
+      </Card>
 
-      <section className="rounded-xl border border-line bg-surface p-5">
-        <h2 className="mb-3 text-xs uppercase tracking-[0.08em] text-slate">In pool</h2>
-        {pool.loading ? (
-          <p className="text-sm text-slate">Loading…</p>
-        ) : pool.data && pool.data.memories.length === 0 ? (
-          <p className="text-sm text-slate">Empty pool. Publish your shareable memories to start contributing.</p>
-        ) : pool.data ? (
-          <ul className="space-y-2">
-            {pool.data.memories.map((m, i) => (
-              <li key={i} className="rounded-lg border border-line bg-surface2 px-3 py-2 text-sm">
-                {m.content}
-                <div className="mt-1 flex items-center gap-2 text-[11px] text-slate">
-                  <span className={`rounded-full border px-2 py-0.5 ${BADGE[m.sensitivity]}`}>
-                    {m.sensitivity}
-                  </span>
-                  <span>{m.kind}</span>
-                  {m.redactions > 0 && <span>· {m.redactions} redaction{m.redactions === 1 ? "" : "s"}</span>}
-                </div>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle>In pool</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {pool.isLoading ? (
+            <div className="space-y-2">
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+            </div>
+          ) : pool.data && pool.data.memories.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Empty pool. Publish your shareable memories to start contributing.
+            </p>
+          ) : pool.data ? (
+            <ul className="space-y-2">
+              {pool.data.memories.map((m, i) => (
+                <Item key={i} variant="outline" size="sm">
+                  <ItemContent>
+                    <ItemTitle className="line-clamp-2">{m.content}</ItemTitle>
+                    <ItemDescription className="flex items-center gap-2">
+                      <Badge
+                        variant={SENSITIVITY[m.sensitivity]}
+                        className="capitalize"
+                      >
+                        {m.sensitivity}
+                      </Badge>
+                      <span className="text-muted-foreground">{m.kind}</span>
+                      {m.redactions > 0 && (
+                        <span className="text-muted-foreground">
+                          · {m.redactions} redaction
+                          {m.redactions === 1 ? "" : "s"}
+                        </span>
+                      )}
+                    </ItemDescription>
+                  </ItemContent>
+                </Item>
+              ))}
+            </ul>
+          ) : null}
+        </CardContent>
+      </Card>
 
-      <section className="rounded-xl border border-line bg-surface p-5">
-        <h2 className="mb-3 text-xs uppercase tracking-[0.08em] text-slate">Federate across machines</h2>
-        <p className="mb-2 text-sm text-slate">
-          Run on the peer machine:
-        </p>
-        <pre className="rounded-md border border-line bg-surface2 p-3 font-mono text-xs text-[#cdd5e0] overflow-x-auto">{`cairn contribute --server ${typeof window !== "undefined" ? window.location.origin : "<server>"}
+      <Card>
+        <CardHeader>
+          <CardTitle>Federate across machines</CardTitle>
+          <CardDescription>
+            Pull and push the pool with another Cairn instance.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <pre className="rounded-md border border-line bg-secondary p-3 font-mono text-xs overflow-x-auto">{`cairn contribute --server ${typeof window !== "undefined" ? window.location.origin : "<server>"}
 cairn pull --server ${typeof window !== "undefined" ? window.location.origin : "<server>"}`}</pre>
-      </section>
+        </CardContent>
+      </Card>
     </div>
   );
 }

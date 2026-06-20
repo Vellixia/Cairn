@@ -1,10 +1,30 @@
 "use client";
 
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldDescription,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import Logo from "@/components/Logo";
-import { ApiError, getJSON, postJSON, type AuthStatus, type Me } from "@/lib/api";
-import { pushToast } from "@/lib/hooks";
+import { ApiError, getJSON, type AuthStatus } from "@/lib/api";
+import { useLoginMutation } from "@/lib/queries";
+import { loginSchema, type LoginInput } from "@/lib/forms/schemas";
 
 export default function LoginPage() {
   return (
@@ -18,46 +38,35 @@ function LoginForm() {
   const router = useRouter();
   const search = useSearchParams();
   const from = search?.get("from") ?? "/dashboard";
+  const login = useLoginMutation();
 
-  const usernameRef = useRef<HTMLInputElement>(null);
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("");
-  const [pending, setPending] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<AuthStatus | null>(null);
+  const form = useForm<LoginInput>({
+    resolver: zodResolver(loginSchema),
+    defaultValues: { username: "admin", password: "" },
+  });
 
   useEffect(() => {
-    usernameRef.current?.focus();
-    // If setup is required, redirect so the operator never sees a useless "invalid credentials"
-    // after hitting /login by mistake on a brand-new install.
     getJSON<AuthStatus>("/api/auth/status")
       .then((s) => {
-        setStatus(s);
         if (s.setup_required) router.replace("/setup");
       })
       .catch(() => {});
   }, [router]);
 
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setError(null);
-    setPending(true);
+  async function onSubmit(values: LoginInput) {
     try {
-      await postJSON("/api/auth/login", { username, password });
-      // The cookie is set by the server response; verify it before redirecting.
-      const me = await getJSON<Me>("/api/auth/me");
-      pushToast(`Welcome back, ${me.username}`, "success");
+      await login.mutateAsync(values);
       router.replace(from);
     } catch (e) {
       if (e instanceof ApiError && e.status === 401) {
-        setError("Invalid username or password.");
+        form.setError("password", { message: "Invalid username or password." });
       } else if (e instanceof ApiError && e.status === 429) {
-        setError("Too many attempts. Try again in a minute.");
+        form.setError("root", { message: "Too many attempts. Try again in a minute." });
       } else {
-        setError(e instanceof Error ? e.message : "Sign-in failed.");
+        form.setError("root", {
+          message: e instanceof Error ? e.message : "Sign-in failed.",
+        });
       }
-    } finally {
-      setPending(false);
     }
   }
 
@@ -68,61 +77,87 @@ function LoginForm() {
           <Logo size={36} />
           <span className="text-xl font-semibold tracking-tight">Cairn</span>
         </div>
-
-        <div className="rounded-2xl border border-line bg-surface p-6 shadow-lg shadow-black/30">
-          <h1 className="text-lg font-semibold">Sign in</h1>
-          <p className="mt-1 text-sm text-slate">Dashboard admin account.</p>
-
-          <form onSubmit={onSubmit} className="mt-5 space-y-3">
-            <label className="block">
-              <span className="block text-xs uppercase tracking-wider text-slate mb-1">Username</span>
-              <input
-                ref={usernameRef}
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                autoComplete="username"
-                required
-                className="w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-ember"
-              />
-            </label>
-            <label className="block">
-              <span className="block text-xs uppercase tracking-wider text-slate mb-1">Password</span>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                autoComplete="current-password"
-                required
-                className="w-full rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-ember"
-              />
-            </label>
-
-            {error && (
-              <p role="alert" className="rounded-md border border-[#f87171] bg-surface2 px-3 py-2 text-sm text-[#f87171]">
-                {error}
-              </p>
-            )}
-
-            <button
-              type="submit"
-              disabled={pending}
-              className="w-full rounded-lg bg-ember px-4 py-2 font-semibold text-[#1a1206] disabled:opacity-50"
+        <Card>
+          <CardHeader>
+            <CardTitle>Sign in</CardTitle>
+            <CardDescription>Dashboard admin account.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <form
+              id="form-login"
+              onSubmit={form.handleSubmit(onSubmit)}
+              className="space-y-3"
             >
-              {pending ? "Signing in…" : "Sign in"}
-            </button>
-          </form>
-
-          <p className="mt-5 text-xs text-slate">
-            Default username <code>admin</code>. First run?{" "}
-            <a href="/setup" className="text-teal hover:underline">Create admin →</a>
-          </p>
-          {status && !status.setup_required && (
-            <p className="mt-1 text-[11px] text-slate">
-              Forgot the password? On the server:{" "}
-              <code className="font-mono">cairn-server admin password</code> (loopback only).
+              <FieldGroup>
+                <Controller
+                  name="username"
+                  control={form.control}
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor="form-login-username">Username</FieldLabel>
+                      <Input
+                        {...field}
+                        id="form-login-username"
+                        aria-invalid={fieldState.invalid}
+                        autoComplete="username"
+                        required
+                      />
+                      {fieldState.invalid && (
+                        <FieldError errors={[fieldState.error]} />
+                      )}
+                    </Field>
+                  )}
+                />
+                <Controller
+                  name="password"
+                  control={form.control}
+                  render={({ field, fieldState }) => (
+                    <Field data-invalid={fieldState.invalid}>
+                      <FieldLabel htmlFor="form-login-password">Password</FieldLabel>
+                      <Input
+                        {...field}
+                        id="form-login-password"
+                        aria-invalid={fieldState.invalid}
+                        type="password"
+                        autoComplete="current-password"
+                        required
+                      />
+                      {fieldState.invalid && (
+                        <FieldError errors={[fieldState.error]} />
+                      )}
+                    </Field>
+                  )}
+                />
+                {form.formState.errors.root && (
+                  <Field>
+                    <p
+                      role="alert"
+                      className="text-sm text-destructive"
+                    >
+                      {form.formState.errors.root.message}
+                    </p>
+                  </Field>
+                )}
+                <Field>
+                  <Button
+                    type="submit"
+                    form="form-login"
+                    className="w-full"
+                    disabled={login.isPending}
+                  >
+                    {login.isPending ? "Signing in…" : "Sign in"}
+                  </Button>
+                </Field>
+              </FieldGroup>
+            </form>
+            <p className="mt-5 text-xs text-muted-foreground">
+              Default username <code>admin</code>. First run?{" "}
+              <a href="/setup" className="text-primary hover:underline">
+                Create admin →
+              </a>
             </p>
-          )}
-        </div>
+          </CardContent>
+        </Card>
       </div>
     </main>
   );

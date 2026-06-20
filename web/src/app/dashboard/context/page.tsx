@@ -1,36 +1,61 @@
 "use client";
 
 import { useState } from "react";
-import { getJSON, type ReadResult } from "@/lib/api";
-import { pushToast } from "@/lib/hooks";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { ScrollArea } from "@/components/ui/scroll-area";
+import { Badge } from "@/components/ui/badge";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Skeleton } from "@/components/ui/skeleton";
+import { getJSON } from "@/lib/api";
+import { useContextReadQuery } from "@/lib/queries";
+import { contextReadSchema, type ContextReadInput } from "@/lib/forms/schemas";
 
 export default function ContextInspectorPage() {
-  const [path, setPath] = useState("README.md");
-  const [mode, setMode] = useState("auto");
-  const [result, setResult] = useState<ReadResult | null>(null);
+  const form = useForm<ContextReadInput>({
+    resolver: zodResolver(contextReadSchema),
+    defaultValues: { path: "README.md", mode: "auto" },
+  });
+  const [submitted, setSubmitted] = useState<ContextReadInput | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const query = useContextReadQuery(submitted);
 
-  async function read() {
+  function onSubmit(values: ContextReadInput) {
+    setSubmitted(values);
     setExpanded(null);
-    try {
-      const r = await getJSON<ReadResult>(
-        `/api/context/read?path=${encodeURIComponent(path)}&mode=${encodeURIComponent(mode)}`,
-      );
-      setResult(r);
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Read failed", "error");
-    }
   }
 
   async function expand() {
-    if (!result) return;
+    if (!query.data) return;
     try {
       const r = await getJSON<{ content: string }>(
-        `/api/context/expand?hash=${encodeURIComponent(result.hash)}`,
+        `/api/context/expand?hash=${encodeURIComponent(query.data.hash)}`,
       );
       setExpanded(r.content);
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Expand failed", "error");
+    } catch {
+      /* toast via api  */
     }
   }
 
@@ -38,68 +63,116 @@ export default function ContextInspectorPage() {
     <div className="space-y-6 max-w-4xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Context Inspector</h1>
-        <p className="mt-1 text-sm text-slate">
-          Read a file with cache hit, AST outline, or full content — and recover the
-          byte-identical original on demand.
+        <p className="mt-1 text-sm text-muted-foreground">
+          Read a file with cache hit, AST outline, or full content — and recover
+          the byte-identical original on demand.
         </p>
       </header>
 
-      <section className="rounded-xl border border-line bg-surface p-5 space-y-3">
-        <div className="flex flex-wrap gap-2">
-          <input
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") read(); }}
-            placeholder="path relative to the server, e.g. crates/cairn-core/src/model.rs"
-            className="flex-1 min-w-[20rem] rounded-lg border border-line bg-surface2 px-3 py-2 font-mono text-sm outline-none focus:border-ember"
-          />
-          <select
-            value={mode}
-            onChange={(e) => setMode(e.target.value)}
-            className="rounded-lg border border-line bg-surface2 px-3 py-2 text-sm"
+      <Card>
+        <CardHeader>
+          <CardTitle>Read</CardTitle>
+          <CardDescription>
+            Pick a path and a mode. Auto picks full or signatures based on file size.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form
+            id="form-context"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="flex flex-wrap gap-2"
           >
-            <option value="auto">auto</option>
-            <option value="full">full</option>
-            <option value="signatures">signatures</option>
-            <option value="map">map</option>
-          </select>
-          <button
-            onClick={read}
-            className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206]"
-          >
-            Read
-          </button>
-        </div>
+            <FieldGroup className="flex flex-1 flex-row gap-2 flex-wrap">
+              <Controller
+                name="path"
+                control={form.control}
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid} className="flex-1 min-w-[20rem]">
+                    <FieldLabel htmlFor="form-context-path" className="sr-only">
+                      Path
+                    </FieldLabel>
+                    <Input
+                      {...field}
+                      id="form-context-path"
+                      aria-invalid={fieldState.invalid}
+                      className="font-mono"
+                      placeholder="path relative to the server, e.g. crates/cairn-core/src/model.rs"
+                    />
+                    {fieldState.invalid && (
+                      <FieldError errors={[fieldState.error]} />
+                    )}
+                  </Field>
+                )}
+              />
+              <Controller
+                name="mode"
+                control={form.control}
+                render={({ field }) => (
+                  <Field>
+                    <FieldLabel htmlFor="form-context-mode" className="sr-only">
+                      Mode
+                    </FieldLabel>
+                    <Select
+                      value={field.value}
+                      onValueChange={field.onChange}
+                    >
+                      <SelectTrigger id="form-context-mode" className="w-36">
+                        <SelectValue placeholder="auto" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">auto</SelectItem>
+                        <SelectItem value="full">full</SelectItem>
+                        <SelectItem value="signatures">signatures</SelectItem>
+                        <SelectItem value="map">map</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                )}
+              />
+              <Button type="submit" form="form-context">
+                Read
+              </Button>
+            </FieldGroup>
+          </form>
 
-        {result && (
-          <div className="space-y-3 pt-2">
-            <div className="grid grid-cols-2 gap-y-1 text-sm md:grid-cols-4">
-              <Stat k="status" v={result.status} />
-              <Stat k="lines" v={String(result.lines)} />
-              <Stat k="est. tokens" v={String(result.est_tokens)} />
-              <Stat k="handle" v={result.handle.slice(0, 12) + "…"} />
+          {query.isLoading ? (
+            <div className="mt-4 space-y-2">
+              <Skeleton className="h-4 w-3/4" />
+              <Skeleton className="h-40 w-full" />
             </div>
-            <p className="text-xs text-slate">{result.note}</p>
-            <button
-              onClick={expand}
-              className="rounded-lg border border-line px-3 py-1.5 text-xs hover:bg-surface2"
-            >
-              Expand → recover byte-identical original
-            </button>
-            <pre className="max-h-96 overflow-auto rounded-lg border border-line bg-surface2 p-3 font-mono text-xs text-[#cdd5e0]">
-              {expanded ?? (result.view || "(cached view — expand to see the full original)")}
-            </pre>
-          </div>
-        )}
-      </section>
+          ) : query.data ? (
+            <div className="mt-4 space-y-3">
+              <div className="grid grid-cols-2 gap-y-1 text-sm md:grid-cols-4">
+                <Stat k="status" v={query.data.status} />
+                <Stat k="lines" v={String(query.data.lines)} />
+                <Stat k="est. tokens" v={String(query.data.est_tokens)} />
+                <Stat k="handle" v={query.data.handle.slice(0, 12) + "…"} />
+              </div>
+              <p className="text-xs text-muted-foreground">{query.data.note}</p>
+              <Button variant="outline" size="sm" onClick={expand}>
+                Expand → recover byte-identical original
+              </Button>
+              <ScrollArea className="h-96 rounded-lg border border-line bg-secondary">
+                <pre className="p-3 font-mono text-xs">
+                  {expanded ??
+                    (query.data.view ||
+                      "(cached view — expand to see the full original)")}
+                </pre>
+              </ScrollArea>
+            </div>
+          ) : null}
+        </CardContent>
+      </Card>
     </div>
   );
 }
 
 function Stat({ k, v }: { k: string; v: string }) {
   return (
-    <div className="rounded-md bg-surface2 px-3 py-1.5">
-      <div className="text-[10px] uppercase tracking-wider text-slate">{k}</div>
+    <div className="rounded-md bg-secondary px-3 py-1.5">
+      <div className="text-[10px] uppercase tracking-wider text-muted-foreground">
+        {k}
+      </div>
       <div className="font-mono text-teal truncate">{v}</div>
     </div>
   );

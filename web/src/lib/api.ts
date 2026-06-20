@@ -19,6 +19,20 @@ export function resolveApiBase(): string {
 
 export const API_BASE = resolveApiBase();
 
+const AUTH_PATHS = new Set([
+  "/api/auth/login",
+  "/api/auth/logout",
+  "/api/auth/setup",
+  "/api/auth/status",
+  "/api/auth/me",
+  "/api/health",
+  "/api/pair/claim",
+]);
+
+function isAuthPath(path: string): boolean {
+  return AUTH_PATHS.has(path);
+}
+
 export class ApiError extends Error {
   readonly status: number;
   readonly body: unknown;
@@ -30,49 +44,47 @@ export class ApiError extends Error {
   }
 }
 
-function isAuthPath(path: string): boolean {
-  return (
-    path === "/api/auth/login" ||
-    path === "/api/auth/logout" ||
-    path === "/api/auth/setup" ||
-    path === "/api/auth/status" ||
-    path === "/api/auth/me" ||
-    path === "/api/health" ||
-    path === "/api/pair/claim"
-  );
+export interface RequestOptions extends Omit<RequestInit, "body"> {
+  body?: unknown;
 }
 
 export async function request<T>(
   path: string,
-  init: RequestInit = {},
+  init: RequestOptions = {},
 ): Promise<T> {
+  const { body, headers, ...rest } = init;
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
-    ...init,
+    ...rest,
     headers: {
       "content-type": "application/json",
-      ...(init.headers ?? {}),
+      ...(headers ?? {}),
     },
+    body: body == null ? undefined : JSON.stringify(body),
   });
   if (!res.ok) {
-    let body: unknown = null;
+    let parsed: unknown = null;
     try {
-      body = await res.json();
+      parsed = await res.json();
     } catch {
-      try { body = await res.text(); } catch { /* ignore */ }
+      try {
+        parsed = await res.text();
+      } catch {
+        /* ignore */
+      }
     }
     const message =
-      typeof body === "object" && body && "error" in body
-        ? String((body as { error: unknown }).error)
+      typeof parsed === "object" && parsed && "error" in parsed
+        ? String((parsed as { error: unknown }).error)
         : `${res.status} ${res.statusText}`;
-    // Single bounce rule: any 401 from a non-auth path sends the user to /login.
     if (res.status === 401 && !isAuthPath(path) && typeof window !== "undefined") {
-      const from = encodeURIComponent(window.location.pathname + window.location.search);
+      const from = encodeURIComponent(
+        window.location.pathname + window.location.search,
+      );
       window.location.assign(`/login?from=${from}`);
     }
-    throw new ApiError(res.status, message, body);
+    throw new ApiError(res.status, message, parsed);
   }
-  // 204 / empty body
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
 }
@@ -82,25 +94,25 @@ export function getJSON<T>(path: string): Promise<T> {
 }
 
 export function postJSON<T>(path: string, body: unknown): Promise<T> {
-  return request<T>(path, { method: "POST", body: JSON.stringify(body) });
+  return request<T>(path, { method: "POST", body });
 }
 
 export function delJSON<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
 
-// ---- Wire types -------------------------------------------------------------------------------
-
-export interface AuthStatus {
-  admin_exists: boolean;
-  setup_required: boolean;
-}
+// ---- Wire types -------------------------------------------------------------
 
 export interface Me {
   username: string;
   generation: number;
   login_at: number;
   expires_at: number;
+}
+
+export interface AuthStatus {
+  admin_exists: boolean;
+  setup_required: boolean;
 }
 
 export interface Health {
@@ -139,8 +151,16 @@ export interface RollbackReport {
 }
 
 export type Sensitivity = "shareable" | "needs_review" | "private";
-export interface Finding { kind: string; start: number; end: number; }
-export interface Sanitized { text: string; findings: Finding[]; sensitivity: Sensitivity; }
+export interface Finding {
+  kind: string;
+  start: number;
+  end: number;
+}
+export interface Sanitized {
+  text: string;
+  findings: Finding[];
+  sensitivity: Sensitivity;
+}
 
 export interface ShareExport {
   schema: string;
@@ -177,7 +197,10 @@ export interface Memory {
   created_at: string;
   updated_at: string;
 }
-export interface ScoredMemory { memory: Memory; score: number; }
+export interface ScoredMemory {
+  memory: Memory;
+  score: number;
+}
 
 export interface ReadResult {
   path: string;

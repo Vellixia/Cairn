@@ -2,12 +2,23 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarGroup,
+  SidebarGroupContent,
+  SidebarGroupLabel,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuButton,
+  SidebarMenuItem,
+  SidebarProvider,
+} from "@/components/ui/sidebar";
 import Logo from "@/components/Logo";
 
-type Section = {
-  title: string;
-  items: { href: string; label: string }[];
-};
+type Item = { href: string; label: string };
+
+type Section = { title: string; items: Item[] };
 
 const SECTIONS: Section[] = [
   {
@@ -58,46 +69,48 @@ const SECTIONS: Section[] = [
   },
 ];
 
-export function Sidebar() {
+export function CairnSidebar() {
   const pathname = usePathname();
   return (
-    <aside className="hidden md:flex md:w-60 md:shrink-0 md:flex-col border-r border-line bg-surface/60 backdrop-blur-sm">
-      <div className="flex items-center gap-2 px-5 py-4 border-b border-line">
-        <Logo size={26} />
-        <span className="font-semibold tracking-tight">Cairn</span>
-      </div>
-      <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5" aria-label="Main">
-        {SECTIONS.map((s) => (
-          <div key={s.title}>
-            <p className="px-2 mb-1.5 text-[10.5px] uppercase tracking-[0.12em] text-slate">
-              {s.title}
-            </p>
-            <ul className="space-y-0.5">
-              {s.items.map((it) => {
-                const active =
-                  pathname === it.href ||
-                  (it.href !== "/dashboard" && pathname?.startsWith(it.href + "/")) ||
-                  (it.href === "/dashboard" && pathname === "/dashboard");
-                return (
-                  <li key={it.href}>
-                    <Link
-                      href={it.href}
-                      aria-current={active ? "page" : undefined}
-                      className={`block rounded-md px-2.5 py-1.5 text-sm transition-colors ${
-                        active
-                          ? "bg-surface2 text-offwhite"
-                          : "text-[#b9c2cf] hover:bg-surface2 hover:text-offwhite"
-                      }`}
-                    >
-                      {it.label}
-                    </Link>
-                  </li>
-                );
-              })}
-            </ul>
+    <SidebarProvider>
+      <Sidebar collapsible="none" className="border-r border-line">
+        <SidebarHeader className="border-b border-line">
+          <div className="flex items-center gap-2 px-2 py-2">
+            <Logo size={26} />
+            <span className="font-semibold tracking-tight">Cairn</span>
           </div>
-        ))}
-      </nav>
-    </aside>
+        </SidebarHeader>
+        <SidebarContent>
+          {SECTIONS.map((s) => (
+            <SidebarGroup key={s.title}>
+              <SidebarGroupLabel>{s.title}</SidebarGroupLabel>
+              <SidebarGroupContent>
+                <SidebarMenu>
+                  {s.items.map((it) => {
+                    const active =
+                      pathname === it.href ||
+                      (it.href !== "/dashboard" &&
+                        pathname?.startsWith(it.href + "/")) ||
+                      (it.href === "/dashboard" && pathname === "/dashboard");
+                    return (
+                      <SidebarMenuItem key={it.href}>
+                        <SidebarMenuButton asChild isActive={active} size="sm">
+                          <Link
+                            href={it.href}
+                            aria-current={active ? "page" : undefined}
+                          >
+                            {it.label}
+                          </Link>
+                        </SidebarMenuButton>
+                      </SidebarMenuItem>
+                    );
+                  })}
+                </SidebarMenu>
+              </SidebarGroupContent>
+            </SidebarGroup>
+          ))}
+        </SidebarContent>
+      </Sidebar>
+    </SidebarProvider>
   );
 }

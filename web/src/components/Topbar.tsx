@@ -1,114 +1,101 @@
 "use client";
 
-import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { getJSON, type Health, type Me } from "@/lib/api";
-import { pushToast } from "@/lib/hooks";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
+import { Kbd } from "@/components/ui/kbd";
+import { Button } from "@/components/ui/button";
+import { useHealthQuery, useLogoutMutation } from "@/lib/queries";
+import { useMeStore } from "@/lib/stores/me";
+import { useUIStore } from "@/lib/stores/ui";
 
-interface Props {
-  me: Me;
-}
-
-export function Topbar({ me }: Props) {
+export function Topbar() {
   const router = useRouter();
-  const [health, setHealth] = useState<Health | null>(null);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const me = useMeStore((s) => s.me);
+  const toggleCommand = useUIStore((s) => s.toggleCommand);
+  const logout = useLogoutMutation();
+  const health = useHealthQuery();
 
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const h = await getJSON<Health>("/api/health");
-        if (!cancelled) setHealth(h);
-      } catch {
-        if (!cancelled) setHealth(null);
-      }
-    };
-    poll();
-    const id = window.setInterval(poll, 15_000);
-    return () => {
-      cancelled = true;
-      window.clearInterval(id);
-    };
-  }, []);
+  const healthy = health.data?.status === "ok";
+  const initial = (me?.username ?? "?").slice(0, 1).toUpperCase();
 
-  async function logout() {
-    try {
-      const res = await fetch("/api/auth/logout", {
-        method: "POST",
-        credentials: "include",
-      });
-      if (!res.ok) {
-        pushToast("Sign-out failed; please try again.", "error");
-        return;
-      }
-    } catch {
-      pushToast("Sign-out failed; please try again.", "error");
-      return;
-    }
-    router.replace("/login");
+  function handleLogout() {
+    logout.mutate(undefined, {
+      onSettled: () => router.replace("/login"),
+    });
   }
 
-  const status = health ? (
-    <span className="flex items-center gap-1.5 text-xs">
-      <span className="h-2 w-2 rounded-full bg-teal" aria-hidden />
-      <span className="text-slate">healthy</span>
-    </span>
-  ) : (
-    <span className="flex items-center gap-1.5 text-xs">
-      <span className="h-2 w-2 rounded-full bg-[#f87171]" aria-hidden />
-      <span className="text-slate">offline</span>
-    </span>
-  );
-
   return (
-    <header className="sticky top-0 z-10 border-b border-line bg-ink/80 backdrop-blur">
+    <header className="sticky top-0 z-10 border-b border-line bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex items-center justify-between gap-4 px-5 py-3">
-        <div className="flex items-center gap-3 text-sm">
-          <kbd className="hidden sm:inline-flex items-center gap-1 rounded border border-line bg-surface2 px-1.5 py-0.5 font-mono text-[11px] text-slate">
-            ⌘K
-          </kbd>
-          <span className="text-slate hidden sm:inline">jump to anything</span>
+        <div className="flex items-center gap-3 text-sm text-muted-foreground">
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2 font-mono text-[11px]"
+            onClick={toggleCommand}
+            aria-label="Open command palette"
+          >
+            <Kbd>⌘K</Kbd>
+            <span className="ml-1.5 hidden sm:inline">jump to anything</span>
+          </Button>
         </div>
         <div className="flex items-center gap-4">
-          {status}
-          <span className="text-xs text-slate hidden sm:inline">
-            signed in as <span className="text-offwhite font-medium">{me.username}</span>
-          </span>
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setMenuOpen((v) => !v)}
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              className="rounded-full border border-line bg-surface2 px-2.5 py-1 text-xs hover:bg-surface"
-            >
-              {me.username.slice(0, 1).toUpperCase()}
-            </button>
-            {menuOpen && (
-              <div
-                role="menu"
-                className="absolute right-0 mt-2 w-44 rounded-lg border border-line bg-surface2 py-1 shadow-lg shadow-black/30"
+          {healthy ? (
+            <Badge variant="secondary" className="font-normal">
+              <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              healthy
+            </Badge>
+          ) : (
+            <Badge variant="destructive" className="font-normal">
+              <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-red-500" />
+              {health.isError ? "offline" : "…"}
+            </Badge>
+          )}
+          {me && (
+            <span className="hidden text-xs text-muted-foreground sm:inline">
+              signed in as{" "}
+              <span className="font-medium text-foreground">{me.username}</span>
+            </span>
+          )}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="secondary"
+                size="icon"
+                className="h-7 w-7 rounded-full text-xs"
+                aria-label="Open profile menu"
               >
-                <a
-                  href="/dashboard/settings"
-                  role="menuitem"
-                  className="block px-3 py-1.5 text-sm hover:bg-surface"
-                  onClick={() => setMenuOpen(false)}
-                >
-                  Settings
-                </a>
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={logout}
-                  className="block w-full px-3 py-1.5 text-left text-sm text-[#f87171] hover:bg-surface"
-                >
-                  Sign out
-                </button>
-              </div>
-            )}
-          </div>
+                {initial}
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-44">
+              <DropdownMenuLabel>
+                {me ? `Signed in as ${me.username}` : "Account"}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onSelect={() => router.replace("/dashboard/settings")}>
+                Settings
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => router.replace("/dashboard/devices/audit")}>
+                Audit log
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                className="text-destructive focus:text-destructive"
+                onSelect={handleLogout}
+              >
+                Sign out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
       </div>
     </header>

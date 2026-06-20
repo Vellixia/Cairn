@@ -1,8 +1,17 @@
 "use client";
 
-import { Command } from "cmdk";
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import {
+  CommandDialog,
+  CommandEmpty,
+  CommandGroup,
+  CommandInput,
+  CommandItem,
+  CommandList,
+  CommandShortcut,
+} from "@/components/ui/command";
+import { useUIStore } from "@/lib/stores/ui";
 
 interface Item {
   id: string;
@@ -14,22 +23,20 @@ interface Item {
 
 export function CommandPalette() {
   const router = useRouter();
-  const [open, setOpen] = useState(false);
-  const [query, setQuery] = useState("");
+  const open = useUIStore((s) => s.commandOpen);
+  const setOpen = useUIStore((s) => s.setCommandOpen);
+  const setShortcutsOpen = useUIStore((s) => s.setShortcutsOpen);
 
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
-      // ⌘K / Ctrl+K — toggle
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
-        setOpen((v) => !v);
-      } else if (e.key === "Escape" && open) {
-        setOpen(false);
+        setOpen(!useUIStore.getState().commandOpen);
       }
     }
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [open]);
+  }, [setOpen]);
 
   const nav = (href: string) => () => {
     setOpen(false);
@@ -53,61 +60,58 @@ export function CommandPalette() {
     { id: "nav-devs", label: "Devices · Tokens", group: "Navigate", action: nav("/dashboard/devices") },
     { id: "nav-pair", label: "Devices · Pair new", group: "Navigate", action: nav("/dashboard/devices/pair") },
     { id: "nav-audit", label: "Devices · Audit", group: "Navigate", action: nav("/dashboard/devices/audit") },
-    // Memory shortcuts
     { id: "act-remember", label: "Remember something", hint: "jump to Memories", group: "Memory", action: nav("/dashboard/memory") },
     { id: "act-recall", label: "Recall a memory", hint: "jump to Recall", group: "Memory", action: nav("/dashboard/memory/recall") },
-    // Reliability
     { id: "act-cp", label: "Create a checkpoint", hint: "jump to Checkpoints", group: "Reliability", action: nav("/dashboard/reliability/checkpoints") },
-    // Devices
     { id: "act-issue", label: "Issue a device token", hint: "jump to Tokens", group: "Devices", action: nav("/dashboard/devices") },
-    // Share
     { id: "act-san", label: "Sanitize text", hint: "jump to Sanitize", group: "Share", action: nav("/dashboard/share/sanitize") },
   ];
 
   return (
-    <Command.Dialog
-      open={open}
-      onOpenChange={setOpen}
-      label="Cairn command palette"
-      className="cairn-dialog fixed left-1/2 top-24 z-50 w-[min(640px,92vw)] -translate-x-1/2 rounded-xl border border-line bg-surface shadow-2xl shadow-black/50"
-    >
-      <div className="border-b border-line">
-        <Command.Input
-          autoFocus
-          value={query}
-          onValueChange={setQuery}
-          placeholder="Jump to a section, run an action…"
-          className="w-full bg-transparent px-4 py-3 text-sm outline-none placeholder:text-slate"
-        />
-      </div>
-      <Command.List className="max-h-[60vh] overflow-y-auto p-2">
-        <Command.Empty className="px-3 py-6 text-center text-sm text-slate">
-          No matches. Try a section name like "memory" or "tokens".
-        </Command.Empty>
+    <CommandDialog open={open} onOpenChange={setOpen}>
+      <CommandInput placeholder="Jump to a section, run an action…" />
+      <CommandList>
+        <CommandEmpty>No matches. Try a section name like "memory" or "tokens".</CommandEmpty>
         {(["Navigate", "Memory", "Reliability", "Devices", "Share"] as const).map((group) => {
           const filtered = items.filter((i) => i.group === group);
           if (filtered.length === 0) return null;
           return (
-            <Command.Group key={group} heading={group} className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:py-1 [&_[cmdk-group-heading]]:text-[10.5px] [&_[cmdk-group-heading]]:uppercase [&_[cmdk-group-heading]]:tracking-wider [&_[cmdk-group-heading]]:text-slate">
+            <CommandGroup key={group} heading={group}>
               {filtered.map((it) => (
-                <Command.Item
+                <CommandItem
                   key={it.id}
                   value={`${it.label} ${it.hint ?? ""}`}
                   onSelect={it.action}
-                  className="flex cursor-pointer items-center gap-3 rounded-md px-3 py-2 text-sm aria-selected:bg-surface2 aria-selected:text-offwhite data-[selected=true]:bg-surface2 data-[selected=true]:text-offwhite"
                 >
                   <span className="flex-1 truncate">{it.label}</span>
-                  {it.hint && <span className="text-[11px] text-slate truncate">{it.hint}</span>}
-                </Command.Item>
+                  {it.hint && (
+                    <span className="text-[11px] text-muted-foreground truncate">
+                      {it.hint}
+                    </span>
+                  )}
+                </CommandItem>
               ))}
-            </Command.Group>
+            </CommandGroup>
           );
         })}
-      </Command.List>
-      <div className="flex items-center justify-between border-t border-line px-3 py-2 text-[11px] text-slate">
-        <span><kbd className="font-mono">↑↓</kbd> navigate · <kbd className="font-mono">↵</kbd> select · <kbd className="font-mono">esc</kbd> close</span>
-        <span><kbd className="font-mono">?</kbd> for shortcuts</span>
+      </CommandList>
+      <div className="flex items-center justify-between border-t border-line px-3 py-2 text-[11px] text-muted-foreground">
+        <span>
+          <CommandShortcut>↑↓</CommandShortcut> navigate ·{" "}
+          <CommandShortcut>↵</CommandShortcut> select ·{" "}
+          <CommandShortcut>esc</CommandShortcut> close
+        </span>
+        <button
+          type="button"
+          className="text-[11px] text-muted-foreground hover:text-foreground"
+          onClick={() => {
+            setOpen(false);
+            setShortcutsOpen(true);
+          }}
+        >
+          <CommandShortcut>?</CommandShortcut> shortcuts
+        </button>
       </div>
-    </Command.Dialog>
+    </CommandDialog>
   );
 }

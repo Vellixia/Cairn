@@ -1,37 +1,71 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery, pushToast } from "@/lib/hooks";
-import { postJSON, type Checkpoint, type RollbackReport } from "@/lib/api";
+import { useForm } from "react-hook-form";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { Controller } from "react-hook-form";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import {
+  Field,
+  FieldError,
+  FieldGroup,
+  FieldLabel,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Badge } from "@/components/ui/badge";
+import { Item, ItemContent, ItemTitle, ItemDescription } from "@/components/ui/item";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
+import {
+  useCheckpointsQuery,
+  useCreateCheckpointMutation,
+  useRollbackMutation,
+} from "@/lib/queries";
+import { checkpointSchema, type CheckpointInput } from "@/lib/forms/schemas";
 
 export default function CheckpointsPage() {
-  const cps = useQuery<Checkpoint[]>("/api/guard/checkpoints");
-  const [label, setLabel] = useState("");
-  const [busy, setBusy] = useState(false);
+  const checkpoints = useCheckpointsQuery();
+  const create = useCreateCheckpointMutation();
+  const rollback = useRollbackMutation();
+  const [pending, setPending] = useState<string | null>(null);
 
-  async function create() {
-    setBusy(true);
+  const form = useForm<CheckpointInput>({
+    resolver: zodResolver(checkpointSchema),
+    defaultValues: { label: "" },
+  });
+
+  async function onSubmit(values: CheckpointInput) {
     try {
-      const q = label.trim() ? `?label=${encodeURIComponent(label.trim())}` : "";
-      const cp = await postJSON<Checkpoint>(`/api/guard/checkpoint${q}`, {});
-      pushToast(`Checkpoint ${cp.id.slice(0, 8)} · ${cp.files} files`, "success");
-      setLabel("");
-      cps.refetch();
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Checkpoint failed", "error");
-    } finally {
-      setBusy(false);
+      await create.mutateAsync(values);
+      form.reset({ label: "" });
+    } catch {
+      /* toast handled */
     }
   }
 
-  async function rollback(id: string) {
-    if (!window.confirm(`Roll back to checkpoint ${id.slice(0, 8)}? Tracked files on disk will be restored.`)) return;
+  async function onRollback(id: string) {
+    setPending(id);
     try {
-      const r = await postJSON<RollbackReport>(`/api/guard/rollback?id=${encodeURIComponent(id)}`, {});
-      pushToast(`Restored ${r.restored.length} · skipped ${r.skipped.length}`, "info");
-      cps.refetch();
-    } catch (e) {
-      pushToast(e instanceof Error ? e.message : "Rollback failed", "error");
+      await rollback.mutateAsync(id);
+    } finally {
+      setPending(null);
     }
   }
 
@@ -39,58 +73,124 @@ export default function CheckpointsPage() {
     <div className="space-y-6 max-w-3xl">
       <header>
         <h1 className="text-2xl font-semibold tracking-tight">Checkpoints</h1>
-        <p className="mt-1 text-sm text-slate">
-          Snapshot every file Cairn has tracked, then roll back any tracked file to that snapshot.
+        <p className="mt-1 text-sm text-muted-foreground">
+          Snapshot every file Cairn has tracked, then roll back any tracked file
+          to that snapshot.
         </p>
       </header>
 
-      <section className="rounded-xl border border-line bg-surface p-5 space-y-3">
-        <div className="flex gap-2">
-          <input
-            value={label}
-            onChange={(e) => setLabel(e.target.value)}
-            placeholder="label (optional)"
-            className="flex-1 rounded-lg border border-line bg-surface2 px-3 py-2 text-sm outline-none focus:border-ember"
-          />
-          <button
-            onClick={create}
-            disabled={busy}
-            className="rounded-lg bg-ember px-4 py-2 text-sm font-semibold text-[#1a1206] disabled:opacity-50"
+      <Card>
+        <CardHeader>
+          <CardTitle>Create</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form
+            id="form-checkpoint"
+            onSubmit={form.handleSubmit(onSubmit)}
+            className="flex gap-2"
           >
-            {busy ? "…" : "Checkpoint"}
-          </button>
-        </div>
-      </section>
+            <FieldGroup className="flex flex-1 flex-row gap-2">
+              <Controller
+                name="label"
+                control={form.control}
+                render={({ field, fieldState }) => (
+                  <Field data-invalid={fieldState.invalid} className="flex-1">
+                    <FieldLabel htmlFor="form-checkpoint-label" className="sr-only">
+                      Label
+                    </FieldLabel>
+                    <Input
+                      {...field}
+                      id="form-checkpoint-label"
+                      aria-invalid={fieldState.invalid}
+                      placeholder="label (optional)"
+                    />
+                    {fieldState.invalid && (
+                      <FieldError errors={[fieldState.error]} />
+                    )}
+                  </Field>
+                )}
+              />
+              <Button type="submit" form="form-checkpoint" disabled={create.isPending}>
+                {create.isPending ? "…" : "Checkpoint"}
+              </Button>
+            </FieldGroup>
+          </form>
+        </CardContent>
+      </Card>
 
-      <section className="rounded-xl border border-line bg-surface p-5">
-        <h2 className="mb-3 text-xs uppercase tracking-[0.08em] text-slate">History</h2>
-        {cps.loading ? (
-          <p className="text-sm text-slate">Loading…</p>
-        ) : cps.data && cps.data.length === 0 ? (
-          <p className="text-sm text-slate">
-            No checkpoints — your edits aren't being snapshotted yet. Create one before risky changes.
-          </p>
-        ) : cps.data && cps.data.length > 0 ? (
-          <ul className="space-y-2">
-            {cps.data.map((c) => (
-              <li key={c.id} className="flex items-center justify-between rounded-lg border border-line bg-surface2 px-3 py-2 text-sm">
-                <div>
-                  <div className="text-offwhite">{c.label || "(unlabeled)"}</div>
-                  <div className="text-[11px] text-slate font-mono">
-                    {c.id.slice(0, 8)} · {c.files} files · {new Date(c.created_at).toLocaleString()}
-                  </div>
-                </div>
-                <button
-                  onClick={() => rollback(c.id)}
-                  className="rounded-lg border border-line px-3 py-1.5 text-xs hover:bg-surface"
+      <Card>
+        <CardHeader>
+          <CardTitle>History</CardTitle>
+          <CardDescription>
+            Restore tracked files to any snapshot in this list.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {checkpoints.isLoading ? (
+            <div className="space-y-2">
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+            </div>
+          ) : checkpoints.data && checkpoints.data.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              No checkpoints — your edits aren't being snapshotted yet. Create
+              one before risky changes.
+            </p>
+          ) : checkpoints.data ? (
+            <ul className="space-y-2">
+              {checkpoints.data.map((c) => (
+                <Item
+                  key={c.id}
+                  variant="outline"
+                  size="sm"
+                  className="flex-row items-center justify-between"
                 >
-                  Rollback
-                </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-      </section>
+                  <ItemContent>
+                    <ItemTitle>{c.label || "(unlabeled)"}</ItemTitle>
+                    <ItemDescription>
+                      <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
+                        {c.id.slice(0, 8)}
+                      </Badge>
+                      {c.files} files ·{" "}
+                      {new Date(c.created_at).toLocaleString()}
+                    </ItemDescription>
+                  </ItemContent>
+                  <AlertDialog>
+                    <AlertDialogTrigger asChild>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        disabled={pending === c.id}
+                      >
+                        {pending === c.id ? "…" : "Rollback"}
+                      </Button>
+                    </AlertDialogTrigger>
+                    <AlertDialogContent>
+                      <AlertDialogHeader>
+                        <AlertDialogTitle>
+                          Roll back to {c.id.slice(0, 8)}?
+                        </AlertDialogTitle>
+                        <AlertDialogDescription>
+                          Tracked files on disk will be restored to the snapshot
+                          taken at this checkpoint. This is a one-way operation —
+                          create a new checkpoint first if you want to be able to
+                          undo it.
+                        </AlertDialogDescription>
+                      </AlertDialogHeader>
+                      <AlertDialogFooter>
+                        <AlertDialogCancel>Cancel</AlertDialogCancel>
+                        <AlertDialogAction onClick={() => onRollback(c.id)}>
+                          Roll back
+                        </AlertDialogAction>
+                      </AlertDialogFooter>
+                    </AlertDialogContent>
+                  </AlertDialog>
+                </Item>
+              ))}
+            </ul>
+          ) : null}
+        </CardContent>
+      </Card>
     </div>
   );
 }

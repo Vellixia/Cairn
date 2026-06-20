@@ -2,23 +2,92 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color-scheme: dark;
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 24 95% 53%;
+    --primary-foreground: 28 33% 8%;
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 46%;
+    --accent: 24 95% 53%;
+    --accent-foreground: 28 33% 8%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
+    --ring: 24 95% 53%;
+    --radius: 0.5rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 213 25% 6%;
+    --foreground: 218 17% 94%;
+    --card: 212 24% 10%;
+    --card-foreground: 218 17% 94%;
+    --popover: 212 24% 10%;
+    --popover-foreground: 218 17% 94%;
+    --primary: 24 95% 53%;
+    --primary-foreground: 28 33% 8%;
+    --secondary: 213 19% 14%;
+    --secondary-foreground: 218 17% 94%;
+    --muted: 213 19% 14%;
+    --muted-foreground: 218 10% 60%;
+    --accent: 24 95% 53%;
+    --accent-foreground: 28 33% 8%;
+    --destructive: 0 79% 63%;
+    --destructive-foreground: 218 17% 94%;
+    --border: 213 17% 21%;
+    --input: 213 17% 21%;
+    --ring: 24 95% 53%;
+    --sidebar-background: 212 24% 10%;
+    --sidebar-foreground: 218 17% 94%;
+    --sidebar-primary: 24 95% 53%;
+    --sidebar-primary-foreground: 28 33% 8%;
+    --sidebar-accent: 213 19% 14%;
+    --sidebar-accent-foreground: 218 17% 94%;
+    --sidebar-border: 213 17% 21%;
+    --sidebar-ring: 24 95% 53%;
+  }
 }
 
-body {
-  @apply bg-ink text-offwhite font-sans antialiased;
-  background-image: radial-gradient(1200px 600px at 70% -10%, #16202b 0%, #0b0f14 55%);
-  background-attachment: fixed;
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    background-image: radial-gradient(
+      1200px 600px at 70% -10%,
+      #16202b 0%,
+      hsl(var(--background)) 55%
+    );
+    background-attachment: fixed;
+  }
 }
 
 /* Loading skeleton used by SessionGate during the first /api/auth/me probe. */
-@keyframes cairn-skeleton-pulse {
-  0%, 100% { opacity: .55; }
-  50% { opacity: 1; }
-}
 .cairn-skeleton {
-  background: linear-gradient(90deg, #1a2129 0%, #222b35 50%, #1a2129 100%);
+  background: linear-gradient(
+    90deg,
+    #1a2129 0%,
+    #222b35 50%,
+    #1a2129 100%
+  );
   background-size: 200% 100%;
   animation: cairn-skeleton-pulse 1.4s ease-in-out infinite;
   border-radius: 9px;
@@ -26,16 +95,16 @@ body {
 
 /* Keyboard focus ring — accessible, brand-tinted. */
 :focus-visible {
-  outline: 2px solid #fb923c;
+  outline: 2px solid hsl(var(--ring));
   outline-offset: 2px;
   border-radius: 6px;
 }
 
-/* ⌘K palette overlay — escape hatch from the modal backdrop. */
-.cairn-dialog[open] {
-  animation: cairn-dialog-in 120ms ease-out;
-}
-@keyframes cairn-dialog-in {
-  from { opacity: 0; transform: translateY(-4px); }
-  to { opacity: 1; transform: translateY(0); }
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
 }
