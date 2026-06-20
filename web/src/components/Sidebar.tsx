@@ -13,6 +13,8 @@ import {
   Activity,
   Target,
   History,
+  ShieldAlert,
+  PiggyBank,
   Network,
   ShieldCheck,
   Package,
@@ -62,6 +64,7 @@ const SECTIONS: Section[] = [
     items: [
       { href: "/dashboard/context", label: "Inspector", icon: FileSearch },
       { href: "/dashboard/context/assemble", label: "Assemble", icon: Layers },
+      { href: "/dashboard/savings", label: "Savings", icon: PiggyBank },
     ],
   },
   {
@@ -70,6 +73,7 @@ const SECTIONS: Section[] = [
       { href: "/dashboard/reliability", label: "Score", icon: Activity },
       { href: "/dashboard/reliability/anchor", label: "Anchor", icon: Target },
       { href: "/dashboard/reliability/checkpoints", label: "Checkpoints", icon: History },
+      { href: "/dashboard/reliability/drift", label: "Drift center", icon: ShieldAlert },
     ],
   },
   {

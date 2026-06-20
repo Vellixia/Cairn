@@ -20,7 +20,7 @@ use axum::{extract::State, Json};
 use cairn_assemble::AssemblyReport;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Live counter — `bytes_in` is the compact payload we served the agent, `bytes_out_full` is
@@ -60,7 +60,8 @@ impl SavingsCounter {
             .fetch_add(r.used_tokens as u64, Ordering::Relaxed);
         self.compact
             .fetch_add(r.used_tokens as u64, Ordering::Relaxed);
-        self.full.fetch_add(r.budget_tokens as u64, Ordering::Relaxed);
+        self.full
+            .fetch_add(r.budget_tokens as u64, Ordering::Relaxed);
         self.calls.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -72,7 +73,11 @@ impl SavingsCounter {
         let hits = self.hits.load(Ordering::Relaxed);
         let bounces = self.bounces.load(Ordering::Relaxed);
         let saved = full.saturating_sub(compact);
-        let ratio = if full == 0 { 0.0 } else { saved as f64 / full as f64 };
+        let ratio = if full == 0 {
+            0.0
+        } else {
+            saved as f64 / full as f64
+        };
         SavingsSnapshot {
             compact_bytes: compact,
             full_bytes: full,
@@ -160,6 +165,7 @@ pub struct MetricsResponse {
 /// Build the "top savings sources" breakdown. Used by the dashboard's `/dashboard/savings`
 /// page (Sprint 5). Walks a small fixed list of well-known read endpoints and reports the
 /// compact-vs-full delta each one has contributed to the global counter.
+#[allow(dead_code)]
 pub fn source_breakdown(s: &AppState) -> HashMap<&'static str, u64> {
     let mut out = HashMap::new();
     let snap = s.savings.snapshot();
@@ -250,14 +256,11 @@ mod tests {
         s.record_read(100, 10_000, false);
         let snap = s.snapshot();
         let usd = snap.usd_saved();
-        assert!(usd > 0.0, "usd_saved should be > 0 for non-zero savings; got {usd}");
+        assert!(
+            usd > 0.0,
+            "usd_saved should be > 0 for non-zero savings; got {usd}"
+        );
         // Sanity bound — 9900 bytes ≈ 2475 tokens ≈ $0.074.
         assert!(usd < 1.0);
     }
-}
-
-// keep AtomicI64 import warm so adding it later doesn't disturb the file
-#[allow(dead_code)]
-fn _warm_atomic_i64() -> AtomicI64 {
-    AtomicI64::new(0)
 }

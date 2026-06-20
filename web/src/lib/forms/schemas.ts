@@ -18,6 +18,17 @@ export const setupSchema = z
   });
 export type SetupInput = z.infer<typeof setupSchema>;
 
+export const setupWizardSchema = z.object({
+  username: z.string().min(1, "Username is required."),
+  password: z.string().min(8, "Password must be at least 8 characters."),
+  confirm: z.string().min(8, "Password must be at least 8 characters."),
+  embed_provider: z.enum(["hashing", "local", "ollama", "openai"]),
+  embed_model: z.string().optional(),
+  embed_url: z.string().optional(),
+  embed_api_key: z.string().optional(),
+});
+export type SetupWizardInput = z.infer<typeof setupWizardSchema>;
+
 export const rememberSchema = z.object({
   content: z.string().min(1, "Memory cannot be empty."),
 });

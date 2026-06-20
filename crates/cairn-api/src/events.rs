@@ -35,10 +35,15 @@ use crate::AppState;
 use cairn_store::AuditRecord;
 
 /// SSE event kinds surfaced to the dashboard. New kinds are additive; old ones stay forever.
+#[allow(dead_code)] // Exposed for future sprint handlers; the constant itself is the wire contract.
 pub const KIND_AUDIT: &str = "audit";
+#[allow(dead_code)]
 pub const KIND_STATS: &str = "stats";
+#[allow(dead_code)]
 pub const KIND_MEMORY: &str = "memory";
+#[allow(dead_code)]
 pub const KIND_CHECKPOINT: &str = "checkpoint";
+#[allow(dead_code)]
 pub const KIND_DRIFT: &str = "drift";
 
 /// Payload of an event published to subscribers. `id` is a unique, monotonic string suitable for
@@ -151,10 +156,8 @@ pub async fn events(
         .into_response();
     // Disable proxy buffering (nginx defaults to buffering SSE responses, which defeats the
     // real-time guarantee).
-    resp.headers_mut().insert(
-        "x-accel-buffering",
-        HeaderValue::from_static("no"),
-    );
+    resp.headers_mut()
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
     resp
 }
 
@@ -166,11 +169,11 @@ fn broadcast_stream(
 ) -> impl Stream<Item = Result<Event, Infallible>> {
     // A small adapter that drains a Vec, then pumps a broadcast receiver. The receiver is moved
     // into the closure so each subscriber gets its own.
-    let mut history_iter = history.into_iter().peekable();
+    let history_iter = history.into_iter().peekable();
     let mut rx = rx;
     async_stream::stream! {
         // Replay first.
-        while let Some(ev) = history_iter.next() {
+        for ev in history_iter {
             yield Ok(to_sse_event(&ev));
         }
         // Then live.
@@ -200,7 +203,10 @@ fn to_sse_event(p: &EventPayload) -> Event {
 
 /// Read audit events with id greater than `since` (if given), up to `MAX_REPLAY`. Newest first
 /// in the result so the SSE stream replays in chronological order from the client's POV.
-fn backfill(state: &AppState, since: Option<&str>) -> std::result::Result<Vec<EventPayload>, cairn_core::Error> {
+fn backfill(
+    state: &AppState,
+    since: Option<&str>,
+) -> std::result::Result<Vec<EventPayload>, cairn_core::Error> {
     const MAX_REPLAY: usize = 500;
     let mut records = state.store.recent_audit(MAX_REPLAY, since)?;
     records.reverse(); // oldest first so the replay reads in order
@@ -210,6 +216,7 @@ fn backfill(state: &AppState, since: Option<&str>) -> std::result::Result<Vec<Ev
 /// Test-only wrapper for `backfill` — used by integration tests that need to assert on the
 /// replay set without spinning up an HTTP server.
 #[doc(hidden)]
+#[allow(dead_code)]
 pub fn test_backfill(
     state: &AppState,
     since: Option<&str>,
@@ -219,6 +226,7 @@ pub fn test_backfill(
 
 /// Convenience for handlers that just want to publish a stats-changed event without writing the
 /// full payload inline.
+#[allow(dead_code)]
 pub fn publish_stats(broker: &EventBroker) {
     broker.publish(EventPayload {
         id: format!("stats-{}", Utc::now().timestamp_millis()),
@@ -230,6 +238,7 @@ pub fn publish_stats(broker: &EventBroker) {
 
 /// Publish a memory-related event (add/edit/delete/pin). `action` is "added" | "edited" |
 /// "deleted" | "pinned".
+#[allow(dead_code)]
 pub fn publish_memory(broker: &EventBroker, action: &str, memory_id: &str) {
     broker.publish(EventPayload {
         id: format!("mem-{}-{}", action, memory_id),
@@ -240,6 +249,7 @@ pub fn publish_memory(broker: &EventBroker, action: &str, memory_id: &str) {
 }
 
 /// Publish a checkpoint/rollback event.
+#[allow(dead_code)]
 pub fn publish_checkpoint(broker: &EventBroker, action: &str, id: &str, files: usize) {
     broker.publish(EventPayload {
         id: format!("cp-{}-{}", action, id),
@@ -250,6 +260,7 @@ pub fn publish_checkpoint(broker: &EventBroker, action: &str, id: &str, files: u
 }
 
 /// Publish a drift event (verify flagged an edit as warn/danger).
+#[allow(dead_code)]
 pub fn publish_drift(broker: &EventBroker, path: &str, risk: &str) {
     broker.publish(EventPayload {
         id: format!("drift-{}", Utc::now().timestamp_millis()),

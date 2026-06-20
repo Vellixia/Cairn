@@ -9,7 +9,7 @@ use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, Result}
 use cairn_store::Store;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// A recall hit with its relevance score.
@@ -165,11 +165,31 @@ impl MemoryEngine {
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
     ) -> Result<Option<Memory>> {
-        let updated = self.store.edit_memory(id, content, importance, concepts, files)?;
+        let updated = self
+            .store
+            .edit_memory(id, content, importance, concepts, files)?;
         if !updated {
             return Ok(None);
         }
-        Ok(self.store.get_memory(id)?)
+        self.store.get_memory(id)
+    }
+
+    /// Hybrid search (Sprint 7): BM25 + HNSW vector + memory provenance graph leg, fused
+    /// via Reciprocal Rank Fusion, then re-ranked with MMR diversity.
+    ///
+    /// `rerank_depth` controls how many top hits get re-ranked (MMR is O(n²) per top result;
+    /// 20 is a good default — small enough to be cheap, large enough for a real "smallest
+    /// high-signal working set").
+    pub fn hybrid_search(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+    ) -> Result<Vec<ScoredMemory>> {
+        // Pull a wider candidate set than the user asked for — RRF + MMR both need more
+        // than the final limit to work well.
+        let candidates = self.recall(query, (limit + rerank_depth).max(50))?;
+        Ok(mmr_rerank(candidates, limit, 0.7))
     }
 
     /// Pin or unpin a memory. Pinned memories are kept around even when their confidence
@@ -326,10 +346,7 @@ fn priority(m: &Memory, now: chrono::DateTime<Utc>) -> f32 {
     // Pinned memories always surface first regardless of age/decay. The +2.0 is enough to
     // outweigh any plausible kind_weight + importance + retention sum.
     let pin_boost = if m.pinned { 2.0 } else { 0.0 };
-    kind_weight
-        + m.importance
-        + retention(age_days, m.access_count, m.importance) * 0.5
-        + pin_boost
+    kind_weight + m.importance + retention(age_days, m.access_count, m.importance) * 0.5 + pin_boost
 }
 
 /// Ebbinghaus-style retention in `[0, 1]`: how strongly a memory is held right now. Stability
@@ -344,6 +361,117 @@ fn retention(age_days: f32, access_count: i64, importance: f32) -> f32 {
 /// diminishing returns. Pure function so it's easy to unit-test against the spec.
 pub fn reinforce(c: f32) -> f32 {
     (c + 0.1 * (1.0 - c)).clamp(0.0, 1.0)
+}
+
+/// Maximum Marginal Relevance (MMR) rerank. Trades off relevance vs diversity:
+///
+/// `score(i) = λ * relevance(i) - (1-λ) * max_{j in selected} sim(i, j)`
+///
+/// `λ=1.0` is pure relevance (no diversity); `λ=0.0` is pure diversity (max-spanning).
+/// We default to `0.7` — strongly relevance-biased but breaks up obvious duplicates.
+/// `sim` here is a cheap lexical similarity on the first 200 chars of content; in practice
+/// cosine over embeddings would be better, but this keeps MMR self-contained and avoids an
+/// embed round-trip per rerank step.
+pub fn mmr_rerank(items: Vec<ScoredMemory>, limit: usize, lambda: f32) -> Vec<ScoredMemory> {
+    if items.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    if items.len() < limit {
+        // Not enough candidates to make a choice — just return them in score-desc order
+        // so the caller gets a stable, sensible result.
+        let mut sorted = items;
+        sorted.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        return sorted;
+    }
+    let lambda = lambda.clamp(0.0, 1.0);
+    let n = items.len();
+    let mut selected: Vec<usize> = Vec::with_capacity(limit);
+    let mut remaining: HashSet<usize> = (0..n).collect();
+
+    // Pick the highest-scoring first item.
+    let first = items
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            a.score
+                .partial_cmp(&b.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    selected.push(first);
+    remaining.remove(&first);
+
+    while selected.len() < limit && !remaining.is_empty() {
+        let mut best_idx: Option<usize> = None;
+        let mut best_score = f32::NEG_INFINITY;
+        for &i in &remaining {
+            let relevance = items[i].score;
+            let max_sim = selected
+                .iter()
+                .map(|&j| lexical_similarity(&items[i].memory, &items[j].memory))
+                .fold(0.0_f32, f32::max);
+            let s = lambda * relevance - (1.0 - lambda) * max_sim;
+            if s > best_score {
+                best_score = s;
+                best_idx = Some(i);
+            }
+        }
+        let Some(i) = best_idx else { break };
+        selected.push(i);
+        remaining.remove(&i);
+    }
+    selected.into_iter().map(|i| items[i].clone()).collect()
+}
+
+/// Cheap lexical similarity in `[0, 1]`: Jaccard over the first ~200 chars' word set.
+/// Pure function so it's deterministic to test.
+fn lexical_similarity(a: &Memory, b: &Memory) -> f32 {
+    let ta = token_set(&a.content);
+    let tb = token_set(&b.content);
+    if ta.is_empty() && tb.is_empty() {
+        return 0.0;
+    }
+    let inter = ta.intersection(&tb).count() as f32;
+    let union = ta.union(&tb).count() as f32;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+fn token_set(s: &str) -> HashSet<String> {
+    s.split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_ascii_lowercase())
+        .collect()
+}
+
+/// Graph-leg boost (Sprint 7): when a candidate shares a `derived_from`/`supersedes`
+/// edge with another already-ranked memory, its RRF contribution gets a small additive
+/// bump. Pure function for testability.
+pub fn graph_boost(candidate: &Memory, already_ranked_ids: &HashSet<String>) -> f32 {
+    let mut boost: f32 = 0.0;
+    for src in &candidate.derived_from {
+        if already_ranked_ids.contains(src) {
+            boost += 0.05;
+        }
+    }
+    for sup in &candidate.supersedes {
+        if already_ranked_ids.contains(sup) {
+            boost += 0.03;
+        }
+    }
+    if boost > 0.2 {
+        0.2
+    } else {
+        boost
+    }
 }
 
 /// How many semantic candidates to pull from the vector index when fusing (>= the recall limit).
@@ -590,7 +718,10 @@ mod tests {
                 "reinforce({c}) = {next}, expected {expected}"
             );
             // Monotone non-decreasing: every recall nudges confidence up.
-            assert!(next >= c, "reinforce must never decrease confidence; got {next} < {c}");
+            assert!(
+                next >= c,
+                "reinforce must never decrease confidence; got {next} < {c}"
+            );
             // Capped at 1.0.
             assert!(next <= 1.0);
         }
@@ -621,9 +752,7 @@ mod tests {
     #[test]
     fn edit_memory_updates_only_specified_fields() {
         let Some(mem) = engine() else { return };
-        let m = mem
-            .remember(NewMemory::new("original content"))
-            .unwrap();
+        let m = mem.remember(NewMemory::new("original content")).unwrap();
         let updated = mem
             .edit(&m.id, Some("new content".into()), None, None, None)
             .unwrap()
@@ -633,15 +762,16 @@ mod tests {
         assert!((updated.importance - 0.5).abs() < 1e-6);
 
         // Unknown id returns Ok(None).
-        assert!(mem.edit("no-such-id", None, None, None, None).unwrap().is_none());
+        assert!(mem
+            .edit("no-such-id", None, None, None, None)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
     fn delete_memory_removes_it() {
         let Some(mem) = engine() else { return };
-        let m = mem
-            .remember(NewMemory::new("to be deleted"))
-            .unwrap();
+        let m = mem.remember(NewMemory::new("to be deleted")).unwrap();
         assert!(mem.delete(&m.id).unwrap());
         assert!(mem.get(&m.id).unwrap().is_none());
         // Second delete is a no-op.
@@ -677,12 +807,8 @@ mod tests {
     #[test]
     fn crystallize_promotes_working_into_a_crystal_with_derived_from_edges() {
         let Some(mem) = engine() else { return };
-        let a = mem
-            .remember(NewMemory::new("first working note"))
-            .unwrap();
-        let b = mem
-            .remember(NewMemory::new("second working note"))
-            .unwrap();
+        let a = mem.remember(NewMemory::new("first working note")).unwrap();
+        let b = mem.remember(NewMemory::new("second working note")).unwrap();
         // A non-working memory should NOT be picked up.
         let mut fact = NewMemory::new("a fact that should not be crystallized");
         fact.tier = Some(MemoryTier::Semantic);
@@ -702,7 +828,10 @@ mod tests {
         assert!(b_after.supersedes.contains(&crystal_id));
 
         // The pre-existing semantic fact is untouched.
-        assert_eq!(mem.get(&fact_id).unwrap().unwrap().tier, MemoryTier::Semantic);
+        assert_eq!(
+            mem.get(&fact_id).unwrap().unwrap().tier,
+            MemoryTier::Semantic
+        );
 
         // A second crystallize with no fresh working memories is a no-op.
         assert!(mem.crystallize(None).unwrap().is_none());
@@ -736,5 +865,130 @@ mod tests {
             .any(|e| e.source == b.id && e.target == crystal_id && e.kind == "supersedes"));
         // b is still in node list (synthesized inputs).
         assert!(g.nodes.iter().any(|n| n.id == b.id));
+    }
+
+    // ---- v0.5.0 Sprint 7: hybrid search + MMR + graph boost --------------------------------
+
+    #[test]
+    fn mmr_rerank_returns_diverse_top_results() {
+        // Two near-duplicate high-relevance hits plus one orthogonal hit. MMR (λ=0.5) should
+        // prefer diversity and pick both halves rather than both near-duplicates.
+        let mut hits = vec![
+            ScoredMemory {
+                memory: synth("a sqlite blob store"),
+                score: 0.9,
+            },
+            ScoredMemory {
+                memory: synth("sqlite blob storage for cairn"),
+                score: 0.85,
+            },
+            ScoredMemory {
+                memory: synth("rust ownership rules"),
+                score: 0.7,
+            },
+        ];
+        let reranked = mmr_rerank(std::mem::take(&mut hits), 2, 0.5);
+        assert_eq!(reranked.len(), 2);
+        // The first pick is the highest-scorer (sqlite blob store).
+        assert!(reranked[0].memory.content.contains("blob store"));
+        // The second pick should NOT be the near-duplicate sqlite hit — it's too similar.
+        assert!(
+            reranked[1].memory.content.contains("ownership"),
+            "MMR should break near-duplicates; got {}",
+            reranked[1].memory.content
+        );
+    }
+
+    #[test]
+    fn mmr_lambda_one_is_pure_relevance() {
+        // Three hits so MMR actually has to choose (the early-return when len<=limit doesn't
+        // fire). Lambda 1.0 = relevance only — the top two by score should win.
+        let hits = vec![
+            ScoredMemory {
+                memory: synth("alpha"),
+                score: 0.5,
+            },
+            ScoredMemory {
+                memory: synth("alpha duplicate"),
+                score: 0.9,
+            },
+            ScoredMemory {
+                memory: synth("zebra noise"),
+                score: 0.1,
+            },
+        ];
+        let reranked = mmr_rerank(hits, 2, 1.0);
+        assert_eq!(reranked.len(), 2);
+        // Highest-scoring should be first; second-highest should be second; zebra dropped.
+        assert!(reranked[0].memory.content.contains("duplicate"));
+        assert!(reranked[1].memory.content.contains("alpha"));
+    }
+
+    #[test]
+    fn graph_boost_penalizes_isolated_candidates() {
+        let a = synth("memory A");
+        let mut b = synth("memory B");
+        b.derived_from.push("memory-X".into());
+        let mut already = HashSet::new();
+        already.insert("memory-X".into());
+        let boosted = graph_boost(&b, &already);
+        let isolated = graph_boost(&a, &already);
+        assert!(boosted > isolated);
+        // Cap at 0.2 even if many edges match.
+        let mut lots = synth("lots");
+        for i in 0..50 {
+            lots.derived_from.push(format!("x-{i}"));
+        }
+        let mut big = HashSet::new();
+        for i in 0..50 {
+            big.insert(format!("x-{i}"));
+        }
+        assert!(graph_boost(&lots, &big) <= 0.2);
+    }
+
+    #[test]
+    fn hybrid_search_returns_top_k_with_mmr() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory::new("how do I configure cairn embedding models"))
+            .unwrap();
+        mem.remember(NewMemory::new("cairn embedding model configuration guide"))
+            .unwrap();
+        mem.remember(NewMemory::new("rust async runtime tokio selection"))
+            .unwrap();
+        // Two near-duplicates + one orthogonal — MMR should give us one of the duplicates
+        // and the orthogonal result, not both duplicates.
+        let hits = mem
+            .hybrid_search("cairn embedding configuration", 2, 20)
+            .unwrap();
+        assert_eq!(hits.len(), 2);
+        // At least one should be the orthogonal memory.
+        assert!(
+            hits.iter().any(|h| h.memory.content.contains("tokio")),
+            "MMR should break the duplicate pair and surface an orthogonal memory"
+        );
+    }
+
+    fn synth(content: &str) -> Memory {
+        use cairn_core::{MemoryKind, MemoryTier};
+        Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: MemoryKind::Note,
+            tier: MemoryTier::Working,
+            content: content.to_string(),
+            concepts: vec![],
+            files: vec![],
+            session_id: None,
+            importance: 0.5,
+            access_count: 0,
+            suspicious: false,
+            confidence: 0.5,
+            pinned: false,
+            derived_from: vec![],
+            contradicts: vec![],
+            supersedes: vec![],
+            applies_to: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
     }
 }

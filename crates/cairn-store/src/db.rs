@@ -98,11 +98,7 @@ pub(crate) trait StoreBackend: Send + Sync {
     /// Recent audit events, newest first. `since_event_id=None` returns the most recent
     /// `limit`; `since_event_id=Some(id)` returns events strictly newer than `id` (for SSE
     /// reconnect replay).
-    fn recent_audit(
-        &self,
-        limit: usize,
-        since_event_id: Option<&str>,
-    ) -> Result<Vec<AuditRecord>> {
+    fn recent_audit(&self, limit: usize, since_event_id: Option<&str>) -> Result<Vec<AuditRecord>> {
         let _ = (limit, since_event_id);
         Ok(Vec::new())
     }
@@ -553,8 +549,12 @@ mod tests {
     fn audit_append_assigns_monotonic_ids_and_reads_back() {
         let Some(s) = store() else { return };
         let id1 = s.append_audit(1000, "login_ok", "alice", "").unwrap();
-        let id2 = s.append_audit(2000, "token_issued", "alice", "laptop").unwrap();
-        let id3 = s.append_audit(3000, "login_failed", "bob", "bad password").unwrap();
+        let id2 = s
+            .append_audit(2000, "token_issued", "alice", "laptop")
+            .unwrap();
+        let id3 = s
+            .append_audit(3000, "login_failed", "bob", "bad password")
+            .unwrap();
         // Ids are monotonically increasing as integers.
         let i1: i64 = id1.parse().unwrap();
         let i2: i64 = id2.parse().unwrap();
@@ -595,7 +595,10 @@ mod tests {
         s.append_audit(100, "x", "y", "").unwrap();
         s.append_audit(200, "x", "y", "").unwrap();
         let max = s.max_audit_event_id().unwrap();
-        assert!(max >= 2, "max audit id should be at least 2 after two appends; got {max}");
+        assert!(
+            max >= 2,
+            "max audit id should be at least 2 after two appends; got {max}"
+        );
     }
 
     #[test]
@@ -605,7 +608,8 @@ mod tests {
         // from the in-memory ring buffer.
         let Some(s1) = store() else { return };
         s1.append_audit(100, "login_ok", "alice", "").unwrap();
-        s1.append_audit(200, "token_issued", "alice", "laptop").unwrap();
+        s1.append_audit(200, "token_issued", "alice", "laptop")
+            .unwrap();
         drop(s1);
 
         let Some(s2) = store() else { return };

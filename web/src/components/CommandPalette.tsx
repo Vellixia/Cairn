@@ -30,6 +30,9 @@ import {
   UserPlus,
   FileClock,
   UserCircle,
+  ShieldAlert,
+  MessagesSquare,
+  PiggyBank,
 } from "lucide-react";
 import { useUIStore } from "@/lib/stores/ui";
 
@@ -38,7 +41,7 @@ interface Item {
   label: string;
   hint?: string;
   shortcut?: string;
-  group: "Navigate" | "Memory" | "Reliability" | "Devices" | "Share" | "Personalization";
+  group: "Navigate" | "Memory" | "Reliability" | "Devices" | "Share" | "Personalization" | "Sessions";
   icon: React.ComponentType<{ className?: string }>;
   action: () => void;
 }
@@ -74,9 +77,12 @@ export function CommandPalette() {
     { id: "nav-graph", label: "Memories · Graph", group: "Navigate", icon: Network, action: nav("/dashboard/memory/graph") },
     { id: "nav-ctx", label: "Context · Inspector", group: "Navigate", icon: FileSearch, action: nav("/dashboard/context") },
     { id: "nav-asm", label: "Context · Assemble", group: "Navigate", icon: Layers, action: nav("/dashboard/context/assemble") },
+    { id: "nav-savings", label: "Savings & recover", group: "Navigate", icon: PiggyBank, action: nav("/dashboard/savings") },
     { id: "nav-rel", label: "Reliability · Score", group: "Navigate", icon: Activity, action: nav("/dashboard/reliability") },
     { id: "nav-anchor", label: "Reliability · Anchor", group: "Navigate", icon: Target, action: nav("/dashboard/reliability/anchor") },
     { id: "nav-cp", label: "Reliability · Checkpoints", group: "Navigate", icon: History, action: nav("/dashboard/reliability/checkpoints") },
+    { id: "nav-drift", label: "Reliability · Drift center", group: "Navigate", icon: ShieldAlert, action: nav("/dashboard/reliability/drift") },
+    { id: "nav-sessions", label: "Sessions", group: "Navigate", icon: MessagesSquare, action: nav("/dashboard/sessions") },
     { id: "nav-san", label: "Share · Sanitize", group: "Navigate", icon: ShieldCheck, action: nav("/dashboard/share/sanitize") },
     { id: "nav-bun", label: "Share · Bundles", group: "Navigate", icon: Package, action: nav("/dashboard/share/export") },
     { id: "nav-pool", label: "Pool", group: "Navigate", icon: Users, action: nav("/dashboard/pool") },
@@ -97,7 +103,7 @@ export function CommandPalette() {
       <CommandInput placeholder="Jump to a section, run an action…" />
       <CommandList>
         <CommandEmpty>No matches. Try a section name like "memory" or "tokens".</CommandEmpty>
-        {(["Navigate", "Memory", "Reliability", "Devices", "Share", "Personalization"] as const).map((group) => {
+        {(["Navigate", "Memory", "Reliability", "Devices", "Share", "Personalization", "Sessions"] as const).map((group) => {
           const filtered = items.filter((i) => i.group === group);
           if (filtered.length === 0) return null;
           return (

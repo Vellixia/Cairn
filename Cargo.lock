@@ -461,10 +461,12 @@ dependencies = [
  "cairn-assemble",
  "cairn-context",
  "cairn-core",
+ "cairn-embed",
  "cairn-guard",
  "cairn-mcp",
  "cairn-memory",
  "cairn-profile",
+ "cairn-session",
  "cairn-share",
  "cairn-shell",
  "cairn-store",
@@ -618,6 +620,7 @@ dependencies = [
  "serde",
  "tempfile",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -644,6 +647,21 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "cairn-session"
+version = "0.4.0"
+dependencies = [
+ "cairn-core",
+ "cairn-store",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

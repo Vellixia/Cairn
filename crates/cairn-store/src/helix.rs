@@ -713,15 +713,8 @@ impl StoreBackend for HelixBackend {
         Ok(next.to_string())
     }
 
-    fn recent_audit(
-        &self,
-        limit: usize,
-        since_event_id: Option<&str>,
-    ) -> Result<Vec<AuditRecord>> {
-        let rows = self.read_rows(
-            "AuditEvent",
-            &["id", "ts", "kind", "actor", "detail"],
-        )?;
+    fn recent_audit(&self, limit: usize, since_event_id: Option<&str>) -> Result<Vec<AuditRecord>> {
+        let rows = self.read_rows("AuditEvent", &["id", "ts", "kind", "actor", "detail"])?;
         let mut out: Vec<AuditRecord> = rows
             .into_iter()
             .map(|r| AuditRecord {
@@ -732,7 +725,7 @@ impl StoreBackend for HelixBackend {
                 detail: get_str(&r, "detail"),
             })
             .collect();
-        out.sort_by(|a, b| b.id.cmp(&a.id)); // newest id first
+        out.sort_by_key(|b| std::cmp::Reverse(b.id)); // newest id first
         if let Some(since) = since_event_id {
             if let Ok(since_id) = since.parse::<i64>() {
                 out.retain(|e| e.id > since_id);
@@ -744,10 +737,7 @@ impl StoreBackend for HelixBackend {
 
     fn max_audit_event_id(&self) -> Result<i64> {
         let rows = self.read_rows("AuditCounter", &["value"])?;
-        Ok(rows
-            .first()
-            .map(|r| get_i64(r, "value"))
-            .unwrap_or(0))
+        Ok(rows.first().map(|r| get_i64(r, "value")).unwrap_or(0))
     }
 }
 
@@ -763,10 +753,7 @@ impl HelixBackend {
         let next = cur + 1;
         // Append a fresh counter row each time; reads take the latest. This is the same
         // append-only pattern as SyncState.
-        self.add_node(
-            "AuditCounter",
-            vec![("value".into(), next.into())],
-        )?;
+        self.add_node("AuditCounter", vec![("value".into(), next.into())])?;
         Ok(next)
     }
 }

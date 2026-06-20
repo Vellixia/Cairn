@@ -10,6 +10,7 @@ members = [
     "crates/cairn-shell",
     "crates/cairn-profile",
     "crates/cairn-share",
+    "crates/cairn-session",
     "crates/cairn-embed",
     "crates/cairn-api",
     "crates/cairn-mcp",
@@ -36,6 +37,7 @@ cairn-assemble = { path = "crates/cairn-assemble" }
 cairn-shell = { path = "crates/cairn-shell" }
 cairn-profile = { path = "crates/cairn-profile" }
 cairn-share = { path = "crates/cairn-share" }
+cairn-session = { path = "crates/cairn-session" }
 cairn-embed = { path = "crates/cairn-embed" }
 cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
