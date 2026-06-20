@@ -17,6 +17,7 @@ mod doctor;
 mod extra;
 mod hook;
 mod onboard;
+mod pack;
 mod pair;
 mod pool;
 mod rules;
@@ -147,6 +148,11 @@ enum Cmd {
     },
     /// Print local metrics (memory/checkpoint counts). Live savings go through /api/metrics.
     Metrics,
+    /// Build / inspect / install / publish `.cairnpkg` bundles (Sprint 11).
+    Pack {
+        #[command(subcommand)]
+        action: PackAction,
+    },
     /// Write per-agent instruction files that tell the model to use Cairn's tools.
     Rules {
         /// Agent: claude-code, cursor, vscode, windsurf, opencode, agents. Omit with --all.
@@ -256,6 +262,47 @@ enum SessionCmd {
         server: Option<String>,
         #[arg(long)]
         token: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PackAction {
+    /// Bundle the current store into a new `.cairnpkg`.
+    Create {
+        name: String,
+        #[arg(long, default_value = "0.1.0")]
+        version: String,
+        #[arg(long, default_value = "")]
+        author: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Output path; defaults to `<name>.cairnpkg` in the current directory.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Print the manifest of a tarball.
+    Info { tarball: std::path::PathBuf },
+    /// Install a tarball into the local pack dir + ingest memories.
+    Install { tarball: std::path::PathBuf },
+    /// List installed packs.
+    List,
+    /// Remove an installed pack.
+    Remove { name: String },
+    /// Re-tar an installed pack into a file.
+    Export {
+        name: String,
+        output: std::path::PathBuf,
+    },
+    /// Import a tarball (alias for install with a friendlier verb).
+    Import { tarball: std::path::PathBuf },
+    /// Print (or toggle) the auto-load list.
+    AutoLoad,
+    /// POST a tarball to a registry.
+    Publish {
+        tarball: std::path::PathBuf,
+        /// Registry base URL, e.g. `https://cairn.sh`.
+        #[arg(long)]
+        registry: String,
     },
 }
 
@@ -450,6 +497,57 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Metrics => {
             let s = State::open(&cfg)?;
             extra::metrics(&s)?;
+        }
+        Cmd::Pack { action } => {
+            let s = State::open(&cfg)?;
+            let resolve = |p: Option<std::path::PathBuf>| -> std::path::PathBuf {
+                p.unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                })
+            };
+            let pack = |a: pack::PackCmd| pack::run(a, &s);
+            match action {
+                PackAction::Create {
+                    name,
+                    version,
+                    author,
+                    description,
+                    output,
+                } => {
+                    let out = resolve(output);
+                    pack(pack::PackCmd::Create {
+                        name,
+                        version,
+                        author,
+                        description,
+                        output: out,
+                    })?;
+                }
+                PackAction::Info { tarball } => {
+                    pack(pack::PackCmd::Info { tarball })?;
+                }
+                PackAction::Install { tarball } => {
+                    pack(pack::PackCmd::Install { tarball })?;
+                }
+                PackAction::List => {
+                    pack(pack::PackCmd::List)?;
+                }
+                PackAction::Remove { name } => {
+                    pack(pack::PackCmd::Remove { name })?;
+                }
+                PackAction::Export { name, output } => {
+                    pack(pack::PackCmd::Export { name, output })?;
+                }
+                PackAction::Import { tarball } => {
+                    pack(pack::PackCmd::Import { tarball })?;
+                }
+                PackAction::AutoLoad => {
+                    pack(pack::PackCmd::AutoLoad)?;
+                }
+                PackAction::Publish { tarball, registry } => {
+                    pack(pack::PackCmd::Publish { tarball, registry })?;
+                }
+            }
         }
         Cmd::Pair { code, server } => {
             let s = State::open(&cfg)?;

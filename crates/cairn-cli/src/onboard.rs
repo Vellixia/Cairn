@@ -42,7 +42,10 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     eprintln!("🪨  Cairn onboard — zero-prompt setup\n");
 
     let interactive = atty_stdout();
-    let mut diag = doctor::run(doctor::DoctorOptions { fix: opts.fix, interactive });
+    let mut diag = doctor::run(doctor::DoctorOptions {
+        fix: opts.fix,
+        interactive,
+    });
 
     // If --fix is set and we got failures, re-run to confirm.
     if opts.fix && !diag.ok() {
@@ -104,7 +107,9 @@ fn provision_store(opts: &OnboardOptions) -> Result<()> {
     let store = cairn_store::Store::open(&cfg).context("opening local store")?;
 
     // Quick read-through to confirm the store is queryable.
-    let n = store.count_memories().context("counting memories in store")?;
+    let n = store
+        .count_memories()
+        .context("counting memories in store")?;
     eprintln!("  store: {} memories", n);
 
     // If we're in remote-proxy mode, the local store is intentionally empty — that's
@@ -139,7 +144,11 @@ fn wire_agents(opts: &OnboardOptions) -> Result<usize> {
             "setup --all exited with status {}: {}{}",
             out.status,
             stderr,
-            if stderr.is_empty() { stdout.as_ref() } else { "" }
+            if stderr.is_empty() {
+                stdout.as_ref()
+            } else {
+                ""
+            }
         );
     }
     print!("{}", stdout);

@@ -62,7 +62,9 @@ pub fn graph(cmd: GraphCmd, s: &State) -> Result<()> {
 
 pub enum GraphCmd {
     Related { path: String },
+    #[allow(dead_code)] // Wired through in Sprint 9 follow-up; CLI dispatch currently prints "coming soon".
     Impact { path: String },
+    #[allow(dead_code)] // Wired through in Sprint 9 follow-up; CLI dispatch currently prints "coming soon".
     Callgraph { symbol: String },
 }
 
@@ -173,12 +175,10 @@ fn sessions_call(
 ) -> Result<()> {
     let server_env = std::env::var("CAIRN_SERVER").ok();
     let token_env = std::env::var("CAIRN_TOKEN").ok();
-    let server = server
-        .or(server_env.as_deref())
-        .context(
-            "no server configured — set --server <url> or CAIRN_SERVER \
+    let server = server.or(server_env.as_deref()).context(
+        "no server configured — set --server <url> or CAIRN_SERVER \
              (sessions live on the server, not the local store)",
-        )?;
+    )?;
     let token = token
         .or(token_env.as_deref())
         .context("no token — set --token <jwt> or CAIRN_TOKEN")?;
@@ -193,20 +193,14 @@ fn sessions_call(
         let out = req
             .send_string(&b.to_string())
             .context("sending sessions request")?;
-        let body: serde_json::Value = out
-            .into_json()
-            .context("parsing server response as JSON")?;
+        let body: serde_json::Value = out.into_json().context("parsing server response as JSON")?;
         println!(
             "{}",
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
         );
     } else {
-        let out = req
-            .call()
-            .context("calling sessions endpoint")?;
-        let body: serde_json::Value = out
-            .into_json()
-            .context("parsing server response as JSON")?;
+        let out = req.call().context("calling sessions endpoint")?;
+        let body: serde_json::Value = out.into_json().context("parsing server response as JSON")?;
         println!(
             "{}",
             serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
@@ -217,6 +211,7 @@ fn sessions_call(
 
 /// Convenience for `--help` style text — used by `cairn-cli <cmd> --help` to render a
 /// summary that matches what clap prints.
+#[allow(dead_code)] // Reserved for `cairn help` follow-up; not currently called by main.rs.
 pub fn help_summary() -> &'static str {
     "graph related <path>  — list memories that apply_to <path>\n\
      graph impact <path>   — blast radius (planned v0.5.x)\n\
@@ -277,26 +272,34 @@ mod tests {
 
     #[test]
     fn metrics_command_runs_against_empty_store() {
-        let Some((_dir, s)) = temp_state() else { return };
+        let Some((_dir, s)) = temp_state() else {
+            return;
+        };
         metrics(&s).unwrap();
     }
 
     #[test]
     fn memory_timeline_runs_against_empty_store() {
-        let Some((_dir, s)) = temp_state() else { return };
+        let Some((_dir, s)) = temp_state() else {
+            return;
+        };
         memory_timeline(&s, 10).unwrap();
     }
 
     #[test]
     fn memory_crystallize_no_working_memories_is_noop() {
-        let Some((_dir, s)) = temp_state() else { return };
+        let Some((_dir, s)) = temp_state() else {
+            return;
+        };
         // Empty store — should print "no working memories" and not panic.
         memory_crystallize(&s).unwrap();
     }
 
     #[test]
     fn memory_crystallize_creates_crystal_from_working_set() {
-        let Some((_dir, s)) = temp_state() else { return };
+        let Some((_dir, s)) = temp_state() else {
+            return;
+        };
         s.mem
             .remember(cairn_core::NewMemory::new("first working note"))
             .unwrap();
@@ -317,10 +320,12 @@ mod tests {
 
     #[test]
     fn graph_related_finds_memories_pointing_at_a_path() {
-        let Some((_dir, s)) = temp_state() else { return };
+        let Some((_dir, s)) = temp_state() else {
+            return;
+        };
         // Manually insert a memory with an applies_to edge so we can test the filter
         // without going through the full pipeline.
-        let mut m = Memory {
+        let m = Memory {
             id: uuid::Uuid::new_v4().to_string(),
             kind: MemoryKind::Note,
             tier: MemoryTier::Working,
@@ -363,7 +368,9 @@ mod tests {
 
     #[test]
     fn graph_impact_and_callgraph_are_stubs() {
-        let Some((_dir, s)) = temp_state() else { return };
+        let Some((_dir, s)) = temp_state() else {
+            return;
+        };
         graph(
             GraphCmd::Impact {
                 path: "anything".into(),
@@ -382,7 +389,9 @@ mod tests {
 
     #[test]
     fn search_returns_results_for_known_query() {
-        let Some((_dir, s)) = temp_state() else { return };
+        let Some((_dir, s)) = temp_state() else {
+            return;
+        };
         s.mem
             .remember(cairn_core::NewMemory::new("cairn memory recall test"))
             .unwrap();

@@ -296,24 +296,18 @@ impl McpServer {
                     .get("importance")
                     .and_then(Value::as_f64)
                     .map(|f| f as f32);
-                let concepts = args
-                    .get("concepts")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(Value::as_str)
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>()
-                    });
-                let files = args
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(Value::as_str)
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>()
-                    });
+                let concepts = args.get("concepts").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                });
+                let files = args.get("files").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                });
                 match self
                     .mem
                     .edit(id, content, importance, concepts, files)
@@ -333,10 +327,7 @@ impl McpServer {
             }
             "memory_pin" => {
                 let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
-                let pinned = args
-                    .get("pinned")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
+                let pinned = args.get("pinned").and_then(Value::as_bool).unwrap_or(true);
                 if self.mem.pin(id, pinned).map_err(|e| e.to_string())? {
                     Ok(format!(
                         "{pinned_status} {id}",
@@ -349,7 +340,8 @@ impl McpServer {
             "memory_promote" => {
                 let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
                 let tier = str_arg(args.get("tier")).ok_or("missing 'tier'")?;
-                let target: cairn_core::MemoryTier = tier.parse().map_err(|e: cairn_core::Error| e.to_string())?;
+                let target: cairn_core::MemoryTier =
+                    tier.parse().map_err(|e: cairn_core::Error| e.to_string())?;
                 match self.mem.get(id).map_err(|e| e.to_string())? {
                     Some(mut m) => {
                         m.tier = target;
@@ -371,12 +363,10 @@ impl McpServer {
                 mems.truncate(limit);
                 serde_json::to_string_pretty(&mems).map_err(|e| e.to_string())
             }
-            "memory_crystallize" => {
-                match self.mem.crystallize(None).map_err(|e| e.to_string())? {
-                    Some(id) => Ok(format!("crystallized: {id}")),
-                    None => Ok("nothing to crystallize".into()),
-                }
-            }
+            "memory_crystallize" => match self.mem.crystallize(None).map_err(|e| e.to_string())? {
+                Some(id) => Ok(format!("crystallized: {id}")),
+                None => Ok("nothing to crystallize".into()),
+            },
             "memory_graph" => {
                 let g = self.mem.graph().map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&g).map_err(|e| e.to_string())
@@ -396,7 +386,11 @@ impl McpServer {
             }
             "metrics" => {
                 let mem_count = self.store.count_memories().map_err(|e| e.to_string())?;
-                let cp_count = self.guard.list_checkpoints().map_err(|e| e.to_string())?.len();
+                let cp_count = self
+                    .guard
+                    .list_checkpoints()
+                    .map_err(|e| e.to_string())?
+                    .len();
                 serde_json::to_string_pretty(&serde_json::json!({
                     "memories": mem_count,
                     "checkpoints": cp_count,
@@ -907,130 +901,144 @@ mod tests {
             .is_none());
     }
 
-#[test]
-fn sanitize_tool_redacts_and_classifies() {
-    let Some(s) = server() else { return };
-    // Assembled at runtime so the repo stores no verbatim credential (push protection).
-    let token = format!("ghp_{}", "0123456789abcdefghijklmnopqrstuvwxyz");
-    let resp = s
-        .handle(
-            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+    #[test]
+    fn sanitize_tool_redacts_and_classifies() {
+        let Some(s) = server() else { return };
+        // Assembled at runtime so the repo stores no verbatim credential (push protection).
+        let token = format!("ghp_{}", "0123456789abcdefghijklmnopqrstuvwxyz");
+        let resp = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
             "name":"sanitize","arguments":{"text": format!("deploy token={token}")}}}),
-        )
-        .unwrap();
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-    let v: Value = serde_json::from_str(text).unwrap();
-    assert_eq!(v["sensitivity"], "private");
-    assert!(v["text"]
-        .as_str()
-        .unwrap()
-        .contains("[redacted:github_token]"));
-    assert!(!text.contains(&token), "raw secret leaked in tool output");
-}
-
-#[test]
-fn tools_list_exposes_40_plus_sprint_10_tools() {
-    let Some(s) = server() else { return };
-    let list = s
-        .handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
-        .unwrap();
-    let tools = list["result"]["tools"].as_array().unwrap();
-    // Sprint 10 brings the total to ≥40 tools. Assert the floor + a handful of the new ones.
-    assert!(
-        tools.len() >= 40,
-        "expected ≥40 tools after Sprint 10, got {}",
-        tools.len()
-    );
-    for name in [
-        "memory_edit",
-        "memory_delete",
-        "memory_pin",
-        "memory_promote",
-        "memory_reinforce",
-        "memory_timeline",
-        "memory_crystallize",
-        "memory_graph",
-        "graph",
-        "search",
-        "metrics",
-    ] {
-        assert!(
-            tools.iter().any(|t| t["name"] == name),
-            "missing tool {name} in tools/list"
-        );
+            )
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let v: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(v["sensitivity"], "private");
+        assert!(v["text"]
+            .as_str()
+            .unwrap()
+            .contains("[redacted:github_token]"));
+        assert!(!text.contains(&token), "raw secret leaked in tool output");
     }
-}
 
-#[test]
-fn memory_edit_pin_delete_pin_round_trip() {
-    let Some(s) = server() else { return };
-    let create = s
-        .handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-            "name":"remember","arguments":{"content":"sprint 10 round trip"}}}))
-        .unwrap();
-    let create_text = create["result"]["content"][0]["text"].as_str().unwrap();
-    // "remembered <id> ..." — extract the id.
-    let id = create_text
-        .split_whitespace()
-        .nth(1)
-        .expect("id present in remember output");
-    let id = id.trim_end_matches(&['(', ')', '.', ','][..]);
+    #[test]
+    fn tools_list_exposes_40_plus_sprint_10_tools() {
+        let Some(s) = server() else { return };
+        let list = s
+            .handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+            .unwrap();
+        let tools = list["result"]["tools"].as_array().unwrap();
+        // Sprint 10 brings the total to ≥40 tools. Assert the floor + a handful of the new ones.
+        assert!(
+            tools.len() >= 40,
+            "expected ≥40 tools after Sprint 10, got {}",
+            tools.len()
+        );
+        for name in [
+            "memory_edit",
+            "memory_delete",
+            "memory_pin",
+            "memory_promote",
+            "memory_reinforce",
+            "memory_timeline",
+            "memory_crystallize",
+            "memory_graph",
+            "graph",
+            "search",
+            "metrics",
+        ] {
+            assert!(
+                tools.iter().any(|t| t["name"] == name),
+                "missing tool {name} in tools/list"
+            );
+        }
+    }
 
-    // memory_edit
-    let edited = s
-        .handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
-            "name":"memory_edit","arguments":{"id": id, "content":"sprint 10 EDITED"}}}))
-        .unwrap();
-    assert!(edited["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("edited"));
+    #[test]
+    fn memory_edit_pin_delete_pin_round_trip() {
+        let Some(s) = server() else { return };
+        let create = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"remember","arguments":{"content":"sprint 10 round trip"}}}),
+            )
+            .unwrap();
+        let create_text = create["result"]["content"][0]["text"].as_str().unwrap();
+        // "remembered <id> ..." — extract the id.
+        let id = create_text
+            .split_whitespace()
+            .nth(1)
+            .expect("id present in remember output");
+        let id = id.trim_end_matches(&['(', ')', '.', ','][..]);
 
-    // memory_pin
-    let pinned = s
-        .handle(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
-            "name":"memory_pin","arguments":{"id": id, "pinned": true}}}))
-        .unwrap();
-    assert!(pinned["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("pinned"));
+        // memory_edit
+        let edited = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"memory_edit","arguments":{"id": id, "content":"sprint 10 EDITED"}}}),
+            )
+            .unwrap();
+        assert!(edited["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("edited"));
 
-    // memory_reinforce
-    let reinforced = s
-        .handle(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
-            "name":"memory_reinforce","arguments":{"id": id}}}))
-        .unwrap();
-    assert!(reinforced["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("reinforced"));
+        // memory_pin
+        let pinned = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"memory_pin","arguments":{"id": id, "pinned": true}}}),
+            )
+            .unwrap();
+        assert!(pinned["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pinned"));
 
-    // memory_graph returns nodes + edges (serialized JSON).
-    let graph = s
-        .handle(&json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
-            "name":"memory_graph","arguments":{}}}))
-        .unwrap();
-    let body = graph["result"]["content"][0]["text"].as_str().unwrap();
-    let v: Value = serde_json::from_str(body).unwrap();
-    assert!(v["nodes"].as_array().is_some());
-    assert!(v["edges"].as_array().is_some());
+        // memory_reinforce
+        let reinforced = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            "name":"memory_reinforce","arguments":{"id": id}}}),
+            )
+            .unwrap();
+        assert!(reinforced["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("reinforced"));
 
-    // memory_delete
-    let deleted = s
-        .handle(&json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{
-            "name":"memory_delete","arguments":{"id": id}}}))
-        .unwrap();
-    assert!(deleted["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap()
-        .contains("deleted"));
+        // memory_graph returns nodes + edges (serialized JSON).
+        let graph = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+            "name":"memory_graph","arguments":{}}}),
+            )
+            .unwrap();
+        let body = graph["result"]["content"][0]["text"].as_str().unwrap();
+        let v: Value = serde_json::from_str(body).unwrap();
+        assert!(v["nodes"].as_array().is_some());
+        assert!(v["edges"].as_array().is_some());
 
-    // memory_delete again → tool error
-    let err = s
-        .handle(&json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
-            "name":"memory_delete","arguments":{"id": id}}}))
-        .unwrap();
-    assert!(err["result"]["isError"].as_bool().unwrap_or(false));
-}
+        // memory_delete
+        let deleted = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{
+            "name":"memory_delete","arguments":{"id": id}}}),
+            )
+            .unwrap();
+        assert!(deleted["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("deleted"));
+
+        // memory_delete again → tool error
+        let err = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
+            "name":"memory_delete","arguments":{"id": id}}}),
+            )
+            .unwrap();
+        assert!(err["result"]["isError"].as_bool().unwrap_or(false));
+    }
 }

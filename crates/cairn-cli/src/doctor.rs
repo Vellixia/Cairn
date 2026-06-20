@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // `interactive` is wired through in a follow-up; kept for API stability.
 pub struct DoctorOptions {
     pub fix: bool,
     pub interactive: bool,
@@ -126,7 +127,7 @@ fn check_data_dir(cfg: &cairn_core::Config, fix: bool) -> Check {
             },
         }
     } else if fix {
-        match std::fs::create_dir_all(&dir) {
+        match std::fs::create_dir_all(dir) {
             Ok(()) => Check {
                 name: "data dir",
                 ok: true,
@@ -145,10 +146,7 @@ fn check_data_dir(cfg: &cairn_core::Config, fix: bool) -> Check {
         Check {
             name: "data dir",
             ok: false,
-            detail: format!(
-                "{} (missing — run with --fix to create)",
-                dir.display()
-            ),
+            detail: format!("{} (missing — run with --fix to create)", dir.display()),
         }
     }
 }
@@ -173,7 +171,9 @@ fn check_helix_url(cfg: &cairn_core::Config) -> Check {
                 Check {
                     name: "helix url",
                     ok: false,
-                    detail: "CAIRN_HELIX_URL is not set (set it or run `cairn onboard --server ...`)".into(),
+                    detail:
+                        "CAIRN_HELIX_URL is not set (set it or run `cairn onboard --server ...`)"
+                            .into(),
                 }
             }
         }
@@ -381,6 +381,7 @@ fn redact_url(url: &str) -> String {
 /// Simple command runner for `doctor --fix` — used by tests to spawn the actual binary
 /// and verify that a missing data dir gets created.
 #[doc(hidden)]
+#[allow(dead_code)] // Reserved for upcoming end-to-end tests; the unit tests use the inner fn.
 pub fn run_cli(args: &[&str]) -> Result<i32> {
     let current = std::env::current_exe().context("locating cairn-cli binary")?;
     let out = Command::new(&current)
@@ -396,158 +397,160 @@ pub fn run_cli(args: &[&str]) -> Result<i32> {
     Ok(out.status.code().unwrap_or(-1))
 }
 
-
 #[cfg(test)]
 mod tests {
-use super::*;
-/// Tests for the `doctor` module.
-///
-/// Mutex that serializes every test which mutates process-wide env vars (CAIRN_SERVER,
-/// CAIRN_HELIX_URL, etc.). Held for the entire duration of each test that needs it.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use super::*;
+    /// Tests for the `doctor` module.
+    ///
+    /// Mutex that serializes every test which mutates process-wide env vars (CAIRN_SERVER,
+    /// CAIRN_HELIX_URL, etc.). Held for the entire duration of each test that needs it.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-#[test]
-fn diagnosis_exit_code_reflects_ok_or_fail() {
-    let ok = Diagnosis {
-        checks: vec![Check {
-            name: "x",
-            ok: true,
-            detail: "ok".into(),
-        }],
-    };
-    assert_eq!(ok.exit_code(), 0);
-    assert!(ok.ok());
+    #[test]
+    fn diagnosis_exit_code_reflects_ok_or_fail() {
+        let ok = Diagnosis {
+            checks: vec![Check {
+                name: "x",
+                ok: true,
+                detail: "ok".into(),
+            }],
+        };
+        assert_eq!(ok.exit_code(), 0);
+        assert!(ok.ok());
 
-    let bad = Diagnosis {
-        checks: vec![Check {
-            name: "x",
-            ok: false,
-            detail: "fail".into(),
-        }],
-    };
-    assert_eq!(bad.exit_code(), 1);
-    assert!(!bad.ok());
+        let bad = Diagnosis {
+            checks: vec![Check {
+                name: "x",
+                ok: false,
+                detail: "fail".into(),
+            }],
+        };
+        assert_eq!(bad.exit_code(), 1);
+        assert!(!bad.ok());
+    }
+
+    #[test]
+    fn redact_url_strips_userinfo() {
+        assert_eq!(
+            redact_url("http://user:pass@example.com:6969/path"),
+            "http://***@example.com:6969/path"
+        );
+        assert_eq!(redact_url("http://localhost:6969"), "http://localhost:6969");
+        assert_eq!(
+            redact_url("http://***@example.com:6969"),
+            "http://***@example.com:6969"
+        );
+    }
+
+    #[test]
+    fn doctor_check_data_dir_creates_when_fix_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cairn-data");
+        assert!(!target.exists());
+
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.data_dir = target.clone();
+
+        let c = check_data_dir(&cfg, true);
+        assert!(
+            c.ok,
+            "fix=true should create the missing dir; got: {}",
+            c.detail
+        );
+        assert!(target.exists(), "the data dir should have been created");
+
+        let c = check_data_dir(&cfg, false);
+        assert!(c.ok);
+    }
+
+    #[test]
+    fn doctor_check_data_dir_reports_missing_without_fix() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("cairn-data-missing");
+        assert!(!target.exists());
+
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.data_dir = target;
+
+        let c = check_data_dir(&cfg, false);
+        assert!(!c.ok);
+        assert!(c.detail.contains("--fix"));
+    }
+
+    #[test]
+    fn doctor_check_embedder_rejects_unknown_provider() {
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.embed.provider = "magic".into();
+        let c = check_embedder(&cfg);
+        assert!(!c.ok);
+        assert!(c.detail.contains("magic"));
+    }
+
+    #[test]
+    fn doctor_check_embedder_accepts_hashing() {
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.embed.provider = "hashing".into();
+        let c = check_embedder(&cfg);
+        assert!(c.ok);
+        assert!(c.detail.contains("hashing"));
+    }
+
+    #[test]
+    fn doctor_check_helix_url_set_passes() {
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.helix_url = Some("http://localhost:6969".into());
+        let c = check_helix_url(&cfg);
+        assert!(c.ok);
+    }
+
+    #[test]
+    fn doctor_env_var_tests_are_serial_safe() {
+        let _guard = ENV_LOCK.lock().unwrap();
+
+        std::env::remove_var("CAIRN_SERVER");
+
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.helix_url = None;
+        cfg.default_server = None;
+        assert!(
+            !check_helix_url(&cfg).ok,
+            "missing helix in local mode must fail"
+        );
+
+        cfg.helix_url = Some("http://localhost:6969".into());
+        assert!(check_helix_url(&cfg).ok);
+
+        std::env::set_var("CAIRN_SERVER", "http://localhost:7777");
+        cfg.helix_url = None;
+        assert!(
+            check_helix_url(&cfg).ok,
+            "with remote server set, missing helix is ok"
+        );
+        assert!(check_helix_url(&cfg).detail.contains("remote-proxy"));
+        std::env::remove_var("CAIRN_SERVER");
+
+        // Confirm we still fail when nothing is set.
+        cfg.helix_url = None;
+        cfg.default_server = None;
+        std::env::remove_var("CAIRN_SERVER");
+        assert!(!check_helix_url(&cfg).ok);
+    }
+
+    #[test]
+    fn doctor_check_secret_key_short_is_fail() {
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.secret_key = Some(b"short".to_vec());
+        let c = check_secret_key(&cfg);
+        assert!(!c.ok);
+        assert!(c.detail.contains("32"));
+    }
+
+    #[test]
+    fn doctor_check_secret_key_long_is_ok() {
+        let mut cfg = cairn_core::Config::resolve(None).unwrap();
+        cfg.secret_key = Some(b"this-is-exactly-thirty-two-bytes!!!".to_vec());
+        let c = check_secret_key(&cfg);
+        assert!(c.ok);
+        assert!(c.detail.contains("32"));
+    }
 }
-
-#[test]
-fn redact_url_strips_userinfo() {
-    assert_eq!(
-        redact_url("http://user:pass@example.com:6969/path"),
-        "http://***@example.com:6969/path"
-    );
-    assert_eq!(redact_url("http://localhost:6969"), "http://localhost:6969");
-    assert_eq!(
-        redact_url("http://***@example.com:6969"),
-        "http://***@example.com:6969"
-    );
-}
-
-#[test]
-fn doctor_check_data_dir_creates_when_fix_set() {
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("cairn-data");
-    assert!(!target.exists());
-
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.data_dir = target.clone();
-
-    let c = check_data_dir(&cfg, true);
-    assert!(c.ok, "fix=true should create the missing dir; got: {}", c.detail);
-    assert!(target.exists(), "the data dir should have been created");
-
-    let c = check_data_dir(&cfg, false);
-    assert!(c.ok);
-}
-
-#[test]
-fn doctor_check_data_dir_reports_missing_without_fix() {
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("cairn-data-missing");
-    assert!(!target.exists());
-
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.data_dir = target;
-
-    let c = check_data_dir(&cfg, false);
-    assert!(!c.ok);
-    assert!(c.detail.contains("--fix"));
-}
-
-#[test]
-fn doctor_check_embedder_rejects_unknown_provider() {
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.embed.provider = "magic".into();
-    let c = check_embedder(&cfg);
-    assert!(!c.ok);
-    assert!(c.detail.contains("magic"));
-}
-
-#[test]
-fn doctor_check_embedder_accepts_hashing() {
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.embed.provider = "hashing".into();
-    let c = check_embedder(&cfg);
-    assert!(c.ok);
-    assert!(c.detail.contains("hashing"));
-}
-
-#[test]
-fn doctor_check_helix_url_set_passes() {
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.helix_url = Some("http://localhost:6969".into());
-    let c = check_helix_url(&cfg);
-    assert!(c.ok);
-}
-
-#[test]
-fn doctor_env_var_tests_are_serial_safe() {
-    let _guard = ENV_LOCK.lock().unwrap();
-
-    std::env::remove_var("CAIRN_SERVER");
-
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.helix_url = None;
-    cfg.default_server = None;
-    assert!(
-        !check_helix_url(&cfg).ok,
-        "missing helix in local mode must fail"
-    );
-
-    cfg.helix_url = Some("http://localhost:6969".into());
-    assert!(check_helix_url(&cfg).ok);
-
-    std::env::set_var("CAIRN_SERVER", "http://localhost:7777");
-    cfg.helix_url = None;
-    assert!(
-        check_helix_url(&cfg).ok,
-        "with remote server set, missing helix is ok"
-    );
-    assert!(check_helix_url(&cfg).detail.contains("remote-proxy"));
-    std::env::remove_var("CAIRN_SERVER");
-
-    // Confirm we still fail when nothing is set.
-    cfg.helix_url = None;
-    cfg.default_server = None;
-    std::env::remove_var("CAIRN_SERVER");
-    assert!(!check_helix_url(&cfg).ok);
-}
-
-#[test]
-fn doctor_check_secret_key_short_is_fail() {
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.secret_key = Some(b"short".to_vec());
-    let c = check_secret_key(&cfg);
-    assert!(!c.ok);
-    assert!(c.detail.contains("32"));
-}
-
-#[test]
-fn doctor_check_secret_key_long_is_ok() {
-    let mut cfg = cairn_core::Config::resolve(None).unwrap();
-    cfg.secret_key = Some(b"this-is-exactly-thirty-two-bytes!!!".to_vec());
-    let c = check_secret_key(&cfg);
-    assert!(c.ok);
-    assert!(c.detail.contains("32"));
-}
-}
-

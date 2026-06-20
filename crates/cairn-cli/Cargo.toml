@@ -27,6 +27,7 @@ cairn-shell.workspace = true
 cairn-profile.workspace = true
 cairn-mcp.workspace = true
 cairn-share.workspace = true
+cairn-pack.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
