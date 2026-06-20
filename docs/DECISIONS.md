@@ -453,9 +453,270 @@ and runs as `user: "10001:10001"`.
 
 ---
 
+## ADR-017: Ed25519 pack signatures (replace HMAC)
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 13)  
+**Status:** Accepted
+
+### Context
+The pre-Sprint 13 `.cairnpkg` carried only a content-hash (`signature.sha256`) which
+proved integrity but not authenticity — anyone with the tarball could claim to be the
+author. Sharing between teams required trusting the registry URL as a proxy for
+authenticity, which doesn't scale: a malicious registry can republish any unsigned
+pack under its own author identity.
+
+### Decision
+Add an **Ed25519** signature alongside the existing SHA-256 hash:
+- `Pack::write_tarball_signed(&mut self, path, &Keypair)` adds a `signature.ed25519`
+  file and embeds the author's public key in `manifest.signers`.
+- `cairn_pack::install::verify_ed25519_signature(entries, manifest_bytes, trusted_keys)`
+  returns `Ok(true)` on match, `Ok(false)` for unsigned, `Err(Mismatch)` for
+  signed-but-not-trusted.
+- `cairn-pack::signing::{Keypair, PublicKey, sign_manifest_ed25519, verify_manifest_ed25519}`
+  are the public surface.
+
+Install verification prefers Ed25519 when present (integrity + authenticity); falls
+back to `signature.sha256` for legacy packs.
+
+### Rationale
+- Ed25519 is fast, deterministic, no key infrastructure (vs. PKI), small keys/signatures
+  (32B / 64B), and well-audited (libsodium, NaCl, ed25519-dalek). It's the modern
+  default for code-signing and package-signing.
+- Each peer maintains a small `trusted_keys.json` whitelist — there's no CA chain to
+  compromise. Trust is anchored in the operator's explicit grant, not in a third party.
+- Backwards compatible: old unsigned packs install fine; the registry flags them but
+  doesn't reject (so historical content keeps working).
+
+### Trade-offs
+- A leaked secret key forges any pack version under that author identity. Mitigated
+  by the `revoke` flow + cascade propagation (Sprint 14b): re-keying requires
+  publishing a new author key + explicit re-trust on every peer.
+- We don't support cosign attestations or SLSA provenance here. A future layer can add
+  them on top of the same Ed25519 keys (ADR-022 covers the v0.6 timeline).
+
+---
+
+## ADR-018: Self-hosted pack registry embedded in `cairn-server`
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 13)  
+**Status:** Accepted
+
+### Context
+Cairn needed a place to publish, discover, download, and revoke `.cairnpkg` bundles.
+Options considered:
+1. **External service** (e.g. OCI Distribution, Git LFS) — already solved storage and
+   discovery but brings an entire deployment story and a new auth surface.
+2. **Hand-rolled HTTP service in a new `cairn-registry` crate, mounted on
+   `cairn-server` under `/registry`** — self-contained, reuses auth + audit log.
+3. **`cairn.sh` proxy** (planned v0.6 Sprint 19) — public registry for sharing
+   *between* cairn.sh users, not self-hosting.
+
+### Decision
+Add a new `cairn-registry` crate that owns `Registry::open(data_dir)` and stores
+everything under `<data_dir>/registry/`. Wire it into `cairn-api` via
+`build_router_with_registry` so the same auth middleware that protects `/api/*` also
+protects `/registry/*`. Endpoints: `POST /registry/packs`, `GET /registry/packs[/:name]`,
+`GET /registry/packs/:name/:version/download`, `DELETE /registry/packs/:name/:version`,
+`GET /registry/search?q=`, `GET /registry/revocations[?since=]`.
+
+### Rationale
+- Reusing `cairn-api`'s auth + audit + rate-limit layers keeps the trust boundary
+  small (one auth model).
+- On-disk JSON (`index.json` + `trusted_keys.json` + `revocations.jsonl` + per-pack
+  tarballs) means backup = `cp -r <data_dir>/registry`. No database dependency.
+- The `cairn.sh` proxy in Sprint 19 will be a thin layer *on top* of this same HTTP API
+  — adding it later doesn't require migrating data.
+
+### Trade-offs
+- Federation sync uses the same on-disk JSON files as a transport-agnostic log. A
+  truly huge registry (10k+ packs) would want sqlite; for v0.5.0 scale the index file
+  parses in <10ms.
+- No role-based access control yet — anyone who can call `POST /registry/packs` can
+  publish, gated only by the trust-scope check (Sprint 14a). Sprint 19 multi-tenancy
+  will add per-tenant scope.
+
+---
+
+## ADR-019: Vector clocks + CRDTs for offline-first sync
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 15a)  
+**Status:** Accepted
+
+### Context
+The pre-Sprint 15 sync used last-write-wins (LWW) keyed on `updated_at`. This silently
+dropped data when two devices edited the same memory offline: whichever device wrote
+later "won" and the other edit was lost. The user saw no warning.
+
+### Decision
+Add a new `cairn-sync` crate with three primitives:
+- **Vector clock** — per-actor counter; each device tracks events from every other device.
+  Two clocks are concurrent iff neither dominates the other.
+- **GCounter** — grow-only counter for `access_count` and `confidence`. Concurrent
+  increments on different replicas both survive a merge (per-actor max).
+- **OR-Set** — observed-remove set for `tags` and `concepts`. Concurrent add + remove
+  resolves to "present" (add wins); concurrent add + add resolves to "present" (union).
+
+`SyncPeer::apply_envelope` walks each incoming `MemoryOp`, looks up the local clock
+for that id, and returns `Applied` (clean merge), `Concurrent` (flag for the UI to
+resolve), or `Skipped` (the local copy is already newer).
+
+### Rationale
+- GCounter + OR-Set cover the two cases that matter in Cairn (counters + tags) without
+  pulling in a full document CRDT.
+- Vector clocks are the smallest primitive that detects concurrent edits without a
+  global synchronized clock.
+- We deliberately did NOT adopt `automerge` / automerge-crdt. The binary weight
+  (~3 MiB of compiled deps, ~10x larger than Cairn's existing sync) wasn't justified
+  for two CRDT types — and the protocol changes (every document carries its full
+  history) would have made E2E encryption (Sprint 15b) much harder.
+
+### Trade-offs
+- `content` and `description` are still LWW-by-clock (last-write-wins among
+  causally-ordered edits). Concurrent `content` edits are flagged `Concurrent` and
+  surfaced in the UI — the user resolves manually.
+- Vector clocks grow with the number of distinct peers. A binary-clock compression
+  (the standard "version vectors" approach in production CRDT systems) is a v0.6
+  item.
+
+---
+
+## ADR-020: Argon2id + ChaCha20-Poly1305 for sync envelope E2E encryption
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 15b)  
+**Status:** Accepted
+
+### Context
+TLS protects sync traffic from a network observer. But a compromised
+`cairn-server` (the box the user deploys at home or in a VPS) still sees plaintext
+sync payloads — including any secrets the user has accidentally remembered. We
+wanted an opt-in mode where the server is **never** able to decrypt, even with
+filesystem access.
+
+### Decision
+A new `cairn-sync::crypto` module:
+- **Argon2id** derives a 32-byte key from the user's passphrase (64 MiB memory, 3
+  iterations, 1 lane — OWASP minimum for interactive use).
+- **ChaCha20-Poly1305** AEAD encrypts the envelope body, with the actor pair
+  (`from → to`) bound as associated data so envelopes can't be cross-delivered.
+- The header is plaintext: magic + version + kdf + salt + nonce. Standard AEAD
+  header pattern; lets a future iteration upgrade to Argon2id with higher parameters
+  without breaking older envelopes.
+
+`encrypt_envelope(plaintext, passphrase, aad)` and
+`decrypt_envelope(env, passphrase, expected_aad)` are the two public functions.
+6 tests cover round-trip, wrong passphrase, wrong AAD, tampered ciphertext, bad
+magic, version mismatch.
+
+### Rationale
+- Argon2id is the OWASP-recommended password hashing function: memory-hard, GPU-
+  resistant, side-channel resistant.
+- ChaCha20-Poly1305 is RFC 8439, audited, fast on CPUs without AES-NI, and ships as a
+  single tiny dependency.
+- AEAD's authentication tag catches forgeries. The AAD bind prevents envelope
+  redirection (an attacker can't replay alice→bob's envelope to charlie→dana).
+
+### Trade-offs
+- **No forward secrecy** — a single passphrase encrypts every envelope; rotating
+  requires re-encrypting everything. A future iteration can layer an ephemeral ECDH
+  exchange (X25519 + Double Ratchet) for per-session keys.
+- **No deniability** — the receiver can prove the sender had the passphrase. A
+  future iteration can sign with a separate Mac-style key per message.
+- A lost passphrase is unrecoverable. We document this prominently.
+
+---
+
+## ADR-021: Trust scopes (Local / Team / Public)
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 14a)  
+**Status:** Accepted
+
+### Context
+A single trust grant (`trusted_keys.json` with a list of public keys) is too coarse.
+Once you've added an author key, that author can publish at any scope — including
+`public` packs from your team's internal channels. We needed a way to grant trust
+*with a scope cap*: "this key may publish up to Team, but never Public."
+
+### Decision
+Replace `Vec<PublicKey>` with `Vec<TrustGrant { key, allows, label, granted_at }>`
+where `allows: TrustScope` is one of `Local | Team | Public`. On publish:
+- The pack's declared scope is read from `manifest.description` (line `scope: <local|team|public>`).
+- Each trust grant is tested; the first one whose `allows` is at least as wide as the
+  pack's scope AND whose key verifies the signature wins.
+- A signed pack with no compatible grant returns `RegistryError::ScopeDenied {
+  pack_scope, granted_scopes }`.
+
+Legacy `Vec<PublicKey>` files auto-migrate to `Vec<TrustGrant>` with
+`allows = Public` on first read.
+
+### Rationale
+- Three scopes (`local`, `team`, `public`) match the operational reality of how teams
+  share context in v0.5.0. Adding a fourth (`organization`) is a single-line change.
+- Per-grant `label` (e.g. `"alice@vellixia"`) gives operators a human-readable audit
+  trail without re-deriving from pubkey hex.
+- Auto-migration means existing deployments don't break on first upgrade.
+
+### Trade-offs
+- A wider grant can publish a narrower pack, so `allows=Public` is the default and
+  trusts the operator to assign appropriately. We log scope mismatches as warnings.
+- `scope: <...>` in `description` is a soft hint until v0.6 adds a first-class
+  `scope` field to the manifest schema. The description parser is forgiving
+  (case-insensitive, substring match).
+
+---
+
+## ADR-022: Federation revocation propagation (pull-based, append-only log)
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 14b)  
+**Status:** Accepted
+
+### Context
+Federation needs a way for peer A's "revoke pack X" decision to reach peer B within
+a reasonable window, even when peer B never installed pack X. The naive approach
+(API push notifications) requires a pub/sub fabric and a fan-out service. We
+needed something a single cairn-server can run by itself.
+
+### Decision
+A pull-based sync:
+1. Every revoking registry appends a `RevocationEvent { name, version, revoked_at, reason }`
+   to its own `revocations.jsonl` file.
+2. Peers poll `GET /registry/revocations?since=<unix_seconds>` periodically (e.g.
+   via a cron job or a background tokio task).
+3. The response returns every event strictly newer than `since`, ordered chronologically.
+4. The subscriber is idempotent: events already known by `(name, version, revoked_at)`
+   are skipped.
+5. `Registry::revoke_if_exists(name, version)` records a cascade event without
+   requiring a local pack tarball — so subscribers that never installed pack X still
+   learn about its revocation.
+
+The high-water mark is the maximum `revoked_at` of every locally-known event. After
+each sync, the subscriber stores the new mark and passes it as `since=` next time.
+
+### Rationale
+- Append-only JSONL is grep-friendly and easy to back up to S3 for long-term audit.
+- Pull (vs push) means a subscriber that goes offline for a week gets all the
+  revocations it missed on its next sync — no message loss, no queue to operate.
+- Idempotency means duplicates are safe — a peer can re-pull the same window multiple
+  times without duplicating events in its own log.
+
+### Trade-offs
+- **Latency = polling interval.** The plan target is "subscriber receives revocation
+  within 60s." A future iteration can add an SSE push channel (Sprint 19) for
+  sub-second latency.
+- **No cross-origin provenance.** When peer B applies a revocation from peer A, B
+  doesn't know *why* A revoked the pack. The `reason` field is optional and
+  informational — we'd need signed revocation receipts to do better, which is
+  beyond v0.5.0's scope.
+- **Trust on the receiver.** Peer B applies revocations from any peer it pulls
+  from. The `PeerConfig.base_url` is the trust anchor. TLS + a future bearer-token
+  check (per PeerConfig.token, accepted but not yet verified server-side) will
+  tighten this in v0.6.
+
+---
+
 ## See also
 
 - [Architecture](ARCHITECTURE.md) — how these decisions manifest in the code
+- [SECURITY.md](../SECURITY.md) — threat model + hardening checklist (updated Sprint 15c)
 - [Roadmap](ROADMAP.md) — what's done, what's next
 - [Web](WEB.md) — admin/CLI auth split surface
 - [Upgrading](UPGRADING.md) — 0.3.x → 0.4.0 migration
