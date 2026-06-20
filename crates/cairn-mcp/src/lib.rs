@@ -31,6 +31,7 @@ pub struct McpServer {
     profile: Arc<Profile>,
     san: cairn_share::Sanitizer,
     mem: Arc<MemoryEngine>,
+    store: Arc<cairn_store::Store>,
 }
 
 impl McpServer {
@@ -48,6 +49,7 @@ impl McpServer {
             profile: Arc::new(Profile::new(mem.clone())),
             san: cairn_share::Sanitizer::new(),
             mem,
+            store,
         })
     }
 
@@ -283,6 +285,131 @@ impl McpServer {
                 let s = self.san.sanitize(text);
                 serde_json::to_string_pretty(&s).map_err(|e| e.to_string())
             }
+            // ---- v0.5.0 Sprint 10: graph + memory CRUD extensions ----
+            "memory_edit" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                let content = args
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|s| s.to_string());
+                let importance = args
+                    .get("importance")
+                    .and_then(Value::as_f64)
+                    .map(|f| f as f32);
+                let concepts = args
+                    .get("concepts")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                    });
+                let files = args
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| s.to_string())
+                            .collect::<Vec<_>>()
+                    });
+                match self
+                    .mem
+                    .edit(id, content, importance, concepts, files)
+                    .map_err(|e| e.to_string())?
+                {
+                    Some(m) => Ok(format!("edited {} (kind={})", m.id, m.kind.as_str())),
+                    None => Err("no such memory".into()),
+                }
+            }
+            "memory_delete" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                if self.mem.delete(id).map_err(|e| e.to_string())? {
+                    Ok(format!("deleted {id}"))
+                } else {
+                    Err("no such memory".into())
+                }
+            }
+            "memory_pin" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                let pinned = args
+                    .get("pinned")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                if self.mem.pin(id, pinned).map_err(|e| e.to_string())? {
+                    Ok(format!(
+                        "{pinned_status} {id}",
+                        pinned_status = if pinned { "pinned" } else { "unpinned" }
+                    ))
+                } else {
+                    Err("no such memory".into())
+                }
+            }
+            "memory_promote" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                let tier = str_arg(args.get("tier")).ok_or("missing 'tier'")?;
+                let target: cairn_core::MemoryTier = tier.parse().map_err(|e: cairn_core::Error| e.to_string())?;
+                match self.mem.get(id).map_err(|e| e.to_string())? {
+                    Some(mut m) => {
+                        m.tier = target;
+                        let updated = self.store.upsert_memory(&m).map_err(|e| e.to_string())?;
+                        Ok(format!("tier promoted to {}: {}", target.as_str(), updated))
+                    }
+                    None => Err("no such memory".into()),
+                }
+            }
+            "memory_reinforce" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                self.store.reinforce_memory(id).map_err(|e| e.to_string())?;
+                Ok(format!("reinforced {id}"))
+            }
+            "memory_timeline" => {
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+                let mut mems = self.store.all_memories().map_err(|e| e.to_string())?;
+                mems.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+                mems.truncate(limit);
+                serde_json::to_string_pretty(&mems).map_err(|e| e.to_string())
+            }
+            "memory_crystallize" => {
+                match self.mem.crystallize(None).map_err(|e| e.to_string())? {
+                    Some(id) => Ok(format!("crystallized: {id}")),
+                    None => Ok("nothing to crystallize".into()),
+                }
+            }
+            "memory_graph" => {
+                let g = self.mem.graph().map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&g).map_err(|e| e.to_string())
+            }
+            "search" => {
+                let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+                let hits = self
+                    .mem
+                    .hybrid_search(query, limit, 20)
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())
+            }
+            "graph" => {
+                let g = self.mem.graph().map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&g).map_err(|e| e.to_string())
+            }
+            "metrics" => {
+                let mem_count = self.store.count_memories().map_err(|e| e.to_string())?;
+                let cp_count = self.guard.list_checkpoints().map_err(|e| e.to_string())?.len();
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "memories": mem_count,
+                    "checkpoints": cp_count,
+                }))
+                .map_err(|e| e.to_string())
+            }
+            "stats" => {
+                let mem_count = self.store.count_memories().map_err(|e| e.to_string())?;
+                let tokens = self.store.count_memories().map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "{{\"memories\":{mem_count},\"checkpoints\":{tokens}}}"
+                ))
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -438,6 +565,109 @@ pub fn tool_defs() -> Value {
                 },
                 "required": ["text"]
             }
+        },
+        // ---- v0.5.0 Sprint 10: memory CRUD + graph + search + metrics ----
+        {
+            "name": "memory_edit",
+            "description": "Edit an existing memory's mutable fields (content, importance, concepts, files). Fields omitted from the input are left unchanged.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Memory id to edit." },
+                    "content": { "type": "string", "description": "New content (optional)." },
+                    "importance": { "type": "number", "description": "0.0–1.0, clamped." },
+                    "concepts": { "type": "array", "items": { "type": "string" } },
+                    "files": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_delete",
+            "description": "Delete a memory by id. Returns true if the memory existed and was removed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_pin",
+            "description": "Pin or unpin a memory. Pinned memories always surface first in wakeup regardless of score/decay.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "pinned": { "type": "boolean", "default": true }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_promote",
+            "description": "Promote a memory to a specific tier (working / episodic / semantic / procedural).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "tier": { "type": "string", "enum": ["working", "episodic", "semantic", "procedural"] }
+                },
+                "required": ["id", "tier"]
+            }
+        },
+        {
+            "name": "memory_reinforce",
+            "description": "Manually nudge a memory's confidence upward (agentmemory reinforcement curve) and bump access_count.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_timeline",
+            "description": "Newest-first memory timeline (by updated_at).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "limit": { "type": "integer", "minimum": 1 } }
+            }
+        },
+        {
+            "name": "memory_crystallize",
+            "description": "Promote all working-tier memories into one semantic crystal (agentmemory pattern). Each input gets a supersedes edge back to the crystal; the crystal gets derived_from edges to each input.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "memory_graph",
+            "description": "Return the full memory provenance graph (nodes + edges) for the dashboard.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "graph",
+            "description": "Alias for memory_graph.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "search",
+            "description": "Hybrid search (BM25 + HNSW + memory provenance graph, fused with RRF, reranked with MMR for diversity).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "metrics",
+            "description": "Return local metrics (memory and checkpoint counts). Live savings ledger: GET /api/metrics.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "stats",
+            "description": "Compact stats summary (memory + checkpoint counts).",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
@@ -677,24 +907,130 @@ mod tests {
             .is_none());
     }
 
-    #[test]
-    fn sanitize_tool_redacts_and_classifies() {
-        let Some(s) = server() else { return };
-        // Assembled at runtime so the repo stores no verbatim credential (push protection).
-        let token = format!("ghp_{}", "0123456789abcdefghijklmnopqrstuvwxyz");
-        let resp = s
-            .handle(
-                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"sanitize","arguments":{"text": format!("deploy token={token}")}}}),
-            )
-            .unwrap();
-        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        let v: Value = serde_json::from_str(text).unwrap();
-        assert_eq!(v["sensitivity"], "private");
-        assert!(v["text"]
-            .as_str()
-            .unwrap()
-            .contains("[redacted:github_token]"));
-        assert!(!text.contains(&token), "raw secret leaked in tool output");
+#[test]
+fn sanitize_tool_redacts_and_classifies() {
+    let Some(s) = server() else { return };
+    // Assembled at runtime so the repo stores no verbatim credential (push protection).
+    let token = format!("ghp_{}", "0123456789abcdefghijklmnopqrstuvwxyz");
+    let resp = s
+        .handle(
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"sanitize","arguments":{"text": format!("deploy token={token}")}}}),
+        )
+        .unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let v: Value = serde_json::from_str(text).unwrap();
+    assert_eq!(v["sensitivity"], "private");
+    assert!(v["text"]
+        .as_str()
+        .unwrap()
+        .contains("[redacted:github_token]"));
+    assert!(!text.contains(&token), "raw secret leaked in tool output");
+}
+
+#[test]
+fn tools_list_exposes_40_plus_sprint_10_tools() {
+    let Some(s) = server() else { return };
+    let list = s
+        .handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+        .unwrap();
+    let tools = list["result"]["tools"].as_array().unwrap();
+    // Sprint 10 brings the total to ≥40 tools. Assert the floor + a handful of the new ones.
+    assert!(
+        tools.len() >= 40,
+        "expected ≥40 tools after Sprint 10, got {}",
+        tools.len()
+    );
+    for name in [
+        "memory_edit",
+        "memory_delete",
+        "memory_pin",
+        "memory_promote",
+        "memory_reinforce",
+        "memory_timeline",
+        "memory_crystallize",
+        "memory_graph",
+        "graph",
+        "search",
+        "metrics",
+    ] {
+        assert!(
+            tools.iter().any(|t| t["name"] == name),
+            "missing tool {name} in tools/list"
+        );
     }
+}
+
+#[test]
+fn memory_edit_pin_delete_pin_round_trip() {
+    let Some(s) = server() else { return };
+    let create = s
+        .handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"remember","arguments":{"content":"sprint 10 round trip"}}}))
+        .unwrap();
+    let create_text = create["result"]["content"][0]["text"].as_str().unwrap();
+    // "remembered <id> ..." — extract the id.
+    let id = create_text
+        .split_whitespace()
+        .nth(1)
+        .expect("id present in remember output");
+    let id = id.trim_end_matches(&['(', ')', '.', ','][..]);
+
+    // memory_edit
+    let edited = s
+        .handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"memory_edit","arguments":{"id": id, "content":"sprint 10 EDITED"}}}))
+        .unwrap();
+    assert!(edited["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("edited"));
+
+    // memory_pin
+    let pinned = s
+        .handle(&json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"memory_pin","arguments":{"id": id, "pinned": true}}}))
+        .unwrap();
+    assert!(pinned["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("pinned"));
+
+    // memory_reinforce
+    let reinforced = s
+        .handle(&json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            "name":"memory_reinforce","arguments":{"id": id}}}))
+        .unwrap();
+    assert!(reinforced["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("reinforced"));
+
+    // memory_graph returns nodes + edges (serialized JSON).
+    let graph = s
+        .handle(&json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+            "name":"memory_graph","arguments":{}}}))
+        .unwrap();
+    let body = graph["result"]["content"][0]["text"].as_str().unwrap();
+    let v: Value = serde_json::from_str(body).unwrap();
+    assert!(v["nodes"].as_array().is_some());
+    assert!(v["edges"].as_array().is_some());
+
+    // memory_delete
+    let deleted = s
+        .handle(&json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{
+            "name":"memory_delete","arguments":{"id": id}}}))
+        .unwrap();
+    assert!(deleted["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("deleted"));
+
+    // memory_delete again → tool error
+    let err = s
+        .handle(&json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
+            "name":"memory_delete","arguments":{"id": id}}}))
+        .unwrap();
+    assert!(err["result"]["isError"].as_bool().unwrap_or(false));
+}
 }
