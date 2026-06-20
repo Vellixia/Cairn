@@ -513,6 +513,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-bench"
+version = "0.4.0"
+dependencies = [
+ "cairn-core",
+ "cairn-memory",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cairn-cli"
 version = "0.4.0"
 dependencies = [
