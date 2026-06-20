@@ -195,11 +195,15 @@ pools it. v0.5.0 turns this into a discoverable, signed package system.
 - `.cairnpkg` file format: manifest.json + knowledge.jsonl + graph.sqlite + session.json +
   patterns.json + gotchas.json + signature.sha256
 - Adopt the lean-ctx `.ctxpkg` design (SHA-256 integrity, atomic writes, knowledge merge with
-  confidence capping, graph overlay, auto-load). Rename to `.cairnpkg` for distinct identity
-  but credit the design lineage.
+  confidence capping, graph overlay, auto-load) as the **primary `.cairnpkg` format**. The
+  `.ctxpkg` extension is recognized as an import alias for interoperability.
 - CLI: `cairn pack create|list|info|install|remove|export|import|auto-load|publish|search`
-- Registry: self-hosted first, optional public cairn.sh/registry later
+- Registry: embedded in `cairn-server` for self-hosting; optional separate `cairn.sh/registry`
+  service only if public traffic justifies it
 - Web UI: Collective / Federation manager
+
+**Decision:** `.cairnpkg` is the canonical extension; `.ctxpkg` imports are accepted. The
+registry starts embedded in `cairn-server`.
 
 ### 2.8 SSE Real-Time Dashboard — simpler than WebSocket
 
@@ -304,9 +308,10 @@ pub struct Session {
 - `metrics`
 - `ledger`
 
-**MCP Resources (5):**
+**MCP Resources (6):**
 - `cairn://sessions/recent`
 - `cairn://memory/wakeup`
+- `cairn://memory/graph`
 - `cairn://stats/live`
 - `cairn://prefs/active`
 - `cairn://ledger/savings`
@@ -418,21 +423,30 @@ pub struct Session {
 - Add SSE endpoint `/api/events`
 - Add `/api/metrics` (tokens saved, hit rate, bounce rate)
 - Replace 5s polling on Overview/Audit with SSE
-- Verification: SSE event reaches dashboard <500ms latency
+- **Testing:**
+  - Unit test: audit events round-trip through HelixDB
+  - Integration test: SSE event reaches dashboard <500ms latency
+  - Test metrics endpoint returns non-empty JSON after a tool call
 
 **Sprint 2 — Memory CRUD + Confidence + Profile**
 - Add `confidence: f32` to Memory schema; default 0.5 for existing
 - Implement reinforcement on `recall` hit
 - Add memory edit/delete/pin mutations
 - Add `/dashboard/profile` page
-- Verification: memory edit/delete reflected in Wakeup within one event
+- **Testing:**
+  - Unit test: confidence reinforcement curve matches agentmemory formula
+  - Integration test: memory edit/delete reflected in Wakeup within one event
+  - UI test: profile page renders active preferences
 
 **Sprint 3 — Memory Graph + Crystallize + Edges**
 - Add `derived_from`, `contradicts`, `supersedes`, `applies_to` fields
 - Store edges in HelixDB graph
 - Add `cairn memory crystallize` CLI + MCP tool
 - Build `/dashboard/memory/graph` with react-force-graph-2d
-- Verification: 50-node graph renders <1s
+- **Testing:**
+  - Unit test: edge insert/query via HelixDB graph API
+  - Integration test: crystallize promotes working memories to semantic tier
+  - UI test: 50-node graph renders <1s in headless browser
 
 **Sprint 4 — Sessions + Reliability Center**
 - Add `cairn-session` crate + CCP
@@ -440,28 +454,40 @@ pub struct Session {
 - Build `/dashboard/sessions` and `/dashboard/sessions/<id>`
 - Persist `verify` results to HelixDB drift log
 - Build `/dashboard/reliability/drift` approve/reject UI
-- Verification: session auto-restore on new chat
+- **Testing:**
+  - Unit test: CCP serialization round-trip
+  - Integration test: session auto-restore on new chat injects CCP block
+  - End-to-end test: approve/reject drift event updates reliability score
 
 **Sprint 5 — Assembler Playground + Savings Dashboard**
 - Upgrade `/dashboard/context/assemble` with budget slider
 - Show drops + reasons + expand buttons
 - Add `/api/ledger` + signed entries
 - Build `/dashboard/savings`
-- Verification: assembler reports in/dropped correctly
+- **Testing:**
+  - Unit test: ledger entry HMAC verifies offline
+  - Integration test: assembler reports in/dropped correctly
+  - UI test: savings chart updates after a cached read
 
 **Sprint 6 — Setup Wizard v2 + Landing Site**
 - Add embed provider picker to setup form
 - Add device-pair step + QR code
 - Green-health check on completion
 - Rewrite landing page (`/`) with hero + install commands + comparison
-- Verification: first-run setup completes without manual `.env` editing
+- **Testing:**
+  - End-to-end test: first-run setup completes without manual `.env` editing
+  - UI test: landing page renders hero, install commands, comparison table
+  - Test default embed provider is local hashing
 
 **Sprint 7 — Hybrid Search RRF + Rerank + CSP**
 - Finish graph leg of hybrid search
 - Add rerank + MMR diversity
 - Add `/api/search` + `cairn search`
 - Implement nonce-based CSP for prebuilt assets
-- Verification: RRF recall beats BM25-only on LongMemEval fixture
+- **Testing:**
+  - Benchmark test: RRF recall beats BM25-only on LongMemEval fixture
+  - Unit test: rerank scores sort correctly
+  - Security test: CSP nonce present on all script tags
 
 ### Phase 4.0 — CLI + MCP Depth (5 sprints)
 
@@ -470,35 +496,50 @@ pub struct Session {
 - `cairn doctor --fix`
 - `install.sh` (Linux/macOS) + `install.ps1` (Windows)
 - `cairn update` against release binaries
-- Verification: fresh VM installs in one command
+- **Testing:**
+  - CI job runs `install.sh` in fresh Ubuntu container
+  - CI job runs `install.ps1` in Windows runner
+  - `cairn doctor --fix` smoke test repairs a broken `.mcp.json`
 
 **Sprint 9 — CLI Surface Expansion**
 - `cairn graph`, `cairn impact`, `cairn callgraph`
 - `cairn memory timeline`, `cairn memory crystallize`
 - `cairn session`, `cairn sessions`
 - `cairn metrics`
-- Verification: each command has `--help` and smoke test
+- **Testing:**
+  - Each new command has `--help` and a smoke test
+  - `cairn graph related` returns nodes linked to a file
+  - `cairn callgraph callers` resolves a symbol from the codebase
 
 **Sprint 10 — MCP Surface Expansion**
 - Expand MCP tools 16 → 40+
 - Add 5 MCP resources
 - Add 5 MCP prompts
 - Add MCP elicitation (pressure-gated)
-- Verification: MCP `tools/list` returns ≥40 tools
+- **Testing:**
+  - MCP `tools/list` returns ≥40 tools
+  - Each new tool has a round-trip integration test
+  - `cairn://memory/graph` resource returns valid graph JSON
 
 **Sprint 11 — Context Package System**
 - `.cairnpkg` format (adopt lean-ctx `.ctxpkg` design)
 - 9 CLI subcommands
 - Registry backend `/api/pack/*`
 - Multi-platform release binaries + SHA256SUMS
-- Verification: round-trip create → export → import preserves graph
+- **Testing:**
+  - Round-trip: create → export → import preserves graph and signatures
+  - `.ctxpkg` import alias loads correctly
+  - Registry search returns published pack metadata
 
 **Sprint 12 — Distribution Polish**
 - Homebrew tap (`Vellixia/homebrew-tap`)
 - Fly/Railway/Render one-click templates
 - Non-root Docker volume init
 - OpenCode README quickstart section
-- Verification: `brew install cairn` works
+- **Testing:**
+  - `brew install cairn` formula test in CI
+  - Docker compose `up` with non-root volume succeeds
+  - README install flow verified by fresh user (manual QA)
 
 ### Phase 4.1 — Collective + Federation (3 sprints)
 
@@ -506,19 +547,28 @@ pub struct Session {
 - Self-hosted registry endpoints
 - Web UI: Collective / Federation manager
 - Pack signing (Ed25519)
-- Verification: publish + search + install works end-to-end
+- **Testing:**
+  - End-to-end: publish + search + install works via web UI
+  - Signature verification rejects tampered pack
+  - Federation manager lists installed packs with revocation status
 
 **Sprint 14 — Federation Protocol**
 - Trust scopes + signed packs
 - Revocation propagation (`unshare` cascades)
 - Provenance display
-- Verification: subscriber receives revocation within 60s
+- **Testing:**
+  - Integration test: subscriber receives revocation within 60s
+  - Unit test: provenance chain validates across 3 pack hops
+  - Security test: untrusted scope cannot install into trusted scope
 
 **Sprint 15 — Privacy Hardening**
 - Offline-first sync via automerge CRDT (replace LWW)
 - Optional E2E encryption for sync
 - Updated SECURITY.md + threat model
-- Verification: sync works offline then reconciles
+- **Testing:**
+  - Integration test: sync works offline then reconciles on reconnect
+  - Unit test: CRDT merge resolves concurrent preference edits
+  - Threat model review sign-off
 
 ### Phase 4.2 — Benchmarks + Adoption (2 sprints)
 
@@ -527,25 +577,78 @@ pub struct Session {
 - Task-success horizon benchmark
 - Cairn-specific "smart memory retention" benchmark
 - Publish in `docs/BENCHMARKS.md`
-- Verification: numbers reproducible in CI
+- **Testing:**
+  - Benchmarks run in CI with locked dependencies
+  - LongMemEval fixture score recorded
+  - Results reproducible across 3 reruns (variance <5%)
 
 **Sprint 17 — Marketing + Adoption**
 - Final landing site with benchmarks
 - Demo video / GIF
 - Comparison table (honest)
 - Docs polish cross-links
-- Verification: README install flow tested by fresh user
+- **Testing:**
+  - README install flow verified by fresh user (manual QA)
+  - Landing page Lighthouse performance score ≥ 80
+  - All docs cross-links validated by link checker
 
-### Phase 5 — Beyond (open-ended, v1+ candidates)
+### Phase 5 — Proactive, Service & Cross-Platform (committed)
 
-These are marked **ideas under consideration** for post-v0.5.0:
+Phase 5 items are no longer "future ideas" — they are committed v0.5.0 sprints.
 
-- **Proactive Recall** — inject relevant memories based on intent without agent asking
-- **Cairn-as-a-Service** — multi-tenant host at `cairn.sh` with optional federation
-- **PWA + Push Notifications** — approve drift/revocation from phone
-- **Browser Extension** — capture web pages into memories
-- **Voice / Transcript Ingestion** — meetings become memories
-- **Mobile Companion App** — dedicated app for approvals and quick stats
+**Sprint 18 — Proactive Recall**
+- Intent detection hook in `cairn-mcp` before each agent turn
+- Auto-inject up to 3 relevant memories when intent is detected
+- User preference to disable per-project
+- **Testing:**
+  - Unit test intent detector on 50 synthetic prompts
+  - Integration test: memory injected before agent turn when intent matches
+  - Test opt-out: disabled project receives no proactive recall
+
+**Sprint 19 — Cairn-as-a-Service (`cairn.sh`)**
+- Multi-tenant mode in `cairn-server` (organization isolation)
+- Embedded pack registry exposed at `/registry`
+- Optional public `cairn.sh` reverse proxy to self-hosted registries
+- **Testing:**
+  - Integration test tenant isolation (project A cannot read project B)
+  - Registry publish/search/install round-trip via `/registry`
+  - Load test: 100 concurrent pack searches
+
+**Sprint 20 — PWA + Push Notifications**
+- Service worker for offline dashboard shell
+- Push subscription endpoint `/api/push/subscribe`
+- Push drift/revocation notifications to subscribed devices
+- **Testing:**
+  - Lighthouse PWA audit score ≥ 90
+  - End-to-end push delivery for drift event
+  - Offline dashboard renders cached shell
+
+**Sprint 21 — Browser Extension**
+- Manifest V3 extension: capture page text + selection as memory
+- Native messaging to `cairn-server` (or HTTP to local server)
+- "Add to Cairn" context menu
+- **Testing:**
+  - Unit test content extraction preserves source URL
+  - Integration test: captured memory appears in `/api/memory` within 5s
+  - Cross-browser smoke test (Chrome + Firefox)
+
+**Sprint 22 — Voice / Transcript Ingestion**
+- `/api/ingest/transcript` endpoint accepting VTT/SRT/JSON
+- Chunk transcripts by speaker + timestamp; summarize to memories
+- CLI: `cairn ingest transcript <file>`
+- **Testing:**
+  - Unit test transcript chunking boundaries
+  - Integration test: 10-minute transcript produces ≥3 memories
+  - Test memory source link points to timestamp
+
+**Sprint 23 — Mobile Companion App**
+- Capacitor or PWA-standalone app for approvals and quick stats
+- Approve/reject drift, view pack installs, see savings card
+- Biometric lock option
+- **Testing:**
+  - End-to-end drift approval from mobile viewport
+  - Savings card reflects live metrics
+  - Authentication session survives app background
 
 ---
 
@@ -553,17 +656,20 @@ These are marked **ideas under consideration** for post-v0.5.0:
 
 The following decisions are locked for v0.5.0:
 
-| Decision | Rationale |
-|---|---|
-| **Confidence field adopts agentmemory's reinforcement curve** | Proven, easy to implement, intuitive |
-| **Memory graph edges use HelixDB native graph** | Graph-native queries, no secondary store |
-| **Cross-Session Protocol adopts lean-ctx pattern** | Battle-tested, compact (~400 tokens), auto-restore works |
-| **Context Package System adopts lean-ctx `.ctxpkg` design** | Free interop/ecosystem trust; rename to `.cairnpkg` for identity |
-| **SSE instead of WebSocket for dashboard** | One-way is enough; simpler; native EventSource |
-| **Memory Graph Visualization uses `react-force-graph-2d`** | Clean API, d3-force, works with Next.js static export |
-| **Setup wizard v2 includes embed provider picker** | PLAN.md requirement; avoids post-install `.env` edits |
-| **Audit log moves to HelixDB** | Currently lost on restart; trust-critical |
-| **Savings ledger is signed** | Proves no-loss compression claim |
+| Decision | Resolution | Rationale |
+|---|---|---|
+| **Confidence field adopts agentmemory's reinforcement curve** | Locked | Proven, easy to implement, intuitive |
+| **Memory graph edges use HelixDB native graph** | Locked | Graph-native queries, no secondary store |
+| **Cross-Session Protocol adopts lean-ctx pattern** | Locked | Battle-tested, compact (~400 tokens), auto-restore works |
+| **Context Package System adopts lean-ctx `.ctxpkg` design** | `.cairnpkg` canonical; `.ctxpkg` accepted as import alias | Free interop/ecosystem trust; distinct Cairn identity |
+| **SSE instead of WebSocket for dashboard** | Locked | One-way is enough; simpler; native EventSource |
+| **Memory Graph Visualization uses `react-force-graph-2d`** | Locked | Clean API, d3-force, works with Next.js static export |
+| **Setup wizard v2 includes embed provider picker** | Locked; default = local hashing first | PLAN.md requirement; avoids post-install `.env` edits |
+| **Audit log moves to HelixDB** | Locked | Currently lost on restart; trust-critical |
+| **Savings ledger is signed** | Locked | Proves no-loss compression claim |
+| **Memory graph exposed as MCP resource** | `cairn://memory/graph` plus tools | Natural complement to graph-native store |
+| **Pack registry host** | Embedded in `cairn-server` via `/registry` routes | Self-hostable first; public `cairn.sh` can proxy later |
+| **Phase 5 "Beyond" items** | Promoted to committed sprints in the phase map below | User wants all Phase 5 features committed to v0.5.0 |
 
 ---
 
@@ -572,7 +678,7 @@ The following decisions are locked for v0.5.0:
 At the end of v0.5.0:
 
 - **≥40 MCP tools** exposed (up from 16)
-- **5 MCP resources + 5 MCP prompts**
+- **6 MCP resources + 5 MCP prompts**
 - **≤500ms** SSE event latency
 - **Memory Graph renders 50 nodes in <1s**
 - **Confidence reinforcement visible in UI**
@@ -593,7 +699,7 @@ At the end of v0.5.0:
 | MCP tool explosion confusing users | Use dynamic tool categories (core / arch / memory / metrics / session / pack) |
 | Package format interop disputes | Credit lean-ctx lineage; publish spec openly |
 | Benchmark numbers not competitive | Publish methodology and honest deltas; iterate |
-| Feature scope creep | Phase 5 items are explicitly "ideas under consideration" |
+| Feature scope creep | Phase 5 items are now committed sprints with dedicated testing; keep scope fixed to the 23 sprints above |
 
 ---
 
@@ -604,21 +710,39 @@ At the end of v0.5.0:
 - [ARCHITECTURE.md](ARCHITECTURE.md) — current crate graph and API surface
 - [WEB.md](WEB.md) — v0.4.0 dashboard surface (will be updated for v0.5.0)
 - [BENCHMARKS.md](BENCHMARKS.md) — measured numbers + targets
-- [DECISIONS.md](DECISIONS.md) — ADRs for the v0.5.0 decisions will be added here
+- [DECISIONS.md](DECISIONS.md) — ADRs for the v0.5.0 decisions will be added here (see planned ADR-010 through ADR-016 below)
+
+### §9.1 Planned v0.5.0 ADRs
+
+| ADR | Decision |
+|---|---|
+| ADR-010 | Confidence field and reinforcement curve (agentmemory adoption) |
+| ADR-011 | Memory provenance graph stored in HelixDB native graph |
+| ADR-012 | Cross-Session Protocol (lean-ctx CCP adoption) |
+| ADR-013 | Context package format: `.cairnpkg` canonical, `.ctxpkg` import alias |
+| ADR-014 | SSE real-time dashboard vs WebSocket |
+| ADR-015 | Default embedding provider: local hashing first |
+| ADR-016 | Pack registry embedded in `cairn-server` for self-hosting |
 
 ---
 
-## §10. Open Questions
+## §10. Resolved Open Questions
 
-Before implementation begins, the following should be confirmed:
+The following questions were answered before implementation begins:
 
-1. Should `.cairnpkg` remain `.cairnpkg` or interoperate as `.ctxpkg`?
-2. Should Phase 5 items be promoted to committed roadmap or stay as ideas?
-3. Which embedding provider is the default in the setup wizard (local hashing vs local ONNX vs OpenAI vs Ollama)?
-4. Should the memory graph be public-only or also exposed as an MCP resource (`cairn://memory/graph`)?
-5. Should `cairn.sh` registry be a separate service or embedded in `cairn-server`?
+1. **`.cairnpkg` vs `.ctxpkg`** — `.cairnpkg` is the canonical extension; `.ctxpkg` files are
+   accepted as an import alias for interoperability with lean-ctx.
+2. **Phase 5 items** — promoted to committed roadmap and mapped into the sprints below.
+3. **Default embed provider** — local hashing first (offline-first), with optional local ONNX and
+   OpenAI-compatible endpoints selectable in the setup wizard.
+4. **Memory graph visibility** — exposed both in the web dashboard and as the MCP resource
+   `cairn://memory/graph`, plus `memory_graph` and related graph tools.
+5. **`cairn.sh` registry** — the v0.5.0 registry is embedded in `cairn-server` for self-hosting.
+   A public `cairn.sh` proxy can be added later without changing the protocol.
+
+These resolutions will be captured as ADRs in `docs/DECISIONS.md`.
 
 ---
 
 *This plan is a living document. As implementation starts, each sprint will produce or update
-SPEC.md tasks, and §10 open questions will be resolved into DECISIONS.md ADRs.*
+SPEC.md tasks, and the resolutions above will be mirrored into DECISIONS.md ADRs.*
