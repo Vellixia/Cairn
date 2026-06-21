@@ -366,6 +366,7 @@ impl Store {
                 api_key: None,
             },
             admin: cairn_core::AdminConfig::default(),
+            multi_tenant: false,
         };
         std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
         Some(cfg)
@@ -395,6 +396,7 @@ mod tests {
             session_id: None,
             importance: 0.5,
             access_count: 0,
+            org_id: cairn_core::OrgId::default(),
             suspicious: false,
             confidence: 0.5,
             pinned: false,

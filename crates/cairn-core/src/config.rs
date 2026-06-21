@@ -123,6 +123,12 @@ pub struct Config {
     pub embed: EmbedConfig,
     /// Admin account settings.
     pub admin: AdminConfig,
+    /// Multi-tenant mode (v0.5.0 Sprint 19). When `true`, every memory is
+    /// tagged with the bearer token's org id; queries are scoped to the caller's
+    /// org. When `false` (default for self-hosted installs), all memories share
+    /// a single implicit org — `OrgId::default()` — so the on-disk schema doesn't
+    /// change for existing users.
+    pub multi_tenant: bool,
 }
 
 impl Config {
@@ -179,6 +185,7 @@ impl Config {
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(24),
             },
+            multi_tenant: env_bool("CAIRN_MULTI_TENANT"),
             data_dir,
         };
         std::fs::create_dir_all(cfg.blobs_dir())?;
@@ -268,6 +275,7 @@ mod tests {
                 api_key: None,
             },
             admin: AdminConfig::default(),
+            multi_tenant: false,
         }
     }
 

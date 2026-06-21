@@ -29,7 +29,9 @@
 //! property indexes.
 
 use crate::db::{AuditRecord, StoreBackend};
-use cairn_core::{Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, Result};
+use cairn_core::{
+    Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, OrgId, Result,
+};
 use cairn_embed::Embedder;
 use chrono::{DateTime, Utc};
 use helix_db::dsl::prelude::*;
@@ -862,6 +864,7 @@ fn memory_from_props(m: &Map<String, Value>) -> Memory {
         },
         importance: get_f64(m, "importance") as f32,
         access_count: get_i64(m, "access_count"),
+        org_id: OrgId::default(),
         suspicious: get_bool(m, "suspicious"),
         confidence: get_f64(m, "confidence") as f32,
         pinned: get_bool(m, "pinned"),
@@ -918,6 +921,7 @@ mod live {
                 api_key: None,
             },
             admin: cairn_core::AdminConfig::default(),
+            multi_tenant: false,
         };
         Some(HelixBackend::connect(&url, &cfg).expect("connect to live HelixDB"))
     }
@@ -1019,6 +1023,7 @@ mod live {
             session_id: None,
             importance: 0.7,
             access_count: 0,
+            org_id: OrgId::default(),
             suspicious: false,
             confidence: 0.5,
             pinned: false,

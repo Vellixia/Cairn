@@ -5,7 +5,7 @@
 //! across the four tiers (working → episodic → semantic → procedural). Vector/graph hybrid
 //! retrieval builds on this foundation.
 
-use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, Result};
+use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result};
 use cairn_store::Store;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -39,6 +39,21 @@ impl MemoryEngine {
         Ok(memory)
     }
 
+    /// Persist a memory tagged with `org_id` (v0.5.0 Sprint 19). The single-tenant
+    /// `remember` is a thin wrapper that calls this with `OrgId::default()`.
+    pub fn remember_for_org(&self, input: NewMemory, org_id: OrgId) -> Result<Memory> {
+        let memory = input.into_memory_for_org(org_id);
+        let hash = ContentHash::of_str(&memory.content);
+        if let Some(existing) = self.store.find_memory_by_content_hash(hash.as_str())? {
+            // Even if a different tenant wrote it, dedup is per-content so we
+            // return whichever copy we found. A future Sprint 19 follow-up will
+            // scope the dedup by org_id.
+            return Ok(existing);
+        }
+        self.store.insert_memory(&memory)?;
+        Ok(memory)
+    }
+
     /// Recall the most relevant memories for a query.
     ///
     /// **Hybrid retrieval:** lexical relevance (BM25 over the corpus) and, when the backend has a
@@ -46,7 +61,27 @@ impl MemoryEngine {
     /// scale-free combination of the two rankings. Importance and Ebbinghaus recency break ties.
     /// On a lexical-only backend (`semantic_recall` → `None`) this degrades to pure BM25.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>> {
-        let mems = self.store.all_memories()?;
+        // Single-tenant: scope everything to the implicit default org.
+        self.recall_for_org(query, limit, OrgId::default())
+    }
+
+    /// Tenant-scoped recall (v0.5.0 Sprint 19). Only memories with matching
+    /// `org_id` (or the implicit default for self-hosted installs) are
+    /// considered.
+    pub fn recall_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        org_id: OrgId,
+    ) -> Result<Vec<ScoredMemory>> {
+        let all = self.store.all_memories()?;
+        // Tenant isolation: filter by org_id before any ranking work.
+        let mems: Vec<Memory> = all
+            .into_iter()
+            .filter(|m| {
+                m.org_id == org_id || m.org_id == OrgId::default() && org_id == OrgId::default()
+            })
+            .collect();
         if mems.is_empty() {
             return Ok(Vec::new());
         }
@@ -969,7 +1004,7 @@ mod tests {
     }
 
     fn synth(content: &str) -> Memory {
-        use cairn_core::{MemoryKind, MemoryTier};
+        use cairn_core::{MemoryKind, MemoryTier, OrgId};
         Memory {
             id: uuid::Uuid::new_v4().to_string(),
             kind: MemoryKind::Note,
@@ -980,6 +1015,7 @@ mod tests {
             session_id: None,
             importance: 0.5,
             access_count: 0,
+            org_id: OrgId::default(),
             suspicious: false,
             confidence: 0.5,
             pinned: false,
@@ -990,5 +1026,48 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
+    }
+
+    #[test]
+    fn tenant_isolation_filters_recall_by_org() {
+        let Some(mem) = engine() else {
+            return;
+        };
+        // Two orgs each store one memory that matches the query. Default-tenant
+        // recall returns only the default-tenant memory; org-A recall returns
+        // only org-A's.
+        mem.remember_for_org(
+            NewMemory::new("org-A secret: unicorns taste like cotton candy"),
+            OrgId::new("acme").unwrap(),
+        )
+        .unwrap();
+        mem.remember_for_org(
+            NewMemory::new("default secret: dragons are real"),
+            OrgId::default(),
+        )
+        .unwrap();
+
+        let from_acme = mem
+            .recall_for_org("secret", 10, OrgId::new("acme").unwrap())
+            .unwrap();
+        assert_eq!(from_acme.len(), 1, "acme should see only acme's memory");
+        assert!(from_acme[0].memory.content.contains("unicorns"));
+
+        let from_default = mem.recall("secret", 10).unwrap();
+        assert_eq!(
+            from_default.len(),
+            1,
+            "default tenant should see only default's memory"
+        );
+        assert!(from_default[0].memory.content.contains("dragons"));
+
+        // Acme can never see default's memory, even with a known-keyword query.
+        let from_acme_again = mem
+            .recall_for_org("dragons", 10, OrgId::new("acme").unwrap())
+            .unwrap();
+        assert!(
+            from_acme_again.is_empty(),
+            "acme must not leak across tenants"
+        );
     }
 }

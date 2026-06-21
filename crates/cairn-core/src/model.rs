@@ -1,5 +1,6 @@
 //! Core domain model: memories and their tiers/kinds.
 
+use crate::OrgId;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -99,6 +100,10 @@ pub struct Memory {
     pub session_id: Option<String>,
     pub importance: f32,
     pub access_count: i64,
+    /// Tenant scope (v0.5.0 Sprint 19). Defaults to `OrgId::default()` for
+    /// self-hosted installs; ignored when `Config::multi_tenant = false`.
+    #[serde(default)]
+    pub org_id: OrgId,
     #[serde(default)]
     pub suspicious: bool,
     /// Confidence score `[0.0, 1.0]` — evolves over time via the agentmemory reinforcement
@@ -177,6 +182,11 @@ pub struct NewMemory {
     pub confidence: Option<f32>,
     #[serde(default)]
     pub pinned: Option<bool>,
+    /// Tenant scope for the new memory (v0.5.0 Sprint 19). If absent, the
+    /// storage layer uses `OrgId::default()` so single-tenant installs don't
+    /// need to pass it.
+    #[serde(default)]
+    pub org_id: Option<OrgId>,
     // v0.5.0 Sprint 3: optional edge inputs so callers can create a memory already wired
     // into the provenance graph (e.g. a crystallization step that knows which memories it's
     // summarizing).
@@ -211,6 +221,7 @@ impl NewMemory {
             session_id: self.session_id,
             importance: self.importance.unwrap_or(0.5).clamp(0.0, 1.0),
             access_count: 0,
+            org_id: self.org_id.unwrap_or_default(),
             suspicious: self.suspicious.unwrap_or(false),
             confidence: self.confidence.unwrap_or(0.5).clamp(0.0, 1.0),
             pinned: self.pinned.unwrap_or(false),
@@ -221,6 +232,14 @@ impl NewMemory {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Materialize into a [`Memory`] tagged with `org_id` — used by the multi-tenant
+    /// cairn-server to scope every memory at write time.
+    pub fn into_memory_for_org(self, org_id: OrgId) -> Memory {
+        let mut mem = self.into_memory();
+        mem.org_id = org_id;
+        mem
     }
 }
 

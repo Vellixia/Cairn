@@ -144,6 +144,7 @@ mod tests {
             session_id: None,
             importance: 0.5,
             access_count: 0,
+            org_id: cairn_core::OrgId::default(),
             suspicious: false,
             confidence: 0.5,
             pinned: false,
