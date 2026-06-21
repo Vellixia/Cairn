@@ -16,8 +16,10 @@ cairn-assemble.workspace = true
 cairn-shell.workspace = true
 cairn-profile.workspace = true
 cairn-share.workspace = true
+cairn-proactive.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

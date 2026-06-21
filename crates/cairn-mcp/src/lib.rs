@@ -285,6 +285,12 @@ impl McpServer {
                 let s = self.san.sanitize(text);
                 serde_json::to_string_pretty(&s).map_err(|e| e.to_string())
             }
+            "proactive_recall" => {
+                let prompt = str_arg(args.get("prompt")).ok_or("missing 'prompt'")?;
+                let project_root = str_arg(args.get("project_root"));
+                let mems = proactive_recall(self, prompt, project_root);
+                serde_json::to_string_pretty(&mems).map_err(|e| e.to_string())
+            }
             // ---- v0.5.0 Sprint 10: graph + memory CRUD extensions ----
             "memory_edit" => {
                 let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
@@ -549,6 +555,19 @@ pub fn tool_defs() -> Value {
                 "required": ["path", "content"]
             }
         },
+        // ---- v0.5.0 Sprint 18: proactive recall ----
+        {
+            "name": "proactive_recall",
+            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply — saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn-cli prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The pending user prompt or task description." },
+                    "project_root": { "type": "string", "description": "Optional workspace root to check against opt-out preferences." }
+                },
+                "required": ["prompt"]
+            }
+        },
         {
             "name": "sanitize",
             "description": "Check text for secrets/PII before you share, log, or commit it. Redacts API keys, tokens, private keys, JWTs, secret=value assignments, emails, IPs, and home-directory paths, and classifies the result as shareable, needs_review, or private. Returns the redacted text plus the findings.",
@@ -669,6 +688,46 @@ pub fn tool_defs() -> Value {
 /// Extract a string argument, if present.
 fn str_arg(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str)
+}
+
+// ---- v0.5.0 Sprint 18: Proactive Recall ----
+
+/// Run the proactive recall hook for `prompt`. Returns the list of memories to
+/// prepend to the agent's context, or an empty list if the hook decides no
+/// recall is warranted (intent didn't match, project opted out, or no matches).
+pub fn proactive_recall(
+    server: &McpServer,
+    prompt: &str,
+    project_root: Option<&str>,
+) -> Vec<cairn_core::Memory> {
+    let store = server.store.clone();
+    let mem = server.mem.clone();
+
+    // Build the opt-out preference set from any preference memories that
+    // contain `cairn.proactive_recall=false`.
+    let all_prefs: Vec<(String, Vec<String>)> = store
+        .all_memories()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| (m.content, m.applies_to))
+        .collect();
+    let pref = cairn_proactive::ProactivePref::from_memories(&all_prefs);
+
+    let hook = cairn_proactive::ProactiveHook::new(move |prompt: &str, k: usize| {
+        let hits = mem.recall(prompt, k.max(1)).unwrap_or_default();
+        hits.into_iter().map(|h| h.memory).collect()
+    })
+    .with_pref(pref)
+    .with_max_inject(3)
+    .with_threshold(0.4);
+
+    match hook.on_turn(prompt, project_root) {
+        cairn_proactive::HookOutcome::Recalled(mems) => mems,
+        cairn_proactive::HookOutcome::Skipped { reason } => {
+            tracing::debug!(reason, "proactive recall skipped");
+            Vec::new()
+        }
+    }
 }
 
 fn ok(id: Option<Value>, result: Value) -> Value {
@@ -947,6 +1006,7 @@ mod tests {
             "graph",
             "search",
             "metrics",
+            "proactive_recall",
         ] {
             assert!(
                 tools.iter().any(|t| t["name"] == name),
@@ -1040,5 +1100,77 @@ mod tests {
             )
             .unwrap();
         assert!(err["result"]["isError"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn proactive_recall_tool_returns_memories_for_recall_cue() {
+        let Some(s) = server() else { return };
+        // Seed a memory with a recognizable token.
+        s.handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"remember","arguments":{"content":"the team decided tabs over spaces last time"}}}))
+            .unwrap();
+
+        // A recall cue prompt — the hook should fire and return at least one memory.
+        let resp = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"proactive_recall","arguments":{"prompt":"What did we decide last time about formatting?"}}}),
+            )
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("tabs"),
+            "expected the seeded decision to be recalled, got: {text}"
+        );
+    }
+
+    #[test]
+    fn proactive_recall_skips_plain_imperative_prompt() {
+        let Some(s) = server() else { return };
+        let resp = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"proactive_recall","arguments":{"prompt":"Add a print statement to foo.rs"}}}),
+            )
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        // Plain imperative → hook returns no memories → JSON `[]`.
+        assert_eq!(text.trim(), "[]", "expected empty recall, got: {text}");
+    }
+
+    #[test]
+    fn proactive_recall_respects_per_project_opt_out() {
+        let Some(s) = server() else { return };
+        // Remember a decision so recall would otherwise fire.
+        s.handle(
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"remember","arguments":{"content":"unique-token-foo-bar-baz last time"}}}),
+        )
+        .unwrap();
+        // Opt out the project.
+        s.handle(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"remember","arguments":{
+                "content":"cairn.proactive_recall=false for this loud project",
+                "applies_to": ["/work/loud"]
+            }}}),
+        )
+        .unwrap();
+
+        let resp = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+                "name":"proactive_recall","arguments":{
+                    "prompt":"What did we decide last time about unique-token-foo-bar-baz?",
+                    "project_root": "/work/loud"
+                }}}),
+            )
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            text.trim(),
+            "[]",
+            "expected opt-out to suppress recall, got: {text}"
+        );
     }
 }

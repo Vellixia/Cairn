@@ -628,12 +628,14 @@ dependencies = [
  "cairn-core",
  "cairn-guard",
  "cairn-memory",
+ "cairn-proactive",
  "cairn-profile",
  "cairn-share",
  "cairn-shell",
  "cairn-store",
  "serde_json",
  "tempfile",
+ "tracing",
  "ureq 2.12.1",
 ]
 
@@ -667,6 +669,20 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "cairn-proactive"
+version = "0.4.0"
+dependencies = [
+ "cairn-core",
+ "cairn-memory",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
