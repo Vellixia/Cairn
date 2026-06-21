@@ -156,7 +156,11 @@ mod tests {
         let c = pack("2", "beta", "2.0.0");
         let merged = merge_results(vec![("peer-a", vec![a]), ("peer-b", vec![b, c])]);
         assert_eq!(merged.packs.len(), 2);
-        let alpha = merged.packs.iter().find(|m| m.pack.name == "alpha").unwrap();
+        let alpha = merged
+            .packs
+            .iter()
+            .find(|m| m.pack.name == "alpha")
+            .unwrap();
         assert_eq!(alpha.sources.len(), 2);
     }
 

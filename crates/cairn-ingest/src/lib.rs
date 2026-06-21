@@ -91,26 +91,57 @@ pub fn parse_file(path: &Path) -> Result<Vec<Cue>, IngestError> {
 /// between cues.
 pub fn parse_vtt(input: &str) -> Result<Vec<Cue>, IngestError> {
     let mut cues = Vec::new();
-    let mut lines = input.lines().enumerate();
-    // Skip the WEBVTT header line + any header metadata until the first
-    // blank line.
-    while let Some((_, line)) = lines.next() {
+    // We need to peek the first non-header line and then stream the rest into
+    // `parse_vtt_cue`. Collect into a Vec so we can iterate without holding a
+    // borrow of `lines` that conflicts with `&mut lines` passed downstream.
+    let lines: Vec<&str> = input.lines().collect();
+
+    // Skip WEBVTT header + any NOTE / STYLE / REGION metadata until we hit a
+    // real cue line.
+    let mut first_idx: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
         if line.trim().is_empty() || line.starts_with("WEBVTT") {
             continue;
         }
-        // We allow free-form NOTE / STYLE / REGION blocks above the first cue.
         if line.starts_with("NOTE") || line.starts_with("STYLE") || line.starts_with("REGION") {
             continue;
         }
-        // Otherwise `line` is the start of the first cue — push it back.
-        cues.push(parse_vtt_cue(line.to_string(), &mut lines)?);
+        first_idx = Some(i);
         break;
     }
-    while let Some((_, line)) = lines.next() {
-        if line.trim().is_empty() {
-            continue;
+    if let Some(start) = first_idx {
+        // Build an iterator over the *remaining* lines (start+1 .. end).
+        let rest: Vec<(usize, &str)> = lines
+            .iter()
+            .enumerate()
+            .skip(start + 1)
+            .map(|(i, l)| (i, *l))
+            .collect();
+        let mut rest_iter = rest.into_iter();
+        // First line of the cue we already pulled out:
+        let first_line = lines[start].to_string();
+        if let Some(cue) = parse_vtt_cue(first_line, &mut rest_iter)? {
+            cues.push(cue);
         }
-        cues.push(parse_vtt_cue(line.to_string(), &mut lines)?);
+        let mut peek: Option<(usize, &str)> = None;
+        loop {
+            let next = match peek.take() {
+                Some(v) => Some(v),
+                None => rest_iter.next(),
+            };
+            match next {
+                Some((_, line)) => {
+                    if line.trim().is_empty() {
+                        continue;
+                    }
+                    match parse_vtt_cue(line.to_string(), &mut rest_iter)? {
+                        Some(cue) => cues.push(cue),
+                        None => break,
+                    }
+                }
+                None => break,
+            }
+        }
     }
     Ok(cues)
 }
@@ -118,27 +149,30 @@ pub fn parse_vtt(input: &str) -> Result<Vec<Cue>, IngestError> {
 fn parse_vtt_cue<'a>(
     first: String,
     lines: &mut impl Iterator<Item = (usize, &'a str)>,
-) -> Result<Cue, IngestError> {
+) -> Result<Option<Cue>, IngestError> {
     // `first` is either a cue identifier (numeric or string) or the timestamp
     // line. Try timestamp first; if it doesn't parse, treat as identifier and
     // read the next line as the timestamp.
     let ts_line = if first.contains("-->") {
         first
     } else {
-        let (_, l) = lines
-            .next()
-            .ok_or_else(|| IngestError::Vtt { line: 0, msg: "EOF in cue header".into() })?;
-        l.to_string()
-    };
-    let (start_ms, end_ms) = parse_vtt_timestamp_line(&ts_line).ok_or_else(|| {
-        IngestError::Vtt {
-            line: 0,
-            msg: format!("invalid VTT timestamp line: {ts_line}"),
+        match lines.next() {
+            Some((_, l)) => l.to_string(),
+            None => return Ok(None),
         }
-    })?;
+    };
+    let (start_ms, end_ms) = match parse_vtt_timestamp_line(&ts_line) {
+        Some(v) => v,
+        None => {
+            return Err(IngestError::Vtt {
+                line: 0,
+                msg: format!("invalid VTT timestamp line: {ts_line}"),
+            });
+        }
+    };
     let mut text_lines: Vec<String> = Vec::new();
     let mut speaker: Option<String> = None;
-    while let Some((_, line)) = lines.next() {
+    for (_, line) in lines.by_ref() {
         if line.trim().is_empty() {
             break;
         }
@@ -160,12 +194,12 @@ fn parse_vtt_cue<'a>(
             text_lines.push(line.to_string());
         }
     }
-    Ok(Cue {
+    Ok(Some(Cue {
         speaker,
         start_ms,
         end_ms,
         text: text_lines.join(" "),
-    })
+    }))
 }
 
 fn parse_vtt_timestamp_line(line: &str) -> Option<(u64, u64)> {
@@ -228,12 +262,11 @@ fn parse_srt_block(lines: &[String]) -> Result<Cue, IngestError> {
         cue: cue_index,
         msg: "missing timestamp line".into(),
     })?;
-    let (start_ms, end_ms) = parse_srt_timestamp_line(&ts_line).ok_or_else(|| {
-        IngestError::Srt {
+    let (start_ms, end_ms) =
+        parse_srt_timestamp_line(&ts_line).ok_or_else(|| IngestError::Srt {
             cue: cue_index,
             msg: format!("invalid SRT timestamp: {ts_line}"),
-        }
-    })?;
+        })?;
     let text = lines[2..].join(" ").trim().to_string();
     Ok(Cue {
         speaker: None,
@@ -323,11 +356,7 @@ fn collapse(cues: &[Cue]) -> CairnChunk {
     let last = cues.last().unwrap();
     // Speaker is the dominant label within the chunk (or None).
     let speaker = most_common(cues.iter().filter_map(|c| c.speaker.as_deref()));
-    let id = format!(
-        "{}@{}",
-        speaker.unwrap_or("anon"),
-        first.start_ms
-    );
+    let id = format!("{}@{}", speaker.unwrap_or("anon"), first.start_ms);
     CairnChunk {
         id,
         speaker: speaker.map(str::to_string),
@@ -369,6 +398,7 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    #[allow(dead_code)] // Reserved for future on-disk round-trip tests.
     fn write_tmp(name: &str, body: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(name);

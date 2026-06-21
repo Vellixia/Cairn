@@ -43,7 +43,8 @@ fn default_port() -> u16 {
 impl ProxyConfig {
     /// Load from a TOML file. Returns an error if the file is missing or malformed.
     pub fn from_toml_file(path: &Path) -> Result<Self, crate::ProxyError> {
-        let s = std::fs::read_to_string(path).map_err(|e| crate::ProxyError::Config(e.to_string()))?;
+        let s =
+            std::fs::read_to_string(path).map_err(|e| crate::ProxyError::Config(e.to_string()))?;
         let cfg: ProxyConfig =
             toml::from_str(&s).map_err(|e| crate::ProxyError::Config(e.to_string()))?;
         if cfg.peers.is_empty() {

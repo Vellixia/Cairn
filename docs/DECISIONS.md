@@ -818,6 +818,136 @@ fallback first still recognises the canonical page when they rebuild with
 
 ---
 
+## ADR-025: Intent classifier is local + cheap (no LLM call)
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 18)  
+**Status:** Accepted
+
+### Context
+The proactive-recall hook fires on **every** agent turn. A common mistake in
+this kind of design is to ship a learned model that costs 50-200 ms per turn —
+invisible during a 1-turn demo, painful at 200 turns/hour. The hook must
+feel free.
+
+### Decision
+`cairn-proactive::intent::classify` is a pure-Rust heuristic:
+- Single pass over the lowercased prompt.
+- Counts question markers (`?`, `what/why/...`), recall cues
+  (`remember`, `decided`, `last time`, ...), file/path mentions, and
+  reference pronouns.
+- Score = weighted sum normalized to `[0.0, 1.0]`. Default threshold 0.4.
+- No allocations beyond small fixed strings; sub-millisecond on a 1 KB prompt.
+
+### Rationale
+- The goal is to **fire often enough to be useful** (don't miss obvious recall
+  cases) and **skip often enough to be silent** (don't pollute every plain
+  imperative). A heuristic with a hand-tuned threshold is good enough for
+  v0.5.0 and costs ~1 ms.
+- A learned model would be tunable per-project but adds a dependency on a
+  runtime embedding model or a hosted inference API. Either erodes the
+  "self-hosted, no cloud" guarantee.
+- The hook also honors per-project opt-out via `cairn.proactive_recall=false`,
+  so users who find the classifier too noisy can disable it project-by-project
+  instead of needing a model swap.
+
+### Trade-offs
+- The heuristic is dumb on paraphrase. "what was the api I was using" + a
+  recall-cue doc scores high; "hey, do you remember the rate-limit we set?"
+  scores high too. Paraphrase without recall cues ("remind me about throttling")
+  scores below threshold — that's the miss rate.
+- If miss rate becomes a problem in real usage, we can swap in a learned
+  classifier behind the same `classify` function (no API change). The hook
+  interface is the contract.
+
+---
+
+## ADR-026: Multi-tenant via per-memory `org_id` (column, not database)
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 19)  
+**Status:** Accepted
+
+### Context
+A multi-tenant cairn-server (Sprint 19) needs every memory scoped to a tenant
+identifier, so cross-tenant leakage is impossible even under shared BM25 /
+HNSW indices. Options considered:
+
+1. **One database per tenant.** Strong isolation, but requires per-tenant
+   migrations and per-tenant index tuning. Bad fit for a single-binary self-hosted
+   install.
+2. **One schema per tenant inside a shared database.** Same isolation, more
+   ops. Same problem with migrations.
+3. **One schema, one shared index, every row carries an `org_id` column.**
+   Cheapest. The store filters by `org_id` on every read, and the recall path
+   filters again before any ranking work.
+
+### Decision
+Option 3 — every `Memory` carries an `OrgId`. `MemoryEngine::recall_for_org`
+filters by `org_id` before any ranking. The implicit default org
+(`OrgId::default()`) is the value used when `Config::multi_tenant = false`,
+so existing self-hosted installs see no change in behaviour.
+
+`OrgId` is a short lower-case ASCII tenant identifier (`[a-z0-9_-]{1,64}`)
+validated at construction. It's a tenant identifier, not a secret.
+
+### Rationale
+- One storage engine, one index — `cairn-store` and `cairn-registry` don't
+  grow new code paths.
+- Tenant isolation is enforced in the memory engine (the recall path) and
+  in the registry (a future Sprint 19 follow-up). Even with shared indices,
+  no read crosses the tenant boundary.
+- The default org id lets us ship multi-tenant support as a feature flag —
+  off by default, the existing single-tenant behaviour is unchanged.
+
+### Trade-offs
+- A blast-radius bug in the filter (`org_id == other_org`) leaks data.
+  Mitigated by the integration test in Sprint 19a (`tenant_isolation_filters_recall_by_org`).
+- The shared index means one noisy tenant can affect another's recall latency
+  (no index-level isolation). For Sprint 19 scale (hundreds of orgs on one
+  box) this is fine; for true SaaS scale, per-tenant indices are a v0.6 item.
+
+---
+
+## ADR-027: cairn.sh reverse proxy is its own crate, not a cairn-server mode
+
+**Date:** 2026-06-20 (v0.5.0 Sprint 19)  
+**Status:** Accepted
+
+### Context
+A `cairn.sh` proxy that fronts multiple self-hosted cairn registries is a
+different deployment shape than a single cairn-server. It needs:
+- A separate binary with its own config file (`peers.toml`).
+- Its own auth model (peer-level bearer tokens, not per-user JWTs).
+- Its own scaling profile (fan-out across many peers, not single-tenant).
+
+### Decision
+`cairn-proxy` is a separate crate (22nd workspace member). It speaks the same
+registry HTTP API as `cairn-server`, so:
+
+- `cairn-proxy`'s router fans out GETs to every configured peer in parallel
+  via ureq in a blocking-task pool and merges the results by pack id.
+- A `cairn-server` operator can run a proxy in front of their own registry to
+  enable federation without changing the cairn-server binary.
+- A public `cairn.sh` deployment (planned for v0.6 Sprint 19 follow-up)
+  reuses the same crate unchanged.
+
+### Rationale
+- A shared binary with a `--mode=proxy` flag would force operators to deploy
+  the cairn-server's full auth/admin surface just to fan out reads.
+- Splitting lets the proxy be tiny (no memory engine, no MCP) — easy to
+  deploy as a sidecar or a serverless function.
+- The proxy speaks the same `/registry/*` HTTP API the cairn-server exposes
+  via Sprint 13, so the wire protocol is owned by `cairn-registry`, not by
+  either binary.
+
+### Trade-offs
+- The proxy re-implements merging logic (best-effort peer failures, source
+  tracking) instead of reusing a server-side join. This is the right call —
+  the proxy is a separate crate and shouldn't import from cairn-server.
+- The proxy is a thin shim over HTTP + JSON. A future iteration can swap ureq
+  for reqwest if async pipelining becomes a bottleneck.
+
+---
+
 ## See also
 
 - [Architecture](ARCHITECTURE.md) — how these decisions manifest in the code

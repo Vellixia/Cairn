@@ -1,0 +1,17 @@
+docs(decisions): ADR-025 + ADR-026 + ADR-027 (Phase 5 ADR catch-up)
+
+ADR-025 — Intent classifier is local + cheap (Sprint 18).
+- Why a pure-Rust heuristic over a learned model.
+- Cost (~1 ms) vs. recall-coverage trade-offs.
+
+ADR-026 — Multi-tenant via per-memory org_id column (Sprint 19a).
+- Three options considered; chosen because it keeps a single binary + index.
+- Default-org fallback for self-hosted installs preserves back-compat.
+- Isolation enforced in MemoryEngine::recall_for_org before any ranking.
+
+ADR-027 — cairn.sh proxy is a separate crate (Sprint 19b).
+- Different deployment shape, different binary.
+- Speaks the same /registry/* HTTP API the cairn-server exposes.
+- Lets the proxy stay tiny — no memory engine, no MCP surface.
+
+cargo fmt + clippy -D warnings clean. 317 tests pass + 5 ignored.

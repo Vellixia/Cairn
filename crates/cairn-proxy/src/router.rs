@@ -27,9 +27,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
-async fn list_packs(
-    State(config): State<Arc<ProxyConfig>>,
-) -> Result<Response, ProxyHttpError> {
+async fn list_packs(State(config): State<Arc<ProxyConfig>>) -> Result<Response, ProxyHttpError> {
     let result = fanout_async(config, "/registry/packs").await?;
     Ok(Json(result.packs).into_response())
 }
@@ -85,10 +83,6 @@ impl IntoResponse for ProxyHttpError {
         let status = match &self {
             ProxyHttpError::Upstream(_) => StatusCode::BAD_GATEWAY,
         };
-        (
-            status,
-            Json(serde_json::json!({"error": self.to_string()})),
-        )
-            .into_response()
+        (status, Json(serde_json::json!({"error": self.to_string()}))).into_response()
     }
 }
