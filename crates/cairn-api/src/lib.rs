@@ -8,6 +8,8 @@ mod admin;
 mod auth;
 mod devices;
 mod events;
+mod extensions;
+mod ingest;
 mod ledger;
 mod metrics;
 mod push;
@@ -234,6 +236,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/subscribe", post(push::subscribe))
         .route("/api/push/unsubscribe", post(push::unsubscribe))
         .route("/api/push/list", get(push::list_subscriptions))
+        .route("/api/extensions/capture", post(extensions::capture))
+        .route("/api/ingest/transcript", post(ingest::transcript))
         .fallback(static_handler)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), auth))

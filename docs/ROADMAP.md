@@ -206,6 +206,14 @@ The product is feature-complete enough to install and use. The remaining work is
 | Phase 4.1 (Sprint 14) — Trust scopes + revocation cascade + provenance | Passed | `398a052` |
 | Phase 4.1 (Sprint 15) — cairn-sync CRDTs + E2E encryption + threat model | Passed | `06f5b4e` |
 | Phase 4.2 (Sprint 16) — cairn-bench + LongMemEval/horizon/retention | Passed | `455c34b` |
+| Phase 4.2 (Sprint 17) — public landing page + comparison + cross-links | Passed | `45d1e39` |
+| Phase 5 (Sprint 18) — cairn-proactive + intent-detection hook + opt-out | Passed | `fcc8487` |
+| Phase 5 (Sprint 19a) — multi-tenant `OrgId` + tenant-scoped recall | Passed | `d69d3c4` |
+| Phase 5 (Sprint 19b) — cairn-proxy (cairn.sh reverse proxy) | Passed | `9c60a7b` |
+| Phase 5 (Sprint 20) — PWA service worker + push subscription store | Passed | `f484a44` |
+| Phase 5 (Sprint 21) — Manifest V3 browser extension + `/api/extensions/capture` | Passed | `<sprint 21 commit>` |
+| Phase 5 (Sprint 22) — cairn-ingest VTT/SRT/JSON parsers + chunking | Passed | `ae68b06` |
+| Phase 5 (Sprint 23) — mobile companion PWA scaffold + biometric gate | Passed | `<sprint 23 commit>` |
 
 ---
 
@@ -215,7 +223,7 @@ The product is feature-complete enough to install and use. The remaining work is
 - [Architecture](ARCHITECTURE.md) — how it works today
 - [Web](WEB.md) — admin/CLI auth split, dashboard surface
 - [Upgrading](UPGRADING.md) — 0.3.x → 0.4.0 migration
-- [Decisions](DECISIONS.md) — ADRs 001–022 (binary split through v0.5.0 distribution polish + Phase 4.1 federation)
+- [Decisions](DECISIONS.md) — ADRs 001–027 (binary split through v0.5.0 Phase 5 proactive/service/cross-platform)
 - [Benchmarks](BENCHMARKS.md) — measured numbers (LongMemEval + horizon + retention, Sprint 16)
 - [Security](../SECURITY.md) — threat model + hardening checklist
 - [Audit Report](audits/REPORT.md) — security findings with fix status

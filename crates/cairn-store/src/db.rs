@@ -152,6 +152,13 @@ impl Store {
     pub fn insert_memory(&self, m: &Memory) -> Result<()> {
         self.backend.insert_memory(m)
     }
+    /// Materialize a `NewMemory` (with id + timestamps) and insert it. Used by
+    /// the API layer where a handler doesn't want to depend on `MemoryEngine`.
+    pub fn insert_memory_for(&self, new_mem: &cairn_core::NewMemory) -> Result<Memory> {
+        let mem = new_mem.clone().into_memory();
+        self.backend.insert_memory(&mem)?;
+        Ok(mem)
+    }
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
         self.backend.get_memory(id)
     }

@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cairn Capture</title>
+    <style>
+      :root {
+        --bg: #0B0F14;
+        --fg: #E2E8F0;
+        --accent: #FB923C;
+        --muted: #64748B;
+      }
+      body {
+        font-family: ui-sans-serif, system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--fg);
+        width: 280px;
+        margin: 0;
+        padding: 14px 16px;
+      }
+      h1 { font-size: 14px; margin: 0 0 6px; color: var(--accent); }
+      p  { font-size: 12px; margin: 0 0 12px; color: var(--muted); }
+      .row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 10px; }
+      label { font-size: 11px; color: var(--muted); }
+      input { background: #0F1620; color: var(--fg); border: 1px solid #1F2937;
+              border-radius: 4px; padding: 6px 8px; font-size: 12px; }
+      .status { font-size: 11px; color: var(--muted); }
+      .status.ok { color: #22C55E; }
+      .status.bad { color: #EF4444; }
+    </style>
+  </head>
+  <body>
+    <h1>Cairn Capture</h1>
+    <p>Right-click any selection to send it to your local cairn-server.</p>
+    <div class="row">
+      <label for="url">cairn-server URL</label>
+      <input id="url" placeholder="http://127.0.0.1:7777" />
+    </div>
+    <div id="status" class="status">Idle.</div>
+    <script src="popup.js"></script>
+  </body>
+</html>

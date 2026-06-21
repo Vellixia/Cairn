@@ -473,6 +473,7 @@ dependencies = [
  "cairn-core",
  "cairn-embed",
  "cairn-guard",
+ "cairn-ingest",
  "cairn-mcp",
  "cairn-memory",
  "cairn-pack",

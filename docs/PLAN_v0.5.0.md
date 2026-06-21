@@ -599,6 +599,12 @@ pub struct Session {
 
 ### Phase 5 — Proactive, Service & Cross-Platform (committed)
 
+> ✅ **Status (v0.5.0):** Sprints 18, 19, 20, 22 shipped. Sprints 21 (browser
+> extension) and 23 (mobile companion) deferred to v0.6.0 — both are
+> JavaScript-only artefacts that ship independently of the Rust binary, so the
+> v0.5.0 release is unblocked. See `docs/ROADMAP.md` for the verification
+> rows.
+
 Phase 5 items are no longer "future ideas" — they are committed v0.5.0 sprints.
 
 **Sprint 18 — Proactive Recall**
