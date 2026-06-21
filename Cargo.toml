@@ -17,6 +17,7 @@ members = [
     "crates/cairn-bench",
     "crates/cairn-proxy",
     "crates/cairn-proactive",
+    "crates/cairn-ingest",
     "crates/cairn-embed",
     "crates/cairn-api",
     "crates/cairn-mcp",
@@ -50,6 +51,7 @@ cairn-sync = { path = "crates/cairn-sync" }
 cairn-bench = { path = "crates/cairn-bench" }
 cairn-proxy = { path = "crates/cairn-proxy" }
 cairn-proactive = { path = "crates/cairn-proactive" }
+cairn-ingest = { path = "crates/cairn-ingest" }
 cairn-embed = { path = "crates/cairn-embed" }
 cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
