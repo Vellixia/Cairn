@@ -10,6 +10,7 @@ mod devices;
 mod events;
 mod ledger;
 mod metrics;
+mod push;
 mod security_headers;
 mod session;
 mod setup_wizard;
@@ -87,6 +88,10 @@ pub struct AppState {
     pub ledger: LedgerState,
     /// Self-hosted pack registry (v0.5.0 Sprint 13). Mounted under `/registry`.
     pub registry: Option<Arc<cairn_registry::Registry>>,
+    /// Push notification subscription store (v0.5.0 Sprint 20b). One JSON
+    /// file per subscription under `<data_dir>/push/`. Optional so the API can
+    /// run without a writable data dir (some embedded test harnesses).
+    pub push: Option<Arc<push::PushStore>>,
     signer: Option<Arc<TokenSigner>>,
 }
 
@@ -135,6 +140,7 @@ impl AppState {
             registry: cairn_registry::Registry::open(&cfg.data_dir)
                 .ok()
                 .map(Arc::new),
+            push: push::PushStore::open(&cfg.data_dir).ok().map(Arc::new),
             signer,
         })
     }
@@ -225,6 +231,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/devices/tokens", get(list_tokens).post(create_token))
         .route("/api/devices/tokens/:id/revoke", post(revoke_token))
         .route("/api/devices/pair-codes", post(create_pair_code))
+        .route("/api/push/subscribe", post(push::subscribe))
+        .route("/api/push/unsubscribe", post(push::unsubscribe))
+        .route("/api/push/list", get(push::list_subscriptions))
         .fallback(static_handler)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
@@ -1358,7 +1367,7 @@ mod tests {
 
     /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
     /// The temp dir is a scratch workspace for the test's files (separate from the store).
-    fn test_state() -> Option<(AppState, tempfile::TempDir)> {
+    pub(crate) fn test_state() -> Option<(AppState, tempfile::TempDir)> {
         let cfg = cairn_store::Store::test_config()?;
         let dir = tempfile::tempdir().ok()?;
         Some((AppState::new(&cfg).ok()?, dir))
