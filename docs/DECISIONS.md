@@ -387,42 +387,6 @@ parsing code small (~200 lines).
 
 ---
 
-## ADR-015: Cairn → hosted deploys via platform-native manifests
-
-**Date:** 2026-06-20 (v0.5.0 Sprint 12)  
-**Status:** Accepted
-
-### Context
-The Docker compose stack is the canonical local-dev path. For one-click hosted deploys we
-needed Fly.io, Railway, and Render configs — but each platform has a different manifest
-format and a different way to mount persistent disks.
-
-### Decision
-Ship three platform-native templates under `deploy/`:
-- `fly.toml` — Fly's app config: machine size, persistent volume, http_checks on `/api/health`,
-  TCP+TLS handlers.
-- `railway.toml` — Railway's builder + deploy config with healthcheck + volume mount.
-- `render.yaml` — Render's blueprint with a `cairn` web service + a dev-only `cairn-helix`
-  worker (production should point `CAIRN_HELIX_URL` at a managed HelixDB).
-
-All three are opinionated: bind to `0.0.0.0`, set `CAIRN_INSECURE=1` (TLS terminates at the
-platform edge), and pin the image tag (`ghcr.io/vellixia/cairn:0.5.0`).
-
-### Rationale
-- Native manifests give each platform's tooling the metadata it needs (volume mounts,
-  healthchecks, replica counts) without us maintaining a parallel deploy CLI.
-- Dev-only `cairn-helix` worker on Render makes `Import Blueprint` succeed with zero config;
-  the README warns that it's not for production.
-
-### Trade-offs
-- Pinning the image tag means a security patch requires editing three files + cutting a
-  release. The release workflow updates them in lock-step.
-- `CAIRN_INSECURE=1` is acceptable inside Fly/Railway/Render (TLS at the edge) but is **not**
-  documented for self-hosted LAN use — that path still requires `CAIRN_TLS_CERT` +
-  `CAIRN_TLS_KEY` (see ADR-004).
-
----
-
 ## ADR-016: Non-root Docker volume init (proper `cairn-init`)
 
 **Date:** 2026-06-20 (v0.5.0 Sprint 12)  

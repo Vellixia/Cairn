@@ -13,10 +13,4 @@ Assert-True -Condition (Test-Path $composePath) -Msg 'docker-compose.yml exists'
 $brewPath = Join-Path $script:RepoRoot 'packaging/homebrew-tap/cairn.rb'
 Assert-True -Condition (Test-Path $brewPath) -Msg 'Homebrew formula exists'
 
-# One-click deploy templates exist.
-foreach ($f in @('deploy/fly.toml', 'deploy/railway.toml', 'deploy/render.yaml')) {
-    $p = Join-Path $script:RepoRoot $f
-    Assert-True -Condition (Test-Path $p) -Msg "$f exists"
-}
-
 Show-Scenario -Sprint '4.0' -Name 'desktop-install' -Status pass

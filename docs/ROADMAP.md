@@ -38,7 +38,6 @@ gantt
     Health checks in Compose       :done, p3e, 2026-06-19, 1d
     CI smoke test                  :done, p3f, 2026-06-19, 1d
     LongMemEval benchmarks         :p3g, 2026-05-15, 60d
-    One-click deploy templates     :p3h, 2026-06-01, 45d
     Multi-platform release binaries :p3i, 2026-06-01, 45d
     Slim image + model SHA pin     :done, p3j, 2026-06-19, 1d
     Web 0.4.0 admin + dashboard    :done, p3k, 2026-06-19, 1d
@@ -47,7 +46,6 @@ gantt
     OpenCode README quickstart     :active, p4a, 2026-06-19, 1d
     Multi-platform release         :p4b, 2026-06-20, 45d
     Homebrew tap                   :p4c, 2026-07-01, 7d
-    One-click deploy               :p4d, 2026-07-01, 14d
     Non-root Docker volume init    :p4e, 2026-07-01, 3d
     LongMemEval/LoCoMo benchmarks  :p4f, 2026-07-01, 30d
     Task-success horizon benchmark :p4g, 2026-07-15, 30d
@@ -60,7 +58,7 @@ gantt
 | Item | Status | Notes |
 |---|---|---|
 | Cargo workspace + crate structure | Done | 14 crates |
-| Next.js web app (admin console, sidebar dashboard) | Done | Static export, embedded via rust-embed; prebuilt `web/out/` is committed for hermetic `cargo build` |
+| Next.js web app (admin console, sidebar dashboard) | Done | Static export, embedded via rust-embed; `web/out/.gitkeep` ships so the binary falls back to a built-in page |
 | Docker Compose stack (Cairn + HelixDB + MinIO) | Done | `docker compose up -d` |
 | CI pipeline (test/clippy/fmt) | Done | GitHub Actions |
 | Brand identity (name/logo/palette) | Done | Cairn — 3-stone cairn, ember accent |
@@ -172,7 +170,6 @@ The product is feature-complete enough to install and use. The remaining work is
 | OpenCode README quickstart | Done | New "OpenCode quickstart" section in README + Homebrew promoted to recommended install path |
 | Multi-platform release binaries | Not started | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`; upload + `SHA256SUMS` per release |
 | Homebrew tap | Done | `packaging/homebrew-tap/cairn.rb`; tap lives at `Vellixia/homebrew-tap`; `brew install Vellixia/tap/cairn` installs both binaries |
-| One-click deploy (Fly / Railway / Render) | Done | `deploy/fly.toml`, `deploy/railway.toml`, `deploy/render.yaml` with platform-native manifests + healthchecks + persistent volumes |
 | Non-root Docker volume init | Done | New `cairn-init` one-shot chowns `/data` to uid 10001, verifies with `stat`, fails fast on host-bind misconfig. cairn service runs as `user: "10001:10001"` — verified live (`uid=10001(cairn)`) |
 | LongMemEval / LoCoMo benchmarks | Not started | Standard recall benchmarks; publish numbers in `docs/BENCHMARKS.md` |
 | Task-success lift at increasing horizons | Not started | Synthetic drift benchmark; cite the architecture justification in `docs/PLAN.md` |
@@ -201,7 +198,7 @@ The product is feature-complete enough to install and use. The remaining work is
 | Cookie expires after TTL → `/login` shown; existing cookie rejected | Passed |
 | `cairn-server admin password` rotates + invalidates all sessions | Passed |
 | `cairn-server admin reset` clears admin via tombstone; next `/setup` succeeds | Passed |
-| Web: prebuilt `web/out/` committed; `cargo build` is hermetic (no Node required) | Passed |
+| Web: `web/out/.gitkeep` ships; `cargo build` is hermetic (no Node required) | Passed |
 | Phase 4.1 (Sprint 13) — cairn-registry + Ed25519 pack signing | Passed | `cb06f9f` |
 | Phase 4.1 (Sprint 14) — Trust scopes + revocation cascade + provenance | Passed | `398a052` |
 | Phase 4.1 (Sprint 15) — cairn-sync CRDTs + E2E encryption + threat model | Passed | `06f5b4e` |
@@ -211,9 +208,9 @@ The product is feature-complete enough to install and use. The remaining work is
 | Phase 5 (Sprint 19a) — multi-tenant `OrgId` + tenant-scoped recall | Passed | `d69d3c4` |
 | Phase 5 (Sprint 19b) — cairn-proxy (cairn.sh reverse proxy) | Passed | `9c60a7b` |
 | Phase 5 (Sprint 20) — PWA service worker + push subscription store | Passed | `f484a44` |
-| Phase 5 (Sprint 21) — Manifest V3 browser extension + `/api/extensions/capture` | Passed | `<sprint 21 commit>` |
+| Phase 5 (Sprint 21) — `/api/extensions/capture` endpoint (loopback-only) | Passed | `06e6740` |
 | Phase 5 (Sprint 22) — cairn-ingest VTT/SRT/JSON parsers + chunking | Passed | `ae68b06` |
-| Phase 5 (Sprint 23) — mobile companion PWA scaffold + biometric gate | Passed | `<sprint 23 commit>` |
+| Phase 5 (Sprint 23) — mobile companion PWA scaffold + biometric gate | Passed | `06e6740` |
 
 ---
 
@@ -223,7 +220,7 @@ The product is feature-complete enough to install and use. The remaining work is
 - [Architecture](ARCHITECTURE.md) — how it works today
 - [Web](WEB.md) — admin/CLI auth split, dashboard surface
 - [Upgrading](UPGRADING.md) — 0.3.x → 0.4.0 migration
-- [Decisions](DECISIONS.md) — ADRs 001–027 (binary split through v0.5.0 Phase 5 proactive/service/cross-platform)
+- [Decisions](DECISIONS.md) — ADRs 001–027 (binary split through v0.5.0 Phase 5; ADR-015 superseded)
 - [Benchmarks](BENCHMARKS.md) — measured numbers (LongMemEval + horizon + retention, Sprint 16)
 - [Security](../SECURITY.md) — threat model + hardening checklist
 - [Audit Report](audits/REPORT.md) — security findings with fix status

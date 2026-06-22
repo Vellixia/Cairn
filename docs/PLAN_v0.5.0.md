@@ -634,10 +634,10 @@ Phase 5 items are no longer "future ideas" — they are committed v0.5.0 sprints
   - End-to-end push delivery for drift event
   - Offline dashboard renders cached shell
 
-**Sprint 21 — Browser Extension**
-- Manifest V3 extension: capture page text + selection as memory
-- Native messaging to `cairn-server` (or HTTP to local server)
-- "Add to Cairn" context menu
+**Sprint 21 — Browser Extension Capture Endpoint**
+- HTTP endpoint `POST /api/extensions/capture` accepting selection/page text
+- Loopback-only: rejects non-local Origin headers
+- "Add to Cairn" context menu support (browser extension ships separately)
 - **Testing:**
   - Unit test content extraction preserves source URL
   - Integration test: captured memory appears in `/api/memory` within 5s

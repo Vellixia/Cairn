@@ -38,7 +38,7 @@ pub enum CaptureKind {
     Page,
 }
 
-/// Wire format from the extension's `background.js`.
+/// Wire format from a browser extension capture request.
 #[derive(Debug, Deserialize)]
 pub struct CaptureRequest {
     pub kind: CaptureKind,
@@ -136,8 +136,9 @@ fn is_local_request(headers: &HeaderMap) -> bool {
         }
         return false;
     }
-    // No Origin header — direct API call (curl, CLI, background.js without
-    // Origin). Allow it; the deployment is loopback-only by default.
+    // No Origin header — direct API call (curl, CLI, or extension
+    // background script without Origin). Allow it; the deployment is
+    // loopback-only by default.
     true
 }
 

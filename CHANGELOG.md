@@ -65,8 +65,6 @@ self-installable, multi-tenant aware, federated, and proactive.
 
 **Distribution polish (Phase 4.0, Sprint 12)**
 - **Homebrew tap** at `Vellixia/homebrew-tap` (`brew install Vellixia/tap/cairn`).
-- **One-click deploys** for Fly.io (`deploy/fly.toml`), Railway
-  (`deploy/railway.toml`), and Render (`deploy/render.yaml`).
 - **Non-root Docker volume init.** New `cairn-init` service chowns `/data` to
   uid 10001 before `cairn` starts as non-root. The pre-0.5.0 `user: "0"`
   workaround is gone.
@@ -132,10 +130,9 @@ self-installable, multi-tenant aware, federated, and proactive.
   `GET /api/push/list`. Each subscription is a JSON file under
   `<data_dir>/push/`.
 
-**Browser extension (Phase 5, Sprint 21)**
-- Manifest V3 extension in `extensions/chrome/`.
-- Context-menu + Ctrl+Shift+Y keyboard shortcut for "send selection to Cairn".
-- Server endpoint `POST /api/extensions/capture` (loopback-only, 20 KB cap).
+**Browser extension capture endpoint (Phase 5, Sprint 21)**
+- Server endpoint `POST /api/extensions/capture` (loopback-only, 20 KB cap)
+  for capturing browser selections and page text as Cairn memories.
 
 **Transcript ingestion (Phase 5, Sprint 22)**
 - New `cairn-ingest` crate with VTT/SRT/JSON parsers + speaker-window
@@ -231,8 +228,6 @@ require a live HelixDB.
 
 **Distribution polish (Sprint 12)**
 - **Homebrew tap** at `Vellixia/homebrew-tap` (`brew install Vellixia/tap/cairn`).
-- **One-click deploys** for Fly.io (`deploy/fly.toml`), Railway
-  (`deploy/railway.toml`), and Render (`deploy/render.yaml`).
 - **Non-root Docker volume init.** New `cairn-init` service chowns `/data` to
   uid 10001 before `cairn` starts as non-root. The pre-0.5.0 `user: "0"`
   workaround is gone.

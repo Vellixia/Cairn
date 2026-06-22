@@ -204,7 +204,6 @@ export default function LandingPage() {
             <InstallCard label="PowerShell (Windows)" code="iwr cairn.sh/install.ps1 | iex" />
             <InstallCard label="Full stack (Docker)" code="cp .env.example .env && docker compose up -d" />
             <InstallCard label="From source" code="cargo install --git https://github.com/Vellixia/Cairn cairn-server cairn-cli" />
-            <InstallCard label="One-click deploy" code="fly launch --copy-config  # uses deploy/fly.toml" />
           </div>
         </section>
 

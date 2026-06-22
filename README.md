@@ -138,9 +138,8 @@ docker compose up -d          # builds Cairn, pulls HelixDB + MinIO, wires them 
 ```
 
 ```sh
-# Hosted: one-click deploys
-fly launch --copy-config      # uses deploy/fly.toml
-# or import deploy/render.yaml / deploy/railway.toml on those platforms
+# From source
+cargo install --git https://github.com/Vellixia/Cairn cairn-server cairn-cli
 ```
 
 Cairn stores data in **HelixDB** — `docker compose` starts one for you, or point

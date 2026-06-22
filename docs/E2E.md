@@ -25,7 +25,7 @@ The harness runs **20 scenarios** covering the full v0.5.0 release:
 | 13 | 5.0 | Proactive recall: fires on cue, returns [] on plain imperative |
 | 14 | 5.0 | Multi-tenant: /api/metrics smoke (org_id field present) |
 | 15 | 5.0 | PWA + push: /sw.js + /api/push/subscribe round-trip |
-| 16 | 5.0 | Browser extension: /api/extensions/capture (loopback-only) |
+| 16 | 5.0 | Browser extension capture: /api/extensions/capture (loopback-only) |
 | 17 | 5.0 | Transcript ingestion: VTT + SRT formats |
 | 18 | 3.5 | SSE events: /api/events stream + /api/metrics |
 | 19 | 4.0 | CLI subcommands: doctor, stats, export |
