@@ -212,7 +212,7 @@ The product is feature-complete enough to install and use. The remaining work is
 | Phase 5 (Sprint 22) — cairn-ingest VTT/SRT/JSON parsers + chunking | Passed | `ae68b06` |
 | Phase 5 (Sprint 23) — mobile companion PWA scaffold + biometric gate | Passed | `06e6740` |
 | **Sprint 25 — dashboard overview + sidebar refresh** — KPI hero, HealthRow, ActivityTimeline, SavingsChart (Recharts), DriftAnchorCard, recent memory; collapsible sidebar (8 groups, `localStorage` persisted) | Passed | branch `sprint/25-dashboard-overview` |
-| **Sprint 26 — single-page hubs + InfoCard** — 4-rail sidebar (`v2`), 21 sub-views consolidated as tabs on `/dashboard?view=<hub>&tab=<sub>`; inline InfoCard (dismissible per session) on every sub-page; 5 new overview visuals (TokensSavedHeadline, ReliabilitySparkline, MemoryTierDonut, SourceMixBar, LastAdminActionCard); mobile fallback to `<select>` | Passed | branch `sprint/26-single-page-hubs`, PR #14, commit `41f7119` |
+| **Sprint 27 — UI/UX audit + flat routes + HelpDialog** — removed landing page, flat URLs (`/memory`, `/trust`, `/you`), Sprint 26 InfoCard duplicate bug fixed (Trust Score had 11 nested cards), replaced with `?` HelpButton → Dialog (What/How/Impact), Sidebar v3 (4 entries, WORKSPACE label), Trust Score redesigned (7xl score, 4-up grid) | Passed | branch `sprint/27-ui-ux-audit`, PR #15 |
 
 ---
 

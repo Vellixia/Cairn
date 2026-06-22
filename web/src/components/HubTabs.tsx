@@ -27,7 +27,6 @@ export function HubTabs({
   defaultTab: string;
 }) {
   const router = useRouter();
-  const pathname = usePathname();
   const params = useSearchParams();
   const tabParam = params.get("tab") ?? defaultTab;
   const [hydrated, setHydrated] = useState(false);
@@ -35,9 +34,9 @@ export function HubTabs({
   const active = tabs.find((t) => t.id === tabParam) ?? tabs[0];
   const setTab = (id: string) => {
     const sp = new URLSearchParams(params.toString());
-    sp.set("view", view);
     sp.set("tab", id);
-    router.replace(`${pathname}?${sp.toString()}`, { scroll: false });
+    sp.delete("view");
+    router.replace(`/${view}?${sp.toString()}`, { scroll: false });
   };
 
   return (
@@ -69,13 +68,13 @@ export function HubTabs({
       </div>
 
       <div className="hidden border-b border-line md:block">
-        <nav className="-mb-px flex flex-wrap gap-2" aria-label={`${title} sections`}>
+        <nav className="-mb-px flex flex-wrap gap-1" aria-label={`${title} sections`}>
           {tabs.map((t) => {
             const isActive = t.id === active?.id;
             return (
               <Link
                 key={t.id}
-                href={`/dashboard?view=${view}&tab=${t.id}`}
+                href={`/${view}?tab=${t.id}`}
                 scroll={false}
                 onClick={(e) => {
                   e.preventDefault();

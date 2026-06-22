@@ -21,49 +21,33 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { cn } from "@/lib/utils";
 import Logo from "@/components/Logo";
 
 type Item = { href: string; label: string; icon: LucideIcon };
 
 const ITEMS: Item[] = [
-  { href: "/dashboard", label: "Now", icon: LayoutDashboard },
-  {
-    href: "/dashboard?view=memory",
-    label: "Memory & Context",
-    icon: Brain,
-  },
-  { href: "/dashboard?view=trust", label: "Trust", icon: ShieldCheck },
-  { href: "/dashboard?view=you", label: "You", icon: UserCircle },
+  { href: "/", label: "Now", icon: LayoutDashboard },
+  { href: "/memory", label: "Memory", icon: Brain },
+  { href: "/trust", label: "Trust", icon: ShieldCheck },
+  { href: "/you", label: "You", icon: UserCircle },
 ];
 
-const STORAGE_KEY = "cairn-sidebar-v2";
+const STORAGE_KEY = "cairn-sidebar-v3";
 
 function isActive(pathname: string | null, href: string): boolean {
   if (!pathname) return false;
-  if (href === "/dashboard") {
-    return pathname === "/dashboard" || pathname === "/dashboard/";
+  const [path] = href.split("?");
+  if (path === "/") {
+    return pathname === "/" || pathname === "";
   }
-  // query-aware match for hub links
-  const [path, query] = href.split("?");
-  if (pathname !== path) return false;
-  if (!query) return true;
-  if (typeof window === "undefined") return false;
-  const params = new URLSearchParams(window.location.search);
-  const wanted = new URLSearchParams(query);
-  for (const [k, v] of wanted) {
-    if (params.get(k) !== v) return false;
-  }
-  return true;
+  return pathname === path || pathname.startsWith(path + "/");
 }
 
 function NavLink({
   item,
-  pathname,
   active,
 }: {
   item: Item;
-  pathname: string | null;
   active: boolean;
 }) {
   const Icon = item.icon;
@@ -93,12 +77,16 @@ export function CairnSidebar() {
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    // Migration: v1 (8-group) -> v2 (4-entry). Drop unknown ids; no group-open state preserved.
-    try {
-      const v1 = window.localStorage.getItem("cairn-sidebar-v1");
-      if (v1) {
-        window.localStorage.removeItem("cairn-sidebar-v1");
+    // Migration: drop any prior sidebar keys; v3 = flat.
+    for (const k of ["cairn-sidebar-v1", "cairn-sidebar-v2", "cairn-infocard-dismissed-v1"]) {
+      try {
+        window.localStorage.removeItem(k);
+      } catch {
+        /* ignore */
       }
+    }
+    try {
+      window.sessionStorage.removeItem("cairn-infocard-dismissed-v1");
     } catch {
       /* ignore */
     }
@@ -120,23 +108,15 @@ export function CairnSidebar() {
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
-          <SidebarGroupLabel
-            className={cn(
-              "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs font-semibold uppercase tracking-wide text-muted-foreground",
-            )}
-          >
-            <span>Now</span>
+          <SidebarGroupLabel className="px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Workspace
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {hydrated
                 ? ITEMS.map((it) => (
                     <SidebarMenuItem key={it.href}>
-                      <NavLink
-                        item={it}
-                        pathname={pathname}
-                        active={isActive(pathname, it.href)}
-                      />
+                      <NavLink item={it} active={isActive(pathname, it.href)} />
                     </SidebarMenuItem>
                   ))
                 : null}
