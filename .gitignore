@@ -13,6 +13,10 @@
 # TypeScript build cache
 *.tsbuildinfo
 
+# Audit / internal screenshots — not for the public repo
+/docs/img
+!/docs/img/.gitkeep
+
 # Local dogfood testing artifacts
 /dogfood-output
 
