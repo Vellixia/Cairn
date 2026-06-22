@@ -32,6 +32,14 @@
     --sidebar-accent-foreground: 240 5.9% 10%;
     --sidebar-border: 220 13% 91%;
     --sidebar-ring: 217.2 91.2% 59.8%;
+    --color-positive: 142 71% 45%;
+    --color-positive-foreground: 0 0% 98%;
+    --color-warning: 38 92% 50%;
+    --color-warning-foreground: 26 47% 14%;
+    --color-danger: 0 84% 60%;
+    --color-danger-foreground: 0 0% 98%;
+    --color-info: 199 89% 48%;
+    --color-info-foreground: 0 0% 98%;
   }
 
   .dark {
@@ -62,6 +70,14 @@
     --sidebar-accent-foreground: 218 17% 94%;
     --sidebar-border: 213 17% 21%;
     --sidebar-ring: 24 95% 53%;
+    --color-positive: 142 71% 45%;
+    --color-positive-foreground: 218 17% 94%;
+    --color-warning: 38 92% 50%;
+    --color-warning-foreground: 26 47% 14%;
+    --color-danger: 0 79% 63%;
+    --color-danger-foreground: 218 17% 94%;
+    --color-info: 199 89% 48%;
+    --color-info-foreground: 218 17% 94%;
   }
 }
 

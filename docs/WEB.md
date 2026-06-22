@@ -66,14 +66,35 @@ Every request goes through `auth()` (in `crates/cairn-api/src/lib.rs`):
 
 ## Dashboard surface
 
-### Layout
+### Layout (Sprint 25)
 
-- Left rail: sectioned sidebar (Server / Memory / Context / Reliability /
-  Share / Devices). `aria-current="page"` on the active item.
+- Left rail: **collapsible** sidebar with 8 groups — **Now** (static label,
+  never collapses) / Memory / Context / Reliability / Share / Personalization
+  / Devices / System. Group state persists per-browser in `localStorage`
+  under the key `cairn-sidebar-v1`. Default state: Now + Memory open, rest
+  collapsed. `aria-current="page"` on the active item.
 - Top: ⌘K trigger + server health pill + reliability score + profile chip.
 - Center: per-section routes (Next.js App Router).
 - Right-bottom: toast tray with `aria-live="polite"` and `role="alert"` for
   errors.
+
+### Overview page (`/dashboard`)
+
+Signal-dense landing page composed of:
+
+1. **KPI hero** — 4 cards: Memories, Reliability, Token savings, Active
+   devices. Tones follow semantic color tokens (`positive` / `warning` /
+   `danger` / `info` / `neutral`).
+2. **HealthRow** — 5 status pills (Server, Helix, Embedder, Reliability, PWA)
+   refetched every 30 s. Backed by existing `/api/health`,
+   `/api/setup/health`, `/api/stats` — no new backend.
+3. **ActivityTimeline** — last 8 audit events from `/api/devices/audit`.
+4. **SavingsChart** — 7-day rolling Recharts AreaChart of
+   `wakeup_tokens + recall_tokens` from `/api/metrics`. Empty state with
+   `PiggyBank` icon when ledger is empty.
+5. **DriftAnchorCard** — current task anchor (read + edit) + reliability
+   summary + link to the drift center.
+6. **Recent memory** — last 5 wakeup memories from `/api/memory/wakeup`.
 
 ### Keyboard
 

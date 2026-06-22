@@ -211,6 +211,7 @@ The product is feature-complete enough to install and use. The remaining work is
 | Phase 5 (Sprint 21) — `/api/extensions/capture` endpoint (loopback-only) | Passed | `06e6740` |
 | Phase 5 (Sprint 22) — cairn-ingest VTT/SRT/JSON parsers + chunking | Passed | `ae68b06` |
 | Phase 5 (Sprint 23) — mobile companion PWA scaffold + biometric gate | Passed | `06e6740` |
+| **Sprint 25 — dashboard overview + sidebar refresh** — KPI hero, HealthRow, ActivityTimeline, SavingsChart (Recharts), DriftAnchorCard, recent memory; collapsible sidebar (8 groups, `localStorage` persisted) | Passed | branch `sprint/25-dashboard-overview` |
 
 ---
 
