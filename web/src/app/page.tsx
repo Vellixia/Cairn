@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { Logo } from "@/components/Logo";
+import Logo from "@/components/Logo";
 
 /**
  * Cairn's public landing page (v0.5.0 Sprint 17). Renders at `/` when the

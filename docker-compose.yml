@@ -173,7 +173,7 @@ services:
       helix:
         condition: service_healthy
     environment:
-      CAIRN_HOST: 0.0.0.0
+      CAIRN_HOST: 127.0.0.1
       CAIRN_PORT: "7777"
       # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
       CAIRN_HELIX_URL: http://helix:8080

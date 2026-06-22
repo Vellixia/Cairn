@@ -462,7 +462,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
 name = "cairn-api"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-stream",
  "axum",
@@ -504,7 +504,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-assemble"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-bench"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -528,7 +528,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "cairn-assemble",
@@ -556,7 +556,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-context"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-store",
@@ -579,7 +579,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "argon2",
  "chrono",
@@ -595,7 +595,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-embed"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "fastembed",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-guard"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-profile",
@@ -622,7 +622,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-ingest"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "chrono",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-mcp"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-assemble",
  "cairn-context",
@@ -656,7 +656,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-memory"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-store",
@@ -669,7 +669,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-pack"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-share",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-proactive"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-profile"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -712,7 +712,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-proxy"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "axum",
  "cairn-pack",
@@ -735,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-registry"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -764,7 +764,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-server"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "cairn-api",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-session"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-store",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-share"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "regex",
@@ -805,7 +805,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-shell"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-store",
@@ -815,7 +815,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-store"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cairn-core",
  "cairn-embed",
@@ -831,7 +831,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-sync"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "argon2",
  "cairn-core",

@@ -256,11 +256,14 @@ pub fn router(state: AppState) -> Router {
 pub fn build_router_with_registry(state: AppState) -> Router {
     let base = router(state.clone());
     match state.registry.as_ref() {
-        Some(reg) => base.merge(cairn_registry::router(reg.clone()).layer(
-            tower_http::limit::RequestBodyLimitLayer::new(
-                32 * 1024 * 1024, // 32 MiB for pack uploads
+        Some(reg) => base.nest(
+            "/registry",
+            cairn_registry::router(reg.clone()).layer(
+                tower_http::limit::RequestBodyLimitLayer::new(
+                    32 * 1024 * 1024, // 32 MiB for pack uploads
+                ),
             ),
-        )),
+        ),
         None => base,
     }
 }
@@ -1239,6 +1242,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
                 | "/api/auth/me"
                 | "/api/auth/setup"
                 | "/api/auth/status"
+                | "/api/setup/health"
         )
     {
         return next.run(req).await;

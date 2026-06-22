@@ -167,8 +167,12 @@ pub fn mint_session(state: &AppState, rec: &AdminRecord) -> SessionPayload {
 }
 
 /// Are we on a TLS-enabled bind? Controls whether we attach `Secure` to the cookie.
+/// True when the cookie should carry the `Secure` attribute (i.e. only
+/// over HTTPS). Production runs that ship TLS mark it true; loopback /
+/// `CAIRN_INSECURE=1` runs mark it false so curl-based tests don't lose
+/// the cookie on plain HTTP.
 pub fn cookie_is_secure(state: &AppState) -> bool {
-    state.cfg.tls.is_some() || state.cfg.insecure
+    state.cfg.tls.is_some() && !state.cfg.insecure
 }
 
 /// Append `Set-Cookie` (or clear) to a response builder.
