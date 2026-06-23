@@ -1,4 +1,4 @@
-[workspace]
+﻿[workspace]
 resolver = "2"
 members = [
     "crates/cairn-core",
@@ -22,7 +22,6 @@ members = [
     "crates/cairn-api",
     "crates/cairn-mcp",
     "crates/cairn-client",
-    "crates/cairn-server",
 ]
 
 [workspace.package]
@@ -31,7 +30,7 @@ edition = "2021"
 license = "Apache-2.0"
 authors = ["Cairn contributors"]
 repository = "https://github.com/Vellixia/cairn"
-# MSRV 1.85 — required by quinn-proto 0.11.15 (RUSTSEC-2026-0185 fix; see
+# MSRV 1.85 â€” required by quinn-proto 0.11.15 (RUSTSEC-2026-0185 fix; see
 # [patch.crates-io] below). Bumped from 1.80 on 2026-06-22 to clear the
 # advisory; nothing in the workspace itself requires >1.80 features.
 rust-version = "1.85"
@@ -59,7 +58,6 @@ cairn-embed = { path = "crates/cairn-embed" }
 cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
 cairn-client = { path = "crates/cairn-client" }
-cairn-server = { path = "crates/cairn-server" }
 
 # Pinned to specific minor versions via tilde (~major.minor) so CI can fail
 # loudly via `cargo build --locked` if Cargo.lock drifts outside that minor.
@@ -102,7 +100,7 @@ opt-level = 3
 lto = "thin"
 strip = true
 
-# Security override: RUSTSEC-2026-0185 (GHSA-4w2j-m93h-cj5j) — quinn-proto
+# Security override: RUSTSEC-2026-0185 (GHSA-4w2j-m93h-cj5j) â€” quinn-proto
 # 0.11.14 is vulnerable to unbounded out-of-order stream reassembly (CVSS 7.5
 # HIGH, unauth network DoS). The fix landed in quinn-proto 0.11.15
 # (2026-06-22). helix-db 2.0.x pins reqwest 0.13.4 which transitively pins

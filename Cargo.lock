@@ -461,6 +461,7 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 name = "cairn-api"
 version = "0.5.0"
 dependencies = [
+ "anyhow",
  "async-stream",
  "axum",
  "axum-server",
@@ -496,6 +497,7 @@ dependencies = [
  "tower",
  "tower-http 0.5.2",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -755,22 +757,6 @@ dependencies = [
  "tracing",
  "ureq",
  "uuid",
-]
-
-[[package]]
-name = "cairn-server"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "cairn-api",
- "cairn-core",
- "cairn-store",
- "chrono",
- "clap",
- "dotenvy",
- "serde_json",
- "tokio",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -1294,12 +1280,6 @@ dependencies = [
  "quote",
  "syn",
 ]
-
-[[package]]
-name = "dotenvy"
-version = "0.15.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
 
 [[package]]
 name = "dunce"

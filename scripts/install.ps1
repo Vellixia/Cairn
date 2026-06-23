@@ -2,157 +2,58 @@
 #
 #   irm https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.ps1 | iex
 #
-# Honors: $env:CAIRN_REPO, $env:CAIRN_INSTALL_DIR, $env:CAIRN_VERSION, $env:CAIRN_INSTALL_SKIP_VERIFY,
-#          $env:CAIRN_INSTALL_REQUIRE_ATTESTATION (set to '1' to make SLSA provenance a hard gate).
+# Cairn runs inside Docker. This script downloads docker-compose.yml and
+# a template .env into the install directory and prints the next step.
+#
+# Honors: $env:CAIRN_REPO, $env:CAIRN_INSTALL_DIR.
 $ErrorActionPreference = 'Stop'
 
-$Repo       = if ($env:CAIRN_REPO)              { $env:CAIRN_REPO }              else { 'Vellixia/Cairn' }
-$InstallDir = if ($env:CAIRN_INSTALL_DIR)       { $env:CAIRN_INSTALL_DIR }       else { "$env:LOCALAPPDATA\Cairn\bin" }
-$Version    = if ($env:CAIRN_VERSION)           { $env:CAIRN_VERSION }           else { 'latest' }
-$SkipVerify = ($env:CAIRN_INSTALL_SKIP_VERIFY -eq '1')
-$BaseUrl    = "https://github.com/$Repo/releases"
-$target     = 'x86_64-pc-windows-msvc'
-$archive    = "cairn-$target.zip"
-$sumsName   = 'SHA256SUMS'
-$Bin        = 'cairn'
-$CliBin     = 'cairn-cli'
+$Repo       = if ($env:CAIRN_REPO)         { $env:CAIRN_REPO }         else { 'Vellixia/Cairn' }
+$InstallDir = if ($env:CAIRN_INSTALL_DIR) { $env:CAIRN_INSTALL_DIR } else { "$env:LOCALAPPDATA\Cairn" }
+$RawBase    = "https://raw.githubusercontent.com/$Repo/main"
 
-function Write-Step($msg)  { Write-Host "› $msg" -ForegroundColor Cyan }
-function Write-Warn($msg)  { Write-Host "⚠ $msg" -ForegroundColor Yellow }
-function Fail($msg)        { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
+function Write-Step($msg) { Write-Host "> $msg" -ForegroundColor Cyan }
+function Fail($msg)       { Write-Host "X $msg" -ForegroundColor Red; exit 1 }
 
-# Resolve 'latest' to the concrete tag name via the GitHub releases/latest redirect.
-# If $env:CAIRN_VERSION is set, return it verbatim.
-function Resolve-Version {
-    param([string]$Requested)
-    if ($Requested -ne 'latest') { return $Requested }
-    try {
-        $resp = Invoke-WebRequest -Uri "$BaseUrl/latest" -MaximumRedirection 5 -Method Head -ErrorAction Stop
-        $final = $resp.Headers['Location'] | Select-Object -First 1
-        if (-not $final) { Fail "Could not resolve latest release for $Repo (no Location header)." }
-        # Final URL is https://github.com/<repo>/releases/tag/<tag>
-        if ($final -match '/releases/tag/([^/?#]+)$') { return $Matches[1] }
-        Fail "Unexpected redirect URL when resolving latest: $final"
-    } catch {
-        Fail "Could not resolve latest release for $Repo (network error: $($_.Exception.Message))"
-    }
+if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+    Fail "docker is required. Install Docker Desktop first."
 }
 
-# Look up the expected SHA-256 for a given archive name in a SHA256SUMS manifest.
-# Format: "<hex>  <filename>" per line; filenames may have leading "./" or CR/LF endings.
-function Get-ExpectedHash {
-    param([string]$SumsPath, [string]$ArchiveName)
-    $expected = $null
-    Get-Content -LiteralPath $SumsPath | ForEach-Object {
-        $line = $_.TrimEnd("`r")
-        if ($line -match '^([0-9a-fA-F]{64})\s+(.+)$') {
-            $hex  = $Matches[1].ToLower()
-            $name = $Matches[2]
-            # Strip any leading "./" and any path prefix; compare base name.
-            $base = [System.IO.Path]::GetFileName($name)
-            if ($base -eq $ArchiveName) {
-                $script:expected = $hex
-            }
-        }
-    }
-    return $expected
-}
+Write-Step "Cairn install - Docker-only setup"
+Write-Step "Target directory: $InstallDir"
 
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-$tag = Resolve-Version -Requested $Version
-Write-Step "Installing cairn $tag ($target) -> $InstallDir"
-
-$archiveUrl = "$BaseUrl/download/$tag/$archive"
-$sumsUrl    = "$BaseUrl/download/$tag/$sumsName"
-$zipPath    = Join-Path $env:TEMP $archive
-$sumsPath   = Join-Path $env:TEMP $sumsName
 
 try {
-    Invoke-WebRequest -Uri $archiveUrl -OutFile $zipPath -ErrorAction Stop
+    Invoke-WebRequest -Uri "$RawBase/docker-compose.yml" -OutFile "$InstallDir\docker-compose.yml" -ErrorAction Stop
 } catch {
-    if (Get-Command cargo -ErrorAction SilentlyContinue) {
-        Write-Host "No prebuilt release found; building from source with cargo…"
-        cargo install --git "https://github.com/$Repo" cairn-server cairn-cli
-        return
-    }
-    Fail "No prebuilt binary available for $target and cargo is not installed."
+    Fail "could not download docker-compose.yml from $RawBase"
 }
+Write-Step "wrote $InstallDir\docker-compose.yml"
 
-# Verify the archive before unpacking — defence against a compromised or partial download.
-if ($SkipVerify) {
-    Write-Warn "================================================================"
-    Write-Warn "  !!! CAIRN_INSTALL_SKIP_VERIFY=1 set — checksum verification !!!"
-    Write-Warn "  !!! SKIPPED. You are about to execute an UNVERIFIED binary.  !!!"
-    Write-Warn "  !!! This is a SECURITY RISK. Only use for local debugging.    !!!"
-    Write-Warn "================================================================"
+try {
+    Invoke-WebRequest -Uri "$RawBase/.env.example" -OutFile "$InstallDir\.env.example" -ErrorAction Stop
+} catch {
+    Fail "could not download .env.example from $RawBase"
+}
+Write-Step "wrote $InstallDir\.env.example"
+
+$envFile = Join-Path $InstallDir '.env'
+if (-not (Test-Path $envFile)) {
+    Copy-Item "$InstallDir\.env.example" $envFile
+    Write-Step "created $envFile from template"
+    Write-Host ""
+    Write-Host "Next steps:" -ForegroundColor Yellow
+    Write-Host "  1. Edit $envFile and set:"
+    Write-Host "       CAIRN_ADMIN_USERNAME=admin"
+    Write-Host "       CAIRN_ADMIN_PASSWORD=<a strong password, 8+ chars>"
+    Write-Host "       MINIO_ROOT_USER=<random>"
+    Write-Host "       MINIO_ROOT_PASSWORD=<random>"
+    Write-Host "  2. cd $InstallDir"
+    Write-Host "  3. docker compose up -d"
+    Write-Host "  4. Open http://127.0.0.1:7777 and log in"
 } else {
-    Write-Step "Verifying SHA-256 checksum…"
-    try {
-        Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath -ErrorAction Stop
-    } catch {
-        Fail "Could not download SHA256SUMS from $sumsUrl — refusing to install unverified artifact. Re-run after a few seconds (the release job may still be finalizing) or pin CAIRN_VERSION to a known-good release."
-    }
-    $expected = Get-ExpectedHash -SumsPath $sumsPath -ArchiveName $archive
-    if (-not $expected) {
-        Fail "$archive not listed in $sumsName — refusing to install unverified artifact."
-    }
-    $actual = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLower()
-    if ($actual -ne $expected) {
-        Fail "Checksum mismatch for ${archive}: expected $expected, got $actual"
-    }
-    Write-Step "Checksum OK ($actual)"
-
-    # Verify the SLSA provenance attestation if cosign is available. This proves the archive
-    # was built by the official GitHub Actions workflow and not from a fork or local rebuild.
-    # Soft gate by default: a failed provenance check warns but does not abort, because users
-    # may be running in an environment where cosign is not installed. Set
-    # $env:CAIRN_INSTALL_REQUIRE_ATTESTATION = '1' to upgrade to a hard gate.
-    $RequireAttestation = ($env:CAIRN_INSTALL_REQUIRE_ATTESTATION -eq '1')
-    $cosign = Get-Command cosign -ErrorAction SilentlyContinue
-    if ($cosign) {
-        $attestationUrl = "$BaseUrl/download/$tag/cairn.intoto.jsonl"
-        $attestationPath = Join-Path $env:TEMP 'cairn.intoto.jsonl'
-        Write-Step "Verifying SLSA provenance (cosign verify-attestation)…"
-        try {
-            Invoke-WebRequest -Uri $attestationUrl -OutFile $attestationPath -ErrorAction Stop
-        } catch {
-            Write-Warn "No cairn.intoto.jsonl found at $attestationUrl — skipping provenance verification."
-        }
-        if (Test-Path $attestationPath) {
-            $cosignResult = & cosign verify-attestation `
-                --certificate-identity-regexp 'https://github.com/Vellixia/Cairn' `
-                --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' `
-                --insecure-ignore-tlog `
-                $zipPath 2>&1
-            $cosignExit = $LASTEXITCODE
-            if ($cosignExit -ne 0) {
-                if ($RequireAttestation) {
-                    Write-Host $cosignResult
-                    Fail "SLSA provenance verification failed and CAIRN_INSTALL_REQUIRE_ATTESTATION=1 — refusing to install."
-                }
-                Write-Warn "SLSA provenance verification failed — proceeding because SHA256SUMS matched."
-                Write-Warn "Set CAIRN_INSTALL_REQUIRE_ATTESTATION=1 to make provenance a hard gate."
-            } else {
-                Write-Step "SLSA provenance OK"
-            }
-            Remove-Item $attestationPath -Force -ErrorAction SilentlyContinue
-        }
-    }
+    Write-Step "$envFile already exists - leaving it alone"
+    Write-Host ""
+    Write-Host "Next step: cd $InstallDir; docker compose up -d" -ForegroundColor Yellow
 }
-
-Expand-Archive -Path $zipPath -DestinationPath $InstallDir -Force
-Remove-Item $zipPath -Force
-if (Test-Path $sumsPath) { Remove-Item $sumsPath -Force }
-
-if (-not (Test-Path (Join-Path $InstallDir "$Bin.exe"))) { Fail "Archive did not contain $Bin.exe" }
-if (-not (Test-Path (Join-Path $InstallDir "$CliBin.exe"))) { Fail "Archive did not contain $CliBin.exe" }
-
-# Add to the user PATH if missing.
-$userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$InstallDir*") {
-    [Environment]::SetEnvironmentVariable('Path', "$userPath;$InstallDir", 'User')
-    Write-Host "Added $InstallDir to your PATH (restart your shell)."
-}
-
-Write-Host "Done. Start the server with:  cairn serve"
-Write-Host "Configure agents with:        cairn-cli setup <agent> --server <url>"
