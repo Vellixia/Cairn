@@ -7,7 +7,7 @@
 
 ## Context
 
-Using AI coding agents (Claude Code, Codex, OpenCode, Cursorâ€¦) over long or multi-session work
+Using AI coding agents (Claude Code, Codex, OpenCode) over long or multi-session work
 fails in ways that bigger context windows do **not** fix. The user named two pains (forgetting,
 re-reading); 2026 research shows the problem is deeper and partly *architectural*. Cairn is a
 new, from-scratch **Rust** tool that unifies the best ideas of four references into one

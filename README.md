@@ -17,29 +17,27 @@ tasks Â· get smarter together â€” self-hosted, with no context ever lost.
 > benefits. Each coding session leaves a marker the next one follows (**memory**); a cairn is
 > minimal â€” only the stones you need to navigate (**lean, no-loss context**).
 
-Cairn sits between your AI coding agents (Claude Code, OpenCode, Cursor, â€¦) and your code.
-It runs as one small server you self-host once, and every device + agent connects to it through a
-single MCP endpoint plus lifecycle hooks.
+Cairn sits between your AI coding agents (Claude Code, Codex CLI, OpenCode) and your code.
+It runs as one small server you self-host once via Docker, and every device + agent connects to
+it through a single MCP endpoint plus lifecycle hooks.
 
 ```mermaid
 flowchart LR
     subgraph Agents["Your agents"]
         CC["Claude Code"]
+        CX["Codex CLI"]
         OC["OpenCode"]
-        CUR["Cursor"]
-        VS["VS Code"]
-        WS["Windsurf"]
     end
 
     CLI["cairn<br/>MCP + hooks + setup"]
-    Server["cairn server<br/>REST API + web UI"]
+    Server["cairn-server<br/>in-container<br/>REST API + web UI"]
     Store["HelixDB<br/>graph + vectors<br/>+ blob store"]
 
     Agents -->|"MCP stdio"| CLI
-    CLI -->|"local or<br/>remote proxy"| Server
+    CLI -->|"HTTP"| Server
     Server --> Store
 
-    CLI -->|"remember / recall<br/>read / expand<br/>verify / checkpoint"| Store
+    CLI -->|"remember / recall<br/>read / expand<br/>verify / checkpoint"| Server
 ```
 
 ## Why
@@ -147,8 +145,8 @@ cairn setup --all         # auto-detect every installed agent and wire up MCP
 cairn setup opencode --server http://localhost:7777 --token <token>
 ```
 
-Supports Claude Code (MCP + lifecycle hooks), OpenCode, Cursor, VS Code, Windsurf.
-See [Architecture â€” Connecting an agent](docs/ARCHITECTURE.md#connecting-an-agent-by-hand) for manual setup.
+Supports Claude Code (MCP + lifecycle hooks), Codex CLI, and OpenCode.
+See [Architecture — Connecting an agent](docs/ARCHITECTURE.md#connecting-an-agent-by-hand) for manual setup.
 
 ### 4. Verify
 

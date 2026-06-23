@@ -9,7 +9,7 @@ and Docker topology.
 
 ```mermaid
 graph TD
-    Agent["AI Agent<br/>Claude Code OpenCode Cursor VS Code Windsurf"]
+    Agent["AI Agent<br/>Claude Code Codex CLI OpenCode"] 
     CLI["cairn client binary<br/>McpServer / RemoteProxy<br/>setup run hook sync pair pack"]
     Server["cairn server binary<br/>cairn-api axum REST + web UI<br/>auth cookie + JWT + CORS + CSP nonce"]
     Store["cairn-store<br/>HelixBackend + BlobStore"]
@@ -302,9 +302,14 @@ Add lifecycle hooks to `.claude/settings.json`:
 
 And add the MCP entry to `.mcp.json` (same as OpenCode above).
 
-### Cursor
+### Codex CLI
 
-Add to `.cursor/mcp.json` (same JSON shape as OpenCode).
+`cairn setup codex` writes the `[mcp_servers.cairn]` block to
+`~/.codex/config.toml` (or `<project>/.codex/config.toml` for project scope).
+Codex reads TOML, not JSON — the block uses stdio transport with
+`command = "cairn"` and `args = ["mcp"]`. When `--server` is passed we
+also write a `[mcp_servers.cairn.env]` sub-block with
+`CAIRN_SERVER` and `CAIRN_TOKEN`.
 
 ---
 

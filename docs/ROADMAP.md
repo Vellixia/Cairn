@@ -101,7 +101,7 @@ gantt
 | Multi-device sync (pull/push) | Done | Last-write-wins on `updated_at` |
 | Pairing codes (device-code flow) | Done | Short, single-use |
 | Binary split (`cairn` server + `cairn` client) | Done | Two binaries, clear separation |
-| `cairn setup <agent>` | Done | Claude Code, Cursor, VS Code, Windsurf, OpenCode |
+| `cairn setup <agent>` | Done | Claude Code, Codex CLI, OpenCode |
 | `cairn setup --all` (auto-detect) | Done | Detects from project/home markers |
 | Lifecycle hooks (Claude Code) | Done | SessionStart/UserPromptSubmit/PostToolUse/SessionEnd |
 | Remote proxy MCP mode | Done | `CAIRN_SERVER` + `CAIRN_TOKEN`, no local HelixDB |

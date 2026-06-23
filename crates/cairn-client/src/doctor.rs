@@ -303,7 +303,7 @@ fn check_agents() -> Check {
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = home_dir();
     let mut found = Vec::new();
-    for id in ["claude-code", "cursor", "vscode", "windsurf", "opencode"] {
+    for id in ["claude-code", "codex", "opencode"] {
         if detect_agent(id, &project, home.as_deref()) {
             found.push(id);
         }
@@ -332,9 +332,11 @@ fn detect_agent(id: &str, project: &std::path::Path, home: Option<&std::path::Pa
                 || home_has(".claude")
                 || home_has(".claude.json")
         }
-        "cursor" => project.join(".cursor").exists() || home_has(".cursor"),
-        "vscode" => project.join(".vscode").exists(),
-        "windsurf" => home_has(".codeium/windsurf"),
+        "codex" => {
+            codex_config_path(home).exists()
+                || project.join(".codex").join("config.toml").exists()
+                || home_has(".codex/config.toml")
+        }
         "opencode" => opencode_config_path().exists() || project.join(".opencode").exists(),
         _ => false,
     }
@@ -349,6 +351,15 @@ fn opencode_config_path() -> PathBuf {
         .join(".config")
         .join("opencode")
         .join("opencode.json")
+}
+
+fn codex_config_path(home: Option<&std::path::Path>) -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(PathBuf::from))
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    config_home.join(".codex").join("config.toml")
 }
 
 fn home_dir() -> Option<PathBuf> {
