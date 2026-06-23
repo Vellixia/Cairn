@@ -19,7 +19,6 @@ use crate::AppState;
 use axum::{extract::State, Json};
 use cairn_assemble::AssemblyReport;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -158,24 +157,6 @@ pub struct MetricsResponse {
     pub checkpoints: usize,
     /// Server build metadata.
     pub server: serde_json::Value,
-}
-
-// ---- reference data: per-source savings share ------------------------------------------------
-
-/// Build the "top savings sources" breakdown. Used by the dashboard's `/dashboard/savings`
-/// page (Sprint 5). Walks a small fixed list of well-known read endpoints and reports the
-/// compact-vs-full delta each one has contributed to the global counter.
-#[allow(dead_code)]
-pub fn source_breakdown(s: &AppState) -> HashMap<&'static str, u64> {
-    let mut out = HashMap::new();
-    let snap = s.savings.snapshot();
-    // We can't reconstruct per-source numbers after the fact without changing every call site,
-    // so this is a coarse split: read endpoints (hits/bounces) vs assembler (wakeup/recall).
-    out.insert("context.read", snap.hits);
-    out.insert("context.expand", snap.recall_tokens);
-    out.insert("assembler", snap.wakeup_tokens);
-    out.insert("bounces", snap.bounces);
-    out
 }
 
 // ---- wire type so the metric counter survives in AppState ------------------------------------

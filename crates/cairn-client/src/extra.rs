@@ -1,10 +1,10 @@
-﻿//! `cairn graph / memory / sessions / metrics` subcommands (v0.5.0 Phase 4.0 Sprint 9).
+//! `cairn graph / memory / sessions / metrics` subcommands (v0.5.0 Phase 4.0 Sprint 9).
 //!
 //! Strategy: implement everything we can run against the *local* store directly. For
 //! commands that need the server (sessions/drift, which write to disk on the server host),
 //! fall back to the HTTP API when `CAIRN_SERVER` is set.
 //!
-//! The plan also lists `cairn impact` and `cairn callgraph` â€” those need the codebase-graph
+//! The plan also lists `cairn impact` and `cairn callgraph` — those need the codebase-graph
 //! layer (`cairn-context` already has `read/expand/write`, and graph APIs land later).
 //! They're stubs here that point the user at `cairn graph related` (the actual
 //! memory-graph feature that ships today).
@@ -16,7 +16,6 @@
 //! - `cairn metrics` prints a one-line summary of local state.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 
 use crate::State;
 
@@ -64,14 +63,17 @@ pub enum GraphCmd {
     Related {
         path: String,
     },
-    #[allow(dead_code)]
-    // Wired through in Sprint 9 follow-up; CLI dispatch currently prints "coming soon".
+    /// Stub: the impact graph (blast radius from a path) is planned for a
+    /// future sprint. The field is captured so the CLI surface stays
+    /// stable, but the handler currently prints "coming soon".
     Impact {
+        #[allow(dead_code)]
         path: String,
     },
-    #[allow(dead_code)]
-    // Wired through in Sprint 9 follow-up; CLI dispatch currently prints "coming soon".
+    /// Stub: the call-graph traversal is planned for a future sprint. Field
+    /// captured for CLI stability; handler prints "coming soon".
     Callgraph {
+        #[allow(dead_code)]
         symbol: String,
     },
 }
@@ -88,7 +90,7 @@ pub fn memory_timeline(s: &State, limit: usize) -> Result<()> {
     eprintln!("memory timeline (newest first, limit={limit}):");
     for m in sorted {
         println!(
-            "[{}] {} Â· {} Â· conf {:.2}{}",
+            "[{}] {} · {} · conf {:.2}{}",
             m.updated_at.format("%Y-%m-%d %H:%M:%S"),
             m.kind.as_str(),
             m.content.chars().take(80).collect::<String>(),
@@ -117,7 +119,7 @@ pub fn metrics(s: &State) -> Result<()> {
     eprintln!("cairn metrics:");
     println!("  memories   : {memories}");
     println!("  checkpoints: {checkpoints}");
-    println!("  tokens     : {tokens} (placeholder â€” see /api/metrics for live ledger)");
+    println!("  tokens     : {tokens} (placeholder — see /api/metrics for live ledger)");
     Ok(())
 }
 
@@ -135,7 +137,7 @@ pub fn search(s: &State, query: &str, limit: usize) -> Result<()> {
     println!("search: {} hit(s) for {query:?}", hits.len());
     for h in hits {
         println!(
-            "  [{:.3}] {} Â· {}",
+            "  [{:.3}] {} · {}",
             h.score,
             h.memory.kind.as_str(),
             h.memory.content
@@ -184,12 +186,12 @@ fn sessions_call(
     let server_env = std::env::var("CAIRN_SERVER").ok();
     let token_env = std::env::var("CAIRN_TOKEN").ok();
     let server = server.or(server_env.as_deref()).context(
-        "no server configured â€” set --server <url> or CAIRN_SERVER \
+        "no server configured — set --server <url> or CAIRN_SERVER \
              (sessions live on the server, not the local store)",
     )?;
     let token = token
         .or(token_env.as_deref())
-        .context("no token â€” set --token <jwt> or CAIRN_TOKEN")?;
+        .context("no token — set --token <jwt> or CAIRN_TOKEN")?;
 
     let url = format!("{}{}", server.trim_end_matches('/'), path);
     eprintln!("sessions {method} {url}");
@@ -217,32 +219,11 @@ fn sessions_call(
     Ok(())
 }
 
-/// Convenience for `--help` style text â€” used by `cairn <cmd> --help` to render a
-/// summary that matches what clap prints.
-#[allow(dead_code)] // Reserved for `cairn help` follow-up; not currently called by main.rs.
-pub fn help_summary() -> &'static str {
-    "graph related <path>  â€” list memories that apply_to <path>\n\
-     graph impact <path>   â€” blast radius (planned v0.5.x)\n\
-     graph callgraph <sym> â€” callers/callees (planned v0.5.x)\n\
-     memory timeline [N]   â€” newest-first memory timeline (default N=20)\n\
-     memory crystallize    â€” promote working memories to a semantic crystal\n\
-     metrics               â€” local memory/checkpoint counts\n\
-     search <q> [N]        â€” hybrid (RRF + MMR) search; default N=20\n\
-     sessions list         â€” list sessions (needs --server)\n\
-     session show <id>     â€” show one session\n\
-     session task <id> <task-id> <title> <progress>\n\
-                            â€” append a task to a session"
-}
-
-#[allow(dead_code)]
-fn _ts() -> DateTime<Utc> {
-    Utc::now()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use cairn_core::{Memory, MemoryKind, MemoryTier};
+    use chrono::Utc;
     use tempfile::TempDir;
 
     fn temp_state() -> Option<(TempDir, State)> {
@@ -272,13 +253,6 @@ mod tests {
     }
 
     #[test]
-    fn help_summary_is_not_empty() {
-        assert!(help_summary().contains("graph related"));
-        assert!(help_summary().contains("memory crystallize"));
-        assert!(help_summary().contains("metrics"));
-    }
-
-    #[test]
     fn metrics_command_runs_against_empty_store() {
         let Some((_dir, s)) = temp_state() else {
             return;
@@ -299,7 +273,7 @@ mod tests {
         let Some((_dir, s)) = temp_state() else {
             return;
         };
-        // Empty store â€” should print "no working memories" and not panic.
+        // Empty store — should print "no working memories" and not panic.
         memory_crystallize(&s).unwrap();
     }
 
@@ -368,7 +342,7 @@ mod tests {
         // graph related on a path that doesn't match.
         graph(
             GraphCmd::Related {
-                path: "crates/cairn/src/main.rs".into(),
+                path: "crates/cairn-client/src/main.rs".into(),
             },
             &s,
         )
@@ -409,7 +383,7 @@ mod tests {
 
     #[test]
     fn sessions_call_requires_server() {
-        // No server set â†’ should fail with a clear error message.
+        // No server set → should fail with a clear error message.
         std::env::remove_var("CAIRN_SERVER");
         std::env::remove_var("CAIRN_TOKEN");
         let r = sessions_list(None, None);

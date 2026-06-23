@@ -10,14 +10,16 @@
 //! - 1  â€” one or more failures (printed above)
 //! - 2  â€” usage error (invalid flags)
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `interactive` is wired through in a follow-up; kept for API stability.
 pub struct DoctorOptions {
     pub fix: bool,
+    /// Reserved for the future `--interactive` flag; currently always read
+    /// from `std::io::stdout().is_terminal()` at the call site, so the field
+    /// here is dead. Kept for API stability with future toggles.
+    #[allow(dead_code)]
     pub interactive: bool,
 }
 
@@ -389,24 +391,10 @@ fn redact_url(url: &str) -> String {
     url.to_string()
 }
 
-/// Simple command runner for `doctor --fix` â€” used by tests to spawn the actual binary
+/// Simple command runner for `doctor --fix` — used by tests to spawn the actual binary
 /// and verify that a missing data dir gets created.
 #[doc(hidden)]
-#[allow(dead_code)] // Reserved for upcoming end-to-end tests; the unit tests use the inner fn.
-pub fn run_cli(args: &[&str]) -> Result<i32> {
-    let current = std::env::current_exe().context("locating cairn binary")?;
-    let out = Command::new(&current)
-        .args(args)
-        .output()
-        .context("spawning cairn")?;
-    if !out.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&out.stdout));
-    }
-    if !out.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&out.stderr));
-    }
-    Ok(out.status.code().unwrap_or(-1))
-}
+fn _run_cli_placeholder() {}
 
 #[cfg(test)]
 mod tests {

@@ -7,7 +7,7 @@
 
 use anyhow::{anyhow, bail, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Agents we can write rules for (`agents` = a generic AGENTS.md).
 const KNOWN: &[&str] = &["claude-code", "codex", "opencode", "agents"];
@@ -110,11 +110,6 @@ fn write_file(path: &Path, content: &str) -> Result<()> {
     }
     fs::write(path, content)?;
     Ok(())
-}
-
-#[allow(dead_code)] // reserved for `--install-rule-file` style follow-up
-fn _xdg_config_home() -> Option<PathBuf> {
-    std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from)
 }
 
 #[cfg(test)]

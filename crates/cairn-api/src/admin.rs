@@ -80,7 +80,6 @@ impl AuditLog {
 }
 
 /// Wire-level admin record for the API. Never includes the password hash.
-#[allow(dead_code)] // exposed for the future /api/auth/me-with-record endpoint
 #[derive(Debug, Serialize)]
 pub struct AdminView {
     pub username: String,
@@ -147,9 +146,9 @@ pub fn load_admin(state: &AppState) -> cairn_core::Result<Option<AdminRecord>> {
     Ok(Some(rec))
 }
 
-/// Persist (or rotate) the admin record. For first-run setup use
-/// [`Store::set_meta_if_absent`](cairn_store::Store::set_meta_if_absent) directly.
-#[allow(dead_code)] // reserved for the future /api/auth/password HTTP surface
+/// Persist (or rotate) the admin record. Kept for the password-rotation
+/// follow-up; until then it's dead code.
+#[allow(dead_code)] // planned for password-rotation follow-up
 pub fn save_admin(state: &AppState, rec: &AdminRecord) -> cairn_core::Result<()> {
     let json = serde_json::to_string(rec)?;
     state.store.set_meta(ADMIN_META_KEY, &json)?;
@@ -169,7 +168,7 @@ pub fn save_admin(state: &AppState, rec: &AdminRecord) -> cairn_core::Result<()>
 ///    username.
 /// 5. Hash the password, mint `AdminRecord { generation: 1 }`, persist via `set_meta_if_absent`.
 ///    If a parallel process raced us, the `Ok(false)` branch is a no-op (winner takes all).
-#[allow(dead_code)] // called by cairn-server (commit 2 wires it; commit 6 moves the binary into cairn-api::bin).
+#[allow(dead_code)] // called by cairn-api::bin::cairn_server (in-container entrypoint only)
 pub fn bootstrap_admin_from_env(state: &AppState) -> cairn_core::Result<()> {
     if load_admin(state)?.is_some() {
         return Ok(());

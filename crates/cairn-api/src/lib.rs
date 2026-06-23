@@ -1769,7 +1769,7 @@ mod tests {
         let mut rx = broker.subscribe();
         broker.publish(crate::events::EventPayload {
             id: "test-1".into(),
-            kind: crate::events::KIND_STATS,
+            kind: crate::events::KIND_AUDIT,
             ts: 12345,
             data: serde_json::json!({"hello": "world"}),
         });
@@ -1779,7 +1779,7 @@ mod tests {
             match rx.try_recv() {
                 Ok(ev) => {
                     assert_eq!(ev.id, "test-1");
-                    assert_eq!(ev.kind, crate::events::KIND_STATS);
+                    assert_eq!(ev.kind, crate::events::KIND_AUDIT);
                     assert_eq!(ev.ts, 12345);
                     assert_eq!(ev.data["hello"], "world");
                     return;
@@ -1880,7 +1880,7 @@ mod tests {
             .unwrap();
 
         // Since the first id, only the latter two should come back, in chronological order.
-        let backfilled = crate::events::test_backfill(&state, Some(&id1)).unwrap();
+        let backfilled = crate::events::backfill(&state, Some(&id1)).unwrap();
         assert_eq!(backfilled.len(), 2);
         assert_eq!(backfilled[0].kind, crate::events::KIND_AUDIT);
         assert_eq!(backfilled[0].data["kind"], "token_issued");
