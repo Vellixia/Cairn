@@ -3,22 +3,21 @@
 
 # Sprint 1: SSE events + Last-Event-ID replay.
 # Open an SSE connection, force a memory write, assert the event arrives.
-# The SSE endpoint requires auth — send the cookie so curl gets through.
+# The SSE endpoint requires auth — pass the cookie via curl -H. We use
+# Start-Job + `& curl.exe @argList` instead of Start-Process because
+# Start-Process -ArgumentList mangles the embedded space in the
+# "Cookie: <value>" header (the cookie never reaches curl, and curl then
+# falls back to treating the URL as malformed).
 $sseUrl = "$Global:E2E_BaseUrl/api/events"
-$sseArgs = @('-sS', '-N', '-o', '__SSE_OUT__', $sseUrl)
-if ($Global:E2E_Cookie) {
-    $sseArgs += @('-H', "Cookie: $($Global:E2E_Cookie)")
-}
 $tmp = New-TemporaryFile
-$sseArgs[3] = $tmp.FullName  # replace __SSE_OUT__ with the real temp path
+$argList = @('-sS', '-N', '-o', $tmp.FullName, $sseUrl, '-H', "Cookie: $($Global:E2E_Cookie)", '--max-time', '5')
+$job = Start-Job -ScriptBlock { & curl.exe @using:argList } -ArgumentList @{ argList = $argList }
 try {
-    $proc = Start-Process -FilePath curl.exe -ArgumentList $sseArgs `
-        -NoNewWindow -PassThru
     Start-Sleep -Milliseconds 800
     # Force a memory write to trigger an event.
     Invoke-CairnCli remember 'e2e-sse-test: event trigger'
     Start-Sleep -Milliseconds 1500
-    try { $proc | Stop-Process -Force } catch { }
+    try { $job | Stop-Job } catch { }
     $body = Get-Content $tmp.FullName -Raw -ErrorAction SilentlyContinue
     # SSE events use `data: <json>` lines; the exact format depends on
     # whether the server includes the event type. Accept any of the
@@ -26,6 +25,8 @@ try {
     $hasEvent = $body -match 'data:|`event`|"event_id"|event:'
     Assert-True -Condition $hasEvent -Msg 'SSE stream contains event lines'
 } finally {
+    try { $job | Stop-Job } catch { }
+    try { $job | Remove-Job } catch { }
     Remove-Item $tmp -ErrorAction SilentlyContinue
 }
 
