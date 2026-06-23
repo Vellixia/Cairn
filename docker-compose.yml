@@ -155,6 +155,37 @@ services:
       - cairn-data:/data
     restart: "no"
 
+  # Startup guard for the env-only admin bootstrap. Refuses to bring up the cairn service if
+  # CAIRN_ADMIN_USERNAME is empty, CAIRN_ADMIN_PASSWORD is shorter than 8 chars, or the two
+  # match each other. To opt out, comment out CAIRN_ADMIN_PASSWORD in .env and the dashboard
+  # /setup wizard will mint the admin on first visit.
+  cairn-admin-guard:
+    image: alpine:3.19
+    container_name: cairn-admin-guard
+    env_file:
+      - path: .env
+        required: true
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        : "$${CAIRN_ADMIN_USERNAME:?CAIRN_ADMIN_USERNAME must be set in .env (see .env.example)}"
+        if [ -z "$${CAIRN_ADMIN_PASSWORD:-}" ]; then
+          echo "CAIRN_ADMIN_PASSWORD is unset — falling back to /setup wizard on first dashboard visit."
+          echo "OK (env-only admin bootstrap skipped)"
+          exit 0
+        fi
+        if [ "$${#CAIRN_ADMIN_PASSWORD}" -lt 8 ]; then
+          echo "FATAL: CAIRN_ADMIN_PASSWORD must be at least 8 chars (got $${#CAIRN_ADMIN_PASSWORD})." >&2
+          echo "       Edit .env (see .env.example) and restart." >&2
+          exit 1
+        fi
+        if [ "$${CAIRN_ADMIN_USERNAME}" = "$${CAIRN_ADMIN_PASSWORD}" ]; then
+          echo "FATAL: CAIRN_ADMIN_USERNAME equals CAIRN_ADMIN_PASSWORD — pick a real password." >&2
+          exit 1
+        fi
+        echo "admin env OK (CAIRN_ADMIN_USERNAME=$${CAIRN_ADMIN_USERNAME}, password length $${#CAIRN_ADMIN_PASSWORD})"
+
   cairn:
     build:
       context: .
@@ -170,11 +201,17 @@ services:
     depends_on:
       cairn-init:
         condition: service_completed_successfully
+      cairn-admin-guard:
+        condition: service_completed_successfully
       helix:
         condition: service_healthy
     environment:
       CAIRN_HOST: 127.0.0.1
       CAIRN_PORT: "7777"
+      # Env-only admin bootstrap (see cairn-admin-guard init service). Comment out
+      # CAIRN_ADMIN_PASSWORD in .env to fall back to the dashboard /setup wizard.
+      CAIRN_ADMIN_USERNAME: ${CAIRN_ADMIN_USERNAME:-admin}
+      CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:-}
       # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
       CAIRN_HELIX_URL: http://helix:8080
       # CAIRN_INSECURE=1 is intentional for the local-dev compose stack: the Cairn API is

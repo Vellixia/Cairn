@@ -121,9 +121,11 @@ irm https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.ps1 | 
 
 ```sh
 # Docker — the full stack (Cairn + HelixDB + MinIO), the easiest path
-cp .env.example .env          # set MinIO credentials (see .env.example)
+cp .env.example .env          # set MinIO + admin credentials (see .env.example)
 docker compose up -d          # builds Cairn, pulls HelixDB + MinIO, wires them together
 # → http://localhost:7777
+# First-boot admin is bootstrapped from CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD.
+# Comment out CAIRN_ADMIN_PASSWORD to fall back to the /setup wizard on first visit.
 ```
 
 ```sh

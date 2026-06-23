@@ -125,6 +125,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.cmd {
         Cmd::Serve { host, port } => {
             let state = AppState::new(&cfg)?;
+            // Env-only admin bootstrap. No-op when an admin already exists; mints one when
+            // CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD are set and no record exists yet.
+            cairn_api::admin::bootstrap_admin_from_env(&state)?;
             let host = host.unwrap_or_else(|| cfg.host.clone());
             let port = port.unwrap_or(cfg.port);
             let addr: SocketAddr = format!("{host}:{port}")

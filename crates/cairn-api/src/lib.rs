@@ -4,7 +4,7 @@
 //! and guard (verify, anchor, checkpoint/rollback) engines over REST, and serves the embedded
 //! Next.js control plane — with a built-in fallback page when the UI hasn't been built.
 
-mod admin;
+pub mod admin;
 mod auth;
 mod devices;
 mod events;
