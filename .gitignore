@@ -35,3 +35,22 @@
 # OS
 .DS_Store
 Thumbs.db
+
+# Working-tree scratch files (build logs, dump outputs, ad-hoc notes,
+# local experiment captures). Anything matched by these patterns is
+# expected to be regenerated on demand and never committed. Explicit
+# allowlist below keeps source-of-truth files (Cargo.toml, README.md,
+# etc.) from being ignored.
+/*.log
+/*.txt
+!/CONTRIBUTING.md
+!/LICENSE
+!/README.md
+!/CHANGELOG.md
+!/SECURITY.md
+!/AGENTS.md
+!/CLAUDE.md
+!/Cargo.toml
+!/Cargo.lock
+!/deny.toml
+!/rust-toolchain.toml
