@@ -133,9 +133,10 @@ cargo install --git https://github.com/Vellixia/Cairn cairn-server cairn
 
 ### 2. Start the server
 
-Cairn stores data in **HelixDB** â€” `docker compose` starts one for you, or point
-`CAIRN_HELIX_URL` at an existing server. Then run `cairn serve` and open
-<http://127.0.0.1:7777>.
+`docker compose up -d` brings up Cairn + HelixDB + MinIO. The admin record
+is bootstrapped from `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD` in
+`.env` on first boot. See [docs/ADMIN.md](docs/ADMIN.md) for the full
+admin surface (mint tokens, pair codes, password rotation).
 
 ### 3. Connect an agent
 
