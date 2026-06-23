@@ -23,7 +23,6 @@ mod pool;
 mod rules;
 mod setup;
 mod sync;
-mod update;
 
 #[derive(Parser)]
 #[command(
@@ -161,13 +160,6 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Log in to a Cairn server. (coming soon)
-    Login {
-        /// Server URL.
-        server: Option<String>,
-    },
-    /// Update the cairn-cli binary in place to the latest GitHub release.
-    Update,
     /// Run the MCP server over stdio (point your agent's MCP config at `cairn-cli mcp`).
     Mcp,
     /// Run a command and print compressed output; the full output is retained and recoverable.
@@ -332,11 +324,6 @@ impl State {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
-    if let Some(global) = cairn_core::config::global_env_path() {
-        let _ = dotenvy::from_path(&global);
-    }
-
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -560,11 +547,6 @@ async fn main() -> anyhow::Result<()> {
             token,
         } => setup::run(agent.as_deref(), all, server.as_deref(), token.as_deref())?,
         Cmd::Rules { agent, all } => rules::run(agent.as_deref(), all)?,
-        Cmd::Login { server } => coming_soon(&format!(
-            "logging in to {}",
-            server.as_deref().unwrap_or("<server>")
-        )),
-        Cmd::Update => update::run()?,
         Cmd::Mcp => {
             cairn_mcp::serve_stdio(&cfg)?;
         }
@@ -661,10 +643,6 @@ fn build_share_bundle(mems: &[cairn_core::Memory]) -> anyhow::Result<String> {
         stats.total, stats.shared, stats.needs_review, stats.withheld
     );
     Ok(serde_json::to_string_pretty(&bundle)?)
-}
-
-fn coming_soon(what: &str) {
-    println!("cairn-cli: {what} — coming soon in a later build.");
 }
 
 #[cfg(test)]
