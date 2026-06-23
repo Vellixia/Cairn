@@ -41,7 +41,7 @@ export default function ReliabilityScorePage() {
         <Card>
           <CardContent className="pt-6">
             <p className="text-sm text-muted-foreground">
-              No edit history yet. Run <code>cairn-cli verify</code> or call
+              No edit history yet. Run <code>cairn verify</code> or call
               <code className="ml-1">/api/guard/verify</code> to seed the score.
             </p>
           </CardContent>

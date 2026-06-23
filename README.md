@@ -127,8 +127,8 @@ docker compose up -d          # builds Cairn, pulls HelixDB + MinIO, wires them 
 ```
 
 ```sh
-# From source
-cargo install --git https://github.com/Vellixia/Cairn cairn-server cairn
+# From source (host binary only — the in-container server bin ships in the Docker image)
+cargo install --git https://github.com/Vellixia/Cairn cairn
 ```
 
 ### 2. Start the server
@@ -172,8 +172,9 @@ docker compose up -d                     # HelixDB + MinIO + Cairn on :7777
 # 3. Wire OpenCode (creates ~/.config/opencode/opencode.json with the MCP entry)
 cairn setup opencode --server http://localhost:7777
 
-# 4. Generate a token (one-time, copy it)
-cairn token create --name laptop --scope write
+# 4. Generate a token (one-time, copy it).
+# Mint a device token via the dashboard: open http://127.0.0.1:7777/settings/tokens
+# and click "Mint token". The bearer appears once in the success toast.
 
 # 5. Restart OpenCode so the MCP entry picks up. You'll see `cairn` in the tool list.
 ```

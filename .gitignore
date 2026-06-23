@@ -23,6 +23,7 @@
 # Cairn runtime data
 /data
 /.cairn
+/.e2e-data
 *.db
 *.sqlite
 *.sqlite3

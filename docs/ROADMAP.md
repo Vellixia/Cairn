@@ -60,7 +60,7 @@ gantt
 
 | Item | Status | Notes |
 |---|---|---|
-| Cargo workspace + crate structure | Done | 22 crates (8 added in 0.5.0: session, pack, registry, sync, bench, proactive, proxy, ingest) |
+| Cargo workspace + crate structure | Done | 21 crates (8 added in 0.5.0: session, pack, registry, sync, bench, proactive, proxy, ingest; cairn-server dropped in 0.6.0 — its bin now lives in cairn-api) |
 | Next.js web app (admin console, sidebar dashboard) | Done | Static export, embedded via rust-embed; cairn-api/build.rs creates `web/out/` at compile time when missing |
 | Docker Compose stack (Cairn + HelixDB + MinIO) | Done | `docker compose up -d` |
 | CI pipeline (test/clippy/fmt) | Done | GitHub Actions |

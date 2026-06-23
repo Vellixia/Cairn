@@ -14,8 +14,10 @@ A running **HelixDB** instance is required for live integration tests â€” t
 cargo build --workspace
 cargo test --workspace
 
-# run the server (+ embedded UI / built-in fallback page) on http://127.0.0.1:7777
-cargo run -p cairn-server -- serve
+# run the in-container server (+ embedded UI / built-in fallback page) on http://127.0.0.1:7777
+docker compose up -d cairn
+# or for local-dev with the host-stdout binary:
+cargo run -p cairn-api --bin cairn-server -- serve
 
 # web control plane (dev server on http://localhost:3000, talks to the API on :7777)
 cd web && npm install && npm run dev
@@ -42,8 +44,8 @@ cargo test --workspace
 
 ## Workspace layout
 
-22 crates. Dep graph: `cairn-core` â†’ `cairn-store` â†’ domain crates â†’ `cairn-mcp` â†’ `cairn-api`
-â†’ `cairn-server` / `cairn`.
+21 crates. Dep graph: `cairn-core` → `cairn-store` → domain crates → `cairn-mcp` → `cairn-api`
+→ `cairn-client`. The in-container server entrypoint lives at `cairn-api::bin::cairn-server`.
 
 | Crate | Role |
 |---|---|
@@ -66,11 +68,10 @@ cargo test --workspace
 | `cairn-ingest` | VTT/SRT/JSON transcript parsers Â· speaker-window chunking |
 | `cairn-embed` | embedding providers (hashing default, ONNX opt-in) |
 | `cairn-api` | axum REST API Â· embedded web UI Â· PWA service worker Â· push subscriptions |
-| `cairn-mcp` | MCP server (stdio) Â· 29 tools + 10 graph actions = 39 total Â· 6 resources Â· 5 prompts |
-| `cairn` | the `cairn` binary (serve, mcp, setup, hook, sync, bench, token, pack, sync, proxy) |
-| `cairn-server` | the `cairn` binary entry point (alternative name) |
+| `cairn-mcp` | MCP server (stdio) · 29 tools + 10 graph actions = 39 total · 6 resources · 5 prompts |
+| `cairn-client` | the host `cairn` binary (mcp, setup, hook, sync, pair, bench, pack, doctor, ...) |
 
-The two binaries shipped are `cairn` (from `cairn-server`) and `cairn`.
+The two binaries shipped are `cairn-server` (in-container, from `cairn-api`) and `cairn` (host, from `cairn-client`).
 
 ## License
 

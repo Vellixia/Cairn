@@ -33,8 +33,7 @@ cargo build --workspace
 
 **Server (requires HelixDB):**
 ```sh
-docker compose up -d helix
-cargo run -p cairn-server -- serve
+docker compose up -d
 ```
 
 **Web UI (separate from Rust):**
@@ -44,14 +43,14 @@ cd web && npm install && npm run dev   # :3000 → API on :7777
 
 ## Architecture
 
-22-crate Rust workspace (MSRV 1.85) + Next.js static-export web UI. Two binaries:
+21-crate Rust workspace (MSRV 1.85) + Next.js static-export web UI. Two binaries:
 
-| Binary | Crate | Purpose |
-|--------|-------|---------|
-| `cairn` | `cairn-server` | Server: `serve`, `token`, `pair-code` |
-| `cairn-cli` | `cairn-cli` | Client: `mcp`, `setup`, `hook`, `sync`, `bench` |
+| Binary | Lives in | Purpose |
+|--------|----------|---------|
+| `cairn-server` (in-container) | Docker image (`cairn-api` bin) | Long-lived server: binds :7777, serves the API + web UI, runs env-only admin bootstrap |
+| `cairn` (host) | release tarball (`cairn-client` crate) | Client: `mcp`, `setup`, `rules`, `run`, `hook`, `remember`, `recall`, `sync`, `pair`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard` |
 
-**Dep graph:** `cairn-core` → `cairn-store` → domain crates (`context`, `memory`, `guard`, `shell`, `profile`, `embed`, `share`, `assemble`) → `cairn-mcp` → `cairn-api` → `cairn-server` / `cairn-cli`.
+**Dep graph:** `cairn-core` → `cairn-store` → domain crates (`context`, `memory`, `guard`, `shell`, `profile`, `embed`, `share`, `assemble`) → `cairn-mcp` → `cairn-api` → `cairn-client`.
 
 **Config precedence:** CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 
@@ -82,5 +81,5 @@ cd web && npm install && npm run dev   # :3000 → API on :7777
 - `Cargo.toml` — workspace manifest, dep versions, `[profile.release]` (lto = "thin", strip = true)
 - `deny.toml` — cargo-deny config (bans multiple-versions, yanked crates)
 - `rust-toolchain.toml` — pins `stable` with `rustfmt` + `clippy` components
-- `.mcp.json` / `.cursor/mcp.json` — MCP config for OpenCode / Cursor
-- `.claude/settings.json` — Claude Code lifecycle hooks via `cairn-cli hook`
+- `.mcp.json` — MCP config for OpenCode (Claude Code + Codex use their own configs)
+- `.claude/settings.json` — Claude Code lifecycle hooks via `cairn hook`

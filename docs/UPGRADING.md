@@ -19,7 +19,7 @@ crates). The single-admin/cookie-session model from 0.4.0 is unchanged â€” 
 
 ## What changed for operators
 
-- 22 crates in the workspace. The old 14-crate dep graph is gone â€” `cairn-session`,
+- 21 crates in the workspace. The old 14-crate dep graph is gone â€” `cairn-session`,
   `cairn-pack`, `cairn-registry`, `cairn-sync`, `cairn-bench`, `cairn-proactive`,
   `cairn-proxy`, and `cairn-ingest` are new.
 - **HelixDB is required.** `cairn-store` ships a pluggable backend (HelixDB +
@@ -105,7 +105,7 @@ proactive, and the mobile companion.
 ```sh
 cargo build --workspace
 cargo test --workspace         # 330 lib tests pass; 5 ignored are live-HelixDB ones
-cargo run -p cairn-server -- serve
+docker compose up -d           # in-container cairn-server now resolves config + bootstrap from .env
 pwsh scripts/e2e.ps1           # end-to-end harness
 ```
 

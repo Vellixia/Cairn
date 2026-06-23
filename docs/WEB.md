@@ -171,7 +171,7 @@ The admin can do everything the CLI could, from the dashboard:
   only the metadata.
 - **Revoke a device token**: marks the id revoked; future bearer calls 401.
 - **Generate a pairing code**: short 8-char code, TTL 1â€“60 min (default 10).
-  Same-store pattern as `cairn pair-code` â€” the claim endpoint signs a fresh
+  Same-store pattern: the dashboard **You → Pair** page mints codes; the claim endpoint signs a fresh
   JWT at claim time.
 
 ## Static export

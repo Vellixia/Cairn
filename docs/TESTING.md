@@ -237,12 +237,12 @@ Historical category table (v0.4.0, kept for diff context):
 ## Category 9 â€” Multi-device & Sync (CLI)
 
 - [ ] **9.1** Token creation
-  - Method: `cairn token create device-2 --scope write` via docker exec
+  - Method: dashboard **You → Tokens** page, or `POST /api/devices/tokens` (admin session)
   - Expected: Prints JWT
   - Result: **SKIP** â€” Already tested in earlier session; token exists and works.
 
 - [ ] **9.2** Pairing
-  - Method: `cairn pair-code` then `cairn pair`
+  - Method: dashboard **You → Pair** page (`POST /api/devices/pair-codes`), then `cairn pair <code>`
   - Expected: Device paired, token claimed
   - Result: **SKIP** â€” Tested in earlier session; pairing works.
 
@@ -279,7 +279,7 @@ Historical category table (v0.4.0, kept for diff context):
   - Method: `cairn contribute --server http://localhost:7777 --token <admin>` then `cairn pull`
   - Expected: Sanitized knowledge federated
   - Result: **PASS** â€” `contributed to http://localhost:7777: 11 accepted, 0 rejected`; pull ingests pool memories
-  - Note: `/api/pool/contribute` requires an **admin** token (write scope is intentionally denied for shared-pool mutation). Create one with `cairn token create --scope admin <name>` from inside the server environment.
+  - Note: `/api/pool/contribute` requires an **admin** token (write scope is intentionally denied for shared-pool mutation). Mint one via the dashboard **You → Tokens** page (`POST /api/devices/tokens` with `scope=admin`).
 
 ---
 

@@ -33,7 +33,7 @@ export default function SessionsPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Sessions</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Every session you logged with `cairn-cli session start`. Open one to
+            Every session you logged with `cairn session start`. Open one to
           see its CCP block + tasks + decisions.
           </p>
         </div>
@@ -71,7 +71,7 @@ export default function SessionsPage() {
       ) : (
         <Card className="p-6 text-sm text-muted-foreground">
           No sessions yet. Start one with{" "}
-          <code className="font-mono">cairn-cli session start</code>.
+          <code className="font-mono">cairn session start</code>.
         </Card>
       )}
     </div>

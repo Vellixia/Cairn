@@ -85,7 +85,7 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     if let Some(s) = &opts.server {
         eprintln!("  â€¢ server  : {s}");
     } else {
-        eprintln!("  â€¢ server  : (local HelixDB â€” start with `cairn serve`)");
+        eprintln!("  • server  : (local HelixDB — start with `docker compose up -d cairn`)");
     }
     eprintln!("  â€¢ open the dashboard at http://127.0.0.1:7777 (or your configured host)");
     eprintln!("  â€¢ first agent action: cairn remember \"your first memory\"");

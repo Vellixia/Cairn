@@ -27,7 +27,6 @@ $lib = Join-Path $PSScriptRoot 'e2e/_lib.ps1'
 Write-Host "Cairn e2e harness (lib=$lib, fail-fast=$Global:E2E_FailFast, base=$Global:E2E_BaseUrl)" -ForegroundColor Cyan
 Write-Host "Binaries:" -ForegroundColor DarkGray
 Write-Host "  cairn    = $Global:E2E_BinCairn"   -ForegroundColor DarkGray
-Write-Host "  cairn-cli= $Global:E2E_BinCairnCli" -ForegroundColor DarkGray
 Write-Host "Data dir : $Global:E2E_DataDir" -ForegroundColor DarkGray
 Write-Host "Log file : $Global:E2E_LogFile" -ForegroundColor DarkGray
 Write-Host ""

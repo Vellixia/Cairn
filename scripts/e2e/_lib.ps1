@@ -5,7 +5,7 @@
 #   Assert-Eq   -Expected X -Actual Y -Msg "..."
 #   Assert-True -Condition X -Msg "..."
 #   Test-Endpoint -Method GET -Path /api/health [-Token $token] [-Body $obj] -ExpectStatus 200
-#   Invoke-Mcp  -Tool <name> -Args @{...}                  # drives cairn-cli.exe mcp over stdio
+#   Invoke-Mcp  -Tool <name> -Args @{...}                  # drives cairn.exe mcp over stdio
 #   Initialize-Mcp                                              # one-time per session
 #   Show-Scenario -Sprint <n> -Name <name> [-Status pass|fail|skip]
 #   Get-BearerToken -Username admin -Password $pw
@@ -19,12 +19,11 @@ $ErrorActionPreference = 'Stop'
 
 $script:RepoRoot      = (Resolve-Path "$PSScriptRoot/../..").Path
 $Global:E2E_BinCairn   = Join-Path $script:RepoRoot 'target/release/cairn.exe'
-$Global:E2E_BinCairnCli = Join-Path $script:RepoRoot 'target/release/cairn-cli.exe'
 $Global:E2E_BaseUrl   = if ($env:CAIRN_BASE_URL) { $env:CAIRN_BASE_URL } else { 'http://127.0.0.1:7777' }
 $Global:E2E_DataDir   = if ($env:CAIRN_E2E_DATA) { $env:CAIRN_E2E_DATA } else { Join-Path $script:RepoRoot '.e2e-data' }
 $Global:E2E_LogFile   = Join-Path $Global:E2E_DataDir 'e2e.log'
 
-# Prepend our freshly-built release dir to PATH so `cairn-cli` resolves
+# Prepend our freshly-built release dir to PATH so `cairn` resolves
 # to v0.5.0 regardless of any older global copy.
 $env:PATH = "$script:RepoRoot/target/release;$env:PATH"
 
@@ -184,8 +183,8 @@ function Get-BearerToken {
 # ----------------------------------------------------------------------
 # MCP stdio driver
 #
-# Spawns cairn-cli mcp with redirected stdin/stdout, sends a JSON-RPC
-# message per call, parses the response. The cairn-cli stdio server reads
+# Spawns `cairn mcp` with redirected stdin/stdout, sends a JSON-RPC
+# message per call, parses the response. The cairn stdio server reads
 # one JSON message per line, replies with one JSON message per line.
 # ----------------------------------------------------------------------
 
@@ -288,7 +287,7 @@ function Stop-Mcp {
 }
 
 # ----------------------------------------------------------------------
-# CLI wrapper — runs `cairn-cli <args>` and returns stdout as a string.
+# CLI wrapper — runs `cairn <args>` and returns stdout as a string.
 # Uses a fresh data dir per call so we don't pollute the live container.
 # ----------------------------------------------------------------------
 

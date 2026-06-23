@@ -9,16 +9,15 @@ and Docker topology.
 
 ```mermaid
 graph TD
-    Agent["AI Agent<br/>Claude Code Codex CLI OpenCode"] 
-    CLI["cairn client binary<br/>McpServer / RemoteProxy<br/>setup run hook sync pair pack"]
-    Server["cairn server binary<br/>cairn-api axum REST + web UI<br/>auth cookie + JWT + CORS + CSP nonce"]
+    Agent["AI Agent<br/>Claude Code Codex CLI OpenCode"]
+    CLI["cairn (host binary)<br/>McpServer / RemoteProxy<br/>setup run hook sync pair pack"]
+    Server["cairn-server (in-container bin)<br/>cairn-api axum REST + web UI<br/>auth cookie + JWT + CORS + CSP nonce"]
     Store["cairn-store<br/>HelixBackend + BlobStore"]
     Helix["HelixDB<br/>graph + HNSW vectors"]
     MinIO["MinIO<br/>S3 persistence"]
 
     Agent -->|"MCP stdio<br/>+ lifecycle hooks"| CLI
-    CLI -->|"local store HelixDB"| Store
-    CLI -->|"HTTP proxy<br/>CAIRN_SERVER + CAIRN_TOKEN"| Server
+    CLI -->|"HTTP<br/>CAIRN_SERVER + CAIRN_TOKEN"| Server
     Server --> Store
     Store --> Helix
     Helix --> MinIO
@@ -26,16 +25,20 @@ graph TD
 
 ---
 
-## Two Binaries
+## One Host Binary + One In-Container Binary
 
-| Binary | Crate | Role |
+| Binary | Lives in | Role |
 |---|---|---|
-| `cairn` | `cairn-server` | Server: `serve`, `token create/list/revoke`, `pair-code`, `admin password/reset` |
-| `cairn` | `cairn` | Client: `mcp`, `setup`, `rules`, `run`, `hook`, `remember`, `recall`, `wakeup`, `prefer`, `anchor`, `checkpoint`, `rollback`, `sync`, `pair`, `export`, `import`, `contribute`, `pull`, `bench`, `update`, `doctor`, `onboard`, `pack`, `graph`, `memory`, `search`, `sessions`, `session`, `metrics`, `stats` |
+| `cairn` (host) | release tarball + install script | Client: `mcp`, `setup`, `rules`, `run`, `hook`, `remember`, `recall`, `wakeup`, `prefer`, `anchor`, `checkpoint`, `rollback`, `sync`, `pair`, `export`, `import`, `contribute`, `pull`, `bench`, `doctor`, `onboard`, `pack`, `graph`, `memory`, `search`, `sessions`, `session`, `metrics`, `stats` |
+| `cairn-server` (in-container) | Docker image only | Long-lived server: binds :7777, serves the API + web UI, runs env-only admin bootstrap |
+
+v0.5.0 shipped both as the same name (`cairn`); v0.6.0 split them so the
+host tarball ships exactly one binary and the in-container server is
+rebuilt only when the Docker image is rebuilt. See ADR-029.
 
 ---
 
-## Cargo Workspace â€” 22 Crates
+## Cargo Workspace â€” 21 Crates
 
 ### Dependency Graph
 
@@ -61,8 +64,8 @@ graph BT
     ingest["cairn-ingest<br/>VTT/SRT/JSON transcript parsers"]
     mcp["cairn-mcp<br/>MCP server (stdio) â€” 29 tools + 10 graph actions Â· 6 resources Â· 5 prompts"]
     api["cairn-api<br/>REST API + web UI + registry + extensions + push"]
-    server["cairn-server<br/>cairn binary"]
-    cli["cairn<br/>cairn binary"]
+    server["cairn-server<br/>in-container bin<br/>(cairn-api::bin::cairn_server)"]
+    cli["cairn<br/>host binary<br/>(cairn-client crate)"] 
 
     core --> store
     core --> embed
@@ -119,8 +122,8 @@ graph BT
 | `cairn-ingest` | VTT/SRT/JSON transcript parsers + speaker-window chunking (default 60s). |
 | `cairn-mcp` | MCP server over stdio. Local mode (opens HelixDB store) or remote proxy mode (forwards to `cairn-api`). 29 tools + 10 graph actions = 39, 6 resources, 5 prompts. |
 | `cairn-api` | Axum REST API + embedded web UI (rust-embed). Auth middleware (cookie session + JWT device tokens), CORS, per-request CSP nonce. Registry + extensions + push + ingest routes. |
-| `cairn-server` | The `cairn` binary: `serve`, `token`, `pair-code`, `admin`. |
-| `cairn` | The `cairn` binary: `mcp`, `setup`, `run`, `hook`, `sync`, `pair`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
+| `cairn-api` (bin `cairn-server`) | In-container entrypoint. Resolves config, opens the store, runs `bootstrap_admin_from_env`, binds :7777, serves the API + web UI. Built into the Docker image; never ships in host tarballs. |
+| `cairn-client` | Host binary `cairn`: `mcp`, `setup`, `run`, `hook`, `sync`, `pair`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
 
 ---
 

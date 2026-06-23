@@ -287,17 +287,19 @@ command palette** to search memory/code/sessions/collective and run actions), da
 single static Rust binary â€” **no Node/Python/runtime** to install.
 
 **1. Server (once â€” home server / NAS / Pi / VPS):**
-- One-liner: `curl -fsSL https://cairn.sh/install.sh | sh` Â· Windows: `irm https://cairn.sh/install.ps1 | iex`.
+- One-liner: `curl -fsSL https://cairn.sh/install.sh | sh` (Windows: `irm https://cairn.sh/install.ps1 | iex`).
 - Or Docker: `docker compose up -d`.
 - Or one-click: Fly / Railway / Render deploy buttons.
-- `cairn serve` starts the server **+ embedded web UI**, and prints the URL + a first-run admin link.
+- The Docker container starts `cairn-server` (REST API + embedded web UI) and prints the URL.
+  The admin account is bootstrapped from `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD` in `.env`
+  (env-only — there is no first-run admin link to click).
 
 **2. Each device (the "easy on every device" part) â€” Tailscale / `gh`-style pairing:**
 - In the web UI, click **Add Device** â†’ it shows a copy-paste one-liner with a short-lived
   pairing code (and a **QR code** for mobile).
 - That command **installs the binary, pairs the device** to your server (device-code flow â€” no
   manual token juggling), then runs **`cairn setup --all`** to **auto-detect installed agents**
-  (Claude Code, Codex, OpenCode, Cursor, Windsurf, Cline, Gemini CLI, Copilotâ€¦) and write their
+  (Claude Code, Codex, OpenCode) and write their
   **hook + MCP config** to point at your server.
 - Manual paths exist too: `cairn pair <code>`, `cairn setup <agent>`, `cairn doctor`.
 

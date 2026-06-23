@@ -216,8 +216,9 @@ services:
       CAIRN_HELIX_URL: http://helix:8080
       # CAIRN_INSECURE=1 is intentional for the local-dev compose stack: the Cairn API is
       # authenticated and must not travel in cleartext over a public network. For production
-      # deployments, run `cairn serve` directly with CAIRN_TLS_CERT + CAIRN_TLS_KEY, or place a
-      # reverse proxy in front. See docs/ARCHITECTURE.md for the recommended topology.
+      # deployments, terminate TLS at a reverse proxy (Caddy/Traefik/nginx) in front of the
+      # cairn container, and set CAIRN_TLS_CERT + CAIRN_TLS_KEY on that proxy. See
+      # docs/ARCHITECTURE.md for the recommended topology.
       CAIRN_INSECURE: "1"
       # Mount the host project so cairn read/verify/checkpoint tools can access local files.
       CAIRN_WORKSPACE_ROOT: /workspace

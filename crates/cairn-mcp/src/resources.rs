@@ -62,7 +62,7 @@ pub fn resource_defs() -> &'static [ResourceDef] {
         ResourceDef {
             uri: "cairn://config/toml",
             name: "Effective Config (TOML)",
-            description: "Current cairn-server configuration as a TOML document. Includes host, port, multi_tenant flag.",
+            description: "Current in-container server configuration as a TOML document. Includes host, port, multi_tenant flag.",
             mime_type: "text/plain",
         },
     ]
@@ -131,15 +131,15 @@ fn read_savings_today(_server: &McpServer) -> Value {
     // a placeholder that the dashboard-side bridge can fill in. Future
     // iteration: wire cairn-api's SavingsState into McpServer.
     json!({
-        "note": "savings summary lives at /api/ledger on the cairn-server; bridged by cairn.",
+        "note": "savings summary lives at /api/ledger on the in-container server; bridged by cairn.",
         "fetched_at": Utc::now().to_rfc3339(),
     })
 }
 
 fn read_drift_pending(_server: &McpServer) -> Value {
-    // Same as above â€” drift is owned by cairn-session. The MCP surface
+    // Same as above — drift is owned by cairn-session. The MCP surface
     // exposes the URI; the actual JSON is filled by the host (cairn
-    // proxy or cairn-server) so the contract is honest.
+    // proxy or in-container server) so the contract is honest.
     json!({
         "note": "drift pending is fetched via cairn_session::SessionStore on the server; the MCP server proxies to it.",
         "fetched_at": Utc::now().to_rfc3339(),
@@ -147,16 +147,16 @@ fn read_drift_pending(_server: &McpServer) -> Value {
 }
 
 fn read_audit_recent(server: &McpServer) -> Value {
-    // Audit events are stored in HelixDB on the cairn-server. The standalone
-    // MCP stdio binary (without the cairn-server HTTP surface) returns an
-    // empty list â€” production clients should read this URI through the
-    // cairn-server's `/api/mcp/resources/read` bridge.
+    // Audit events are stored in HelixDB on the in-container server. The standalone
+    // MCP stdio binary (without the HTTP surface) returns an
+    // empty list — production clients should read this URI through the
+    // server's `/api/mcp/resources/read` bridge.
     let events: Vec<Value> = Vec::new();
     let _ = server; // silence unused warning when no live store backend
     json!({
         "events": events,
         "count": 0,
-        "note": "live audit feed requires the cairn-server HTTP bridge; standalone MCP returns an empty list.",
+        "note": "live audit feed requires the in-container server HTTP bridge; standalone MCP returns an empty list.",
         "fetched_at": Utc::now().to_rfc3339(),
     })
 }
@@ -164,8 +164,8 @@ fn read_audit_recent(server: &McpServer) -> Value {
 fn read_config_toml(server: &McpServer) -> Value {
     let cfg = &server.config;
     let body = format!(
-        "# Effective cairn-server configuration (read-only snapshot)\n\
-         # This document is for diagnostics only â€” do not edit and re-apply.\n\
+        "# Effective in-container server configuration (read-only snapshot)\n\
+         # This document is for diagnostics only — do not edit and re-apply.\n\
          \n\
          host = \"{}\"\n\
          port = {}\n\
