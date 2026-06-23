@@ -4,6 +4,7 @@
 //! When `CAIRN_HELIX_URL` is set it talks to a local HelixDB; when `CAIRN_SERVER` is set it proxies
 //! through the remote Cairn HTTP API.
 
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,7 +13,11 @@ use cairn_core::{Config, NewMemory};
 use clap::{Parser, Subcommand};
 
 mod bench;
+mod doctor;
+mod extra;
 mod hook;
+mod onboard;
+mod pack;
 mod pair;
 mod pool;
 mod rules;
@@ -72,7 +77,24 @@ enum Cmd {
     /// Show basic stats.
     Stats,
     /// Verify the local setup.
-    Doctor,
+    Doctor {
+        /// Attempt to repair failures automatically (creates missing data dirs, etc.).
+        #[arg(long)]
+        fix: bool,
+    },
+    /// Zero-prompt setup for first-run installs: doctor + provision store + wire agents.
+    Onboard {
+        /// Skip agent auto-detection and wiring (useful for CI).
+        #[arg(long)]
+        skip_agents: bool,
+        /// Remote Cairn server URL — sets `CAIRN_SERVER` so the spawned `setup` subprocess
+        /// runs in remote-proxy mode.
+        #[arg(long)]
+        server: Option<String>,
+        /// Remote Cairn server token.
+        #[arg(long)]
+        token: Option<String>,
+    },
     /// Measure the token savings Cairn gives on a codebase.
     Bench { path: Option<PathBuf> },
     /// Pair this device with a Cairn server using a code from the host.
@@ -95,6 +117,41 @@ enum Cmd {
         /// Device token for the remote server (defaults to `CAIRN_TOKEN`).
         #[arg(long)]
         token: Option<String>,
+    },
+    /// Build / query the memory provenance graph (Sprint 9).
+    Graph {
+        #[command(subcommand)]
+        action: GraphCmd,
+    },
+    /// Memory commands that go beyond remember / recall / wakeup (Sprint 9).
+    Memory {
+        #[command(subcommand)]
+        action: MemoryCmd,
+    },
+    /// Hybrid search (RRF + MMR) over the local store (Sprint 9).
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// List sessions on the server.
+    Sessions {
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Show or update a single session.
+    Session {
+        #[command(subcommand)]
+        action: SessionCmd,
+    },
+    /// Print local metrics (memory/checkpoint counts). Live savings go through /api/metrics.
+    Metrics,
+    /// Build / inspect / install / publish `.cairnpkg` bundles (Sprint 11).
+    Pack {
+        #[command(subcommand)]
+        action: PackAction,
     },
     /// Write per-agent instruction files that tell the model to use Cairn's tools.
     Rules {
@@ -161,6 +218,91 @@ enum Cmd {
         /// Treat the file as a sanitized share bundle and ingest it as shared memories.
         #[arg(long)]
         share: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GraphCmd {
+    /// List memories that `applies_to <path>`.
+    Related { path: String },
+    /// Blast radius for a file (planned v0.5.x; see `cairn graph related` today).
+    Impact { path: String },
+    /// Callers/callees for a symbol (planned v0.5.x).
+    Callgraph { symbol: String },
+}
+
+#[derive(Subcommand)]
+enum MemoryCmd {
+    /// Newest-first memory timeline (default 20 entries).
+    Timeline {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Promote working-tier memories to a semantic crystal (agentmemory pattern).
+    Crystallize,
+}
+
+#[derive(Subcommand)]
+enum SessionCmd {
+    /// Show a session by id.
+    Show {
+        id: String,
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Append a task to a session.
+    Task {
+        id: String,
+        task_id: String,
+        title: String,
+        progress: String,
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long)]
+        token: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PackAction {
+    /// Bundle the current store into a new `.cairnpkg`.
+    Create {
+        name: String,
+        #[arg(long, default_value = "0.1.0")]
+        version: String,
+        #[arg(long, default_value = "")]
+        author: String,
+        #[arg(long, default_value = "")]
+        description: String,
+        /// Output path; defaults to `<name>.cairnpkg` in the current directory.
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
+    },
+    /// Print the manifest of a tarball.
+    Info { tarball: std::path::PathBuf },
+    /// Install a tarball into the local pack dir + ingest memories.
+    Install { tarball: std::path::PathBuf },
+    /// List installed packs.
+    List,
+    /// Remove an installed pack.
+    Remove { name: String },
+    /// Re-tar an installed pack into a file.
+    Export {
+        name: String,
+        output: std::path::PathBuf,
+    },
+    /// Import a tarball (alias for install with a friendlier verb).
+    Import { tarball: std::path::PathBuf },
+    /// Print (or toggle) the auto-load list.
+    AutoLoad,
+    /// POST a tarball to a registry.
+    Publish {
+        tarball: std::path::PathBuf,
+        /// Registry base URL, e.g. `https://cairn.sh`.
+        #[arg(long)]
+        registry: String,
     },
 }
 
@@ -282,41 +424,130 @@ async fn main() -> anyhow::Result<()> {
             let s = State::open(&cfg)?;
             println!("memories: {}", s.store.count_memories()?);
         }
-        Cmd::Doctor => {
-            println!("cairn-cli doctor");
-            println!("  data dir     : {}", cfg.data_dir().display());
-            println!("  blobs        : {}", cfg.blobs_dir().display());
-            println!(
-                "  helix url    : {}",
-                cfg.helix_url
-                    .as_deref()
-                    .unwrap_or("(not set — CAIRN_HELIX_URL required)")
-            );
-            println!(
-                "  server       : {}",
-                cfg.default_server
-                    .as_deref()
-                    .unwrap_or("(not set — CAIRN_SERVER optional)")
-            );
-            println!("  embed        : {}", cfg.embed.provider);
-            match State::open(&cfg) {
-                Ok(s) => {
-                    let n = s.store.count_memories()?;
-                    println!("  helix        : ok");
-                    println!("  memories     : {n}");
-                    println!("cairn-cli doctor: ok");
-                }
-                Err(e) => {
-                    println!("  helix        : FAILED — {e}");
-                    anyhow::bail!("cairn-cli doctor: setup incomplete");
-                }
-            }
+        Cmd::Doctor { fix } => {
+            doctor::run_and_exit(doctor::DoctorOptions {
+                fix,
+                interactive: std::io::stdout().is_terminal(),
+            })?;
+        }
+        Cmd::Onboard {
+            skip_agents,
+            server,
+            token,
+        } => {
+            onboard::run(onboard::OnboardOptions {
+                skip_agents,
+                fix: true,
+                server,
+                token,
+            })?;
         }
         Cmd::Bench { path } => {
             let s = State::open(&cfg)?;
             let root = path
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
             bench::run(&s, &root)?;
+        }
+        Cmd::Graph { action } => {
+            let s = State::open(&cfg)?;
+            match action {
+                GraphCmd::Related { path } => extra::graph(extra::GraphCmd::Related { path }, &s)?,
+                GraphCmd::Impact { path } => extra::graph(extra::GraphCmd::Impact { path }, &s)?,
+                GraphCmd::Callgraph { symbol } => {
+                    extra::graph(extra::GraphCmd::Callgraph { symbol }, &s)?
+                }
+            }
+        }
+        Cmd::Memory { action } => {
+            let s = State::open(&cfg)?;
+            match action {
+                MemoryCmd::Timeline { limit } => extra::memory_timeline(&s, limit)?,
+                MemoryCmd::Crystallize => extra::memory_crystallize(&s)?,
+            }
+        }
+        Cmd::Search { query, limit } => {
+            let s = State::open(&cfg)?;
+            extra::search(&s, &query, limit)?;
+        }
+        Cmd::Sessions { server, token } => {
+            extra::sessions_list(server.as_deref(), token.as_deref())?;
+        }
+        Cmd::Session { action } => match action {
+            SessionCmd::Show { id, server, token } => {
+                extra::session_show(server.as_deref(), token.as_deref(), &id)?;
+            }
+            SessionCmd::Task {
+                id,
+                task_id,
+                title,
+                progress,
+                server,
+                token,
+            } => {
+                extra::session_task(
+                    server.as_deref(),
+                    token.as_deref(),
+                    &id,
+                    &task_id,
+                    &title,
+                    &progress,
+                )?;
+            }
+        },
+        Cmd::Metrics => {
+            let s = State::open(&cfg)?;
+            extra::metrics(&s)?;
+        }
+        Cmd::Pack { action } => {
+            let s = State::open(&cfg)?;
+            let resolve = |p: Option<std::path::PathBuf>| -> std::path::PathBuf {
+                p.unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+                })
+            };
+            let pack = |a: pack::PackCmd| pack::run(a, &s);
+            match action {
+                PackAction::Create {
+                    name,
+                    version,
+                    author,
+                    description,
+                    output,
+                } => {
+                    let out = resolve(output);
+                    pack(pack::PackCmd::Create {
+                        name,
+                        version,
+                        author,
+                        description,
+                        output: out,
+                    })?;
+                }
+                PackAction::Info { tarball } => {
+                    pack(pack::PackCmd::Info { tarball })?;
+                }
+                PackAction::Install { tarball } => {
+                    pack(pack::PackCmd::Install { tarball })?;
+                }
+                PackAction::List => {
+                    pack(pack::PackCmd::List)?;
+                }
+                PackAction::Remove { name } => {
+                    pack(pack::PackCmd::Remove { name })?;
+                }
+                PackAction::Export { name, output } => {
+                    pack(pack::PackCmd::Export { name, output })?;
+                }
+                PackAction::Import { tarball } => {
+                    pack(pack::PackCmd::Import { tarball })?;
+                }
+                PackAction::AutoLoad => {
+                    pack(pack::PackCmd::AutoLoad)?;
+                }
+                PackAction::Publish { tarball, registry } => {
+                    pack(pack::PackCmd::Publish { tarball, registry })?;
+                }
+            }
         }
         Cmd::Pair { code, server } => {
             let s = State::open(&cfg)?;

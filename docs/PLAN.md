@@ -18,7 +18,7 @@ self-hostable engine, and addresses **all** of the failure classes below.
 | Project | Lang | What we take |
 |---|---|---|
 | **agentmemory** (rohitg00) | TS/iii | 4-tier memory (working→episodic→semantic→procedural), consolidation/decay, hybrid recall (BM25+vector+graph, RRF), lifecycle hooks, viewer |
-| **lean-ctx** (yvgude) | Rust | 10 read modes, ~13-tok cached re-reads, tree-sitter AST (18 langs), property graph, `serve` HTTP-MCP |
+| **lean-ctx** (yvgude) | Rust | 10 read modes, ~13-tok cached re-reads, tree-sitter AST (11 langs), property graph, `serve` HTTP-MCP |
 | **rtk / Rust Token Killer** (rtk-ai) | Rust | Command-output compression (filter/group/dedup) via hooks, 100+ filters, **tee/recover**, single binary, ~80% session cut — proves the Rust+hook approach |
 | **caveman** (JuliusBrussee) | JS/Py | Output-**style** compression (~65% output cut, reasoning intact); finding that brevity can *raise* accuracy |
 
@@ -313,7 +313,7 @@ single static Rust binary — **no Node/Python/runtime** to install.
 
 - **License:** **Apache-2.0** for the core (permissive, max adoption, matches rtk).
 - **Repo:** monorepo — Cargo workspace + `/web` (Next.js) + `/docs`.
-- **Install:** one-command shell installer + Homebrew/cargo + prebuilt binaries (musl, mac
+- **Install:** one-command shell installer + cargo + prebuilt binaries (musl, mac
   arm/x86, windows); `cairn-cli setup <agent>` auto-configs agents (hooks + MCP).
 - **Project files:** README, CONTRIBUTING, SECURITY.md + threat model, governance, Discord/community.
 - **CI:** `cargo test`/`clippy`/`fmt`, web build, docker build, multi-platform release, **benchmark CI**.

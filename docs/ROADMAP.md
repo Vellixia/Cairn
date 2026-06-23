@@ -33,24 +33,25 @@ gantt
     section Phase 3 — Collective
     Export import sanitized bundles :done, p3a, 2026-04-01, 30d
     Pool contribute pull           :done, p3b, 2026-04-01, 30d
-    Full 4-tier consolidation      :active, p3c, 2026-04-15, 60d
-    Hybrid search BM25 vec graph   :p3d, 2026-05-01, 60d
+    Full 4-tier consolidation      :done, p3c, 2026-04-15, 60d
+    Hybrid search BM25 vec graph   :done, p3d, 2026-05-01, 60d
     Health checks in Compose       :done, p3e, 2026-06-19, 1d
     CI smoke test                  :done, p3f, 2026-06-19, 1d
-    LongMemEval benchmarks         :p3g, 2026-05-15, 60d
-    One-click deploy templates     :p3h, 2026-06-01, 45d
-    Multi-platform release binaries :p3i, 2026-06-01, 45d
+    LongMemEval benchmarks         :done, p3g, 2026-05-15, 60d
+    Multi-platform release binaries :done, p3i, 2026-06-01, 45d
     Slim image + model SHA pin     :done, p3j, 2026-06-19, 1d
     Web 0.4.0 admin + dashboard    :done, p3k, 2026-06-19, 1d
+    Multi-tenant OrgId             :done, p3t, 2026-04-15, 30d
 
     section Phase 4 — Distribution
-    OpenCode README quickstart     :active, p4a, 2026-06-19, 1d
-    Multi-platform release         :p4b, 2026-06-20, 45d
-    Homebrew tap                   :p4c, 2026-07-01, 7d
-    One-click deploy               :p4d, 2026-07-01, 14d
-    Non-root Docker volume init    :p4e, 2026-07-01, 3d
-    LongMemEval/LoCoMo benchmarks  :p4f, 2026-07-01, 30d
-    Task-success horizon benchmark :p4g, 2026-07-15, 30d
+    OpenCode README quickstart     :done, p4a, 2026-06-19, 1d
+    Multi-platform release         :done, p4b, 2026-06-20, 45d
+    Non-root Docker volume init    :done, p4e, 2026-07-01, 3d
+    LongMemEval/LoCoMo benchmarks  :done, p4f, 2026-07-01, 30d
+    Task-success horizon benchmark :done, p4g, 2026-07-15, 30d
+    Sprint 25 dashboard + sidebar  :done, p4h, 2026-06-22, 1d
+    Sprint 26 single-page hubs     :done, p4i, 2026-06-22, 1d
+    Sprint 27 UI/UX audit          :done, p4j, 2026-06-22, 1d
 ```
 
 ---
@@ -59,8 +60,8 @@ gantt
 
 | Item | Status | Notes |
 |---|---|---|
-| Cargo workspace + crate structure | Done | 14 crates |
-| Next.js web app (admin console, sidebar dashboard) | Done | Static export, embedded via rust-embed; prebuilt `web/out/` is committed for hermetic `cargo build` |
+| Cargo workspace + crate structure | Done | 22 crates (8 added in 0.5.0: session, pack, registry, sync, bench, proactive, proxy, ingest) |
+| Next.js web app (admin console, sidebar dashboard) | Done | Static export, embedded via rust-embed; cairn-api/build.rs creates `web/out/` at compile time when missing |
 | Docker Compose stack (Cairn + HelixDB + MinIO) | Done | `docker compose up -d` |
 | CI pipeline (test/clippy/fmt) | Done | GitHub Actions |
 | Brand identity (name/logo/palette) | Done | Cairn — 3-stone cairn, ember accent |
@@ -76,7 +77,7 @@ gantt
 | `cairn-shell`: compress + recover | Done | RTK-style filter/group/dedup, lossless via blob store |
 | `cairn-memory`: remember/recall/wakeup | Done | 4-tier, BM25 lexical recall, Ebbinghaus decay |
 | `cairn-assemble`: token-budgeted context assembly | Done | Edge-ordered, reports dropped items |
-| `cairn-mcp`: MCP server over stdio | Done | 16 tools, local + remote proxy modes |
+| `cairn-mcp`: MCP server over stdio | Done | 29 tools + 10 graph actions = 39, local + remote proxy modes |
 | `cairn-api`: REST API | Done | 27 endpoints, embedded web UI |
 | `cairn-cli`: `bench` command | Done | Measures token savings on a codebase |
 | Web UI: landing page | Done | Next.js static export |
@@ -98,7 +99,7 @@ gantt
 | `cairn-profile`: preference learning | Done | `prefer`/`profile` tools, injected at session start |
 | `cairn-share`: sanitization | Done | Secret/PII redaction, classification, diff preview |
 | Multi-device sync (pull/push) | Done | Last-write-wins on `updated_at` |
-| Pairing codes (device-code flow) | Done | Short, single-use, rate-limited |
+| Pairing codes (device-code flow) | Done | Short, single-use |
 | Binary split (`cairn` server + `cairn-cli` client) | Done | Two binaries, clear separation |
 | `cairn-cli setup <agent>` | Done | Claude Code, Cursor, VS Code, Windsurf, OpenCode |
 | `cairn-cli setup --all` (auto-detect) | Done | Detects from project/home markers |
@@ -112,7 +113,6 @@ gantt
 | Install script checksums | Done | SHA256SUMS verification |
 | MinIO credential guard | Done | Refuses insecure defaults |
 | CORS allow-list | Done | `CAIRN_CORS_ORIGINS`, default same-origin |
-| Rate limiting | Done | 60/min API, 5/min pairing |
 | Dependency pinning (tilde) | Done | `~major.minor`, `cargo build --locked` |
 | `cargo audit` + `cargo deny` in CI | Done | Blocks on advisories/duplicates |
 | SLSA + Sigstore signing | Done | Release binaries signed |
@@ -169,11 +169,9 @@ The product is feature-complete enough to install and use. The remaining work is
 
 | Item | Status | Notes |
 |---|---|---|
-| OpenCode README quickstart | Partial | OpenCode integration is verified end-to-end (remember/recall/sanitize/read), but the README still needs a one-screen "set up OpenCode in 4 commands" section that mirrors the live test |
+| OpenCode README quickstart | Done | New "OpenCode quickstart" section in README |
 | Multi-platform release binaries | Not started | `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`, `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-pc-windows-msvc`, `aarch64-pc-windows-msvc`; upload + `SHA256SUMS` per release |
-| Homebrew tap | Not started | `Vellixia/homebrew-tap`; formula points at the GitHub release, verifies `SHA256SUMS`; `brew install cairn` |
-| One-click deploy (Fly / Railway / Render) | Not started | `render.yaml` + `fly.toml` templates; "Deploy to…" buttons in README |
-| Non-root Docker volume init | Not started | Currently `user: "0"` workaround. Proper init container or capability grant so the runtime can drop to `cairn` uid 10001 |
+| Non-root Docker volume init | Done | New `cairn-init` one-shot chowns `/data` to uid 10001, verifies with `stat`, fails fast on host-bind misconfig. cairn service runs as `user: "10001:10001"` — verified live (`uid=10001(cairn)`) |
 | LongMemEval / LoCoMo benchmarks | Not started | Standard recall benchmarks; publish numbers in `docs/BENCHMARKS.md` |
 | Task-success lift at increasing horizons | Not started | Synthetic drift benchmark; cite the architecture justification in `docs/PLAN.md` |
 
@@ -184,11 +182,11 @@ The product is feature-complete enough to install and use. The remaining work is
 | Milestone | Status |
 |---|---|
 | Fresh clone builds (`cargo check --workspace`) | Passed |
-| `cargo test --workspace` (118 tests, 5 ignored) | Passed |
-| `cargo clippy --workspace -- -D warnings` | Passed |
-| `docker compose up -d` from clean checkout | Passed |
+| `cargo test --workspace` (330 tests, 5 ignored — v0.5.0) | Passed |
+| `cargo clippy --workspace --all-targets -- -D warnings` | Passed |
+| `docker compose up -d` from clean checkout (cairn runs as uid 10001, not root) | Passed (verified live in v0.5.0) |
 | Docker compose health checks (all 3 services `healthy`) | Passed (verified live) |
-| 54-test end-to-end live suite (memory/context/guard/profile/shell/assembly/sanitize/sync/share/api/setup/bench/path-rewrite) | Passed (verified live) — see `docs/TESTING.md` |
+| 20-scenario end-to-end live harness (memory/context/guard/profile/shell/assembly/sanitize/sync/share/api/setup/bench/path-rewrite) | Passed (verified live) — see `docs/TESTING.md` + `docs/E2E.md` |
 | `cairn-cli bench` shows 90%+ savings | Passed |
 | OpenCode MCP: remember/recall/wakeup/sanitize | Passed (verified live) |
 | OpenCode MCP: read (remote proxy with workspace mount) | Passed (verified live) |
@@ -201,7 +199,21 @@ The product is feature-complete enough to install and use. The remaining work is
 | Cookie expires after TTL → `/login` shown; existing cookie rejected | Passed |
 | `cairn-server admin password` rotates + invalidates all sessions | Passed |
 | `cairn-server admin reset` clears admin via tombstone; next `/setup` succeeds | Passed |
-| Web: prebuilt `web/out/` committed; `cargo build` is hermetic (no Node required) | Passed |
+| Web: cairn-api/build.rs creates `web/out/` at compile time when missing; `cargo build` is hermetic (no Node required) | Passed |
+| Phase 4.1 (Sprint 13) — cairn-registry + Ed25519 pack signing | Passed | `cb06f9f` |
+| Phase 4.1 (Sprint 14) — Trust scopes + revocation cascade + provenance | Passed | `398a052` |
+| Phase 4.1 (Sprint 15) — cairn-sync CRDTs + E2E encryption + threat model | Passed | `06f5b4e` |
+| Phase 4.2 (Sprint 16) — cairn-bench + LongMemEval/horizon/retention | Passed | `455c34b` |
+| Phase 4.2 (Sprint 17) — public landing page + comparison + cross-links | Passed | `45d1e39` |
+| Phase 5 (Sprint 18) — cairn-proactive + intent-detection hook + opt-out | Passed | `fcc8487` |
+| Phase 5 (Sprint 19a) — multi-tenant `OrgId` + tenant-scoped recall | Passed | `d69d3c4` |
+| Phase 5 (Sprint 19b) — cairn-proxy (cairn.sh reverse proxy) | Passed | `9c60a7b` |
+| Phase 5 (Sprint 20) — PWA service worker + push subscription store | Passed | `f484a44` |
+| Phase 5 (Sprint 21) — `/api/extensions/capture` endpoint (loopback-only) | Passed | `06e6740` |
+| Phase 5 (Sprint 22) — cairn-ingest VTT/SRT/JSON parsers + chunking | Passed | `ae68b06` |
+| Phase 5 (Sprint 23) — mobile companion PWA scaffold + biometric gate | Passed | `06e6740` |
+| **Sprint 25 — dashboard overview + sidebar refresh** — KPI hero, HealthRow, ActivityTimeline, SavingsChart (Recharts), DriftAnchorCard, recent memory; collapsible sidebar (8 groups, `localStorage` persisted) | Passed | branch `sprint/25-dashboard-overview` |
+| **Sprint 27 — UI/UX audit + flat routes + HelpDialog** — removed landing page, flat URLs (`/memory`, `/trust`, `/you`), Sprint 26 InfoCard duplicate bug fixed (Trust Score had 11 nested cards), replaced with `?` HelpButton → Dialog (What/How/Impact), Sidebar v3 (4 entries, WORKSPACE label), Trust Score redesigned (7xl score, 4-up grid) | Passed | branch `sprint/27-ui-ux-audit`, PR #15 |
 
 ---
 
@@ -210,7 +222,8 @@ The product is feature-complete enough to install and use. The remaining work is
 - [Plan](PLAN.md) — product vision and phases
 - [Architecture](ARCHITECTURE.md) — how it works today
 - [Web](WEB.md) — admin/CLI auth split, dashboard surface
-- [Upgrading](UPGRADING.md) — 0.3.x → 0.4.0 migration
-- [Decisions](DECISIONS.md) — ADRs, including ADR-010 (single-admin split)
-- [Benchmarks](BENCHMARKS.md) — measured numbers
+- [Upgrading](UPGRADING.md) — 0.4.0 → 0.5.0 migration
+- [Decisions](DECISIONS.md) — ADRs 001–014, 016–027 (binary split through v0.5.0 Phase 5; ADR-015 superseded)
+- [Benchmarks](BENCHMARKS.md) — measured numbers (LongMemEval + horizon + retention, Sprint 16)
+- [Security](../SECURITY.md) — threat model + hardening checklist
 - [Audit Report](audits/REPORT.md) — security findings with fix status

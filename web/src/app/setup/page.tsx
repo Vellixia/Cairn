@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
@@ -13,6 +14,15 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Field,
   FieldDescription,
@@ -62,13 +72,35 @@ export default function SetupPage() {
     }
   }
 
-  return (
+return (
     <main className="min-h-screen flex items-center justify-center px-5 py-12">
       <div className="w-full max-w-sm">
         <div className="flex items-center gap-2.5 mb-6 justify-center">
           <Logo size={36} />
           <span className="text-xl font-semibold tracking-tight">Cairn</span>
         </div>
+
+        <AlertDialog defaultOpen>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>v1 setup — deprecated in v0.5.0</AlertDialogTitle>
+              <AlertDialogDescription>
+                The new wizard (admin → embed → pair → health) lives at{" "}
+                <Link href="/setup/wizard" className="underline font-mono">
+                  /setup/wizard
+                </Link>
+                . This form still works but skips the embed provider picker.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <Button asChild variant="outline">
+                <Link href="/setup/wizard">Open wizard</Link>
+              </Button>
+              <AlertDialogAction>Continue with v1</AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+
         <Card>
           <CardHeader>
             <CardTitle>Create admin</CardTitle>

@@ -26,10 +26,10 @@ cargo test --workspace
 cargo build --workspace
 ```
 
-- No CI workflows in repo yet — run all three locally before PRs.
+- CI runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --workspace` on every PR via `.github/workflows/ci.yml`. Run the same commands locally before pushing.
 - Dependencies use tilde constraints (`~major.minor`) — build with `--locked` to catch drift.
 - Run a single crate's tests: `cargo test -p cairn-core` (substitute any crate name).
-- `cargo build --workspace` does **not** require the web UI; `web/out/.gitkeep` ships so the binary falls back to a built-in page.
+- `cargo build --workspace` does **not** require the web UI; `crates/cairn-api/build.rs` creates `web/out/` at compile time when missing so the binary falls back to its built-in page.
 
 **Server (requires HelixDB):**
 ```sh
@@ -44,7 +44,7 @@ cd web && npm install && npm run dev   # :3000 → API on :7777
 
 ## Architecture
 
-14-crate Rust workspace (MSRV 1.80) + Next.js static-export web UI. Two binaries:
+22-crate Rust workspace (MSRV 1.85) + Next.js static-export web UI. Two binaries:
 
 | Binary | Crate | Purpose |
 |--------|-------|---------|
@@ -67,7 +67,7 @@ cd web && npm install && npm run dev   # :3000 → API on :7777
 | `CONTRIBUTING.md` | Dev setup, PR checklist, workspace layout |
 | `docs/ARCHITECTURE.md` | Full crate graph, MCP tools, API endpoints, Docker, config, CLI |
 | `docs/DECISIONS.md` | Architecture decision records |
-| `docs/TESTING.md` | End-to-end live-suite coverage (54 integration tests; cargo test --workspace reports 118 passed + 5 ignored) |
+| `docs/TESTING.md` | End-to-end live-suite coverage (20 e2e scenarios; cargo test --workspace reports 330 passed + 5 ignored) |
 | `docs/ROADMAP.md` | Development status and phases |
 | `docs/BENCHMARKS.md` | Token savings benchmarks |
 

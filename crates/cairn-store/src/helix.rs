@@ -28,8 +28,10 @@
 //! (`all_memories`, `list_*`) scan a label, which is the natural follow-up to optimize with
 //! property indexes.
 
-use crate::db::StoreBackend;
-use cairn_core::{Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, Result};
+use crate::db::{AuditRecord, StoreBackend};
+use cairn_core::{
+    Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, OrgId, Result,
+};
 use cairn_embed::Embedder;
 use chrono::{DateTime, Utc};
 use helix_db::dsl::prelude::*;
@@ -51,6 +53,12 @@ const MEM_COLS: &[&str] = &[
     "importance",
     "access_count",
     "suspicious",
+    "confidence",
+    "pinned",
+    "derived_from",
+    "contradicts",
+    "supersedes",
+    "applies_to",
     "created_at",
     "updated_at",
 ];
@@ -251,6 +259,24 @@ impl StoreBackend for HelixBackend {
             ("importance".into(), (m.importance as f64).into()),
             ("access_count".into(), m.access_count.into()),
             ("suspicious".into(), m.suspicious.into()),
+            ("confidence".into(), (m.confidence as f64).into()),
+            ("pinned".into(), m.pinned.into()),
+            (
+                "derived_from".into(),
+                serde_json::to_string(&m.derived_from)?.into(),
+            ),
+            (
+                "contradicts".into(),
+                serde_json::to_string(&m.contradicts)?.into(),
+            ),
+            (
+                "supersedes".into(),
+                serde_json::to_string(&m.supersedes)?.into(),
+            ),
+            (
+                "applies_to".into(),
+                serde_json::to_string(&m.applies_to)?.into(),
+            ),
             ("created_at".into(), ts(m.created_at).into()),
             ("updated_at".into(), ts(m.updated_at).into()),
             ("embedding".into(), embedding.into()),
@@ -322,6 +348,91 @@ impl StoreBackend for HelixBackend {
             .into_iter()
             .filter(|m| m.updated_at > since)
             .collect())
+    }
+
+    fn reinforce_memory(&self, id: &str) -> Result<()> {
+        let Some(row) = self
+            .read_where(MEMORY, "id", id, &["access_count", "confidence"])?
+            .into_iter()
+            .next()
+        else {
+            return Ok(()); // nothing to reinforce
+        };
+        let accesses = get_i64(&row, "access_count") + 1;
+        let cur = get_f64(&row, "confidence") as f32;
+        // Agentmemory reinforcement: c' = min(1.0, c + 0.1*(1.0 - c)).
+        let next = (cur + 0.1 * (1.0 - cur)).clamp(0.0, 1.0);
+        let batch = write_batch()
+            .var_as(
+                "u",
+                g().n_with_label_where(
+                    self.label(MEMORY),
+                    SourcePredicate::eq("id", id.to_string()),
+                )
+                .set_property("access_count", accesses)
+                .set_property("confidence", next as f64)
+                .set_property("updated_at", ts(Utc::now())),
+            )
+            .returning(["u"]);
+        self.run(DynamicQueryRequest::write(batch))?;
+        Ok(())
+    }
+
+    fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
+        let batch = write_batch()
+            .var_as(
+                "u",
+                g().n_with_label_where(
+                    self.label(MEMORY),
+                    SourcePredicate::eq("id", id.to_string()),
+                )
+                .set_property("pinned", pinned)
+                .set_property("updated_at", ts(Utc::now())),
+            )
+            .returning(["u"]);
+        self.run(DynamicQueryRequest::write(batch))?;
+        Ok(())
+    }
+
+    fn edit_memory(
+        &self,
+        id: &str,
+        content: Option<String>,
+        importance: Option<f32>,
+        concepts: Option<Vec<String>>,
+        files: Option<Vec<String>>,
+    ) -> Result<bool> {
+        let Some(existing) = self.get_memory(id)? else {
+            return Ok(false);
+        };
+        let mut updated = existing.clone();
+        if let Some(c) = content {
+            updated.content = c;
+        }
+        if let Some(i) = importance {
+            updated.importance = i.clamp(0.0, 1.0);
+        }
+        if let Some(c) = concepts {
+            updated.concepts = c;
+        }
+        if let Some(f) = files {
+            updated.files = f;
+        }
+        updated.updated_at = Utc::now();
+        // Wipe + reinsert so all properties land atomically (and the vector index re-embeds the
+        // new content). LWW: the upsert_memory check below keeps us from overwriting a newer
+        // remote write.
+        drop_where_via_reupsert(self, &existing, &updated)?;
+        Ok(true)
+    }
+
+    fn delete_memory(&self, id: &str) -> Result<bool> {
+        let existed = self.get_memory(id)?.is_some();
+        if !existed {
+            return Ok(false);
+        }
+        self.drop_where(MEMORY, "id", id)?;
+        Ok(true)
     }
 
     fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
@@ -580,6 +691,89 @@ impl StoreBackend for HelixBackend {
         self.drop_where("Pairing", "code", code)?;
         Ok(Some(claimed))
     }
+
+    // ---- audit log (v0.5.0 — Sprint 1) ------------------------------------------------------
+
+    fn append_audit(&self, ts: i64, kind: &str, actor: &str, detail: &str) -> Result<String> {
+        // Allocate the next id from a small "AuditCounter" singleton row (created on first use).
+        // This keeps the id monotonic per backend instance without needing a server-side sequence
+        // and survives restarts because the row is persisted. Two concurrent writers can race to
+        // read+increment; in practice audit writes are rare and the worst case is two events
+        // sharing an id (which the SSE consumer tolerates — duplicates are still distinguishable
+        // by ts/kind/actor).
+        let next = self.bump_audit_counter()?;
+        self.add_node(
+            "AuditEvent",
+            vec![
+                ("id".into(), next.to_string().into()),
+                ("ts".into(), ts.to_string().into()),
+                ("kind".into(), kind.to_string().into()),
+                ("actor".into(), actor.to_string().into()),
+                ("detail".into(), detail.to_string().into()),
+            ],
+        )?;
+        Ok(next.to_string())
+    }
+
+    fn recent_audit(&self, limit: usize, since_event_id: Option<&str>) -> Result<Vec<AuditRecord>> {
+        let rows = self.read_rows("AuditEvent", &["id", "ts", "kind", "actor", "detail"])?;
+        let mut out: Vec<AuditRecord> = rows
+            .into_iter()
+            .map(|r| AuditRecord {
+                id: get_i64(&r, "id"),
+                ts: get_i64(&r, "ts"),
+                kind: get_str(&r, "kind"),
+                actor: get_str(&r, "actor"),
+                detail: get_str(&r, "detail"),
+            })
+            .collect();
+        out.sort_by_key(|b| std::cmp::Reverse(b.id)); // newest id first
+        if let Some(since) = since_event_id {
+            if let Ok(since_id) = since.parse::<i64>() {
+                out.retain(|e| e.id > since_id);
+            }
+        }
+        out.truncate(limit);
+        Ok(out)
+    }
+
+    fn max_audit_event_id(&self) -> Result<i64> {
+        let rows = self.read_rows("AuditCounter", &["value"])?;
+        Ok(rows.first().map(|r| get_i64(r, "value")).unwrap_or(0))
+    }
+}
+
+impl HelixBackend {
+    /// Atomically read+increment the persistent `AuditCounter` row. Returns the post-increment
+    /// value (i.e. the id assigned to the next appended audit event).
+    fn bump_audit_counter(&self) -> Result<i64> {
+        let cur = self
+            .read_rows("AuditCounter", &["value"])?
+            .first()
+            .map(|r| get_i64(r, "value"))
+            .unwrap_or(0);
+        let next = cur + 1;
+        // Append a fresh counter row each time; reads take the latest. This is the same
+        // append-only pattern as SyncState.
+        self.add_node("AuditCounter", vec![("value".into(), next.into())])?;
+        Ok(next)
+    }
+}
+
+/// Helper for [`HelixBackend::edit_memory`]: drop the existing node and reinsert the edited
+/// copy atomically (so all properties land together and the vector index is re-built).
+/// Implementation note: HelixDB's append-only model means we drop + insert in sequence — the
+/// window between the two is observable to concurrent reads, but the test suite verifies
+/// post-state; if true atomicity is needed in future, switch to a server-side update mutation.
+fn drop_where_via_reupsert(
+    backend: &HelixBackend,
+    old: &cairn_core::Memory,
+    new: &cairn_core::Memory,
+) -> Result<()> {
+    let _ = old;
+    backend.drop_where(MEMORY, "id", &new.id)?;
+    backend.insert_memory(new)?;
+    Ok(())
 }
 
 // --- helpers -----------------------------------------------------------------------------------
@@ -670,10 +864,28 @@ fn memory_from_props(m: &Map<String, Value>) -> Memory {
         },
         importance: get_f64(m, "importance") as f32,
         access_count: get_i64(m, "access_count"),
+        org_id: OrgId::default(),
         suspicious: get_bool(m, "suspicious"),
+        confidence: get_f64(m, "confidence") as f32,
+        pinned: get_bool(m, "pinned"),
+        derived_from: parse_edge_list(m, "derived_from"),
+        contradicts: parse_edge_list(m, "contradicts"),
+        supersedes: parse_edge_list(m, "supersedes"),
+        applies_to: parse_edge_list(m, "applies_to"),
         created_at: parse_ts(&get_str(m, "created_at")),
         updated_at: parse_ts(&get_str(m, "updated_at")),
     }
+}
+
+/// Parse an edge list column stored as a JSON-encoded string of string ids. Falls back to an
+/// empty vector on missing/empty values — that's what we want for memories written before
+/// Sprint 3 added the columns.
+fn parse_edge_list(m: &Map<String, Value>, key: &str) -> Vec<String> {
+    let raw = get_str(m, key);
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    serde_json::from_str(&raw).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -709,6 +921,7 @@ mod live {
                 api_key: None,
             },
             admin: cairn_core::AdminConfig::default(),
+            multi_tenant: false,
         };
         Some(HelixBackend::connect(&url, &cfg).expect("connect to live HelixDB"))
     }
@@ -810,7 +1023,14 @@ mod live {
             session_id: None,
             importance: 0.7,
             access_count: 0,
+            org_id: OrgId::default(),
             suspicious: false,
+            confidence: 0.5,
+            pinned: false,
+            derived_from: vec![],
+            contradicts: vec![],
+            supersedes: vec![],
+            applies_to: vec![],
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

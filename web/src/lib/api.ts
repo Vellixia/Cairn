@@ -97,6 +97,37 @@ export function postJSON<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, { method: "POST", body });
 }
 
+/// Like [`postJSON`] but sends a raw `ArrayBuffer` with a caller-supplied content type.
+/// Used by the pack registry's `POST /registry/packs` endpoint, where the body is the
+/// tarball bytes rather than a JSON document.
+export async function postBinary<T>(
+  path: string,
+  body: ArrayBuffer,
+  contentType: string,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: { "content-type": contentType },
+    body,
+  });
+  if (!res.ok) {
+    let parsed: unknown = null;
+    try {
+      parsed = await res.json();
+    } catch {
+      /* ignore */
+    }
+    const message =
+      typeof parsed === "object" && parsed && "error" in parsed
+        ? String((parsed as { error: unknown }).error)
+        : `${res.status} ${res.statusText}`;
+    throw new ApiError(res.status, message, parsed);
+  }
+  if (res.status === 204) return undefined as T;
+  return (await res.json()) as T;
+}
+
 export function delJSON<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
@@ -194,6 +225,10 @@ export interface Memory {
   files: string[];
   importance: number;
   access_count: number;
+  /** Confidence score [0.0, 1.0], evolves with reinforcement. Defaults to 0.5. */
+  confidence: number;
+  /** Pinned memories always surface first in wakeup regardless of score. */
+  pinned: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -238,4 +273,15 @@ export interface AuditEvent {
   kind: string;
   actor: string;
   detail: string;
+}
+
+export interface LedgerEntry {
+  id: number;
+  ts: string;
+  source: string;
+  bytes_in: number;
+  bytes_out: number;
+  tokens_saved: number;
+  cost_usd_saved: number;
+  signature: string;
 }

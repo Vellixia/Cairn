@@ -23,14 +23,19 @@ use std::sync::Arc;
 /// Default protocol version we advertise if the client doesn't specify one.
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+pub mod prompts;
+pub mod resources;
+
 pub struct McpServer {
-    ctx: Arc<ContextEngine>,
-    guard: Arc<Guard>,
-    asm: Arc<Assembler>,
-    shell: Arc<ShellCompressor>,
-    profile: Arc<Profile>,
-    san: cairn_share::Sanitizer,
-    mem: Arc<MemoryEngine>,
+    pub ctx: Arc<ContextEngine>,
+    pub guard: Arc<Guard>,
+    pub asm: Arc<Assembler>,
+    pub shell: Arc<ShellCompressor>,
+    pub profile: Arc<Profile>,
+    pub san: cairn_share::Sanitizer,
+    pub mem: Arc<MemoryEngine>,
+    pub store: Arc<cairn_store::Store>,
+    pub config: Config,
 }
 
 impl McpServer {
@@ -48,6 +53,8 @@ impl McpServer {
             profile: Arc::new(Profile::new(mem.clone())),
             san: cairn_share::Sanitizer::new(),
             mem,
+            store,
+            config: cfg.clone(),
         })
     }
 
@@ -98,7 +105,7 @@ impl McpServer {
                     id,
                     json!({
                         "protocolVersion": ver,
-                        "capabilities": { "tools": {} },
+                        "capabilities": { "tools": {}, "resources": { "subscribe": true }, "prompts": {} },
                         "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") }
                     }),
                 ))
@@ -107,6 +114,56 @@ impl McpServer {
             "ping" => Some(ok(id, json!({}))),
             "tools/list" => Some(ok(id, json!({ "tools": tool_defs() }))),
             "tools/call" => Some(self.call_tool(id, req.get("params"))),
+            "resources/list" => Some(ok(
+                id,
+                json!({
+                    "resources": resources::resource_defs().iter().map(|r| json!({
+                        "uri": r.uri,
+                        "name": r.name,
+                        "description": r.description,
+                        "mimeType": r.mime_type,
+                    })).collect::<Vec<_>>()
+                }),
+            )),
+            "resources/read" => {
+                let uri = req
+                    .get("params")
+                    .and_then(|p| p.get("uri"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match resources::read_resource(self, uri) {
+                    Ok(v) => Some(ok(
+                        id,
+                        json!({ "contents": [{
+                        "uri": uri,
+                        "mimeType": if uri == "cairn://config/toml" { "text/plain" } else { "application/json" },
+                        "text": v.to_string(),
+                    }] }),
+                    )),
+                    Err(e) => Some(err(id, -32602, &e)),
+                }
+            }
+            "prompts/list" => Some(ok(
+                id,
+                json!({
+                    "prompts": prompts::prompt_defs().iter().map(|p| json!({
+                        "name": p.name,
+                        "description": p.description,
+                        "arguments": p.arguments,
+                    })).collect::<Vec<_>>()
+                }),
+            )),
+            "prompts/get" => {
+                let name = req
+                    .get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                match prompts::render_prompt(name) {
+                    Ok(v) => Some(ok(id, v)),
+                    Err(e) => Some(err(id, -32602, &e)),
+                }
+            }
             other => id.map(|id| err(Some(id), -32601, &format!("method not found: {other}"))),
         }
     }
@@ -283,6 +340,131 @@ impl McpServer {
                 let s = self.san.sanitize(text);
                 serde_json::to_string_pretty(&s).map_err(|e| e.to_string())
             }
+            "proactive_recall" => {
+                let prompt = str_arg(args.get("prompt")).ok_or("missing 'prompt'")?;
+                let project_root = str_arg(args.get("project_root"));
+                let mems = proactive_recall(self, prompt, project_root);
+                serde_json::to_string_pretty(&mems).map_err(|e| e.to_string())
+            }
+            // ---- v0.5.0 Sprint 10: graph + memory CRUD extensions ----
+            "memory_edit" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                let content = args
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .map(|s| s.to_string());
+                let importance = args
+                    .get("importance")
+                    .and_then(Value::as_f64)
+                    .map(|f| f as f32);
+                let concepts = args.get("concepts").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                });
+                let files = args.get("files").and_then(Value::as_array).map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(|s| s.to_string())
+                        .collect::<Vec<_>>()
+                });
+                match self
+                    .mem
+                    .edit(id, content, importance, concepts, files)
+                    .map_err(|e| e.to_string())?
+                {
+                    Some(m) => Ok(format!("edited {} (kind={})", m.id, m.kind.as_str())),
+                    None => Err("no such memory".into()),
+                }
+            }
+            "memory_delete" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                if self.mem.delete(id).map_err(|e| e.to_string())? {
+                    Ok(format!("deleted {id}"))
+                } else {
+                    Err("no such memory".into())
+                }
+            }
+            "memory_pin" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                let pinned = args.get("pinned").and_then(Value::as_bool).unwrap_or(true);
+                if self.mem.pin(id, pinned).map_err(|e| e.to_string())? {
+                    Ok(format!(
+                        "{pinned_status} {id}",
+                        pinned_status = if pinned { "pinned" } else { "unpinned" }
+                    ))
+                } else {
+                    Err("no such memory".into())
+                }
+            }
+            "memory_promote" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                let tier = str_arg(args.get("tier")).ok_or("missing 'tier'")?;
+                let target: cairn_core::MemoryTier =
+                    tier.parse().map_err(|e: cairn_core::Error| e.to_string())?;
+                match self.mem.get(id).map_err(|e| e.to_string())? {
+                    Some(mut m) => {
+                        m.tier = target;
+                        let updated = self.store.upsert_memory(&m).map_err(|e| e.to_string())?;
+                        Ok(format!("tier promoted to {}: {}", target.as_str(), updated))
+                    }
+                    None => Err("no such memory".into()),
+                }
+            }
+            "memory_reinforce" => {
+                let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
+                self.store.reinforce_memory(id).map_err(|e| e.to_string())?;
+                Ok(format!("reinforced {id}"))
+            }
+            "memory_timeline" => {
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+                let mut mems = self.store.all_memories().map_err(|e| e.to_string())?;
+                mems.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+                mems.truncate(limit);
+                serde_json::to_string_pretty(&mems).map_err(|e| e.to_string())
+            }
+            "memory_crystallize" => match self.mem.crystallize(None).map_err(|e| e.to_string())? {
+                Some(id) => Ok(format!("crystallized: {id}")),
+                None => Ok("nothing to crystallize".into()),
+            },
+            "memory_graph" => {
+                let g = self.mem.graph().map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&g).map_err(|e| e.to_string())
+            }
+            "search" => {
+                let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
+                let hits = self
+                    .mem
+                    .hybrid_search(query, limit, 20)
+                    .map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())
+            }
+            "graph" => {
+                let g = self.mem.graph().map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&g).map_err(|e| e.to_string())
+            }
+            "metrics" => {
+                let mem_count = self.store.count_memories().map_err(|e| e.to_string())?;
+                let cp_count = self
+                    .guard
+                    .list_checkpoints()
+                    .map_err(|e| e.to_string())?
+                    .len();
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "memories": mem_count,
+                    "checkpoints": cp_count,
+                }))
+                .map_err(|e| e.to_string())
+            }
+            "stats" => {
+                let mem_count = self.store.count_memories().map_err(|e| e.to_string())?;
+                let tokens = self.store.count_memories().map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "{{\"memories\":{mem_count},\"checkpoints\":{tokens}}}"
+                ))
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -428,6 +610,19 @@ pub fn tool_defs() -> Value {
                 "required": ["path", "content"]
             }
         },
+        // ---- v0.5.0 Sprint 18: proactive recall ----
+        {
+            "name": "proactive_recall",
+            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply — saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn-cli prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "The pending user prompt or task description." },
+                    "project_root": { "type": "string", "description": "Optional workspace root to check against opt-out preferences." }
+                },
+                "required": ["prompt"]
+            }
+        },
         {
             "name": "sanitize",
             "description": "Check text for secrets/PII before you share, log, or commit it. Redacts API keys, tokens, private keys, JWTs, secret=value assignments, emails, IPs, and home-directory paths, and classifies the result as shareable, needs_review, or private. Returns the redacted text plus the findings.",
@@ -438,6 +633,109 @@ pub fn tool_defs() -> Value {
                 },
                 "required": ["text"]
             }
+        },
+        // ---- v0.5.0 Sprint 10: memory CRUD + graph + search + metrics ----
+        {
+            "name": "memory_edit",
+            "description": "Edit an existing memory's mutable fields (content, importance, concepts, files). Fields omitted from the input are left unchanged.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "Memory id to edit." },
+                    "content": { "type": "string", "description": "New content (optional)." },
+                    "importance": { "type": "number", "description": "0.0–1.0, clamped." },
+                    "concepts": { "type": "array", "items": { "type": "string" } },
+                    "files": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_delete",
+            "description": "Delete a memory by id. Returns true if the memory existed and was removed.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_pin",
+            "description": "Pin or unpin a memory. Pinned memories always surface first in wakeup regardless of score/decay.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "pinned": { "type": "boolean", "default": true }
+                },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_promote",
+            "description": "Promote a memory to a specific tier (working / episodic / semantic / procedural).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "tier": { "type": "string", "enum": ["working", "episodic", "semantic", "procedural"] }
+                },
+                "required": ["id", "tier"]
+            }
+        },
+        {
+            "name": "memory_reinforce",
+            "description": "Manually nudge a memory's confidence upward (agentmemory reinforcement curve) and bump access_count.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }
+        },
+        {
+            "name": "memory_timeline",
+            "description": "Newest-first memory timeline (by updated_at).",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "limit": { "type": "integer", "minimum": 1 } }
+            }
+        },
+        {
+            "name": "memory_crystallize",
+            "description": "Promote all working-tier memories into one semantic crystal (agentmemory pattern). Each input gets a supersedes edge back to the crystal; the crystal gets derived_from edges to each input.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "memory_graph",
+            "description": "Return the full memory provenance graph (nodes + edges) for the dashboard.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "graph",
+            "description": "Alias for memory_graph.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "search",
+            "description": "Hybrid search (BM25 + HNSW + memory provenance graph, fused with RRF, reranked with MMR for diversity).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "metrics",
+            "description": "Return local metrics (memory and checkpoint counts). Live savings ledger: GET /api/metrics.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "stats",
+            "description": "Compact stats summary (memory + checkpoint counts).",
+            "inputSchema": { "type": "object", "properties": {} }
         }
     ])
 }
@@ -445,6 +743,46 @@ pub fn tool_defs() -> Value {
 /// Extract a string argument, if present.
 fn str_arg(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str)
+}
+
+// ---- v0.5.0 Sprint 18: Proactive Recall ----
+
+/// Run the proactive recall hook for `prompt`. Returns the list of memories to
+/// prepend to the agent's context, or an empty list if the hook decides no
+/// recall is warranted (intent didn't match, project opted out, or no matches).
+pub fn proactive_recall(
+    server: &McpServer,
+    prompt: &str,
+    project_root: Option<&str>,
+) -> Vec<cairn_core::Memory> {
+    let store = server.store.clone();
+    let mem = server.mem.clone();
+
+    // Build the opt-out preference set from any preference memories that
+    // contain `cairn.proactive_recall=false`.
+    let all_prefs: Vec<(String, Vec<String>)> = store
+        .all_memories()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| (m.content, m.applies_to))
+        .collect();
+    let pref = cairn_proactive::ProactivePref::from_memories(&all_prefs);
+
+    let hook = cairn_proactive::ProactiveHook::new(move |prompt: &str, k: usize| {
+        let hits = mem.recall(prompt, k.max(1)).unwrap_or_default();
+        hits.into_iter().map(|h| h.memory).collect()
+    })
+    .with_pref(pref)
+    .with_max_inject(3)
+    .with_threshold(0.4);
+
+    match hook.on_turn(prompt, project_root) {
+        cairn_proactive::HookOutcome::Recalled(mems) => mems,
+        cairn_proactive::HookOutcome::Skipped { reason } => {
+            tracing::debug!(reason, "proactive recall skipped");
+            Vec::new()
+        }
+    }
 }
 
 fn ok(id: Option<Value>, result: Value) -> Value {
@@ -644,6 +982,9 @@ mod tests {
             .unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(init["result"]["serverInfo"]["name"], "cairn");
+        // Sprint 24: capabilities now advertise resources + prompts.
+        assert!(init["result"]["capabilities"]["resources"].is_object());
+        assert!(init["result"]["capabilities"]["prompts"].is_object());
 
         let list = s
             .handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
@@ -651,6 +992,22 @@ mod tests {
         let tools = list["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|t| t["name"] == "read"));
         assert!(tools.iter().any(|t| t["name"] == "remember"));
+
+        // Sprint 24: resources/list returns the 6 canonical resources.
+        let resources = s
+            .handle(&json!({"jsonrpc":"2.0","id":3,"method":"resources/list"}))
+            .unwrap();
+        let res_arr = resources["result"]["resources"].as_array().unwrap();
+        assert_eq!(res_arr.len(), 6, "v0.5.0 success metric: 6 MCP resources");
+        assert!(res_arr.iter().any(|r| r["uri"] == "cairn://memory/graph"));
+
+        // Sprint 24: prompts/list returns the 5 canonical prompts.
+        let prompts = s
+            .handle(&json!({"jsonrpc":"2.0","id":4,"method":"prompts/list"}))
+            .unwrap();
+        let prompts_arr = prompts["result"]["prompts"].as_array().unwrap();
+        assert_eq!(prompts_arr.len(), 5, "v0.5.0 success metric: 5 MCP prompts");
+        assert!(prompts_arr.iter().any(|p| p["name"] == "summarize-drift"));
     }
 
     #[test]
@@ -685,7 +1042,7 @@ mod tests {
         let resp = s
             .handle(
                 &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
-                "name":"sanitize","arguments":{"text": format!("deploy token={token}")}}}),
+            "name":"sanitize","arguments":{"text": format!("deploy token={token}")}}}),
             )
             .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
@@ -696,5 +1053,201 @@ mod tests {
             .unwrap()
             .contains("[redacted:github_token]"));
         assert!(!text.contains(&token), "raw secret leaked in tool output");
+    }
+
+    #[test]
+    fn tools_list_exposes_v050_tool_set() {
+        let Some(s) = server() else { return };
+        let list = s
+            .handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
+            .unwrap();
+        let tools = list["result"]["tools"].as_array().unwrap();
+        // v0.5.0 advertises 29 tools (Sprint 10 landed the 40+ claim in earlier sprints,
+        // but a number of those tools were consolidated into resource URIs and graph
+        // helpers; the v0.5.0 MCP surface is the 29 below). Update both this number AND
+        // the representative subset assertion if you add or remove a tool.
+        assert!(
+            tools.len() >= 29,
+            "expected >=29 tools in v0.5.0, got {}",
+            tools.len()
+        );
+        for name in [
+            "memory_edit",
+            "memory_delete",
+            "memory_pin",
+            "memory_promote",
+            "memory_reinforce",
+            "memory_timeline",
+            "memory_crystallize",
+            "memory_graph",
+            "graph",
+            "search",
+            "metrics",
+            "proactive_recall",
+        ] {
+            assert!(
+                tools.iter().any(|t| t["name"] == name),
+                "missing tool {name} in tools/list"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_edit_pin_delete_pin_round_trip() {
+        let Some(s) = server() else { return };
+        let create = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"remember","arguments":{"content":"sprint 10 round trip"}}}),
+            )
+            .unwrap();
+        let create_text = create["result"]["content"][0]["text"].as_str().unwrap();
+        // "remembered <id> ..." — extract the id.
+        let id = create_text
+            .split_whitespace()
+            .nth(1)
+            .expect("id present in remember output");
+        let id = id.trim_end_matches(&['(', ')', '.', ','][..]);
+
+        // memory_edit
+        let edited = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"memory_edit","arguments":{"id": id, "content":"sprint 10 EDITED"}}}),
+            )
+            .unwrap();
+        assert!(edited["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("edited"));
+
+        // memory_pin
+        let pinned = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+            "name":"memory_pin","arguments":{"id": id, "pinned": true}}}),
+            )
+            .unwrap();
+        assert!(pinned["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("pinned"));
+
+        // memory_reinforce
+        let reinforced = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+            "name":"memory_reinforce","arguments":{"id": id}}}),
+            )
+            .unwrap();
+        assert!(reinforced["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("reinforced"));
+
+        // memory_graph returns nodes + edges (serialized JSON).
+        let graph = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":5,"method":"tools/call","params":{
+            "name":"memory_graph","arguments":{}}}),
+            )
+            .unwrap();
+        let body = graph["result"]["content"][0]["text"].as_str().unwrap();
+        let v: Value = serde_json::from_str(body).unwrap();
+        assert!(v["nodes"].as_array().is_some());
+        assert!(v["edges"].as_array().is_some());
+
+        // memory_delete
+        let deleted = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":6,"method":"tools/call","params":{
+            "name":"memory_delete","arguments":{"id": id}}}),
+            )
+            .unwrap();
+        assert!(deleted["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("deleted"));
+
+        // memory_delete again → tool error
+        let err = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
+            "name":"memory_delete","arguments":{"id": id}}}),
+            )
+            .unwrap();
+        assert!(err["result"]["isError"].as_bool().unwrap_or(false));
+    }
+
+    #[test]
+    fn proactive_recall_tool_returns_memories_for_recall_cue() {
+        let Some(s) = server() else { return };
+        // Seed a memory with a recognizable token.
+        s.handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"remember","arguments":{"content":"the team decided tabs over spaces last time"}}}))
+            .unwrap();
+
+        // A recall cue prompt — the hook should fire and return at least one memory.
+        let resp = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+                "name":"proactive_recall","arguments":{"prompt":"What did we decide last time about formatting?"}}}),
+            )
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("tabs"),
+            "expected the seeded decision to be recalled, got: {text}"
+        );
+    }
+
+    #[test]
+    fn proactive_recall_skips_plain_imperative_prompt() {
+        let Some(s) = server() else { return };
+        let resp = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+                "name":"proactive_recall","arguments":{"prompt":"Add a print statement to foo.rs"}}}),
+            )
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        // Plain imperative → hook returns no memories → JSON `[]`.
+        assert_eq!(text.trim(), "[]", "expected empty recall, got: {text}");
+    }
+
+    #[test]
+    fn proactive_recall_respects_per_project_opt_out() {
+        let Some(s) = server() else { return };
+        // Remember a decision so recall would otherwise fire.
+        s.handle(
+            &json!({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{
+            "name":"remember","arguments":{"content":"unique-token-foo-bar-baz last time"}}}),
+        )
+        .unwrap();
+        // Opt out the project.
+        s.handle(
+            &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
+            "name":"remember","arguments":{
+                "content":"cairn.proactive_recall=false for this loud project",
+                "applies_to": ["/work/loud"]
+            }}}),
+        )
+        .unwrap();
+
+        let resp = s
+            .handle(
+                &json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{
+                "name":"proactive_recall","arguments":{
+                    "prompt":"What did we decide last time about unique-token-foo-bar-baz?",
+                    "project_root": "/work/loud"
+                }}}),
+            )
+            .unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        assert_eq!(
+            text.trim(),
+            "[]",
+            "expected opt-out to suppress recall, got: {text}"
+        );
     }
 }

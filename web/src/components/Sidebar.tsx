@@ -2,23 +2,12 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
-  Settings,
   Brain,
-  Search,
-  Sparkles,
-  FileSearch,
-  Layers,
-  Activity,
-  Target,
-  History,
   ShieldCheck,
-  Package,
-  Users,
-  KeyRound,
-  UserPlus,
-  FileClock,
+  UserCircle,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -36,59 +25,79 @@ import Logo from "@/components/Logo";
 
 type Item = { href: string; label: string; icon: LucideIcon };
 
-type Section = { title: string; items: Item[] };
-
-const SECTIONS: Section[] = [
-  {
-    title: "Server",
-    items: [
-      { href: "/dashboard", label: "Overview", icon: LayoutDashboard },
-      { href: "/dashboard/settings", label: "Settings", icon: Settings },
-    ],
-  },
-  {
-    title: "Memory",
-    items: [
-      { href: "/dashboard/memory", label: "Memories", icon: Brain },
-      { href: "/dashboard/memory/recall", label: "Recall", icon: Search },
-      { href: "/dashboard/memory/wakeup", label: "Wakeup", icon: Sparkles },
-    ],
-  },
-  {
-    title: "Context",
-    items: [
-      { href: "/dashboard/context", label: "Inspector", icon: FileSearch },
-      { href: "/dashboard/context/assemble", label: "Assemble", icon: Layers },
-    ],
-  },
-  {
-    title: "Reliability",
-    items: [
-      { href: "/dashboard/reliability", label: "Score", icon: Activity },
-      { href: "/dashboard/reliability/anchor", label: "Anchor", icon: Target },
-      { href: "/dashboard/reliability/checkpoints", label: "Checkpoints", icon: History },
-    ],
-  },
-  {
-    title: "Share",
-    items: [
-      { href: "/dashboard/share/sanitize", label: "Sanitize", icon: ShieldCheck },
-      { href: "/dashboard/share/export", label: "Bundles", icon: Package },
-      { href: "/dashboard/pool", label: "Pool", icon: Users },
-    ],
-  },
-  {
-    title: "Devices",
-    items: [
-      { href: "/dashboard/devices", label: "Tokens", icon: KeyRound },
-      { href: "/dashboard/devices/pair", label: "Pair new", icon: UserPlus },
-      { href: "/dashboard/devices/audit", label: "Audit", icon: FileClock },
-    ],
-  },
+const ITEMS: Item[] = [
+  { href: "/", label: "Now", icon: LayoutDashboard },
+  { href: "/memory", label: "Memory", icon: Brain },
+  { href: "/trust", label: "Trust", icon: ShieldCheck },
+  { href: "/you", label: "You", icon: UserCircle },
 ];
+
+const STORAGE_KEY = "cairn-sidebar-v3";
+
+function isActive(pathname: string | null, href: string): boolean {
+  if (!pathname) return false;
+  const [path] = href.split("?");
+  if (path === "/") {
+    return pathname === "/" || pathname === "";
+  }
+  return pathname === path || pathname.startsWith(path + "/");
+}
+
+function NavLink({
+  item,
+  active,
+}: {
+  item: Item;
+  active: boolean;
+}) {
+  const Icon = item.icon;
+  return (
+    <SidebarMenuButton asChild isActive={active} size="sm">
+      <Link
+        href={item.href}
+        aria-current={active ? "page" : undefined}
+        onClick={() => {
+          if (typeof window === "undefined") return;
+          try {
+            window.localStorage.setItem(STORAGE_KEY, "1");
+          } catch {
+            /* ignore */
+          }
+        }}
+      >
+        <Icon />
+        <span>{item.label}</span>
+      </Link>
+    </SidebarMenuButton>
+  );
+}
 
 export function CairnSidebar() {
   const pathname = usePathname();
+  const [hydrated, setHydrated] = useState(false);
+
+  useEffect(() => {
+    // Migration: drop any prior sidebar keys; v3 = flat.
+    for (const k of ["cairn-sidebar-v1", "cairn-sidebar-v2", "cairn-infocard-dismissed-v1"]) {
+      try {
+        window.localStorage.removeItem(k);
+      } catch {
+        /* ignore */
+      }
+    }
+    try {
+      window.sessionStorage.removeItem("cairn-infocard-dismissed-v1");
+    } catch {
+      /* ignore */
+    }
+    try {
+      window.localStorage.setItem(STORAGE_KEY, "1");
+    } catch {
+      /* ignore */
+    }
+    setHydrated(true);
+  }, []);
+
   return (
     <Sidebar collapsible="offcanvas" className="border-r border-line">
       <SidebarHeader className="border-b border-line">
@@ -98,36 +107,22 @@ export function CairnSidebar() {
         </div>
       </SidebarHeader>
       <SidebarContent>
-        {SECTIONS.map((s) => (
-          <SidebarGroup key={s.title}>
-            <SidebarGroupLabel>{s.title}</SidebarGroupLabel>
-            <SidebarGroupContent>
-              <SidebarMenu>
-                {s.items.map((it) => {
-                  const active =
-                    pathname === it.href ||
-                    (it.href !== "/dashboard" &&
-                      pathname?.startsWith(it.href + "/")) ||
-                    (it.href === "/dashboard" && pathname === "/dashboard");
-                  const Icon = it.icon;
-                  return (
+        <SidebarGroup>
+          <SidebarGroupLabel className="px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Workspace
+          </SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {hydrated
+                ? ITEMS.map((it) => (
                     <SidebarMenuItem key={it.href}>
-                      <SidebarMenuButton asChild isActive={active} size="sm">
-                        <Link
-                          href={it.href}
-                          aria-current={active ? "page" : undefined}
-                        >
-                          <Icon />
-                          <span>{it.label}</span>
-                        </Link>
-                      </SidebarMenuButton>
+                      <NavLink item={it} active={isActive(pathname, it.href)} />
                     </SidebarMenuItem>
-                  );
-                })}
-              </SidebarMenu>
-            </SidebarGroupContent>
-          </SidebarGroup>
-        ))}
+                  ))
+                : null}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
       </SidebarContent>
     </Sidebar>
   );

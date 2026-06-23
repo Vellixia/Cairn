@@ -1,98 +1,118 @@
-# Upgrading to 0.4.0
+# Upgrading to 0.5.0
 
-0.4.0 replaces the unauthenticated "open dashboard" model with a single admin account
-behind a cookie session, and moves device-token issuance into the web UI.
+0.5.0 adds the **Context + Reliability + Distribution + Proactive** layers (23 sprints, 22
+crates). The single-admin/cookie-session model from 0.4.0 is unchanged — this release expands
+*what* Cairn does, not *how* you log in.
 
 ## What changed for end users
 
-- Visiting `/` now redirects to `/dashboard`.
-- On a fresh install, the dashboard shows a **setup wizard** at `/setup` the first time
-  it loads. After you create the admin, subsequent visits go to `/login` and then
-  `/dashboard`.
-- The CLI now uses **device tokens** (HS256 JWTs) you mint from the dashboard's
-  **Devices** panel, instead of the previously-pasted dev token. The CLI's own
-  `cairn token create` and `cairn pair-code` commands still work for automation.
+- The dashboard still serves a single admin behind a cookie session.
+- The **Devices** panel now exposes a per-token **scope** dropdown (`read` / `write` /
+  `admin`) and lists revocation time.
+- Browser-extension capture moved server-side: `POST /api/extensions/capture` accepts an
+  Origin-gated JSON payload and stores it as a `Memory` with `source = "extension"`. The
+  bundled Chrome extension has been retired.
+- A **mobile companion** PWA lives at `/mobile` (installable; uses the service worker at
+  `/sw.js`).
+- A landing page replaces the old `/` redirect for unauthenticated visitors; the authed
+  redirect to `/dashboard` is preserved.
+
+## What changed for operators
+
+- 22 crates in the workspace. The old 14-crate dep graph is gone — `cairn-session`,
+  `cairn-pack`, `cairn-registry`, `cairn-sync`, `cairn-bench`, `cairn-proactive`,
+  `cairn-proxy`, and `cairn-ingest` are new.
+- **HelixDB is required.** `cairn-store` ships a pluggable backend (HelixDB +
+  in-memory). If you were on the 0.4 SQLite backend, run a HelixDB container and
+  `docker compose up -d helix` before restarting Cairn. The server refuses to start
+  when `CAIRN_HELIX_URL` is unset (or unreachable from the bound interface).
+- `deploy/` templates and the Chrome extension under `extensions/chrome/` were removed.
+  Use `cairn-cli onboard` (or the new `cairn-cli install --docker` subcommand) to bootstrap
+  a fresh stack.
+- `cairn-bench` now produces a single CSV row per fixture (`LongMemEval`, `horizon`,
+  `retention`) and prints token savings alongside MRR.
+- The Cairn repository does not commit `web/out/`. The directory is created at
+  compile time by `crates/cairn-api/build.rs` if missing; the Next.js static export
+  is gitignored. CI must run `cd web && npm ci && npm run build` before
+  `cargo build --workspace` if the dashboard is needed at runtime; otherwise the
+  binary falls back to its built-in page.
 
 ## Migration steps
 
-### 1. Pick your bootstrap mode
-
-The admin record lives in the same meta store as the rest of Cairn state. You can
-seed it three ways, in priority order:
-
-| Priority | Method | When to use |
-|----------|--------|-------------|
-| 1 | `CAIRN_ADMIN_PASSWORD_HASH` in `.env` | Production. Pre-hash with: `cairn-server admin password --print-hash` (see below) — or any Argon2id tool that emits the PHC format (`$argon2id$v=19$m=...$t=...$p=...$salt$hash`). |
-| 2 | `CAIRN_ADMIN_PASSWORD` in `.env` | Loopback dev only. Refused on non-loopback binds unless `CAIRN_INSECURE=1`. |
-| 3 | First-run `/setup` wizard | Easiest path. Visit `http://localhost:7777/setup`, set a username and an 8+ char password. |
-
-The default username is `admin`. Override with `CAIRN_ADMIN_USERNAME`.
-
-### 2. Migrate existing device tokens
-
-If you were using `cairn token create` in 0.3.x, the tokens still work — they were
-HS256 JWTs the whole time. The only thing that changed is that you can now mint,
-list, and revoke them from the dashboard.
-
-To copy a token out of the store into a CLI machine:
+### 1. Back up before you touch anything
 
 ```sh
-# On the server host:
-cairn-server token list
-
-# The id column is the JWT id, but the bearer itself was never persisted in cleartext.
-# Re-issue from the dashboard if you've lost it, then paste into the CLI's env.
+cairn-cli export dump.json           # personal memories (deterministic order)
+cairn-cli export --share share.json  # sanitized bundle (safe to inspect)
 ```
 
-### 3. Existing 0.3.x deployments without an admin
+If you were on 0.3.x, both flows are unchanged from 0.4.0.
 
-The server starts cleanly without an admin. `GET /api/auth/status` returns
-`{"admin_exists": false, "setup_required": true}`, the dashboard redirects to
-`/setup`, and the only writable routes until you create one are `/setup`,
-`/login`, `/health`, and `/pair/claim`. Device tokens issued before the admin
-exists still authenticate via `Authorization: Bearer …` because the auth
-middleware tries cookie → bearer → loopback in that order.
+### 2. Point at HelixDB
 
-### 4. Recovering a lost password
-
-Both recovery commands are **loopback-only** (mirroring the existing TLS gate):
+`docker compose up -d helix` starts HelixDB on `:6969`. Set in `.env`:
 
 ```sh
-# On the server host:
-cairn-server admin password   # reads CAIRN_ADMIN_PASSWORD or prompts; bumps generation
-cairn-server admin reset      # deletes the admin; next /setup creates a new one
+CAIRN_HELIX_URL=http://localhost:6969
 ```
 
-`admin password` bumps the `generation` counter on the persisted admin record,
-which immediately invalidates every existing cookie session. `admin reset` writes
-a tombstone sentinel (`__deleted__`) under the `admin` meta key — HelixDB's
-append-only schema can't physically remove rows, so readers treat the tombstone
-as absent. The next call to `/api/auth/setup` (with `Store::set_meta_if_absent`)
-succeeds.
+When the URL is unset *and* the bind address is non-loopback, the server refuses to start.
+This is intentional — running the audit pipeline against an in-memory backend would lose
+data on restart.
+
+### 3. Upgrade the binary
+
+```sh
+git pull --tags
+cargo build --workspace --release
+# or via the one-liner installer:
+curl -fsSL https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.sh | sh
+```
+
+The 0.4.0 device tokens still authenticate — JWTs are HS256 and the secret is the same
+(`CAIRN_SECRET_KEY`). Existing sessions are not invalidated.
+
+### 4. Run the e2e harness
+
+```sh
+pwsh scripts/e2e.ps1            # 20 scenarios, ~67/69 assertions pass
+```
+
+The harness needs `cairn` and `cairn-cli` on `$PATH` plus a running HelixDB. It exercises
+memory, context, guardrails, sessions, sync, federation, registry, sync, ingest,
+proactive, and the mobile companion.
+
+## Removed
+
+- `deploy/` (Compose templates, k8s manifests, Helm chart) — replaced by
+  `cairn-cli install --docker` and the root `docker-compose.yml`.
+- `extensions/chrome/` — moved to `POST /api/extensions/capture`.
+- `web/out/_next/` build artifacts — gitignored; rebuild with `cd web && npm run build`.
+
+## New config keys
+
+| Key | Default | Notes |
+|---|---|---|
+| `CAIRN_HELIX_URL` | `http://localhost:6969` | Required for non-loopback binds |
+| `CAIRN_EMBED_PROVIDER` | `hashing` | `onnx` opt-in via `cairn-embed` feature |
+| `CAIRN_PROACTIVE_DEFAULT` | `on` | Set `off` to disable auto-inject for all users |
+| `CAIRN_REGISTRY_URL` | _(unset)_ | Enables federation; pull-based, cursor: `revocations_since(since)` |
+| `CAIRN_PROXY_ADDR` | `127.0.0.1:7780` | The `cairn.sh` reverse-proxy listener |
+| `CAIRN_PUSH_VAPID_KEY` | _(unset)_ | Enables PWA push; pair with `CAIRN_PUSH_VAPID_SECRET` |
 
 ## Verifying the upgrade
 
 ```sh
 cargo build --workspace
-cargo test --workspace         # 113 lib tests pass; 5 ignored are the live HelixDB ones
+cargo test --workspace         # 330 lib tests pass; 5 ignored are live-HelixDB ones
 cargo run -p cairn-server -- serve
-# Visit http://localhost:7777 — should land on /setup (or /login if you set an admin)
+pwsh scripts/e2e.ps1           # end-to-end harness
 ```
-
-The new web dashboard is committed prebuilt at `web/out/` so `cargo build` is
-hermetic — no Node toolchain required.
-
-## Removed
-
-- The standalone landing page (`web/src/app/page.tsx` was a marketing pitch;
-  replaced by a server-side redirect to `/dashboard`).
-- The fallback `INDEX_HTML` no longer calls authed endpoints, so a fresh
-  checkout with no `web/out/` build no longer produces a broken UI that shows
-  "invalid or missing device token".
 
 ## Open items
 
-- 2FA / TOTP is not yet implemented. The cookie payload schema leaves room for a
-  second factor field without breaking existing sessions.
-- Multi-admin isn't supported. Adding it requires an `AdminRecord` per user
-  rather than a single record; tracked for a later release.
+- 2FA / TOTP is still not implemented. Tracked for 0.6.0.
+- Per-tenant quotas are enforced by the new `OrgId` column but no admin UI surfaces them
+  yet — `cairn-cli tenant quota <org> --set N` is the workaround.
+- `cairn-registry` ships with Local/Team/Public trust scopes; cross-scope imports
+  return `RegistryError::ScopeDenied` and do not auto-elevate.

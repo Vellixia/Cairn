@@ -120,6 +120,41 @@ services:
       retries: 24
       start_period: 30s
 
+  # v0.5.0 Sprint 12: proper non-root volume init. Pre-0.5.0 the cairn container ran as
+  # root (`user: "0"`) because the Docker image's user (`cairn`, uid 10001) couldn't
+  # write into a freshly-mounted anonymous volume — anonymous volumes come up owned
+  # by root and there was no init container to chown them. The cairn-init service
+  # below does that chown once, then exits. After it succeeds, cairn starts as the
+  # non-root `cairn` user. Drop the `cairn-init` block to go back to the old behaviour.
+  cairn-init:
+    image: alpine:3.19
+    container_name: cairn-init
+    # Run as root so we can chown /data; exit cleanly once done. restart: "no" so a
+    # chown failure doesn't loop forever — the cairn container's own error message
+    # will surface the misconfiguration.
+    user: "0"
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        set -eu
+        echo "cairn-init: preparing /data for uid 10001 (cairn user)..."
+        # Ensure the mount point exists (the volume driver does, but be defensive).
+        mkdir -p /data
+        # chown recursively. On a 1 GiB volume with a few hundred memories this is
+        # sub-second; on a 100 GiB volume it's still faster than running cairn as root.
+        chown -R 10001:10001 /data
+        # Verify the chown landed so a misconfigured volume driver fails fast.
+        if [ "$(stat -c %u /data)" != "10001" ]; then
+          echo "cairn-init: FATAL — /data is still owned by uid $(stat -c %u /data)" >&2
+          echo "cairn-init: this usually means the volume was mounted with a host bind" >&2
+          echo "cairn-init: that overrides anonymous-volume permissions." >&2
+          exit 1
+        fi
+        echo "cairn-init: /data is now owned by uid 10001"
+    volumes:
+      - cairn-data:/data
+    restart: "no"
+
   cairn:
     build:
       context: .
@@ -129,12 +164,16 @@ services:
         CAIRN_FEATURES: ""
     image: cairn:dev
     container_name: cairn
-    user: "0"
+    # Non-root user from the Dockerfile (cairn, uid 10001). After cairn-init runs the
+    # chown above, the volume is writable by this uid. No more `user: "0"` workaround.
+    user: "10001:10001"
     depends_on:
+      cairn-init:
+        condition: service_completed_successfully
       helix:
         condition: service_healthy
     environment:
-      CAIRN_HOST: 0.0.0.0
+      CAIRN_HOST: 127.0.0.1
       CAIRN_PORT: "7777"
       # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
       CAIRN_HELIX_URL: http://helix:8080

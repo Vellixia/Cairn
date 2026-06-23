@@ -24,6 +24,35 @@ pub(crate) trait StoreBackend: Send + Sync {
     fn count_memories(&self) -> Result<i64>;
     fn upsert_memory(&self, m: &Memory) -> Result<bool>;
     fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>>;
+    /// Apply the agentmemory reinforcement curve `c' = min(1.0, c + 0.1*(1-c))` and bump
+    /// `access_count`. Idempotent on missing rows (no-op).
+    fn reinforce_memory(&self, id: &str) -> Result<()> {
+        let _ = id;
+        Ok(())
+    }
+    /// Set `pinned` to the given value. Idempotent; missing rows are no-ops.
+    fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
+        let _ = (id, pinned);
+        Ok(())
+    }
+    /// Edit a memory's mutable fields. Returns `Ok(true)` if the row was updated, `Ok(false)`
+    /// if no row exists. Only the fields that are `Some` are applied — the rest are kept.
+    fn edit_memory(
+        &self,
+        id: &str,
+        content: Option<String>,
+        importance: Option<f32>,
+        concepts: Option<Vec<String>>,
+        files: Option<Vec<String>>,
+    ) -> Result<bool> {
+        let _ = (id, content, importance, concepts, files);
+        Ok(false)
+    }
+    /// Delete a memory by id. Returns `Ok(true)` if a row was removed, `Ok(false)` otherwise.
+    fn delete_memory(&self, id: &str) -> Result<bool> {
+        let _ = id;
+        Ok(false)
+    }
     /// Semantic (vector) recall, newest-relevant first, if the backend has an embedding index.
     /// `Ok(None)` means the backend has no vectors — callers fall back to lexical ranking.
     fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
@@ -55,6 +84,39 @@ pub(crate) trait StoreBackend: Send + Sync {
     fn create_pairing(&self, code: &str, token: &str, name: &str, expires_at: &str) -> Result<()>;
     /// Atomically claim a non-expired code (single-use): returns `(token, name)` and removes it.
     fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>>;
+
+    // ---- audit log (v0.5.0 — Sprint 1) ------------------------------------------------------
+    /// Append an audit event to durable storage. Returns the assigned event id (a monotonically
+    /// increasing integer encoded as a string, suitable for SSE `Last-Event-ID` resync).
+    /// Implementations must surface failures so a torn audit trail can't go silently unrecorded.
+    fn append_audit(&self, ts: i64, kind: &str, actor: &str, detail: &str) -> Result<String> {
+        // Default no-op for backends that haven't implemented durable audit yet. Returns a
+        // pseudo-id derived from the timestamp so callers always get *something* back.
+        let _ = (ts, kind, actor, detail);
+        Ok(format!("inmem-{ts}"))
+    }
+    /// Recent audit events, newest first. `since_event_id=None` returns the most recent
+    /// `limit`; `since_event_id=Some(id)` returns events strictly newer than `id` (for SSE
+    /// reconnect replay).
+    fn recent_audit(&self, limit: usize, since_event_id: Option<&str>) -> Result<Vec<AuditRecord>> {
+        let _ = (limit, since_event_id);
+        Ok(Vec::new())
+    }
+    /// Maximum event id ever assigned (used to confirm no events have been pruned when a client
+    /// asks for events older than the ring's window).
+    fn max_audit_event_id(&self) -> Result<i64> {
+        Ok(0)
+    }
+}
+
+/// A single audit event read from durable storage.
+#[derive(Debug, Clone)]
+pub struct AuditRecord {
+    pub id: i64,
+    pub ts: i64,
+    pub kind: String,
+    pub actor: String,
+    pub detail: String,
 }
 
 /// The structured store plus the content-addressed blob store. Backend-agnostic public API.
@@ -90,6 +152,13 @@ impl Store {
     pub fn insert_memory(&self, m: &Memory) -> Result<()> {
         self.backend.insert_memory(m)
     }
+    /// Materialize a `NewMemory` (with id + timestamps) and insert it. Used by
+    /// the API layer where a handler doesn't want to depend on `MemoryEngine`.
+    pub fn insert_memory_for(&self, new_mem: &cairn_core::NewMemory) -> Result<Memory> {
+        let mem = new_mem.clone().into_memory();
+        self.backend.insert_memory(&mem)?;
+        Ok(mem)
+    }
     pub fn get_memory(&self, id: &str) -> Result<Option<Memory>> {
         self.backend.get_memory(id)
     }
@@ -114,6 +183,30 @@ impl Store {
     }
     pub fn memories_since(&self, since: DateTime<Utc>) -> Result<Vec<Memory>> {
         self.backend.memories_since(since)
+    }
+    /// Apply the reinforcement curve on a memory's confidence and bump access_count.
+    pub fn reinforce_memory(&self, id: &str) -> Result<()> {
+        self.backend.reinforce_memory(id)
+    }
+    /// Set a memory's `pinned` flag.
+    pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
+        self.backend.set_pinned(id, pinned)
+    }
+    /// Edit a memory's mutable fields. Only the `Some` values are applied.
+    pub fn edit_memory(
+        &self,
+        id: &str,
+        content: Option<String>,
+        importance: Option<f32>,
+        concepts: Option<Vec<String>>,
+        files: Option<Vec<String>>,
+    ) -> Result<bool> {
+        self.backend
+            .edit_memory(id, content, importance, concepts, files)
+    }
+    /// Delete a memory by id.
+    pub fn delete_memory(&self, id: &str) -> Result<bool> {
+        self.backend.delete_memory(id)
     }
     pub fn create_token(&self, name: &str) -> Result<DeviceToken> {
         self.backend.create_token(name)
@@ -160,6 +253,28 @@ impl Store {
         }
         self.backend.set_meta(key, value)?;
         Ok(true)
+    }
+
+    /// Append a durable audit event. Returns the assigned event id so callers (SSE broadcaster)
+    /// can include it in the `id:` line for `Last-Event-ID` resync.
+    pub fn append_audit(&self, ts: i64, kind: &str, actor: &str, detail: &str) -> Result<String> {
+        self.backend.append_audit(ts, kind, actor, detail)
+    }
+
+    /// Recent audit events, newest first. `since_event_id=None` returns up to `limit`; `Some(id)`
+    /// returns events strictly newer than `id` (used by the SSE endpoint to replay missed events
+    /// after a disconnect).
+    pub fn recent_audit(
+        &self,
+        limit: usize,
+        since_event_id: Option<&str>,
+    ) -> Result<Vec<AuditRecord>> {
+        self.backend.recent_audit(limit, since_event_id)
+    }
+
+    /// Maximum audit event id ever assigned (used by SSE clients to detect pruning).
+    pub fn max_audit_event_id(&self) -> Result<i64> {
+        self.backend.max_audit_event_id()
     }
 
     /// Mark `key` as deleted by appending the tombstone sentinel. The append-only HelixDB
@@ -258,6 +373,7 @@ impl Store {
                 api_key: None,
             },
             admin: cairn_core::AdminConfig::default(),
+            multi_tenant: false,
         };
         std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
         Some(cfg)
@@ -287,7 +403,14 @@ mod tests {
             session_id: None,
             importance: 0.5,
             access_count: 0,
+            org_id: cairn_core::OrgId::default(),
             suspicious: false,
+            confidence: 0.5,
+            pinned: false,
+            derived_from: vec![],
+            contradicts: vec![],
+            supersedes: vec![],
+            applies_to: vec![],
             created_at: updated,
             updated_at: updated,
         }
@@ -427,5 +550,83 @@ mod tests {
     fn reset_meta_on_missing_key_reports_no_prior_record() {
         let Some(s) = store() else { return };
         assert!(!s.reset_meta("never_set").unwrap());
+    }
+
+    // ---- v0.5.0 Sprint 1: durable audit log tests ------------------------------------------
+
+    #[test]
+    fn audit_append_assigns_monotonic_ids_and_reads_back() {
+        let Some(s) = store() else { return };
+        let id1 = s.append_audit(1000, "login_ok", "alice", "").unwrap();
+        let id2 = s
+            .append_audit(2000, "token_issued", "alice", "laptop")
+            .unwrap();
+        let id3 = s
+            .append_audit(3000, "login_failed", "bob", "bad password")
+            .unwrap();
+        // Ids are monotonically increasing as integers.
+        let i1: i64 = id1.parse().unwrap();
+        let i2: i64 = id2.parse().unwrap();
+        let i3: i64 = id3.parse().unwrap();
+        assert!(i1 < i2 && i2 < i3);
+
+        // recent_audit returns newest first by default.
+        let recent = s.recent_audit(10, None).unwrap();
+        assert_eq!(recent.len(), 3);
+        assert_eq!(recent[0].id, i3);
+        assert_eq!(recent[2].id, i1);
+        assert_eq!(recent[0].kind, "login_failed");
+        assert_eq!(recent[1].actor, "alice");
+        assert_eq!(recent[2].detail, "");
+    }
+
+    #[test]
+    fn audit_replay_since_id_returns_only_newer_events() {
+        let Some(s) = store() else { return };
+        s.append_audit(1000, "a", "x", "").unwrap();
+        s.append_audit(2000, "b", "x", "").unwrap();
+        s.append_audit(3000, "c", "x", "").unwrap();
+
+        // Take the id of the middle event and ask for everything newer.
+        let all = s.recent_audit(10, None).unwrap();
+        let middle_id = all.iter().find(|r| r.kind == "b").unwrap().id.to_string();
+
+        let newer = s.recent_audit(10, Some(&middle_id)).unwrap();
+        // Only "c" remains.
+        assert_eq!(newer.len(), 1);
+        assert_eq!(newer[0].kind, "c");
+    }
+
+    #[test]
+    fn audit_survives_replay_via_max_event_id() {
+        let Some(s) = store() else { return };
+        assert_eq!(s.max_audit_event_id().unwrap(), 0);
+        s.append_audit(100, "x", "y", "").unwrap();
+        s.append_audit(200, "x", "y", "").unwrap();
+        let max = s.max_audit_event_id().unwrap();
+        assert!(
+            max >= 2,
+            "max audit id should be at least 2 after two appends; got {max}"
+        );
+    }
+
+    #[test]
+    fn audit_survives_round_trip_after_a_store_drop_and_reopen() {
+        // Append a few events to one store, then close it and open a fresh one. The events
+        // should still be readable — that's the whole point of the Sprint 1 migration away
+        // from the in-memory ring buffer.
+        let Some(s1) = store() else { return };
+        s1.append_audit(100, "login_ok", "alice", "").unwrap();
+        s1.append_audit(200, "token_issued", "alice", "laptop")
+            .unwrap();
+        drop(s1);
+
+        let Some(s2) = store() else { return };
+        let recent = s2.recent_audit(10, None).unwrap();
+        let kinds: Vec<&str> = recent.iter().map(|r| r.kind.as_str()).collect();
+        assert!(
+            kinds.contains(&"login_ok") && kinds.contains(&"token_issued"),
+            "audit events should survive reopen; got kinds {kinds:?}"
+        );
     }
 }

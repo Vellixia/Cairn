@@ -5,7 +5,9 @@ welcome.
 
 ## Development setup
 
-You'll need a recent **Rust** toolchain and **Node 20+** (for the web UI).
+You'll need a recent **Rust** toolchain (stable, MSRV 1.85) and **Node 20+** (for the web UI).
+A running **HelixDB** instance is required for live integration tests — the simplest path is
+`docker compose up -d helix`.
 
 ```sh
 # engine
@@ -13,11 +15,15 @@ cargo build --workspace
 cargo test --workspace
 
 # run the server (+ embedded UI / built-in fallback page) on http://127.0.0.1:7777
-cargo run -p cairn-cli -- serve
+cargo run -p cairn-server -- serve
 
 # web control plane (dev server on http://localhost:3000, talks to the API on :7777)
 cd web && npm install && npm run dev
 ```
+
+The Rust build does **not** require building the web UI — `crates/cairn-api/build.rs`
+creates `web/out/` at compile time when missing, so the binary falls back to a
+built-in page when no export is present. Build artifacts are never committed.
 
 ## Before you open a PR
 
@@ -31,25 +37,40 @@ cargo test --workspace
 
 - Keep changes focused; one logical change per PR.
 - Match the surrounding style. New behavior gets a test.
-- The Rust build does **not** require building the web UI — `web/out` ships a `.gitkeep` and the
-  binary falls back to the built-in page when no export is present.
+- Dependencies use tilde constraints (`~major.minor`); build with `--locked` to catch drift.
+- CI runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --workspace` on every PR via `.github/workflows/ci.yml`. Run the same commands locally before pushing.
 
 ## Workspace layout
 
+22 crates. Dep graph: `cairn-core` → `cairn-store` → domain crates → `cairn-mcp` → `cairn-api`
+→ `cairn-server` / `cairn-cli`.
+
 | Crate | Role |
 |---|---|
-| `cairn-core` | domain types, hashing, config |
-| `cairn-store` | pluggable backend (SQLite today) + content-hash blob store |
+| `cairn-core` | domain types, hashing, config, `OrgId` tenant scope |
+| `cairn-store` | pluggable backend (HelixDB + in-memory) + content-hash blob store |
 | `cairn-context` | cached reads · AST signature outlines · byte-identical `expand` |
-| `cairn-memory` | remember · BM25 recall · wakeup · decay · 4-tier consolidation |
-| `cairn-assemble` | token-budgeted, edge-ordered context assembler |
+| `cairn-memory` | remember · BM25/semantic recall · wakeup · decay · 4-tier consolidation · MMR hybrid |
+| `cairn-assemble` | token-budgeted, edge-ordered context assembler with CSP nonce support |
 | `cairn-guard` | verify edits vs originals · task anchor · checkpoint/rollback · reliability score |
 | `cairn-shell` | RTK-style command-output compression (lossless via `expand`) |
 | `cairn-profile` | preference learning |
 | `cairn-share` | privacy-first sanitization (redact secrets/PII before sharing) |
-| `cairn-api` | axum REST API + embedded web UI |
-| `cairn-mcp` | MCP server (stdio) |
-| `cairn-cli` | the `cairn` binary (serve, mcp, run, hook, install, …) |
+| `cairn-session` | on-disk session store (JSON), replay + resume |
+| `cairn-pack` | `.cairnpkg` archive format (ustar + SHA-256 + HMAC + Ed25519) |
+| `cairn-registry` | Ed25519-signed pack registry · trust scopes · revocation cascade |
+| `cairn-sync` | CRDTs (GCounter + ORSet) · vector clocks · E2E encryption (Argon2id + ChaCha20-Poly1305) |
+| `cairn-bench` | LongMemEval / horizon / retention benchmarks |
+| `cairn-proactive` | intent classifier · auto-inject · opt-out (`PROJECT_OPT_OUT`) |
+| `cairn-proxy` | `cairn.sh` reverse proxy · fanout · claim tokens |
+| `cairn-ingest` | VTT/SRT/JSON transcript parsers · speaker-window chunking |
+| `cairn-embed` | embedding providers (hashing default, ONNX opt-in) |
+| `cairn-api` | axum REST API · embedded web UI · PWA service worker · push subscriptions |
+| `cairn-mcp` | MCP server (stdio) · 29 tools + 10 graph actions = 39 total · 6 resources · 5 prompts |
+| `cairn-cli` | the `cairn` binary (serve, mcp, setup, hook, sync, bench, token, pack, sync, proxy) |
+| `cairn-server` | the `cairn` binary entry point (alternative name) |
+
+The two binaries shipped are `cairn` (from `cairn-server`) and `cairn-cli`.
 
 ## License
 

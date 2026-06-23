@@ -27,6 +27,7 @@ cairn-shell.workspace = true
 cairn-profile.workspace = true
 cairn-mcp.workspace = true
 cairn-share.workspace = true
+cairn-pack.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
@@ -36,6 +37,7 @@ ureq.workspace = true
 tracing-subscriber.workspace = true
 dotenvy.workspace = true
 self_update.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

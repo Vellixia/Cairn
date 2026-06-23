@@ -11,6 +11,8 @@ cairn-core.workspace = true
 cairn-store.workspace = true
 serde.workspace = true
 chrono.workspace = true
+tracing.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

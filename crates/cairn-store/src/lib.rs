@@ -8,4 +8,4 @@ mod db;
 mod helix;
 
 pub use blob::BlobStore;
-pub use db::Store;
+pub use db::{AuditRecord, Store};
