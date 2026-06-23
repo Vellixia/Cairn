@@ -414,31 +414,66 @@ impl Registry {
             (false, _) => (PublishStatus::Unsigned, None),
         };
 
-        // Stage the tarball to packs/<name>/<version>.cairnpkg.
+        // Stage the tarball to packs/<name>/<version>.cairnpkg. Use OpenOptions::create_new
+        // (which fails with AlreadyExists if the file already exists) so two concurrent
+        // publishes of the same name+version can no longer both succeed and clobber each
+        // other. The previous `exists()` + `fs::write()` pair was a TOCTOU race; the
+        // `create_new` open is atomic on POSIX and Windows.
         let pack_path = self
             .root
             .join("packs")
             .join(&manifest.name)
             .join(format!("{}.cairnpkg", manifest.version));
-        if pack_path.exists() {
-            return Err(RegistryError::AlreadyExists(format!(
-                "{}-{}",
-                manifest.name, manifest.version
-            )));
-        }
         if let Some(parent) = pack_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&pack_path, tarball)?;
+        let mut pack_file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&pack_path)
+        {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                return Err(RegistryError::AlreadyExists(format!(
+                    "{}-{}",
+                    manifest.name, manifest.version
+                )));
+            }
+            Err(e) => return Err(RegistryError::Io(e)),
+        };
+        use std::io::Write;
+        pack_file.write_all(tarball)?;
+        pack_file.sync_all()?;
+        drop(pack_file);
         let size_bytes = fs::metadata(&pack_path)?.len();
 
         // Cache the manifest under a sibling filename so a quick `find` over the registry
         // can render metadata without unpacking. Use the canonical
         // `packs/<name>/<version>.manifest.json` shape (not `<version>.cairnpkg.manifest.json`)
         // so the `download_manifest` HTTP endpoint and a future `find` index agree on
-        // the same path.
+        // the same path. Same create_new semantics — never clobber a cached manifest.
         let manifest_cache = pack_path.with_extension("manifest.json");
-        fs::write(&manifest_cache, serde_json::to_vec_pretty(&manifest)?)?;
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&manifest_cache)
+        {
+            Ok(mut f) => {
+                f.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
+                f.sync_all()?;
+            }
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                // Manifest cache for this version already exists from a prior publish
+                // that wrote the tarball but never landed in the index (e.g. a crash).
+                // Don't fail the publish — the cache is a hint, not the source of truth.
+                tracing::warn!(
+                    path = %manifest_cache.display(),
+                    "manifest cache already existed; overwriting"
+                );
+                fs::write(&manifest_cache, serde_json::to_vec_pretty(&manifest)?)?;
+            }
+            Err(e) => return Err(RegistryError::Io(e)),
+        }
 
         // Append to the index.
         let meta = PackMeta {
@@ -613,8 +648,20 @@ fn parse_pubkey(hex_str: &str) -> Result<PublicKey, RegistryError> {
 
 /// Read the pack's declared scope from its manifest. The current `.cairnpkg` manifest
 /// doesn't carry an explicit `scope` field — we infer it from the `description` field's
-/// `scope: <local|team|public>` prefix when present, falling back to `public`. Future
-/// revisions will add a first-class `scope` field to the manifest schema.
+/// `scope: <local|team|public>` prefix when present, falling back to `public`.
+///
+/// **SECURITY CAVEAT:** This is a substring match on a description string that the
+/// publisher controls and that is *not* part of the manifest's signed payload
+/// (`signature.ed25519` covers the manifest JSON, not its rendered description text in
+/// the registry). A malicious publisher can ship a pack whose description reads
+/// "Public release, please redistribute" with the literal phrase `scope: local`
+/// anywhere in it, and the registry will classify it as local (and refuse public
+/// re-publish). The first match in the fixed-order probe list wins, so the attack is
+/// trivial. Until the schema is upgraded, treat `manifest_scope` as best-effort and
+/// require a `trust_override` on publish for any non-`Public` scope.
+// FIXME: v0.6 — replace description-prefix parsing with a first-class `scope` field in
+// `cairn_pack::Manifest` and include it in the canonical signed payload. Track the
+// schema bump alongside the other v0.6 ledger + manifest migrations.
 fn manifest_scope(manifest: &cairn_pack::Manifest) -> TrustScope {
     let desc = &manifest.description;
     for (marker, scope) in [
@@ -833,6 +880,47 @@ mod tests {
             Default::default(),
         );
         assert_eq!(manifest_scope(&m_default), TrustScope::Public);
+    }
+
+    /// Two concurrent publishes of the same name+version must produce exactly one success
+    /// and one AlreadyExists failure. Without the atomic create_new open, both writers
+    /// would race past the `exists()` check and clobber each other.
+    #[test]
+    fn concurrent_publish_of_same_version_only_one_wins() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let dir = TempDir::new().unwrap();
+        let reg = Arc::new(Registry::open(dir.path()).unwrap());
+
+        // Pre-build the tarball bytes once so the threads share identical inputs.
+        let kp = Keypair::generate();
+        reg.trust(kp.public(), TrustScope::Public, None).unwrap();
+        let bytes = Arc::new(signed_pack_bytes(&kp));
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let reg = Arc::clone(&reg);
+            let bytes = Arc::clone(&bytes);
+            handles.push(thread::spawn(move || reg.publish(&bytes, None)));
+        }
+        let mut successes = 0;
+        let mut already_exists = 0;
+        for h in handles {
+            match h.join().unwrap() {
+                Ok(_) => successes += 1,
+                Err(RegistryError::AlreadyExists(_)) => already_exists += 1,
+                Err(e) => panic!("unexpected error: {e:?}"),
+            }
+        }
+        assert_eq!(successes, 1, "exactly one publish must succeed");
+        assert_eq!(
+            already_exists, 3,
+            "all other concurrent publishes must see AlreadyExists"
+        );
+
+        let listed = reg.list_all().unwrap();
+        assert_eq!(listed.len(), 1, "index must contain exactly one pack");
     }
 
     #[test]

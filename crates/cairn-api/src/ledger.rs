@@ -37,10 +37,21 @@ pub struct LedgerEntry {
     pub bytes_out: u64,
     pub tokens_saved: i64,
     pub cost_usd_saved: f64,
-    /// Lower-case hex HMAC-SHA256 over the canonical JSON of all the fields above (id, ts,
-    /// source, bytes_in, bytes_out, tokens_saved). Verification re-canonicalizes the same
-    /// way and compares; if the entry has been tampered with, the HMAC won't match.
+    /// Lower-case hex HMAC-SHA256 over the canonical JSON of exactly six fields:
+    /// (id, ts, source, bytes_in, bytes_out, tokens_saved). `cost_usd_saved` is
+    /// **deliberately excluded** from the signed payload — it's computed at display
+    /// time from `tokens_saved` and the current `$0.00003 / 4` price constant. If the
+    /// price constant ever changes, historical entries will recompute their
+    /// `cost_usd_saved` against the new price while the signature still verifies; this
+    /// is intentional (the price is treated as a runtime parameter, not as part of the
+    /// tamper-evidence scope). To reproduce historical USD exactly across price
+    /// updates, sign `price_usd_per_million_tokens_at_sign_time` alongside the other
+    /// fields — tracked for v0.6 (FIXME below).
     pub signature: String,
+    // FIXME: v0.6 — add `price_usd_per_million_tokens_at_sign_time: f64` and include it
+    // in `canonical_json` / `sign_ledger` so historical `cost_usd_saved` values are
+    // reproducible after the price constant changes. This is a breaking change to the
+    // signed payload, so it ships alongside the v0.6 ledger schema migration.
 }
 
 #[derive(Default)]

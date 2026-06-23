@@ -133,8 +133,18 @@ impl PushStore {
     pub fn unsubscribe(&self, id: &str) -> Result<(), PushStoreError> {
         let mut guard = self.cache.lock().expect("push cache poisoned");
         guard.retain(|r| r.id != id);
-        let _ = fs::remove_file(self.root.join(format!("{id}.json")));
-        Ok(())
+        // Distinguish "file was already gone" (NotFound — fine, we just removed it
+        // from the cache too) from a real I/O error (log it and surface as a
+        // PushStoreError). Pre-fix both were silently swallowed with `let _ =`,
+        // letting zombie subscription files accumulate on disk after a crash.
+        match fs::remove_file(self.root.join(format!("{id}.json"))) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => {
+                tracing::warn!(id, error = %e, "push unsubscribe: failed to remove subscription file");
+                Err(PushStoreError::Io(e))
+            }
+        }
     }
 
     /// Bump a subscription's last-event cursor (the dashboard calls this
@@ -202,6 +212,36 @@ mod tests {
         store.ack(&r.id, 3).unwrap(); // smaller — no-op
         let after = store.list();
         assert_eq!(after[0].last_event_id, 5);
+    }
+
+    /// Pre-fix regression: `let _ = fs::remove_file(...)` silently swallowed I/O errors,
+    /// letting zombie subscription files accumulate on disk after a crash. NotFound
+    /// is still OK (cache is the source of truth); any other error must propagate.
+    #[test]
+    fn unsubscribe_handles_missing_file_silently_and_propagates_other_errors() {
+        let dir = TempDir::new().unwrap();
+        let store = PushStore::open(dir.path()).unwrap();
+        let r = store
+            .upsert(
+                "https://e/missing".into(),
+                PushKeys {
+                    p256dh: "p".into(),
+                    auth: "a".into(),
+                },
+                None,
+            )
+            .unwrap();
+        // Yank the file out from under the store so the unsubscribe hits NotFound.
+        let path = dir.path().join("push").join(format!("{}.json", r.id));
+        std::fs::remove_file(&path).unwrap();
+        store
+            .unsubscribe(&r.id)
+            .expect("NotFound from remove_file must be silent Ok");
+
+        // Calling unsubscribe on a never-existed id (cache miss) is also Ok.
+        store
+            .unsubscribe("never-existed")
+            .expect("missing entry is Ok");
     }
 }
 

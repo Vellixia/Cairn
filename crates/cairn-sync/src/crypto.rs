@@ -80,9 +80,37 @@ impl Default for KdfParams {
 }
 
 impl KdfParams {
-    fn to_argon2(&self) -> Params {
+    /// Clamp peer-supplied KDF parameters to the OWASP-recommended minimums before handing
+    /// them to `argon2::Params::new`. Without this, a malicious peer could ship
+    /// `m_cost_kib=1, t_cost=1, p_cost=1` in the envelope header and coerce us into a
+    /// 4 KiB / 1-iteration derivation — fast enough to be a denial-of-service vector even
+    /// though the AEAD tag still rejects forgery. The `t_cost >= 3` floor matches the
+    /// minimum we use ourselves; the `p_cost <= 4` cap blocks attackers from spinning up
+    /// unbounded argon2 threads.
+    fn to_argon2(&self) -> Result<Params, CryptoError> {
+        const MIN_M_COST_KIB: u32 = 64 * 1024;
+        const MIN_T_COST: u32 = 3;
+        const MAX_P_COST: u32 = 4;
+        if self.m_cost_kib < MIN_M_COST_KIB {
+            return Err(CryptoError::Argon2(format!(
+                "m_cost_kib {} below minimum {}",
+                self.m_cost_kib, MIN_M_COST_KIB
+            )));
+        }
+        if self.t_cost < MIN_T_COST {
+            return Err(CryptoError::Argon2(format!(
+                "t_cost {} below minimum {}",
+                self.t_cost, MIN_T_COST
+            )));
+        }
+        if self.p_cost < 1 || self.p_cost > MAX_P_COST {
+            return Err(CryptoError::Argon2(format!(
+                "p_cost {} outside [1, {}]",
+                self.p_cost, MAX_P_COST
+            )));
+        }
         Params::new(self.m_cost_kib, self.t_cost, self.p_cost, Some(32))
-            .expect("argon2 params are valid")
+            .map_err(|e| CryptoError::Argon2(e.to_string()))
     }
 }
 
@@ -105,7 +133,7 @@ pub enum CryptoError {
 
 /// Derive a 32-byte ChaCha20-Poly1305 key from the user's passphrase using Argon2id.
 fn derive_key(passphrase: &[u8], salt: &[u8], params: &KdfParams) -> Result<[u8; 32], CryptoError> {
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.to_argon2());
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.to_argon2()?);
     let mut out = [0u8; 32];
     argon
         .hash_password_into(passphrase, salt, &mut out)
@@ -260,5 +288,56 @@ mod tests {
         env.header.version = 99;
         let err = decrypt_envelope(&env, b"pw", None).expect_err("bad version must fail");
         assert!(matches!(err, CryptoError::VersionMismatch { .. }));
+    }
+
+    /// Pre-fix regression: a malicious peer could ship `m_cost_kib=1, t_cost=1, p_cost=1`
+    /// in the envelope header and coerce the receiver into a 4 KiB / 1-iteration Argon2id
+    /// derivation. The receiver's AEAD would still reject forgery, but the cheap
+    /// derivation is a denial-of-service vector — an attacker can force us to spend
+    /// negligible CPU per envelope. The fix clamps `KdfParams` to OWASP-recommended
+    /// minimums before calling `Params::new`.
+    #[test]
+    fn kdf_params_below_minimum_are_rejected_on_decrypt() {
+        let mut env = encrypt_envelope(b"x", b"pw", None).unwrap();
+        // m_cost_kib below the 64 MiB floor
+        env.header.kdf_params = KdfParams {
+            m_cost_kib: 1,
+            t_cost: 3,
+            p_cost: 1,
+        };
+        let err = decrypt_envelope(&env, b"pw", None).expect_err("weak m_cost must reject");
+        assert!(matches!(err, CryptoError::Argon2(_)), "got {err:?}");
+
+        // t_cost below the 3-iteration floor
+        env.header.kdf_params = KdfParams {
+            m_cost_kib: 64 * 1024,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let err = decrypt_envelope(&env, b"pw", None).expect_err("weak t_cost must reject");
+        assert!(matches!(err, CryptoError::Argon2(_)), "got {err:?}");
+
+        // p_cost above the 4-thread cap
+        env.header.kdf_params = KdfParams {
+            m_cost_kib: 64 * 1024,
+            t_cost: 3,
+            p_cost: 64,
+        };
+        let err = decrypt_envelope(&env, b"pw", None).expect_err("excessive p_cost must reject");
+        assert!(matches!(err, CryptoError::Argon2(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn kdf_params_at_default_still_round_trip() {
+        // Sanity-check that the default params (which the clamp accepts) still produce
+        // a valid round-trip after the clamp was introduced. encrypt_envelope always
+        // writes the default, so this should be a no-op for the happy path.
+        let plaintext = b"kdf clamp ok";
+        let env = encrypt_envelope(plaintext, b"pw", None).unwrap();
+        assert_eq!(env.header.kdf_params.m_cost_kib, 64 * 1024);
+        assert_eq!(env.header.kdf_params.t_cost, 3);
+        assert_eq!(env.header.kdf_params.p_cost, 1);
+        let back = decrypt_envelope(&env, b"pw", None).unwrap();
+        assert_eq!(back, plaintext);
     }
 }

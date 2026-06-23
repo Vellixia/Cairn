@@ -119,6 +119,17 @@ impl AppState {
             .secret_key
             .as_ref()
             .map(|k| Arc::new(SessionSigner::new(k.clone())));
+        // Seed the synthetic-event counter from the durable audit log so SSE ids for
+        // `stats-`/`drift-` events never collide with replayed audit-log ids.
+        // Performed before `store` is moved into `Self`.
+        let events = {
+            let seed = store
+                .max_audit_event_id()
+                .ok()
+                .and_then(|n| u64::try_from(n).ok())
+                .unwrap_or(0);
+            crate::events::EventBroker::new(1024, seed.saturating_add(1))
+        };
         Ok(Self {
             store,
             ctx,
@@ -134,7 +145,7 @@ impl AppState {
             cors_origins: cfg.cors_origins.clone(),
             session_signer,
             audit_log: Arc::new(admin::AuditLog::default()),
-            events: EventBroker::default(),
+            events,
             savings: SavingsState::default(),
             started_at: metrics_mod::server_started(),
             sessions: Arc::new(cairn_session::SessionStore::new(cfg.data_dir.clone())),
@@ -455,7 +466,11 @@ fn inject_csp_nonce<'a>(html: &'a [u8], nonce: &Option<String>) -> std::borrow::
         Ok(s) => s,
         Err(_) => return std::borrow::Cow::Borrowed(html),
     };
-    // Tag each <script> with `nonce="..."` if not already tagged.
+    // Tag each <script> with `nonce="..."` if not already tagged. Insert a space between
+    // the rewritten nonce attribute and whatever follows (typically `type=`) so the
+    // rendered HTML reads `<script nonce="X" type="...">` instead of the no-space
+    // `<script nonce="X"type="...">`. Browsers parse both correctly, but the latter
+    // is harder to read and trips some linters.
     let mut out = String::with_capacity(s.len() + 64);
     let mut rest = s;
     while let Some(idx) = rest.find("<script") {
@@ -463,6 +478,7 @@ fn inject_csp_nonce<'a>(html: &'a [u8], nonce: &Option<String>) -> std::borrow::
         out.push_str("<script nonce=\"");
         out.push_str(n);
         out.push('"');
+        out.push(' ');
         // Skip the "<script" prefix and look at the rest of the tag.
         let after_open = idx + "<script".len();
         rest = &rest[after_open..];
@@ -1256,11 +1272,23 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
     }
 
     // 3. Device-token bearer.
-    if let Some(bearer_ok) = verify_bearer_auth(&s, &req, method, path) {
-        if bearer_ok {
+    // `verify_bearer_auth` returns a tri-state so we can hard-401 on a presented-but-invalid
+    // bearer instead of falling through to the loopback fallback (the previous code only
+    // distinguished `Ok(true)` from "everything else", which let a junk bearer from
+    // loopback pass when no admin/tokens were configured yet).
+    match verify_bearer_auth(&s, &req, method, path) {
+        VerifyBearerOutcome::Valid => {
             tracing::trace!(path, "auth=bearer");
             return next.run(req).await;
         }
+        VerifyBearerOutcome::Invalid => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid bearer token" })),
+            )
+                .into_response();
+        }
+        VerifyBearerOutcome::Absent => {} // fall through to loopback / 401 below
     }
 
     // 4. Loopback fallback — only when there are no device tokens AND no admin.
@@ -1304,19 +1332,49 @@ fn verify_admin_cookie(s: &AppState, req: &Request) -> Option<()> {
     Some(())
 }
 
-/// Verify a device-token bearer against the request, returning `Some(true)` on success,
-/// `Some(false)` on a present-but-invalid bearer (so the caller can decide whether to fall
-/// through), `None` when no bearer was presented at all.
-fn verify_bearer_auth(s: &AppState, req: &Request, method: &str, path: &str) -> Option<bool> {
-    let bearer = req
+/// Outcome of probing a request for a device-token bearer. The tri-state lets the auth
+/// middleware hard-401 on a presented-but-invalid bearer instead of silently falling
+/// through to the loopback fallback path (which would let a junk bearer pass when no
+/// admin / tokens are configured yet).
+enum VerifyBearerOutcome {
+    /// A bearer was presented AND it verified against a trusted key with sufficient scope.
+    Valid,
+    /// A bearer was presented but did not verify (bad signature, expired, revoked, or
+    /// out-of-scope). The caller MUST reject with 401.
+    Invalid,
+    /// No `Authorization: Bearer …` header was sent at all. The caller may fall through
+    /// to weaker authentication paths (loopback fallback) if appropriate.
+    Absent,
+}
+
+/// Verify a device-token bearer against the request. Returns a tri-state — see
+/// [`VerifyBearerOutcome`] for why we don't collapse `Invalid` and `Absent`.
+fn verify_bearer_auth(
+    s: &AppState,
+    req: &Request,
+    method: &str,
+    path: &str,
+) -> VerifyBearerOutcome {
+    let Some(bearer) = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(extract_bearer)?;
-    let info = s.verify_bearer(bearer)?;
-    let allowed =
-        info.scope.allows(method, path) && s.store.validate_token_id(&info.id).unwrap_or(false);
-    Some(allowed)
+        .and_then(extract_bearer)
+    else {
+        return VerifyBearerOutcome::Absent;
+    };
+    match s.verify_bearer(bearer) {
+        None => VerifyBearerOutcome::Invalid,
+        Some(info) => {
+            let allowed = info.scope.allows(method, path)
+                && s.store.validate_token_id(&info.id).unwrap_or(false);
+            if allowed {
+                VerifyBearerOutcome::Valid
+            } else {
+                VerifyBearerOutcome::Invalid
+            }
+        }
+    }
 }
 
 // ---- error plumbing ----------------------------------------------------------------------------
@@ -2480,5 +2538,39 @@ mod tests {
             serde_json::from_slice(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
         assert_eq!(manifest["name"], "local-notes");
         assert_eq!(manifest["stats"]["graph_edges"], 1);
+    }
+
+    #[test]
+    fn verify_bearer_distinguishes_absent_from_invalid() {
+        // The tri-state must return Absent / Invalid / Invalid respectively — collapsing
+        // Invalid into Absent would let a junk bearer slip past the middleware to the
+        // loopback fallback. Skipped on environments without a backend fixture.
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+
+        let mk = |auth: Option<&str>| -> axum::extract::Request {
+            let mut b = axum::extract::Request::builder()
+                .uri("/api/memories")
+                .body(axum::body::Body::empty())
+                .unwrap();
+            if let Some(value) = auth {
+                b.headers_mut()
+                    .insert(axum::http::header::AUTHORIZATION, value.parse().unwrap());
+            }
+            b
+        };
+
+        let absent = mk(None);
+        assert!(matches!(
+            verify_bearer_auth(&state, &absent, "GET", "/api/memories"),
+            VerifyBearerOutcome::Absent
+        ));
+
+        let bogus = mk(Some("Bearer this-is-not-a-valid-jwt"));
+        assert!(matches!(
+            verify_bearer_auth(&state, &bogus, "GET", "/api/memories"),
+            VerifyBearerOutcome::Invalid
+        ));
     }
 }

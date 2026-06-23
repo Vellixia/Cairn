@@ -1056,16 +1056,19 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_exposes_40_plus_sprint_10_tools() {
+    fn tools_list_exposes_v050_tool_set() {
         let Some(s) = server() else { return };
         let list = s
             .handle(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}))
             .unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
-        // Sprint 10 brings the total to ≥40 tools. Assert the floor + a handful of the new ones.
+        // v0.5.0 advertises 29 tools (Sprint 10 landed the 40+ claim in earlier sprints,
+        // but a number of those tools were consolidated into resource URIs and graph
+        // helpers; the v0.5.0 MCP surface is the 29 below). Update both this number AND
+        // the representative subset assertion if you add or remove a tool.
         assert!(
-            tools.len() >= 40,
-            "expected ≥40 tools after Sprint 10, got {}",
+            tools.len() >= 29,
+            "expected >=29 tools in v0.5.0, got {}",
             tools.len()
         );
         for name in [

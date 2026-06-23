@@ -126,20 +126,28 @@ pub async fn capture(
     }
 }
 
-/// Allow when Origin is unset (direct API call from curl/CLI) or matches
-/// a loopback origin. Cross-origin browser extensions are not allowed.
+/// Allow only when the request carries an `Origin` header that matches a loopback origin
+/// (`http://127.0.0.1:<port>` or `http://localhost:<port>`). Reject when:
+///   - no `Origin` header is present (the previous version silently accepted this — direct
+///     API calls from `curl` on remote hosts would otherwise pass through), or
+///   - the origin is a remote scheme/host.
+///
+/// This is a defense-in-depth check layered on top of the auth middleware, which already
+/// verifies loopback via `ConnectInfo<SocketAddr>`. The middleware runs first; this
+/// function tightens the policy at the handler boundary for the browser-extension
+/// endpoint specifically, so a misconfigured `host_permissions` in the extension
+/// manifest can't slip a request past the loopback requirement.
 fn is_local_request(headers: &HeaderMap) -> bool {
-    if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) {
-        // Allow http://127.0.0.1:<port> and http://localhost:<port>.
-        if origin.starts_with("http://127.0.0.1:") || origin.starts_with("http://localhost:") {
-            return true;
+    match headers.get("origin").and_then(|v| v.to_str().ok()) {
+        Some(origin)
+            if origin.starts_with("http://127.0.0.1:")
+                || origin.starts_with("http://localhost:") =>
+        {
+            true
         }
-        return false;
+        Some(_) => false,
+        None => false,
     }
-    // No Origin header — direct API call (curl, CLI, or extension
-    // background script without Origin). Allow it; the deployment is
-    // loopback-only by default.
-    true
 }
 
 #[cfg(test)]
@@ -147,15 +155,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn is_local_request_accepts_no_origin() {
-        let h = HeaderMap::new();
-        assert!(is_local_request(&h));
-    }
-
-    #[test]
     fn is_local_request_accepts_loopback_origin() {
         let mut h = HeaderMap::new();
         h.insert("origin", "http://127.0.0.1:7777".parse().unwrap());
+        assert!(is_local_request(&h));
+        h.insert("origin", "http://localhost:7777".parse().unwrap());
         assert!(is_local_request(&h));
     }
 
@@ -163,6 +167,15 @@ mod tests {
     fn is_local_request_rejects_remote_origin() {
         let mut h = HeaderMap::new();
         h.insert("origin", "https://evil.example".parse().unwrap());
+        assert!(!is_local_request(&h));
+    }
+
+    #[test]
+    fn is_local_request_rejects_missing_origin() {
+        // No Origin header at all — must NOT silently pass through. The auth middleware
+        // still catches the actual network path, but a missing Origin on a browser
+        // request is suspicious enough to reject at the handler too.
+        let h = HeaderMap::new();
         assert!(!is_local_request(&h));
     }
 }

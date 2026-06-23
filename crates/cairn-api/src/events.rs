@@ -28,7 +28,14 @@ use axum::{
 use chrono::Utc;
 use futures_core::Stream;
 use serde::Serialize;
-use std::{convert::Infallible, sync::Arc, time::Duration};
+use std::{
+    convert::Infallible,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::sync::broadcast;
 
 use crate::AppState;
@@ -76,20 +83,36 @@ impl EventPayload {
 #[derive(Clone)]
 pub struct EventBroker {
     tx: broadcast::Sender<EventPayload>,
+    /// Monotonic counter used to mint SSE ids for synthetic events (`stats-`, `drift-`).
+    /// Seeded from the durable audit-log high-water mark at startup so a freshly published
+    /// `stats-` event never collides with an audit-log id replayed to a reconnecting client.
+    /// Pre-fix the counter was `Utc::now().timestamp_millis()` and two publishes in the
+    /// same millisecond produced identical ids, breaking the SSE `Last-Event-ID` contract.
+    next_synth_id: Arc<AtomicU64>,
 }
 
 impl Default for EventBroker {
     fn default() -> Self {
-        Self::new(1024)
+        Self::new(1024, 0)
     }
 }
 
 impl EventBroker {
     /// Build a broker with `capacity` slots for slow subscribers. Overflow is dropped (broadcast's
     /// "lagged" semantics — we accept dropped events on a slow client rather than block).
-    pub fn new(capacity: usize) -> Self {
+    /// `seed` is the initial value of the synthetic-event counter — pass `max_audit_event_id`
+    /// from the durable audit log so live and replayed ids share the same namespace.
+    pub fn new(capacity: usize, seed: u64) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
-        Self { tx }
+        Self {
+            tx,
+            next_synth_id: Arc::new(AtomicU64::new(seed)),
+        }
+    }
+
+    /// Build a broker with no seed (synthetic ids start at 0). Mostly useful for tests.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self::new(capacity, 0)
     }
 
     /// Publish an event to all current subscribers. Returns the number of receivers that saw it.
@@ -107,6 +130,13 @@ impl EventBroker {
     /// Number of active subscribers (for tests + diagnostics).
     pub fn receiver_count(&self) -> usize {
         self.tx.receiver_count()
+    }
+
+    /// Mint the next monotonic synthetic-id suffix. Called by the `publish_*` helpers
+    /// below — exposed only for tests.
+    #[allow(dead_code)]
+    pub(crate) fn next_synth_id(&self) -> u64 {
+        self.next_synth_id.fetch_add(1, Ordering::Relaxed)
     }
 }
 
@@ -229,7 +259,7 @@ pub fn test_backfill(
 #[allow(dead_code)]
 pub fn publish_stats(broker: &EventBroker) {
     broker.publish(EventPayload {
-        id: format!("stats-{}", Utc::now().timestamp_millis()),
+        id: format!("stats-{}", broker.next_synth_id()),
         kind: KIND_STATS,
         ts: Utc::now().timestamp(),
         data: serde_json::json!({}),
@@ -263,7 +293,7 @@ pub fn publish_checkpoint(broker: &EventBroker, action: &str, id: &str, files: u
 #[allow(dead_code)]
 pub fn publish_drift(broker: &EventBroker, path: &str, risk: &str) {
     broker.publish(EventPayload {
-        id: format!("drift-{}", Utc::now().timestamp_millis()),
+        id: format!("drift-{}", broker.next_synth_id()),
         kind: KIND_DRIFT,
         ts: Utc::now().timestamp(),
         data: serde_json::json!({"path": path, "risk": risk}),
@@ -274,3 +304,56 @@ pub fn publish_drift(broker: &EventBroker, path: &str, risk: &str) {
 /// delivery.
 #[allow(dead_code)]
 pub type BrokerRef = Arc<EventBroker>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Pre-fix regression: `publish_stats` minted its id from `timestamp_millis()` and two
+    /// publishes in the same millisecond produced identical ids, breaking the SSE
+    /// `Last-Event-ID` contract. The fix moved id minting to an `AtomicU64` counter.
+    #[test]
+    fn synthetic_event_ids_are_monotonic_under_burst() {
+        let broker = EventBroker::with_capacity(8);
+        // Use Option so we can distinguish "first call returns 0" from "monotonic violation".
+        let mut prev: Option<u64> = None;
+        for _ in 0..100 {
+            let id = broker.next_synth_id();
+            match prev {
+                None => assert_eq!(id, 0, "first id must be the seed value"),
+                Some(p) => assert!(id > p, "ids must strictly increase under burst"),
+            }
+            prev = Some(id);
+        }
+    }
+
+    #[test]
+    fn publish_stats_uses_counter_prefix() {
+        let broker = EventBroker::with_capacity(4);
+        let mut rx = broker.subscribe();
+        publish_stats(&broker);
+        let ev = rx.try_recv().unwrap();
+        assert!(ev.id.starts_with("stats-"), "got id={}", ev.id);
+        // Format is "stats-<decimal>" — assert the suffix parses as a u64.
+        let n: u64 = ev.id.trim_start_matches("stats-").parse().unwrap();
+        assert_eq!(n, 0, "first stats event should use seed=0");
+    }
+
+    #[test]
+    fn publish_drift_uses_counter_prefix() {
+        let broker = EventBroker::with_capacity(4);
+        let mut rx = broker.subscribe();
+        publish_drift(&broker, "/x.rs", "warn");
+        let ev = rx.try_recv().unwrap();
+        assert!(ev.id.starts_with("drift-"), "got id={}", ev.id);
+        let n: u64 = ev.id.trim_start_matches("drift-").parse().unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn seeded_counter_starts_above_audit_high_water() {
+        let broker = EventBroker::new(8, 42);
+        assert_eq!(broker.next_synth_id(), 42);
+        assert_eq!(broker.next_synth_id(), 43);
+    }
+}
