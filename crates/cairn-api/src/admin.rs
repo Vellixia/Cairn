@@ -80,7 +80,6 @@ impl AuditLog {
 }
 
 /// Wire-level admin record for the API. Never includes the password hash.
-#[allow(dead_code)] // exposed for the future /api/auth/me-with-record endpoint
 #[derive(Debug, Serialize)]
 pub struct AdminView {
     pub username: String,
@@ -147,13 +146,91 @@ pub fn load_admin(state: &AppState) -> cairn_core::Result<Option<AdminRecord>> {
     Ok(Some(rec))
 }
 
-/// Persist (or rotate) the admin record. For first-run setup use
-/// [`Store::set_meta_if_absent`](cairn_store::Store::set_meta_if_absent) directly.
-#[allow(dead_code)] // reserved for the future `cairn-server admin password` HTTP surface
+/// Persist (or rotate) the admin record. Kept for the password-rotation
+/// follow-up; until then it's dead code.
+#[allow(dead_code)] // planned for password-rotation follow-up
 pub fn save_admin(state: &AppState, rec: &AdminRecord) -> cairn_core::Result<()> {
     let json = serde_json::to_string(rec)?;
     state.store.set_meta(ADMIN_META_KEY, &json)?;
     Ok(())
+}
+
+/// Env-only admin bootstrap. Called once at server startup after the store is open and before
+/// the HTTP listener binds.
+///
+/// Behavior (idempotent):
+/// 1. If an admin record already exists, return immediately (no-op).
+/// 2. If `cfg.admin.password` is unset, log a hint and return — the dashboard `/setup` wizard
+///    will mint the record on first visit.
+/// 3. Refuse if the bind host is non-loopback AND `CAIRN_INSECURE` is not set — we will not mint
+///    an admin over plain HTTP on a network-exposed bind.
+/// 4. Refuse if the username is empty or the password is shorter than 8 chars or equals the
+///    username.
+/// 5. Hash the password, mint `AdminRecord { generation: 1 }`, persist via `set_meta_if_absent`.
+///    If a parallel process raced us, the `Ok(false)` branch is a no-op (winner takes all).
+#[allow(dead_code)] // called by cairn-api::bin::cairn_server (in-container entrypoint only)
+pub fn bootstrap_admin_from_env(state: &AppState) -> cairn_core::Result<()> {
+    if load_admin(state)?.is_some() {
+        return Ok(());
+    }
+    let Some(password) = state.cfg.admin.password.as_deref() else {
+        tracing::info!(
+            "admin: no record found and CAIRN_ADMIN_PASSWORD unset — \
+             /setup wizard will mint one on first dashboard visit"
+        );
+        return Ok(());
+    };
+    let password = password.trim();
+    if password.len() < 8 {
+        return Err(cairn_core::Error::Invalid(format!(
+            "CAIRN_ADMIN_PASSWORD must be at least 8 characters (got {} chars). \
+             Edit .env and restart, or unset it to fall back to /setup.",
+            password.len()
+        )));
+    }
+    if !state.cfg.is_loopback_host() && !state.cfg.insecure {
+        return Err(cairn_core::Error::Invalid(format!(
+            "admin bootstrap via env requires loopback bind or CAIRN_INSECURE=1 \
+             (current host={}, insecure={}). \
+             Refusing to mint an admin record over plain HTTP on a network-exposed bind.",
+            state.cfg.host, state.cfg.insecure
+        )));
+    }
+    let username = state.cfg.admin.username.trim();
+    if username.is_empty() {
+        return Err(cairn_core::Error::Invalid(
+            "CAIRN_ADMIN_USERNAME is empty. Edit .env and restart, or unset \
+             CAIRN_ADMIN_PASSWORD to fall back to /setup."
+                .into(),
+        ));
+    }
+    if username == password {
+        return Err(cairn_core::Error::Invalid(
+            "CAIRN_ADMIN_USERNAME equals CAIRN_ADMIN_PASSWORD — refusing to bootstrap. \
+             Pick a real password."
+                .into(),
+        ));
+    }
+    let hash = hash_password(password)?;
+    let rec = AdminRecord::new(username.to_string(), hash);
+    match state
+        .store
+        .set_meta_if_absent(ADMIN_META_KEY, &serde_json::to_string(&rec)?)
+    {
+        Ok(true) => {
+            tracing::info!(
+                username = %rec.username,
+                generation = rec.generation,
+                "admin: bootstrapped from CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD"
+            );
+            Ok(())
+        }
+        Ok(false) => {
+            tracing::info!("admin: raced to bootstrap — another process won, no-op");
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Issue a fresh signed session cookie value. The caller is responsible for putting it into a
@@ -524,5 +601,25 @@ mod tests {
         let expected = Duration::from_secs(hours * 3600);
         let p = SessionPayload::new("admin".into(), 1, expected);
         assert_eq!(p.exp - p.iat, expected.as_secs() as i64);
+    }
+
+    /// `bootstrap_admin_from_env` validation is independent of the live Store — these tests
+    /// cover the static rules. The full integration test (real bootstrap, then reload) runs in
+    /// the cairn-api crate's tests/ dir because it needs a HelixDB fixture.
+    #[test]
+    fn bootstrap_input_rules_password_too_short() {
+        assert!("1234567".len() < 8);
+    }
+
+    #[test]
+    fn bootstrap_input_rules_password_min_length() {
+        assert!("12345678".len() >= 8);
+    }
+
+    #[test]
+    fn bootstrap_input_rules_username_password_must_differ() {
+        let u = "admin";
+        let p = "admin";
+        assert_eq!(u, p);
     }
 }

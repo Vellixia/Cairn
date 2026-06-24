@@ -6,7 +6,7 @@ $out = Invoke-CairnCli read Cargo.toml --mode map
 Assert-Contains -Haystack $out -Needle 'cairn' -Msg 'read Cargo.toml returns content'
 
 # sanitize: the test token format matters. `ghp_` is the GitHub PAT
-# prefix. `cairn-cli sanitize` is not a subcommand (it's an MCP/HTTP tool)
+# prefix. `cairn sanitize` is not a subcommand (it's an MCP/HTTP tool)
 # so we drive it via /api/tools/call directly. Accept any token redaction
 # marker.
 $body = @{

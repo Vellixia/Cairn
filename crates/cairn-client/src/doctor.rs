@@ -1,23 +1,25 @@
-//! `cairn-cli doctor` — diagnostic check that the local environment is wired up correctly.
+﻿//! `cairn doctor` â€” diagnostic check that the local environment is wired up correctly.
 //!
 //! The diagnostic is deliberately cheap: it never talks to the network, never opens the
 //! store unless HelixDB is configured, and runs in <100 ms. `doctor --fix` adds a small
-//! repair pass — it creates missing data dirs, writes a default `.env` next to a fresh
+//! repair pass â€” it creates missing data dirs, writes a default `.env` next to a fresh
 //! binary, and prints guidance for things it can't fix automatically.
 //!
 //! Exit codes:
-//! - 0  — all green
-//! - 1  — one or more failures (printed above)
-//! - 2  — usage error (invalid flags)
+//! - 0  â€” all green
+//! - 1  â€” one or more failures (printed above)
+//! - 2  â€” usage error (invalid flags)
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
-use std::process::Command;
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // `interactive` is wired through in a follow-up; kept for API stability.
 pub struct DoctorOptions {
     pub fix: bool,
+    /// Reserved for the future `--interactive` flag; currently always read
+    /// from `std::io::stdout().is_terminal()` at the call site, so the field
+    /// here is dead. Kept for API stability with future toggles.
+    #[allow(dead_code)]
     pub interactive: bool,
 }
 
@@ -70,7 +72,7 @@ pub fn run(opts: DoctorOptions) -> Diagnosis {
     // 2. HelixDB URL is set (required for local mode).
     checks.push(check_helix_url(&cfg));
 
-    // 3. Embedder provider — `hashing` is the zero-deps default; warn if the user picked
+    // 3. Embedder provider â€” `hashing` is the zero-deps default; warn if the user picked
     //    something heavier that needs more config.
     checks.push(check_embedder(&cfg));
 
@@ -85,7 +87,7 @@ pub fn run(opts: DoctorOptions) -> Diagnosis {
         checks.push(check_store_open(&cfg));
     }
 
-    // 7. Agent detection — what agents would `setup --all` wire today?
+    // 7. Agent detection â€” what agents would `setup --all` wire today?
     checks.push(check_agents());
 
     finalize(checks)
@@ -95,13 +97,13 @@ fn finalize(checks: Vec<Check>) -> Diagnosis {
     let diag = Diagnosis { checks };
     // Print in a stable order.
     for c in &diag.checks {
-        let sym = if c.ok { "✓" } else { "✗" };
+        let sym = if c.ok { "âœ“" } else { "âœ—" };
         eprintln!("  {sym} {:<14} {}", c.name, c.detail);
     }
     if diag.ok() {
-        eprintln!("\ncairn-cli doctor: ok");
+        eprintln!("\ncairn doctor: ok");
     } else {
-        eprintln!("\ncairn-cli doctor: FAIL");
+        eprintln!("\ncairn doctor: FAIL");
     }
     diag
 }
@@ -110,7 +112,7 @@ fn check_data_dir(cfg: &cairn_core::Config, fix: bool) -> Check {
     let dir = cfg.data_dir();
     if dir.exists() {
         // Probe writability with a tiny test file (don't actually persist it).
-        let probe = dir.join(".cairn-cli-doctor-probe");
+        let probe = dir.join(".cairn-doctor-probe");
         match std::fs::write(&probe, b"ok") {
             Ok(()) => {
                 let _ = std::fs::remove_file(&probe);
@@ -146,7 +148,7 @@ fn check_data_dir(cfg: &cairn_core::Config, fix: bool) -> Check {
         Check {
             name: "data dir",
             ok: false,
-            detail: format!("{} (missing — run with --fix to create)", dir.display()),
+            detail: format!("{} (missing â€” run with --fix to create)", dir.display()),
         }
     }
 }
@@ -165,7 +167,7 @@ fn check_helix_url(cfg: &cairn_core::Config) -> Check {
                 Check {
                     name: "helix url",
                     ok: true,
-                    detail: "(unset — running in remote-proxy mode)".into(),
+                    detail: "(unset â€” running in remote-proxy mode)".into(),
                 }
             } else {
                 Check {
@@ -234,7 +236,7 @@ fn check_secret_key(cfg: &cairn_core::Config) -> Check {
             name: "secret key",
             ok: false,
             detail: format!(
-                "{} bytes (need >= 32 — set CAIRN_SECRET_KEY to a 32+ byte value)",
+                "{} bytes (need >= 32 â€” set CAIRN_SECRET_KEY to a 32+ byte value)",
                 k.len()
             ),
         },
@@ -264,7 +266,7 @@ fn check_remote_server() -> Check {
                             " (CAIRN_TOKEN is empty)".to_string()
                         }
                     } else {
-                        " (no CAIRN_TOKEN — every request will 401)".to_string()
+                        " (no CAIRN_TOKEN â€” every request will 401)".to_string()
                     }
                 ),
             }
@@ -272,7 +274,7 @@ fn check_remote_server() -> Check {
         _ => Check {
             name: "remote server",
             ok: true,
-            detail: "(unset — local mode)".into(),
+            detail: "(unset â€” local mode)".into(),
         },
     }
 }
@@ -303,7 +305,7 @@ fn check_agents() -> Check {
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = home_dir();
     let mut found = Vec::new();
-    for id in ["claude-code", "cursor", "vscode", "windsurf", "opencode"] {
+    for id in ["claude-code", "codex", "opencode"] {
         if detect_agent(id, &project, home.as_deref()) {
             found.push(id);
         }
@@ -312,7 +314,7 @@ fn check_agents() -> Check {
         Check {
             name: "agents",
             ok: true,
-            detail: "no supported agents detected (run `cairn-cli setup <agent>`)".into(),
+            detail: "no supported agents detected (run `cairn setup <agent>`)".into(),
         }
     } else {
         Check {
@@ -332,9 +334,11 @@ fn detect_agent(id: &str, project: &std::path::Path, home: Option<&std::path::Pa
                 || home_has(".claude")
                 || home_has(".claude.json")
         }
-        "cursor" => project.join(".cursor").exists() || home_has(".cursor"),
-        "vscode" => project.join(".vscode").exists(),
-        "windsurf" => home_has(".codeium/windsurf"),
+        "codex" => {
+            codex_config_path(home).exists()
+                || project.join(".codex").join("config.toml").exists()
+                || home_has(".codex/config.toml")
+        }
         "opencode" => opencode_config_path().exists() || project.join(".opencode").exists(),
         _ => false,
     }
@@ -351,6 +355,15 @@ fn opencode_config_path() -> PathBuf {
         .join("opencode.json")
 }
 
+fn codex_config_path(home: Option<&std::path::Path>) -> PathBuf {
+    let config_home = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| home.map(PathBuf::from))
+        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("."));
+    config_home.join(".codex").join("config.toml")
+}
+
 fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -358,7 +371,7 @@ fn home_dir() -> Option<PathBuf> {
         .filter(|p| !p.as_os_str().is_empty())
 }
 
-/// Build a short-lived full diagnosis from a list of checks — used by the `doctor`
+/// Build a short-lived full diagnosis from a list of checks â€” used by the `doctor`
 /// CLI entry point so it can return a non-zero exit code on failure.
 pub fn run_and_exit(opts: DoctorOptions) -> Result<()> {
     let diag = run(opts);
@@ -366,7 +379,7 @@ pub fn run_and_exit(opts: DoctorOptions) -> Result<()> {
 }
 
 /// Strip userinfo (`user:pass@`) from a URL for safe logging. Pure-string operation;
-/// doesn't parse the URL — that's fine for diagnostics.
+/// doesn't parse the URL â€” that's fine for diagnostics.
 fn redact_url(url: &str) -> String {
     if let Some(at_idx) = url.find('@') {
         if let Some(scheme_end) = url.find("://") {
@@ -381,21 +394,7 @@ fn redact_url(url: &str) -> String {
 /// Simple command runner for `doctor --fix` — used by tests to spawn the actual binary
 /// and verify that a missing data dir gets created.
 #[doc(hidden)]
-#[allow(dead_code)] // Reserved for upcoming end-to-end tests; the unit tests use the inner fn.
-pub fn run_cli(args: &[&str]) -> Result<i32> {
-    let current = std::env::current_exe().context("locating cairn-cli binary")?;
-    let out = Command::new(&current)
-        .args(args)
-        .output()
-        .context("spawning cairn-cli")?;
-    if !out.stdout.is_empty() {
-        print!("{}", String::from_utf8_lossy(&out.stdout));
-    }
-    if !out.stderr.is_empty() {
-        eprint!("{}", String::from_utf8_lossy(&out.stderr));
-    }
-    Ok(out.status.code().unwrap_or(-1))
-}
+fn _run_cli_placeholder() {}
 
 #[cfg(test)]
 mod tests {

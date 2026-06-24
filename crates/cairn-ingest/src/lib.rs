@@ -396,19 +396,6 @@ pub fn ingest(path: &Path, window_ms: u64) -> Result<Vec<CairnChunk>, IngestErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
-
-    #[allow(dead_code)] // Reserved for future on-disk round-trip tests.
-    fn write_tmp(name: &str, body: &str) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(name);
-        let mut f = std::fs::File::create(&path).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        f.flush().unwrap();
-        // Caller takes the TempDir by value; when it drops, the file is removed.
-        let _ = f;
-        dir
-    }
 
     #[test]
     fn vtt_parses_basic_cues() {

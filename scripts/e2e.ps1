@@ -27,7 +27,6 @@ $lib = Join-Path $PSScriptRoot 'e2e/_lib.ps1'
 Write-Host "Cairn e2e harness (lib=$lib, fail-fast=$Global:E2E_FailFast, base=$Global:E2E_BaseUrl)" -ForegroundColor Cyan
 Write-Host "Binaries:" -ForegroundColor DarkGray
 Write-Host "  cairn    = $Global:E2E_BinCairn"   -ForegroundColor DarkGray
-Write-Host "  cairn-cli= $Global:E2E_BinCairnCli" -ForegroundColor DarkGray
 Write-Host "Data dir : $Global:E2E_DataDir" -ForegroundColor DarkGray
 Write-Host "Log file : $Global:E2E_LogFile" -ForegroundColor DarkGray
 Write-Host ""
@@ -47,7 +46,7 @@ $env:CAIRN_ADMIN_PASSWORD = 'cairn-e2e-admin-password-12345'
 $setupProbe = Test-Endpoint -Method GET -Path '/api/setup/health'
 $isFresh = ($setupProbe.Body -match '"needs_setup"\s*:\s*true')
 if ($isFresh) {
-    Write-Host "Fresh install — running first-time setup to mint an admin..." -ForegroundColor Yellow
+    Write-Host "Fresh install -- running first-time setup to mint an admin..." -ForegroundColor Yellow
     $setupBody = @{
         username = 'admin'
         password = $env:CAIRN_ADMIN_PASSWORD
@@ -69,9 +68,10 @@ if ($isFresh) {
 # password above, /api/auth/setup mints it; /api/auth/login then works.
 try {
     $cookie = Get-BearerToken -Username 'admin' -Password $env:CAIRN_ADMIN_PASSWORD
-    Write-Host "Session cookie acquired ($($cookie.Length) chars)" -ForegroundColor Green
+    $len = $cookie.Length
+    Write-Host ('Session cookie acquired (' + $len + ' chars)') -ForegroundColor Green
 } catch {
-    Write-Host "WARN: failed to acquire session cookie (some scenarios will skip auth-gated paths): $_" -ForegroundColor Yellow
+    Write-Host ('WARN: failed to acquire session cookie (some scenarios will skip auth-gated paths): ' + $_) -ForegroundColor Yellow
     $Global:E2E_Cookie = $null
 }
 
@@ -82,24 +82,24 @@ $scripts = Get-ChildItem -Path $scenariosDir -Filter '*.ps1' -File `
     | Sort-Object Name
 
 if ($Only) {
-    $scripts = $scripts | Where-Object { $_.BaseName -like "$Only*" }
+    $scripts = $scripts | Where-Object { $_.BaseName -like ($Only + '*') }
     if (-not $scripts) {
-        Write-Host "No scenarios match '$Only'" -ForegroundColor Red
+        Write-Host ('No scenarios match ''' + $Only + '''') -ForegroundColor Red
         exit 2
     }
 }
 
 Write-Host ""
-Write-Host "Running $($scripts.Count) scenario(s)..." -ForegroundColor Cyan
+Write-Host ('Running ' + $scripts.Count + ' scenario(s)...') -ForegroundColor Cyan
 Write-Host ""
 
 foreach ($s in $scripts) {
-    Write-Host "--- $($s.BaseName) ---" -ForegroundColor Magenta
+    Write-Host ('--- ' + $s.BaseName + ' ---') -ForegroundColor Magenta
     try {
         & $s.FullName
         Write-Host ""
     } catch {
-        Write-Host "EXCEPTION in $($s.BaseName): $_" -ForegroundColor Red
+        Write-Host ('EXCEPTION in ' + $s.BaseName + ': ' + $_) -ForegroundColor Red
         if ($Global:E2E_FailFast) {
             Show-Summary
             Stop-Mcp

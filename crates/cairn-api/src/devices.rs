@@ -1,7 +1,7 @@
 //! Admin-facing device management: issue device tokens + pair codes from the dashboard.
 //!
-//! The CLI (`cairn token create`, `cairn pair-code`) still works — this module exists so the
-//! admin can do the same operations from the web UI without leaving the browser. The JWT is
+//! The web UI (You → Tokens, You → Pair) drives these endpoints so the admin can issue
+//! tokens / pair codes from the browser without leaving the dashboard. The JWT is
 //! returned ONCE in the `POST /api/devices/tokens` response; subsequent reads only return the
 //! token metadata (id, name, scope, created_at, revoked). The server never persists the JWT
 //! itself beyond what `create_token` does in the store (token id + metadata).

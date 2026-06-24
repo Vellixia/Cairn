@@ -41,16 +41,10 @@ use tokio::sync::broadcast;
 use crate::AppState;
 use cairn_store::AuditRecord;
 
-/// SSE event kinds surfaced to the dashboard. New kinds are additive; old ones stay forever.
-#[allow(dead_code)] // Exposed for future sprint handlers; the constant itself is the wire contract.
+/// SSE event kinds surfaced to the dashboard. New kinds are additive; old
+/// ones stay forever so existing clients don't break.
 pub const KIND_AUDIT: &str = "audit";
-#[allow(dead_code)]
-pub const KIND_STATS: &str = "stats";
-#[allow(dead_code)]
 pub const KIND_MEMORY: &str = "memory";
-#[allow(dead_code)]
-pub const KIND_CHECKPOINT: &str = "checkpoint";
-#[allow(dead_code)]
 pub const KIND_DRIFT: &str = "drift";
 
 /// Payload of an event published to subscribers. `id` is a unique, monotonic string suitable for
@@ -132,9 +126,8 @@ impl EventBroker {
         self.tx.receiver_count()
     }
 
-    /// Mint the next monotonic synthetic-id suffix. Called by the `publish_*` helpers
-    /// below — exposed only for tests.
-    #[allow(dead_code)]
+    /// Mint the next monotonic synthetic-id suffix. Used by `publish_drift`
+    /// and exposed to tests.
     pub(crate) fn next_synth_id(&self) -> u64 {
         self.next_synth_id.fetch_add(1, Ordering::Relaxed)
     }
@@ -233,7 +226,8 @@ fn to_sse_event(p: &EventPayload) -> Event {
 
 /// Read audit events with id greater than `since` (if given), up to `MAX_REPLAY`. Newest first
 /// in the result so the SSE stream replays in chronological order from the client's POV.
-fn backfill(
+#[doc(hidden)] // exposed only for integration tests in `lib.rs`
+pub fn backfill(
     state: &AppState,
     since: Option<&str>,
 ) -> std::result::Result<Vec<EventPayload>, cairn_core::Error> {
@@ -242,33 +236,8 @@ fn backfill(
     records.reverse(); // oldest first so the replay reads in order
     Ok(records.iter().map(EventPayload::audit).collect())
 }
-
-/// Test-only wrapper for `backfill` — used by integration tests that need to assert on the
-/// replay set without spinning up an HTTP server.
-#[doc(hidden)]
-#[allow(dead_code)]
-pub fn test_backfill(
-    state: &AppState,
-    since: Option<&str>,
-) -> std::result::Result<Vec<EventPayload>, cairn_core::Error> {
-    backfill(state, since)
-}
-
-/// Convenience for handlers that just want to publish a stats-changed event without writing the
-/// full payload inline.
-#[allow(dead_code)]
-pub fn publish_stats(broker: &EventBroker) {
-    broker.publish(EventPayload {
-        id: format!("stats-{}", broker.next_synth_id()),
-        kind: KIND_STATS,
-        ts: Utc::now().timestamp(),
-        data: serde_json::json!({}),
-    });
-}
-
 /// Publish a memory-related event (add/edit/delete/pin). `action` is "added" | "edited" |
 /// "deleted" | "pinned".
-#[allow(dead_code)]
 pub fn publish_memory(broker: &EventBroker, action: &str, memory_id: &str) {
     broker.publish(EventPayload {
         id: format!("mem-{}-{}", action, memory_id),
@@ -278,19 +247,7 @@ pub fn publish_memory(broker: &EventBroker, action: &str, memory_id: &str) {
     });
 }
 
-/// Publish a checkpoint/rollback event.
-#[allow(dead_code)]
-pub fn publish_checkpoint(broker: &EventBroker, action: &str, id: &str, files: usize) {
-    broker.publish(EventPayload {
-        id: format!("cp-{}-{}", action, id),
-        kind: KIND_CHECKPOINT,
-        ts: Utc::now().timestamp(),
-        data: serde_json::json!({"action": action, "id": id, "files": files}),
-    });
-}
-
 /// Publish a drift event (verify flagged an edit as warn/danger).
-#[allow(dead_code)]
 pub fn publish_drift(broker: &EventBroker, path: &str, risk: &str) {
     broker.publish(EventPayload {
         id: format!("drift-{}", broker.next_synth_id()),
@@ -300,18 +257,14 @@ pub fn publish_drift(broker: &EventBroker, path: &str, risk: &str) {
     });
 }
 
-/// Wrap an [`Arc<EventBroker>`] in a closure-friendly helper for tests that want to assert on
-/// delivery.
-#[allow(dead_code)]
-pub type BrokerRef = Arc<EventBroker>;
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Pre-fix regression: `publish_stats` minted its id from `timestamp_millis()` and two
-    /// publishes in the same millisecond produced identical ids, breaking the SSE
-    /// `Last-Event-ID` contract. The fix moved id minting to an `AtomicU64` counter.
+    /// Pre-fix regression: synthetic event ids minted from `timestamp_millis()`
+    /// collided when two publishes landed in the same millisecond, breaking
+    /// the SSE `Last-Event-ID` contract. The fix moved id minting to an
+    /// `AtomicU64` counter (`next_synth_id`).
     #[test]
     fn synthetic_event_ids_are_monotonic_under_burst() {
         let broker = EventBroker::with_capacity(8);
@@ -325,18 +278,6 @@ mod tests {
             }
             prev = Some(id);
         }
-    }
-
-    #[test]
-    fn publish_stats_uses_counter_prefix() {
-        let broker = EventBroker::with_capacity(4);
-        let mut rx = broker.subscribe();
-        publish_stats(&broker);
-        let ev = rx.try_recv().unwrap();
-        assert!(ev.id.starts_with("stats-"), "got id={}", ev.id);
-        // Format is "stats-<decimal>" — assert the suffix parses as a u64.
-        let n: u64 = ev.id.trim_start_matches("stats-").parse().unwrap();
-        assert_eq!(n, 0, "first stats event should use seed=0");
     }
 
     #[test]

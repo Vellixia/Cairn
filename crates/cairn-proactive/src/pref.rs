@@ -1,8 +1,8 @@
-//! Per-project opt-out preference (v0.5.0 Sprint 18c).
+﻿//! Per-project opt-out preference (v0.5.0 Sprint 18c).
 //!
 //! Stored as a `Memory` with `kind = Preference` and `applies_to = [project_root]`.
 //! A `ProactivePref` is the in-memory view of the set of opted-out project
-//! roots — refreshed on each `cairn-cli prefer` call. The match is prefix-based
+//! roots â€” refreshed on each `cairn prefer` call. The match is prefix-based
 //! so opting out of `/work/foo` also opts out of `/work/foo/subdir`.
 //!
 //! The `PROJECT_OPT_OUT` constant is the magic content string the agentmemory
@@ -30,7 +30,7 @@ impl ProactivePref {
         self
     }
 
-    /// Drop a previously-set opt-out (rare — the agentmemory store is append-only
+    /// Drop a previously-set opt-out (rare â€” the agentmemory store is append-only
     /// in spirit, so this is mostly for tests).
     pub fn without_opt_out(mut self, project_root: &str) -> Self {
         self.opted_out.retain(|p| p != project_root);

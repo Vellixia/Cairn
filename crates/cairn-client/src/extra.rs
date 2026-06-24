@@ -1,4 +1,4 @@
-//! `cairn-cli graph / memory / sessions / metrics` subcommands (v0.5.0 Phase 4.0 Sprint 9).
+//! `cairn graph / memory / sessions / metrics` subcommands (v0.5.0 Phase 4.0 Sprint 9).
 //!
 //! Strategy: implement everything we can run against the *local* store directly. For
 //! commands that need the server (sessions/drift, which write to disk on the server host),
@@ -6,7 +6,7 @@
 //!
 //! The plan also lists `cairn impact` and `cairn callgraph` — those need the codebase-graph
 //! layer (`cairn-context` already has `read/expand/write`, and graph APIs land later).
-//! They're stubs here that point the user at `cairn-cli graph related` (the actual
+//! They're stubs here that point the user at `cairn graph related` (the actual
 //! memory-graph feature that ships today).
 //!
 //! **Testing:**
@@ -16,7 +16,6 @@
 //! - `cairn metrics` prints a one-line summary of local state.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 
 use crate::State;
 
@@ -49,12 +48,12 @@ pub fn graph(cmd: GraphCmd, s: &State) -> Result<()> {
         }
         GraphCmd::Impact { path: _ } => {
             eprintln!("cairn impact: not yet implemented in v0.5.0 (planned for v0.5.x)");
-            eprintln!("  until then, run:  cairn-cli graph related <path>");
+            eprintln!("  until then, run:  cairn graph related <path>");
             Ok(())
         }
         GraphCmd::Callgraph { symbol: _ } => {
             eprintln!("cairn callgraph: not yet implemented in v0.5.0");
-            eprintln!("  until then, the codebase graph lives at:  cairn-cli read <file>");
+            eprintln!("  until then, the codebase graph lives at:  cairn read <file>");
             Ok(())
         }
     }
@@ -64,14 +63,17 @@ pub enum GraphCmd {
     Related {
         path: String,
     },
-    #[allow(dead_code)]
-    // Wired through in Sprint 9 follow-up; CLI dispatch currently prints "coming soon".
+    /// Stub: the impact graph (blast radius from a path) is planned for a
+    /// future sprint. The field is captured so the CLI surface stays
+    /// stable, but the handler currently prints "coming soon".
     Impact {
+        #[allow(dead_code)]
         path: String,
     },
-    #[allow(dead_code)]
-    // Wired through in Sprint 9 follow-up; CLI dispatch currently prints "coming soon".
+    /// Stub: the call-graph traversal is planned for a future sprint. Field
+    /// captured for CLI stability; handler prints "coming soon".
     Callgraph {
+        #[allow(dead_code)]
         symbol: String,
     },
 }
@@ -217,32 +219,11 @@ fn sessions_call(
     Ok(())
 }
 
-/// Convenience for `--help` style text — used by `cairn-cli <cmd> --help` to render a
-/// summary that matches what clap prints.
-#[allow(dead_code)] // Reserved for `cairn help` follow-up; not currently called by main.rs.
-pub fn help_summary() -> &'static str {
-    "graph related <path>  — list memories that apply_to <path>\n\
-     graph impact <path>   — blast radius (planned v0.5.x)\n\
-     graph callgraph <sym> — callers/callees (planned v0.5.x)\n\
-     memory timeline [N]   — newest-first memory timeline (default N=20)\n\
-     memory crystallize    — promote working memories to a semantic crystal\n\
-     metrics               — local memory/checkpoint counts\n\
-     search <q> [N]        — hybrid (RRF + MMR) search; default N=20\n\
-     sessions list         — list sessions (needs --server)\n\
-     session show <id>     — show one session\n\
-     session task <id> <task-id> <title> <progress>\n\
-                            — append a task to a session"
-}
-
-#[allow(dead_code)]
-fn _ts() -> DateTime<Utc> {
-    Utc::now()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use cairn_core::{Memory, MemoryKind, MemoryTier};
+    use chrono::Utc;
     use tempfile::TempDir;
 
     fn temp_state() -> Option<(TempDir, State)> {
@@ -269,13 +250,6 @@ mod tests {
                 profile,
             },
         ))
-    }
-
-    #[test]
-    fn help_summary_is_not_empty() {
-        assert!(help_summary().contains("graph related"));
-        assert!(help_summary().contains("memory crystallize"));
-        assert!(help_summary().contains("metrics"));
     }
 
     #[test]
@@ -368,7 +342,7 @@ mod tests {
         // graph related on a path that doesn't match.
         graph(
             GraphCmd::Related {
-                path: "crates/cairn-cli/src/main.rs".into(),
+                path: "crates/cairn-client/src/main.rs".into(),
             },
             &s,
         )

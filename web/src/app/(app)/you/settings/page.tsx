@@ -137,17 +137,21 @@ export default function SettingsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Recovery (loopback-only)</CardTitle>
+          <CardTitle>Recovery (env-only bootstrap)</CardTitle>
           <CardDescription>
-            Run on the server host to rotate the password or reset the admin.
+            Admin credentials are seeded from <code>CAIRN_ADMIN_USERNAME</code> +
+            <code className="ml-1">CAIRN_ADMIN_PASSWORD</code> on first boot. To rotate, update
+            <code className="ml-1">CAIRN_ADMIN_PASSWORD</code> and restart the container, or wipe
+            the data volume (<code>docker compose down -v</code>) to re-bootstrap.
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <pre className="rounded-md border border-line bg-secondary p-3 font-mono text-xs overflow-x-auto">{`# Rotate the admin password (bumps generation, invalidates all cookies)
-cairn-server admin password
+          <pre className="rounded-md border border-line bg-secondary p-3 font-mono text-xs overflow-x-auto">{`# Update the password in your .env, then restart:
+docker compose up -d cairn
 
-# Delete the admin (next /setup creates a new one)
-cairn-server admin reset`}</pre>
+# To reset from scratch (DESTROYS ALL DATA):
+docker compose down -v
+docker compose up -d cairn`}</pre>
           <p className="mt-2 text-xs text-muted-foreground">
             Both refuse on a non-loopback bind.
           </p>

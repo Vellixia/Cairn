@@ -1,6 +1,93 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to Cairn are documented here. Versions follow [Semantic Versioning](https://semver.org/).
+
+## [0.6.0] — 2026-06-23 — Cleanup sprint
+
+A focused cleanup over the v0.5.0 release. **No new features**, no new
+endpoints, no new dependencies. The product surface is smaller, the
+install path is unambiguous, and the host install ships one binary
+instead of two.
+
+### What's changed
+
+**Workspace (21 crates, down from 22)**
+- `cairn-server` crate deleted; the in-container server is now
+  `cairn-api::bin::cairn-server` declared as a `[[bin]]` in
+  `cairn-api`. See ADR-029.
+- `cairn-cli` crate renamed to `cairn-client`. The host binary is
+  now just `cairn`. See ADR-030.
+
+**Agents (3 supported, down from 6)**
+- Dropped: Cursor, VS Code (Copilot), Windsurf, Cline.
+- Added: Codex CLI. Verified against the `openai/codex` source tree
+  that the `[mcp_servers.<name>]` stdio transport shape is identical
+  to OpenCode's. See ADR-028.
+- The TOML serializer uses a `<<CAIRN_SKIP>>` sentinel marker to
+  detect unchanged sub-blocks (TOML has no per-key `exists?` check).
+
+**Admin bootstrap (env-only)**
+- The admin account is now created at server boot from
+  `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD`. The dashboard's
+  first-run "set admin password" form is gone — it was a
+  v0.4.0 → v0.5.0 footgun.
+- Admin ops (token create / revoke, pair-code generation) live in
+  the dashboard under **You → Tokens** and **You → Pair**. No new
+  HTTP routes were added; the existing `/api/devices/*` routes are
+  reused.
+- `docker-compose.yml` requires both env vars to be set in `.env`
+  (or in the compose file directly) before the `cairn` service
+  will start. The startup guard fails fast on
+  `CAIRN_ADMIN_PASSWORD=""` or length < 12.
+
+**Dead code removed**
+- `cairn update` and `cairn login` subcommands removed (were
+  never exercised in v0.5.0).
+- `self_update` and `dotenvy` dependencies removed.
+- `cairn-api/src/events.rs`: dropped `KIND_STATS`,
+  `KIND_CHECKPOINT`, `KIND_VECTOR`, `KIND_GRAPH` constants
+  (kept `KIND_AUDIT`, `KIND_MEMORY`, `KIND_DRIFT`).
+- `cairn-api/src/metrics.rs`: dropped `source_breakdown` helper.
+- `cairn-ingest/src/lib.rs`: dropped `write_tmp` helper.
+- `plugins/cairn/` directory deleted (9 files); the modern
+  install path is `cairn setup`.
+
+**Distribution**
+- Host tarball ships exactly one binary: `cairn` (from
+  `cairn-client`). The `release.yml` matrix drops the second
+  `bin` entry; the in-container `cairn-server` is built into
+  the Docker image only.
+- Docker `ENTRYPOINT` is now `["cairn-server"]` (was `["cairn"]`).
+- The host install script (`./scripts/install.{sh,ps1}`)
+  installs the `cairn` client only; the server is now
+  Docker-only.
+
+### Migration from v0.5.0
+
+1. **Re-run `./scripts/install.{sh,ps1}`** to replace
+   `cairn-cli` with `cairn` on your `PATH`.
+2. **Update MCP configs**: every `command: "cairn-cli"` reference
+   becomes `command: "cairn"`. (For Claude Code: `.mcp.json` and
+   `.claude/settings.json`.)
+3. **Add the admin env vars to `.env`**:
+   ```
+   CAIRN_ADMIN_USERNAME=<your-username>
+   CAIRN_ADMIN_PASSWORD=<at-least-12-chars>
+   ```
+4. **`docker compose down -v && docker compose up -d`** to pick
+   up the new entrypoint.
+5. **Test count invariant preserved**: `cargo test --workspace`
+   still reports 343 passed, 5 ignored.
+
+### New in the docs
+
+- `docs/ADMIN.md` — env bootstrap, dashboard surface, curl
+  equivalents, password rotation.
+- `docs/PLAN_v0.6.0.md` — this sprint plan.
+- `docs/PLAN_v0.5.0.md` → `docs/archive/PLAN_v0.5.0.md`.
+- ADRs 028 / 029 / 030 in `docs/DECISIONS.md`.
+
+---
 
 ## [0.5.0] — 2026-06-21 — Context + Reliability + Distribution + Proactive (Phases 3.5 + 4.0 + 4.1 + 4.2 + 5)
 
@@ -33,11 +120,11 @@ self-installable, multi-tenant aware, federated, and proactive.
 **Hybrid search (Phase 3.5, Sprint 7)**
 - `MemoryEngine::hybrid_search()` combines lexical (BM25-lite) + semantic
   via Reciprocal Rank Fusion; MMR diversity rerank (`λ=0.7`) keeps the top-N
-  non-redundant. Exposed as `/api/search` and `cairn-cli search`.
+  non-redundant. Exposed as `/api/search` and `cairn search`.
 
 **Zero-prompt setup (Phase 4.0, Sprint 8)**
-- `cairn-cli onboard` runs `doctor --fix` + provisions the local store + wires
-  every detected agent in one shot. `cairn-cli doctor --fix` repairs missing
+- `cairn onboard` runs `doctor --fix` + provisions the local store + wires
+  every detected agent in one shot. `cairn doctor --fix` repairs missing
   data dirs, weak MinIO creds, etc. Non-zero exit when remediation is required.
 
 **CLI surface (Phase 4.0, Sprints 9–10)**
@@ -50,7 +137,7 @@ self-installable, multi-tenant aware, federated, and proactive.
   `cairn://config/toml`.
 - 5 MCP prompts: `summarize-drift`, `remember-decision`, `what-do-we-know`,
   `weekly-savings-report`, `drift-triage`.
-- New CLI subcommands: `cairn-cli graph related|impact|callgraph`,
+- New CLI subcommands: `cairn graph related|impact|callgraph`,
   `memory timeline|crystallize`, `search`, `sessions`, `session`, `metrics`.
 
 **Context packages (Phase 4.0, Sprint 11)**
@@ -59,7 +146,7 @@ self-installable, multi-tenant aware, federated, and proactive.
   + optional `signature.ed25519`. Per-file SHA-256 + HMAC + optional
   Ed25519 signing; rejects oversized (>16 MiB) and tampered packs.
   `.ctxpkg` is accepted as an import alias.
-- New `cairn-pack` crate + `cairn-cli pack` with 9 actions:
+- New `cairn-pack` crate + `cairn pack` with 9 actions:
   `create | info | install | list | remove | export | import | auto-load |
   publish`.
 
@@ -106,7 +193,7 @@ self-installable, multi-tenant aware, federated, and proactive.
     reference pronouns. Sub-millisecond per turn.
   - `ProactiveHook` returns up to 3 relevant memories or a `Skipped { reason }`
     for diagnostics.
-- Per-project opt-out: `cairn-cli prefer cairn.proactive_recall=false
+- Per-project opt-out: `cairn prefer cairn.proactive_recall=false
   --applies-to <project_root>` disables for a project prefix.
 - New MCP tool: `proactive_recall(prompt, project_root?)`.
 
@@ -203,18 +290,18 @@ require a live HelixDB.
 **Hybrid search (Sprint 7)**
 - `MemoryEngine::hybrid_search()` combines lexical (BM25-lite) + semantic
   via Reciprocal Rank Fusion; MMR diversity rerank (`λ=0.7`) keeps the top-N
-  non-redundant. Exposed as `/api/search` and `cairn-cli search`.
+  non-redundant. Exposed as `/api/search` and `cairn search`.
 
 **CLI surface (Sprint 9–10)**
 - 25 new MCP tools (`memory_edit`, `memory_delete`, `memory_pin`,
   `memory_reinforce`, `memory_timeline`, `memory_crystallize`, `memory_graph`,
   `graph`, `search`, `metrics`, `stats`, etc.). Total tool count is now 40+.
-- New CLI subcommands: `cairn-cli graph related|impact|callgraph`,
+- New CLI subcommands: `cairn graph related|impact|callgraph`,
   `memory timeline|crystallize`, `search`, `sessions`, `session`, `metrics`.
 
 **Zero-prompt setup (Sprint 8)**
-- `cairn-cli onboard` runs `doctor --fix` + provisions the local store + wires
-  every detected agent in one shot. `cairn-cli doctor --fix` repairs missing
+- `cairn onboard` runs `doctor --fix` + provisions the local store + wires
+  every detected agent in one shot. `cairn doctor --fix` repairs missing
   data dirs, weak MinIO creds, etc. Non-zero exit when remediation is required.
 
 **Context packages (Sprint 11)**
@@ -222,7 +309,7 @@ require a live HelixDB.
   `profile.jsonl` + `patterns.jsonl` + `graph.jsonl` + `signature.sha256`.
   Per-file SHA-256 + HMAC signature; rejects oversized (>16 MiB) and tampered
   packs. `.ctxpkg` is accepted as an import alias.
-- New `cairn-pack` crate + `cairn-cli pack` with 9 actions:
+- New `cairn-pack` crate + `cairn pack` with 9 actions:
   `create | info | install | list | remove | export | import | auto-load |
   publish`.
 
@@ -260,16 +347,16 @@ each decision.
 
 - **CLI binary split.** The single `cairn` binary was replaced by two
   binaries: `cairn` (the server: `serve`, `token`, `pair-code`) and
-  `cairn-cli` (client commands: `setup`, `mcp`, `hook`, `sync`, `bench`,
+  `cairn` (client commands: `setup`, `mcp`, `hook`, `sync`, `bench`,
   `pair`, `update`, `rule`). The `cairn install <agent>` subcommand was
-  removed; use `cairn-cli setup <agent>`. User scripts that invoke
+  removed; use `cairn setup <agent>`. User scripts that invoke
   `cairn install` must be updated.
 
 - **Device tokens are now signed JWTs (HS256), not opaque bearer
   values.** Previously-issued plaintext tokens are invalid after upgrade
   to this release. Re-mint each device token:
   ```sh
-  cairn-cli token create --name <device> --scope <admin|write|read>
+  cairn token create --name <device> --scope <admin|write|read>
   ```
   The bearer value is shown exactly once. The server stores only token
   id, name, scope, and created_at; the JWT itself is regenerated from

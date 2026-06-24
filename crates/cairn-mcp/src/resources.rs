@@ -1,11 +1,11 @@
-//! MCP resources (v0.5.0 Sprint 24).
+﻿//! MCP resources (v0.5.0 Sprint 24).
 //!
 //! Resources are a read-only, addressable surface on top of the memory store
-//! — clients subscribe by URI and read the latest snapshot. Six canonical
+//! â€” clients subscribe by URI and read the latest snapshot. Six canonical
 //! resources are listed in [`resource_defs`].
 //!
 //! Each resource has a [`ResourceDef`] (URI + metadata) and a runtime
-//! [`read_resource`] resolver that maps URI → JSON payload. Resolvers
+//! [`read_resource`] resolver that maps URI â†’ JSON payload. Resolvers
 //! gracefully return an empty result when the underlying data isn't available
 //! (e.g. memory graph on a fresh install), so a client can subscribe without
 //! crashing.
@@ -25,7 +25,7 @@ pub struct ResourceDef {
     pub mime_type: &'static str,
 }
 
-/// Six canonical resources. The set is locked for v0.5.0 — adding more is a
+/// Six canonical resources. The set is locked for v0.5.0 â€” adding more is a
 /// breaking change for clients that enumerate the resource list.
 pub fn resource_defs() -> &'static [ResourceDef] {
     &[
@@ -62,7 +62,7 @@ pub fn resource_defs() -> &'static [ResourceDef] {
         ResourceDef {
             uri: "cairn://config/toml",
             name: "Effective Config (TOML)",
-            description: "Current cairn-server configuration as a TOML document. Includes host, port, multi_tenant flag.",
+            description: "Current in-container server configuration as a TOML document. Includes host, port, multi_tenant flag.",
             mime_type: "text/plain",
         },
     ]
@@ -131,15 +131,15 @@ fn read_savings_today(_server: &McpServer) -> Value {
     // a placeholder that the dashboard-side bridge can fill in. Future
     // iteration: wire cairn-api's SavingsState into McpServer.
     json!({
-        "note": "savings summary lives at /api/ledger on the cairn-server; bridged by cairn-cli.",
+        "note": "savings summary lives at /api/ledger on the in-container server; bridged by cairn.",
         "fetched_at": Utc::now().to_rfc3339(),
     })
 }
 
 fn read_drift_pending(_server: &McpServer) -> Value {
     // Same as above — drift is owned by cairn-session. The MCP surface
-    // exposes the URI; the actual JSON is filled by the host (cairn-cli
-    // proxy or cairn-server) so the contract is honest.
+    // exposes the URI; the actual JSON is filled by the host (cairn
+    // proxy or in-container server) so the contract is honest.
     json!({
         "note": "drift pending is fetched via cairn_session::SessionStore on the server; the MCP server proxies to it.",
         "fetched_at": Utc::now().to_rfc3339(),
@@ -147,16 +147,16 @@ fn read_drift_pending(_server: &McpServer) -> Value {
 }
 
 fn read_audit_recent(server: &McpServer) -> Value {
-    // Audit events are stored in HelixDB on the cairn-server. The standalone
-    // MCP stdio binary (without the cairn-server HTTP surface) returns an
+    // Audit events are stored in HelixDB on the in-container server. The standalone
+    // MCP stdio binary (without the HTTP surface) returns an
     // empty list — production clients should read this URI through the
-    // cairn-server's `/api/mcp/resources/read` bridge.
+    // server's `/api/mcp/resources/read` bridge.
     let events: Vec<Value> = Vec::new();
     let _ = server; // silence unused warning when no live store backend
     json!({
         "events": events,
         "count": 0,
-        "note": "live audit feed requires the cairn-server HTTP bridge; standalone MCP returns an empty list.",
+        "note": "live audit feed requires the in-container server HTTP bridge; standalone MCP returns an empty list.",
         "fetched_at": Utc::now().to_rfc3339(),
     })
 }
@@ -164,7 +164,7 @@ fn read_audit_recent(server: &McpServer) -> Value {
 fn read_config_toml(server: &McpServer) -> Value {
     let cfg = &server.config;
     let body = format!(
-        "# Effective cairn-server configuration (read-only snapshot)\n\
+        "# Effective in-container server configuration (read-only snapshot)\n\
          # This document is for diagnostics only — do not edit and re-apply.\n\
          \n\
          host = \"{}\"\n\
@@ -185,7 +185,7 @@ fn read_config_toml(server: &McpServer) -> Value {
     json!({ "body": body, "fetched_at": Utc::now().to_rfc3339() })
 }
 
-/// Per-URI freshness — clients can use this to decide whether to re-read.
+/// Per-URI freshness â€” clients can use this to decide whether to re-read.
 pub fn resource_metadata(uri: &str) -> Option<Value> {
     let now: DateTime<Utc> = Utc::now();
     match uri {

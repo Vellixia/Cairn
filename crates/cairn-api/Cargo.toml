@@ -6,6 +6,13 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# In-container entrypoint — built into the Docker image, never shipped to
+# the host. The host runs `cairn` (the renamed client binary); the
+# container runs `cairn-server` (this bin).
+[[bin]]
+name = "cairn-server"
+path = "src/bin/cairn_server.rs"
+
 [dependencies]
 cairn-core.workspace = true
 cairn-store.workspace = true
@@ -33,6 +40,8 @@ rust-embed.workspace = true
 tracing.workspace = true
 jsonwebtoken.workspace = true
 thiserror.workspace = true
+anyhow.workspace = true
+tracing-subscriber.workspace = true
 base64.workspace = true
 hmac.workspace = true
 sha2.workspace = true

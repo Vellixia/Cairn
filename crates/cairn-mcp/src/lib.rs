@@ -1,4 +1,4 @@
-//! A minimal Model Context Protocol server over stdio.
+﻿//! A minimal Model Context Protocol server over stdio.
 //!
 //! MCP's stdio transport is newline-delimited JSON-RPC 2.0: one JSON message per line on stdin,
 //! one per line on stdout. (Logs must go to stderr so they don't corrupt the channel.) We
@@ -256,9 +256,9 @@ impl McpServer {
                 if ms.is_empty() {
                     return Ok("(no memories yet)".into());
                 }
-                let mut out = String::from("Cairn wakeup — what you already know:\n");
+                let mut out = String::from("Cairn wakeup â€” what you already know:\n");
                 for m in ms {
-                    out.push_str(&format!("· ({}) {}\n", m.kind.as_str(), m.content));
+                    out.push_str(&format!("Â· ({}) {}\n", m.kind.as_str(), m.content));
                 }
                 Ok(out)
             }
@@ -475,12 +475,12 @@ pub fn tool_defs() -> Value {
     json!([
         {
             "name": "read",
-            "description": "Read a file through Cairn. Re-reading an unchanged file is nearly free; after edits you get only the diff. Returns a handle you can pass to `expand` for the full original — no context is ever lost.",
+            "description": "Read a file through Cairn. Re-reading an unchanged file is nearly free; after edits you get only the diff. Returns a handle you can pass to `expand` for the full original â€” no context is ever lost.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path to read." },
-                    "mode": { "type": "string", "enum": ["auto", "full", "signatures", "map"], "description": "auto (cache-aware), full, signatures (AST outline — bodies elided), or map (outline + line numbers). For code files, signatures/map cost a fraction of the tokens; recover the full file with expand." }
+                    "mode": { "type": "string", "enum": ["auto", "full", "signatures", "map"], "description": "auto (cache-aware), full, signatures (AST outline â€” bodies elided), or map (outline + line numbers). For code files, signatures/map cost a fraction of the tokens; recover the full file with expand." }
                 },
                 "required": ["path"]
             }
@@ -522,7 +522,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "assemble",
-            "description": "Assemble a lean, edge-ordered working set for a query under a token budget — the anti-context-rot context block. Reports what was included and dropped (dropped items remain recoverable via recall).",
+            "description": "Assemble a lean, edge-ordered working set for a query under a token budget â€” the anti-context-rot context block. Reports what was included and dropped (dropped items remain recoverable via recall).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -561,7 +561,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "anchor",
-            "description": "Set or read the current task anchor — the goal Cairn re-injects at session start to keep you on track. Pass `goal` to set; omit to read the current goal.",
+            "description": "Set or read the current task anchor â€” the goal Cairn re-injects at session start to keep you on track. Pass `goal` to set; omit to read the current goal.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "goal": { "type": "string" } }
@@ -595,7 +595,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "consolidate",
-            "description": "Consolidate memory across the four tiers (working → episodic → semantic → procedural). Run at session end to turn transient notes into durable knowledge.",
+            "description": "Consolidate memory across the four tiers (working â†’ episodic â†’ semantic â†’ procedural). Run at session end to turn transient notes into durable knowledge.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -613,7 +613,7 @@ pub fn tool_defs() -> Value {
         // ---- v0.5.0 Sprint 18: proactive recall ----
         {
             "name": "proactive_recall",
-            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply — saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn-cli prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project.",
+            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply â€” saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -643,7 +643,7 @@ pub fn tool_defs() -> Value {
                 "properties": {
                     "id": { "type": "string", "description": "Memory id to edit." },
                     "content": { "type": "string", "description": "New content (optional)." },
-                    "importance": { "type": "number", "description": "0.0–1.0, clamped." },
+                    "importance": { "type": "number", "description": "0.0â€“1.0, clamped." },
                     "concepts": { "type": "array", "items": { "type": "string" } },
                     "files": { "type": "array", "items": { "type": "string" } }
                 },
@@ -821,7 +821,7 @@ pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
 pub struct RemoteProxy {
     server: String,
     token: Option<String>,
-    /// The host directory where `cairn-cli mcp` was launched (the project root from the agent).
+    /// The host directory where `cairn mcp` was launched (the project root from the agent).
     host_workspace: std::path::PathBuf,
 }
 
@@ -880,7 +880,7 @@ impl RemoteProxy {
                     json!({
                         "protocolVersion": ver,
                         "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "cairn-cli", "version": env!("CARGO_PKG_VERSION") }
+                        "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") }
                     }),
                 ))
             }
@@ -1102,7 +1102,7 @@ mod tests {
             )
             .unwrap();
         let create_text = create["result"]["content"][0]["text"].as_str().unwrap();
-        // "remembered <id> ..." — extract the id.
+        // "remembered <id> ..." â€” extract the id.
         let id = create_text
             .split_whitespace()
             .nth(1)
@@ -1169,7 +1169,7 @@ mod tests {
             .unwrap()
             .contains("deleted"));
 
-        // memory_delete again → tool error
+        // memory_delete again â†’ tool error
         let err = s
             .handle(
                 &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
@@ -1187,7 +1187,7 @@ mod tests {
             "name":"remember","arguments":{"content":"the team decided tabs over spaces last time"}}}))
             .unwrap();
 
-        // A recall cue prompt — the hook should fire and return at least one memory.
+        // A recall cue prompt â€” the hook should fire and return at least one memory.
         let resp = s
             .handle(
                 &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
@@ -1211,7 +1211,7 @@ mod tests {
             )
             .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        // Plain imperative → hook returns no memories → JSON `[]`.
+        // Plain imperative â†’ hook returns no memories â†’ JSON `[]`.
         assert_eq!(text.trim(), "[]", "expected empty recall, got: {text}");
     }
 

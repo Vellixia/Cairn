@@ -4,7 +4,7 @@
       "args": [
         "mcp"
       ],
-      "command": "cairn-cli"
+      "command": "cairn"
     }
   }
 }

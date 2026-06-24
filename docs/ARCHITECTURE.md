@@ -1,6 +1,6 @@
-# Architecture
+﻿# Architecture
 
-How Cairn is structured today — crate graph, data flow, MCP tool surface, API endpoints,
+How Cairn is structured today â€” crate graph, data flow, MCP tool surface, API endpoints,
 and Docker topology.
 
 ---
@@ -9,16 +9,15 @@ and Docker topology.
 
 ```mermaid
 graph TD
-    Agent["AI Agent<br/>Claude Code OpenCode Cursor VS Code Windsurf"]
-    CLI["cairn-cli client binary<br/>McpServer / RemoteProxy<br/>setup run hook sync pair pack"]
-    Server["cairn server binary<br/>cairn-api axum REST + web UI<br/>auth cookie + JWT + CORS + CSP nonce"]
+    Agent["AI Agent<br/>Claude Code Codex CLI OpenCode"]
+    CLI["cairn (host binary)<br/>McpServer / RemoteProxy<br/>setup run hook sync pair pack"]
+    Server["cairn-server (in-container bin)<br/>cairn-api axum REST + web UI<br/>auth cookie + JWT + CORS + CSP nonce"]
     Store["cairn-store<br/>HelixBackend + BlobStore"]
     Helix["HelixDB<br/>graph + HNSW vectors"]
     MinIO["MinIO<br/>S3 persistence"]
 
     Agent -->|"MCP stdio<br/>+ lifecycle hooks"| CLI
-    CLI -->|"local store HelixDB"| Store
-    CLI -->|"HTTP proxy<br/>CAIRN_SERVER + CAIRN_TOKEN"| Server
+    CLI -->|"HTTP<br/>CAIRN_SERVER + CAIRN_TOKEN"| Server
     Server --> Store
     Store --> Helix
     Helix --> MinIO
@@ -26,27 +25,31 @@ graph TD
 
 ---
 
-## Two Binaries
+## One Host Binary + One In-Container Binary
 
-| Binary | Crate | Role |
+| Binary | Lives in | Role |
 |---|---|---|
-| `cairn` | `cairn-server` | Server: `serve`, `token create/list/revoke`, `pair-code`, `admin password/reset` |
-| `cairn-cli` | `cairn-cli` | Client: `mcp`, `setup`, `rules`, `run`, `hook`, `remember`, `recall`, `wakeup`, `prefer`, `anchor`, `checkpoint`, `rollback`, `sync`, `pair`, `export`, `import`, `contribute`, `pull`, `bench`, `update`, `doctor`, `onboard`, `pack`, `graph`, `memory`, `search`, `sessions`, `session`, `metrics`, `stats` |
+| `cairn` (host) | release tarball + install script | Client: `mcp`, `setup`, `rules`, `run`, `hook`, `remember`, `recall`, `wakeup`, `prefer`, `anchor`, `checkpoint`, `rollback`, `sync`, `pair`, `export`, `import`, `contribute`, `pull`, `bench`, `doctor`, `onboard`, `pack`, `graph`, `memory`, `search`, `sessions`, `session`, `metrics`, `stats` |
+| `cairn-server` (in-container) | Docker image only | Long-lived server: binds :7777, serves the API + web UI, runs env-only admin bootstrap |
+
+v0.5.0 shipped both as the same name (`cairn`); v0.6.0 split them so the
+host tarball ships exactly one binary and the in-container server is
+rebuilt only when the Docker image is rebuilt. See ADR-029.
 
 ---
 
-## Cargo Workspace — 22 Crates
+## Cargo Workspace â€” 21 Crates
 
 ### Dependency Graph
 
 ```mermaid
 graph BT
-    core["cairn-core<br/>types · config · OrgId · errors"]
+    core["cairn-core<br/>types Â· config Â· OrgId Â· errors"]
     store["cairn-store<br/>HelixDB + BlobStore"]
-    context["cairn-context<br/>read · cache · AST · assemble"]
-    memory["cairn-memory<br/>4-tier · recall · RRF · MMR · graph · crystallize"]
-    guard["cairn-guard<br/>verify · anchor · checkpoint"]
-    shell["cairn-shell<br/>compress · recover"]
+    context["cairn-context<br/>read Â· cache Â· AST Â· assemble"]
+    memory["cairn-memory<br/>4-tier Â· recall Â· RRF Â· MMR Â· graph Â· crystallize"]
+    guard["cairn-guard<br/>verify Â· anchor Â· checkpoint"]
+    shell["cairn-shell<br/>compress Â· recover"]
     profile["cairn-profile<br/>preferences"]
     assemble["cairn-assemble<br/>token-budget assembly"]
     share["cairn-share<br/>sanitization"]
@@ -59,10 +62,10 @@ graph BT
     proactive["cairn-proactive<br/>intent classifier + auto-inject"]
     proxy["cairn-proxy<br/>cairn.sh reverse proxy"]
     ingest["cairn-ingest<br/>VTT/SRT/JSON transcript parsers"]
-    mcp["cairn-mcp<br/>MCP server (stdio) — 29 tools + 10 graph actions · 6 resources · 5 prompts"]
+    mcp["cairn-mcp<br/>MCP server (stdio) â€” 29 tools + 10 graph actions Â· 6 resources Â· 5 prompts"]
     api["cairn-api<br/>REST API + web UI + registry + extensions + push"]
-    server["cairn-server<br/>cairn binary"]
-    cli["cairn-cli<br/>cairn-cli binary"]
+    server["cairn-server<br/>in-container bin<br/>(cairn-api::bin::cairn_server)"]
+    cli["cairn<br/>host binary<br/>(cairn-client crate)"] 
 
     core --> store
     core --> embed
@@ -110,7 +113,7 @@ graph BT
 | `cairn-share` | Privacy-first sanitization: secret/PII detection, redaction, classification (shareable/review/private). |
 | `cairn-embed` | Pluggable embeddings: local (fastembed/ONNX all-MiniLM-L6-v2), OpenAI, Ollama, hashing fallback. |
 | `cairn-session` | Cross-Session Protocol (JSONL sessions + drift log), approve/reject workflow. |
-| `cairn-pack` | `.cairnpkg` format — hand-rolled ustar, SHA-256 per-file integrity, HMAC signature, Ed25519 signing. |
+| `cairn-pack` | `.cairnpkg` format â€” hand-rolled ustar, SHA-256 per-file integrity, HMAC signature, Ed25519 signing. |
 | `cairn-registry` | Self-hosted pack registry: HTTP endpoints under `/registry/*`, trust scopes, revocation cascade. |
 | `cairn-sync` | Offline-first CRDT sync: `GCounter` + `ORSet` + vector clocks + Argon2id/ChaCha20-Poly1305 E2E encryption. |
 | `cairn-bench` | LongMemEval + horizon + retention benchmarks with hand-built fixtures. |
@@ -119,14 +122,14 @@ graph BT
 | `cairn-ingest` | VTT/SRT/JSON transcript parsers + speaker-window chunking (default 60s). |
 | `cairn-mcp` | MCP server over stdio. Local mode (opens HelixDB store) or remote proxy mode (forwards to `cairn-api`). 29 tools + 10 graph actions = 39, 6 resources, 5 prompts. |
 | `cairn-api` | Axum REST API + embedded web UI (rust-embed). Auth middleware (cookie session + JWT device tokens), CORS, per-request CSP nonce. Registry + extensions + push + ingest routes. |
-| `cairn-server` | The `cairn` binary: `serve`, `token`, `pair-code`, `admin`. |
-| `cairn-cli` | The `cairn-cli` binary: `mcp`, `setup`, `run`, `hook`, `sync`, `pair`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
+| `cairn-api` (bin `cairn-server`) | In-container entrypoint. Resolves config, opens the store, runs `bootstrap_admin_from_env`, binds :7777, serves the API + web UI. Built into the Docker image; never ships in host tarballs. |
+| `cairn-client` | Host binary `cairn`: `mcp`, `setup`, `run`, `hook`, `sync`, `pair`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
 
 ---
 
 ## MCP Tool Surface (29 tools + 10 graph actions = 39)
 
-All tools are exposed via `cairn-cli mcp` (stdio) and mirrored at `/api/tools/list` + `/api/tools/call`.
+All tools are exposed via `cairn mcp` (stdio) and mirrored at `/api/tools/list` + `/api/tools/call`.
 
 | Category | Tools |
 |---|---|
@@ -235,7 +238,7 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 | `CAIRN_HELIX_URL` | (none) | HelixDB server URL |
 | `CAIRN_HELIX_TOKEN` | (none) | HelixDB bearer API key |
 | `CAIRN_HELIX_NS` | `cairn_` | HelixDB label namespace prefix |
-| `CAIRN_SECRET_KEY` | (required) | HMAC secret for JWTs (≥ 32 bytes) |
+| `CAIRN_SECRET_KEY` | (required) | HMAC secret for JWTs (â‰¥ 32 bytes) |
 | `CAIRN_TLS_CERT` / `CAIRN_TLS_KEY` | (none) | TLS material for HTTPS |
 | `CAIRN_INSECURE` | `0` | Allow plain HTTP on non-loopback |
 | `CAIRN_WORKSPACE_ROOT` | (none) | Project root for context engine |
@@ -245,7 +248,7 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 | `CAIRN_ADMIN_PASSWORD` | (none) | Admin password (plaintext; loopback dev only) |
 | `CAIRN_ADMIN_PASSWORD_HASH` | (none) | Admin password hash (Argon2id PHC; production) |
 | `CAIRN_MULTI_TENANT` | `0` | Enable multi-tenant org isolation |
-| `CAIRN_SERVER` | (none) | Remote cairn-server URL for `cairn-cli mcp` proxy mode |
+| `CAIRN_SERVER` | (none) | Remote cairn-server URL for `cairn mcp` proxy mode |
 | `CAIRN_TOKEN` | (none) | Bearer token for remote proxy mode |
 
 ---
@@ -254,12 +257,12 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 
 ```
 docker compose up -d
-  → minio-guard   (one-shot: validates MinIO creds)
-  → minio         (S3-compatible storage for HelixDB persistence)
-  → minio-init    (one-shot: creates helix-db bucket)
-  → helix         (HelixDB graph + vector datastore, :6969)
-  → cairn-init    (one-shot: chowns /data to uid 10001)
-  → cairn         (Cairn server + web UI, 127.0.0.1:7777, non-root)
+  â†’ minio-guard   (one-shot: validates MinIO creds)
+  â†’ minio         (S3-compatible storage for HelixDB persistence)
+  â†’ minio-init    (one-shot: creates helix-db bucket)
+  â†’ helix         (HelixDB graph + vector datastore, :6969)
+  â†’ cairn-init    (one-shot: chowns /data to uid 10001)
+  â†’ cairn         (Cairn server + web UI, 127.0.0.1:7777, non-root)
 ```
 
 The `cairn` container runs as `user: "10001:10001"` (non-root). The `cairn-init`
@@ -277,7 +280,7 @@ Add to `~/.config/opencode/opencode.json` or `.mcp.json` in the project root:
 {
   "mcpServers": {
     "cairn": {
-      "command": "cairn-cli",
+      "command": "cairn",
       "args": ["mcp"]
     }
   }
@@ -293,26 +296,31 @@ Add lifecycle hooks to `.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "SessionStart": [{ "hooks": [{ "command": "cairn-cli hook SessionStart", "type": "command" }] }],
-    "SessionEnd": [{ "hooks": [{ "command": "cairn-cli hook SessionEnd", "type": "command" }] }],
-    "PostToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [{ "command": "cairn-cli hook PostToolUse", "type": "command" }] }]
+    "SessionStart": [{ "hooks": [{ "command": "cairn hook SessionStart", "type": "command" }] }],
+    "SessionEnd": [{ "hooks": [{ "command": "cairn hook SessionEnd", "type": "command" }] }],
+    "PostToolUse": [{ "matcher": "Edit|Write|MultiEdit", "hooks": [{ "command": "cairn hook PostToolUse", "type": "command" }] }]
   }
 }
 ```
 
 And add the MCP entry to `.mcp.json` (same as OpenCode above).
 
-### Cursor
+### Codex CLI
 
-Add to `.cursor/mcp.json` (same JSON shape as OpenCode).
+`cairn setup codex` writes the `[mcp_servers.cairn]` block to
+`~/.codex/config.toml` (or `<project>/.codex/config.toml` for project scope).
+Codex reads TOML, not JSON — the block uses stdio transport with
+`command = "cairn"` and `args = ["mcp"]`. When `--server` is passed we
+also write a `[mcp_servers.cairn.env]` sub-block with
+`CAIRN_SERVER` and `CAIRN_TOKEN`.
 
 ---
 
 ## See also
 
-- [Plan v0.5.0](PLAN_v0.5.0.md) — 23-sprint plan, success metrics, risks
-- [Benchmarks](BENCHMARKS.md) — measured token savings + methodology
-- [Decisions](DECISIONS.md) — 26 ADRs
-- [Roadmap](ROADMAP.md) — what's done, what's next
-- [Security](../SECURITY.md) — threat model + hardening checklist
-- [E2E Tests](E2E.md) — 20-scenario end-to-end test harness
+- [Plan v0.5.0](PLAN_v0.5.0.md) â€” 23-sprint plan, success metrics, risks
+- [Benchmarks](BENCHMARKS.md) â€” measured token savings + methodology
+- [Decisions](DECISIONS.md) â€” 26 ADRs
+- [Roadmap](ROADMAP.md) â€” what's done, what's next
+- [Security](../SECURITY.md) â€” threat model + hardening checklist
+- [E2E Tests](E2E.md) â€” 20-scenario end-to-end test harness

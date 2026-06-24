@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "cairn-cli hook PostToolUse",
+            "command": "cairn hook PostToolUse",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "cairn-cli hook SessionEnd",
+            "command": "cairn hook SessionEnd",
             "type": "command"
           }
         ]
@@ -25,7 +25,7 @@
       {
         "hooks": [
           {
-            "command": "cairn-cli hook SessionStart",
+            "command": "cairn hook SessionStart",
             "type": "command"
           }
         ]
@@ -35,7 +35,7 @@
       {
         "hooks": [
           {
-            "command": "cairn-cli hook UserPromptSubmit",
+            "command": "cairn hook UserPromptSubmit",
             "type": "command"
           }
         ]

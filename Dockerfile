@@ -8,10 +8,10 @@ RUN npm ci
 COPY web/ ./
 RUN npm run build   # -> /web/out
 
-# ---- rust build: compile the CLI, embedding the UI ---------------------------
+# ---- rust build: compile the in-container server + embed the UI -------------
 FROM rust:1-bookworm AS builder
-# Cargo features for the cairn binaries. Default is empty (lean image, no in-process
-# embeddings): users get the deterministic hashing embedder out of the box, or wire up a
+# Cargo features. Default is empty (lean image, no in-process embeddings):
+# users get the deterministic hashing embedder out of the box, or wire up a
 # hosted provider via CAIRN_EMBED_PROVIDER=openai|ollama. Opt into the heavy
 # `embed-local` feature (fastembed/ONNX) with:
 #   docker build --build-arg CAIRN_FEATURES=embed-local .
@@ -21,9 +21,9 @@ COPY . .
 # Bring in the freshly built UI so cairn-api can embed it.
 COPY --from=web /web/out ./web/out
 RUN if [ -n "$CAIRN_FEATURES" ]; then \
-        cargo build --release -p cairn-server -p cairn-cli --features "$CAIRN_FEATURES"; \
+        cargo build --release -p cairn-api --bin cairn-server --features "$CAIRN_FEATURES"; \
     else \
-        cargo build --release -p cairn-server -p cairn-cli; \
+        cargo build --release -p cairn-api --bin cairn-server; \
     fi
 
 # ---- runtime -----------------------------------------------------------------
@@ -36,10 +36,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates libgomp1 wget \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --create-home cairn
-COPY --from=builder /app/target/release/cairn /usr/local/bin/cairn
-COPY --from=builder /app/target/release/cairn-cli /usr/local/bin/cairn-cli
+COPY --from=builder /app/target/release/cairn-server /usr/local/bin/cairn-server
 USER cairn
 VOLUME ["/data"]
 EXPOSE 7777
-ENTRYPOINT ["cairn"]
-CMD ["serve", "--host", "0.0.0.0", "--port", "7777", "--data-dir", "/data"]
+ENTRYPOINT ["cairn-server"]

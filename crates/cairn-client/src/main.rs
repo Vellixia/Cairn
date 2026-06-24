@@ -1,6 +1,6 @@
-//! The `cairn-cli` binary.
+﻿//! The `cairn` binary.
 //!
-//! `cairn-cli` connects AI agents to a Cairn server and runs local tools against the local store.
+//! `cairn` connects AI agents to a Cairn server and runs local tools against the local store.
 //! When `CAIRN_HELIX_URL` is set it talks to a local HelixDB; when `CAIRN_SERVER` is set it proxies
 //! through the remote Cairn HTTP API.
 
@@ -23,13 +23,12 @@ mod pool;
 mod rules;
 mod setup;
 mod sync;
-mod update;
 
 #[derive(Parser)]
 #[command(
-    name = "cairn-cli",
+    name = "cairn",
     version,
-    about = "Cairn client — connect AI agents to a Cairn server"
+    about = "Cairn client â€” connect AI agents to a Cairn server"
 )]
 struct Cli {
     /// Override the data directory (defaults to the OS data dir).
@@ -55,12 +54,12 @@ enum Cmd {
         #[arg(long, default_value_t = 12)]
         limit: usize,
     },
-    /// Record a standing preference (e.g. `cairn-cli prefer always use ripgrep`).
+    /// Record a standing preference (e.g. `cairn prefer always use ripgrep`).
     Prefer {
         #[arg(trailing_var_arg = true, num_args = 1..)]
         rule: Vec<String>,
     },
-    /// Set the current task anchor — the goal re-injected at session start.
+    /// Set the current task anchor â€” the goal re-injected at session start.
     Anchor {
         #[arg(trailing_var_arg = true, num_args = 1..)]
         goal: Vec<String>,
@@ -87,7 +86,7 @@ enum Cmd {
         /// Skip agent auto-detection and wiring (useful for CI).
         #[arg(long)]
         skip_agents: bool,
-        /// Remote Cairn server URL — sets `CAIRN_SERVER` so the spawned `setup` subprocess
+        /// Remote Cairn server URL â€” sets `CAIRN_SERVER` so the spawned `setup` subprocess
         /// runs in remote-proxy mode.
         #[arg(long)]
         server: Option<String>,
@@ -161,18 +160,11 @@ enum Cmd {
         #[arg(long)]
         all: bool,
     },
-    /// Log in to a Cairn server. (coming soon)
-    Login {
-        /// Server URL.
-        server: Option<String>,
-    },
-    /// Update the cairn-cli binary in place to the latest GitHub release.
-    Update,
-    /// Run the MCP server over stdio (point your agent's MCP config at `cairn-cli mcp`).
+    /// Run the MCP server over stdio (point your agent's MCP config at `cairn mcp`).
     Mcp,
     /// Run a command and print compressed output; the full output is retained and recoverable.
     Run {
-        /// The command to run, e.g. `cairn-cli run -- cargo test`.
+        /// The command to run, e.g. `cairn run -- cargo test`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
         command: Vec<String>,
     },
@@ -332,11 +324,6 @@ impl State {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
-    if let Some(global) = cairn_core::config::global_env_path() {
-        let _ = dotenvy::from_path(&global);
-    }
-
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -370,7 +357,7 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Wakeup { limit } => {
             let s = State::open(&cfg)?;
             for m in s.mem.wakeup(limit)? {
-                println!("· ({}) {}", m.kind.as_str(), m.content);
+                println!("Â· ({}) {}", m.kind.as_str(), m.content);
             }
         }
         Cmd::Prefer { rule } => {
@@ -560,17 +547,12 @@ async fn main() -> anyhow::Result<()> {
             token,
         } => setup::run(agent.as_deref(), all, server.as_deref(), token.as_deref())?,
         Cmd::Rules { agent, all } => rules::run(agent.as_deref(), all)?,
-        Cmd::Login { server } => coming_soon(&format!(
-            "logging in to {}",
-            server.as_deref().unwrap_or("<server>")
-        )),
-        Cmd::Update => update::run()?,
         Cmd::Mcp => {
             cairn_mcp::serve_stdio(&cfg)?;
         }
         Cmd::Run { command } => {
             if command.is_empty() {
-                anyhow::bail!("usage: cairn-cli run -- <command>");
+                anyhow::bail!("usage: cairn run -- <command>");
             }
             let s = State::open(&cfg)?;
             let output = std::process::Command::new(&command[0])
@@ -585,7 +567,7 @@ async fn main() -> anyhow::Result<()> {
                 println!();
             }
             eprintln!(
-                "[cairn-cli: {} → {} lines, {:.0}% saved · recover full output with `expand {}`]",
+                "[cairn: {} â†’ {} lines, {:.0}% saved Â· recover full output with `expand {}`]",
                 c.original_lines,
                 c.compressed_lines,
                 c.saved_ratio * 100.0,
@@ -657,14 +639,10 @@ fn build_share_bundle(mems: &[cairn_core::Memory]) -> anyhow::Result<String> {
     let san = cairn_share::Sanitizer::new();
     let (bundle, stats) = san.bundle(mems);
     eprintln!(
-        "[cairn share: {} scanned → {} shareable ({} need review), {} withheld as private]",
+        "[cairn share: {} scanned â†’ {} shareable ({} need review), {} withheld as private]",
         stats.total, stats.shared, stats.needs_review, stats.withheld
     );
     Ok(serde_json::to_string_pretty(&bundle)?)
-}
-
-fn coming_soon(what: &str) {
-    println!("cairn-cli: {what} — coming soon in a later build.");
 }
 
 #[cfg(test)]

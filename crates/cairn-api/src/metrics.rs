@@ -1,7 +1,7 @@
-//! Live cost-savings metrics.
+﻿//! Live cost-savings metrics.
 //!
 //! The Cairn context engine's [`cairn_context`] and shell compressor already emit savings data
-//! through the API and through the `cairn-cli bench` tool. This module aggregates those signals
+//! through the API and through the `cairn bench` tool. This module aggregates those signals
 //! into a single `/api/metrics` endpoint for the dashboard:
 //!
 //! - **cumulative bytes / tokens served** (the sum of every read/compress payload the server
@@ -11,20 +11,19 @@
 //!   approximated via access_count > 0 in the memory engine)
 //! - **total memories, total checkpoints** (the headline trust counters)
 //!
-//! The numbers are best-effort and intentionally cheap — no on-the-fly recomputation across
-//! millions of records. The point is "did the user's token spend go down?" — a running tally
+//! The numbers are best-effort and intentionally cheap â€” no on-the-fly recomputation across
+//! millions of records. The point is "did the user's token spend go down?" â€” a running tally
 //! updated on every read.
 
 use crate::AppState;
 use axum::{extract::State, Json};
 use cairn_assemble::AssemblyReport;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Live counter — `bytes_in` is the compact payload we served the agent, `bytes_out_full` is
-/// what we *would* have sent uncompressed (so saved = full − compact, divided by `full`).
+/// Live counter â€” `bytes_in` is the compact payload we served the agent, `bytes_out_full` is
+/// what we *would* have sent uncompressed (so saved = full âˆ’ compact, divided by `full`).
 #[derive(Debug, Default)]
 pub struct SavingsCounter {
     pub compact: AtomicU64,
@@ -53,7 +52,7 @@ impl SavingsCounter {
         }
     }
 
-    /// Record one assembler pass — its `used_tokens` and dropped-token counts add to the ledger
+    /// Record one assembler pass â€” its `used_tokens` and dropped-token counts add to the ledger
     /// so the savings dashboard can show "I assembled N queries, kept M tokens, dropped K".
     pub fn record_assemble(&self, r: &AssemblyReport) {
         self.wakeup_tokens
@@ -108,14 +107,14 @@ pub struct SavingsSnapshot {
     pub compact_bytes: u64,
     pub full_bytes: u64,
     pub saved_bytes: u64,
-    /// 0.0–1.0 fraction of full bytes saved by compaction.
+    /// 0.0â€“1.0 fraction of full bytes saved by compaction.
     pub saved_ratio: f64,
     pub calls: u64,
     pub hits: u64,
     pub bounces: u64,
-    /// 0.0–1.0 — share of read calls that returned something.
+    /// 0.0â€“1.0 â€” share of read calls that returned something.
     pub hit_rate: f64,
-    /// 0.0–1.0 — share of read calls that returned nothing.
+    /// 0.0â€“1.0 â€” share of read calls that returned nothing.
     pub bounce_rate: f64,
     pub wakeup_tokens: u64,
     pub recall_tokens: u64,
@@ -131,7 +130,7 @@ impl SavingsSnapshot {
     }
 }
 
-/// `GET /api/metrics` — live savings + hit-rate + bounce-rate.
+/// `GET /api/metrics` â€” live savings + hit-rate + bounce-rate.
 pub async fn metrics(State(s): State<AppState>) -> Result<Json<MetricsResponse>, crate::ApiError> {
     let snap = s.savings.snapshot();
     let memories = s.store.count_memories().unwrap_or(0);
@@ -160,27 +159,9 @@ pub struct MetricsResponse {
     pub server: serde_json::Value,
 }
 
-// ---- reference data: per-source savings share ------------------------------------------------
-
-/// Build the "top savings sources" breakdown. Used by the dashboard's `/dashboard/savings`
-/// page (Sprint 5). Walks a small fixed list of well-known read endpoints and reports the
-/// compact-vs-full delta each one has contributed to the global counter.
-#[allow(dead_code)]
-pub fn source_breakdown(s: &AppState) -> HashMap<&'static str, u64> {
-    let mut out = HashMap::new();
-    let snap = s.savings.snapshot();
-    // We can't reconstruct per-source numbers after the fact without changing every call site,
-    // so this is a coarse split: read endpoints (hits/bounces) vs assembler (wakeup/recall).
-    out.insert("context.read", snap.hits);
-    out.insert("context.expand", snap.recall_tokens);
-    out.insert("assembler", snap.wakeup_tokens);
-    out.insert("bounces", snap.bounces);
-    out
-}
-
 // ---- wire type so the metric counter survives in AppState ------------------------------------
 
-/// Thread-safe handle to the live savings counter — held in [`AppState`] and incremented by
+/// Thread-safe handle to the live savings counter â€” held in [`AppState`] and incremented by
 /// instrumented handlers. Lives next to AppState so the metrics endpoint can read it cheaply.
 #[derive(Clone, Default)]
 pub struct SavingsState(pub Arc<SavingsCounter>);
@@ -260,7 +241,7 @@ mod tests {
             usd > 0.0,
             "usd_saved should be > 0 for non-zero savings; got {usd}"
         );
-        // Sanity bound — 9900 bytes ≈ 2475 tokens ≈ $0.074.
+        // Sanity bound â€” 9900 bytes â‰ˆ 2475 tokens â‰ˆ $0.074.
         assert!(usd < 1.0);
     }
 }
