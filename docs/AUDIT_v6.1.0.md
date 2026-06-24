@@ -237,6 +237,46 @@ identified in this sprint.
 
 ---
 
+## Phase 6 — Web Dashboard Testing
+
+The Next.js dashboard at `web/` was exercised end-to-end against a live Cairn backend
+(Docker, `CAIRN_HOST=0.0.0.0`). All core flows were verified:
+
+| Page / Flow | Result |
+|---|---|
+| Login (admin) | PASS |
+| Now — KPI overview (memories, reliability, health indicators) | PASS |
+| Memory → Recall (vector search, scored results) | PASS |
+| Trust → Score (100/100, sample count) | PASS |
+| Trust → Sanitize (secret redaction scan) | PASS — detects `named_secret`, `open_ai_key`, `jwt` |
+| You → Tokens (issue device token) | PASS — toast confirms issuance |
+| You → Audit (audit event log, timestamps) | PASS — timestamps correct after `bump_audit_counter` fix |
+
+### W-1: React hydration error — `<div>` inside `<p>` (fixed)
+
+**Finding:** `Badge` in [`web/src/components/ui/badge.tsx`](../web/src/components/ui/badge.tsx)
+rendered a `<div>`, which is invalid HTML inside `<p>`. `ItemDescription` renders `<p>`, and
+five pages nest `<Badge>` inside it (`wakeup`, `recall`, `pool`, `profile`, `drift`). React
+emitted a hydration warning on every render and the mismatch broke client-side routing.
+
+**Fix:** Changed `Badge` to render `<span>` and updated `BadgeProps` to extend
+`HTMLAttributes<HTMLSpanElement>`. `<span>` is the correct semantic element for an inline
+label/chip.
+
+**File:** `web/src/components/ui/badge.tsx`
+
+### W-2: Dev-mode API proxy (added)
+
+**Finding:** `next dev` had no route for `/api/*`, causing 404s when the dashboard called the
+Cairn backend. The static-export build works fine (the binary serves both), but local
+development was unusable.
+
+**Fix:** Added `rewrites()` to [`web/next.config.mjs`](../web/next.config.mjs) forwarding
+`/api/:path*` → `http://127.0.0.1:7777` in development only. Rewrites are ignored by
+`output: "export"` so the production build is unaffected.
+
+---
+
 ## Files Changed
 
 ```
@@ -254,4 +294,6 @@ crates/cairn-shell/src/lib.rs        test: injection, empty args, env passthroug
 crates/cairn-store/src/helix.rs      fix: bump_audit_counter uses .max() not .first()
 crates/cairn-sync/src/counter.rs     test: GCounter monotonicity and merge properties
 crates/cairn-sync/src/orset.rs       test: ORSet commutativity/associativity/idempotence
+web/next.config.mjs                  fix: dev-mode /api proxy for local development
+web/src/components/ui/badge.tsx      fix: Badge renders <span> not <div> (hydration/routing)
 ```

@@ -55,3 +55,7 @@ Thumbs.db
 !/Cargo.lock
 !/deny.toml
 !/rust-toolchain.toml
+
+# Local dev overrides (not for commit)
+docker-compose.override.yml
+.claude/launch.json
