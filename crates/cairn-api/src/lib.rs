@@ -535,12 +535,12 @@ async fn health() -> Json<Value> {
 
 /// `GET /api/health/deep` — real dependency probe. Returns 200 when all components are
 /// reachable, 503 when any are degraded. Safe to use as a load-balancer readiness check.
-async fn health_deep(
-    State(s): State<AppState>,
-) -> (axum::http::StatusCode, Json<Value>) {
+async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
     let helix_ok = s.store.count_memories().is_ok();
     let embedder_ok = cairn_embed::from_config(&s.cfg.embed).is_ok();
-    let admin_ok = admin_mod::load_admin(&s).map(|r| r.is_some()).unwrap_or(false);
+    let admin_ok = admin_mod::load_admin(&s)
+        .map(|r| r.is_some())
+        .unwrap_or(false);
     let all_ok = helix_ok && embedder_ok;
     let code = if all_ok {
         axum::http::StatusCode::OK

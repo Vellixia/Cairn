@@ -45,7 +45,10 @@ impl AuthRateLimiter {
         let window = self.0.window;
         let mut map = self.0.buckets.lock().expect("rate limiter mutex");
         let bucket = map.entry(ip).or_default();
-        while bucket.front().is_some_and(|t| now.duration_since(*t) > window) {
+        while bucket
+            .front()
+            .is_some_and(|t| now.duration_since(*t) > window)
+        {
             bucket.pop_front();
         }
         if bucket.len() >= self.0.max_requests {

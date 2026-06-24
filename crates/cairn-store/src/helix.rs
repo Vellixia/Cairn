@@ -111,7 +111,12 @@ impl HelixBackend {
             .and_then(|s| s.parse().ok())
             .unwrap_or(10);
         let query_timeout = std::time::Duration::from_secs(timeout_secs);
-        let backend = Self { client, embed, ns, query_timeout };
+        let backend = Self {
+            client,
+            embed,
+            ns,
+            query_timeout,
+        };
         backend.wait_ready()?;
         Ok(backend)
     }

@@ -309,7 +309,15 @@ mod tests {
         let ts = DateTime::parse_from_rfc3339("2026-01-02T03:04:05.000Z")
             .unwrap()
             .with_timezone(&Utc);
-        let sig = Signable { id: 1, ts, source: "src", bytes_in: 100, bytes_out: 200, tokens_saved: 50, price_usd_per_token: PRICE_USD_PER_TOKEN };
+        let sig = Signable {
+            id: 1,
+            ts,
+            source: "src",
+            bytes_in: 100,
+            bytes_out: 200,
+            tokens_saved: 50,
+            price_usd_per_token: PRICE_USD_PER_TOKEN,
+        };
         let a = canonical_json(&sig);
         let b = canonical_json(&sig);
         assert_eq!(a, b);
