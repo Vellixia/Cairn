@@ -739,7 +739,9 @@ impl StoreBackend for HelixBackend {
 
     fn max_audit_event_id(&self) -> Result<i64> {
         let rows = self.read_rows("AuditCounter", &["value"])?;
-        Ok(rows.first().map(|r| get_i64(r, "value")).unwrap_or(0))
+        // Use max() because HelixDB returns rows in ascending insertion order; .first()
+        // would give the oldest value, not the current maximum.
+        Ok(rows.iter().map(|r| get_i64(r, "value")).max().unwrap_or(0))
     }
 }
 
@@ -749,12 +751,11 @@ impl HelixBackend {
     fn bump_audit_counter(&self) -> Result<i64> {
         let cur = self
             .read_rows("AuditCounter", &["value"])?
-            .first()
+            .iter()
             .map(|r| get_i64(r, "value"))
+            .max()
             .unwrap_or(0);
         let next = cur + 1;
-        // Append a fresh counter row each time; reads take the latest. This is the same
-        // append-only pattern as SyncState.
         self.add_node("AuditCounter", vec![("value".into(), next.into())])?;
         Ok(next)
     }

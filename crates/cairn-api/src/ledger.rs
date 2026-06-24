@@ -291,10 +291,9 @@ mod tests {
         // Tamper with bytes_in.
         entry.bytes_in = 999;
         assert!(!verify_entry(&entry, &key()));
-        // And tampering with the signature doesn't help (wrong key).
+        // Replacing the signature with all-zeros always produces an invalid HMAC.
         entry = l.append("assembler", 100, 500, &key());
-        let wrong = entry.signature.replace('a', "f");
-        entry.signature = wrong;
+        entry.signature = "0".repeat(entry.signature.len());
         assert!(!verify_entry(&entry, &key()));
     }
 
