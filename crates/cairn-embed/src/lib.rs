@@ -315,6 +315,21 @@ mod local {
                 }
             }
             _ => {
+                // CAIRN_EMBED_REQUIRE_PINNED=1 makes an absent pin a hard error rather than a
+                // warning. Useful for production deployments where an unverified model is
+                // unacceptable.
+                let strict = std::env::var("CAIRN_EMBED_REQUIRE_PINNED")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if strict {
+                    return Err(Error::Other(format!(
+                        "CAIRN_EMBED_REQUIRE_PINNED is set but CAIRN_EMBED_FASTEMBED_SHA256 \
+                         is not configured. Set CAIRN_EMBED_FASTEMBED_SHA256={} to pin the \
+                         current model, or unset CAIRN_EMBED_REQUIRE_PINNED to allow \
+                         unverified models.",
+                        actual_hex
+                    )));
+                }
                 tracing::warn!(
                     "local embedding model sha256 = {} (set CAIRN_EMBED_FASTEMBED_SHA256 to pin)",
                     actual_hex
@@ -346,32 +361,40 @@ mod local {
     /// Recursively walk `dir` for `model.onnx` files and return the most-recently-modified one.
     /// fastembed pulls into `models--Qdrant--all-MiniLM-L6-v2-onnx/snapshots/<rev>/onnx/model.onnx`
     /// (and possibly `Qdrant--all-MiniLM-L6-v2-quantized/...`).
+    ///
+    /// Depth is capped at `MAX_ONNX_WALK_DEPTH` (8) to prevent symlink-loop DoS on a
+    /// maliciously crafted or corrupted HF cache directory.
     fn newest_onnx(dir: &std::path::Path) -> Option<PathBuf> {
-        let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
-        let entries = std::fs::read_dir(dir).ok()?;
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ft = match entry.file_type() {
-                Ok(ft) => ft,
-                Err(_) => continue,
-            };
-            if ft.is_dir() {
-                if let Some(found) = newest_onnx(&path) {
-                    if let Ok(modified) = std::fs::metadata(&found).and_then(|m| m.modified()) {
+        const MAX_DEPTH: u32 = 8;
+        fn inner(dir: &std::path::Path, depth: u32) -> Option<(std::time::SystemTime, PathBuf)> {
+            if depth > MAX_DEPTH {
+                return None;
+            }
+            let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+            let entries = std::fs::read_dir(dir).ok()?;
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let ft = match entry.file_type() {
+                    Ok(ft) => ft,
+                    Err(_) => continue,
+                };
+                if ft.is_dir() {
+                    if let Some((modified, found)) = inner(&path, depth + 1) {
                         if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
                             newest = Some((modified, found));
                         }
                     }
-                }
-            } else if path.file_name().and_then(|s| s.to_str()) == Some("model.onnx") {
-                if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                    if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
-                        newest = Some((modified, path));
+                } else if path.file_name().and_then(|s| s.to_str()) == Some("model.onnx") {
+                    if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                        if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+                            newest = Some((modified, path));
+                        }
                     }
                 }
             }
+            newest
         }
-        newest.map(|(_, p)| p)
+        inner(dir, 0).map(|(_, p)| p)
     }
 
     /// SHA-256 a file in 64 KiB chunks. Returns the 32 raw bytes.
@@ -472,6 +495,66 @@ mod local {
 
             std::env::remove_var("HF_HOME");
             std::env::remove_var("CAIRN_EMBED_FASTEMBED_SHA256");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        /// CAIRN_EMBED_REQUIRE_PINNED=1 with no pin set should hard-error when a model file exists.
+        #[test]
+        fn require_pinned_errors_when_pin_absent() {
+            let tmp = std::env::temp_dir()
+                .join(format!("cairn-embed-test-strict-{}", std::process::id()));
+            let nested = tmp.join("models--test").join("snapshots").join("rev1");
+            let _ = std::fs::create_dir_all(&nested);
+            std::fs::write(nested.join("model.onnx"), b"fake").unwrap();
+            std::env::set_var("HF_HOME", &tmp);
+            std::env::set_var("CAIRN_EMBED_REQUIRE_PINNED", "1");
+            std::env::remove_var("CAIRN_EMBED_FASTEMBED_SHA256");
+
+            let cfg = EmbedConfig {
+                provider: "local".into(),
+                model: None,
+                url: None,
+                api_key: None,
+            };
+            let result = verify_model_artifact(&cfg);
+            assert!(result.is_err(), "strict mode must error when pin is absent");
+            let msg = result.unwrap_err().to_string();
+            assert!(
+                msg.contains("CAIRN_EMBED_REQUIRE_PINNED"),
+                "error message should mention the env var; got: {msg}"
+            );
+
+            std::env::remove_var("HF_HOME");
+            std::env::remove_var("CAIRN_EMBED_REQUIRE_PINNED");
+            let _ = std::fs::remove_dir_all(&tmp);
+        }
+
+        /// Depth-capped walk: a symlink loop beyond MAX_DEPTH does not cause a stack overflow.
+        #[test]
+        fn newest_onnx_depth_cap_prevents_infinite_walk() {
+            let tmp =
+                std::env::temp_dir().join(format!("cairn-embed-test-depth-{}", std::process::id()));
+            // Build a 10-level-deep directory tree (exceeds the cap of 8) with model.onnx at
+            // level 9 and 2 (only level-2 is within the cap).
+            let mut path = tmp.clone();
+            for i in 0..=10 {
+                path = path.join(format!("level{i}"));
+                let _ = std::fs::create_dir_all(&path);
+                if i == 2 {
+                    std::fs::write(path.join("model.onnx"), b"shallow").unwrap();
+                }
+                if i == 9 {
+                    std::fs::write(path.join("model.onnx"), b"deep").unwrap();
+                }
+            }
+
+            // Should find the shallow model (depth 3 from tmp) — the deep one (depth 10) is
+            // beyond the cap. The walk completes without stack overflow.
+            let found = newest_onnx(&tmp);
+            assert!(found.is_some(), "should find model within depth cap");
+            let content = std::fs::read_to_string(found.unwrap()).unwrap();
+            assert_eq!(content, "shallow", "should return the within-cap model");
+
             let _ = std::fs::remove_dir_all(&tmp);
         }
 
