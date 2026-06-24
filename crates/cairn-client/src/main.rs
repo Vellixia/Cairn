@@ -217,10 +217,6 @@ enum Cmd {
 enum GraphCmd {
     /// List memories that `applies_to <path>`.
     Related { path: String },
-    /// Blast radius for a file (planned v0.5.x; see `cairn graph related` today).
-    Impact { path: String },
-    /// Callers/callees for a symbol (planned v0.5.x).
-    Callgraph { symbol: String },
 }
 
 #[derive(Subcommand)]
@@ -439,10 +435,6 @@ async fn main() -> anyhow::Result<()> {
             let s = State::open(&cfg)?;
             match action {
                 GraphCmd::Related { path } => extra::graph(extra::GraphCmd::Related { path }, &s)?,
-                GraphCmd::Impact { path } => extra::graph(extra::GraphCmd::Impact { path }, &s)?,
-                GraphCmd::Callgraph { symbol } => {
-                    extra::graph(extra::GraphCmd::Callgraph { symbol }, &s)?
-                }
             }
         }
         Cmd::Memory { action } => {

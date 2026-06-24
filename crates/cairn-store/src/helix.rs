@@ -82,6 +82,8 @@ pub(crate) struct HelixBackend {
     embed: Box<dyn Embedder>,
     /// Prefix applied to every node label, so instances/tests can share one server safely.
     ns: String,
+    /// Per-query deadline. Read from `CAIRN_HELIX_TIMEOUT_SECS` at connect time (default 10 s).
+    query_timeout: std::time::Duration,
 }
 
 impl HelixBackend {
@@ -104,7 +106,12 @@ impl HelixBackend {
         let client = client.with_api_key(cfg.helix_token.as_deref());
         let embed = cairn_embed::from_config(&cfg.embed)?;
         let ns = cfg.helix_ns.clone().unwrap_or_else(|| "cairn_".to_string());
-        let backend = Self { client, embed, ns };
+        let timeout_secs: u64 = std::env::var("CAIRN_HELIX_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(10);
+        let query_timeout = std::time::Duration::from_secs(timeout_secs);
+        let backend = Self { client, embed, ns, query_timeout };
         backend.wait_ready()?;
         Ok(backend)
     }
@@ -146,9 +153,20 @@ impl HelixBackend {
 
     /// Execute a dynamic query and return the raw JSON response.
     fn run(&self, req: DynamicQueryRequest) -> Result<Value> {
-        let out = self.block(async move { self.client.query().dynamic(req).send().await });
+        let timeout = self.query_timeout;
+        let out = self.block(async move {
+            tokio::time::timeout(timeout, self.client.query().dynamic(req).send()).await
+        });
         // Anchoring the Ok type to `Value` drives `send`'s response-type inference.
-        let val: Value = out.map_err(|e| Error::Storage(format!("helix query: {e}")))?;
+        let val: Value = match out {
+            Ok(inner) => inner.map_err(|e| Error::Storage(format!("helix query: {e}")))?,
+            Err(_elapsed) => {
+                return Err(Error::Storage(format!(
+                    "helix query timed out after {}s (set CAIRN_HELIX_TIMEOUT_SECS to override)",
+                    timeout.as_secs()
+                )))
+            }
+        };
         Ok(val)
     }
 
@@ -207,6 +225,15 @@ impl HelixBackend {
             .returning(["rows"]);
         let resp = self.run(DynamicQueryRequest::read(batch))?;
         Ok(rows_of(&resp, "rows"))
+    }
+
+    /// Delete all nodes of base label `label`.
+    fn drop_all(&self, label: &str) -> Result<()> {
+        let batch = write_batch()
+            .var_as("d", g().n_with_label(self.label(label)).drop())
+            .returning(["d"]);
+        self.run(DynamicQueryRequest::write(batch))?;
+        Ok(())
     }
 
     /// Delete every node of base label `label` where `prop == val`.
@@ -746,8 +773,9 @@ impl StoreBackend for HelixBackend {
 }
 
 impl HelixBackend {
-    /// Atomically read+increment the persistent `AuditCounter` row. Returns the post-increment
-    /// value (i.e. the id assigned to the next appended audit event).
+    /// Read+increment the persistent `AuditCounter`. Returns the post-increment value (the id
+    /// assigned to the next appended audit event). Keeps the label at exactly one row by dropping
+    /// all existing rows before inserting the new value — O(1) reads after the first call.
     fn bump_audit_counter(&self) -> Result<i64> {
         let cur = self
             .read_rows("AuditCounter", &["value"])?
@@ -756,6 +784,8 @@ impl HelixBackend {
             .max()
             .unwrap_or(0);
         let next = cur + 1;
+        // Replace the entire label with a single row so future reads don't scan a growing set.
+        self.drop_all("AuditCounter")?;
         self.add_node("AuditCounter", vec![("value".into(), next.into())])?;
         Ok(next)
     }

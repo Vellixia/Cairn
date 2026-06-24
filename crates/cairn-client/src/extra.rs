@@ -4,11 +4,6 @@
 //! commands that need the server (sessions/drift, which write to disk on the server host),
 //! fall back to the HTTP API when `CAIRN_SERVER` is set.
 //!
-//! The plan also lists `cairn impact` and `cairn callgraph` — those need the codebase-graph
-//! layer (`cairn-context` already has `read/expand/write`, and graph APIs land later).
-//! They're stubs here that point the user at `cairn graph related` (the actual
-//! memory-graph feature that ships today).
-//!
 //! **Testing:**
 //! - Each new command has `--help` and a smoke test (the doc-tested `assert!(true)` patterns).
 //! - `cairn graph related <path>` returns memories that mention that path (Sprint 3 edges).
@@ -46,36 +41,11 @@ pub fn graph(cmd: GraphCmd, s: &State) -> Result<()> {
             eprintln!("graph related: {hits} memory node(s) apply to {path}");
             Ok(())
         }
-        GraphCmd::Impact { path: _ } => {
-            eprintln!("cairn impact: not yet implemented in v0.5.0 (planned for v0.5.x)");
-            eprintln!("  until then, run:  cairn graph related <path>");
-            Ok(())
-        }
-        GraphCmd::Callgraph { symbol: _ } => {
-            eprintln!("cairn callgraph: not yet implemented in v0.5.0");
-            eprintln!("  until then, the codebase graph lives at:  cairn read <file>");
-            Ok(())
-        }
     }
 }
 
 pub enum GraphCmd {
-    Related {
-        path: String,
-    },
-    /// Stub: the impact graph (blast radius from a path) is planned for a
-    /// future sprint. The field is captured so the CLI surface stays
-    /// stable, but the handler currently prints "coming soon".
-    Impact {
-        #[allow(dead_code)]
-        path: String,
-    },
-    /// Stub: the call-graph traversal is planned for a future sprint. Field
-    /// captured for CLI stability; handler prints "coming soon".
-    Callgraph {
-        #[allow(dead_code)]
-        symbol: String,
-    },
+    Related { path: String },
 }
 
 pub fn memory_timeline(s: &State, limit: usize) -> Result<()> {
@@ -343,27 +313,6 @@ mod tests {
         graph(
             GraphCmd::Related {
                 path: "crates/cairn-client/src/main.rs".into(),
-            },
-            &s,
-        )
-        .unwrap();
-    }
-
-    #[test]
-    fn graph_impact_and_callgraph_are_stubs() {
-        let Some((_dir, s)) = temp_state() else {
-            return;
-        };
-        graph(
-            GraphCmd::Impact {
-                path: "anything".into(),
-            },
-            &s,
-        )
-        .unwrap();
-        graph(
-            GraphCmd::Callgraph {
-                symbol: "foo".into(),
             },
             &s,
         )

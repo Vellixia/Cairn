@@ -25,9 +25,11 @@ use std::{
 
 const LEDGER_CAPACITY: usize = 5_000;
 
-/// What gets saved, in human-readable units. USD is computed at snapshot time using
-/// `$0.00003` per input token (typical Sonnet-class pricing — the same constant
-/// [`SavingsCounter`] uses).
+/// Price constant (USD per input token) used to compute `cost_usd_saved`.
+/// 4 bytes per token at $0.00003 per token = $0.0000075 per byte saved.
+const PRICE_USD_PER_TOKEN: f64 = 0.00003;
+
+/// What gets saved, in human-readable units.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEntry {
     pub id: i64,
@@ -37,21 +39,14 @@ pub struct LedgerEntry {
     pub bytes_out: u64,
     pub tokens_saved: i64,
     pub cost_usd_saved: f64,
-    /// Lower-case hex HMAC-SHA256 over the canonical JSON of exactly six fields:
-    /// (id, ts, source, bytes_in, bytes_out, tokens_saved). `cost_usd_saved` is
-    /// **deliberately excluded** from the signed payload — it's computed at display
-    /// time from `tokens_saved` and the current `$0.00003 / 4` price constant. If the
-    /// price constant ever changes, historical entries will recompute their
-    /// `cost_usd_saved` against the new price while the signature still verifies; this
-    /// is intentional (the price is treated as a runtime parameter, not as part of the
-    /// tamper-evidence scope). To reproduce historical USD exactly across price
-    /// updates, sign `price_usd_per_million_tokens_at_sign_time` alongside the other
-    /// fields — tracked for v0.6 (FIXME below).
+    /// The token price (USD per token) in effect when this entry was signed. Included in the
+    /// HMAC payload so `cost_usd_saved` values are reproducible even after the price constant
+    /// changes — a verifier can recompute `tokens_saved * price_usd_per_token` and check it
+    /// against `cost_usd_saved` without guessing which price was current.
+    pub price_usd_per_token: f64,
+    /// Lower-case hex HMAC-SHA256 over the canonical JSON of seven fields:
+    /// (id, ts, source, bytes_in, bytes_out, tokens_saved, price_usd_per_token).
     pub signature: String,
-    // FIXME: v0.6 — add `price_usd_per_million_tokens_at_sign_time: f64` and include it
-    // in `canonical_json` / `sign_ledger` so historical `cost_usd_saved` values are
-    // reproducible after the price constant changes. This is a breaking change to the
-    // signed payload, so it ships alongside the v0.6 ledger schema migration.
 }
 
 #[derive(Default)]
@@ -69,7 +64,7 @@ impl Ledger {
         signing_key: &[u8],
     ) -> LedgerEntry {
         let tokens_saved = (bytes_out as i64) - (bytes_in as i64);
-        let cost = (tokens_saved.max(0) as f64) * 0.00003 / 4.0; // 4 bytes/token
+        let cost = (tokens_saved.max(0) as f64) * PRICE_USD_PER_TOKEN / 4.0; // 4 bytes/token
         let id = {
             let mut n = self.next_id.lock().expect("ledger next_id mutex");
             let cur = *n;
@@ -78,12 +73,15 @@ impl Ledger {
         };
         let ts = Utc::now();
         let signature = sign_ledger(
-            id,
-            ts,
-            source,
-            bytes_in,
-            bytes_out,
-            tokens_saved,
+            &Signable {
+                id,
+                ts,
+                source,
+                bytes_in,
+                bytes_out,
+                tokens_saved,
+                price_usd_per_token: PRICE_USD_PER_TOKEN,
+            },
             signing_key,
         );
         let entry = LedgerEntry {
@@ -94,6 +92,7 @@ impl Ledger {
             bytes_out,
             tokens_saved,
             cost_usd_saved: cost,
+            price_usd_per_token: PRICE_USD_PER_TOKEN,
             signature,
         };
         let mut q = self.inner.lock().expect("ledger ring mutex");
@@ -126,27 +125,31 @@ impl std::ops::Deref for LedgerState {
 }
 
 /// Canonical serialization for signing. MUST stay stable across versions or every signature
-/// already in the wild becomes unverifiable. The format is the JSON object of all fields
-/// except `signature`, sorted by key.
-fn canonical_json(
+/// already in the wild becomes unverifiable. The format is the JSON object of all signed
+/// fields, sorted by key.
+/// Fields that participate in the HMAC signature.
+struct Signable<'a> {
     id: i64,
     ts: DateTime<Utc>,
-    source: &str,
+    source: &'a str,
     bytes_in: u64,
     bytes_out: u64,
     tokens_saved: i64,
-) -> String {
-    // serde_json::Map's default insertion order is "preserve insertion order" but BTreeMap
-    // gives us deterministic ordering for free.
+    price_usd_per_token: f64,
+}
+
+fn canonical_json(s: &Signable<'_>) -> String {
+    // BTreeMap gives deterministic key ordering for free.
     let mut m: std::collections::BTreeMap<&str, String> = std::collections::BTreeMap::new();
-    m.insert("bytes_in", bytes_in.to_string());
-    m.insert("bytes_out", bytes_out.to_string());
-    m.insert("id", id.to_string());
-    m.insert("source", source.to_string());
-    m.insert("tokens_saved", tokens_saved.to_string());
+    m.insert("bytes_in", s.bytes_in.to_string());
+    m.insert("bytes_out", s.bytes_out.to_string());
+    m.insert("id", s.id.to_string());
+    m.insert("price_usd_per_token", s.price_usd_per_token.to_string());
+    m.insert("source", s.source.to_string());
+    m.insert("tokens_saved", s.tokens_saved.to_string());
     m.insert(
         "ts",
-        ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        s.ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
     );
     // Hand-roll the JSON to avoid serde_json's whitespace variability.
     let mut out = String::from("{");
@@ -182,16 +185,8 @@ fn escape(s: &str) -> String {
     out
 }
 
-fn sign_ledger(
-    id: i64,
-    ts: DateTime<Utc>,
-    source: &str,
-    bytes_in: u64,
-    bytes_out: u64,
-    tokens_saved: i64,
-    key: &[u8],
-) -> String {
-    let canonical = canonical_json(id, ts, source, bytes_in, bytes_out, tokens_saved);
+fn sign_ledger(s: &Signable<'_>, key: &[u8]) -> String {
+    let canonical = canonical_json(s);
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key");
     mac.update(canonical.as_bytes());
     let bytes = mac.finalize().into_bytes();
@@ -204,12 +199,15 @@ fn sign_ledger(
 /// Re-verify a ledger entry's signature offline.
 pub fn verify_entry(entry: &LedgerEntry, key: &[u8]) -> bool {
     let expected = sign_ledger(
-        entry.id,
-        entry.ts,
-        &entry.source,
-        entry.bytes_in,
-        entry.bytes_out,
-        entry.tokens_saved,
+        &Signable {
+            id: entry.id,
+            ts: entry.ts,
+            source: &entry.source,
+            bytes_in: entry.bytes_in,
+            bytes_out: entry.bytes_out,
+            tokens_saved: entry.tokens_saved,
+            price_usd_per_token: entry.price_usd_per_token,
+        },
         key,
     );
     // Constant-time compare — entry.signature is user-controlled.
@@ -311,11 +309,14 @@ mod tests {
         let ts = DateTime::parse_from_rfc3339("2026-01-02T03:04:05.000Z")
             .unwrap()
             .with_timezone(&Utc);
-        let a = canonical_json(1, ts, "src", 100, 200, 50);
-        let b = canonical_json(1, ts, "src", 100, 200, 50);
+        let sig = Signable { id: 1, ts, source: "src", bytes_in: 100, bytes_out: 200, tokens_saved: 50, price_usd_per_token: PRICE_USD_PER_TOKEN };
+        let a = canonical_json(&sig);
+        let b = canonical_json(&sig);
         assert_eq!(a, b);
         // Stable, key-sorted.
         assert!(a.starts_with("{\"bytes_in\":"));
+        // price field present in signed payload.
+        assert!(a.contains("price_usd_per_token"));
     }
 
     #[test]
