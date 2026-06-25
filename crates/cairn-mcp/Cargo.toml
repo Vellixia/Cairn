@@ -17,6 +17,7 @@ cairn-shell.workspace = true
 cairn-profile.workspace = true
 cairn-share.workspace = true
 cairn-proactive.workspace = true
+cairn-registry.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true

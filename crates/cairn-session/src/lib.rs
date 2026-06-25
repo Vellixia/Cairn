@@ -379,6 +379,106 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
+    // --- Session::as_block ---
+
+    #[test]
+    fn block_empty_session_has_header_only() {
+        let s = Session::new("proj");
+        let block = s.as_block();
+        assert!(block.contains("Cross-Session Protocol"));
+        assert!(block.contains("Session:"));
+        assert!(!block.contains("## Tasks"), "no tasks section when empty");
+        assert!(
+            !block.contains("## Findings"),
+            "no findings section when empty"
+        );
+        assert!(
+            !block.contains("## Decisions"),
+            "no decisions section when empty"
+        );
+        assert!(
+            !block.contains("## Touched files"),
+            "no files section when empty"
+        );
+        assert!(!block.contains("## Next steps"), "no next-steps when empty");
+    }
+
+    #[test]
+    fn block_all_fields_present() {
+        let mut s = Session::new("proj");
+        s.tasks.push(Task {
+            id: "t1".into(),
+            title: "Implement foo".into(),
+            progress: "done".into(),
+        });
+        s.findings.push(Finding {
+            text: "bug in bar".into(),
+            source_file: Some("bar.rs".into()),
+            confidence: 0.9,
+        });
+        s.decisions.push(Decision {
+            text: "use btree".into(),
+            rationale: "ordered".into(),
+            confidence: 0.8,
+        });
+        s.touched_files.push(TouchedFile {
+            path: "src/lib.rs".into(),
+            mode: "read".into(),
+            handle: None,
+        });
+        s.next_steps.push("refactor baz".into());
+        let block = s.as_block();
+        assert!(block.contains("Implement foo"));
+        assert!(block.contains("bug in bar"));
+        assert!(block.contains("bar.rs"));
+        assert!(block.contains("use btree"));
+        assert!(block.contains("ordered"));
+        assert!(block.contains("src/lib.rs"));
+        assert!(block.contains("refactor baz"));
+    }
+
+    #[test]
+    fn block_decision_with_empty_rationale() {
+        let mut s = Session::new("proj");
+        s.decisions.push(Decision {
+            text: "chose X".into(),
+            rationale: String::new(),
+            confidence: 1.0,
+        });
+        let block = s.as_block();
+        assert!(block.contains("chose X"));
+    }
+
+    #[test]
+    fn block_finding_without_source_file() {
+        let mut s = Session::new("proj");
+        s.findings.push(Finding {
+            text: "no file".into(),
+            source_file: None,
+            confidence: 0.5,
+        });
+        let block = s.as_block();
+        assert!(block.contains("no file"));
+        assert!(
+            !block.contains("(from"),
+            "no source file → no 'from' annotation"
+        );
+    }
+
+    #[test]
+    fn block_touched_file_mode_shown() {
+        let mut s = Session::new("proj");
+        s.touched_files.push(TouchedFile {
+            path: "a.rs".into(),
+            mode: "write".into(),
+            handle: None,
+        });
+        let block = s.as_block();
+        assert!(block.contains("write"), "mode is shown in block");
+    }
+
+    // --- SessionStore ---
+
     #[test]
     fn session_round_trips_through_disk() {
         let dir = TempDir::new().unwrap();
@@ -480,5 +580,129 @@ mod tests {
         let approved = store.recent_drift(10, Some(DriftStatus::Approved)).unwrap();
         assert_eq!(approved.len(), 1);
         assert_eq!(approved[0].id, 2);
+    }
+
+    #[test]
+    fn load_nonexistent_session_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        assert!(store.load("no-such-id").unwrap().is_none());
+    }
+
+    #[test]
+    fn latest_block_with_no_sessions_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        assert_eq!(store.latest_block().unwrap(), "");
+    }
+
+    #[test]
+    fn list_empty_store_returns_empty_vec() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn recent_drift_empty_log_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        assert!(store.recent_drift(10, None).unwrap().is_empty());
+        assert!(store
+            .recent_drift(10, Some(DriftStatus::Pending))
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn set_drift_status_nonexistent_returns_false() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        assert!(!store.set_drift_status(99, DriftStatus::Approved).unwrap());
+    }
+
+    #[test]
+    fn set_drift_status_already_approved_returns_false() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        let ev = DriftEvent {
+            id: 1,
+            ts: Utc::now(),
+            path: "/f.rs".into(),
+            risk: "warn".into(),
+            kind: "verify".into(),
+            detail: "test".into(),
+            status: DriftStatus::Approved,
+        };
+        store.append_drift(&ev).unwrap();
+        // Already Approved, not Pending → returns false
+        assert!(!store.set_drift_status(1, DriftStatus::Rejected).unwrap());
+    }
+
+    #[test]
+    fn next_drift_id_empty_log_is_one() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        assert_eq!(store.next_drift_id(), 1);
+    }
+
+    #[test]
+    fn next_drift_id_after_events_is_max_plus_one() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        for id in [3i64, 7, 2] {
+            store
+                .append_drift(&DriftEvent {
+                    id,
+                    ts: Utc::now(),
+                    path: "/f.rs".into(),
+                    risk: "ok".into(),
+                    kind: "verify".into(),
+                    detail: "".into(),
+                    status: DriftStatus::Pending,
+                })
+                .unwrap();
+        }
+        assert_eq!(store.next_drift_id(), 8, "max id is 7 → next is 8");
+    }
+
+    #[test]
+    fn drift_status_pending_is_default() {
+        let status: DriftStatus = Default::default();
+        assert_eq!(status, DriftStatus::Pending);
+    }
+
+    #[test]
+    fn latest_block_after_save_is_nonempty() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        let mut s = Session::new("proj");
+        s.next_steps.push("do something".into());
+        store.save(&s).unwrap();
+        let block = store.latest_block().unwrap();
+        assert!(block.contains("Cross-Session Protocol"));
+        assert!(block.contains("do something"));
+    }
+
+    #[test]
+    fn drift_limit_respected() {
+        let dir = TempDir::new().unwrap();
+        let store = SessionStore::new(dir.path());
+        for id in 1..=10i64 {
+            store
+                .append_drift(&DriftEvent {
+                    id,
+                    ts: Utc::now(),
+                    path: "/f.rs".into(),
+                    risk: "warn".into(),
+                    kind: "verify".into(),
+                    detail: "".into(),
+                    status: DriftStatus::Pending,
+                })
+                .unwrap();
+        }
+        let limited = store.recent_drift(3, None).unwrap();
+        assert_eq!(limited.len(), 3, "limit=3 should return 3 most recent");
+        assert_eq!(limited[0].id, 10, "newest first");
     }
 }

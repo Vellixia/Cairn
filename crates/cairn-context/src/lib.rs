@@ -301,14 +301,17 @@ impl ContextEngine {
 ///   it, and `..` components and symlinks that resolve outside the root are rejected.
 fn resolve_within_root(root: Option<&Path>, path: &Path) -> Result<PathBuf> {
     if let Some(root) = root {
-        let root = canonical_or_normalized(root)?;
+        // Strip Windows extended-path prefix (\\?\) so the starts_with comparison works
+        // consistently for both existing paths (canonicalized with \\?\) and non-existent
+        // paths (resolved via normalize_path without \\?\).
+        let root = strip_extended_prefix(canonical_or_normalized(root)?);
         let candidate = if path.is_absolute() {
             path.to_path_buf()
         } else {
             root.join(path)
         };
         let resolved = if candidate.exists() {
-            std::fs::canonicalize(&candidate)?
+            strip_extended_prefix(std::fs::canonicalize(&candidate)?)
         } else {
             normalize_path(&candidate)
         };
@@ -323,6 +326,19 @@ fn resolve_within_root(root: Option<&Path>, path: &Path) -> Result<PathBuf> {
         // No root is configured; accept the path as-given (canonicalization may fail for new files).
         Ok(path.to_path_buf())
     }
+}
+
+/// On Windows, `std::fs::canonicalize` returns paths with a `\\?\` extended-length prefix.
+/// Strip it so comparisons work uniformly across existing and non-existing paths.
+fn strip_extended_prefix(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let s = path.to_string_lossy();
+        if let Some(stripped) = s.strip_prefix(r"\\?\") {
+            return PathBuf::from(stripped);
+        }
+    }
+    path
 }
 
 /// Canonicalize a path if it exists, otherwise return a normalized absolute form.
@@ -514,8 +530,11 @@ pub fn build() -> Widget { Widget::new(1) }
             "path inside root should be allowed"
         );
 
-        let outside = tempfile::tempdir().unwrap().path().join("outside.txt");
-        std::fs::write(&outside, "secret").unwrap();
+        // Keep the TempDir alive in a named binding so the directory is not deleted before
+        // the read attempt (Windows deletes the directory immediately on TempDir drop).
+        // The file need not exist — the engine rejects outside paths before any filesystem op.
+        let _outside_dir = tempfile::tempdir().unwrap();
+        let outside = _outside_dir.path().join("outside.txt");
         let err = eng
             .read(&outside, ReadMode::Full)
             .expect_err("absolute outside path must be rejected");
@@ -584,7 +603,9 @@ pub fn build() -> Widget { Widget::new(1) }
 
         // Relative inside root resolves to an absolute path under root.
         let resolved = resolve_within_root(Some(root), Path::new("file.txt")).unwrap();
-        let canonical_root = std::fs::canonicalize(root).unwrap();
+        // strip_extended_prefix mirrors what resolve_within_root does so both sides
+        // of the comparison are in the same (no \\?\) form on Windows.
+        let canonical_root = super::strip_extended_prefix(std::fs::canonicalize(root).unwrap());
         assert!(
             resolved.starts_with(&canonical_root),
             "resolved {:?} should start with {:?}",

@@ -68,7 +68,7 @@ export function OverviewContent() {
         <KpiCard
           label="Memories"
           value={stats.data ? stats.data.memories : null}
-          href="/dashboard?view=memory&tab=remember"
+          href="/memory?tab=recall"
           icon={Brain}
           hint={
             anchor.data?.anchor
@@ -179,10 +179,10 @@ export function OverviewContent() {
             <p className="text-sm text-muted-foreground">
               No memories yet.{" "}
               <Link
-                href="/dashboard?view=memory&tab=remember"
+                href="/memory?tab=recall"
                 className="text-[hsl(var(--color-info))] hover:underline"
               >
-                Capture the first one →
+                Browse recent memories →
               </Link>
             </p>
           ) : memories.data ? (

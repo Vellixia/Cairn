@@ -167,6 +167,114 @@ mod tests {
     }
 
     #[test]
+    fn new_set_has_no_members() {
+        let s = ORSet::new();
+        assert!(s.members().is_empty());
+    }
+
+    #[test]
+    fn remove_nonexistent_is_safe() {
+        let mut s = ORSet::new();
+        s.remove("nope"); // must not panic
+        assert!(!s.contains("nope"));
+    }
+
+    #[test]
+    fn double_remove_is_safe() {
+        let mut s = ORSet::new();
+        s.add("x");
+        s.remove("x");
+        s.remove("x"); // must not panic
+        assert!(!s.contains("x"));
+    }
+
+    #[test]
+    fn add_same_value_twice_gives_two_markers_one_member() {
+        let mut s = ORSet::new();
+        s.add("rust");
+        s.add("rust");
+        assert_eq!(s.marker_count("rust"), 2, "two adds → two markers");
+        assert_eq!(s.members(), vec!["rust"], "still one logical member");
+    }
+
+    #[test]
+    fn merge_with_empty_unchanged() {
+        let mut s = ORSet::new();
+        s.add("a");
+        s.merge(&ORSet::new());
+        assert!(s.contains("a"), "merge with empty → unchanged");
+    }
+
+    #[test]
+    fn merge_self_idempotent() {
+        let mut s = ORSet::new();
+        s.add("rust");
+        s.add("safety");
+        let clone = s.clone();
+        s.merge(&clone);
+        let mut members = s.members();
+        members.sort();
+        assert_eq!(members, vec!["rust", "safety"]);
+    }
+
+    #[test]
+    fn merge_commutativity() {
+        let mut a = ORSet::new();
+        a.add("x");
+        a.add("y");
+        let mut b = ORSet::new();
+        b.add("y");
+        b.add("z");
+        b.remove("x"); // x was never in b, so this is a no-op
+
+        let mut left = a.clone();
+        left.merge(&b);
+
+        let mut right = b.clone();
+        right.merge(&a);
+
+        assert_eq!(left.members(), right.members(), "merge must be commutative");
+    }
+
+    #[test]
+    fn members_are_sorted() {
+        let mut s = ORSet::new();
+        s.add("zebra");
+        s.add("ant");
+        s.add("mango");
+        let members = s.members();
+        let mut sorted = members.clone();
+        sorted.sort();
+        assert_eq!(members, sorted, "members() must return sorted order");
+    }
+
+    #[test]
+    fn contains_false_before_add() {
+        let s = ORSet::new();
+        assert!(!s.contains("anything"));
+    }
+
+    #[test]
+    fn contains_true_after_add() {
+        let mut s = ORSet::new();
+        s.add("y");
+        assert!(s.contains("y"));
+    }
+
+    #[test]
+    fn remove_after_two_adds_removes_both_markers() {
+        let mut s = ORSet::new();
+        s.add("a");
+        s.add("a");
+        assert_eq!(s.marker_count("a"), 2);
+        s.remove("a");
+        assert!(
+            !s.contains("a"),
+            "remove should clear all markers for value"
+        );
+    }
+
+    #[test]
     fn local_remove_tombstones_block_old_add_resurrection() {
         // alice removes "rust" while bob has an offline add in flight.
         let mut alice = ORSet::new();

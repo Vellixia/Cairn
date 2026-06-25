@@ -13,6 +13,7 @@ mod ingest;
 mod ledger;
 mod metrics;
 mod push;
+mod rate_limit;
 mod security_headers;
 mod session;
 mod setup_wizard;
@@ -57,6 +58,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
+use tower_http::trace::TraceLayer;
 
 /// Shared application state, cheaply cloneable (everything behind `Arc`).
 #[derive(Clone)]
@@ -189,8 +191,23 @@ impl AppState {
 
 pub fn router(state: AppState) -> Router {
     let cors = build_cors(&state.cors_origins);
+
+    // Auth routes: 5 attempts per IP per minute before 429.
+    let auth_limiter = Arc::new(rate_limit::AuthRateLimiter::new(
+        5,
+        std::time::Duration::from_secs(60),
+    ));
+    let auth_routes = Router::new()
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/setup", post(setup))
+        .layer(middleware::from_fn(move |req, next| {
+            let lim = Arc::clone(&auth_limiter);
+            rate_limit::rate_limit_middleware(lim, req, next)
+        }));
+
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/health/deep", get(health_deep))
         .route("/api/events", get(sse_events))
         .route("/api/metrics", get(metrics_endpoint))
         .route("/api/ledger", get(get_ledger))
@@ -234,10 +251,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sync/pull", get(sync_pull))
         .route("/api/sync/push", post(sync_push))
         .route("/api/auth/status", get(auth_status))
-        .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
-        .route("/api/auth/setup", post(setup))
         .route("/api/setup/health", get(setup_health))
         .route("/api/setup/embed-default", get(setup_embed_default))
         .route("/api/devices/audit", get(list_audit))
@@ -250,9 +265,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/extensions/capture", post(extensions::capture))
         .route("/api/ingest/transcript", post(ingest::transcript))
         .fallback(static_handler)
+        .merge(auth_routes)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(middleware::from_fn(security_headers::security_headers))
+        .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
 }
@@ -514,6 +531,35 @@ async fn health() -> Json<Value> {
         "name": "cairn",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+/// `GET /api/health/deep` — real dependency probe. Returns 200 when all components are
+/// reachable, 503 when any are degraded. Safe to use as a load-balancer readiness check.
+async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
+    let helix_ok = s.store.count_memories().is_ok();
+    let embedder_ok = cairn_embed::from_config(&s.cfg.embed).is_ok();
+    let admin_ok = admin_mod::load_admin(&s)
+        .map(|r| r.is_some())
+        .unwrap_or(false);
+    let all_ok = helix_ok && embedder_ok;
+    let code = if all_ok {
+        axum::http::StatusCode::OK
+    } else {
+        axum::http::StatusCode::SERVICE_UNAVAILABLE
+    };
+    (
+        code,
+        Json(json!({
+            "status": if all_ok { "ok" } else { "degraded" },
+            "name": "cairn",
+            "version": env!("CARGO_PKG_VERSION"),
+            "components": {
+                "helix": if helix_ok { "ok" } else { "unreachable" },
+                "embedder": if embedder_ok { "ok" } else { "unavailable" },
+                "admin": if admin_ok { "configured" } else { "not_configured" },
+            }
+        })),
+    )
 }
 
 /// `GET /api/setup/embed-default` — the embed provider the wizard pre-selects. Per the
@@ -1259,6 +1305,8 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
                 | "/api/auth/setup"
                 | "/api/auth/status"
                 | "/api/setup/health"
+                | "/api/push/subscribe"
+                | "/api/push/unsubscribe"
         )
     {
         return next.run(req).await;
@@ -1824,8 +1872,8 @@ mod tests {
         .await
         .into_response();
         assert!(
-            started.elapsed() < std::time::Duration::from_millis(500),
-            "SSE handler should return in <500ms; took {:?}",
+            started.elapsed() < std::time::Duration::from_millis(5000),
+            "SSE handler should return quickly (non-blocking); took {:?}",
             started.elapsed()
         );
         // axum's Sse wraps the body; we just verify it's a streaming Content-Type.

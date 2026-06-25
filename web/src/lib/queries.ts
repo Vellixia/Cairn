@@ -2,11 +2,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
-  delJSON,
   getJSON,
   postJSON,
   type AuditEvent,
-  type Checkpoint,
   type DeviceTokenMeta,
   type Health,
   type IssuedToken,
@@ -14,25 +12,15 @@ import {
   type Me,
   type Memory,
   type PairCode,
-  type Pool,
-  type ReadResult,
-  type RollbackReport,
-  type Sanitized,
   type ScoredMemory,
-  type ShareExport,
   type Stats,
 } from "@/lib/api";
 import { useMeStore } from "@/lib/stores/me";
 import type {
   AnchorInput,
-  AssembleInput,
-  CheckpointInput,
-  ContextReadInput,
   IssueTokenInput,
   PairCodeInput,
   RecallInput,
-  RememberInput,
-  SanitizeInput,
 } from "@/lib/forms/schemas";
 
 // ---- query keys (single source of truth) ------------------------------------
@@ -42,16 +30,10 @@ export const qk = {
   me: ["auth", "me"] as const,
   stats: ["stats"] as const,
   anchor: ["guard", "anchor"] as const,
-  anchorList: (path: string) => ["guard", "anchor", path] as const,
   memories: (limit: number) => ["memory", "wakeup", limit] as const,
   recall: (q: string) => ["memory", "recall", q] as const,
-  context: (path: string, mode: string) => ["context", "read", path, mode] as const,
-  contextExpand: (hash: string) => ["context", "expand", hash] as const,
-  checkpoints: ["guard", "checkpoints"] as const,
   devicesTokens: ["devices", "tokens"] as const,
   devicesAudit: ["devices", "audit"] as const,
-  pool: ["pool"] as const,
-  shareExport: ["share", "export"] as const,
   ledger: (limit: number) => ["ledger", limit] as const,
 };
 
@@ -105,24 +87,6 @@ export function useRecallQuery(q: string) {
   });
 }
 
-export function useContextReadQuery(input: ContextReadInput | null) {
-  return useQuery({
-    queryKey: input ? qk.context(input.path, input.mode) : ["context", "read", "_", "_"],
-    queryFn: () =>
-      getJSON<ReadResult>(
-        `/api/context/read?path=${encodeURIComponent(input!.path)}&mode=${encodeURIComponent(input!.mode)}`,
-      ),
-    enabled: !!input,
-  });
-}
-
-export function useCheckpointsQuery() {
-  return useQuery({
-    queryKey: qk.checkpoints,
-    queryFn: () => getJSON<Checkpoint[]>("/api/guard/checkpoints"),
-  });
-}
-
 export function useDevicesTokensQuery() {
   return useQuery({
     queryKey: qk.devicesTokens,
@@ -143,13 +107,6 @@ export function useLedgerQuery(limit = 200) {
     queryKey: qk.ledger(limit),
     queryFn: () => getJSON<LedgerEntry[]>(`/api/ledger?limit=${limit}`),
     refetchInterval: 30_000,
-  });
-}
-
-export function usePoolQuery() {
-  return useQuery({
-    queryKey: qk.pool,
-    queryFn: () => getJSON<Pool>("/api/pool"),
   });
 }
 
@@ -209,94 +166,6 @@ export function useLogoutMutation() {
   });
 }
 
-export function useRememberMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: RememberInput) =>
-      postJSON<Memory>("/api/memory", input),
-    onSuccess: (m) => {
-      qc.invalidateQueries({ queryKey: ["memory"] });
-      qc.invalidateQueries({ queryKey: qk.stats });
-      toast.success(`stored ${m.kind}/${m.tier} · ${m.id.slice(0, 8)}`);
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useEditMemoryMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: Partial<Pick<Memory, "content" | "importance" | "concepts" | "files">> }) =>
-      postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}`, patch),
-    onSuccess: (m) => {
-      qc.invalidateQueries({ queryKey: ["memory"] });
-      qc.invalidateQueries({ queryKey: qk.stats });
-      toast.success(`edited ${m.id.slice(0, 8)}`);
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useDeleteMemoryMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) =>
-      delJSON<{ deleted: boolean }>(`/api/memory/${encodeURIComponent(id)}`),
-    onSuccess: (_r, id) => {
-      qc.invalidateQueries({ queryKey: ["memory"] });
-      qc.invalidateQueries({ queryKey: qk.stats });
-      toast(`Deleted ${id.slice(0, 8)}`);
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function usePinMemoryMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, pinned }: { id: string; pinned: boolean }) =>
-      postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/pin`, { pinned }),
-    onSuccess: (m) => {
-      qc.invalidateQueries({ queryKey: ["memory"] });
-      toast.success(`${m.pinned ? "Pinned" : "Unpinned"} ${m.id.slice(0, 8)}`);
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useReinforceMemoryMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) =>
-      postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/reinforce`, {}),
-    onSuccess: (m) => {
-      qc.invalidateQueries({ queryKey: ["memory"] });
-      toast.success(`Reinforced · confidence ${m.confidence.toFixed(2)}`);
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useCrystallizeMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { session_id?: string } = {}) =>
-      postJSON<{ crystallized: boolean; crystal_id?: string }>(
-        "/api/memory/crystallize",
-        input,
-      ),
-    onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: ["memory"] });
-      if (r.crystallized) {
-        toast.success(`Crystallized · ${r.crystal_id?.slice(0, 8) ?? "—"}`);
-      } else {
-        toast("Nothing to crystallize (no working memories).");
-      }
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
 export function useSetAnchorMutation() {
   const qc = useQueryClient();
   return useMutation({
@@ -305,67 +174,6 @@ export function useSetAnchorMutation() {
       qc.invalidateQueries({ queryKey: qk.anchor });
       qc.invalidateQueries({ queryKey: qk.stats });
       toast.success("Anchor set");
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useCreateCheckpointMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: CheckpointInput) => {
-      const q = input.label?.trim() ? `?label=${encodeURIComponent(input.label.trim())}` : "";
-      return postJSON<Checkpoint>(`/api/guard/checkpoint${q}`, {});
-    },
-    onSuccess: (cp) => {
-      qc.invalidateQueries({ queryKey: qk.checkpoints });
-      qc.invalidateQueries({ queryKey: qk.stats });
-      toast.success(`Checkpoint ${cp.id.slice(0, 8)} · ${cp.files} files`);
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useRollbackMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) =>
-      postJSON<RollbackReport>(`/api/guard/rollback?id=${encodeURIComponent(id)}`, {}),
-    onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: qk.checkpoints });
-      toast(`Restored ${r.restored.length} · skipped ${r.skipped.length}`);
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useSanitizeMutation() {
-  return useMutation({
-    mutationFn: (input: SanitizeInput) => postJSON<Sanitized>("/api/share/sanitize", input),
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useBuildExportMutation() {
-  return useMutation({
-    mutationFn: () => getJSON<ShareExport>("/api/share/export"),
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function usePublishPoolMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: async () => {
-      const bundle = await getJSON<ShareExport>("/api/share/export");
-      return postJSON<{ accepted: number; rejected: number }>(
-        "/api/pool/contribute",
-        bundle,
-      );
-    },
-    onSuccess: (r) => {
-      qc.invalidateQueries({ queryKey: qk.pool });
-      toast.success(`Published · ${r.accepted} accepted, ${r.rejected} rejected`);
     },
     onError: (e) => toast.error(errMessage(e)),
   });

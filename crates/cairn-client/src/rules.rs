@@ -31,6 +31,12 @@ You have **Cairn** (MCP server `cairn`): persistent memory, lean context, and ed
 - **Risky edits:** `checkpoint` before large changes; `verify` a proposed file against its retained
   original to catch silent corruption; `rollback` to undo damage.
 - **Stay on task:** keep the current goal in `anchor`.
+- **End of session:** run `consolidate` then `memory_crystallize` to promote working notes into
+  durable knowledge. Curate with `memory_pin` (keep), `memory_reinforce` (bump confidence),
+  `memory_delete` (remove stale). On self-hosted servers use `registry_search` / `registry_revoke`
+  to manage the local pack registry.
+- **Dashboard is observability-only:** the web UI shows what exists and progress — you are the one
+  who writes, curates, and maintains; humans watch.
 
 Everything Cairn shows is lossless — the full original is always one `expand` away.";
 

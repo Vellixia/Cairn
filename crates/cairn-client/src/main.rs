@@ -23,6 +23,7 @@ mod pool;
 mod rules;
 mod setup;
 mod sync;
+mod update;
 
 #[derive(Parser)]
 #[command(
@@ -197,6 +198,12 @@ enum Cmd {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Check for a newer release and update the binary in place.
+    Update {
+        /// Only report whether an update is available; do not download.
+        #[arg(long)]
+        check: bool,
+    },
     /// Export all memories as JSON (to a file, or stdout if omitted).
     Export {
         path: Option<PathBuf>,
@@ -217,10 +224,6 @@ enum Cmd {
 enum GraphCmd {
     /// List memories that `applies_to <path>`.
     Related { path: String },
-    /// Blast radius for a file (planned v0.5.x; see `cairn graph related` today).
-    Impact { path: String },
-    /// Callers/callees for a symbol (planned v0.5.x).
-    Callgraph { symbol: String },
 }
 
 #[derive(Subcommand)]
@@ -232,6 +235,8 @@ enum MemoryCmd {
     },
     /// Promote working-tier memories to a semantic crystal (agentmemory pattern).
     Crystallize,
+    /// Re-embed all memories using the current provider (use after switching CAIRN_EMBED_PROVIDER).
+    ReEmbed,
 }
 
 #[derive(Subcommand)]
@@ -293,6 +298,21 @@ enum PackAction {
     Publish {
         tarball: std::path::PathBuf,
         /// Registry base URL, e.g. `https://cairn.sh`.
+        #[arg(long)]
+        registry: String,
+    },
+    /// Revoke (unpublish) a pack from a registry.
+    Revoke {
+        name: String,
+        version: String,
+        /// Registry base URL.
+        #[arg(long)]
+        registry: String,
+    },
+    /// Search a registry's pack catalog.
+    Search {
+        query: String,
+        /// Registry base URL.
         #[arg(long)]
         registry: String,
     },
@@ -439,10 +459,6 @@ async fn main() -> anyhow::Result<()> {
             let s = State::open(&cfg)?;
             match action {
                 GraphCmd::Related { path } => extra::graph(extra::GraphCmd::Related { path }, &s)?,
-                GraphCmd::Impact { path } => extra::graph(extra::GraphCmd::Impact { path }, &s)?,
-                GraphCmd::Callgraph { symbol } => {
-                    extra::graph(extra::GraphCmd::Callgraph { symbol }, &s)?
-                }
             }
         }
         Cmd::Memory { action } => {
@@ -450,6 +466,7 @@ async fn main() -> anyhow::Result<()> {
             match action {
                 MemoryCmd::Timeline { limit } => extra::memory_timeline(&s, limit)?,
                 MemoryCmd::Crystallize => extra::memory_crystallize(&s)?,
+                MemoryCmd::ReEmbed => extra::memory_re_embed(&s)?,
             }
         }
         Cmd::Search { query, limit } => {
@@ -534,6 +551,20 @@ async fn main() -> anyhow::Result<()> {
                 PackAction::Publish { tarball, registry } => {
                     pack(pack::PackCmd::Publish { tarball, registry })?;
                 }
+                PackAction::Revoke {
+                    name,
+                    version,
+                    registry,
+                } => {
+                    pack(pack::PackCmd::Revoke {
+                        name,
+                        version,
+                        registry,
+                    })?;
+                }
+                PackAction::Search { query, registry } => {
+                    pack(pack::PackCmd::Search { query, registry })?;
+                }
             }
         }
         Cmd::Pair { code, server } => {
@@ -588,6 +619,7 @@ async fn main() -> anyhow::Result<()> {
             let s = State::open(&cfg)?;
             pool::pull(&s.mem, &server, token.as_deref())?;
         }
+        Cmd::Update { check } => update::run(check)?,
         Cmd::Export { path, share } => {
             let s = State::open(&cfg)?;
             let mems = s.store.all_memories()?;

@@ -677,14 +677,15 @@ fn manifest_scope(manifest: &cairn_pack::Manifest) -> TrustScope {
 }
 
 /// True when a trust grant with `granted_scope` is allowed to publish packs whose
-/// declared scope is `pack_scope`. Local ⊂ Team ⊂ Public (i.e. a wider grant can
-/// publish a narrower-scoped pack, but not the other way around).
+/// declared scope is `pack_scope`. Ranking: Local(0) < Public(1) < Team(2). A Team
+/// grant (highest) can publish any scope; a Public grant can publish Public or Local
+/// packs but not Team-restricted ones; a Local grant can only publish Local packs.
 fn scope_allows(granted: TrustScope, pack: TrustScope) -> bool {
     fn rank(s: TrustScope) -> u8 {
         match s {
             TrustScope::Local => 0,
-            TrustScope::Team => 1,
-            TrustScope::Public => 2,
+            TrustScope::Public => 1,
+            TrustScope::Team => 2,
         }
     }
     rank(granted) >= rank(pack)

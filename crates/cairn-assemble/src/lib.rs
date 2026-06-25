@@ -147,6 +147,127 @@ mod tests {
         Some((Assembler::new(mem.clone()), mem))
     }
 
+    // --- edge_order ---
+
+    #[test]
+    fn edge_order_empty() {
+        let v: Vec<i32> = Vec::new();
+        assert!(edge_order(v).is_empty());
+    }
+
+    #[test]
+    fn edge_order_single() {
+        assert_eq!(edge_order(vec![42i32]), vec![42]);
+    }
+
+    #[test]
+    fn edge_order_two() {
+        // items [0, 1]: left=[0], right=[1] → reversed right=[1] → [0, 1]
+        assert_eq!(edge_order(vec!['a', 'b']), vec!['a', 'b']);
+    }
+
+    #[test]
+    fn edge_order_three_best_at_edges() {
+        // items [0,1,2] by rank: left=[0,2], right=[1]; right.rev()=[1]; result=[0,2,1]
+        // Rank 0 is at position 0 (edge), rank 1 is at position 2 (edge), rank 2 is middle.
+        let result = edge_order(vec![0usize, 1usize, 2usize]);
+        assert_eq!(result[0], 0, "best rank at left edge");
+        assert_eq!(*result.last().unwrap(), 1, "second-best at right edge");
+        assert_eq!(result[1], 2, "weakest in middle");
+    }
+
+    #[test]
+    fn edge_order_four_best_two_at_edges() {
+        // items [0,1,2,3]: left=[0,2], right=[1,3]; right.rev()=[3,1]; result=[0,2,3,1]
+        let result = edge_order(vec![0usize, 1, 2, 3]);
+        assert_eq!(result[0], 0, "rank 0 at position 0");
+        assert_eq!(*result.last().unwrap(), 1, "rank 1 at last position");
+    }
+
+    #[test]
+    fn edge_order_five_preserves_all_items() {
+        let input: Vec<usize> = (0..5).collect();
+        let result = edge_order(input.clone());
+        assert_eq!(result.len(), 5);
+        let mut sorted = result.clone();
+        sorted.sort();
+        assert_eq!(sorted, input, "no items lost or duplicated");
+    }
+
+    // --- est_tokens ---
+
+    #[test]
+    fn est_tokens_empty_string() {
+        // len=0: max(0/4, 1)+4 = 1+4 = 5
+        assert_eq!(est_tokens(""), 5);
+    }
+
+    #[test]
+    fn est_tokens_very_short() {
+        // len=3: max(0, 1)+4 = 5
+        assert_eq!(est_tokens("abc"), 5);
+    }
+
+    #[test]
+    fn est_tokens_exactly_four_chars() {
+        // len=4: max(1, 1)+4 = 5
+        assert_eq!(est_tokens("abcd"), 5);
+    }
+
+    #[test]
+    fn est_tokens_hundred_chars() {
+        // len=100: max(25, 1)+4 = 29
+        let s: String = "a".repeat(100);
+        assert_eq!(est_tokens(&s), 29);
+    }
+
+    #[test]
+    fn est_tokens_grows_with_length() {
+        let s100 = "x".repeat(100);
+        let s200 = "x".repeat(200);
+        assert!(
+            est_tokens(&s200) > est_tokens(&s100),
+            "longer → more tokens"
+        );
+    }
+
+    // --- preview ---
+
+    #[test]
+    fn preview_empty_string() {
+        assert_eq!(preview(""), "");
+    }
+
+    #[test]
+    fn preview_short_no_ellipsis() {
+        assert_eq!(preview("hello"), "hello");
+    }
+
+    #[test]
+    fn preview_exactly_80_chars_no_ellipsis() {
+        let s: String = "a".repeat(80);
+        let p = preview(&s);
+        assert_eq!(p, s);
+        assert!(!p.contains('…'));
+    }
+
+    #[test]
+    fn preview_81_chars_adds_ellipsis() {
+        let s: String = "a".repeat(81);
+        let p = preview(&s);
+        assert!(p.ends_with('…'));
+        let char_count = p.chars().count();
+        assert_eq!(char_count, 81, "80 chars + one '…' char");
+    }
+
+    #[test]
+    fn preview_multibyte_unicode_counts_chars_not_bytes() {
+        // "é" is 2 bytes but 1 char; 80 × "é" should not add ellipsis
+        let s: String = "é".repeat(80);
+        let p = preview(&s);
+        assert!(!p.contains('…'), "80 unicode chars → no ellipsis");
+    }
+
     #[test]
     fn respects_budget_and_reports_dropped() {
         let Some((a, mem)) = setup() else { return };

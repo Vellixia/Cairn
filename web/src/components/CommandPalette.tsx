@@ -104,7 +104,7 @@ export function CommandPalette() {
     <CommandDialog open={open} onOpenChange={setOpen}>
       <CommandInput placeholder="Jump to a section, run an action…" />
       <CommandList>
-        <CommandEmpty>No matches. Try a section name like "memory" or "tokens".</CommandEmpty>
+        <CommandEmpty>No matches. Try a section name like &quot;memory&quot; or &quot;tokens&quot;.</CommandEmpty>
         {(["Navigate", "Memory", "Reliability", "Devices", "Share", "Personalization", "Sessions"] as const).map((group) => {
           const filtered = items.filter((i) => i.group === group);
           if (filtered.length === 0) return null;

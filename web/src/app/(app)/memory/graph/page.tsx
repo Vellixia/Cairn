@@ -1,7 +1,5 @@
 "use client";
 
-import { HelpButton } from "@/components/HelpButton";
-import { HELP } from "@/components/helpCopy";
 import dynamic from "next/dynamic";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -12,8 +10,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Button } from "@/components/ui/button";
-import { useCrystallizeMutation } from "@/lib/queries";
 import { getJSON } from "@/lib/api";
 
 // react-force-graph is a client-only library (uses canvas / d3-force); load with `ssr: false`
@@ -46,8 +42,6 @@ export default function MemoryGraphPage() {
     queryFn: () => getJSON<GraphResponse>("/api/memory/graph"),
     refetchInterval: 10_000,
   });
-  const crystallize = useCrystallizeMutation();
-
   const stats = graph.data
     ? {
         nodes: graph.data.nodes.length,
@@ -60,24 +54,14 @@ export default function MemoryGraphPage() {
   return (
     <div className="space-y-6">
 
-      <header className="flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Memory graph</h1>
-          <p className="mt-1 text-sm text-muted-foreground">
-            The provenance graph: every memory as a node, every{" "}
-            <code>derived_from</code> / <code>contradicts</code> /{" "}
-            <code>supersedes</code> / <code>applies_to</code> edge as a link. Node size is
-            importance, color is tier.
-          </p>
-        </div>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={crystallize.isPending}
-          onClick={() => crystallize.mutate({})}
-        >
-          {crystallize.isPending ? "Crystallizing…" : "Crystallize working"}
-        </Button>
+      <header>
+        <h1 className="text-2xl font-semibold tracking-tight">Memory graph</h1>
+        <p className="mt-1 text-sm text-muted-foreground">
+          The provenance graph: every memory as a node, every{" "}
+          <code>derived_from</code> / <code>contradicts</code> /{" "}
+          <code>supersedes</code> / <code>applies_to</code> edge as a link. Node size is
+          importance, color is tier.
+        </p>
       </header>
 
       <section className="grid gap-4 md:grid-cols-4">

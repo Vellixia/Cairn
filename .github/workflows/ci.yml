@@ -28,8 +28,37 @@ jobs:
       - name: cargo test
         run: cargo test --workspace
 
+  rust-msrv:
+    name: rust (MSRV 1.85)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.85"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --workspace --locked
+
+  security:
+    name: security (audit, deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: Audit advisories
+        run: cargo audit --deny warnings
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+      - name: Check bans / advisories / sources
+        run: cargo deny check advisories bans sources
+
   web:
-    name: web (build)
+    name: web (build, lint, typecheck, test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -41,3 +70,6 @@ jobs:
           node-version: 22
       - run: npm ci
       - run: npm run build
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test

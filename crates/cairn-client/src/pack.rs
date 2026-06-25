@@ -1,4 +1,4 @@
-﻿//! `cairn pack` â€” build / inspect / install / publish `.cairnpkg` bundles (Sprint 11).
+//! `cairn pack` â€” build / inspect / install / publish `.cairnpkg` bundles (Sprint 11).
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -36,6 +36,15 @@ pub enum PackCmd {
         tarball: PathBuf,
         registry: String,
     },
+    Revoke {
+        name: String,
+        version: String,
+        registry: String,
+    },
+    Search {
+        query: String,
+        registry: String,
+    },
 }
 
 pub fn run(cmd: PackCmd, s: &State) -> Result<()> {
@@ -55,6 +64,12 @@ pub fn run(cmd: PackCmd, s: &State) -> Result<()> {
         PackCmd::Import { tarball } => install(&tarball, s),
         PackCmd::AutoLoad => auto_load(s),
         PackCmd::Publish { tarball, registry } => publish(&tarball, &registry),
+        PackCmd::Revoke {
+            name,
+            version,
+            registry,
+        } => revoke(&name, &version, &registry),
+        PackCmd::Search { query, registry } => search(&query, &registry),
     }
 }
 
@@ -285,6 +300,67 @@ fn publish(tarball: &Path, registry: &str) -> Result<()> {
         serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
     );
     Ok(())
+}
+
+/// `cairn pack revoke <name> <version> --registry <url>` — unpublish a pack from a registry.
+fn revoke(name: &str, version: &str, registry: &str) -> Result<()> {
+    let url = format!(
+        "{}/registry/packs/{name}/{version}",
+        registry.trim_end_matches('/')
+    );
+    let token = std::env::var("CAIRN_REGISTRY_TOKEN").ok();
+    let mut req = ureq::delete(&url).set("Accept", "application/json");
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = req.call().with_context(|| format!("DELETE {url}"))?;
+    let body: serde_json::Value = resp
+        .into_json()
+        .context("parsing registry response as JSON")?;
+    eprintln!("revoked {name}@{version} from {registry}");
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+    );
+    Ok(())
+}
+
+/// `cairn pack search <query> --registry <url>` — search a registry's pack catalog.
+fn search(query: &str, registry: &str) -> Result<()> {
+    let encoded = percent_encode(query);
+    let url = format!(
+        "{}/registry/search?q={encoded}",
+        registry.trim_end_matches('/')
+    );
+    let token = std::env::var("CAIRN_REGISTRY_TOKEN").ok();
+    let mut req = ureq::get(&url).set("Accept", "application/json");
+    if let Some(t) = token {
+        req = req.set("Authorization", &format!("Bearer {t}"));
+    }
+    let resp = req.call().with_context(|| format!("GET {url}"))?;
+    let body: serde_json::Value = resp
+        .into_json()
+        .context("parsing registry response as JSON")?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&body).unwrap_or_else(|_| body.to_string())
+    );
+    Ok(())
+}
+
+/// Minimal percent-encoding for URL query parameter values (RFC 3986 unreserved chars pass through).
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 3);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            b => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 #[cfg(test)]

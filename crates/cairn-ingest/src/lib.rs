@@ -99,11 +99,22 @@ pub fn parse_vtt(input: &str) -> Result<Vec<Cue>, IngestError> {
     // Skip WEBVTT header + any NOTE / STYLE / REGION metadata until we hit a
     // real cue line.
     let mut first_idx: Option<usize> = None;
+    // Track whether we're inside a multi-line NOTE/STYLE/REGION block. A blank line
+    // terminates the block; otherwise every non-blank line in the block is skipped.
+    let mut in_meta_block = false;
     for (i, line) in lines.iter().enumerate() {
-        if line.trim().is_empty() || line.starts_with("WEBVTT") {
+        if line.trim().is_empty() {
+            in_meta_block = false;
+            continue;
+        }
+        if line.starts_with("WEBVTT") {
+            continue;
+        }
+        if in_meta_block {
             continue;
         }
         if line.starts_with("NOTE") || line.starts_with("STYLE") || line.starts_with("REGION") {
+            in_meta_block = true;
             continue;
         }
         first_idx = Some(i);
@@ -492,6 +503,263 @@ mod tests {
         ];
         let chunks = chunk_by_speaker_and_window(&cues, 60_000);
         assert_eq!(chunks.len(), 2, "60s boundary must split the chunk");
+    }
+
+    // --- VTT edge / adversarial cases ---
+
+    #[test]
+    fn vtt_header_only_returns_empty() {
+        let result = parse_vtt("WEBVTT\n");
+        assert!(result.unwrap().is_empty(), "header-only VTT has no cues");
+    }
+
+    #[test]
+    fn vtt_whitespace_only_returns_empty() {
+        let result = parse_vtt("   \n\n\t\n");
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn vtt_invalid_timestamp_returns_error() {
+        let vtt = "WEBVTT\n\nNOT_A_TIMESTAMP\nsome text\n";
+        let result = parse_vtt(vtt);
+        assert!(result.is_err(), "invalid timestamp line must error");
+    }
+
+    #[test]
+    fn vtt_mm_ss_format_parses() {
+        // 2-part timestamp: MM:SS.mmm → minutes*60000 + seconds*1000 + ms
+        let vtt = "WEBVTT\n\n01:30.500 --> 02:00.000\nhello\n";
+        let cues = parse_vtt(vtt).unwrap();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].start_ms, 90_500, "1m30.5s = 90500ms");
+        assert_eq!(cues[0].end_ms, 120_000, "2m0s = 120000ms");
+    }
+
+    #[test]
+    fn vtt_skips_note_style_region_blocks() {
+        let vtt = "WEBVTT\n\nNOTE this is a comment\nSTYLE\n::cue { color: red }\n\n00:00:01.000 --> 00:00:02.000\nhello\n";
+        let cues = parse_vtt(vtt).unwrap();
+        assert_eq!(cues.len(), 1);
+        assert_eq!(cues[0].text, "hello");
+    }
+
+    #[test]
+    fn vtt_zero_timestamp_is_zero_ms() {
+        let vtt = "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nfirst\n";
+        let cues = parse_vtt(vtt).unwrap();
+        assert_eq!(cues[0].start_ms, 0);
+    }
+
+    #[test]
+    fn vtt_large_timestamp_max_hours() {
+        let vtt = "WEBVTT\n\n23:59:59.999 --> 24:00:00.000\nend\n";
+        let cues = parse_vtt(vtt).unwrap();
+        let expected = 23 * 3_600_000 + 59 * 60_000 + 59 * 1000 + 999;
+        assert_eq!(cues[0].start_ms, expected);
+    }
+
+    #[test]
+    fn vtt_multiple_cues_ordering() {
+        let vtt = "WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nfirst\n\n00:00:03.000 --> 00:00:04.000\nsecond\n";
+        let cues = parse_vtt(vtt).unwrap();
+        assert_eq!(cues.len(), 2);
+        assert!(cues[0].start_ms < cues[1].start_ms);
+    }
+
+    // --- SRT edge / adversarial cases ---
+
+    #[test]
+    fn srt_empty_input_returns_empty() {
+        assert!(parse_srt("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn srt_missing_timestamp_returns_error() {
+        let srt = "1\n";
+        assert!(
+            parse_srt(srt).is_err(),
+            "SRT cue without timestamp must error"
+        );
+    }
+
+    #[test]
+    fn srt_invalid_timestamp_returns_error() {
+        let srt = "1\nnot-a-timestamp\ntext\n";
+        assert!(parse_srt(srt).is_err());
+    }
+
+    #[test]
+    fn srt_multiline_text_joined() {
+        let srt = "1\n00:00:01,000 --> 00:00:02,000\nline one\nline two\n";
+        let cues = parse_srt(srt).unwrap();
+        assert_eq!(cues.len(), 1);
+        assert!(cues[0].text.contains("line one") && cues[0].text.contains("line two"));
+    }
+
+    #[test]
+    fn srt_comma_millis_parsed_correctly() {
+        let srt = "1\n00:00:01,500 --> 00:00:03,250\nhello\n";
+        let cues = parse_srt(srt).unwrap();
+        assert_eq!(cues[0].start_ms, 1500);
+        assert_eq!(cues[0].end_ms, 3250);
+    }
+
+    #[test]
+    fn srt_has_no_speaker() {
+        let srt = "1\n00:00:00,000 --> 00:00:01,000\ntext\n";
+        let cues = parse_srt(srt).unwrap();
+        assert!(cues[0].speaker.is_none(), "SRT format has no speaker field");
+    }
+
+    // --- JSON edge / adversarial cases ---
+
+    #[test]
+    fn json_empty_array_returns_no_cues() {
+        let cues = parse_json("[]").unwrap();
+        assert!(cues.is_empty());
+    }
+
+    #[test]
+    fn json_malformed_returns_error() {
+        assert!(parse_json("not json at all").is_err());
+    }
+
+    #[test]
+    fn json_missing_text_field_is_error() {
+        // "text" is required (not default); missing it causes serde error
+        assert!(parse_json(r#"[{"start": 0, "end": 1}]"#).is_err());
+    }
+
+    #[test]
+    fn json_float_times_rounded_to_ms() {
+        // 1.0005 * 1000.0 = 1000.5 → rounds to 1001
+        // 2.9995 * 1000.0 = 2999.5 → rounds to 3000 (half-up)
+        let json = r#"[{"start": 1.0005, "end": 2.9995, "text": "hi"}]"#;
+        let cues = parse_json(json).unwrap();
+        assert_eq!(cues[0].start_ms, 1001, "1000.5 rounds to 1001");
+        assert_eq!(cues[0].end_ms, 3000, "2999.5 rounds to 3000");
+    }
+
+    #[test]
+    fn json_optional_speaker_field() {
+        let json = r#"[{"start": 0.0, "end": 1.0, "text": "hi", "speaker": "alice"},
+                       {"start": 1.0, "end": 2.0, "text": "bye"}]"#;
+        let cues = parse_json(json).unwrap();
+        assert_eq!(cues[0].speaker.as_deref(), Some("alice"));
+        assert!(cues[1].speaker.is_none());
+    }
+
+    // --- chunking edge / adversarial cases ---
+
+    #[test]
+    fn chunking_empty_cues_returns_empty() {
+        assert!(chunk_by_speaker_and_window(&[], 60_000).is_empty());
+    }
+
+    #[test]
+    fn chunking_skips_whitespace_only_text() {
+        let cues = vec![
+            Cue {
+                speaker: None,
+                start_ms: 0,
+                end_ms: 1000,
+                text: "   ".into(),
+            },
+            Cue {
+                speaker: None,
+                start_ms: 1000,
+                end_ms: 2000,
+                text: "real text".into(),
+            },
+        ];
+        let chunks = chunk_by_speaker_and_window(&cues, 60_000);
+        assert_eq!(chunks.len(), 1, "whitespace-only cue should be skipped");
+        assert_eq!(chunks[0].text, "real text");
+    }
+
+    #[test]
+    fn chunking_single_cue_is_one_chunk() {
+        let cues = vec![Cue {
+            speaker: Some("alice".into()),
+            start_ms: 0,
+            end_ms: 500,
+            text: "hi".into(),
+        }];
+        let chunks = chunk_by_speaker_and_window(&cues, 60_000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].source_cues, 1);
+    }
+
+    #[test]
+    fn chunking_speaker_none_both_merged() {
+        let cues = vec![
+            Cue {
+                speaker: None,
+                start_ms: 0,
+                end_ms: 500,
+                text: "first".into(),
+            },
+            Cue {
+                speaker: None,
+                start_ms: 1000,
+                end_ms: 1500,
+                text: "second".into(),
+            },
+        ];
+        let chunks = chunk_by_speaker_and_window(&cues, 60_000);
+        assert_eq!(
+            chunks.len(),
+            1,
+            "two None-speaker cues in window → one chunk"
+        );
+    }
+
+    #[test]
+    fn chunking_exactly_at_window_boundary_splits() {
+        // First cue at 0ms, second cue at exactly window_ms → should split
+        let window = 10_000u64;
+        let cues = vec![
+            Cue {
+                speaker: Some("alice".into()),
+                start_ms: 0,
+                end_ms: 1000,
+                text: "first".into(),
+            },
+            Cue {
+                speaker: Some("alice".into()),
+                start_ms: window,
+                end_ms: window + 1000,
+                text: "second".into(),
+            },
+        ];
+        let chunks = chunk_by_speaker_and_window(&cues, window);
+        assert_eq!(chunks.len(), 2, "at exactly window boundary should split");
+    }
+
+    #[test]
+    fn chunking_chunk_id_contains_speaker_and_start() {
+        let cues = vec![Cue {
+            speaker: Some("bob".into()),
+            start_ms: 5000,
+            end_ms: 6000,
+            text: "hi".into(),
+        }];
+        let chunks = chunk_by_speaker_and_window(&cues, 60_000);
+        assert!(chunks[0].id.contains("bob"), "chunk id includes speaker");
+        assert!(chunks[0].id.contains("5000"), "chunk id includes start_ms");
+    }
+
+    #[test]
+    fn chunking_anonymous_id_when_no_speaker() {
+        let cues = vec![Cue {
+            speaker: None,
+            start_ms: 0,
+            end_ms: 500,
+            text: "hi".into(),
+        }];
+        let chunks = chunk_by_speaker_and_window(&cues, 60_000);
+        assert!(chunks[0].id.contains("anon"), "no speaker → id has 'anon'");
     }
 
     #[test]

@@ -35,6 +35,7 @@ pub struct McpServer {
     pub san: cairn_share::Sanitizer,
     pub mem: Arc<MemoryEngine>,
     pub store: Arc<cairn_store::Store>,
+    pub registry: Option<Arc<cairn_registry::Registry>>,
     pub config: Config,
 }
 
@@ -53,7 +54,10 @@ impl McpServer {
             profile: Arc::new(Profile::new(mem.clone())),
             san: cairn_share::Sanitizer::new(),
             mem,
-            store,
+            store: store.clone(),
+            registry: cairn_registry::Registry::open(&cfg.data_dir)
+                .map(Arc::new)
+                .ok(),
             config: cfg.clone(),
         })
     }
@@ -465,6 +469,36 @@ impl McpServer {
                     "{{\"memories\":{mem_count},\"checkpoints\":{tokens}}}"
                 ))
             }
+            "registry_search" => {
+                let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
+                let reg = self
+                    .registry
+                    .as_ref()
+                    .ok_or("no registry configured on this server")?;
+                let results = reg.search(query).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
+            }
+            "registry_revoke" => {
+                let name = str_arg(args.get("name")).ok_or("missing 'name'")?;
+                let version = str_arg(args.get("version")).ok_or("missing 'version'")?;
+                let reg = self
+                    .registry
+                    .as_ref()
+                    .ok_or("no registry configured on this server")?;
+                let evt = reg.revoke(name, version).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&evt).map_err(|e| e.to_string())
+            }
+            "registry_publish" => {
+                let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
+                let resolved = self.resolve_tool_path(path)?;
+                let bytes = std::fs::read(&resolved).map_err(|e| e.to_string())?;
+                let reg = self
+                    .registry
+                    .as_ref()
+                    .ok_or("no registry configured on this server")?;
+                let receipt = reg.publish(&bytes, None).map_err(|e| e.to_string())?;
+                serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -736,6 +770,37 @@ pub fn tool_defs() -> Value {
             "name": "stats",
             "description": "Compact stats summary (memory + checkpoint counts).",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        // ---- registry tools (local embedded registry) ----
+        {
+            "name": "registry_search",
+            "description": "Search the local pack registry for published packs by name or description.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "query": { "type": "string" } },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "registry_revoke",
+            "description": "Revoke (unpublish) a pack from the local embedded registry by name and version.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "version": { "type": "string" }
+                },
+                "required": ["name", "version"]
+            }
+        },
+        {
+            "name": "registry_publish",
+            "description": "Publish a local .cairnpkg tarball to the embedded registry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string", "description": "Workspace-relative or absolute path to the .cairnpkg tarball." } },
+                "required": ["path"]
+            }
         }
     ])
 }

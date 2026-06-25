@@ -165,6 +165,71 @@ mod tests {
     }
 
     #[test]
+    fn merge_empty_input_returns_empty() {
+        let r = merge_results(vec![]);
+        assert_eq!(r.packs.len(), 0);
+        assert_eq!(r.upstreams, 0);
+        assert_eq!(r.failed, 0);
+    }
+
+    #[test]
+    fn merge_single_peer_no_packs_returns_empty() {
+        let r = merge_results(vec![("peer-a", vec![])]);
+        assert_eq!(r.packs.len(), 0);
+        assert_eq!(r.upstreams, 1);
+        assert_eq!(
+            r.failed, 0,
+            "empty packs != failure unless 'failed:' prefix"
+        );
+    }
+
+    #[test]
+    fn merge_all_failed_peers_returns_zero_packs() {
+        let r = merge_results(vec![
+            ("failed:peer-a", Vec::new()),
+            ("failed:peer-b", Vec::new()),
+        ]);
+        assert_eq!(r.packs.len(), 0);
+        assert_eq!(r.failed, 2);
+    }
+
+    #[test]
+    fn merge_same_pack_from_three_peers_deduped() {
+        let p = pack("99", "triple", "1.0.0");
+        let r = merge_results(vec![
+            ("peer-a", vec![p.clone()]),
+            ("peer-b", vec![p.clone()]),
+            ("peer-c", vec![p.clone()]),
+        ]);
+        assert_eq!(r.packs.len(), 1, "same id from 3 peers → 1 pack");
+        let merged = &r.packs[0];
+        assert_eq!(merged.sources.len(), 3, "all 3 sources recorded");
+    }
+
+    #[test]
+    fn merge_different_ids_all_preserved() {
+        let r = merge_results(vec![
+            (
+                "peer-a",
+                vec![pack("1", "alpha", "1.0.0"), pack("2", "beta", "2.0.0")],
+            ),
+            ("peer-b", vec![pack("3", "gamma", "3.0.0")]),
+        ]);
+        assert_eq!(r.packs.len(), 3);
+    }
+
+    #[test]
+    fn merge_mixed_failed_and_ok() {
+        let r = merge_results(vec![
+            ("failed:peer-a", Vec::new()),
+            ("peer-b", vec![pack("1", "alpha", "1.0.0")]),
+        ]);
+        assert_eq!(r.packs.len(), 1);
+        assert_eq!(r.failed, 1);
+        assert_eq!(r.upstreams, 2);
+    }
+
+    #[test]
     fn merge_counts_failed_upstreams() {
         let merged = merge_results(vec![
             ("failed:peer-a", Vec::new()),

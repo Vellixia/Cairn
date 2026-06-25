@@ -69,7 +69,7 @@ export default function DriftCenterPage() {
         <p className="mt-1 text-sm text-muted-foreground">
           Edits flagged by <code>verify</code> as <code>warn</code> or <code>danger</code>.
           Approve to mark the edit as expected; reject to roll back. Decisions persist in the
-          session drift log so a server restart doesn't lose them.
+          session drift log so a server restart doesn&apos;t lose them.
         </p>
       </header>
 
@@ -92,7 +92,7 @@ export default function DriftCenterPage() {
             </div>
           ) : drifts.data && drifts.data.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No drift events yet — that's a good thing.
+              No drift events yet — that&apos;s a good thing.
             </p>
           ) : (
             <ul className="space-y-2">

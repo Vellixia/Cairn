@@ -30,7 +30,7 @@ export default function WakeupPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Wakeup</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            The "first thing the agent reads" — high-importance, recently-reinforced
+            The &quot;first thing the agent reads&quot; — high-importance, recently-reinforced
           decisions and tasks. What every new session starts with.
           </p>
         </div>

@@ -517,6 +517,120 @@ mod tests {
         assert_eq!(r.rollbacks, 0);
     }
 
+    // --- assess (pure, offline) ---
+
+    #[test]
+    fn assess_new_file_empty_baseline_is_ok() {
+        let r = assess("new.rs", "", None, "fn main() {}\n");
+        assert_eq!(r.risk, Risk::Ok);
+        assert!(r.message.contains("new file"));
+        assert!(r.baseline_hash.is_none());
+    }
+
+    #[test]
+    fn assess_identical_content_is_ok_no_changes() {
+        let content = "line1\nline2\nline3\n";
+        let r = assess("foo.rs", content, Some("abc".into()), content);
+        assert_eq!(r.risk, Risk::Ok);
+        assert!(r.message.contains("no changes"));
+    }
+
+    #[test]
+    fn assess_small_change_ok() {
+        let baseline = (0..20).map(|i| format!("line {i}\n")).collect::<String>();
+        let new = (0..20)
+            .map(|i| {
+                if i == 5 {
+                    "MODIFIED\n".to_string()
+                } else {
+                    format!("line {i}\n")
+                }
+            })
+            .collect::<String>();
+        let r = assess("f.rs", &baseline, None, &new);
+        assert_eq!(r.risk, Risk::Ok, "single line change should be ok");
+    }
+
+    #[test]
+    fn assess_warn_at_20_pct_removal() {
+        // 100 baseline lines, remove 20 (exactly 20%), add 5
+        let baseline = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+        let new = (0..80).map(|i| format!("line {i}\n")).collect::<String>()
+            + "extra1\nextra2\nextra3\nextra4\nextra5\n";
+        let r = assess("f.rs", &baseline, None, &new);
+        assert_eq!(r.risk, Risk::Warn, "20% removal with some adds → Warn");
+    }
+
+    #[test]
+    fn assess_danger_50_pct_removal_minimal_replacement() {
+        // 100 baseline lines, keep only 5, add only 2 → heavy deletion, few additions
+        let baseline = (0..100).map(|i| format!("line {i}\n")).collect::<String>();
+        let new = "keep1\nkeep2\n";
+        let r = assess("f.rs", &baseline, None, new);
+        assert_eq!(
+            r.risk,
+            Risk::Danger,
+            "≥50% removed with almost no replacement → Danger"
+        );
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn assess_large_replacement_stays_ok() {
+        // Replace all 100 lines with 100 different lines — removed_ratio ≈ 1.0 but added ≈ removed
+        let baseline = (0..100).map(|i| format!("old {i}\n")).collect::<String>();
+        let new = (0..100).map(|i| format!("new {i}\n")).collect::<String>();
+        let r = assess("f.rs", &baseline, None, &new);
+        // added=100, removed=100, removed/2=50, added(100) >= removed/2(50) → NOT danger
+        assert_ne!(
+            r.risk,
+            Risk::Danger,
+            "full replacement with equal additions is not danger"
+        );
+    }
+
+    #[test]
+    fn assess_both_empty_is_ok() {
+        let r = assess("f.rs", "", None, "");
+        assert_eq!(r.risk, Risk::Ok);
+    }
+
+    #[test]
+    fn assess_risk_as_str() {
+        assert_eq!(Risk::Ok.as_str(), "ok");
+        assert_eq!(Risk::Warn.as_str(), "warn");
+        assert_eq!(Risk::Danger.as_str(), "danger");
+    }
+
+    #[test]
+    fn assess_is_clean_only_for_ok() {
+        let make = |risk| VerifyReport {
+            path: "f.rs".into(),
+            baseline_hash: None,
+            baseline_lines: 0,
+            new_lines: 0,
+            added: 0,
+            removed: 0,
+            removed_ratio: 0.0,
+            risk,
+            message: String::new(),
+        };
+        assert!(make(Risk::Ok).is_clean());
+        assert!(!make(Risk::Warn).is_clean());
+        assert!(!make(Risk::Danger).is_clean());
+    }
+
+    #[test]
+    fn assess_reports_correct_line_counts() {
+        let baseline = "a\nb\nc\n";
+        let new = "a\nb\nc\nd\ne\n";
+        let r = assess("f.rs", baseline, None, new);
+        assert_eq!(r.baseline_lines, 3);
+        assert_eq!(r.new_lines, 5);
+        assert_eq!(r.added, 2);
+        assert_eq!(r.removed, 0);
+    }
+
     #[test]
     fn rollback_is_recorded_and_penalizes_reliability() {
         let Some((g, dir)) = guard() else { return };

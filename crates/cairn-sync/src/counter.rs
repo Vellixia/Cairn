@@ -131,6 +131,95 @@ mod tests {
     }
 
     #[test]
+    fn new_counter_has_zero_total() {
+        assert_eq!(GCounter::new().total(), 0);
+    }
+
+    #[test]
+    fn increment_zero_delta_no_change() {
+        let mut c = GCounter::new();
+        c.increment("alice", 5);
+        let before = c.total();
+        c.increment("alice", 0);
+        assert_eq!(c.total(), before, "zero delta must not change total");
+    }
+
+    #[test]
+    fn increment_returns_new_total() {
+        let mut c = GCounter::new();
+        let t = c.increment("a", 3);
+        assert_eq!(t, 3);
+        let t2 = c.increment("b", 4);
+        assert_eq!(t2, 7);
+    }
+
+    #[test]
+    fn saturating_at_u64_max() {
+        let mut c = GCounter::new();
+        c.increment("a", u64::MAX);
+        // increment by 1 more must saturate, not overflow
+        c.increment("a", 1);
+        assert_eq!(*c.per_actor().get("a").unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn merge_self_idempotent() {
+        let mut c = GCounter::new();
+        c.increment("a", 3);
+        c.increment("b", 7);
+        let total_before = c.total();
+        let clone = c.clone();
+        c.merge(&clone);
+        assert_eq!(c.total(), total_before, "merging with self is idempotent");
+    }
+
+    #[test]
+    fn merge_with_empty_counter_unchanged() {
+        let mut c = GCounter::new();
+        c.increment("a", 5);
+        c.merge(&GCounter::new());
+        assert_eq!(c.total(), 5, "merge with empty → unchanged");
+    }
+
+    #[test]
+    fn add_operator_equivalent_to_merge() {
+        let mut a = GCounter::new();
+        a.increment("a", 2);
+        let mut b = GCounter::new();
+        b.increment("b", 3);
+
+        let via_merge = {
+            let mut x = a.clone();
+            x.merge(&b);
+            x
+        };
+        let via_add = a + b;
+        assert_eq!(via_merge, via_add, "+ operator must equal merge");
+    }
+
+    #[test]
+    fn two_merges_same_actor_takes_max() {
+        let mut a = GCounter::new();
+        a.increment("x", 10);
+        let mut b = GCounter::new();
+        b.increment("x", 3);
+        a.merge(&b);
+        // max(10, 3) = 10 — not sum(10+3=13)
+        assert_eq!(a.per_actor().get("x"), Some(&10));
+        assert_eq!(a.total(), 10);
+    }
+
+    #[test]
+    fn multiple_actors_tracked_independently() {
+        let mut c = GCounter::new();
+        c.increment("alice", 1);
+        c.increment("bob", 2);
+        c.increment("carol", 3);
+        assert_eq!(c.per_actor().len(), 3);
+        assert_eq!(c.total(), 6);
+    }
+
+    #[test]
     fn serializes_with_key_sorted_json_for_deterministic_convergence() {
         let mut a = GCounter::new();
         a.increment("alice", 1);
