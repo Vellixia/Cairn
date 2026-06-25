@@ -94,7 +94,7 @@ pub fn memory_re_embed(s: &State) -> Result<()> {
     for m in &memories {
         s.store.upsert_memory(m).context("upserting memory")?;
         done += 1;
-        if done % 50 == 0 || done == total {
+        if done.is_multiple_of(50) || done == total {
             eprintln!("  {done}/{total}");
         }
     }
