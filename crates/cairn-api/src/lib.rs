@@ -2,7 +2,7 @@
 //!
 //! Exposes health/stats plus the context (read/expand/assemble), memory (remember/recall/wakeup),
 //! and guard (verify, anchor, checkpoint/rollback) engines over REST, and serves the embedded
-//! Next.js control plane --- with a built-in fallback page when the UI hasn't been built.
+//! Next.js control plane - with a built-in fallback page when the UI hasn't been built.
 
 pub mod admin;
 mod auth;
@@ -79,14 +79,14 @@ pub struct AppState {
     pub cors_origins: Vec<String>,
     pub session_signer: Option<Arc<SessionSigner>>,
     pub audit_log: Arc<admin::AuditLog>,
-    /// SSE event broker (v0.5.0 Sprint 1) --- publish from mutating handlers, subscribe from
+    /// SSE event broker (v0.5.0 Sprint 1) - publish from mutating handlers, subscribe from
     /// `/api/events`.
     pub events: EventBroker,
-    /// Live cost-savings counter (v0.5.0 Sprint 1) --- instrumented handlers bump it.
+    /// Live cost-savings counter (v0.5.0 Sprint 1) - instrumented handlers bump it.
     pub savings: SavingsState,
     /// Server-start timestamp (seconds since epoch) used by the metrics endpoint.
     pub started_at: i64,
-    /// Cross-Session Protocol store (v0.5.0 Sprint 4) --- sessions + drift log on disk.
+    /// Cross-Session Protocol store (v0.5.0 Sprint 4) - sessions + drift log on disk.
     pub sessions: Arc<cairn_session::SessionStore>,
     /// Signed cost-savings ledger (v0.5.0 Sprint 5).
     pub ledger: LedgerState,
@@ -286,7 +286,7 @@ pub fn router(state: AppState) -> Router {
 // the existing `/api/...` chain is unaffected.
 
 /// Build the full router (API + registry). When `state.registry` is `None`, the
-/// registry routes return 404 --- useful for tests that don't want a registry on disk.
+/// registry routes return 404 - useful for tests that don't want a registry on disk.
 pub fn build_router_with_registry(state: AppState) -> Router {
     let base = router(state.clone());
     match state.registry.as_ref() {
@@ -329,7 +329,7 @@ fn build_cors(origins: &[String]) -> CorsLayer {
         // ERROR-level events. We still return a restrictive layer so a misconfigured server
         // doesn't accidentally open itself up.
         tracing::error!(
-            "CAIRN_CORS_ORIGINS contains '*' --- wildcard origin rejected. The Cairn API is \
+            "CAIRN_CORS_ORIGINS contains '*' - wildcard origin rejected. The Cairn API is \
              authenticated; list explicit origins instead (e.g. CAIRN_CORS_ORIGINS=https://app.example.com). \
              Falling back to same-origin-only CORS."
         );
@@ -465,7 +465,7 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
                 .into_response()
         }
         None => {
-            // Fallback page --- same nonce injection treatment.
+            // Fallback page - same nonce injection treatment.
             let raw = ui::INDEX_HTML.as_bytes();
             let body = inject_csp_nonce(raw, &nonce).into_owned();
             (
@@ -529,7 +529,7 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-// ---- handlers ----------------------------------------------------------------------------------
+// -- handlers --------------------------------------------------------------------------------
 
 async fn health() -> Json<Value> {
     Json(json!({
@@ -539,7 +539,7 @@ async fn health() -> Json<Value> {
     }))
 }
 
-/// `GET /api/health/deep` --- real dependency probe. Returns 200 when all components are
+/// `GET /api/health/deep` - real dependency probe. Returns 200 when all components are
 /// reachable, 503 when any are degraded. Safe to use as a load-balancer readiness check.
 async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
     let helix_ok = s.store.count_memories().is_ok();
@@ -568,7 +568,7 @@ async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json
     )
 }
 
-/// `GET /api/setup/embed-default` --- the embed provider the wizard pre-selects. Per the
+/// `GET /api/setup/embed-default` - the embed provider the wizard pre-selects. Per the
 /// v0.5.0 plan, the default is local hashing (offline-first); the wizard offers an opt-in
 /// switch to ONNX or OpenAI-compatible.
 async fn setup_embed_default() -> Json<Value> {
@@ -604,7 +604,7 @@ async fn read(
 ) -> Result<Json<ReadResult>, ApiError> {
     let mode = ReadMode::parse(q.mode.as_deref());
     let result = s.ctx.read(Path::new(&q.path), mode)?;
-    // Record a savings entry --- the "compact" bytes we sent vs the "full" bytes the file
+    // Record a savings entry - the "compact" bytes we sent vs the "full" bytes the file
     // actually contains. Approximate: ReadResult exposes `bytes` (the served view); for the
     // "full" cost we use the same ReadResult (the served view IS the full bytes for
     // non-cached modes). Cache hits report savings because they reuse prior work.
@@ -668,7 +668,7 @@ struct SearchQuery {
     rerank_depth: Option<usize>,
 }
 
-/// `GET /api/search?q=...&limit=N&rerank_depth=M` --- Sprint 7 hybrid search: BM25 + HNSW
+/// `GET /api/search?q=...&limit=N&rerank_depth=M` - Sprint 7 hybrid search: BM25 + HNSW
 /// + provenance graph, fused with RRF, reranked with MMR.
 async fn search_handler(
     State(s): State<AppState>,
@@ -708,7 +708,7 @@ struct MemoryEditBody {
     files: Option<Vec<String>>,
 }
 
-/// POST `/api/memory/:id` --- edit a memory's mutable fields. Any field omitted from the body is
+/// POST `/api/memory/:id` - edit a memory's mutable fields. Any field omitted from the body is
 /// left unchanged. The suspicious-content scan re-runs on the new content (defense-in-depth).
 async fn edit_memory(
     State(s): State<AppState>,
@@ -730,7 +730,7 @@ async fn edit_memory(
     }
 }
 
-/// DELETE `/api/memory/:id` --- remove a memory by id.
+/// DELETE `/api/memory/:id` - remove a memory by id.
 async fn delete_memory(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -748,7 +748,7 @@ struct PinBody {
     pinned: bool,
 }
 
-/// POST `/api/memory/:id/pin` --- pin or unpin a memory.
+/// POST `/api/memory/:id/pin` - pin or unpin a memory.
 async fn pin_memory(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -766,7 +766,7 @@ async fn pin_memory(
     }
 }
 
-/// POST `/api/memory/:id/reinforce` --- manually nudge a memory's confidence (e.g. after a
+/// POST `/api/memory/:id/reinforce` - manually nudge a memory's confidence (e.g. after a
 /// `confirm_useful` click in the dashboard). Returns the updated memory.
 async fn reinforce_memory(
     State(s): State<AppState>,
@@ -785,7 +785,7 @@ struct CrystallizeBody {
     session_id: Option<String>,
 }
 
-/// POST `/api/memory/crystallize` --- promote working-tier memories into a semantic crystal.
+/// POST `/api/memory/crystallize` - promote working-tier memories into a semantic crystal.
 async fn crystallize(
     State(s): State<AppState>,
     Json(body): Json<CrystallizeBody>,
@@ -799,14 +799,14 @@ async fn crystallize(
     }
 }
 
-/// GET `/api/memory/graph` --- the provenance graph (nodes + edges) for the dashboard.
+/// GET `/api/memory/graph` - the provenance graph (nodes + edges) for the dashboard.
 async fn memory_graph(
     State(s): State<AppState>,
 ) -> Result<Json<cairn_memory::MemoryGraph>, ApiError> {
     Ok(Json(s.mem.graph()?))
 }
 
-// ---- drift + sessions handlers (v0.5.0 Sprint 4) -------------------------------------------
+// -- drift + sessions handlers (v0.5.0 Sprint 4) -----------------------------------------
 
 async fn list_drift(
     State(s): State<AppState>,
@@ -893,7 +893,7 @@ async fn get_session(
     }
 }
 
-/// PATCH a session --- merge in new tasks/findings/decisions/touched_files/next_steps.
+/// PATCH a session - merge in new tasks/findings/decisions/touched_files/next_steps.
 async fn update_session(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1098,7 +1098,7 @@ async fn share_import(
 }
 
 /// Accept a contribution into this server's shared pool. The server re-sanitizes every memory
-/// itself (defense-in-depth --- a client's redaction is never trusted) and rejects anything that
+/// itself (defense-in-depth - a client's redaction is never trusted) and rejects anything that
 /// still contains a hard secret; the rest is stored under `pool` provenance, deduplicated.
 async fn pool_contribute(
     State(s): State<AppState>,
@@ -1209,7 +1209,7 @@ async fn pair_claim(
     }
 }
 
-// ---- sync + auth -------------------------------------------------------------------------------
+// -- sync + auth -----------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct SyncPullQuery {
@@ -1284,13 +1284,13 @@ async fn tools_call(
 /// Authentication middleware.
 ///
 /// Composition:
-///   1. Public endpoints (`/api/health`, `/api/pair/claim`, the admin auth surface) --- pass
+///   1. Public endpoints (`/api/health`, `/api/pair/claim`, the admin auth surface) - pass
 ///      through unchanged.
-///   2. Admin cookie --- if `cairn_session` is present, signed, and the embedded generation
+///   2. Admin cookie - if `cairn_session` is present, signed, and the embedded generation
 ///      matches the live admin record, the request is treated as the admin (all scopes).
-///   3. Device-token bearer --- the existing JWT path; respected when no admin cookie is
+///   3. Device-token bearer - the existing JWT path; respected when no admin cookie is
 ///      available so CLI / MCP clients keep working.
-///   4. Loopback fallback --- when there are no device tokens AND no admin (first-run before
+///   4. Loopback fallback - when there are no device tokens AND no admin (first-run before
 ///      `/setup`), only loopback calls pass. The admin cookie path overrides this once
 ///      `/setup` has been visited.
 ///
@@ -1299,7 +1299,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let method = req.method().as_str();
 
-    // 1. Public endpoints --- never require auth.
+    // 1. Public endpoints - never require auth.
     if !path.starts_with("/api/")
         || matches!(
             path,
@@ -1368,7 +1368,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
         VerifyBearerOutcome::Absent => {} // fall through to loopback / 401 below
     }
 
-    // 4. Loopback fallback --- only when there are no device tokens AND no admin.
+    // 4. Loopback fallback - only when there are no device tokens AND no admin.
     let token_count = s.store.count_tokens().unwrap_or(0);
     let admin_exists = admin_mod::load_admin(&s)
         .map(|r| r.is_some())
@@ -1458,7 +1458,7 @@ fn verify_bearer_auth(
     VerifyBearerOutcome::Valid(info.id)
 }
 
-// ---- error plumbing ----------------------------------------------------------------------------
+// -- error plumbing --------------------------------------------------------------------------
 
 /// A simple API error that renders as JSON `{ "error": ... }`.
 #[derive(Debug)]
@@ -1530,7 +1530,7 @@ mod tests {
         // Track the file by reading it through the context engine (records a baseline version).
         state.ctx.read(&file, ReadMode::Full).unwrap();
 
-        // Create a checkpoint --- it should capture the tracked file.
+        // Create a checkpoint - it should capture the tracked file.
         let cp = create_checkpoint(
             State(state.clone()),
             Query(CheckpointQuery {
@@ -1842,7 +1842,7 @@ mod tests {
         );
     }
 
-    // ---- v0.5.0 Sprint 1: SSE event broker + metrics endpoint -----------------------------
+    // -- v0.5.0 Sprint 1: SSE event broker + metrics endpoint ---------------------------
 
     #[test]
     fn event_broker_delivers_published_payloads_to_subscribers() {
@@ -1895,7 +1895,7 @@ mod tests {
         let Some((state, _dir)) = test_state() else {
             return;
         };
-        // Start the SSE handler --- it returns immediately with a 200 + `text/event-stream`.
+        // Start the SSE handler - it returns immediately with a 200 + `text/event-stream`.
         let started = std::time::Instant::now();
         let resp = sse_events(
             State(state.clone()),
@@ -1968,7 +1968,7 @@ mod tests {
         assert_eq!(backfilled[1].data["kind"], "login_failed");
     }
 
-    // ---- v0.5.0 Sprint 2: memory CRUD + confidence + pin ---------------------------------
+    // -- v0.5.0 Sprint 2: memory CRUD + confidence + pin -------------------------------
 
     #[tokio::test]
     async fn memory_edit_delete_pin_round_trip() {
@@ -2054,7 +2054,7 @@ mod tests {
         assert!(!m.pinned);
     }
 
-    // ---- v0.5.0 Sprint 3: crystallize + memory graph endpoints ----------------------------
+    // -- v0.5.0 Sprint 3: crystallize + memory graph endpoints --------------------------
 
     #[tokio::test]
     async fn memory_crystallize_endpoint_promotes_working_and_publishes_event() {
@@ -2117,7 +2117,7 @@ mod tests {
         );
     }
 
-    // ---- v0.5.0 Sprint 4: sessions + drift --------------------------------------------------
+    // -- v0.5.0 Sprint 4: sessions + drift ------------------------------------------------
 
     #[tokio::test]
     async fn sessions_create_list_latest_round_trip() {
@@ -2200,7 +2200,7 @@ mod tests {
         let f = dir.path().join("drift.txt");
         let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
         std::fs::write(&f, &original).unwrap();
-        // A gutting edit --- verify flags danger.
+        // A gutting edit - verify flags danger.
         verify(
             State(state.clone()),
             Json(VerifyBody {
@@ -2233,7 +2233,7 @@ mod tests {
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
-    // ---- v0.5.0 Sprint 5: ledger -----------------------------------------------------------
+    // -- v0.5.0 Sprint 5: ledger ---------------------------------------------------------
 
     #[tokio::test]
     async fn ledger_records_savings_when_read_runs() {
@@ -2274,7 +2274,7 @@ mod tests {
         assert_eq!(v["valid"], serde_json::json!(true));
     }
 
-    // ---- v0.5.0 Sprint 6: setup wizard v2 --------------------------------------------------
+    // -- v0.5.0 Sprint 6: setup wizard v2 ------------------------------------------------
 
     #[tokio::test]
     async fn setup_wizard_default_embed_provider_is_hashing() {
@@ -2297,7 +2297,7 @@ mod tests {
         assert_eq!(h.embed_provider, "hashing");
     }
 
-    // ---- v0.5.0 Sprint 7: hybrid search + CSP nonce ---------------------------------------
+    // -- v0.5.0 Sprint 7: hybrid search + CSP nonce -------------------------------------
 
     #[tokio::test]
     async fn hybrid_search_endpoint_returns_reranked_hits() {
@@ -2435,7 +2435,7 @@ mod tests {
         assert_eq!(receipt.name, "alpha");
         assert_eq!(receipt.status, PublishStatus::Signed);
 
-        // GET /registry/packs --- must include the published pack.
+        // GET /registry/packs - must include the published pack.
         let resp = app
             .clone()
             .oneshot(
@@ -2452,7 +2452,7 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "alpha");
 
-        // GET /registry/packs/alpha/1.0.0/download --- round-trip the bytes.
+        // GET /registry/packs/alpha/1.0.0/download - round-trip the bytes.
         let resp = app
             .clone()
             .oneshot(
@@ -2470,7 +2470,7 @@ mod tests {
             "downloaded bytes should match published tarball"
         );
 
-        // GET /registry/search?q=alp --- substring match.
+        // GET /registry/search?q=alp - substring match.
         let resp = app
             .clone()
             .oneshot(
@@ -2485,7 +2485,7 @@ mod tests {
             serde_json::from_slice(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
         assert_eq!(hits.len(), 1);
 
-        // DELETE /registry/packs/alpha/1.0.0 --- revoke.
+        // DELETE /registry/packs/alpha/1.0.0 - revoke.
         let resp = app
             .clone()
             .oneshot(
@@ -2522,7 +2522,7 @@ mod tests {
     /// Federation scope + provenance display (Sprint 14). Publishes a pack whose
     /// manifest declares `scope: team` but only public-scope trusts are configured ---
     /// must be rejected with `ScopeDenied`. Then publishes with `scope: local` and
-    /// a public-scope grant --- must succeed, and the cached manifest endpoint must
+    /// a public-scope grant - must succeed, and the cached manifest endpoint must
     /// return a manifest that includes `stats.graph_edges` (Sprint 14c provenance
     /// display).
     #[tokio::test]
@@ -2541,7 +2541,7 @@ mod tests {
         // 1. team-scoped pack + public-only grant -> rejected.
         let team_pack_path = dir.path().join("team.cairnpkg");
         let mut team_pack = Pack::new("team-only", "1.0.0");
-        team_pack.description = "scope: team --- for the team".into();
+        team_pack.description = "scope: team - for the team".into();
         team_pack
             .memories
             .push(serde_json::json!({"id": "m1", "content": "x"}));
@@ -2623,7 +2623,7 @@ mod tests {
 
     #[test]
     fn verify_bearer_distinguishes_absent_from_invalid() {
-        // The tri-state must return Absent / Invalid / Invalid respectively --- collapsing
+        // The tri-state must return Absent / Invalid / Invalid respectively - collapsing
         // Invalid into Absent would let a junk bearer slip past the middleware to the
         // loopback fallback. Skipped on environments without a backend fixture.
         let Some((state, _dir)) = test_state() else {

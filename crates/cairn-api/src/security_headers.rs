@@ -3,10 +3,10 @@
 //! Adds a small set of headers that cost nothing and meaningfully tighten the browser's
 //! default behavior for a same-origin authenticated UI:
 //!
-//! - `X-Frame-Options: DENY` --- refuses framing; the dashboard should never appear in an iframe.
-//! - `X-Content-Type-Options: nosniff` --- refuses MIME-type guessing on static assets.
-//! - `Referrer-Policy: no-referrer` --- never leak the URL of an admin page to third parties.
-//! - `Permissions-Policy: clipboard-write=(self)` --- only this origin can write to the clipboard.
+//! - `X-Frame-Options: DENY` - refuses framing; the dashboard should never appear in an iframe.
+//! - `X-Content-Type-Options: nosniff` - refuses MIME-type guessing on static assets.
+//! - `Referrer-Policy: no-referrer` - never leak the URL of an admin page to third parties.
+//! - `Permissions-Policy: clipboard-write=(self)` - only this origin can write to the clipboard.
 //!
 //! ## CSP nonce (v0.5.0 Sprint 7)
 //!

@@ -3,7 +3,7 @@
 //! The Chrome / Firefox Manifest V3 extension posts `{ kind, url, title,
 //! text, captured_at }` to this endpoint. We turn it into a Cairn
 //! memory (kind = `Note`, applies_to = [url], concepts = []). This is
-//! deliberately minimal --- the dashboard can refine / categorize later.
+//! deliberately minimal - the dashboard can refine / categorize later.
 //!
 //! ## Auth
 //!
@@ -15,7 +15,7 @@
 //!
 //! ## Why not a CLIP/multi-modal embedder?
 //!
-//! We don't embed page text on capture --- the user can trigger a recall
+//! We don't embed page text on capture - the user can trigger a recall
 //! from the dashboard later, which is when semantic recall adds value.
 //! A bare `Note` lets the BM25 index do the right thing at recall time
 //! without paying an embed cost at capture time.
@@ -55,14 +55,14 @@ pub struct CaptureResponse {
     pub url: String,
 }
 
-/// `POST /api/extensions/capture` --- write a memory from a browser
+/// `POST /api/extensions/capture` - write a memory from a browser
 /// extension capture. Returns the new memory id and echoes the URL.
 pub async fn capture(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<CaptureRequest>,
 ) -> Response {
-    // Local-origin check --- the extension declares its hosts in manifest.json;
+    // Local-origin check - the extension declares its hosts in manifest.json;
     // anything else gets a 403. We check Origin header only (ConnectInfo
     // isn't reliably available through axum's middleware chain).
     if !is_local_request(&headers) {
@@ -73,7 +73,7 @@ pub async fn capture(
             .into_response();
     }
 
-    // Build the memory content. Trim aggressively --- a 100 KB page is not a
+    // Build the memory content. Trim aggressively - a 100 KB page is not a
     // useful single memory; the dashboard can re-chunk later if needed.
     let trimmed = req.text.trim();
     let truncated: String = trimmed.chars().take(20_000).collect();
@@ -94,7 +94,7 @@ pub async fn capture(
     };
 
     // Each browser capture gets a synthetic "kind" so the dashboard can
-    // group them. We use the existing MemoryKind::Note --- the URL is in
+    // group them. We use the existing MemoryKind::Note - the URL is in
     // `applies_to` so the dashboard can build a "browser captures" view
     // by filtering on applies_to starting with "http".
     let mut new_mem = NewMemory::new(&content);
@@ -102,7 +102,7 @@ pub async fn capture(
     new_mem.concepts = vec!["browser-capture".to_string()];
     new_mem.org_id = Some(OrgId::default());
 
-    // The store is behind an Arc<Store> --- we call `insert_memory` directly so we
+    // The store is behind an Arc<Store> - we call `insert_memory` directly so we
     // don't go through MemoryEngine (which would also write to the audit log
     // and run the embedding provider).
     match state.store.insert_memory_for(&new_mem) {
@@ -128,7 +128,7 @@ pub async fn capture(
 
 /// Allow only when the request carries an `Origin` header that matches a loopback origin
 /// (`http://127.0.0.1:<port>` or `http://localhost:<port>`). Reject when:
-///   - no `Origin` header is present (the previous version silently accepted this --- direct
+///   - no `Origin` header is present (the previous version silently accepted this - direct
 ///     API calls from `curl` on remote hosts would otherwise pass through), or
 ///   - the origin is a remote scheme/host.
 ///
@@ -172,7 +172,7 @@ mod tests {
 
     #[test]
     fn is_local_request_rejects_missing_origin() {
-        // No Origin header at all --- must NOT silently pass through. The auth middleware
+        // No Origin header at all - must NOT silently pass through. The auth middleware
         // still catches the actual network path, but a missing Origin on a browser
         // request is suspicious enough to reject at the handler too.
         let h = HeaderMap::new();

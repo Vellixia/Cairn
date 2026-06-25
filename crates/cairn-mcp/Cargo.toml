@@ -1,6 +1,6 @@
 [package]
 name = "cairn-mcp"
-description = "Cairn MCP server (stdio) --- connect any MCP-capable agent."
+description = "Cairn MCP server (stdio) - connect any MCP-capable agent."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

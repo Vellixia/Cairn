@@ -62,12 +62,12 @@ errors (the trait `RustEmbed` is not implemented for `WebAssets`).
 
 **Fix options (ranked):**
 
-1. **Re-add `web/out/.gitkeep`** --- lowest-risk, matches CI intent. However, it
+1. **Re-add `web/out/.gitkeep`** - lowest-risk, matches CI intent. However, it
    can be deleted again by future UI/asset commits.
 2. **Add a `build.rs` to `crates/cairn-api` that creates `web/out` if missing**
-   --- robust and self-healing. This is the approach recommended by `rust-embed`
+   - robust and self-healing. This is the approach recommended by `rust-embed`
    maintainers for repositories where the generated UI is not committed.
-3. **Make the RustEmbed folder conditional on a feature** --- e.g. `web-ui` feature
+3. **Make the RustEmbed folder conditional on a feature** - e.g. `web-ui` feature
    that defaults off in dev/tests and on in release/Docker builds.
 
 **Recommendation:** combine options 1 and 2. Commit `web/out/.gitkeep` *and*

@@ -6,7 +6,7 @@
 //! A signed pack carries **both** `signature.sha256` and `signature.ed25519` when a
 //! keypair is available at pack time. The sha256 one is the historical integrity hash
 //! (every file in the manifest already has a per-file sha256, so the "manifest hash"
-//! was redundant). The ed25519 one is the **authenticity** proof --- it binds the pack
+//! was redundant). The ed25519 one is the **authenticity** proof - it binds the pack
 //! to a specific author key.
 //!
 //! Install verification prefers Ed25519 when present:
@@ -37,7 +37,7 @@ use thiserror::Error;
 ///
 /// The inner `ed25519_dalek::SigningKey` is built with the `zeroize` feature enabled
 /// (see `crates/cairn-pack/Cargo.toml`), so its secret material is overwritten on drop.
-/// We deliberately do **not** derive `Clone` here --- cloning would mint a second
+/// We deliberately do **not** derive `Clone` here - cloning would mint a second
 /// 32-byte secret key in heap memory and defeat the zeroize-on-drop guarantee.
 /// Callers that previously needed `kp.clone()` should pass `&Keypair` instead.
 pub struct Keypair {
@@ -98,7 +98,7 @@ impl<'de> Deserialize<'de> for PublicKey {
 /// Hex-encoded Ed25519 signature (lower-case, 128 hex chars).
 pub type SignatureHex = String;
 
-/// Sign errors (signature generation only --- verification errors are typed below).
+/// Sign errors (signature generation only - verification errors are typed below).
 #[derive(Debug, Error)]
 pub enum SignError {
     #[error("invalid key bytes")]
@@ -130,7 +130,7 @@ impl Keypair {
         Ok(Self { inner })
     }
 
-    /// 32 raw secret-key bytes. Treat as sensitive --- never log.
+    /// 32 raw secret-key bytes. Treat as sensitive - never log.
     pub fn to_bytes(&self) -> [u8; 32] {
         self.inner.to_bytes()
     }
@@ -200,7 +200,7 @@ pub fn hash_file(path: &Path) -> std::io::Result<String> {
     Ok(hash_bytes(&bytes))
 }
 
-/// Deterministic hex SHA-256 manifest signature (no key --- integrity only). The `signature.sha256`
+/// Deterministic hex SHA-256 manifest signature (no key - integrity only). The `signature.sha256`
 /// filename is preserved for backwards compatibility: v0.4.x and earlier packs only carry this.
 pub fn sign_manifest(manifest_bytes: &[u8]) -> String {
     hash_bytes(manifest_bytes)
@@ -317,7 +317,7 @@ mod tests {
     /// of a dropped `SigningKey` from a test (it lives behind the `ed25519-dalek`
     /// opaque struct), but we can at least assert the secret is reachable pre-drop.
     /// If someone re-adds `#[derive(Clone)]` to `Keypair`, callers that previously
-    /// did `kp.clone()` will compile again and the ZeroizeOnDrop story breaks --- but
+    /// did `kp.clone()` will compile again and the ZeroizeOnDrop story breaks - but
     /// there are no `.clone()` calls on `Keypair` in the workspace (grep-verified)
     /// so re-introducing Clone would be loud enough to catch in code review.
     #[test]

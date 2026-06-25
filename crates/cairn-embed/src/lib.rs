@@ -1,11 +1,11 @@
-//! Pluggable text embeddings --- Cairn turns memory content into vectors so HelixDB can do semantic
+//! Pluggable text embeddings - Cairn turns memory content into vectors so HelixDB can do semantic
 //! (vector) recall alongside BM25.
 //!
 //! Three providers, chosen by [`cairn_core::EmbedConfig`] (`CAIRN_EMBED_PROVIDER`):
-//! - **local** (default) --- in-process `bge-small-en-v1.5` (384-dim) via `fastembed`/ONNX. No API
+//! - **local** (default) - in-process `bge-small-en-v1.5` (384-dim) via `fastembed`/ONNX. No API
 //!   key, nothing leaves the machine. Requires the `local` cargo feature.
-//! - **openai** --- `/v1/embeddings` (default `text-embedding-3-small`); needs `CAIRN_EMBED_API_KEY`.
-//! - **ollama** --- `/api/embed` (default `nomic-embed-text`) against a local Ollama server.
+//! - **openai** - `/v1/embeddings` (default `text-embedding-3-small`); needs `CAIRN_EMBED_API_KEY`.
+//! - **ollama** - `/api/embed` (default `nomic-embed-text`) against a local Ollama server.
 //!
 //! To migrate existing memories to a new model, run `cairn memory re-embed`.
 
@@ -62,10 +62,10 @@ pub fn cosine(a: &[f32], b: &[f32]) -> f32 {
     }
 }
 
-// --- Hashing (deterministic, dependency-free) --------------------------------------------------
+// - Hashing (deterministic, dependency-free) ------------------------------------------------
 
 /// A deterministic embedder using the **hashing trick** (signed feature hashing of tokens,
-/// L2-normalized). No model, no network, fully reproducible --- texts that share tokens get higher
+/// L2-normalized). No model, no network, fully reproducible - texts that share tokens get higher
 /// cosine similarity, so it preserves lexical relatedness. Ideal for tests and as a
 /// zero-dependency fallback when the local model isn't compiled in (`CAIRN_EMBED_PROVIDER=hashing`;
 /// `CAIRN_EMBED_MODEL` may set the dimension, default 384 to match all-MiniLM-L6-v2).
@@ -124,7 +124,7 @@ fn fnv1a(s: &str) -> u64 {
     h
 }
 
-// --- OpenAI ------------------------------------------------------------------------------------
+// - OpenAI ----------------------------------------------------------------------------------
 
 struct OpenAiEmbedder {
     model: String,
@@ -176,7 +176,7 @@ impl Embedder for OpenAiEmbedder {
     }
 }
 
-// --- Ollama ------------------------------------------------------------------------------------
+// - Ollama ----------------------------------------------------------------------------------
 
 struct OllamaEmbedder {
     model: String,
@@ -246,7 +246,7 @@ fn known_dim(model: &str) -> Option<usize> {
     }
 }
 
-// --- Local (fastembed / ONNX) ------------------------------------------------------------------
+// - Local (fastembed / ONNX) ----------------------------------------------------------------
 
 #[cfg(feature = "local")]
 mod local {
@@ -300,7 +300,7 @@ mod local {
         // The fastest lookup: find the most recent model.onnx in the cache. fastembed pulls
         // into `models--<owner>--<name>/snapshots/<rev>/onnx/model.onnx`.
         let Some(onnx_path) = newest_onnx(&cache_dir) else {
-            // No artifact found --- fastembed must have used a custom path. Skip silently.
+            // No artifact found - fastembed must have used a custom path. Skip silently.
             return Ok(());
         };
 
@@ -355,7 +355,7 @@ mod local {
     ///
     /// We check `$FASTEMBED_CACHE_PATH` first because the library's working-directory
     /// fallback (`<cwd>/.fastembed_cache`) is the path fastembed actually writes to when
-    /// `hf-hub` cannot resolve a home directory --- which is the common case in tests and
+    /// `hf-hub` cannot resolve a home directory - which is the common case in tests and
     /// Docker containers without a proper HOME.
     fn hf_cache_dir() -> Option<PathBuf> {
         // Explicit fastembed cache override.
@@ -580,7 +580,7 @@ mod local {
                 }
             }
 
-            // Should find the shallow model (depth 3 from tmp) --- the deep one (depth 10) is
+            // Should find the shallow model (depth 3 from tmp) - the deep one (depth 10) is
             // beyond the cap. The walk completes without stack overflow.
             let found = newest_onnx(&tmp);
             assert!(found.is_some(), "should find model within depth cap");

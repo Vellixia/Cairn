@@ -1,10 +1,10 @@
-//! GCounter --- grow-only counter (a classic Shapiro / Preguica CRDT).
+//! GCounter - grow-only counter (a classic Shapiro / Preguica CRDT).
 //!
 //! Each replica maintains a per-actor counter. On merge, every per-actor value is the
 //! `max` of the two sides. On increment, the local actor's slot goes up by 1.
 //!
 //! The total count is the sum of every actor's slot. Concurrent increments on different
-//! replicas both survive a merge --- that's the whole point of a CRDT: data loss is
+//! replicas both survive a merge - that's the whole point of a CRDT: data loss is
 //! impossible by construction.
 
 use serde::{Deserialize, Serialize};
@@ -204,7 +204,7 @@ mod tests {
         let mut b = GCounter::new();
         b.increment("x", 3);
         a.merge(&b);
-        // max(10, 3) = 10 --- not sum(10+3=13)
+        // max(10, 3) = 10 - not sum(10+3=13)
         assert_eq!(a.per_actor().get("x"), Some(&10));
         assert_eq!(a.total(), 10);
     }
@@ -226,7 +226,7 @@ mod tests {
         a.increment("bob", 2);
 
         // Two independently-built counters with the same content produce identical
-        // JSON --- important for byte-level convergence.
+        // JSON - important for byte-level convergence.
         let mut b = GCounter::new();
         b.increment("bob", 2);
         b.increment("alice", 1);

@@ -16,14 +16,14 @@
 //! ## Materialization
 //!
 //! [`ingest`] returns the raw chunks. The caller (HTTP handler or CLI
-//! subcommand) decides what to remember --- we don't write to the
+//! subcommand) decides what to remember - we don't write to the
 //! memory store from this crate to keep it pure (no I/O, no store).
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-/// One cue from a transcript --- VTT/SRT line, JSON event entry, etc.
+/// One cue from a transcript - VTT/SRT line, JSON event entry, etc.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cue {
     /// Speaker label when known. `None` for VTT/SRT lines without a `<v>`
@@ -38,7 +38,7 @@ pub struct Cue {
     pub text: String,
 }
 
-/// One chunk after windowing --- at least one cue, contiguous in time.
+/// One chunk after windowing - at least one cue, contiguous in time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CairnChunk {
     pub id: String,
@@ -214,7 +214,7 @@ fn parse_vtt_cue<'a>(
 }
 
 fn parse_vtt_timestamp_line(line: &str) -> Option<(u64, u64)> {
-    // "00:00:01.500 --> 00:00:04.000" --- both sides must parse.
+    // "00:00:01.500 --> 00:00:04.000" - both sides must parse.
     let mut parts = line.splitn(2, "-->");
     let start = parts.next()?.trim();
     let end = parts.next()?.trim();
@@ -480,7 +480,7 @@ mod tests {
             },
         ];
         let chunks = chunk_by_speaker_and_window(&cues, 60_000);
-        // 5 s apart --- same speaker --- collapse into one chunk.
+        // 5 s apart - same speaker - collapse into one chunk.
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].source_cues, 2);
     }
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(chunks.len(), 2, "60s boundary must split the chunk");
     }
 
-    // --- VTT edge / adversarial cases ---
+    // - VTT edge / adversarial cases ---
 
     #[test]
     fn vtt_header_only_returns_empty() {
@@ -567,7 +567,7 @@ mod tests {
         assert!(cues[0].start_ms < cues[1].start_ms);
     }
 
-    // --- SRT edge / adversarial cases ---
+    // - SRT edge / adversarial cases ---
 
     #[test]
     fn srt_empty_input_returns_empty() {
@@ -612,7 +612,7 @@ mod tests {
         assert!(cues[0].speaker.is_none(), "SRT format has no speaker field");
     }
 
-    // --- JSON edge / adversarial cases ---
+    // - JSON edge / adversarial cases ---
 
     #[test]
     fn json_empty_array_returns_no_cues() {
@@ -650,7 +650,7 @@ mod tests {
         assert!(cues[1].speaker.is_none());
     }
 
-    // --- chunking edge / adversarial cases ---
+    // - chunking edge / adversarial cases ---
 
     #[test]
     fn chunking_empty_cues_returns_empty() {

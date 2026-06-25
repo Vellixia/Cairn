@@ -1,9 +1,9 @@
 <!-- BEGIN CAIRN (managed by `cairn rules`) -->
-## Cairn — prefer these tools
+## Cairn - prefer these tools
 
 You have **Cairn** (MCP server `cairn`): persistent memory, lean context, and edit safety. Use it.
 
-- **Reading code/files:** use `read` instead of your default file read — unchanged re-reads are
+- **Reading code/files:** use `read` instead of your default file read - unchanged re-reads are
   nearly free, and `mode:"signatures"` returns a large file as just its structure (huge token
   saving). Recover any full original with `expand`.
 - **Memory:** at the start of a task, `recall` (or `assemble`) relevant past decisions and context;
@@ -17,10 +17,10 @@ You have **Cairn** (MCP server `cairn`): persistent memory, lean context, and ed
   durable knowledge. Curate with `memory_pin` (keep), `memory_reinforce` (bump confidence),
   `memory_delete` (remove stale). On self-hosted servers use `registry_search` / `registry_revoke`
   to manage the local pack registry.
-- **Dashboard is observability-only:** the web UI shows what exists and progress — you are the one
+- **Dashboard is observability-only:** the web UI shows what exists and progress - you are the one
   who writes, curates, and maintains; humans watch.
 
-Everything Cairn shows is lossless — the full original is always one `expand` away.
+Everything Cairn shows is lossless - the full original is always one `expand` away.
 <!-- END CAIRN -->
 
 ## Dev commands
@@ -33,7 +33,7 @@ cargo build --workspace
 ```
 
 - CI runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --workspace` on every PR via `.github/workflows/ci.yml`. Run the same commands locally before pushing.
-- Dependencies use tilde constraints (`~major.minor`) --- build with `--locked` to catch drift.
+- Dependencies use tilde constraints (`~major.minor`) - build with `--locked` to catch drift.
 - Run a single crate's tests: `cargo test -p cairn-core` (substitute any crate name).
 - `cargo build --workspace` does **not** require the web UI; `crates/cairn-api/build.rs` creates `web/out/` at compile time when missing so the binary falls back to its built-in page.
 
@@ -84,8 +84,8 @@ cd web && npm install && npm run dev   # :3000 -> API on :7777
 
 ## Key files
 
-- `Cargo.toml` --- workspace manifest, dep versions, `[profile.release]` (lto = "thin", strip = true)
-- `deny.toml` --- cargo-deny config (bans multiple-versions, yanked crates)
-- `rust-toolchain.toml` --- pins `stable` with `rustfmt` + `clippy` components
-- `.mcp.json` --- MCP config for OpenCode (Claude Code + Codex use their own configs)
-- `.claude/settings.json` --- Claude Code lifecycle hooks via `cairn hook`
+- `Cargo.toml` - workspace manifest, dep versions, `[profile.release]` (lto = "thin", strip = true)
+- `deny.toml` - cargo-deny config (bans multiple-versions, yanked crates)
+- `rust-toolchain.toml` - pins `stable` with `rustfmt` + `clippy` components
+- `.mcp.json` - MCP config for OpenCode (Claude Code + Codex use their own configs)
+- `.claude/settings.json` - Claude Code lifecycle hooks via `cairn hook`

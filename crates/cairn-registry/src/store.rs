@@ -41,7 +41,7 @@ pub enum RegistryError {
     },
 }
 
-/// What `POST /registry/packs` returns --- captures both the verification path taken and
+/// What `POST /registry/packs` returns - captures both the verification path taken and
 /// the stored metadata, so the publisher can confirm where their pack ended up.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishReceipt {
@@ -60,12 +60,12 @@ pub enum PublishStatus {
     /// trusted keys.
     Signed,
     /// Pack had no `signature.ed25519` entry. Stored because integrity hashes still
-    /// match --- but no author authenticity is asserted. The CLI / federation layer is
+    /// match - but no author authenticity is asserted. The CLI / federation layer is
     /// responsible for warning the user when this happens.
     Unsigned,
 }
 
-/// What we keep in `index.json` --- the fields a `GET /registry/packs` caller wants.
+/// What we keep in `index.json` - the fields a `GET /registry/packs` caller wants.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PackMeta {
     pub id: String,
@@ -91,7 +91,7 @@ pub struct PackMeta {
     #[serde(default)]
     pub origin: Option<String>,
     /// Number of provenance graph edges carried in this pack (Sprint 14c). The edges
-    /// themselves live in `graph.jsonl` inside the tarball --- `GET /registry/packs/:name`
+    /// themselves live in `graph.jsonl` inside the tarball - `GET /registry/packs/:name`
     /// returns the count and `GET /registry/packs/:name/:version/manifest.json` returns
     /// the full graph.
     #[serde(default)]
@@ -141,7 +141,7 @@ pub struct RevocationEvent {
     pub reason: Option<String>,
 }
 
-/// Registry's only mutable state. Cheap to wrap in `Arc` --- the disk is the source of
+/// Registry's only mutable state. Cheap to wrap in `Arc` - the disk is the source of
 /// truth, this is a coarse write lock to keep index/keys/revocations consistent.
 pub struct Registry {
     root: PathBuf,
@@ -217,7 +217,7 @@ impl Registry {
         Ok(out)
     }
 
-    /// List versions of a single pack (any order --- caller can sort by `created_at`).
+    /// List versions of a single pack (any order - caller can sort by `created_at`).
     pub fn list_versions(&self, name: &str) -> Result<Vec<PackMeta>, RegistryError> {
         let g = self.state.lock().expect("registry lock poisoned");
         Ok(g.index.iter().filter(|m| m.name == name).cloned().collect())
@@ -300,7 +300,7 @@ impl Registry {
             .clone())
     }
 
-    /// The newest revocation timestamp known to this registry --- the high-water mark for
+    /// The newest revocation timestamp known to this registry - the high-water mark for
     /// federation sync. `None` if no revocations have happened yet (a fresh subscriber
     /// should pass `since=0` to get the full log).
     pub fn last_revocation_ts(&self) -> Option<DateTime<Utc>> {
@@ -334,13 +334,13 @@ impl Registry {
     ///
     /// **Verification policy:** if the tarball contains `signature.ed25519`, at least one
     /// of `trusted_keys` (or the per-call override) must verify the signature. If the
-    /// tarball has no Ed25519 signature, it's stored anyway --- the per-file SHA-256s are
+    /// tarball has no Ed25519 signature, it's stored anyway - the per-file SHA-256s are
     /// still integrity-checked at install time.
     ///
     /// **Scope policy (Sprint 14):** when a pack's manifest declares a `scope`, the
     /// matching trust grant must allow a scope at least as wide. A grant with
     /// `allows = Team` can sign `local` or `team` packs, but not `public`. Mismatched
-    /// scopes fail with [`RegistryError::ScopeDenied`] --- the publisher should narrow
+    /// scopes fail with [`RegistryError::ScopeDenied`] - the publisher should narrow
     /// the pack's scope or request a wider grant.
     pub fn publish(
         &self,
@@ -400,7 +400,7 @@ impl Registry {
             (true, Some(k)) => (PublishStatus::Signed, Some(k.to_hex())),
             (true, None) => {
                 // Signed but no grant accepted the signature. Either no trust or scope
-                // mismatch --- surface the latter explicitly so the operator can fix it.
+                // mismatch - surface the latter explicitly so the operator can fix it.
                 let has_compatible_grant =
                     grants.iter().any(|g| scope_allows(g.allows, pack_scope));
                 if has_compatible_grant {
@@ -451,7 +451,7 @@ impl Registry {
         // can render metadata without unpacking. Use the canonical
         // `packs/<name>/<version>.manifest.json` shape (not `<version>.cairnpkg.manifest.json`)
         // so the `download_manifest` HTTP endpoint and a future `find` index agree on
-        // the same path. Same create_new semantics --- never clobber a cached manifest.
+        // the same path. Same create_new semantics - never clobber a cached manifest.
         let manifest_cache = pack_path.with_extension("manifest.json");
         match fs::OpenOptions::new()
             .write(true)
@@ -465,7 +465,7 @@ impl Registry {
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 // Manifest cache for this version already exists from a prior publish
                 // that wrote the tarball but never landed in the index (e.g. a crash).
-                // Don't fail the publish --- the cache is a hint, not the source of truth.
+                // Don't fail the publish - the cache is a hint, not the source of truth.
                 tracing::warn!(
                     path = %manifest_cache.display(),
                     "manifest cache already existed; overwriting"
@@ -526,7 +526,7 @@ impl Registry {
 
     /// Read the cached manifest for a stored pack (Sprint 14c). The cached file lives
     /// beside the tarball as `<version>.manifest.json` and contains the full pack
-    /// metadata --- including the graph.jsonl contents (when the publisher included
+    /// metadata - including the graph.jsonl contents (when the publisher included
     /// provenance edges). Useful for `/dashboard/registry` to render the provenance
     /// chain without unpacking the tarball.
     pub fn download_manifest(&self, name: &str, version: &str) -> Result<Vec<u8>, RegistryError> {
@@ -647,7 +647,7 @@ fn parse_pubkey(hex_str: &str) -> Result<PublicKey, RegistryError> {
 }
 
 /// Read the pack's declared scope from its manifest. The current `.cairnpkg` manifest
-/// doesn't carry an explicit `scope` field --- we infer it from the `description` field's
+/// doesn't carry an explicit `scope` field - we infer it from the `description` field's
 /// `scope: <local|team|public>` prefix when present, falling back to `public`.
 ///
 /// **SECURITY CAVEAT:** This is a substring match on a description string that the
@@ -659,7 +659,7 @@ fn parse_pubkey(hex_str: &str) -> Result<PublicKey, RegistryError> {
 /// re-publish). The first match in the fixed-order probe list wins, so the attack is
 /// trivial. Until the schema is upgraded, treat `manifest_scope` as best-effort and
 /// require a `trust_override` on publish for any non-`Public` scope.
-// FIXME: v0.6 --- replace description-prefix parsing with a first-class `scope` field in
+// FIXME: v0.6 - replace description-prefix parsing with a first-class `scope` field in
 // `cairn_pack::Manifest` and include it in the canonical signed payload. Track the
 // schema bump alongside the other v0.6 ledger + manifest migrations.
 fn manifest_scope(manifest: &cairn_pack::Manifest) -> TrustScope {
@@ -768,11 +768,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let reg = Registry::open(dir.path()).unwrap();
         let kp = Keypair::generate();
-        // Grant only allows Local --- pack's team scope should be rejected.
+        // Grant only allows Local - pack's team scope should be rejected.
         reg.trust(kp.public(), TrustScope::Local, None).unwrap();
 
         let mut pack = Pack::new("team-pack", "1.0.0");
-        pack.description = "scope: team --- shared with the team".into();
+        pack.description = "scope: team - shared with the team".into();
         pack.memories
             .push(serde_json::json!({"id": "m1", "content": "x"}));
         let td = TempDir::new().unwrap();
@@ -867,7 +867,7 @@ mod tests {
             "x",
             "1",
             "a",
-            "scope: local --- for me only",
+            "scope: local - for me only",
             Default::default(),
             Default::default(),
         );

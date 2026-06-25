@@ -6,7 +6,7 @@
 //!
 //! - [`Guard::verify_edit`] compares a *proposed* new version against the current file (pre-write).
 //! - [`Guard::verify_against_baseline`] compares the *current* file against the version Cairn
-//!   recorded when the agent last read it --- the PostToolUse check that catches damage after a read.
+//!   recorded when the agent last read it - the PostToolUse check that catches damage after a read.
 
 use cairn_core::{ContentHash, Result};
 use cairn_profile::{is_suspicious, strip_preference_blocks};
@@ -90,7 +90,7 @@ pub struct AnchorMeta {
     pub suspicious: bool,
 }
 
-/// A rolling reliability score (0--100) derived from recent guardrail outcomes --- the headline number
+/// A rolling reliability score (0--100) derived from recent guardrail outcomes - the headline number
 /// for the "stay reliable" pillar. Clean edits keep it high; warnings shave it, dangers and
 /// rollbacks pull it down.
 #[derive(Debug, Clone, Serialize)]
@@ -156,7 +156,7 @@ impl Guard {
     }
 
     /// Verify the *current* on-disk file against the version Cairn recorded when the agent last
-    /// read it (its edit baseline) --- catching silent corruption introduced after the read. Returns
+    /// read it (its edit baseline) - catching silent corruption introduced after the read. Returns
     /// `None` if Cairn has no baseline for this path (it was never read through Cairn).
     pub fn verify_against_baseline(&self, path: &Path) -> Result<Option<VerifyReport>> {
         let key = std::fs::canonicalize(path)
@@ -177,7 +177,7 @@ impl Guard {
         Ok(Some(assess(&key, &baseline, Some(hash), &current)))
     }
 
-    /// Set the current task anchor --- the goal Cairn re-injects at session start to keep the agent
+    /// Set the current task anchor - the goal Cairn re-injects at session start to keep the agent
     /// on track (anti-drift). A single current goal. Suspicious directive prefixes are stored but
     /// flagged; retrieval warns before the anchor is injected.
     pub fn set_anchor(&self, goal: &str) -> Result<AnchorMeta> {
@@ -374,7 +374,7 @@ fn assess(
         (
             Risk::Danger,
             format!(
-                "removes {removed} of {baseline_lines} lines ({:.0}%) with little replacement --- possible silent corruption",
+                "removes {removed} of {baseline_lines} lines ({:.0}%) with little replacement - possible silent corruption",
                 removed_ratio * 100.0
             ),
         )
@@ -382,7 +382,7 @@ fn assess(
         (
             Risk::Warn,
             format!(
-                "removes {removed} of {baseline_lines} lines ({:.0}%) --- review before accepting",
+                "removes {removed} of {baseline_lines} lines ({:.0}%) - review before accepting",
                 removed_ratio * 100.0
             ),
         )
@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(r.rollbacks, 0);
     }
 
-    // --- assess (pure, offline) ---
+    // - assess (pure, offline) ---
 
     #[test]
     fn assess_new_file_empty_baseline_is_ok() {
@@ -608,7 +608,7 @@ mod tests {
 
     #[test]
     fn assess_large_replacement_stays_ok() {
-        // Replace all 100 lines with 100 different lines --- removed_ratio ~ 1.0 but added ~ removed
+        // Replace all 100 lines with 100 different lines - removed_ratio ~ 1.0 but added ~ removed
         let baseline = (0..100).map(|i| format!("old {i}\n")).collect::<String>();
         let new = (0..100).map(|i| format!("new {i}\n")).collect::<String>();
         let r = assess("f.rs", &baseline, None, &new);

@@ -19,24 +19,19 @@ embed-local = ["cairn-store/local"]
 [dependencies]
 cairn-core.workspace = true
 cairn-store.workspace = true
-cairn-context.workspace = true
 cairn-memory.workspace = true
 cairn-guard.workspace = true
 cairn-assemble.workspace = true
 cairn-shell.workspace = true
 cairn-profile.workspace = true
 cairn-mcp.workspace = true
-cairn-share.workspace = true
-cairn-pack.workspace = true
 clap.workspace = true
 tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
 self_update.workspace = true
 ureq.workspace = true
 tracing-subscriber.workspace = true
-uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -4,16 +4,16 @@
 //! question and grade the retrieved set against the expected fact IDs. We use
 //! lexical overlap as the recall score: a question is "correctly answered" if
 //! every keyword from `expected_keywords` appears in the top-K retrieved fact
-//! contents. (The harness is intentionally lightweight --- it doesn't pull in
+//! contents. (The harness is intentionally lightweight - it doesn't pull in
 //! Cairn's full memory engine so this crate compiles fast and the benchmark
 //! stays deterministic.)
 //!
 //! The benchmark reports:
-//! - `recall_at_1`, `recall_at_3`, `recall_at_5` --- fraction of questions whose
+//! - `recall_at_1`, `recall_at_3`, `recall_at_5` - fraction of questions whose
 //!   expected keywords all appear in the top-K retrieved facts.
-//! - `precision_at_5` --- fraction of top-5 retrieved facts that are relevant
+//! - `precision_at_5` - fraction of top-5 retrieved facts that are relevant
 //!   (intersect with expected IDs).
-//! - `mean_rank` --- average rank of the first relevant fact (1-indexed; inf if
+//! - `mean_rank` - average rank of the first relevant fact (1-indexed; inf if
 //!   no relevant fact retrieved).
 
 use crate::fixture::Fixture;
@@ -173,7 +173,7 @@ mod tests {
         let f = Fixture::alex_employer_history();
         let r = LongMemEvalBenchmark::run(&[f]);
         assert_eq!(r.questions, 3);
-        // Recall@5 should be 1.0 --- lexical overlap is enough to recover all 3 questions.
+        // Recall@5 should be 1.0 - lexical overlap is enough to recover all 3 questions.
         assert_eq!(r.recall_at_5, 1.0);
         assert_eq!(r.recall_at_3, 1.0);
     }

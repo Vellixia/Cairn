@@ -1,320 +1,64 @@
-//! The `cairn` binary.
-//!
-//! `cairn` connects AI agents to a Cairn server and runs local tools against the local store.
-//! When `CAIRN_HELIX_URL` is set it talks to a local HelixDB; when `CAIRN_SERVER` is set it proxies
-//! through the remote Cairn HTTP API.
+//! The `cairn` binary - connects AI agents to a Cairn server.
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Context;
-use cairn_core::{Config, NewMemory};
+use cairn_core::Config;
 use clap::{Parser, Subcommand};
 
-mod bench;
 mod doctor;
-mod extra;
 mod hook;
 mod onboard;
-mod pack;
-mod pair;
-mod pool;
 mod rules;
 mod setup;
-mod sync;
 mod update;
 
 #[derive(Parser)]
-#[command(
-    name = "cairn",
-    version,
-    about = "Cairn client --- connect AI agents to a Cairn server"
-)]
+#[command(name = "cairn", version, about = "Cairn client - connect AI agents to a Cairn server")]
 struct Cli {
-    /// Override the data directory (defaults to the OS data dir).
     #[arg(long, global = true)]
     data_dir: Option<PathBuf>,
-
     #[command(subcommand)]
     cmd: Cmd,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Store a memory.
-    Remember { content: String },
-    /// Recall memories matching a query.
-    Recall {
-        query: String,
-        #[arg(long, default_value_t = 10)]
-        limit: usize,
-    },
-    /// Print the session-start bootstrap (wakeup) memories.
-    Wakeup {
-        #[arg(long, default_value_t = 12)]
-        limit: usize,
-    },
-    /// Record a standing preference (e.g. `cairn prefer always use ripgrep`).
-    Prefer {
-        #[arg(trailing_var_arg = true, num_args = 1..)]
-        rule: Vec<String>,
-    },
-    /// Set the current task anchor --- the goal re-injected at session start.
-    Anchor {
-        #[arg(trailing_var_arg = true, num_args = 1..)]
-        goal: Vec<String>,
-    },
-    /// Snapshot tracked files so you can roll back later.
-    Checkpoint {
-        #[arg(trailing_var_arg = true, num_args = 0..)]
-        label: Vec<String>,
-    },
-    /// Roll back tracked files to a checkpoint (undo damage).
-    Rollback { id: String },
-    /// List checkpoints (newest first).
-    Checkpoints,
-    /// Show basic stats.
-    Stats,
-    /// Verify the local setup.
+    /// Verify the local setup and server connectivity.
     Doctor {
-        /// Attempt to repair failures automatically (creates missing data dirs, etc.).
         #[arg(long)]
         fix: bool,
     },
-    /// Zero-prompt setup for first-run installs: doctor + provision store + wire agents.
+    /// Zero-prompt setup for first-run installs.
     Onboard {
-        /// Skip agent auto-detection and wiring (useful for CI).
         #[arg(long)]
         skip_agents: bool,
-        /// Remote Cairn server URL --- sets `CAIRN_SERVER` so the spawned `setup` subprocess
-        /// runs in remote-proxy mode.
         #[arg(long)]
         server: Option<String>,
-        /// Remote Cairn server token.
         #[arg(long)]
         token: Option<String>,
-    },
-    /// Measure the token savings Cairn gives on a codebase.
-    Bench { path: Option<PathBuf> },
-    /// Pair this device with a Cairn server using a code from the host.
-    Pair {
-        code: String,
-        /// Server base URL, e.g. http://192.168.1.10:7777
-        #[arg(long)]
-        server: String,
     },
     /// Configure an agent (or --all detected agents) to use a Cairn server.
     Setup {
-        /// Agent name: claude-code, cursor, vscode, windsurf, opencode. Omit (with --all) to auto-detect.
         agent: Option<String>,
-        /// Configure every detected agent.
         #[arg(long)]
         all: bool,
-        /// Remote Cairn server URL (defaults to `CAIRN_SERVER`).
-        #[arg(long)]
-        server: Option<String>,
-        /// Device token for the remote server (defaults to `CAIRN_TOKEN`).
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Build / query the memory provenance graph (Sprint 9).
-    Graph {
-        #[command(subcommand)]
-        action: GraphCmd,
-    },
-    /// Memory commands that go beyond remember / recall / wakeup (Sprint 9).
-    Memory {
-        #[command(subcommand)]
-        action: MemoryCmd,
-    },
-    /// Hybrid search (RRF + MMR) over the local store (Sprint 9).
-    Search {
-        query: String,
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
-    /// List sessions on the server.
-    Sessions {
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
         token: Option<String>,
     },
-    /// Show or update a single session.
-    Session {
-        #[command(subcommand)]
-        action: SessionCmd,
-    },
-    /// Print local metrics (memory/checkpoint counts). Live savings go through /api/metrics.
-    Metrics,
-    /// Build / inspect / install / publish `.cairnpkg` bundles (Sprint 11).
-    Pack {
-        #[command(subcommand)]
-        action: PackAction,
-    },
-    /// Write per-agent instruction files that tell the model to use Cairn's tools.
-    Rules {
-        /// Agent: claude-code, cursor, vscode, windsurf, opencode, agents. Omit with --all.
-        agent: Option<String>,
-        /// Write rules for every supported agent.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Run the MCP server over stdio (point your agent's MCP config at `cairn mcp`).
+    /// Run the MCP server over stdio (launched by AI agents).
     Mcp,
-    /// Run a command and print compressed output; the full output is retained and recoverable.
-    Run {
-        /// The command to run, e.g. `cairn run -- cargo test`.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 1..)]
-        command: Vec<String>,
-    },
-    /// Internal: handle a Claude Code lifecycle hook event (reads JSON on stdin).
+    /// Internal: handle a lifecycle hook event (launched by AI agents).
     Hook { event: String },
-    /// Sync memory with another Cairn server (last-write-wins).
-    Sync {
-        /// Server base URL, e.g. http://192.168.1.10:7777
-        #[arg(long)]
-        server: String,
-        /// Device token for the remote server (if it requires auth).
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Contribute your shareable knowledge to a server's collective pool (sanitized first).
-    Contribute {
-        /// Pool server base URL, e.g. http://pool.example.com:7777
-        #[arg(long)]
-        server: String,
-        /// Device token for the remote server (if it requires auth).
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Pull a server's collective pool into your local memory.
-    Pull {
-        /// Pool server base URL.
-        #[arg(long)]
-        server: String,
-        /// Device token for the remote server (if it requires auth).
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Check for a newer release and update the binary in place.
-    Update {
-        /// Only report whether an update is available; do not download.
+    /// Check for a newer release on GitHub and upgrade the binary.
+    Upgrade {
+        /// Only report whether an upgrade is available; do not download.
         #[arg(long)]
         check: bool,
-    },
-    /// Export all memories as JSON (to a file, or stdout if omitted).
-    Export {
-        path: Option<PathBuf>,
-        /// Sanitize for sharing: redact secrets/PII and drop memories that contain hard secrets.
-        #[arg(long)]
-        share: bool,
-    },
-    /// Import memories from a JSON file (last-write-wins), or a share bundle with `--share`.
-    Import {
-        path: PathBuf,
-        /// Treat the file as a sanitized share bundle and ingest it as shared memories.
-        #[arg(long)]
-        share: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum GraphCmd {
-    /// List memories that `applies_to <path>`.
-    Related { path: String },
-}
-
-#[derive(Subcommand)]
-enum MemoryCmd {
-    /// Newest-first memory timeline (default 20 entries).
-    Timeline {
-        #[arg(long, default_value_t = 20)]
-        limit: usize,
-    },
-    /// Promote working-tier memories to a semantic crystal (agentmemory pattern).
-    Crystallize,
-    /// Re-embed all memories using the current provider (use after switching CAIRN_EMBED_PROVIDER).
-    ReEmbed,
-}
-
-#[derive(Subcommand)]
-enum SessionCmd {
-    /// Show a session by id.
-    Show {
-        id: String,
-        #[arg(long)]
-        server: Option<String>,
-        #[arg(long)]
-        token: Option<String>,
-    },
-    /// Append a task to a session.
-    Task {
-        id: String,
-        task_id: String,
-        title: String,
-        progress: String,
-        #[arg(long)]
-        server: Option<String>,
-        #[arg(long)]
-        token: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum PackAction {
-    /// Bundle the current store into a new `.cairnpkg`.
-    Create {
-        name: String,
-        #[arg(long, default_value = "0.1.0")]
-        version: String,
-        #[arg(long, default_value = "")]
-        author: String,
-        #[arg(long, default_value = "")]
-        description: String,
-        /// Output path; defaults to `<name>.cairnpkg` in the current directory.
-        #[arg(long)]
-        output: Option<std::path::PathBuf>,
-    },
-    /// Print the manifest of a tarball.
-    Info { tarball: std::path::PathBuf },
-    /// Install a tarball into the local pack dir + ingest memories.
-    Install { tarball: std::path::PathBuf },
-    /// List installed packs.
-    List,
-    /// Remove an installed pack.
-    Remove { name: String },
-    /// Re-tar an installed pack into a file.
-    Export {
-        name: String,
-        output: std::path::PathBuf,
-    },
-    /// Import a tarball (alias for install with a friendlier verb).
-    Import { tarball: std::path::PathBuf },
-    /// Print (or toggle) the auto-load list.
-    AutoLoad,
-    /// POST a tarball to a registry.
-    Publish {
-        tarball: std::path::PathBuf,
-        /// Registry base URL, e.g. `https://cairn.sh`.
-        #[arg(long)]
-        registry: String,
-    },
-    /// Revoke (unpublish) a pack from a registry.
-    Revoke {
-        name: String,
-        version: String,
-        /// Registry base URL.
-        #[arg(long)]
-        registry: String,
-    },
-    /// Search a registry's pack catalog.
-    Search {
-        query: String,
-        /// Registry base URL.
-        #[arg(long)]
-        registry: String,
     },
 }
 
@@ -354,94 +98,13 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Config::resolve(cli.data_dir).context("resolving data dir")?;
 
     match cli.cmd {
-        Cmd::Remember { content } => {
-            let s = State::open(&cfg)?;
-            let m = s.mem.remember(NewMemory::new(content))?;
-            println!(
-                "remembered {} ({}/{})",
-                &m.id[..8],
-                m.kind.as_str(),
-                m.tier.as_str()
-            );
-        }
-        Cmd::Recall { query, limit } => {
-            let s = State::open(&cfg)?;
-            let hits = s.mem.recall(&query, limit)?;
-            if hits.is_empty() {
-                println!("(no matches)");
-            }
-            for h in hits {
-                println!("[{:.2}] {}", h.score, h.memory.content);
-            }
-        }
-        Cmd::Wakeup { limit } => {
-            let s = State::open(&cfg)?;
-            for m in s.mem.wakeup(limit)? {
-                println!("- ({}) {}", m.kind.as_str(), m.content);
-            }
-        }
-        Cmd::Prefer { rule } => {
-            let s = State::open(&cfg)?;
-            let m = s.profile.prefer(&rule.join(" "))?;
-            if m.suspicious {
-                println!("noted preference (flagged suspicious): {}", m.content);
-            } else {
-                println!("noted preference: {}", m.content);
-            }
-        }
-        Cmd::Anchor { goal } => {
-            let s = State::open(&cfg)?;
-            let goal = goal.join(" ");
-            s.guard.set_anchor(&goal)?;
-            println!("task anchor set: {goal}");
-        }
-        Cmd::Checkpoint { label } => {
-            let s = State::open(&cfg)?;
-            let label = if label.is_empty() {
-                "checkpoint".to_string()
-            } else {
-                label.join(" ")
-            };
-            let cp = s.guard.checkpoint(&label)?;
-            println!("checkpoint {} created ({} files tracked)", cp.id, cp.files);
-        }
-        Cmd::Rollback { id } => {
-            let s = State::open(&cfg)?;
-            let r = s.guard.rollback(&id)?;
-            println!(
-                "rolled back {}: {} restored, {} skipped",
-                id,
-                r.restored.len(),
-                r.skipped.len()
-            );
-        }
-        Cmd::Checkpoints => {
-            let s = State::open(&cfg)?;
-            for cp in s.guard.list_checkpoints()? {
-                println!(
-                    "{}  {}  ({} files)  {}",
-                    cp.id,
-                    cp.created_at.to_rfc3339(),
-                    cp.files,
-                    cp.label
-                );
-            }
-        }
-        Cmd::Stats => {
-            let s = State::open(&cfg)?;
-            println!("memories: {}", s.store.count_memories()?);
-        }
         Cmd::Doctor { fix } => {
             doctor::run_and_exit(doctor::DoctorOptions {
                 fix,
                 interactive: std::io::stdout().is_terminal(),
             })?;
         }
-        Cmd::Onboard {
-            skip_agents,
-            server,
-            token,
-        } => {
+        Cmd::Onboard { skip_agents, server, token } => {
             onboard::run(onboard::OnboardOptions {
                 skip_agents,
                 fix: true,
@@ -449,258 +112,14 @@ async fn main() -> anyhow::Result<()> {
                 token,
             })?;
         }
-        Cmd::Bench { path } => {
-            let s = State::open(&cfg)?;
-            let root = path
-                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-            bench::run(&s, &root)?;
+        Cmd::Setup { agent, all, server, token } => {
+            setup::run(agent.as_deref(), all, server.as_deref(), token.as_deref())?
         }
-        Cmd::Graph { action } => {
-            let s = State::open(&cfg)?;
-            match action {
-                GraphCmd::Related { path } => extra::graph(extra::GraphCmd::Related { path }, &s)?,
-            }
-        }
-        Cmd::Memory { action } => {
-            let s = State::open(&cfg)?;
-            match action {
-                MemoryCmd::Timeline { limit } => extra::memory_timeline(&s, limit)?,
-                MemoryCmd::Crystallize => extra::memory_crystallize(&s)?,
-                MemoryCmd::ReEmbed => extra::memory_re_embed(&s)?,
-            }
-        }
-        Cmd::Search { query, limit } => {
-            let s = State::open(&cfg)?;
-            extra::search(&s, &query, limit)?;
-        }
-        Cmd::Sessions { server, token } => {
-            extra::sessions_list(server.as_deref(), token.as_deref())?;
-        }
-        Cmd::Session { action } => match action {
-            SessionCmd::Show { id, server, token } => {
-                extra::session_show(server.as_deref(), token.as_deref(), &id)?;
-            }
-            SessionCmd::Task {
-                id,
-                task_id,
-                title,
-                progress,
-                server,
-                token,
-            } => {
-                extra::session_task(
-                    server.as_deref(),
-                    token.as_deref(),
-                    &id,
-                    &task_id,
-                    &title,
-                    &progress,
-                )?;
-            }
-        },
-        Cmd::Metrics => {
-            let s = State::open(&cfg)?;
-            extra::metrics(&s)?;
-        }
-        Cmd::Pack { action } => {
-            let s = State::open(&cfg)?;
-            let resolve = |p: Option<std::path::PathBuf>| -> std::path::PathBuf {
-                p.unwrap_or_else(|| {
-                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-                })
-            };
-            let pack = |a: pack::PackCmd| pack::run(a, &s);
-            match action {
-                PackAction::Create {
-                    name,
-                    version,
-                    author,
-                    description,
-                    output,
-                } => {
-                    let out = resolve(output);
-                    pack(pack::PackCmd::Create {
-                        name,
-                        version,
-                        author,
-                        description,
-                        output: out,
-                    })?;
-                }
-                PackAction::Info { tarball } => {
-                    pack(pack::PackCmd::Info { tarball })?;
-                }
-                PackAction::Install { tarball } => {
-                    pack(pack::PackCmd::Install { tarball })?;
-                }
-                PackAction::List => {
-                    pack(pack::PackCmd::List)?;
-                }
-                PackAction::Remove { name } => {
-                    pack(pack::PackCmd::Remove { name })?;
-                }
-                PackAction::Export { name, output } => {
-                    pack(pack::PackCmd::Export { name, output })?;
-                }
-                PackAction::Import { tarball } => {
-                    pack(pack::PackCmd::Import { tarball })?;
-                }
-                PackAction::AutoLoad => {
-                    pack(pack::PackCmd::AutoLoad)?;
-                }
-                PackAction::Publish { tarball, registry } => {
-                    pack(pack::PackCmd::Publish { tarball, registry })?;
-                }
-                PackAction::Revoke {
-                    name,
-                    version,
-                    registry,
-                } => {
-                    pack(pack::PackCmd::Revoke {
-                        name,
-                        version,
-                        registry,
-                    })?;
-                }
-                PackAction::Search { query, registry } => {
-                    pack(pack::PackCmd::Search { query, registry })?;
-                }
-            }
-        }
-        Cmd::Pair { code, server } => {
-            let s = State::open(&cfg)?;
-            pair::claim(&s, &server, &code)?;
-        }
-        Cmd::Setup {
-            agent,
-            all,
-            server,
-            token,
-        } => setup::run(agent.as_deref(), all, server.as_deref(), token.as_deref())?,
-        Cmd::Rules { agent, all } => rules::run(agent.as_deref(), all)?,
         Cmd::Mcp => {
             cairn_mcp::serve_stdio(&cfg)?;
         }
-        Cmd::Run { command } => {
-            if command.is_empty() {
-                anyhow::bail!("usage: cairn run -- <command>");
-            }
-            let s = State::open(&cfg)?;
-            let output = std::process::Command::new(&command[0])
-                .args(&command[1..])
-                .output()
-                .with_context(|| format!("running `{}`", command.join(" ")))?;
-            let mut combined = String::from_utf8_lossy(&output.stdout).into_owned();
-            combined.push_str(&String::from_utf8_lossy(&output.stderr));
-            let c = s.shell.compress(&command.join(" "), &combined)?;
-            print!("{}", c.output);
-            if !c.output.ends_with('\n') {
-                println!();
-            }
-            eprintln!(
-                "[cairn: {} -> {} lines, {:.0}% saved - recover full output with `expand {}`]",
-                c.original_lines,
-                c.compressed_lines,
-                c.saved_ratio * 100.0,
-                c.original_hash
-            );
-            std::process::exit(output.status.code().unwrap_or(0));
-        }
         Cmd::Hook { event } => hook::run(&cfg, &event)?,
-        Cmd::Sync { server, token } => {
-            let s = State::open(&cfg)?;
-            sync::run(&s.store, &server, token.as_deref())?;
-        }
-        Cmd::Contribute { server, token } => {
-            let s = State::open(&cfg)?;
-            pool::contribute(&s.store, &server, token.as_deref())?;
-        }
-        Cmd::Pull { server, token } => {
-            let s = State::open(&cfg)?;
-            pool::pull(&s.mem, &server, token.as_deref())?;
-        }
-        Cmd::Update { check } => update::run(check)?,
-        Cmd::Export { path, share } => {
-            let s = State::open(&cfg)?;
-            let mems = s.store.all_memories()?;
-            let json = if share {
-                build_share_bundle(&mems)?
-            } else {
-                serde_json::to_string_pretty(&mems)?
-            };
-            match path {
-                Some(p) => {
-                    std::fs::write(&p, json)?;
-                    let what = if share {
-                        "shareable memories"
-                    } else {
-                        "memories"
-                    };
-                    println!("exported {what} to {}", p.display());
-                }
-                None => println!("{json}"),
-            }
-        }
-        Cmd::Import { path, share } => {
-            let s = State::open(&cfg)?;
-            let text = std::fs::read_to_string(&path)?;
-            if share {
-                let bundle: cairn_share::ShareBundle = serde_json::from_str(&text)?;
-                let news = bundle.into_new_memories();
-                let total = news.len();
-                for nm in news {
-                    s.mem.remember(nm)?;
-                }
-                println!("ingested {total} shared memories (deduplicated against existing)");
-            } else {
-                let mems: Vec<cairn_core::Memory> = serde_json::from_str(&text)?;
-                let mut applied = 0usize;
-                for m in &mems {
-                    if s.store.upsert_memory(m)? {
-                        applied += 1;
-                    }
-                }
-                println!("imported {applied} of {} memories", mems.len());
-            }
-        }
+        Cmd::Upgrade { check } => update::run(check)?,
     }
     Ok(())
-}
-
-fn build_share_bundle(mems: &[cairn_core::Memory]) -> anyhow::Result<String> {
-    let san = cairn_share::Sanitizer::new();
-    let (bundle, stats) = san.bundle(mems);
-    eprintln!(
-        "[cairn share: {} scanned -> {} shareable ({} need review), {} withheld as private]",
-        stats.total, stats.shared, stats.needs_review, stats.withheld
-    );
-    Ok(serde_json::to_string_pretty(&bundle)?)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cairn_core::NewMemory;
-
-    #[test]
-    fn share_bundle_redacts_pii_and_withholds_hard_secrets() {
-        let clean = NewMemory::new("use BM25 for recall ranking").into_memory();
-        let pii =
-            NewMemory::new("reach the team at ops@example.com about the rollout").into_memory();
-        let leak = format!(
-            "api_key = sk-ant-{}",
-            "api03-abcdefghijklmnopqrstuvwxyz0123"
-        );
-        let secret = NewMemory::new(&leak).into_memory();
-
-        let json = build_share_bundle(&[clean, pii, secret]).unwrap();
-        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        let mems = v["memories"].as_array().unwrap();
-
-        assert_eq!(mems.len(), 2);
-        assert!(json.contains("[redacted:email]"));
-        assert!(!json.contains("ops@example.com"));
-        assert!(!json.contains("abcdefghijklmnopqrstuvwxyz0123"));
-        assert_eq!(v["schema"], "cairn-share-bundle");
-    }
 }

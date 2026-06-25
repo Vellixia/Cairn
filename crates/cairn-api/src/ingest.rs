@@ -1,7 +1,7 @@
 //! HTTP handler for `/api/ingest/transcript` (v0.5.0 Sprint 22).
 //!
 //! Accepts a raw VTT/SRT/JSON transcript body and writes one memory per
-//! chunk to the store. The endpoint is intentionally minimal --- it does
+//! chunk to the store. The endpoint is intentionally minimal - it does
 //! NOT summarize; each chunk becomes a single `Note` memory with
 //! `applies_to = ["transcript:<source_url>"]` and `concepts =
 //! ["transcript", speaker]`. The dashboard / future summarization step
@@ -28,7 +28,7 @@ pub struct TranscriptRequest {
     /// try all three in order and use whichever parses successfully.
     #[serde(default)]
     pub format: Option<String>,
-    /// Optional source URL --- stored as `applies_to = ["transcript:<url>"]`.
+    /// Optional source URL - stored as `applies_to = ["transcript:<url>"]`.
     #[serde(default)]
     pub source_url: Option<String>,
     /// Chunk window in milliseconds (default 60_000).
@@ -42,7 +42,7 @@ pub struct TranscriptResponse {
     pub memory_ids: Vec<String>,
 }
 
-/// `POST /api/ingest/transcript` --- parse + chunk + write to the memory
+/// `POST /api/ingest/transcript` - parse + chunk + write to the memory
 /// store. Returns the list of new memory ids.
 pub async fn transcript(
     State(state): State<AppState>,

@@ -1,6 +1,6 @@
 //! Offline-first sync via CRDTs (v0.5.0 Sprint 15a).
 //!
-//! The pre-0.5.0 sync path used **last-write-wins** --- two devices editing the same
+//! The pre-0.5.0 sync path used **last-write-wins** - two devices editing the same
 //! memory offline would silently drop one of the edits when they reconnected. That was
 //! fine for the simple "remember once, recall forever" model, but it lost data the
 //! moment a user edited a memory from two devices without an active connection.
@@ -17,9 +17,9 @@
 //!
 //! What we **don't** CRDT-ify: the memory body itself (`content`, `importance`,
 //! `files`, `description`). Those fields are owned by a single logical "latest write"
-//! --- but the comparison uses vector clocks instead of wall-clock timestamps, so a
-//! write from a device with a fresh clock doesn't silently overwrite an older write
-//! that just happened to land later.
+//! - but the comparison uses vector clocks instead of wall-clock timestamps, so a
+//!   write from a device with a fresh clock doesn't silently overwrite an older write
+//!   that just happened to land later.
 //!
 //! See ADR-019 for the rationale on why we picked these two CRDTs over a full
 //! automerge/automerge-style document CRDT (binary size + dependency weight).

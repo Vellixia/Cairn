@@ -219,7 +219,7 @@ mod pair_code {
             .collect();
         let token = state.store.create_token(name, TokenScope::Write, None)?;
         let expires_at = Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64);
-        // Store the token id (not the bearer) --- `pair_claim` signs a fresh JWT at claim time, same
+        // Store the token id (not the bearer) - `pair_claim` signs a fresh JWT at claim time, same
         // pattern as the existing `/api/pair/new` flow.
         state
             .store

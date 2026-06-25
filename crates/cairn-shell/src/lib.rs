@@ -1,8 +1,8 @@
-//! Shell/tool-output compression --- Cairn's take on RTK.
+//! Shell/tool-output compression - Cairn's take on RTK.
 //!
 //! Verbose command output (cargo test, git status, build logs, directory listings) burns tokens.
 //! We filter the noise and collapse repetition into a compact view, while retaining the **exact**
-//! original in the blob store so it's recoverable byte-for-byte via `expand <hash>` --- nothing is
+//! original in the blob store so it's recoverable byte-for-byte via `expand <hash>` - nothing is
 //! lost. The compression itself is a set of pure functions; [`ShellCompressor`] adds retention.
 
 use cairn_core::Result;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize)]
 pub struct Compressed {
     pub command: String,
-    /// Handle to the retained full original --- recover it with `expand`.
+    /// Handle to the retained full original - recover it with `expand`.
     pub original_hash: String,
     pub original_lines: usize,
     pub compressed_lines: usize,
@@ -160,7 +160,7 @@ fn truncate_head_tail(lines: &[String], limit: usize, head: usize, tail: usize) 
 mod tests {
     use super::*;
 
-    // --- filter_keep ---
+    // - filter_keep ---
 
     #[test]
     fn filter_keep_empty_input_returns_empty() {
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(out.len(), 1);
     }
 
-    // --- filter_drop ---
+    // - filter_drop ---
 
     #[test]
     fn filter_drop_empty_input_returns_empty() {
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(out, vec!["keep this", "also keep"]);
     }
 
-    // --- dedup_consecutive ---
+    // - dedup_consecutive ---
 
     #[test]
     fn dedup_empty() {
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(dedup_consecutive(&lines).len(), 3);
     }
 
-    // --- truncate_head_tail ---
+    // - truncate_head_tail ---
 
     #[test]
     fn truncate_below_limit_unchanged() {
@@ -311,7 +311,7 @@ mod tests {
         );
     }
 
-    // --- compress_output ---
+    // - compress_output ---
 
     #[test]
     fn cargo_test_keeps_failures_drops_passes() {

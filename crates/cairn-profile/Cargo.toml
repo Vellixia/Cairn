@@ -1,6 +1,6 @@
 [package]
 name = "cairn-profile"
-description = "Cairn preference/behavior profile --- learn how the user works and inject it."
+description = "Cairn preference/behavior profile - learn how the user works and inject it."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

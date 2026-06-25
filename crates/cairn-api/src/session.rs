@@ -2,7 +2,7 @@
 //!
 //! The dashboard uses an httpOnly cookie instead of a JWT in `Authorization`. The cookie is signed
 //! (HMAC-SHA256) using the same `CAIRN_SECRET_KEY` as device tokens so a single secret covers both
-//! auth surfaces. The signed payload includes the admin's `generation` counter --- when the admin
+//! auth surfaces. The signed payload includes the admin's `generation` counter - when the admin
 //! rotates their password, the generation bumps and every previously-issued cookie is rejected by
 //! [`Session::verify`].
 //!
@@ -10,7 +10,7 @@
 //! Wire format: the same string is what gets written into the `Set-Cookie` and `Cookie` headers.
 //!
 //! Sliding TTL: every call to [`SessionSigner::verify`] returns the original payload plus a hint
-//! about whether the session has consumed more than half its TTL --- the caller can choose to
+//! about whether the session has consumed more than half its TTL - the caller can choose to
 //! re-issue a fresh cookie on the same response. This is what keeps long-lived sessions from
 //! expiring under the user without weakening the absolute maximum lifetime.
 

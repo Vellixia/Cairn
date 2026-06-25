@@ -28,7 +28,7 @@ pub struct Pack {
     pub patterns: Vec<serde_json::Value>,
     #[serde(default)]
     pub graph_edges: Vec<serde_json::Value>,
-    /// Optional author public key --- set by [`Pack::write_tarball_signed`] and recorded in
+    /// Optional author public key - set by [`Pack::write_tarball_signed`] and recorded in
     /// the manifest's `signers` list. Not part of the on-disk format; lives only in the
     /// builder.
     #[serde(skip)]
@@ -56,12 +56,12 @@ impl Pack {
     /// Write the pack to a tarball at `output_path`. Layout (matching the lean-ctx
     /// `.ctxpkg` design we adapted):
     ///
-    /// - `manifest.json` --- at the top, JSON
-    /// - `memory.jsonl`, `profile.jsonl`, `patterns.jsonl`, `graph.jsonl` --- newline-delimited JSON
-    /// - `signature.sha256` --- hex SHA-256 of the canonical manifest bytes (integrity only)
+    /// - `manifest.json` - at the top, JSON
+    /// - `memory.jsonl`, `profile.jsonl`, `patterns.jsonl`, `graph.jsonl` - newline-delimited JSON
+    /// - `signature.sha256` - hex SHA-256 of the canonical manifest bytes (integrity only)
     ///
     /// For authenticity (proves the pack came from a specific author), call
-    /// [`Pack::write_tarball_signed`] with an Ed25519 keypair instead --- it adds
+    /// [`Pack::write_tarball_signed`] with an Ed25519 keypair instead - it adds
     /// `signature.ed25519` and embeds the author's public key in the manifest.
     ///
     /// We use the [tar] crate via the `tempfile` pattern (build in a tempdir, then rename).
@@ -129,7 +129,7 @@ impl Pack {
             );
         }
 
-        // Write the tarball. We hand-roll the ustar header format --- small enough that
+        // Write the tarball. We hand-roll the ustar header format - small enough that
         // adding the `tar` crate as a dependency just for one writer is wasteful, and the
         // format is well documented.
         let mut file = fs::File::create(output_path)?;
@@ -156,7 +156,7 @@ impl Pack {
                     out.push(b'\n');
                 }
                 Err(_) => {
-                    // Skip items that don't serialize --- better than failing the whole pack.
+                    // Skip items that don't serialize - better than failing the whole pack.
                 }
             }
         }

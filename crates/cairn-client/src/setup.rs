@@ -1,14 +1,14 @@
-//! `cairn setup [agent|--all]` --- wire AI agents up to a Cairn server.
+//! `cairn setup [agent|--all]` - wire AI agents up to a Cairn server.
 //!
 //! Every merge is **non-destructive**: existing config is preserved and our entries are added
 //! idempotently (running twice changes nothing). Each agent is configured in its own native
 //! format:
 //!
-//! - **Claude Code** --- project `.mcp.json` (the `cairn` MCP server) **and** `.claude/settings.json`
+//! - **Claude Code** - project `.mcp.json` (the `cairn` MCP server) **and** `.claude/settings.json`
 //!   lifecycle hooks.
-//! - **Codex CLI** --- `~/.codex/config.toml` (or `<project>/.codex/config.toml` for project-scope)
+//! - **Codex CLI** - `~/.codex/config.toml` (or `<project>/.codex/config.toml` for project-scope)
 //!   under `[mcp_servers.cairn]` with stdio transport (TOML, not JSON).
-//! - **OpenCode** --- `$XDG_CONFIG_HOME/opencode/opencode.json` on Unix and
+//! - **OpenCode** - `$XDG_CONFIG_HOME/opencode/opencode.json` on Unix and
 //!   `%USERPROFILE%\.config\opencode\opencode.json` on Windows (XDG-style on both).
 //!   `mcp` top-level key with `{ type, command, environment, enabled }` entries.
 //!
@@ -234,7 +234,7 @@ fn codex_config_path(home: Option<&Path>) -> PathBuf {
 ///
 /// Codex reads TOML, not JSON. We keep this dependency-free: hand-rolled merge
 /// preserves any existing mcp_servers table and only touches our entry. The
-/// block is intentionally simple --- no multi-line arrays, no comments --- so we
+/// block is intentionally simple - no multi-line arrays, no comments - so we
 /// don't have to round-trip a real TOML parser for one stanza.
 fn install_codex(home: Option<&Path>, server: Option<&str>, token: Option<&str>) -> Result<()> {
     let path = codex_config_path(home);
@@ -394,7 +394,7 @@ fn merge_codex_block(original: &str, new_block: &str) -> String {
     }
 
     if !replaced_cairn {
-        // No existing cairn sub-block anywhere --- append at end.
+        // No existing cairn sub-block anywhere - append at end.
         if !out.ends_with('\n') && !out.is_empty() {
             out.push('\n');
         }
@@ -460,7 +460,7 @@ fn install_claude_code(dir: &Path, server: Option<&str>, token: Option<&str>) ->
             hooks,
             "PostToolUse",
             "cairn hook PostToolUse",
-            Some("Edit|Write|MultiEdit|NotebookEdit"),
+            Some("Edit|Write|MultiEdit|NotebookEdit|StrReplace"),
         );
         add_hook(hooks, "SessionEnd", "cairn hook SessionEnd", None);
     }

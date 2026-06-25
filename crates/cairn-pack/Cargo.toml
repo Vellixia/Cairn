@@ -1,6 +1,6 @@
 [package]
 name = "cairn-pack"
-description = "Context package format (`.cairnpkg`) --- portable share + import bundles for Cairn memories, profile, patterns, and graph."
+description = "Context package format (`.cairnpkg`) - portable share + import bundles for Cairn memories, profile, patterns, and graph."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -4,7 +4,7 @@
 //! browser-issued `PushSubscription` JSON. We persist it (one file per
 //! subscription under `<data_dir>/push/`) and broadcast every drift /
 //! revocation event from the event broker to all live subscriptions via the
-//! Web Push protocol (simplified to `display` + `tag` + a JSON body --- full
+//! Web Push protocol (simplified to `display` + `tag` + a JSON body - full
 //! VAPID signing is a v0.6 item).
 //!
 //! For v0.5.0 we focus on:
@@ -13,7 +13,7 @@
 //! 2. Broadcasting on drift / revoke events from the existing `EventBroker`.
 //!
 //! The actual outbound HTTP POST to the push provider (FCM, Mozilla Autopush,
-//! APNs, etc.) is left to a future "push relay" deployment --- we just write
+//! APNs, etc.) is left to a future "push relay" deployment - we just write
 //! the subscription record and the per-subscription cursor.
 
 use chrono::{DateTime, Utc};
@@ -38,7 +38,7 @@ pub struct PushSubscriptionRecord {
     pub user_agent: Option<String>,
     pub created_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
-    /// Cursor (event id) the subscriber has acknowledged --- drives
+    /// Cursor (event id) the subscriber has acknowledged - drives
     /// `?since=` semantics for re-subscribed clients.
     pub last_event_id: i64,
 }
@@ -60,7 +60,7 @@ pub enum PushStoreError {
 }
 
 /// On-disk store for push subscriptions. Cheap clone (`Arc` inside if we
-/// wanted), but we hold a single instance per process --- no sharing needed.
+/// wanted), but we hold a single instance per process - no sharing needed.
 pub struct PushStore {
     root: PathBuf,
     cache: Mutex<Vec<PushSubscriptionRecord>>,
@@ -98,7 +98,7 @@ impl PushStore {
         if let Some(existing) = guard.iter_mut().find(|r| r.endpoint == endpoint) {
             existing.last_seen_at = now;
             existing.keys = keys;
-            // First-registration UA wins --- a user-agent change usually means the
+            // First-registration UA wins - a user-agent change usually means the
             // browser navigated, not that the subscription itself changed.
             if existing.user_agent.is_none() {
                 existing.user_agent = user_agent;
@@ -133,7 +133,7 @@ impl PushStore {
     pub fn unsubscribe(&self, id: &str) -> Result<(), PushStoreError> {
         let mut guard = self.cache.lock().expect("push cache poisoned");
         guard.retain(|r| r.id != id);
-        // Distinguish "file was already gone" (NotFound --- fine, we just removed it
+        // Distinguish "file was already gone" (NotFound - fine, we just removed it
         // from the cache too) from a real I/O error (log it and surface as a
         // PushStoreError). Pre-fix both were silently swallowed with `let _ =`,
         // letting zombie subscription files accumulate on disk after a crash.
@@ -209,7 +209,7 @@ mod tests {
             )
             .unwrap();
         store.ack(&r.id, 5).unwrap();
-        store.ack(&r.id, 3).unwrap(); // smaller --- no-op
+        store.ack(&r.id, 3).unwrap(); // smaller - no-op
         let after = store.list();
         assert_eq!(after[0].last_event_id, 5);
     }
@@ -245,7 +245,7 @@ mod tests {
     }
 }
 
-// ---- HTTP handlers ----------------------------------------------------------
+// -- HTTP handlers --------------------------------------------------------
 //
 // Three small handlers, each accepting the AppState via axum's
 // State<T> extractor. The push module owns these so the route() callsite
@@ -267,7 +267,7 @@ pub struct SubscribeRequest {
     pub user_agent: Option<String>,
 }
 
-/// `POST /api/push/subscribe` --- the dashboard's SW posts its browser-issued
+/// `POST /api/push/subscribe` - the dashboard's SW posts its browser-issued
 /// `PushSubscription` JSON. We persist it and return the assigned id.
 pub async fn subscribe(
     State(state): State<AppState>,
@@ -295,7 +295,7 @@ pub struct UnsubscribeRequest {
     pub id: String,
 }
 
-/// `POST /api/push/unsubscribe` --- drop a subscription by id. Called by the SW
+/// `POST /api/push/unsubscribe` - drop a subscription by id. Called by the SW
 /// when the dashboard unregisters.
 pub async fn unsubscribe(
     State(state): State<AppState>,
@@ -314,7 +314,7 @@ pub async fn unsubscribe(
     }
 }
 
-/// `GET /api/push/list` --- diagnostics. Returns every stored subscription.
+/// `GET /api/push/list` - diagnostics. Returns every stored subscription.
 pub async fn list_subscriptions(State(state): State<AppState>) -> Response {
     let Some(store) = state.push.as_ref() else {
         return Json(Vec::<PushSubscriptionRecord>::new()).into_response();

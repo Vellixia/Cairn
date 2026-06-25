@@ -1,6 +1,6 @@
 # Architecture
 
-How Cairn is structured today --- crate graph, data flow, MCP tool surface, API endpoints,
+How Cairn is structured today - crate graph, data flow, MCP tool surface, API endpoints,
 and Docker topology.
 
 ---
@@ -38,7 +38,7 @@ rebuilt only when the Docker image is rebuilt. See ADR-029.
 
 ---
 
-## Cargo Workspace --- 21 Crates
+## Cargo Workspace - 21 Crates
 
 ### Dependency Graph
 
@@ -62,7 +62,7 @@ graph BT
     proactive["cairn-proactive<br/>intent classifier + auto-inject"]
     proxy["cairn-proxy<br/>cairn.sh reverse proxy"]
     ingest["cairn-ingest<br/>VTT/SRT/JSON transcript parsers"]
-    mcp["cairn-mcp<br/>MCP server (stdio) --- 29 tools + 10 graph actions - 6 resources - 5 prompts"]
+    mcp["cairn-mcp<br/>MCP server (stdio) - 29 tools + 10 graph actions - 6 resources - 5 prompts"]
     api["cairn-api<br/>REST API + web UI + registry + extensions + push"]
     server["cairn-server<br/>in-container bin<br/>(cairn-api::bin::cairn_server)"]
     cli["cairn<br/>host binary<br/>(cairn-client crate)"] 
@@ -113,7 +113,7 @@ graph BT
 | `cairn-share` | Privacy-first sanitization: secret/PII detection, redaction, classification (shareable/review/private). |
 | `cairn-embed` | Pluggable embeddings: local (fastembed/ONNX all-MiniLM-L6-v2), OpenAI, Ollama, hashing fallback. |
 | `cairn-session` | Cross-Session Protocol (JSONL sessions + drift log), approve/reject workflow. |
-| `cairn-pack` | `.cairnpkg` format --- hand-rolled ustar, SHA-256 per-file integrity, HMAC signature, Ed25519 signing. |
+| `cairn-pack` | `.cairnpkg` format - hand-rolled ustar, SHA-256 per-file integrity, HMAC signature, Ed25519 signing. |
 | `cairn-registry` | Self-hosted pack registry: HTTP endpoints under `/registry/*`, trust scopes, revocation cascade. |
 | `cairn-sync` | Offline-first CRDT sync: `GCounter` + `ORSet` + vector clocks + Argon2id/ChaCha20-Poly1305 E2E encryption. |
 | `cairn-bench` | LongMemEval + horizon + retention benchmarks with hand-built fixtures. |
@@ -238,7 +238,7 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 | `CAIRN_HELIX_URL` | (none) | HelixDB server URL |
 | `CAIRN_HELIX_TOKEN` | (none) | HelixDB bearer API key |
 | `CAIRN_HELIX_NS` | `cairn_` | HelixDB label namespace prefix |
-| `CAIRN_SECRET_KEY` | (required) | HMAC secret for JWTs (‰¥ 32 bytes) |
+| `CAIRN_SECRET_KEY` | (required) | HMAC secret for JWTs ( 32 bytes) |
 | `CAIRN_TLS_CERT` / `CAIRN_TLS_KEY` | (none) | TLS material for HTTPS |
 | `CAIRN_INSECURE` | `0` | Allow plain HTTP on non-loopback |
 | `CAIRN_WORKSPACE_ROOT` | (none) | Project root for context engine |
@@ -309,7 +309,7 @@ And add the MCP entry to `.mcp.json` (same as OpenCode above).
 
 `cairn setup codex` writes the `[mcp_servers.cairn]` block to
 `~/.codex/config.toml` (or `<project>/.codex/config.toml` for project scope).
-Codex reads TOML, not JSON --- the block uses stdio transport with
+Codex reads TOML, not JSON - the block uses stdio transport with
 `command = "cairn"` and `args = ["mcp"]`. When `--server` is passed we
 also write a `[mcp_servers.cairn.env]` sub-block with
 `CAIRN_SERVER` and `CAIRN_TOKEN`.
@@ -318,9 +318,9 @@ also write a `[mcp_servers.cairn.env]` sub-block with
 
 ## See also
 
-- [Plan v0.5.0](PLAN_v0.5.0.md) --- 23-sprint plan, success metrics, risks
-- [Benchmarks](BENCHMARKS.md) --- measured token savings + methodology
-- [Decisions](DECISIONS.md) --- 26 ADRs
-- [Roadmap](ROADMAP.md) --- what's done, what's next
-- [Security](../SECURITY.md) --- threat model + hardening checklist
-- [E2E Tests](E2E.md) --- 20-scenario end-to-end test harness
+- [Plan v0.5.0](PLAN_v0.5.0.md) - 23-sprint plan, success metrics, risks
+- [Benchmarks](BENCHMARKS.md) - measured token savings + methodology
+- [Decisions](DECISIONS.md) - 26 ADRs
+- [Roadmap](ROADMAP.md) - what's done, what's next
+- [Security](../SECURITY.md) - threat model + hardening checklist
+- [E2E Tests](E2E.md) - 20-scenario end-to-end test harness

@@ -12,7 +12,7 @@
 //!    and appends the event to its own `revocations.jsonl` so downstream peers pick it
 //!    up on their next sync.
 //!
-//! Auth is out of scope for v0.5.0 --- the peer is expected to be on a private network
+//! Auth is out of scope for v0.5.0 - the peer is expected to be on a private network
 //! or fronted by an auth proxy. v0.6 will add bearer-token auth (see ADR-018).
 //!
 //! Pull-only for now: publish goes through the registry you configured as your
@@ -38,7 +38,7 @@ pub enum FederationError {
     BadSignature(String),
 }
 
-/// What the subscriber's `sync_from` returns --- the set of newly-cascaded revocations
+/// What the subscriber's `sync_from` returns - the set of newly-cascaded revocations
 /// plus the new high-water mark for the next sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncReport {
@@ -50,7 +50,7 @@ pub struct SyncReport {
     /// The newest revocation timestamp the subscriber now knows about. Pass this as
     /// `since=` on the next call.
     pub new_high_water: DateTime<Utc>,
-    /// The peer URL we synced from --- useful in logs and for the audit log.
+    /// The peer URL we synced from - useful in logs and for the audit log.
     pub peer: String,
 }
 
@@ -60,7 +60,7 @@ pub struct PeerConfig {
     pub name: String,
     pub base_url: String,
     /// Optional bearer token. When present, included as `Authorization: Bearer ...`.
-    /// Not currently checked by the receiving registry --- that's a v0.6 item.
+    /// Not currently checked by the receiving registry - that's a v0.6 item.
     pub token: Option<String>,
 }
 
@@ -114,7 +114,7 @@ pub fn sync_from(registry: &Registry, peer: &PeerConfig) -> Result<SyncReport, F
             continue;
         }
         // Apply: delete local pack tarball (if any) and append to our revocations log.
-        // We don't surface a NotFound error if the local copy is gone --- that's the
+        // We don't surface a NotFound error if the local copy is gone - that's the
         // success case for a subscriber that never installed the pack in the first place.
         if let Err(RegistryError::NotFound(_)) = registry.revoke(&ev.name, &ev.version) {
             // No local copy; record the event anyway so we can tell peers we know.
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn sync_from_applies_events_present_in_peer_log() {
-        // We don't spin up an HTTP server here --- the sync logic is straightforward enough
+        // We don't spin up an HTTP server here - the sync logic is straightforward enough
         // that we test it by injecting events directly. The HTTP layer is covered by the
         // cairn-api integration test for the `/registry/revocations?since=` route.
         let peer_dir = TempDir::new().unwrap();
@@ -216,7 +216,7 @@ mod tests {
             Ok(ev) => assert_eq!(ev.name, "cascade-test"),
             Err(crate::RegistryError::NotFound(_)) => {
                 // Expected: no local pack. Append the event manually to record that
-                // we saw it --- the federation sync layer does this via direct access to
+                // we saw it - the federation sync layer does this via direct access to
                 // the revocations log; here we simulate via revoke_if_exists below.
                 sub_reg
                     .revoke_if_exists(&pulled[0].name, &pulled[0].version)

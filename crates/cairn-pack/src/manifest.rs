@@ -2,15 +2,15 @@
 //!
 //! The manifest is a JSON file at `manifest.json` inside the tarball. It carries:
 //!
-//! - `id` --- a stable UUID v4 (regenerated per import if you want a fresh local id).
-//! - `name` --- short slug, e.g. `rust-safety`.
-//! - `version` --- semver string; compares with `>` so newer packages upgrade.
-//! - `author` --- display name; not authenticated (no key infrastructure yet --- see ADR-012).
-//! - `description` --- free text.
-//! - `created_at` --- RFC3339 timestamp.
-//! - `files` --- map of `<filename>` -> sha256 hex digest. Verifies every other file in the
+//! - `id` - a stable UUID v4 (regenerated per import if you want a fresh local id).
+//! - `name` - short slug, e.g. `rust-safety`.
+//! - `version` - semver string; compares with `>` so newer packages upgrade.
+//! - `author` - display name; not authenticated (no key infrastructure yet - see ADR-012).
+//! - `description` - free text.
+//! - `created_at` - RFC3339 timestamp.
+//! - `files` - map of `<filename>` -> sha256 hex digest. Verifies every other file in the
 //!   tarball before we touch its bytes.
-//! - `stats` --- counts (memories, profile entries, patterns, edges) --- informational, helps
+//! - `stats` - counts (memories, profile entries, patterns, edges) - informational, helps
 //!   `pack info` render a one-line summary without unpacking the whole archive.
 
 use chrono::{DateTime, Utc};

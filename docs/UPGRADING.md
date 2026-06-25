@@ -1,7 +1,7 @@
 # Upgrading to 0.5.0
 
 0.5.0 adds the **Context + Reliability + Distribution + Proactive** layers (23 sprints, 22
-crates). The single-admin/cookie-session model from 0.4.0 is unchanged --- this release expands
+crates). The single-admin/cookie-session model from 0.4.0 is unchanged - this release expands
 *what* Cairn does, not *how* you log in.
 
 ## What changed for end users
@@ -19,7 +19,7 @@ crates). The single-admin/cookie-session model from 0.4.0 is unchanged --- this 
 
 ## What changed for operators
 
-- 21 crates in the workspace. The old 14-crate dep graph is gone --- `cairn-session`,
+- 21 crates in the workspace. The old 14-crate dep graph is gone - `cairn-session`,
   `cairn-pack`, `cairn-registry`, `cairn-sync`, `cairn-bench`, `cairn-proactive`,
   `cairn-proxy`, and `cairn-ingest` are new.
 - **HelixDB is required.** `cairn-store` ships a pluggable backend (HelixDB +
@@ -57,7 +57,7 @@ CAIRN_HELIX_URL=http://localhost:6969
 ```
 
 When the URL is unset *and* the bind address is non-loopback, the server refuses to start.
-This is intentional --- running the audit pipeline against an in-memory backend would lose
+This is intentional - running the audit pipeline against an in-memory backend would lose
 data on restart.
 
 ### 3. Upgrade the binary
@@ -69,7 +69,7 @@ cargo build --workspace --release
 curl -fsSL https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.sh | sh
 ```
 
-The 0.4.0 device tokens still authenticate --- JWTs are HS256 and the secret is the same
+The 0.4.0 device tokens still authenticate - JWTs are HS256 and the secret is the same
 (`CAIRN_SECRET_KEY`). Existing sessions are not invalidated.
 
 ### 4. Run the e2e harness
@@ -84,10 +84,10 @@ proactive, and the mobile companion.
 
 ## Removed
 
-- `deploy/` (Compose templates, k8s manifests, Helm chart) --- replaced by
+- `deploy/` (Compose templates, k8s manifests, Helm chart) - replaced by
   `cairn install --docker` and the root `docker-compose.yml`.
-- `extensions/chrome/` --- moved to `POST /api/extensions/capture`.
-- `web/out/_next/` build artifacts --- gitignored; rebuild with `cd web && npm run build`.
+- `extensions/chrome/` - moved to `POST /api/extensions/capture`.
+- `web/out/_next/` build artifacts - gitignored; rebuild with `cd web && npm run build`.
 
 ## New config keys
 
@@ -116,11 +116,11 @@ Cairn's `docker-compose.yml` uses **two** Docker volumes:
 | Volume | Persists | Notes |
 |---|---|---|
 | `cairn-data` | Admin record, audit log, sessions, ledger, push subscriptions | Mounted at `/data` inside the cairn container |
-| `helix-minio` | **All HelixDB data** --- memories, device tokens, sync state, pairing codes, checkpoint metadata | Backed by the MinIO bucket `helix-db` |
+| `helix-minio` | **All HelixDB data** - memories, device tokens, sync state, pairing codes, checkpoint metadata | Backed by the MinIO bucket `helix-db` |
 
 **Critical:** `docker compose down` preserves both volumes. `docker compose down -v`
 **wipes both**. Losing `helix-minio` silently invalidates every device token (the JWT
-signatures still pass, but the token ids no longer exist in HelixDB --- every request
+signatures still pass, but the token ids no longer exist in HelixDB - every request
 returns 401 `"unknown_token"`). Recovery: mint new tokens via the dashboard or
 `cairn pair`, then re-run `cairn setup` on each device.
 
@@ -143,6 +143,6 @@ files.
 
 - 2FA / TOTP is still not implemented. Tracked for 0.6.0.
 - Per-tenant quotas are enforced by the new `OrgId` column but no admin UI surfaces them
-  yet --- `cairn tenant quota <org> --set N` is the workaround.
+  yet - `cairn tenant quota <org> --set N` is the workaround.
 - `cairn-registry` ships with Local/Team/Public trust scopes; cross-scope imports
   return `RegistryError::ScopeDenied` and do not auto-elevate.

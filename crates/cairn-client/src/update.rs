@@ -21,7 +21,7 @@ pub fn run(check_only: bool) -> anyhow::Result<()> {
         let latest = release.version.trim_start_matches('v');
         if self_update::version::bump_is_greater(current, latest).unwrap_or(false) {
             println!("Update available: {current} -> {latest}");
-            println!("Run `cairn update` to install.");
+            println!("Run `cairn upgrade` to install.");
         } else {
             println!("Already up to date ({current}).");
         }
@@ -43,7 +43,7 @@ pub fn run(check_only: bool) -> anyhow::Result<()> {
 
     match status {
         self_update::Status::UpToDate(v) => {
-            println!("Already at {v} --- nothing to do.");
+            println!("Already at {v} - nothing to do.");
         }
         self_update::Status::Updated(v) => {
             println!("Updated to {v}.");

@@ -3,7 +3,7 @@
 Cairn runs **inside a Docker container**; the host has only one binary
 (`cairn`, the client). All admin operations happen either:
 
-1. **At first boot, from environment variables** --- `CAIRN_ADMIN_USERNAME` +
+1. **At first boot, from environment variables** - `CAIRN_ADMIN_USERNAME` +
    `CAIRN_ADMIN_PASSWORD` in `.env` (or compose `environment:`).
 2. **At any time, from the web dashboard** at <http://127.0.0.1:7777>
    once you're logged in.
@@ -12,7 +12,7 @@ There is no `cairn` host binary and no `docker exec` workflow. If your
 admin session is lost, wipe the data volume and start over with a new
 password in `.env`.
 
-## First boot --- env-only admin bootstrap
+## First boot - env-only admin bootstrap
 
 The cairn container reads these two vars at startup and, **only when no
 admin record exists yet**, mints the admin record automatically:
@@ -39,7 +39,7 @@ After the admin record exists, these vars are ignored. To bootstrap a
 fresh admin again, `docker compose down -v` (wipes the data volume) and
 restart.
 
-## After first boot --- dashboard
+## After first boot - dashboard
 
 Log in at <http://127.0.0.1:7777/login> with the admin credentials.
 
@@ -83,7 +83,7 @@ docker compose up -d          # restarts; cairn-admin-guard sees no admin record
 ```
 
 There is intentionally no HTTP "reset admin" route. Any admin-reset
-endpoint would itself require an authenticated admin --- chicken and egg.
+endpoint would itself require an authenticated admin - chicken and egg.
 
 ## Curl equivalents
 
@@ -123,7 +123,7 @@ install path; the user never SSHes into the container; the dashboard
 
 ## See also
 
-- `docs/UPGRADING.md` --- version-to-version upgrade notes
-- `docs/ARCHITECTURE.md` --- the full crate graph + HTTP route map
-- `docs/DECISIONS.md` --- ADR-029 (env-only admin bootstrap) and
+- `docs/UPGRADING.md` - version-to-version upgrade notes
+- `docs/ARCHITECTURE.md` - the full crate graph + HTTP route map
+- `docs/DECISIONS.md` - ADR-029 (env-only admin bootstrap) and
   ADR-030 (no host binary)

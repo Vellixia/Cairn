@@ -3,7 +3,7 @@
 //! In v0.5.0 this doubles as the public landing page for fresh checkouts: install commands
 //! (curl / PowerShell), before/after token comparison, and a pointer to the dashboard.
 //! The full marketing page ships with the Next.js export and is the canonical landing.
-//! This page is intentionally diagnostic-only --- never calls any authed endpoint. The only
+//! This page is intentionally diagnostic-only - never calls any authed endpoint. The only
 //! network calls it makes are to the public `/api/health` and `/api/auth/status`.
 
 pub const INDEX_HTML: &str = r###"<!doctype html>
@@ -11,7 +11,7 @@ pub const INDEX_HTML: &str = r###"<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Cairn --- smart memory for AI agents</title>
+<title>Cairn - smart memory for AI agents</title>
 <style>
   :root{
     --ink:#0B0F14; --surface:#12181F; --surface2:#1a2129; --slate:#8A94A6;
@@ -70,7 +70,7 @@ pub const INDEX_HTML: &str = r###"<!doctype html>
   <div class="card">
     <h2>Make any model remember what matters</h2>
     <p style="color:var(--slate);margin:0 0 12px;font-size:14px">
-      Cairn sits between your agent and your code. It remembers, recalls, and verifies --- and
+      Cairn sits between your agent and your code. It remembers, recalls, and verifies - and
       every decision is signed so the full-fidelity original is always one click away.
     </p>
     <div class="installs">
@@ -92,13 +92,13 @@ pub const INDEX_HTML: &str = r###"<!doctype html>
   </div>
 
   <div class="card">
-    <h2>Before / after --- token savings on a real repo</h2>
+    <h2>Before / after - token savings on a real repo</h2>
     <table class="compare">
       <thead><tr><th>Scenario</th><th>Without Cairn</th><th>With Cairn</th><th>Reduction</th></tr></thead>
       <tbody>
-        <tr><td>Read 1 source file (full)</td><td>~3,200 tokens</td><td>~210 tokens</td><td><b>ˆ'93%</b></td></tr>
-        <tr><td>Recall 10 relevant memories</td><td>~12,000 tokens</td><td>~1,800 tokens</td><td><b>ˆ'85%</b></td></tr>
-        <tr><td>Assemble context (8k budget)</td><td>~8,000 tokens (no ranking)</td><td>~5,300 tokens (edge-ordered)</td><td><b>ˆ'34%</b></td></tr>
+        <tr><td>Read 1 source file (full)</td><td>~3,200 tokens</td><td>~210 tokens</td><td><b>'93%</b></td></tr>
+        <tr><td>Recall 10 relevant memories</td><td>~12,000 tokens</td><td>~1,800 tokens</td><td><b>'85%</b></td></tr>
+        <tr><td>Assemble context (8k budget)</td><td>~8,000 tokens (no ranking)</td><td>~5,300 tokens (edge-ordered)</td><td><b>'34%</b></td></tr>
         <tr><td>Verify an edit post-write</td><td>silent corruption in 25% of edits</td><td>flagged before commit</td><td><b>trust</b></td></tr>
       </tbody>
     </table>

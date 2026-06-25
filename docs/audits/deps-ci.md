@@ -186,7 +186,7 @@ dotenvy = "0.15"
 | Finding | Severity | Evidence | Recommendation |
 |---------|----------|----------|----------------|
 | `release.yml` grants `contents: write` and `packages: write` at job level to the default `GITHUB_TOKEN`. | Warning | `.github/workflows/release.yml:7-9` | Scope is reasonable for a release workflow, but prefer least-privilege job-level splits (create-release only needs `contents: write`, docker only needs `packages: write`, binary upload only needs `contents: write`). |
-| `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` and `token: ${{ secrets.GITHUB_TOKEN }}` are used correctly --- no third-party secrets referenced. | Note | `.github/workflows/release.yml:19`, `59`, `71` | Keep using `GITHUB_TOKEN`; no user PATs detected. |
+| `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` and `token: ${{ secrets.GITHUB_TOKEN }}` are used correctly - no third-party secrets referenced. | Note | `.github/workflows/release.yml:19`, `59`, `71` | Keep using `GITHUB_TOKEN`; no user PATs detected. |
 | `docker login-action` passes `github.actor` as username. OK because `GITHUB_TOKEN` is the password. | Note | `.github/workflows/release.yml:68-71` | OK. |
 
 ### 3.3. Release upload
@@ -233,7 +233,7 @@ dotenvy = "0.15"
 
 - Add `Swatinem/rust-cache@v2` to `release.yml` matrix to speed up cross-compilation, or keep it intentionally cold for reproducibility. Document the choice.
 
-### 3.6. Will the workflows pass? --- web build issue
+### 3.6. Will the workflows pass? - web build issue
 
 **Finding:** The `web` CI job runs `npm ci && npm run build` inside `web/`. The repository does **not** contain a committed `web/out` build output (only `web/src/` exists). `next.config.mjs` uses `output: "export"`, which means `npm run build` should produce `web/out`. However:
 

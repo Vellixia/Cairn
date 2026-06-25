@@ -1,6 +1,6 @@
 [package]
 name = "cairn-session"
-description = "Cross-Session Protocol (CCP) --- durable session state, auto-restore, drift logging."
+description = "Cross-Session Protocol (CCP) - durable session state, auto-restore, drift logging."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -6,7 +6,7 @@ welcome.
 ## Development setup
 
 You'll need a recent **Rust** toolchain (stable, MSRV 1.85) and **Node 20+** (for the web UI).
-A running **HelixDB** instance is required for live integration tests --- the simplest path is
+A running **HelixDB** instance is required for live integration tests - the simplest path is
 `docker compose up -d helix`.
 
 ```sh
@@ -23,13 +23,13 @@ cargo run -p cairn-api --bin cairn-server -- serve
 cd web && npm install && npm run dev
 ```
 
-The Rust build does **not** require building the web UI --- `crates/cairn-api/build.rs`
+The Rust build does **not** require building the web UI - `crates/cairn-api/build.rs`
 creates `web/out/` at compile time when missing, so the binary falls back to a
 built-in page when no export is present. Build artifacts are never committed.
 
 ## Before you open a PR
 
-CI runs these --- please run them locally first:
+CI runs these - please run them locally first:
 
 ```sh
 cargo fmt --all

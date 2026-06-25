@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
-/// Coarse role. Today Cairn has exactly one role --- `Admin` --- and device tokens. Kept as an enum so
+/// Coarse role. Today Cairn has exactly one role - `Admin` - and device tokens. Kept as an enum so
 /// we can extend later (read-only web viewer, etc.) without a schema migration.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

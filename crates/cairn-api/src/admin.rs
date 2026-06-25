@@ -3,7 +3,7 @@
 //! The single admin account lives in the meta store under key `admin` as a JSON-serialized
 //! [`AdminRecord`](cairn_core::AdminRecord). Two concurrent `/setup` requests can't both win
 //! because [`Store::set_meta_if_absent`](cairn_store::Store::set_meta_if_absent) is atomic. The
-//! in-memory [`AuditLog`] is best-effort --- restart loses it --- which keeps the surface small and
+//! in-memory [`AuditLog`] is best-effort - restart loses it - which keeps the surface small and
 //! avoids a HelixDB schema migration for 0.4.0.
 
 use crate::session::{build_clear_cookie, build_set_cookie, extract_cookie, SessionPayload};
@@ -42,7 +42,7 @@ impl AuditLog {
     /// Record an audit event in both the in-memory ring buffer and durable store. The in-memory
     /// ring keeps the last `AUDIT_CAPACITY` events hot for `/api/devices/audit`; the durable
     /// store is what survives restart and what the SSE stream reads from for `Last-Event-ID`
-    /// replay. We never let a write to one block the other --- best-effort durable write that
+    /// replay. We never let a write to one block the other - best-effort durable write that
     /// fails (e.g. backend transiently unreachable) is logged but doesn't lose the in-memory
     /// event the admin is currently looking at.
     pub fn record(&self, store: &cairn_store::Store, kind: &str, actor: &str, detail: String) {
@@ -160,9 +160,9 @@ pub fn save_admin(state: &AppState, rec: &AdminRecord) -> cairn_core::Result<()>
 ///
 /// Behavior (idempotent):
 /// 1. If an admin record already exists, return immediately (no-op).
-/// 2. If `cfg.admin.password` is unset, log a hint and return --- the dashboard `/setup` wizard
+/// 2. If `cfg.admin.password` is unset, log a hint and return - the dashboard `/setup` wizard
 ///    will mint the record on first visit.
-/// 3. Refuse if the bind host is non-loopback AND `CAIRN_INSECURE` is not set --- we will not mint
+/// 3. Refuse if the bind host is non-loopback AND `CAIRN_INSECURE` is not set - we will not mint
 ///    an admin over plain HTTP on a network-exposed bind.
 /// 4. Refuse if the username is empty or the password is shorter than 8 chars or equals the
 ///    username.
@@ -175,7 +175,7 @@ pub fn bootstrap_admin_from_env(state: &AppState) -> cairn_core::Result<()> {
     }
     let Some(password) = state.cfg.admin.password.as_deref() else {
         tracing::info!(
-            "admin: no record found and CAIRN_ADMIN_PASSWORD unset --- \
+            "admin: no record found and CAIRN_ADMIN_PASSWORD unset - \
              /setup wizard will mint one on first dashboard visit"
         );
         return Ok(());
@@ -206,7 +206,7 @@ pub fn bootstrap_admin_from_env(state: &AppState) -> cairn_core::Result<()> {
     }
     if username == password {
         return Err(cairn_core::Error::Invalid(
-            "CAIRN_ADMIN_USERNAME equals CAIRN_ADMIN_PASSWORD --- refusing to bootstrap. \
+            "CAIRN_ADMIN_USERNAME equals CAIRN_ADMIN_PASSWORD - refusing to bootstrap. \
              Pick a real password."
                 .into(),
         ));
@@ -226,7 +226,7 @@ pub fn bootstrap_admin_from_env(state: &AppState) -> cairn_core::Result<()> {
             Ok(())
         }
         Ok(false) => {
-            tracing::info!("admin: raced to bootstrap --- another process won, no-op");
+            tracing::info!("admin: raced to bootstrap - another process won, no-op");
             Ok(())
         }
         Err(e) => Err(e),
@@ -261,7 +261,7 @@ fn with_cookie(mut resp: Response, header_value: String) -> Response {
     resp
 }
 
-/// Public status endpoint --- tells the web UI whether to render `/login` or `/setup`.
+/// Public status endpoint - tells the web UI whether to render `/login` or `/setup`.
 pub async fn auth_status(State(state): State<AppState>) -> Response {
     let admin_exists = matches!(load_admin(&state), Ok(Some(_)));
     let body = AuthStatus {
@@ -273,7 +273,7 @@ pub async fn auth_status(State(state): State<AppState>) -> Response {
     (StatusCode::OK, Json(body)).into_response()
 }
 
-/// POST `/api/auth/login` --- accepts username + password, verifies against the stored admin
+/// POST `/api/auth/login` - accepts username + password, verifies against the stored admin
 /// record, and on success returns the session cookie + a JSON body.
 pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>) -> Response {
     if req.username.is_empty() || req.password.is_empty() {
@@ -351,7 +351,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     with_cookie((StatusCode::OK, Json(body)).into_response(), set_cookie)
 }
 
-/// POST `/api/auth/logout` --- clears the cookie. Always succeeds.
+/// POST `/api/auth/logout` - clears the cookie. Always succeeds.
 pub async fn logout(State(state): State<AppState>) -> Response {
     let cookie = build_clear_cookie(cookie_is_secure(&state));
     with_cookie(
@@ -360,7 +360,7 @@ pub async fn logout(State(state): State<AppState>) -> Response {
     )
 }
 
-/// GET `/api/auth/me` --- returns the current session's admin info, or 401.
+/// GET `/api/auth/me` - returns the current session's admin info, or 401.
 pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let Some(rec) = (match load_admin(&state) {
         Ok(r) => r,
@@ -424,7 +424,7 @@ pub async fn me(State(state): State<AppState>, headers: HeaderMap) -> Response {
     }
 }
 
-/// POST `/api/auth/setup` --- first-run wizard. Refuses if an admin already exists (409).
+/// POST `/api/auth/setup` - first-run wizard. Refuses if an admin already exists (409).
 pub async fn setup(State(state): State<AppState>, Json(req): Json<SetupRequest>) -> Response {
     if req.username.trim().is_empty() || req.password.len() < 8 {
         return (
@@ -492,7 +492,7 @@ pub async fn setup(State(state): State<AppState>, Json(req): Json<SetupRequest>)
     with_cookie((StatusCode::OK, Json(body)).into_response(), set_cookie)
 }
 
-/// GET `/api/devices/audit` --- admin-only. Returns the in-memory audit log.
+/// GET `/api/devices/audit` - admin-only. Returns the in-memory audit log.
 pub async fn list_audit(State(state): State<AppState>, headers: HeaderMap) -> Response {
     match require_admin(&state, &headers).await {
         Ok(_) => {}
@@ -553,7 +553,7 @@ mod tests {
         assert!(snap.last().unwrap().detail.contains("5"));
     }
 
-    /// A helper for tests that don't care about durable persistence --- the production `record`
+    /// A helper for tests that don't care about durable persistence - the production `record`
     /// writes to the store, but tests run with `cairn_store::Store` and that requires a live
     /// HelixDB. Tests want to assert in-memory ring behavior, so they use this stub.
     impl AuditLog {
@@ -603,7 +603,7 @@ mod tests {
         assert_eq!(p.exp - p.iat, expected.as_secs() as i64);
     }
 
-    /// `bootstrap_admin_from_env` validation is independent of the live Store --- these tests
+    /// `bootstrap_admin_from_env` validation is independent of the live Store - these tests
     /// cover the static rules. The full integration test (real bootstrap, then reload) runs in
     /// the cairn-api crate's tests/ dir because it needs a HelixDB fixture.
     #[test]

@@ -2,18 +2,18 @@
 //!
 //! Three classes of benchmark live here:
 //!
-//! - **LongMemEval / LoCoMo** --- synthetic recall tasks. We hand-build a small
+//! - **LongMemEval / LoCoMo** - synthetic recall tasks. We hand-build a small
 //!   fixture set that captures the *shape* of those benchmarks (multi-session
 //!   memories with entity-resolution and temporal questions). The numbers we
 //!   publish in `docs/BENCHMARKS.md` are from this fixture, not the full
 //!   external benchmark (we don't redistribute that data here).
 //!
-//! - **Task-success horizon** --- runs a synthetic task pipeline at increasing
+//! - **Task-success horizon** - runs a synthetic task pipeline at increasing
 //!   horizons (10 / 25 / 50 / 100 steps) and measures how often Cairn's
 //!   `assemble` produces a context that still includes the relevant memory
 //!   before the context is over-full.
 //!
-//! - **Smart memory retention** --- measures how Cairn's `confidence` field +
+//! - **Smart memory retention** - measures how Cairn's `confidence` field +
 //!   `pin` + `crystallize` together preserve "important" memories across many
 //!   `reinforce` cycles vs. naive LRU eviction.
 //!
@@ -57,7 +57,7 @@ pub enum BenchKind {
     Retention,
 }
 
-/// Tagged payload --- exactly one variant per benchmark.
+/// Tagged payload - exactly one variant per benchmark.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BenchData {

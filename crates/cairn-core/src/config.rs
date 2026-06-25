@@ -2,13 +2,13 @@
 //!
 //! Settings resolve with precedence (highest -> lowest):
 //!
-//! 1. **CLI flag** --- e.g. `--host`, `--port`, `--data-dir`.
-//! 2. **Real environment variable** --- whatever the parent shell already exported.
-//! 3. **Project `.env`** --- `<repo>/.env` (or the `environment:` block in `docker-compose.yml`).
-//! 4. **Global `.env`** --- `~/.config/cairn/.env` on Linux,
+//! 1. **CLI flag** - e.g. `--host`, `--port`, `--data-dir`.
+//! 2. **Real environment variable** - whatever the parent shell already exported.
+//! 3. **Project `.env`** - `<repo>/.env` (or the `environment:` block in `docker-compose.yml`).
+//! 4. **Global `.env`** - `~/.config/cairn/.env` on Linux,
 //!    `$XDG_CONFIG_HOME/cairn/.env` elsewhere, `%APPDATA%\\cairn\\.env` on Windows
 //!    (see [`global_env_path`]).
-//! 5. **Built-in default** --- the hard-coded fallback inside [`Config::resolve`].
+//! 5. **Built-in default** - the hard-coded fallback inside [`Config::resolve`].
 //!
 //! The split between CLI / core is intentional: the core crate reads raw `std::env::var`, and the
 //! `cairn` binary loads both `.env` files at startup via `dotenvy` (see
@@ -22,10 +22,10 @@ use std::path::{Path, PathBuf};
 /// Single-admin account settings (web dashboard auth).
 ///
 /// Resolution priority (highest -> lowest):
-/// 1. `CAIRN_ADMIN_PASSWORD_HASH` --- pre-hashed (Argon2id PHC).
-/// 2. `CAIRN_ADMIN_PASSWORD` --- plaintext; refused on non-loopback binds unless
+/// 1. `CAIRN_ADMIN_PASSWORD_HASH` - pre-hashed (Argon2id PHC).
+/// 2. `CAIRN_ADMIN_PASSWORD` - plaintext; refused on non-loopback binds unless
 ///    `CAIRN_INSECURE=1` is set, mirroring the existing TLS gate.
-/// 3. Server starts in setup mode --- `/setup` wizard accepts the first admin.
+/// 3. Server starts in setup mode - `/setup` wizard accepts the first admin.
 ///
 /// Note: the *persisted* admin record (with its generation counter and hash) is stored in the
 /// meta store under key `admin`, not in config. These fields only describe the *bootstrap*
@@ -95,10 +95,10 @@ pub struct Config {
     /// HelixDB server URL (`CAIRN_HELIX_URL`).
     pub helix_url: Option<String>,
     /// HelixDB bearer API key (`CAIRN_HELIX_TOKEN`). Sent as `Authorization: Bearer <token>` on
-    /// every HelixDB request. Optional --- HelixDB instances without auth don't need it.
+    /// every HelixDB request. Optional - HelixDB instances without auth don't need it.
     pub helix_token: Option<String>,
     /// Label-namespace prefix for the HelixDB backend (`CAIRN_HELIX_NS`). Lets multiple Cairn
-    /// instances --- or isolated tests --- share one Helix server without colliding. Default `cairn_`.
+    /// instances - or isolated tests - share one Helix server without colliding. Default `cairn_`.
     pub helix_ns: Option<String>,
     /// Default remote Cairn server for `sync` / `pull` / `contribute` (`CAIRN_SERVER`).
     pub default_server: Option<String>,
@@ -126,7 +126,7 @@ pub struct Config {
     /// Multi-tenant mode (v0.5.0 Sprint 19). When `true`, every memory is
     /// tagged with the bearer token's org id; queries are scoped to the caller's
     /// org. When `false` (default for self-hosted installs), all memories share
-    /// a single implicit org --- `OrgId::default()` --- so the on-disk schema doesn't
+    /// a single implicit org - `OrgId::default()` - so the on-disk schema doesn't
     /// change for existing users.
     pub multi_tenant: bool,
 }
@@ -211,13 +211,13 @@ impl Config {
         if let Ok(ip) = h.parse::<std::net::IpAddr>() {
             return ip.is_loopback();
         }
-        // If the host is a DNS name we can't prove loopback-ness --- assume non-loopback so the
+        // If the host is a DNS name we can't prove loopback-ness - assume non-loopback so the
         // safe-by-default TLS gate kicks in.
         false
     }
 }
 
-/// Path to the machine-global `.env` (OS config dir) --- loaded at CLI startup for "global cairn".
+/// Path to the machine-global `.env` (OS config dir) - loaded at CLI startup for "global cairn".
 pub fn global_env_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("dev", "cairn", "cairn").map(|d| d.config_dir().join(".env"))
 }

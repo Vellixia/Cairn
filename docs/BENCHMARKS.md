@@ -3,12 +3,12 @@
 How Cairn measures token savings, recall quality, and retention. Three classes of
 benchmark live in the `cairn-bench` crate (v0.5.0 Sprint 16):
 
-1. **LongMemEval-style recall** --- multi-session memory recall. We hand-build a small
+1. **LongMemEval-style recall** - multi-session memory recall. We hand-build a small
    fixture set that captures the *shape* of LongMemEval / LoCoMo (entity resolution,
    temporal questions). We do **not** redistribute the upstream datasets.
-2. **Task-success horizon** --- does Cairn's `assemble` keep surfacing the right
+2. **Task-success horizon** - does Cairn's `assemble` keep surfacing the right
    memory as the task pipeline grows to 10/25/50/100/200 steps?
-3. **Smart memory retention** --- does Cairn's `confidence x pin x crystallize` policy
+3. **Smart memory retention** - does Cairn's `confidence x pin x crystallize` policy
    preserve "important" memories better than naive LRU eviction?
 
 ---
@@ -24,7 +24,7 @@ cargo run -p cairn-bench --bin horizon
 cargo run -p cairn-bench --bin retention
 ```
 
-Each binary emits a single `BenchResult` JSON object --- easy to ingest into CI or
+Each binary emits a single `BenchResult` JSON object - easy to ingest into CI or
 compare across runs.
 
 ---
@@ -38,9 +38,9 @@ datasets in this repository. They're large (10k+ dialogs each) and have
 redistribution restrictions. Instead, `cairn-bench::fixture::Fixture` ships
 two hand-built scenarios that exercise the same query types:
 
-- **alex_employer_history** --- entity resolution (Alex / Alexander / Al are the same
+- **alex_employer_history** - entity resolution (Alex / Alexander / Al are the same
   person across sessions) plus temporal recall ("when did Alex join Vellixia?").
-- **migration_timeline** --- sequential events with distractors that look similar
+- **migration_timeline** - sequential events with distractors that look similar
   but are unrelated.
 
 The benchmark (`cairn_bench::longmemeval`) feeds the facts into a synthetic store
@@ -48,7 +48,7 @@ and asks each question. Recall is graded as **lexical overlap**: every keyword
 from `expected_keywords` must appear in the top-K retrieved fact contents.
 
 To compare against published agentmemory / mem0 numbers, run the upstream
-benchmarks against this same harness --- see
+benchmarks against this same harness - see
 <https://github.com/Vellixia/Cairn/discussions> for a recipe.
 
 ### Task-success horizon
@@ -58,10 +58,10 @@ memory from a pool of 50. Cairn's `assemble` ranks memories by confidence and
 picks the top 16 (the default budget). We measure recall at five horizons
 (10 / 25 / 50 / 100 / 200) and report:
 
-- `recall_at_horizon` --- fraction of "needs memory X" annotations that the top-16
+- `recall_at_horizon` - fraction of "needs memory X" annotations that the top-16
   contained at that horizon.
-- `precision_at_horizon` --- fraction of the top-16 that was actually needed.
-- `any_recall_loss` --- true if any annotation at that horizon was missed.
+- `precision_at_horizon` - fraction of the top-16 that was actually needed.
+- `any_recall_loss` - true if any annotation at that horizon was missed.
 
 The synthetic confidence values are fixed per memory (no decay) so the variance
 comes purely from random seed choice. The benchmark is deterministic for a
@@ -70,12 +70,12 @@ given seed.
 ### Smart memory retention
 
 We start with 100 memories (10% pinned, 90% with random importance/confidence).
-The "important" set is the 10 pinned + top-10 non-pinned by importance --- 20 in
+The "important" set is the 10 pinned + top-10 non-pinned by importance - 20 in
 total. We run 50 cycles of "reinforce every existing + remember 10 new" then
 count how many of the original 20 survive under two policies:
 
-- **Naive LRU** --- drop the oldest non-pinned memory.
-- **Cairn policy** --- drop the lowest `confidence x importance` non-pinned memory.
+- **Naive LRU** - drop the oldest non-pinned memory.
+- **Cairn policy** - drop the lowest `confidence x importance` non-pinned memory.
 
 A pinned memory is never dropped by either policy. The Cairn policy should win
 by a comfortable margin because it weighs confidence and importance together.
@@ -111,7 +111,7 @@ These numbers were captured on the v0.5.0 release commit. Run
 
 The flat profile from horizon 25 onward reflects the top-16 budget hitting its
 asymptote. The fact that no horizon shows *any recall loss* on our random
-synthetic fixture is misleading --- it means "for this random distribution, the
+synthetic fixture is misleading - it means "for this random distribution, the
 top-16 happens to cover the requested memory most of the time." Real pipelines
 have skewed access patterns; see ADR-023 for why this benchmark is best used
 as a *variance check*, not an absolute recall number.
@@ -137,9 +137,9 @@ captured by `cairn bench` on the Cairn codebase itself (`crates/`, 25 files):
 ```mermaid
 %%{init: {"theme": "default"}}%%
 pie title Token savings (%)
-    "AST outline reads --- 90%" : 90
-    "Re-read cache --- 99.7%" : 99.7
-    "Shell output --- 99%" : 99
+    "AST outline reads - 90%" : 90
+    "Re-read cache - 99.7%" : 99.7
+    "Shell output - 99%" : 99
 ```
 
 | Mechanism | Before | After | Saved |
@@ -157,13 +157,13 @@ cairn bench crates/      # benchmark a specific path
 
 ## What These Numbers Mean
 
-- **100% recall on our fixtures** is encouraging but not load-bearing --- the
+- **100% recall on our fixtures** is encouraging but not load-bearing - the
   fixtures are small (12 facts) and the questions are designed so lexical
   overlap is enough to find them. The harder questions in real LongMemEval
   (paraphrase, negation, multi-hop) would likely score lower for a lexical
   baseline. Run the upstream LongMemEval to get real numbers.
 - **70% retention vs 30% LRU** is the headline result for the retention
-  benchmark --- it directly motivates `confidence x importance x pin` as the
+  benchmark - it directly motivates `confidence x importance x pin` as the
   default policy.
 - **Flat horizon profile** is a property of the synthetic distribution. A
   realistic workload with skewed importance will show recall drop at longer
@@ -181,7 +181,7 @@ cargo test -p cairn-bench -- --nocapture    # see each test's inputs
 
 The harness writes JSON results to `target/benchmarks/<name>.json`. Compare across
 runs by diffing that directory. Variance target: <5% across 3 reruns on the
-same machine (verified manually for the v0.5.0 release --- see CI logs).
+same machine (verified manually for the v0.5.0 release - see CI logs).
 
 ---
 
@@ -201,8 +201,8 @@ These are planned but not yet implemented:
 
 ## See also
 
-- [Architecture](ARCHITECTURE.md) --- how the assemble + retention pipeline works internally
-- [Roadmap](ROADMAP.md) --- benchmark implementation status (Sprint 16 marked done)
-- [Plan](PLAN_v0.5.0.md) --- benchmark targets (Sprint 16) and CI plan
-- [ADR-023](DECISIONS.md) --- why we hand-build fixtures instead of redistributing upstream data
-- [ADR-024](DECISIONS.md) --- landing-page architecture (Sprint 17)
+- [Architecture](ARCHITECTURE.md) - how the assemble + retention pipeline works internally
+- [Roadmap](ROADMAP.md) - benchmark implementation status (Sprint 16 marked done)
+- [Plan](PLAN_v0.5.0.md) - benchmark targets (Sprint 16) and CI plan
+- [ADR-023](DECISIONS.md) - why we hand-build fixtures instead of redistributing upstream data
+- [ADR-024](DECISIONS.md) - landing-page architecture (Sprint 17)

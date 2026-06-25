@@ -1,4 +1,4 @@
-//! The preference/behavior profile --- Cairn's "make any model smart" engine.
+//! The preference/behavior profile - Cairn's "make any model smart" engine.
 //!
 //! It captures the user's standing preferences (preferred stack, style, do/don'ts, corrections)
 //! and surfaces them so even a small, cheap model honors how *you* work. Preferences are durable
@@ -40,7 +40,7 @@ impl Profile {
     }
 
     /// Detect clear preference directives in a user prompt and record them. Returns what was
-    /// captured. Conservative by design --- only unambiguous coding directives are captured.
+    /// captured. Conservative by design - only unambiguous coding directives are captured.
     pub fn capture_from_prompt(&self, prompt: &str) -> Result<Vec<Memory>> {
         let mut captured = Vec::new();
         for rule in detect_preferences(prompt) {

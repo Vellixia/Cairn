@@ -27,7 +27,7 @@ graph LR
 
 ---
 
-## ADR-001: Binary split --- `cairn` server + `cairn` client
+## ADR-001: Binary split - `cairn` server + `cairn` client
 
 **Date:** 2026-06-18  
 **Status:** Accepted
@@ -41,12 +41,12 @@ and the binary name collision made MCP config awkward (`command: ["cairn", "mcp"
 
 ### Decision
 Split into two binaries:
-- **`cairn`** (crate `cairn-server`): server-only --- `serve`, `token create/list/revoke`, `pair-code`.
-- **`cairn`** (crate `cairn`): client-only --- `mcp`, `setup`, `rules`, `run`, `hook`,
+- **`cairn`** (crate `cairn-server`): server-only - `serve`, `token create/list/revoke`, `pair-code`.
+- **`cairn`** (crate `cairn`): client-only - `mcp`, `setup`, `rules`, `run`, `hook`,
   `remember`, `recall`, `sync`, `pair`, `bench`, `update`, `doctor`.
 
 > **Note (v0.5.0):** the subcommand list above is a snapshot from the v0.4.0
-> ADR; the current `cairn` binary has grown to ~34 subcommands --- see
+> ADR; the current `cairn` binary has grown to ~34 subcommands - see
 > `crates/cairn/src/main.rs::Cmd` for the full enum.
 
 ### Rationale
@@ -135,9 +135,9 @@ that don't exist inside the Docker container.
 2. `RemoteProxy` rewrites absolute host paths to workspace-relative before forwarding.
 
 ### Rationale
-- File operations are inherently local --- the files exist on the host, not the server.
+- File operations are inherently local - the files exist on the host, not the server.
 - Mounting the project is the standard Docker dev pattern.
-- Path rewriting is transparent to the agent --- it sends normal paths, Cairn handles the rest.
+- Path rewriting is transparent to the agent - it sends normal paths, Cairn handles the rest.
 
 ---
 
@@ -172,7 +172,7 @@ Cairn needs both structured storage (memories, tokens, checkpoints, metadata) an
 graph+vector DB.
 
 ### Decision
-Use **HelixDB** --- a graph + vector database with HNSW indexing and S3 persistence.
+Use **HelixDB** - a graph + vector database with HNSW indexing and S3 persistence.
 
 ### Rationale
 - One backend for graph queries (memory relationships, file versions) and vectors (semantic recall).
@@ -195,7 +195,7 @@ them just to verify claims.
 `cairn bench [path]` measures token savings on any codebase and prints a table.
 
 ### Rationale
-- Zero-setup proof --- the binary already has the read/compress logic.
+- Zero-setup proof - the binary already has the read/compress logic.
 - Users can verify claims on their own code immediately.
 - Honest numbers (not cherry-picked marketing).
 
@@ -215,7 +215,7 @@ Build in **Rust** as a single self-hostable binary. No cloud accounts, no teleme
 API calls unless the user opts in (embedding provider).
 
 ### Rationale
-- Privacy by default --- nothing leaves the user's infrastructure.
+- Privacy by default - nothing leaves the user's infrastructure.
 - Single binary deployment (runs on a Raspberry Pi).
 - Rust's performance + safety for a reliability-critical tool.
 - Differentiates from cloud-locked competitors.
@@ -237,10 +237,10 @@ no-op (so offline tests don't need a backend); `HelixBackend` appends events as 
 with monotonic integer ids. SSE replays from `max_event_id` and `recent_audit(since_id)`.
 
 ### Rationale
-- Survives restarts --- `audit_survives_round_trip_after_a_store_drop_and_reopen` test verifies.
+- Survives restarts - `audit_survives_round_trip_after_a_store_drop_and_reopen` test verifies.
 - `Last-Event-ID` becomes reliable for UI reconnect without server-side state.
 - NoSQL append-only schema is exactly what HelixDB is good at; no migration pain.
-- Trait keeps the abstraction clean --- a future Postgres backend can re-implement without
+- Trait keeps the abstraction clean - a future Postgres backend can re-implement without
   touching the audit producer.
 
 ### Trade-offs
@@ -257,17 +257,17 @@ with monotonic integer ids. SSE replays from `max_event_id` and `recent_audit(si
 
 ### Context
 Agentmemory's "reinforcement" curve (each access slightly raises confidence, asymptotic to 1.0)
-is the right signal for "which memories should re-surface today?" --- but pre-0.5.0 Cairn had no
+is the right signal for "which memories should re-surface today?" - but pre-0.5.0 Cairn had no
 confidence field, so recall used only lexical similarity. The memory graph (provenance: derived
 from / contradicts / supersedes / applies_to) was also missing, so there was no way to express
 "this crystallizes these three earlier notes."
 
 ### Decision
 Add three things to `Memory`:
-- `confidence: f32` (default 0.5) --- bumped by the agentmemory formula
+- `confidence: f32` (default 0.5) - bumped by the agentmemory formula
   `c' = min(1.0, c + 0.1*(1-c))` on every `reinforce()`.
-- `pinned: bool` --- never demoted by crystallize / decay passes; user-controlled.
-- `derived_from`, `contradicts`, `supersedes`, `applies_to` --- four `Vec<String>` columns of
+- `pinned: bool` - never demoted by crystallize / decay passes; user-controlled.
+- `derived_from`, `contradicts`, `supersedes`, `applies_to` - four `Vec<String>` columns of
   memory ids (or paths for `applies_to`).
 
 Edges are stored as JSON-encoded columns on the `Memory` node, not as separate HelixDB graph
@@ -277,7 +277,7 @@ edges. The `MemoryEngine::graph()` method materializes a node+edge view from fla
 - Confidence gives recall a second axis to rank on (alongside lexical + applies_to).
 - Pinned lets users mark "always show this" without writing a custom rule.
 - Provenance edges enable `crystallize()` to derive a semantic-tier memory from working-tier
-  inputs --- the agentmemory "lesson" pattern.
+  inputs - the agentmemory "lesson" pattern.
 - Storing edges as columns avoids HelixDB edge migrations when the edge schema evolves.
 
 ### Trade-offs
@@ -295,7 +295,7 @@ edges. The `MemoryEngine::graph()` method materializes a node+edge view from fla
 
 ### Context
 "Sessions" track the per-task workflow: task list, drift events, approve/reject decisions. This
-is operational metadata, not a queryable graph --- there's no cross-session join, no vector
+is operational metadata, not a queryable graph - there's no cross-session join, no vector
 recall, no graph traversal needed.
 
 ### Decision
@@ -309,7 +309,7 @@ crate owns the read/write helpers and the patch schema.
 - Skipping HelixDB for operational metadata keeps the graph store focused on memories.
 
 ### Trade-offs
-- No cross-session queries from the web UI yet (would need a separate index --- Sprint 17 plans).
+- No cross-session queries from the web UI yet (would need a separate index - Sprint 17 plans).
 - Concurrent writers need an OS-level lock; we use `fs2` crate's `FileExt::lock_exclusive`.
 
 ---
@@ -360,12 +360,12 @@ also exposes `/api/ledger/verify` for the dashboard's "verify chain" button.
 
 ### Context
 Cairn needs a portable bundle format to ship context (memories, profile, patterns, edges)
-between machines --- and ideally to interoperate with the wider lean-ctx ecosystem.
+between machines - and ideally to interoperate with the wider lean-ctx ecosystem.
 
 ### Decision
 Adopt the lean-ctx `.ctxpkg` design with three changes:
 1. Canonical extension is `.cairnpkg` (not `.ctxpkg`); `.ctxpkg` is accepted as an import
-   alias for interop per plan ÂS10.
+   alias for interop per plan S10.
 2. Layout is fixed: `manifest.json` + `memory.jsonl` + `profile.jsonl` + `patterns.jsonl` +
    `graph.jsonl` + `signature.sha256`. No pax extensions, no symlinks.
 3. SHA-256 per-file in the manifest; `signature.sha256` is HMAC-SHA256 over the canonical
@@ -384,7 +384,7 @@ parsing code small (~200 lines).
 - No compression in the tarball itself (matches `.ctxpkg`); the `MAX_UNCOMPRESSED_BYTES = 16 MiB`
   cap rejects pathological packs. A future "packed" variant can add zstd without breaking the
   existing format.
-- No per-entry permissions, owners, or symlinks --- we don't need them.
+- No per-entry permissions, owners, or symlinks - we don't need them.
 
 ---
 
@@ -396,7 +396,7 @@ parsing code small (~200 lines).
 ### Context
 The Docker image runs as the `cairn` user (uid 10001) but anonymous Docker volumes come up
 owned by root. The pre-0.5.0 workaround was `user: "0"` on the cairn service, which meant the
-server process ran with full root inside the container --- an unnecessary privilege escalation
+server process ran with full root inside the container - an unnecessary privilege escalation
 just to write a directory.
 
 ### Decision
@@ -425,7 +425,7 @@ and runs as `user: "10001:10001"`.
 
 ### Context
 The pre-Sprint 13 `.cairnpkg` carried only a content-hash (`signature.sha256`) which
-proved integrity but not authenticity --- anyone with the tarball could claim to be the
+proved integrity but not authenticity - anyone with the tarball could claim to be the
 author. Sharing between teams required trusting the registry URL as a proxy for
 authenticity, which doesn't scale: a malicious registry can republish any unsigned
 pack under its own author identity.
@@ -447,7 +447,7 @@ back to `signature.sha256` for legacy packs.
 - Ed25519 is fast, deterministic, no key infrastructure (vs. PKI), small keys/signatures
   (32B / 64B), and well-audited (libsodium, NaCl, ed25519-dalek). It's the modern
   default for code-signing and package-signing.
-- Each peer maintains a small `trusted_keys.json` whitelist --- there's no CA chain to
+- Each peer maintains a small `trusted_keys.json` whitelist - there's no CA chain to
   compromise. Trust is anchored in the operator's explicit grant, not in a third party.
 - Backwards compatible: old unsigned packs install fine; the registry flags them but
   doesn't reject (so historical content keeps working).
@@ -469,11 +469,11 @@ back to `signature.sha256` for legacy packs.
 ### Context
 Cairn needed a place to publish, discover, download, and revoke `.cairnpkg` bundles.
 Options considered:
-1. **External service** (e.g. OCI Distribution, Git LFS) --- already solved storage and
+1. **External service** (e.g. OCI Distribution, Git LFS) - already solved storage and
    discovery but brings an entire deployment story and a new auth surface.
 2. **Hand-rolled HTTP service in a new `cairn-registry` crate, mounted on
-   `cairn-server` under `/registry`** --- self-contained, reuses auth + audit log.
-3. **`cairn.sh` proxy** (planned v0.6 Sprint 19) --- public registry for sharing
+   `cairn-server` under `/registry`** - self-contained, reuses auth + audit log.
+3. **`cairn.sh` proxy** (planned v0.6 Sprint 19) - public registry for sharing
    *between* cairn.sh users, not self-hosting.
 
 ### Decision
@@ -490,13 +490,13 @@ protects `/registry/*`. Endpoints: `POST /registry/packs`, `GET /registry/packs[
 - On-disk JSON (`index.json` + `trusted_keys.json` + `revocations.jsonl` + per-pack
   tarballs) means backup = `cp -r <data_dir>/registry`. No database dependency.
 - The `cairn.sh` proxy in Sprint 19 will be a thin layer *on top* of this same HTTP API
-  --- adding it later doesn't require migrating data.
+  - adding it later doesn't require migrating data.
 
 ### Trade-offs
 - Federation sync uses the same on-disk JSON files as a transport-agnostic log. A
   truly huge registry (10k+ packs) would want sqlite; for v0.5.0 scale the index file
   parses in <10ms.
-- No role-based access control yet --- anyone who can call `POST /registry/packs` can
+- No role-based access control yet - anyone who can call `POST /registry/packs` can
   publish, gated only by the trust-scope check (Sprint 14a). Sprint 19 multi-tenancy
   will add per-tenant scope.
 
@@ -514,11 +514,11 @@ later "won" and the other edit was lost. The user saw no warning.
 
 ### Decision
 Add a new `cairn-sync` crate with three primitives:
-- **Vector clock** --- per-actor counter; each device tracks events from every other device.
+- **Vector clock** - per-actor counter; each device tracks events from every other device.
   Two clocks are concurrent iff neither dominates the other.
-- **GCounter** --- grow-only counter for `access_count` and `confidence`. Concurrent
+- **GCounter** - grow-only counter for `access_count` and `confidence`. Concurrent
   increments on different replicas both survive a merge (per-actor max).
-- **OR-Set** --- observed-remove set for `tags` and `concepts`. Concurrent add + remove
+- **OR-Set** - observed-remove set for `tags` and `concepts`. Concurrent add + remove
   resolves to "present" (add wins); concurrent add + add resolves to "present" (union).
 
 `SyncPeer::apply_envelope` walks each incoming `MemoryOp`, looks up the local clock
@@ -532,13 +532,13 @@ resolve), or `Skipped` (the local copy is already newer).
   global synchronized clock.
 - We deliberately did NOT adopt `automerge` / automerge-crdt. The binary weight
   (~3 MiB of compiled deps, ~10x larger than Cairn's existing sync) wasn't justified
-  for two CRDT types --- and the protocol changes (every document carries its full
+  for two CRDT types - and the protocol changes (every document carries its full
   history) would have made E2E encryption (Sprint 15b) much harder.
 
 ### Trade-offs
 - `content` and `description` are still LWW-by-clock (last-write-wins among
   causally-ordered edits). Concurrent `content` edits are flagged `Concurrent` and
-  surfaced in the UI --- the user resolves manually.
+  surfaced in the UI - the user resolves manually.
 - Vector clocks grow with the number of distinct peers. A binary-clock compression
   (the standard "version vectors" approach in production CRDT systems) is a v0.6
   item.
@@ -553,14 +553,14 @@ resolve), or `Skipped` (the local copy is already newer).
 ### Context
 TLS protects sync traffic from a network observer. But a compromised
 `cairn-server` (the box the user deploys at home or in a VPS) still sees plaintext
-sync payloads --- including any secrets the user has accidentally remembered. We
+sync payloads - including any secrets the user has accidentally remembered. We
 wanted an opt-in mode where the server is **never** able to decrypt, even with
 filesystem access.
 
 ### Decision
 A new `cairn-sync::crypto` module:
 - **Argon2id** derives a 32-byte key from the user's passphrase (64 MiB memory, 3
-  iterations, 1 lane --- OWASP minimum for interactive use).
+  iterations, 1 lane - OWASP minimum for interactive use).
 - **ChaCha20-Poly1305** AEAD encrypts the envelope body, with the actor pair
   (`from -> to`) bound as associated data so envelopes can't be cross-delivered.
 - The header is plaintext: magic + version + kdf + salt + nonce. Standard AEAD
@@ -581,10 +581,10 @@ magic, version mismatch.
   redirection (an attacker can't replay alice->bob's envelope to charlie->dana).
 
 ### Trade-offs
-- **No forward secrecy** --- a single passphrase encrypts every envelope; rotating
+- **No forward secrecy** - a single passphrase encrypts every envelope; rotating
   requires re-encrypting everything. A future iteration can layer an ephemeral ECDH
   exchange (X25519 + Double Ratchet) for per-session keys.
-- **No deniability** --- the receiver can prove the sender had the passphrase. A
+- **No deniability** - the receiver can prove the sender had the passphrase. A
   future iteration can sign with a separate Mac-style key per message.
 - A lost passphrase is unrecoverable. We document this prominently.
 
@@ -597,7 +597,7 @@ magic, version mismatch.
 
 ### Context
 A single trust grant (`trusted_keys.json` with a list of public keys) is too coarse.
-Once you've added an author key, that author can publish at any scope --- including
+Once you've added an author key, that author can publish at any scope - including
 `public` packs from your team's internal channels. We needed a way to grant trust
 *with a scope cap*: "this key may publish up to Team, but never Public."
 
@@ -650,7 +650,7 @@ A pull-based sync:
 4. The subscriber is idempotent: events already known by `(name, version, revoked_at)`
    are skipped.
 5. `Registry::revoke_if_exists(name, version)` records a cascade event without
-   requiring a local pack tarball --- so subscribers that never installed pack X still
+   requiring a local pack tarball - so subscribers that never installed pack X still
    learn about its revocation.
 
 The high-water mark is the maximum `revoked_at` of every locally-known event. After
@@ -659,8 +659,8 @@ each sync, the subscriber stores the new mark and passes it as `since=` next tim
 ### Rationale
 - Append-only JSONL is grep-friendly and easy to back up to S3 for long-term audit.
 - Pull (vs push) means a subscriber that goes offline for a week gets all the
-  revocations it missed on its next sync --- no message loss, no queue to operate.
-- Idempotency means duplicates are safe --- a peer can re-pull the same window multiple
+  revocations it missed on its next sync - no message loss, no queue to operate.
+- Idempotency means duplicates are safe - a peer can re-pull the same window multiple
   times without duplicating events in its own log.
 
 ### Trade-offs
@@ -669,7 +669,7 @@ each sync, the subscriber stores the new mark and passes it as `since=` next tim
   sub-second latency.
 - **No cross-origin provenance.** When peer B applies a revocation from peer A, B
   doesn't know *why* A revoked the pack. The `reason` field is optional and
-  informational --- we'd need signed revocation receipts to do better, which is
+  informational - we'd need signed revocation receipts to do better, which is
   beyond v0.5.0's scope.
 - **Trust on the receiver.** Peer B applies revocations from any peer it pulls
   from. The `PeerConfig.base_url` is the trust anchor. TLS + a future bearer-token
@@ -699,9 +699,9 @@ Two options:
 ### Decision
 Ship 2 hand-built fixtures in `cairn-bench::fixture`:
 
-- `alex_employer_history` --- 6 facts, 3 questions, exercises entity resolution
+- `alex_employer_history` - 6 facts, 3 questions, exercises entity resolution
   (Alex / Alexander / Al across sessions) + temporal recall.
-- `migration_timeline` --- 5 facts, 2 questions, sequential events with
+- `migration_timeline` - 5 facts, 2 questions, sequential events with
   unrelated distractors.
 
 The `LongMemEvalBenchmark` harness grades recall via lexical keyword overlap.
@@ -712,7 +712,7 @@ this same harness (for apples-to-apples comparison) live in BENCHMARKS.md.
 ### Rationale
 - Repo size stays small. The upstream datasets can be downloaded separately by
   anyone who wants the real numbers.
-- License compliance is unambiguous --- we wrote every fixture from scratch.
+- License compliance is unambiguous - we wrote every fixture from scratch.
 - The benchmark still demonstrates the *shape* of recall quality (does our
   confidence + vector clock + hybrid search combo actually surface the right
   memory?), which is the question that matters for v0.5.0.
@@ -721,7 +721,7 @@ this same harness (for apples-to-apples comparison) live in BENCHMARKS.md.
 - Recall scores from this fixture are *not* directly comparable to published
   LongMemEval / LoCoMo numbers. A reader who wants that comparison has to run the
   upstream dataset themselves.
-- The fixtures are small enough that a lexical baseline scores 100% --- the
+- The fixtures are small enough that a lexical baseline scores 100% - the
   benchmark tells us nothing about paraphrase/negation/multi-hop. A future
   Sprint 22 (voice ingestion) release will add a paraphrased-fixture variant.
 
@@ -740,20 +740,20 @@ A v0.5.0 release needs a public landing page (`/`) for:
 - Links into docs (BENCHMARKS, ARCHITECTURE, SECURITY)
 
 Two places to put this:
-1. **Inside the Next.js export** at `web/src/app/page.tsx` --- beautiful when
+1. **Inside the Next.js export** at `web/src/app/page.tsx` - beautiful when
    `web/out/` is built, but silently broken when it's missing (the cairn-server's
    static fallback serves a generic HTML page).
-2. **Inside cairn-api** as `INDEX_HTML` --- always works, but can't be themed or
+2. **Inside cairn-api** as `INDEX_HTML` - always works, but can't be themed or
    react-query'd, and any change requires a Rust rebuild + cairn-server upgrade.
 
 ### Decision
 Ship **both**, with the Next.js export as canonical and the Rust fallback as
 "good enough for a smoke test":
 
-- `web/src/app/page.tsx` --- the canonical landing page. Hero + comparison table +
+- `web/src/app/page.tsx` - the canonical landing page. Hero + comparison table +
   install cards + trust signals + footer. Built into the static export alongside
   the dashboard.
-- `crates/cairn-api/src/ui.rs::INDEX_HTML` --- a minimal branded HTML page served at
+- `crates/cairn-api/src/ui.rs::INDEX_HTML` - a minimal branded HTML page served at
   `/` when `web/out/` is missing. Renders the same install commands + a smaller
   before/after table so a fresh checkout still has something to look at before
   the dashboard is reached.
@@ -767,7 +767,7 @@ fallback first still recognises the canonical page when they rebuild with
   diagnostics.
 - The fallback path also exercises the static-asset pipeline (`rust-embed`'s
   `WebAssets::get`), which is the same code path that serves the dashboard in
-  production --- useful to keep honest.
+  production - useful to keep honest.
 - A demo GIF placeholder is rendered with a dashed border + "placeholder" label
   in the corner so the canonical page doesn't look broken while waiting for the
   real recording.
@@ -777,7 +777,7 @@ fallback first still recognises the canonical page when they rebuild with
   rather than shared React components, so a style tweak has to land in both
   places. A future iteration could generate the fallback page from the same
   React tree with `output: "export"` fallback rules.
-- The Next.js landing page can't be A/B-tested easily --- any change requires a
+- The Next.js landing page can't be A/B-tested easily - any change requires a
   rebuild + redeploy. The static nature is intentional (no auth, no fetches) so
   the rebuild cost is small.
 
@@ -819,7 +819,7 @@ feel free.
 - The heuristic is dumb on paraphrase. "what was the api I was using" + a
   recall-cue doc scores high; "hey, do you remember the rate-limit we set?"
   scores high too. Paraphrase without recall cues ("remind me about throttling")
-  scores below threshold --- that's the miss rate.
+  scores below threshold - that's the miss rate.
 - If miss rate becomes a problem in real usage, we can swap in a learned
   classifier behind the same `classify` function (no API change). The hook
   interface is the contract.
@@ -846,7 +846,7 @@ HNSW indices. Options considered:
    filters again before any ranking work.
 
 ### Decision
-Option 3 --- every `Memory` carries an `OrgId`. `MemoryEngine::recall_for_org`
+Option 3 - every `Memory` carries an `OrgId`. `MemoryEngine::recall_for_org`
 filters by `org_id` before any ranking. The implicit default org
 (`OrgId::default()`) is the value used when `Config::multi_tenant = false`,
 so existing self-hosted installs see no change in behaviour.
@@ -855,7 +855,7 @@ so existing self-hosted installs see no change in behaviour.
 validated at construction. It's a tenant identifier, not a secret.
 
 ### Rationale
-- One storage engine, one index --- `cairn-store` and `cairn-registry` don't
+- One storage engine, one index - `cairn-store` and `cairn-registry` don't
   grow new code paths.
 - Tenant isolation is enforced in the memory engine (the recall path) and
   in the registry (a future Sprint 19 follow-up). Even with shared indices,
@@ -898,7 +898,7 @@ registry HTTP API as `cairn-server`, so:
 ### Rationale
 - A shared binary with a `--mode=proxy` flag would force operators to deploy
   the cairn-server's full auth/admin surface just to fan out reads.
-- Splitting lets the proxy be tiny (no memory engine, no MCP) --- easy to
+- Splitting lets the proxy be tiny (no memory engine, no MCP) - easy to
   deploy as a sidecar or a serverless function.
 - The proxy speaks the same `/registry/*` HTTP API the cairn-server exposes
   via Sprint 13, so the wire protocol is owned by `cairn-registry`, not by
@@ -949,9 +949,9 @@ CAIRN_TOKEN  = "<device-jwt>"
 ### Decision
 Restrict `KNOWN` agents to three:
 
-- `claude-code` --- primary, full hook + MCP + rules surface
-- `codex`      --- MCP stdio, optional `[mcp_servers.cairn.env]`
-- `opencode`   --- MCP stdio via XDG config
+- `claude-code` - primary, full hook + MCP + rules surface
+- `codex`      - MCP stdio, optional `[mcp_servers.cairn.env]`
+- `opencode`   - MCP stdio via XDG config
 
 Removed: `cursor`, `vscode` (Copilot), `windsurf`, `cline`.
 
@@ -964,7 +964,7 @@ Removed: `cursor`, `vscode` (Copilot), `windsurf`, `cline`.
   bodies are skipped via a `<<CAIRN_SKIP>>` marker because TOML has
   no per-key "exists?" check).
 - Cursor/VSCode/Windsurf users can still install `cairn` and
-  register it manually in their agent's MCP panel --- the loss is
+  register it manually in their agent's MCP panel - the loss is
   the auto-setup, not the capability.
 
 ### Trade-offs
@@ -1043,7 +1043,7 @@ v0.5.0 had the host binary called `cairn-cli` and the crate called
 
 - The pre-v0.4.0 single-binary name (`cairn`), which is what most
   users remember and what the install scripts still print.
-- The MCP config convention of `command: "cairn"` --- every agent's
+- The MCP config convention of `command: "cairn"` - every agent's
   MCP JSON ended up referencing the wrong binary.
 - The 21st line of `AGENTS.md` that had to be re-read every time
   someone onboarded.
@@ -1065,7 +1065,7 @@ ADR-029.
   `cairn` (string replace, scoped to the distinct token; no
   partial matches like `cairn-cli-server`).
 - `cairn run`, `cairn mcp`, `cairn setup`, etc. are unchanged in
-  shape --- only the binary name moved.
+  shape - only the binary name moved.
 
 ### Rationale
 - One binary name. The agent MCP config is now
@@ -1083,7 +1083,7 @@ ADR-029.
   `cargo run -p cairn-client` and for CI matrix entries.
 - The bulk rename touched 39 files. Most were docs and a few
   were Rust source files (subcommand names like `cairn_run` and
-  `cairn_mcp` didn't need to change --- only doc comments
+  `cairn_mcp` didn't need to change - only doc comments
   referencing the binary did).
 - Historical references in `CHANGELOG.md`, `docs/DECISIONS.md`,
   `docs/PLAN_v0.5.0.md`, and `docs/audits/*` are left verbatim:
@@ -1095,10 +1095,10 @@ ADR-029.
 
 ## See also
 
-- [Architecture](ARCHITECTURE.md) --- how these decisions manifest in the code
-- [SECURITY.md](../SECURITY.md) --- threat model + hardening checklist (updated Sprint 15c)
-- [Roadmap](ROADMAP.md) --- what's done, what's next
-- [Web](WEB.md) --- admin/CLI auth split surface
-- [Upgrading](UPGRADING.md) --- 0.5.0 -> 0.6.0 migration
-- [Plan v0.6.0](PLAN_v0.6.0.md) --- v0.6.0 cleanup sprint
-- [Audit Report](audits/REPORT.md) --- security findings that informed several of these decisions
+- [Architecture](ARCHITECTURE.md) - how these decisions manifest in the code
+- [SECURITY.md](../SECURITY.md) - threat model + hardening checklist (updated Sprint 15c)
+- [Roadmap](ROADMAP.md) - what's done, what's next
+- [Web](WEB.md) - admin/CLI auth split surface
+- [Upgrading](UPGRADING.md) - 0.5.0 -> 0.6.0 migration
+- [Plan v0.6.0](PLAN_v0.6.0.md) - v0.6.0 cleanup sprint
+- [Audit Report](audits/REPORT.md) - security findings that informed several of these decisions

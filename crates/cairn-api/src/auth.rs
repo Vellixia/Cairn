@@ -42,7 +42,7 @@ pub enum AuthError {
     MissingSecret,
     #[error(
         "CAIRN_SECRET_KEY is too short ({len} bytes); HS256 requires at least {MIN_SECRET_LEN} \
-         bytes --- generate one with `openssl rand -base64 48` and set it in .env"
+         bytes - generate one with `openssl rand -base64 48` and set it in .env"
     )]
     WeakSecret { len: usize },
     #[error("token decode failed: {0}")]

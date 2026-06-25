@@ -1,10 +1,10 @@
-//! OR-Set --- Observed-Remove Set (Bienvenu et al., 2007).
+//! OR-Set - Observed-Remove Set (Bienvenu et al., 2007).
 //!
 //! Every element insertion is tagged with a unique causal marker (UUID). Every
 //! removal deletes *all observed markers* for that element. Concurrent add+remove
 //! resolves to "present" because the add's marker wasn't observed by the remover.
 //!
-//! Used by Cairn for memory `tags` and `concepts` collections --- both behave like
+//! Used by Cairn for memory `tags` and `concepts` collections - both behave like
 //! sets where a user adding "rust" on one device and removing "rust" on another
 //! (offline) should leave "rust" present after sync (both intents preserved).
 
@@ -19,7 +19,7 @@ pub type Marker = String;
 pub struct ORSet {
     /// Element value -> set of causal markers that added it.
     elements: BTreeMap<String, BTreeSet<Marker>>,
-    /// Markers that have been removed. Tombstones --- needed so a "remove" doesn't get
+    /// Markers that have been removed. Tombstones - needed so a "remove" doesn't get
     /// resurrected by an old "add" arriving later.
     tombstones: BTreeSet<Marker>,
 }
@@ -41,7 +41,7 @@ impl ORSet {
     }
 
     /// Remove every observed marker for `value`. Markers from concurrent adds that we
-    /// haven't seen yet are NOT touched --- those adds will resurrect the element on the
+    /// haven't seen yet are NOT touched - those adds will resurrect the element on the
     /// next merge. That's the intended behavior (add wins over remove on conflict).
     pub fn remove(&mut self, value: &str) {
         if let Some(markers) = self.elements.remove(value) {
@@ -124,7 +124,7 @@ mod tests {
         bob.remove("rust");
         assert!(!bob.contains("rust"));
 
-        // Sync --- bob's tombstones don't cover alice's brand-new marker, so the add
+        // Sync - bob's tombstones don't cover alice's brand-new marker, so the add
         // wins.
         alice.merge(&bob);
         assert!(alice.contains("rust"), "concurrent add wins over remove");
@@ -133,7 +133,7 @@ mod tests {
         bob.merge(&alice);
         assert!(bob.contains("rust"));
 
-        // The marker survives --- useful for debugging which side added what.
+        // The marker survives - useful for debugging which side added what.
         assert!(alice.marker_count("rust") >= 1);
         let _ = m;
     }
@@ -157,7 +157,7 @@ mod tests {
         right.merge(&a);
 
         assert_eq!(left.members(), right.members());
-        // Both sides added "rust" so it stays --- add wins over concurrent remove,
+        // Both sides added "rust" so it stays - add wins over concurrent remove,
         // and there's no remove on rust here.
         assert!(left.contains("rust"));
         // Alice's "safety" marker predates bob's remove, so safety is preserved
@@ -286,12 +286,12 @@ mod tests {
         let mut bob = ORSet::new();
         bob.add("rust");
 
-        // Sync. alice's tombstone blocks bob's add? No --- bob's add carries a NEW
+        // Sync. alice's tombstone blocks bob's add? No - bob's add carries a NEW
         // marker (UUID) that alice's tombstone doesn't cover. So the element comes
         // back. This is correct OR-Set semantics: a fresh add is independent of past
         // removals.
 
-        // Wait --- actually the original alice.add marker was created and tombstoned.
+        // Wait - actually the original alice.add marker was created and tombstoned.
         // bob's NEW add marker is different. So after merge, the element should be
         // present (bob's marker survives).
         alice.merge(&bob);

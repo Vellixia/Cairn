@@ -2,7 +2,7 @@
 
 All notable changes to Cairn are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.6.0] --- 2026-06-23 --- Cleanup sprint
+## [0.6.0] - 2026-06-23 - Cleanup sprint
 
 A focused cleanup over the v0.5.0 release. **No new features**, no new
 endpoints, no new dependencies. The product surface is smaller, the
@@ -29,7 +29,7 @@ instead of two.
 **Admin bootstrap (env-only)**
 - The admin account is now created at server boot from
   `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD`. The dashboard's
-  first-run "set admin password" form is gone --- it was a
+  first-run "set admin password" form is gone - it was a
   v0.4.0 -> v0.5.0 footgun.
 - Admin ops (token create / revoke, pair-code generation) live in
   the dashboard under **You -> Tokens** and **You -> Pair**. No new
@@ -81,17 +81,17 @@ instead of two.
 
 ### New in the docs
 
-- `docs/ADMIN.md` --- env bootstrap, dashboard surface, curl
+- `docs/ADMIN.md` - env bootstrap, dashboard surface, curl
   equivalents, password rotation.
-- `docs/PLAN_v0.6.0.md` --- this sprint plan.
+- `docs/PLAN_v0.6.0.md` - this sprint plan.
 - `docs/PLAN_v0.5.0.md` -> `docs/archive/PLAN_v0.5.0.md`.
 - ADRs 028 / 029 / 030 in `docs/DECISIONS.md`.
 
 ---
 
-## [0.5.0] --- 2026-06-21 --- Context + Reliability + Distribution + Proactive (Phases 3.5 + 4.0 + 4.1 + 4.2 + 5)
+## [0.5.0] - 2026-06-21 - Context + Reliability + Distribution + Proactive (Phases 3.5 + 4.0 + 4.1 + 4.2 + 5)
 
-The complete v0.5.0 release --- 23 sprints across 5 phases. Cairn is now
+The complete v0.5.0 release - 23 sprints across 5 phases. Cairn is now
 self-installable, multi-tenant aware, federated, and proactive.
 
 ### What's new
@@ -159,11 +159,11 @@ self-installable, multi-tenant aware, federated, and proactive.
 **Self-hosted registry (Phase 4.1, Sprints 13--14)**
 - `cairn-registry` crate with HTTP endpoints under `/registry/*`:
   publish, search, install, manifest, signed download.
-- **Ed25519 pack signing** --- signers add their public key to `manifest.json`;
+- **Ed25519 pack signing** - signers add their public key to `manifest.json`;
   verifiers reject packs whose signature doesn't match.
-- **Trust scopes** --- Local / Team / Public. Each peer in `TrustGrant` declares
+- **Trust scopes** - Local / Team / Public. Each peer in `TrustGrant` declares
   what scope they allow. Scope mismatch returns `RegistryError::ScopeDenied`.
-- **Revocation cascade** --- `revoke_if_exists` records the event and pulls
+- **Revocation cascade** - `revoke_if_exists` records the event and pulls
   it across federation; no peer can re-publish a revoked pack.
 
 **Federation + sync (Phase 4.1, Sprint 15)**
@@ -171,7 +171,7 @@ self-installable, multi-tenant aware, federated, and proactive.
   - `GCounter` for cumulative counters (memory access counts).
   - `ORSet` for memory sets (concurrent add+remove resolves to present).
 - **Vector clocks** per-actor for causal ordering of `MemoryOp::Put/Bump/Tombstone`.
-- **End-to-end encryption** --- Argon2id (64 MiB / 3 iter) -> ChaCha20-Poly1305
+- **End-to-end encryption** - Argon2id (64 MiB / 3 iter) -> ChaCha20-Poly1305
   AEAD with AAD bound to `from->to` actor pair.
 
 **Benchmarks + landing (Phase 4.2, Sprints 16--17)**
@@ -184,12 +184,12 @@ self-installable, multi-tenant aware, federated, and proactive.
 - Public landing page at `web/src/app/page.tsx` with hero + savings table +
   honest comparison + install cards + trust signals.
 - `docs/BENCHMARKS.md` rewritten with methodology + reproducible numbers.
-- `web/src/app/dashboard/registry/page.tsx` --- pack registry browser with
+- `web/src/app/dashboard/registry/page.tsx` - pack registry browser with
   scope chips + provenance panel.
 
 **Proactive recall (Phase 5, Sprint 18)**
 - New `cairn-proactive` crate with a local intent classifier:
-  - Pure-Rust heuristic --- question markers, recall cues, file/path mentions,
+  - Pure-Rust heuristic - question markers, recall cues, file/path mentions,
     reference pronouns. Sub-millisecond per turn.
   - `ProactiveHook` returns up to 3 relevant memories or a `Skipped { reason }`
     for diagnostics.
@@ -212,7 +212,7 @@ self-installable, multi-tenant aware, federated, and proactive.
 **PWA + push (Phase 5, Sprint 20)**
 - Service worker (`web/public/sw.js`) with cache-first static + network-first
   `/api/*`. Falls back to cached shell when offline.
-- Web App Manifest at `web/public/manifest.json` --- installable PWA.
+- Web App Manifest at `web/public/manifest.json` - installable PWA.
 - New `PushStore` + `POST /api/push/subscribe`, `POST /api/push/unsubscribe`,
   `GET /api/push/list`. Each subscription is a JSON file under
   `<data_dir>/push/`.
@@ -224,11 +224,11 @@ self-installable, multi-tenant aware, federated, and proactive.
 **Transcript ingestion (Phase 5, Sprint 22)**
 - New `cairn-ingest` crate with VTT/SRT/JSON parsers + speaker-window
   chunking (default 60 s).
-- `POST /api/ingest/transcript` --- auto-detect format; writes one memory
+- `POST /api/ingest/transcript` - auto-detect format; writes one memory
   per chunk with `applies_to = ["transcript:<source_url>"]`.
 
 **Mobile companion (Phase 5, Sprint 23)**
-- `web/src/app/mobile/page.tsx` --- standalone PWA surface with biometric
+- `web/src/app/mobile/page.tsx` - standalone PWA surface with biometric
   gate, savings card, drift-approval queue.
 - Best-effort WebAuthn probe; falls back to a tap-to-unlock button.
 
@@ -254,15 +254,15 @@ require a live HelixDB.
 
 ### Docs
 
-- `docs/PLAN_v0.5.0.md` --- full 23-sprint plan + success metrics + risks.
-- `docs/DECISIONS.md` --- 27 ADRs (binary split -> proactive intent classifier
+- `docs/PLAN_v0.5.0.md` - full 23-sprint plan + success metrics + risks.
+- `docs/DECISIONS.md` - 27 ADRs (binary split -> proactive intent classifier
   + multi-tenant + cairn.sh proxy).
-- `docs/BENCHMARKS.md` --- LongMemEval + horizon + retention numbers + methodology.
-- `docs/ROADMAP.md` --- verification rows for every Phase 3.5--5 sprint.
+- `docs/BENCHMARKS.md` - LongMemEval + horizon + retention numbers + methodology.
+- `docs/ROADMAP.md` - verification rows for every Phase 3.5--5 sprint.
 
 ---
 
-## [0.4.0] --- 2026-06-20 --- Context + Reliability Layer (Phase 3.5 + 4.0)
+## [0.4.0] - 2026-06-20 - Context + Reliability Layer (Phase 3.5 + 4.0)
 
 ### What's new
 
@@ -341,7 +341,7 @@ each decision.
 
 ---
 
-## [0.3.0] --- 2026-06-19 --- P0--P3 Security & Build Hardening
+## [0.3.0] - 2026-06-19 - P0--P3 Security & Build Hardening
 
 ### Breaking changes
 

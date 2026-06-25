@@ -1,4 +1,4 @@
-# cargo-audit config --- ignores must be mirrored here for cargo audit to honor them.
+# cargo-audit config - ignores must be mirrored here for cargo audit to honor them.
 # The authoritative documentation lives in deny.toml [advisories].ignore. Keep both in sync.
 #
 # Categories of unmaintained are still emitted as informational warnings (we want to see them);

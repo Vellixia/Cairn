@@ -2,7 +2,7 @@
 //!
 //! The Cairn dashboard is a static Next.js export; pushing real-time state to it over WebSocket
 //! would mean adding a second protocol. SSE is one-way (server -> browser), native to every
-//! browser via [`EventSource`], and auto-reconnects --- exactly what the Overview/Audit pages
+//! browser via [`EventSource`], and auto-reconnects - exactly what the Overview/Audit pages
 //! need to replace their 5 s polling.
 //!
 //! ## Event broker
@@ -12,7 +12,7 @@
 //! `tokio::sync::broadcast` receiver and stream events as they arrive.
 //!
 //! ## Replay (`Last-Event-ID`)
-//! Each event has a monotonically increasing `id` (allocated by the store's audit backend --- same
+//! Each event has a monotonically increasing `id` (allocated by the store's audit backend - same
 //! source the audit log uses, so audit + live are consistent). On reconnect, the browser sends
 //! `Last-Event-ID: <id>` and we replay anything newer from durable storage before resuming the
 //! live stream.
@@ -93,8 +93,8 @@ impl Default for EventBroker {
 
 impl EventBroker {
     /// Build a broker with `capacity` slots for slow subscribers. Overflow is dropped (broadcast's
-    /// "lagged" semantics --- we accept dropped events on a slow client rather than block).
-    /// `seed` is the initial value of the synthetic-event counter --- pass `max_audit_event_id`
+    /// "lagged" semantics - we accept dropped events on a slow client rather than block).
+    /// `seed` is the initial value of the synthetic-event counter - pass `max_audit_event_id`
     /// from the durable audit log so live and replayed ids share the same namespace.
     pub fn new(capacity: usize, seed: u64) -> Self {
         let (tx, _rx) = broadcast::channel(capacity);
@@ -133,14 +133,14 @@ impl EventBroker {
     }
 }
 
-/// SSE query params --- supports `?since=<event-id>` for replay on reconnect.
+/// SSE query params - supports `?since=<event-id>` for replay on reconnect.
 #[derive(Debug, Default, serde::Deserialize)]
 pub struct EventsQuery {
     #[serde(default)]
     pub since: Option<String>,
 }
 
-/// `GET /api/events` --- server-sent event stream.
+/// `GET /api/events` - server-sent event stream.
 ///
 /// On connect, replays any audit events with id greater than `?since=<id>` (or `Last-Event-ID`)
 /// from durable storage, then streams live events as they're published. Sends a 30 s heartbeat

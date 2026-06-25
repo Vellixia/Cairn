@@ -1,10 +1,10 @@
-//! The context assembler --- Cairn's answer to context rot.
+//! The context assembler - Cairn's answer to context rot.
 //!
 //! Research shows every model degrades as input grows, and that information in the *middle* of a
 //! long context gets ignored ("lost in the middle"). So instead of dumping everything, the
 //! assembler builds the smallest high-signal working set that fits a token budget and **orders it
 //! so the best items sit at the two edges**, with weaker items in the middle. Anything that
-//! doesn't fit is reported as dropped --- and is always one memory recall away, so nothing is lost.
+//! doesn't fit is reported as dropped - and is always one memory recall away, so nothing is lost.
 
 use cairn_core::Result;
 use cairn_memory::{MemoryEngine, ScoredMemory};
@@ -147,7 +147,7 @@ mod tests {
         Some((Assembler::new(mem.clone()), mem))
     }
 
-    // --- edge_order ---
+    // - edge_order ---
 
     #[test]
     fn edge_order_empty() {
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(sorted, input, "no items lost or duplicated");
     }
 
-    // --- est_tokens ---
+    // - est_tokens ---
 
     #[test]
     fn est_tokens_empty_string() {
@@ -231,7 +231,7 @@ mod tests {
         );
     }
 
-    // --- preview ---
+    // - preview ---
 
     #[test]
     fn preview_empty_string() {

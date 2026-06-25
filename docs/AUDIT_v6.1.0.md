@@ -1,9 +1,9 @@
-# Cairn v6.1.0 --- Test & Security Audit Report
+# Cairn v6.1.0 - Test & Security Audit Report
 
 **Date:** 2026-06-24  
 **Branch:** `v6.1.0`  
 **Auditor:** Claude Opus 4.8 (automated sprint)  
-**Scope:** full workspace --- 21 crates, ~25.6k LOC, MSRV 1.85
+**Scope:** full workspace - 21 crates, ~25.6k LOC, MSRV 1.85
 
 ---
 
@@ -17,20 +17,20 @@ and adversarial/edge-case paths. `cargo fmt`, `cargo clippy -D warnings`, and `c
 
 ---
 
-## Phase 0 --- Baseline (before any edits)
+## Phase 0 - Baseline (before any edits)
 
 | Check | Result |
 |---|---|
-| `cargo fmt --all -- --check` | **FAIL** --- 24 diffs in newly-written tests (resolved by `cargo fmt`) |
-| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** --- 0 warnings |
+| `cargo fmt --all -- --check` | **FAIL** - 24 diffs in newly-written tests (resolved by `cargo fmt`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** - 0 warnings |
 | `cargo build --workspace --locked` | **PASS** |
-| `cargo test --workspace` | **FAIL** --- 7 test failures (detailed below) |
+| `cargo test --workspace` | **FAIL** - 7 test failures (detailed below) |
 | `cargo audit` | not installed locally; `deny.toml` in CI covers advisories |
 | `cargo deny check` | not installed locally; configuration reviewed manually (see S5) |
 
 ---
 
-## Phase 1 --- Real Failures Fixed
+## Phase 1 - Real Failures Fixed
 
 ### 1. `sse_backfill_replays_audit_events_with_since_id` (cairn-api)
 
@@ -110,7 +110,7 @@ to both `root` and `resolved` in `resolve_within_root`.
 
 ### 7. `rooted_read_allows_inside_and_rejects_outside` (cairn-context)
 
-**Root cause:** `tempfile::tempdir().unwrap().path().join("outside.txt")` --- the `TempDir` was
+**Root cause:** `tempfile::tempdir().unwrap().path().join("outside.txt")` - the `TempDir` was
 a temporary expression, immediately dropped on Windows, deleting the directory before the read
 attempt.
 
@@ -121,7 +121,7 @@ test.
 
 ---
 
-## Phase 2 --- Security Hardening
+## Phase 2 - Security Hardening
 
 ### S-1: Model integrity strict mode (`cairn-embed`)
 
@@ -167,7 +167,7 @@ above.
 
 ---
 
-## Phase 3 --- Deep Test Expansion
+## Phase 3 - Deep Test Expansion
 
 Test count: **~330 baseline -> 464 after sprint** (+134 tests, +41%).
 
@@ -177,7 +177,7 @@ Test count: **~330 baseline -> 464 after sprint** (+134 tests, +41%).
 |---|---|---|
 | `cairn-assemble` | +10 | empty/whitespace/huge input, token budget edge cases, idempotence |
 | `cairn-guard` | +14 | rate-limit boundary, zero-window, concurrent access, rule ordering |
-| `cairn-ingest` | +42 | VTT/SRT/JSON parsers --- truncated, binary garbage, encoding errors, round-trips |
+| `cairn-ingest` | +42 | VTT/SRT/JSON parsers - truncated, binary garbage, encoding errors, round-trips |
 | `cairn-proxy` | +8 | fanout with slow/failing targets, empty pool, response merging |
 | `cairn-session` | +16 | generation-counter invalidation, concurrent ops, expiry, empty state |
 | `cairn-shell` | +18 | argument injection, empty command, env passthrough |
@@ -198,30 +198,30 @@ Test count: **~330 baseline -> 464 after sprint** (+134 tests, +41%).
 
 ---
 
-## Phase 4 --- Dependency Audit
+## Phase 4 - Dependency Audit
 
 `cargo-audit` and `cargo-deny` are not installed in the local environment; both run in CI.
 `deny.toml` was reviewed manually:
 
 | Advisory | Crate | Status |
 |---|---|---|
-| RUSTSEC-2024-0436 | `paste` (via rust-embed 8.x) | Documented ignore --- requires breaking upgrade |
-| RUSTSEC-2025-0119 | `number_prefix` (via indicatif) | Documented ignore --- no maintained fork |
-| RUSTSEC-2025-0134 | `rustls-pemfile` (via axum-server 0.7.x) | Documented ignore --- bounded startup-only risk |
+| RUSTSEC-2024-0436 | `paste` (via rust-embed 8.x) | Documented ignore - requires breaking upgrade |
+| RUSTSEC-2025-0119 | `number_prefix` (via indicatif) | Documented ignore - no maintained fork |
+| RUSTSEC-2025-0134 | `rustls-pemfile` (via axum-server 0.7.x) | Documented ignore - bounded startup-only risk |
 
 All three documented ignores have written rationale in `deny.toml`. No new advisories
 identified in this sprint.
 
 ---
 
-## Phase 5 --- Code Quality
+## Phase 5 - Code Quality
 
 | Check | Result |
 |---|---|
 | `cargo fmt --all -- --check` | **PASS** (clean after `cargo fmt --all`) |
-| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** --- 0 errors, 0 warnings |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** - 0 errors, 0 warnings |
 | `cargo build --workspace --locked` | **PASS** |
-| `cargo test --workspace` | **PASS** --- 464 passed, 0 failed, 5 ignored |
+| `cargo test --workspace` | **PASS** - 464 passed, 0 failed, 5 ignored |
 
 ---
 
@@ -237,7 +237,7 @@ identified in this sprint.
 
 ---
 
-## Phase 6 --- Web Dashboard Testing
+## Phase 6 - Web Dashboard Testing
 
 The Next.js dashboard at `web/` was exercised end-to-end against a live Cairn backend
 (Docker, `CAIRN_HOST=0.0.0.0`). All core flows were verified:
@@ -245,14 +245,14 @@ The Next.js dashboard at `web/` was exercised end-to-end against a live Cairn ba
 | Page / Flow | Result |
 |---|---|
 | Login (admin) | PASS |
-| Now --- KPI overview (memories, reliability, health indicators) | PASS |
+| Now - KPI overview (memories, reliability, health indicators) | PASS |
 | Memory -> Recall (vector search, scored results) | PASS |
 | Trust -> Score (100/100, sample count) | PASS |
-| Trust -> Sanitize (secret redaction scan) | PASS --- detects `named_secret`, `open_ai_key`, `jwt` |
-| You -> Tokens (issue device token) | PASS --- toast confirms issuance |
-| You -> Audit (audit event log, timestamps) | PASS --- timestamps correct after `bump_audit_counter` fix |
+| Trust -> Sanitize (secret redaction scan) | PASS - detects `named_secret`, `open_ai_key`, `jwt` |
+| You -> Tokens (issue device token) | PASS - toast confirms issuance |
+| You -> Audit (audit event log, timestamps) | PASS - timestamps correct after `bump_audit_counter` fix |
 
-### W-1: React hydration error --- `<div>` inside `<p>` (fixed)
+### W-1: React hydration error - `<div>` inside `<p>` (fixed)
 
 **Finding:** `Badge` in [`web/src/components/ui/badge.tsx`](../web/src/components/ui/badge.tsx)
 rendered a `<div>`, which is invalid HTML inside `<p>`. `ItemDescription` renders `<p>`, and

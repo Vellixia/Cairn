@@ -34,8 +34,8 @@ use serde::{Deserialize, Serialize};
 const HEADER_MAGIC: &str = "cairn-sync-e2e";
 const HEADER_VERSION: u8 = 1;
 
-/// Ciphertext envelope as it appears on the wire. The `header` is plaintext --- it
-/// carries the algorithm name, salt, and nonce --- and is followed by the encrypted
+/// Ciphertext envelope as it appears on the wire. The `header` is plaintext - it
+/// carries the algorithm name, salt, and nonce - and is followed by the encrypted
 /// payload + the AEAD authentication tag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedEnvelope {
@@ -54,7 +54,7 @@ pub struct Header {
     pub salt: Vec<u8>,
     /// 12-byte random nonce for ChaCha20-Poly1305.
     pub nonce: Vec<u8>,
-    /// Optional AAD (associated data) --- bound to the ciphertext so the receiver
+    /// Optional AAD (associated data) - bound to the ciphertext so the receiver
     /// can't be tricked into decrypting an envelope intended for a different peer.
     /// In v0.5.0 we use `from + to` actor names.
     pub aad: Option<String>,
@@ -83,7 +83,7 @@ impl KdfParams {
     /// Clamp peer-supplied KDF parameters to the OWASP-recommended minimums before handing
     /// them to `argon2::Params::new`. Without this, a malicious peer could ship
     /// `m_cost_kib=1, t_cost=1, p_cost=1` in the envelope header and coerce us into a
-    /// 4 KiB / 1-iteration derivation --- fast enough to be a denial-of-service vector even
+    /// 4 KiB / 1-iteration derivation - fast enough to be a denial-of-service vector even
     /// though the AEAD tag still rejects forgery. The `t_cost >= 3` floor matches the
     /// minimum we use ourselves; the `p_cost <= 4` cap blocks attackers from spinning up
     /// unbounded argon2 threads.
@@ -180,7 +180,7 @@ pub fn encrypt_envelope(
 }
 
 /// Decrypt a previously-encrypted envelope. Returns the plaintext `SyncEnvelope`
-/// bytes --- the caller is responsible for deserializing them.
+/// bytes - the caller is responsible for deserializing them.
 pub fn decrypt_envelope(
     env: &EncryptedEnvelope,
     passphrase: &[u8],
@@ -293,7 +293,7 @@ mod tests {
     /// Pre-fix regression: a malicious peer could ship `m_cost_kib=1, t_cost=1, p_cost=1`
     /// in the envelope header and coerce the receiver into a 4 KiB / 1-iteration Argon2id
     /// derivation. The receiver's AEAD would still reject forgery, but the cheap
-    /// derivation is a denial-of-service vector --- an attacker can force us to spend
+    /// derivation is a denial-of-service vector - an attacker can force us to spend
     /// negligible CPU per envelope. The fix clamps `KdfParams` to OWASP-recommended
     /// minimums before calling `Params::new`.
     #[test]

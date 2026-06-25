@@ -2,7 +2,7 @@
 //!
 //! A small axum binary that sits in front of one or more self-hosted Cairn
 //! registries and exposes a unified `GET /registry/packs`, `GET /registry/search`,
-//! etc. surface. The proxy doesn't own any state --- it fans out queries to
+//! etc. surface. The proxy doesn't own any state - it fans out queries to
 //! configured backends in parallel and merges the results.
 //!
 //! ## Protocol
@@ -22,7 +22,7 @@
 //!
 //! The proxy trusts the operator's `peers.toml`. Each upstream is reached over
 //! TLS; the operator is responsible for keeping the bearer tokens fresh. The
-//! proxy does NOT itself validate pack signatures --- that's the caller's job.
+//! proxy does NOT itself validate pack signatures - that's the caller's job.
 //!
 //! See ADR-025 for the rationale on why this lives in its own crate vs. being
 //! embedded in `cairn-server`.

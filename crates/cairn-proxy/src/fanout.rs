@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A merged pack metadata after dedup across upstreams. The `seen_at` field is
-/// the wall-clock time we observed the pack at any upstream --- useful for
+/// the wall-clock time we observed the pack at any upstream - useful for
 /// freshness heuristics in the dashboard.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergedPack {

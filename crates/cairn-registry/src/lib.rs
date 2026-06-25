@@ -7,23 +7,23 @@
 //!
 //! ## Endpoints (mounted under `/registry`)
 //!
-//! - `POST   /registry/packs` --- upload a tarball; verify Ed25519 if any trusted keys
+//! - `POST   /registry/packs` - upload a tarball; verify Ed25519 if any trusted keys
 //!   match; return a [`PublishReceipt`].
-//! - `GET    /registry/packs` --- list all pack metadata (newest first).
-//! - `GET    /registry/packs/:name` --- list versions of a single pack.
-//! - `GET    /registry/packs/:name/:version/download` --- stream the tarball.
-//! - `DELETE /registry/packs/:name/:version` --- unpublish (Sprint 14 revocation uses this).
-//! - `GET    /registry/search?q=...` --- substring search on name + description.
+//! - `GET    /registry/packs` - list all pack metadata (newest first).
+//! - `GET    /registry/packs/:name` - list versions of a single pack.
+//! - `GET    /registry/packs/:name/:version/download` - stream the tarball.
+//! - `DELETE /registry/packs/:name/:version` - unpublish (Sprint 14 revocation uses this).
+//! - `GET    /registry/search?q=...` - substring search on name + description.
 //!
 //! ## Storage layout
 //!
 //! ```text
 //! <data_dir>/registry/
-//!   index.json                       --- JSON array of PackMeta
-//!   trusted_keys.json                --- list of trusted author public keys
-//!   revocations.jsonl                --- append-only log of unpublish events
-//!   packs/<name>/<version>.cairnpkg  --- the actual tarball
-//!   packs/<name>/<version>.manifest.json --- cached manifest for fast metadata
+//!   index.json                       - JSON array of PackMeta
+//!   trusted_keys.json                - list of trusted author public keys
+//!   revocations.jsonl                - append-only log of unpublish events
+//!   packs/<name>/<version>.cairnpkg  - the actual tarball
+//!   packs/<name>/<version>.manifest.json - cached manifest for fast metadata
 //! ```
 //!
 //! The index file is rewritten on every mutation. For the v0.5.0 scale (hundreds of
@@ -78,12 +78,12 @@ impl From<RegistryError> for RegistryApiError {
     }
 }
 
-/// `GET /registry/packs` --- list all packs (newest first).
+/// `GET /registry/packs` - list all packs (newest first).
 async fn list_packs(State(reg): State<Arc<Registry>>) -> Result<Json<Vec<PackMeta>>, Response> {
     reg.list_all().map(Json).map_err(|e| e.into_response())
 }
 
-/// `POST /registry/packs` --- body is the raw tarball bytes. Optional `?trusted=<hex-pubkey>`
+/// `POST /registry/packs` - body is the raw tarball bytes. Optional `?trusted=<hex-pubkey>`
 /// query string restricts which author keys are accepted for this publish. The response
 /// is a [`PublishReceipt`] describing the verification + storage outcome.
 async fn publish_pack(
@@ -111,7 +111,7 @@ pub struct PublishQuery {
     pub trusted: Option<String>,
 }
 
-/// `GET /registry/packs/:name` --- list versions of one pack.
+/// `GET /registry/packs/:name` - list versions of one pack.
 async fn list_versions(
     State(reg): State<Arc<Registry>>,
     Path(name): Path<String>,
@@ -121,7 +121,7 @@ async fn list_versions(
         .map_err(|e| e.into_response())
 }
 
-/// `GET /registry/packs/:name/:version/download` --- stream the tarball.
+/// `GET /registry/packs/:name/:version/download` - stream the tarball.
 async fn download_pack(
     State(reg): State<Arc<Registry>>,
     Path((name, version)): Path<(String, String)>,
@@ -137,7 +137,7 @@ async fn download_pack(
         .into_response())
 }
 
-/// `GET /registry/packs/:name/:version/manifest.json` --- return the cached manifest.
+/// `GET /registry/packs/:name/:version/manifest.json` - return the cached manifest.
 /// Includes the full provenance graph (Sprint 14c) so a subscriber can render
 /// "this pack was derived from these 3 memories" without unpacking the tarball.
 async fn fetch_manifest(
@@ -155,7 +155,7 @@ async fn fetch_manifest(
         .into_response())
 }
 
-/// `DELETE /registry/packs/:name/:version` --- unpublish. Appends to the revocations log
+/// `DELETE /registry/packs/:name/:version` - unpublish. Appends to the revocations log
 /// so federation peers see the change in their next sync (Sprint 14).
 async fn revoke_pack(
     State(reg): State<Arc<Registry>>,
@@ -171,7 +171,7 @@ pub struct SearchQuery {
     pub q: Option<String>,
 }
 
-/// `GET /registry/search?q=...` --- case-insensitive substring search on `name + description`.
+/// `GET /registry/search?q=...` - case-insensitive substring search on `name + description`.
 async fn search_packs(
     State(reg): State<Arc<Registry>>,
     Query(q): Query<SearchQuery>,
@@ -180,7 +180,7 @@ async fn search_packs(
     reg.search(&q).map(Json).map_err(|e| e.into_response())
 }
 
-/// `GET /registry/trusted-keys` --- list the trust grants (key + scope) this registry will
+/// `GET /registry/trusted-keys` - list the trust grants (key + scope) this registry will
 /// accept signatures from.
 async fn list_trusted_keys(
     State(reg): State<Arc<Registry>>,
@@ -188,7 +188,7 @@ async fn list_trusted_keys(
     reg.trust_grants().map(Json).map_err(|e| e.into_response())
 }
 
-/// `GET /registry/revocations[?since=<unix_seconds>]` --- the append-only log of
+/// `GET /registry/revocations[?since=<unix_seconds>]` - the append-only log of
 /// unpublish events. Federation subscribers pass `since=<their high-water mark>` to
 /// pull only events newer than what they already have. Without `since`, returns the
 /// entire log.

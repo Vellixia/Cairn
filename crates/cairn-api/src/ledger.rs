@@ -7,7 +7,7 @@
 //! signed, so the verifier doesn't need access to the runtime).
 //!
 //! Persistence: in-memory by default. A future iteration can mirror the audit log to
-//! HelixDB --- the signature scheme is the same so the two backends stay interchangeable.
+//! HelixDB - the signature scheme is the same so the two backends stay interchangeable.
 
 use crate::AppState;
 use axum::{
@@ -41,7 +41,7 @@ pub struct LedgerEntry {
     pub cost_usd_saved: f64,
     /// The token price (USD per token) in effect when this entry was signed. Included in the
     /// HMAC payload so `cost_usd_saved` values are reproducible even after the price constant
-    /// changes --- a verifier can recompute `tokens_saved * price_usd_per_token` and check it
+    /// changes - a verifier can recompute `tokens_saved * price_usd_per_token` and check it
     /// against `cost_usd_saved` without guessing which price was current.
     pub price_usd_per_token: f64,
     /// Lower-case hex HMAC-SHA256 over the canonical JSON of seven fields:
@@ -113,7 +113,7 @@ impl Ledger {
     }
 }
 
-/// Add the ledger to AppState (cheap to clone --- Arc inside).
+/// Add the ledger to AppState (cheap to clone - Arc inside).
 #[derive(Clone, Default)]
 pub struct LedgerState(pub Arc<Ledger>);
 
@@ -210,7 +210,7 @@ pub fn verify_entry(entry: &LedgerEntry, key: &[u8]) -> bool {
         },
         key,
     );
-    // Constant-time compare --- entry.signature is user-controlled.
+    // Constant-time compare - entry.signature is user-controlled.
     if expected.len() != entry.signature.len() {
         return false;
     }
@@ -221,7 +221,7 @@ pub fn verify_entry(entry: &LedgerEntry, key: &[u8]) -> bool {
     diff == 0
 }
 
-// ---- HTTP handlers ---------------------------------------------------------------------------
+// -- HTTP handlers -------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 pub struct LedgerQuery {
@@ -229,7 +229,7 @@ pub struct LedgerQuery {
     pub limit: Option<usize>,
 }
 
-/// GET `/api/ledger` --- recent savings entries (newest first).
+/// GET `/api/ledger` - recent savings entries (newest first).
 pub async fn get_ledger(
     State(s): State<AppState>,
     Query(q): Query<LedgerQuery>,
@@ -246,7 +246,7 @@ pub struct VerifyQuery {
     pub id: i64,
 }
 
-/// GET `/api/ledger/verify?id=N` --- re-check entry N's HMAC. Returns `{ valid: bool }`.
+/// GET `/api/ledger/verify?id=N` - re-check entry N's HMAC. Returns `{ valid: bool }`.
 pub async fn verify_ledger(
     State(s): State<AppState>,
     Query(q): Query<VerifyQuery>,
