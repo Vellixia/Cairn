@@ -339,21 +339,47 @@ mod local {
         Ok(())
     }
 
-    /// Returns `~/.cache/huggingface` on Linux, the platform equivalent on macOS/Windows.
+    /// Returns the directory where fastembed stores downloaded models.
+    ///
+    /// fastembed-rs 4.x uses `hf-hub` which resolves (in priority order):
+    ///   1. `$HF_HOME`  (explicit override)
+    ///   2. `$HOME/.cache/huggingface/hub`  (Linux/macOS)
+    ///   3. `%USERPROFILE%\.cache\huggingface\hub`  (Windows)
+    ///   4. `.fastembed_cache/` relative to `$FASTEMBED_CACHE_PATH` if set
+    ///
+    /// We check `$FASTEMBED_CACHE_PATH` first because the library's working-directory
+    /// fallback (`<cwd>/.fastembed_cache`) is the path fastembed actually writes to when
+    /// `hf-hub` cannot resolve a home directory — which is the common case in tests and
+    /// Docker containers without a proper HOME.
     fn hf_cache_dir() -> Option<PathBuf> {
-        // Prefer the explicit `HF_HOME` env if set; otherwise `~/.cache/huggingface` (Linux),
-        // `~/Library/Caches/huggingface` (macOS), or `%USERPROFILE%\.cache\huggingface`
-        // (Windows). fastembed/hf-hub use the same convention.
-        if let Ok(p) = std::env::var("HF_HOME") {
+        // Explicit fastembed cache override.
+        if let Ok(p) = std::env::var("FASTEMBED_CACHE_PATH") {
             if !p.is_empty() {
                 return Some(PathBuf::from(p));
             }
         }
+        // Explicit HF override.
+        if let Ok(p) = std::env::var("HF_HOME") {
+            if !p.is_empty() {
+                return Some(PathBuf::from(p).join("hub"));
+            }
+        }
+        // Platform home cache.
         if let Some(home) = std::env::var_os("USERPROFILE") {
-            return Some(PathBuf::from(home).join(".cache").join("huggingface"));
+            return Some(
+                PathBuf::from(home)
+                    .join(".cache")
+                    .join("huggingface")
+                    .join("hub"),
+            );
         }
         if let Some(home) = std::env::var_os("HOME") {
-            return Some(PathBuf::from(home).join(".cache").join("huggingface"));
+            return Some(
+                PathBuf::from(home)
+                    .join(".cache")
+                    .join("huggingface")
+                    .join("hub"),
+            );
         }
         None
     }

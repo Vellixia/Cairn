@@ -28,6 +28,10 @@
 *.sqlite
 *.sqlite3
 
+# fastembed / HuggingFace model cache — 86 MB+ ONNX binary, auto-downloaded at runtime
+.fastembed_cache/
+**/.fastembed_cache/
+
 # Env / secrets
 .env
 .env.*
