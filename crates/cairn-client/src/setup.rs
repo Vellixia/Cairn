@@ -59,6 +59,12 @@ pub fn run(
     server: Option<&str>,
     token: Option<&str>,
 ) -> Result<()> {
+    // Fall back to CAIRN_SERVER env var when --server is not passed explicitly.
+    let env_server = server
+        .is_none()
+        .then(|| std::env::var("CAIRN_SERVER").ok())
+        .flatten();
+    let effective_server = server.or(env_server.as_deref());
     let project = std::env::current_dir()?;
     let home = home_dir();
 
@@ -66,7 +72,7 @@ pub fn run(
         let mut configured = 0usize;
         for id in KNOWN {
             if detect(id, &project, home.as_deref()) {
-                install_agent(id, &project, home.as_deref(), server, token)?;
+                install_agent(id, &project, home.as_deref(), effective_server, token)?;
                 configured += 1;
             }
         }
@@ -74,6 +80,8 @@ pub fn run(
             println!("cairn: no supported agents detected here or in your home directory.");
             println!("Install one explicitly, e.g. `cairn setup claude-code`.");
             println!("Supported: {}.", KNOWN.join(", "));
+        } else if let Some(srv) = effective_server {
+            println!("\nCairn server: {srv}. Open a session in your agent.");
         } else {
             println!("\nStart the server with `docker compose up -d`, then open a session in your agent.");
         }
@@ -87,8 +95,12 @@ pub fn run(
             KNOWN.join(", ")
         )
     })?;
-    install_agent(id, &project, home.as_deref(), server, token)?;
-    println!("\nStart the server with `docker compose up -d`, then open a session in your agent.");
+    install_agent(id, &project, home.as_deref(), effective_server, token)?;
+    if let Some(srv) = effective_server {
+        println!("\nCairn server: {srv}. Open a session in your agent.");
+    } else {
+        println!("\nStart the server with `docker compose up -d`, then open a session in your agent.");
+    }
     Ok(())
 }
 
@@ -216,6 +228,49 @@ fn install_opencode(server: Option<&str>, token: Option<&str>) -> Result<()> {
     write_json(&path, &Value::Object(cfg))?;
     println!("\u{2713} Configured OpenCode:");
     println!("  - {}  (MCP server: {})", path.display(), cli_exe);
+
+    // Write OpenCode plugin for lifecycle hooks (session start/end, tool use).
+    write_opencode_plugin(server, token)?;
+
+    Ok(())
+}
+
+/// Write a minimal OpenCode plugin that bridges lifecycle events to `cairn hook`.
+fn write_opencode_plugin(_server: Option<&str>, _token: Option<&str>) -> Result<()> {
+    let config_dir = opencode_config_path()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from(".opencode"));
+    let plugins_dir = config_dir.join("plugins");
+    fs::create_dir_all(&plugins_dir)?;
+    let plugin_path = plugins_dir.join("cairn.js");
+
+    let plugin_content = r#"// Cairn lifecycle plugin. Bridges OpenCode session/tool events to `cairn hook`.
+// Managed by `cairn setup` -- changes will be preserved across runs.
+export const CairnPlugin = async ({ $ }) => {
+  return {
+    "session.created": async () => {
+      await $`echo '{}' | cairn hook SessionStart`.quiet()
+    },
+    "tool.execute.after": async (input) => {
+      const payload = JSON.stringify({
+        tool_name: input.tool,
+        tool_input: input.args || {}
+      })
+      await $`echo ${payload} | cairn hook PostToolUse`.quiet()
+    },
+    "session.idle": async () => {
+      await $`echo '{}' | cairn hook SessionEnd`.quiet()
+    },
+  }
+}
+"#;
+
+    fs::write(&plugin_path, plugin_content)?;
+    println!(
+        "  - {}  (plugin: session + tool hooks)",
+        plugin_path.display()
+    );
     Ok(())
 }
 
@@ -256,6 +311,67 @@ fn install_codex(home: Option<&Path>, server: Option<&str>, token: Option<&str>)
     fs::write(&path, merged).with_context(|| format!("writing {}", path.display()))?;
     println!("\u{2713} Configured Codex CLI:");
     println!("  - {}  (MCP server: cairn)", path.display());
+
+    // Write Codex lifecycle hooks so Cairn fires at SessionStart, UserPromptSubmit,
+    // PostToolUse, and Stop (=> SessionEnd) automatically.
+    if let Some(h) = home {
+        write_codex_hooks(h, server, token)?;
+    }
+
+    Ok(())
+}
+
+/// Write Codex lifecycle hooks to `~/.codex/hooks.json`, idempotently merging
+/// with any existing hooks from other tools (e.g. lean-ctx).
+fn write_codex_hooks(home: &Path, server: Option<&str>, token: Option<&str>) -> Result<()> {
+    let hooks_path = home.join(".codex").join("hooks.json");
+    let mut hooks_cfg = read_object(&hooks_path)?;
+    let hooks_obj = hooks_cfg
+        .entry("hooks")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .with_context(|| format!("{}: 'hooks' is not an object", hooks_path.display()))?;
+
+    // Helper: append a hook entry to an event array if not already present.
+    let mut add_hook = |event: &str, hook: Value| {
+        let arr = hooks_obj
+            .entry(event)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .expect("hooks entry should be an array");
+        // Check if this exact command already exists to avoid duplicates.
+        let cmd = hook["command"].as_str().unwrap_or("");
+        let already = arr.iter().any(|h| {
+            h.get("command")
+                .and_then(|c| c.as_str())
+                .is_some_and(|c| c == cmd)
+        });
+        if !already {
+            arr.push(hook);
+        }
+    };
+
+    add_hook("SessionStart", json!({
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [{ "type": "command", "command": "cairn hook SessionStart" }]
+    }));
+
+    add_hook("UserPromptSubmit", json!({
+        "hooks": [{ "type": "command", "command": "cairn hook UserPromptSubmit" }]
+    }));
+
+    add_hook("PostToolUse", json!({
+        "matcher": "apply_patch|Edit|Write",
+        "hooks": [{ "type": "command", "command": "cairn hook PostToolUse" }]
+    }));
+
+    add_hook("Stop", json!({
+        "hooks": [{ "type": "command", "command": "cairn hook SessionEnd" }]
+    }));
+
+    write_json(&hooks_path, &Value::Object(hooks_cfg))?;
+    println!("  - {}  (hooks: SessionStart, UserPromptSubmit, PostToolUse, Stop)", hooks_path.display());
+    let _ = (server, token);
     Ok(())
 }
 

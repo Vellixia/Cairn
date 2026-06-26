@@ -95,21 +95,21 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
             if matches!(
                 tool,
                 "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "StrReplace"
+                    | "apply_patch"
             ) {
-                if let Some(file) = payload
+                // Claude Code format: tool_input.file_path
+                // Codex format: tool_input.command (apply_patch) - skip guard for this
+                let file_path = payload
                     .get("tool_input")
                     .and_then(|t| t.get("file_path"))
-                    .and_then(Value::as_str)
-                {
+                    .and_then(Value::as_str);
+                if let Some(file) = file_path {
                     if let Some(report) = state.guard.verify_against_baseline(Path::new(file))? {
-                        // Record the outcome (clean or not) so the reliability score reflects it.
                         let _ = state.guard.note_verify(&report);
                         if !report.is_clean() {
                             let ctx = format!(
-                                "[!] Cairn guard ({:?}): {}. The pre-edit original is retained - recover it with Cairn `expand {}` if this was unintended.",
-                                report.risk,
-                                report.message,
-                                report.baseline_hash.as_deref().unwrap_or("")
+                                "[!] Cairn guard ({:?}): {}. The pre-edit original is retained.",
+                                report.risk, report.message
                             );
                             emit(event, &ctx);
                         }
