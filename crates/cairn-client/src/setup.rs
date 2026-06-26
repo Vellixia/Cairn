@@ -23,6 +23,16 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Absolute path to the current cairn binary, with a "cairn" fallback.
+/// Used in agent config files so the MCP server and hooks work regardless
+/// of PATH resolution (especially on Windows).
+fn cairn_exe() -> String {
+    std::env::current_exe()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "cairn".to_string())
+}
+
 /// Verify that a device token is valid before writing it to agent config files.
 /// Makes a `GET /api/auth/me` request and returns Ok(()) on success.
 fn validate_token(server: &str, token: &str) -> Result<()> {
@@ -351,18 +361,20 @@ fn write_codex_hooks(home: &Path, server: Option<&str>, token: Option<&str>) -> 
         }
     };
 
+    let exe = cairn_exe();
+
     add_hook(
         "SessionStart",
         json!({
             "matcher": "startup|resume|clear|compact",
-            "hooks": [{ "type": "command", "command": "cairn hook SessionStart" }]
+            "hooks": [{ "type": "command", "command": format!("{exe} hook SessionStart") }]
         }),
     );
 
     add_hook(
         "UserPromptSubmit",
         json!({
-            "hooks": [{ "type": "command", "command": "cairn hook UserPromptSubmit" }]
+            "hooks": [{ "type": "command", "command": format!("{exe} hook UserPromptSubmit") }]
         }),
     );
 
@@ -370,14 +382,14 @@ fn write_codex_hooks(home: &Path, server: Option<&str>, token: Option<&str>) -> 
         "PostToolUse",
         json!({
             "matcher": "apply_patch|Edit|Write",
-            "hooks": [{ "type": "command", "command": "cairn hook PostToolUse" }]
+            "hooks": [{ "type": "command", "command": format!("{exe} hook PostToolUse") }]
         }),
     );
 
     add_hook(
         "Stop",
         json!({
-            "hooks": [{ "type": "command", "command": "cairn hook SessionEnd" }]
+            "hooks": [{ "type": "command", "command": format!("{exe} hook SessionEnd") }]
         }),
     );
 
@@ -422,9 +434,10 @@ fn render_codex_block(
 
     format!(
         "[mcp_servers.cairn]\n\
-         command = \"cairn\"\n\
+         command = \"{}\"\n\
          {args_line}\n\
          {env_block}",
+        escape_toml(&cairn_exe())
     )
 }
 
@@ -566,9 +579,9 @@ fn cairn_server(
         env.insert("CAIRN_TOKEN".into(), json!(t));
     }
     if env.is_empty() {
-        json!({ "command": "cairn", "args": ["mcp"] })
+        json!({ "command": cairn_exe(), "args": ["mcp"] })
     } else {
-        json!({ "command": "cairn", "args": ["mcp"], "env": Value::Object(env) })
+        json!({ "command": cairn_exe(), "args": ["mcp"], "env": Value::Object(env) })
     }
 }
 
@@ -584,20 +597,26 @@ fn install_claude_code(dir: &Path, server: Option<&str>, token: Option<&str>) ->
             .or_insert_with(|| json!({}))
             .as_object_mut()
             .context("settings.json: hooks is not an object")?;
-        add_hook(hooks, "SessionStart", "cairn hook SessionStart", None);
+        let exe = cairn_exe();
+        add_hook(
+            hooks,
+            "SessionStart",
+            &format!("{exe} hook SessionStart"),
+            None,
+        );
         add_hook(
             hooks,
             "UserPromptSubmit",
-            "cairn hook UserPromptSubmit",
+            &format!("{exe} hook UserPromptSubmit"),
             None,
         );
         add_hook(
             hooks,
             "PostToolUse",
-            "cairn hook PostToolUse",
+            &format!("{exe} hook PostToolUse"),
             Some("Edit|Write|MultiEdit|NotebookEdit|StrReplace"),
         );
-        add_hook(hooks, "SessionEnd", "cairn hook SessionEnd", None);
+        add_hook(hooks, "SessionEnd", &format!("{exe} hook SessionEnd"), None);
     }
     write_json(&settings_path, &Value::Object(settings))?;
 
@@ -607,6 +626,7 @@ fn install_claude_code(dir: &Path, server: Option<&str>, token: Option<&str>) ->
         "  - {}  (hooks: SessionStart, UserPromptSubmit, PostToolUse, SessionEnd)",
         settings_path.display()
     );
+    println!("  - Run /mcp in Claude Code to approve the cairn server");
     Ok(())
 }
 
@@ -708,10 +728,11 @@ mod tests {
         let settings: Value =
             serde_json::from_str(&read_text(&dir.path().join(".claude/settings.json"))).unwrap();
         assert_eq!(settings["model"], "opus");
+        let exe = super::cairn_exe();
         let starts = settings["hooks"]["SessionStart"].as_array().unwrap();
         let cairn_count = starts
             .iter()
-            .filter(|g| g["hooks"][0]["command"] == "cairn hook SessionStart")
+            .filter(|g| g["hooks"][0]["command"] == format!("{exe} hook SessionStart"))
             .count();
         assert_eq!(cairn_count, 1);
         assert!(starts.iter().any(|g| g["hooks"][0]["command"] == "echo hi"));
@@ -719,17 +740,19 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|g| g["hooks"][0]["command"] == "cairn hook PostToolUse"));
+            .any(|g| g["hooks"][0]["command"] == format!("{exe} hook PostToolUse")));
 
         let mcp: Value = serde_json::from_str(&read_text(&dir.path().join(".mcp.json"))).unwrap();
-        assert_eq!(mcp["mcpServers"]["cairn"]["command"], "cairn");
+        assert_eq!(mcp["mcpServers"]["cairn"]["command"], exe);
     }
 
     #[test]
     fn codex_block_renders_minimal_entry() {
+        let exe = super::cairn_exe();
+        let exe_escaped = escape_toml(&exe);
         let block = render_codex_block(None, None, vec![]);
         assert!(block.contains("[mcp_servers.cairn]"));
-        assert!(block.contains("command = \"cairn\""));
+        assert!(block.contains(&format!("command = \"{exe_escaped}\"")));
         assert!(block.contains("args = [\"mcp\"]"));
         assert!(!block.contains("[mcp_servers.cairn.env]"));
     }
@@ -744,30 +767,36 @@ mod tests {
 
     #[test]
     fn codex_merge_appends_when_no_existing_table() {
+        let exe = super::cairn_exe();
+        let exe_escaped = escape_toml(&exe);
         let merged = merge_codex_block(
             "# existing config\nmodel = \"opus\"\n",
-            "[mcp_servers.cairn]\ncommand = \"cairn\"\nargs = [\"mcp\"]\n",
+            &format!("[mcp_servers.cairn]\ncommand = \"{exe_escaped}\"\nargs = [\"mcp\"]\n"),
         );
         assert!(merged.contains("model = \"opus\""));
         assert!(merged.contains("[mcp_servers.cairn]"));
-        assert!(merged.contains("command = \"cairn\""));
+        assert!(merged.contains(&format!("command = \"{exe_escaped}\"")));
     }
 
     #[test]
     fn codex_merge_replaces_existing_cairn_block() {
+        let exe = super::cairn_exe();
+        let exe_escaped = escape_toml(&exe);
         let original = "# head\n[mcp_servers]\n[mcp_servers.cairn]\ncommand = \"stale\"\nargs = [\"old\"]\n[other_table]\nx = 1\n";
         let merged = merge_codex_block(
             original,
-            "[mcp_servers.cairn]\ncommand = \"cairn\"\nargs = [\"mcp\"]\n",
+            &format!("[mcp_servers.cairn]\ncommand = \"{exe_escaped}\"\nargs = [\"mcp\"]\n"),
         );
         assert!(!merged.contains("command = \"stale\""));
-        assert!(merged.contains("command = \"cairn\""));
+        assert!(merged.contains(&format!("command = \"{exe_escaped}\"")));
         assert!(merged.contains("[other_table]"));
         assert!(merged.contains("x = 1"));
     }
 
     #[test]
     fn codex_setup_writes_to_xdg_path_and_preserves_existing_keys() {
+        let exe = super::cairn_exe();
+        let exe_escaped = escape_toml(&exe);
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         fs::write(&cfg, "# user prefs\ntui = { theme = \"dark\" }\n").unwrap();
@@ -777,7 +806,7 @@ mod tests {
         let out = read_text(&cfg);
         assert!(out.contains("tui = { theme = \"dark\" }"));
         assert!(out.contains("[mcp_servers.cairn]"));
-        assert!(out.contains("command = \"cairn\""));
+        assert!(out.contains(&format!("command = \"{exe_escaped}\"")));
         assert!(out.contains("CAIRN_SERVER = \"http://example.com:7777\""));
         assert!(out.contains("CAIRN_TOKEN = \"tok-xyz\""));
     }
@@ -815,13 +844,14 @@ mod tests {
 
     #[test]
     fn opencode_writes_into_the_home_config_and_includes_remote_env() {
+        let exe = super::cairn_exe();
         let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
         fs::create_dir_all(cfg.parent().unwrap()).unwrap();
 
         install_opencode_with_path(Some("http://example.com:7777"), Some("tok-123"), &cfg).unwrap();
 
         let v: Value = serde_json::from_str(&read_text(&cfg)).unwrap();
-        assert_eq!(v["mcp"]["cairn"]["command"][0], "cairn");
+        assert_eq!(v["mcp"]["cairn"]["command"][0], exe);
         assert_eq!(v["mcp"]["cairn"]["command"][1], "mcp");
         assert_eq!(v["mcp"]["cairn"]["type"], "local");
         assert_eq!(v["mcp"]["cairn"]["enabled"], true);
@@ -834,13 +864,14 @@ mod tests {
 
     #[test]
     fn opencode_local_mode_omits_environment() {
+        let exe = super::cairn_exe();
         let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
         fs::create_dir_all(cfg.parent().unwrap()).unwrap();
 
         install_opencode_with_path(None, None, &cfg).unwrap();
 
         let v: Value = serde_json::from_str(&read_text(&cfg)).unwrap();
-        assert_eq!(v["mcp"]["cairn"]["command"][0], "cairn");
+        assert_eq!(v["mcp"]["cairn"]["command"][0], exe);
         assert!(v["mcp"]["cairn"]["environment"].is_null());
     }
 
@@ -861,16 +892,17 @@ mod tests {
         if let Some(t) = token {
             env.insert("CAIRN_TOKEN".into(), json!(t));
         }
+        let exe = super::cairn_exe();
         let entry = if env.is_empty() {
             json!({
                 "type": "local",
-                "command": ["cairn", "mcp"],
+                "command": [exe, "mcp"],
                 "enabled": true
             })
         } else {
             json!({
                 "type": "local",
-                "command": ["cairn", "mcp"],
+                "command": [exe, "mcp"],
                 "environment": Value::Object(env),
                 "enabled": true
             })
