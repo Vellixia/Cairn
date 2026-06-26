@@ -1,4 +1,4 @@
-﻿# Cairn v0.5.0 â€” The Smart Memory Plan
+# Cairn v0.5.0 - The Smart Memory Plan
 
 > **Make AI have smart memory.**
 >
@@ -6,49 +6,49 @@
 > + the integration moat (Memory Provenance Graph + Visualization).
 >
 > This plan builds on the existing foundation and is sequenced for trust: real-time
-> foundation â†’ CRUD/CRUD-adjacent UX â†’ graph layer â†’ session/reliability â†’ assembler/savings
-> â†’ wizard/landing â†’ depth polish, then CLI/MCP surface, distribution, federation, and the
+> foundation -> CRUD/CRUD-adjacent UX -> graph layer -> session/reliability -> assembler/savings
+> -> wizard/landing -> depth polish, then CLI/MCP surface, distribution, federation, and the
 > Phase 5 killer features.
 
 ---
 
-## Â§0. North Star
+## S0. North Star
 
-**Goal:** make any AI agent have smart memory â€” across sessions, devices, projects, and time â€”
+**Goal:** make any AI agent have smart memory - across sessions, devices, projects, and time ---
 without losing a single byte and without burning context budget.
 
 **Why v0.5.0 specifically:** the v0.4.0 web dashboard is shipped and dogfooded. The hard parts
 of "ingest, compress, retrieve, assemble, verify" are done. What remains is making memory
-**smart** â€” not just stored â€” and exposing it through a UX that earns the daily-driver slot
+**smart** - not just stored - and exposing it through a UX that earns the daily-driver slot
 in a developer's workflow.
 
 **Three sentences on what "smart" means here:**
-1. **Memory that thinks for itself** â€” confidence scoring, provenance edges, contradiction
+1. **Memory that thinks for itself** - confidence scoring, provenance edges, contradiction
    detection, tier promotion, decay, and crystallization happen automatically.
-2. **Memory you can see and shape** â€” every memory is editable, pinnable, promotable, and
+2. **Memory you can see and shape** - every memory is editable, pinnable, promotable, and
    deletable from a dashboard that visualizes the memory graph as a first-class artifact.
-3. **Memory that survives everything** â€” compaction, drift, crashes, devices, projects, and
+3. **Memory that survives everything** - compaction, drift, crashes, devices, projects, and
    time. The original is always one `expand` away, the signed ledger proves it.
 
 ---
 
-## Â§1. The Six Dimensions of Smart Memory
+## S1. The Six Dimensions of Smart Memory
 
-Cairn's value isn't any single feature â€” it's the integration. The six dimensions below are
+Cairn's value isn't any single feature - it's the integration. The six dimensions below are
 how we measure "smart," and where each lives in the codebase.
 
-### 1.1 Continuity â€” memory survives across sessions and devices
+### 1.1 Continuity - memory survives across sessions and devices
 
 | Where today | Where v0.5.0 |
 |---|---|
-| `cairn-memory` 4-tier (working â†’ episodic â†’ semantic â†’ procedural) | Same; add Cross-Session Protocol (CCP) auto-restore |
+| `cairn-memory` 4-tier (working -> episodic -> semantic -> procedural) | Same; add Cross-Session Protocol (CCP) auto-restore |
 | `cairn-share` export/import for offline move | Same |
 | Multi-device sync (LWW on `updated_at`) | Add session concept: `sessions/<id>.json` with tasks/findings/decisions/touched_files/next_steps |
 | `SessionStart` hook injects anchor + profile + memories | Inject CCP block too (auto, ~400 tokens) |
 
-**Credit:** Cross-Session Protocol pattern adopted from **lean-ctx** (`docs/reference/03-memory-and-knowledge.md` Â§1).
+**Credit:** Cross-Session Protocol pattern adopted from **lean-ctx** (`docs/reference/03-memory-and-knowledge.md` S1).
 
-### 1.2 Scope â€” memory knows where it belongs
+### 1.2 Scope - memory knows where it belongs
 
 | Where today | Where v0.5.0 |
 |---|---|
@@ -59,7 +59,7 @@ how we measure "smart," and where each lives in the codebase.
 
 **Credit:** Confidence scoring + reinforcement adopted from **agentmemory** (`src/functions/lessons.ts`).
 
-### 1.3 Recall â€” memory retrieves the right thing at the right time
+### 1.3 Recall - memory retrieves the right thing at the right time
 
 | Where today | Where v0.5.0 |
 |---|---|
@@ -68,9 +68,9 @@ how we measure "smart," and where each lives in the codebase.
 | No rerank | Add rerank + MMR diversity (post-retrieval) |
 | No semantic search CLI | Add `cairn search` CLI + `/api/search` hybrid endpoint |
 
-**Credit:** RRF formula and hybrid search fusion adopted from **lean-ctx** (`LEANCTX_FEATURE_CATALOG.md` Â§Hybrid Search Fusion).
+**Credit:** RRF formula and hybrid search fusion adopted from **lean-ctx** (`LEANCTX_FEATURE_CATALOG.md` SHybrid Search Fusion).
 
-### 1.4 Reliability â€” memory can be verified and recovered
+### 1.4 Reliability - memory can be verified and recovered
 
 | Where today | Where v0.5.0 |
 |---|---|
@@ -79,15 +79,15 @@ how we measure "smart," and where each lives in the codebase.
 | Audit log is in-memory only | Move audit to HelixDB-backed store (restart-safe) |
 | Reliability score visible in UI | Drift events detail view linked to affected file/memory |
 
-### 1.5 Compression â€” memory shrinks the window without losing fidelity
+### 1.5 Compression - memory shrinks the window without losing fidelity
 
 | Where today | Where v0.5.0 |
 |---|---|
-| 4 read modes, ~13-tok re-reads, tree-sitter AST, shell compression | This is Cairn's strongest dimension â€” keep and polish |
+| 4 read modes, ~13-tok re-reads, tree-sitter AST, shell compression | This is Cairn's strongest dimension - keep and polish |
 | `cairn bench` measures a codebase | Live `/api/metrics` + savings dashboard: cumulative tokens/$ saved, hit rate, bounce rate |
 | No signed ledger | Signed JSON ledger of every compression/recover event |
 
-### 1.6 Personalization â€” memory learns the user
+### 1.6 Personalization - memory learns the user
 
 | Where today | Where v0.5.0 |
 |---|---|
@@ -97,18 +97,18 @@ how we measure "smart," and where each lives in the codebase.
 
 ---
 
-## Â§2. The Eight Big Ideas
+## S2. The Eight Big Ideas
 
 These are the concrete initiatives that turn the six dimensions into shipped features.
 
-### 2.1 Memory Provenance Graph â€” Cairn's integration moat
+### 2.1 Memory Provenance Graph - Cairn's integration moat
 
 **What it is:** every memory gets a set of typed edges to other memories and to code artifacts.
 
-- `memory â†’ derived_from â†’ memory` â€” a crystallized lesson came from action A and B
-- `memory â†’ contradicts â†’ memory` â€” two memories conflict; needs user resolution
-- `memory â†’ supersedes â†’ memory` â€” a newer memory replaces an older one
-- `memory â†’ applies_to â†’ file|symbol|project` â€” lean-ctx-style graph relevance for code
+- `memory -> derived_from -> memory` - a crystallized lesson came from action A and B
+- `memory -> contradicts -> memory` - two memories conflict; needs user resolution
+- `memory -> supersedes -> memory` - a newer memory replaces an older one
+- `memory -> applies_to -> file|symbol|project` - lean-ctx-style graph relevance for code
 
 **Why it matters:** lean-ctx has code graphs, agentmemory has session graphs, Cairn can have
 **memory provenance graphs**. This is the unique integration moat: a single graph where code,
@@ -118,7 +118,7 @@ sessions, and knowledge connect.
 
 **Surfaced in:** Memory Graph Visualization (Idea 8) + Wakeup "related memories" hints.
 
-### 2.2 Memory Graph Visualization â€” the demo video moment
+### 2.2 Memory Graph Visualization - the demo video moment
 
 **What it is:** a force-directed, interactive graph in the web dashboard where:
 
@@ -126,14 +126,14 @@ sessions, and knowledge connect.
 - Edges = `derived_from` / `contradicts` / `supersedes` / `applies_to`
 - Clicking a node opens the memory detail panel with edit/promote/delete
 - Filtering by tier, kind, project, confidence range
-- "What does the agent know about X?" â†’ subgraph centered on a query
+- "What does the agent know about X?" -> subgraph centered on a query
 
 **Library choice:** `react-force-graph-2d` (clean API, d3-force underneath, ~50KB). The
 dashboard is Next.js static-export; react-force-graph-2d works with `ssr: false`.
 
 **New route:** `/dashboard/memory/graph`.
 
-### 2.3 Confidence + Reinforcement Loop â€” adopted from agentmemory
+### 2.3 Confidence + Reinforcement Loop - adopted from agentmemory
 
 **What it is:** every memory gets a `confidence: f32` field.
 
@@ -147,7 +147,7 @@ dashboard is Next.js static-export; react-force-graph-2d works with `ssr: false`
 
 **Default for existing memories:** 0.5 (neutral).
 
-### 2.4 Cross-Session Protocol (CCP) â€” adopted from lean-ctx
+### 2.4 Cross-Session Protocol (CCP) - adopted from lean-ctx
 
 **What it is:** at session start, Cairn injects a structured "where we were" block.
 
@@ -164,7 +164,7 @@ dashboard is Next.js static-export; react-force-graph-2d works with `ssr: false`
 **CLI surface:** `cairn session task|finding|decision|status|save|load|reset`, plus
 `sessions list|show|cleanup|doctor`.
 
-### 2.5 Cost-Saving Ledger â€” new for Cairn
+### 2.5 Cost-Saving Ledger - new for Cairn
 
 **What it is:** every tool call that saves context budget gets a ledger entry.
 
@@ -176,18 +176,18 @@ dashboard is Next.js static-export; react-force-graph-2d works with `ssr: false`
 
 **Signed:** SHA-256 HMAC per entry, verifiable offline.
 
-### 2.6 Project-Aware Memory Hygiene â€” new for Cairn
+### 2.6 Project-Aware Memory Hygiene - new for Cairn
 
 **What it is:** tooling to keep memory from growing stale or contradictory.
 
-- `cairn doctor memory` â€” counts by tier, importance distribution, decay schedule,
+- `cairn doctor memory` - counts by tier, importance distribution, decay schedule,
   contradiction count, graph density
-- `cairn memory prune --dry-run` â€” preview consolidation removals
-- `cairn memory crystallize` â€” summarize a completed session's working-tier memories into
+- `cairn memory prune --dry-run` - preview consolidation removals
+- `cairn memory crystallize` - summarize a completed session's working-tier memories into
   semantic-tier "crystals" (agentmemory's pattern)
 - Web UI: Memory Workspace with bulk select + promote/delete/pin
 
-### 2.7 Federation as First-Class â€” extends cairn-share
+### 2.7 Federation as First-Class - extends cairn-share
 
 **What it is:** today `cairn share export` makes a sanitized bundle and `contribute`/`pull`
 pools it. v0.5.0 turns this into a discoverable, signed package system.
@@ -205,20 +205,20 @@ pools it. v0.5.0 turns this into a discoverable, signed package system.
 **Decision:** `.cairnpkg` is the canonical extension; `.ctxpkg` imports are accepted. The
 registry starts embedded in `cairn-server`.
 
-### 2.8 SSE Real-Time Dashboard â€” simpler than WebSocket
+### 2.8 SSE Real-Time Dashboard - simpler than WebSocket
 
 **What it is:** replace 5s polling on Overview and Audit with Server-Sent Events.
 
 - `GET /api/events` returns `text/event-stream`
 - Event types: `stats_updated`, `memory_added`, `checkpoint_created`, `audit_event`, `drift_detected`
 - Frontend uses native `EventSource` with reconnection
-- This is one-way from server to browser â€” simpler than WebSocket, no upgrade dance
+- This is one-way from server to browser - simpler than WebSocket, no upgrade dance
 
 **Where:** `cairn-api` axum SSE endpoint + `web/src/lib/sse.ts` + React Query integration.
 
 ---
 
-## Â§3. New Crate / API / CLI / MCP Surface
+## S3. New Crate / API / CLI / MCP Surface
 
 ### 3.1 Schema additions
 
@@ -244,7 +244,7 @@ pub struct Memory {
 }
 ```
 
-**`Session` struct (`cairn-session` â€” new crate or in `cairn-memory`)**
+**`Session` struct (`cairn-session` - new crate or in `cairn-memory`)**
 
 ```rust
 pub struct Session {
@@ -266,20 +266,20 @@ pub struct Session {
 | Crate | Responsibility |
 |---|---|
 | `cairn-memory` | Add confidence, edges, crystallize, timeline |
-| `cairn-session` | NEW â€” CCP storage, latest.json pointer, session CLI |
-| `cairn-graph` | NEW â€” property graph queries for code + memory (or extend `cairn-context`) |
-| `cairn-ledger` | NEW â€” cost-savings ledger, metrics aggregation |
-| `cairn-pack` | NEW â€” context package system |
+| `cairn-session` | NEW - CCP storage, latest.json pointer, session CLI |
+| `cairn-graph` | NEW - property graph queries for code + memory (or extend `cairn-context`) |
+| `cairn-ledger` | NEW - cost-savings ledger, metrics aggregation |
+| `cairn-pack` | NEW - context package system |
 | `cairn-api` | Add SSE, `/api/metrics`, `/api/sessions`, `/api/memory/*`, `/api/pack/*` |
 | `cairn-mcp` | Add tools, resources, prompts, elicitation |
 | `cairn` | Add `onboard`, `doctor --fix`, `graph`, `impact`, `callgraph`, `memory timeline`, `memory crystallize`, `session`, `pack`, `metrics`, `search` |
 
-### 3.3 MCP tool surface (16 â†’ 40+)
+### 3.3 MCP tool surface (16 -> 40+)
 
 **New Context tools:**
-- `graph` â€” build/query the property graph
-- `impact` â€” blast radius for a file or symbol
-- `callgraph` â€” callers/callees
+- `graph` - build/query the property graph
+- `impact` - blast radius for a file or symbol
+- `callgraph` - callers/callees
 
 **New Memory tools:**
 - `memory_edit`
@@ -366,7 +366,7 @@ pub struct Session {
 
 ---
 
-## Â§4. Web Dashboard Plan
+## S4. Web Dashboard Plan
 
 ### 4.1 New pages
 
@@ -377,7 +377,7 @@ pub struct Session {
 | `/dashboard/sessions` | Sessions list + live stream |
 | `/dashboard/sessions/<id>` | Session detail + Resume task |
 | `/dashboard/reliability/drift` | Drift events + approve/reject |
-| `/dashboard/assembler` | Assembler playground (query + budget â†’ drops + why + expand) |
+| `/dashboard/assembler` | Assembler playground (query + budget -> drops + why + expand) |
 | `/dashboard/savings` | Savings & recover dashboard |
 
 ### 4.2 Page upgrades
@@ -396,29 +396,29 @@ pub struct Session {
 
 ### 4.3 Component additions
 
-- `MemoryGraph` â€” react-force-graph-2d wrapper
-- `MemoryCard` â€” editable memory card with confidence bar
-- `ConfidenceBadge` â€” visual indicator
-- `SessionCard` â€” task/finding/decision preview
-- `AssemblerOutput` â€” drop-reason panel
-- `SavingsChart` â€” recharts / shadcn chart component
-- `DriftEventRow` â€” approve/reject actions
-- `SetupWizard` v2 â€” embed provider, device pair, health check
+- `MemoryGraph` - react-force-graph-2d wrapper
+- `MemoryCard` - editable memory card with confidence bar
+- `ConfidenceBadge` - visual indicator
+- `SessionCard` - task/finding/decision preview
+- `AssemblerOutput` - drop-reason panel
+- `SavingsChart` - recharts / shadcn chart component
+- `DriftEventRow` - approve/reject actions
+- `SetupWizard` v2 - embed provider, device pair, health check
 
 ### 4.4 Real-time plumbing
 
-- `web/src/lib/sse.ts` â€” EventSource wrapper with reconnect
+- `web/src/lib/sse.ts` - EventSource wrapper with reconnect
 - Hook: `useEventSource()`
 - React Query integration: invalidate queries on events
 - Toast notifications for `audit_event`, `drift_detected`, `memory_added`
 
 ---
 
-## Â§5. Execution Phases
+## S5. Execution Phases
 
-### Phase 3.5 â€” Dashboard Depth (7 sprints)
+### Phase 3.5 - Dashboard Depth (7 sprints)
 
-**Sprint 1 â€” Foundation: audit to HelixDB + SSE + metrics**
+**Sprint 1 - Foundation: audit to HelixDB + SSE + metrics**
 - Move audit log from in-memory ring buffer to HelixDB (`crates/cairn-api` audit store)
 - Add SSE endpoint `/api/events`
 - Add `/api/metrics` (tokens saved, hit rate, bounce rate)
@@ -428,7 +428,7 @@ pub struct Session {
   - Integration test: SSE event reaches dashboard <500ms latency
   - Test metrics endpoint returns non-empty JSON after a tool call
 
-**Sprint 2 â€” Memory CRUD + Confidence + Profile**
+**Sprint 2 - Memory CRUD + Confidence + Profile**
 - Add `confidence: f32` to Memory schema; default 0.5 for existing
 - Implement reinforcement on `recall` hit
 - Add memory edit/delete/pin mutations
@@ -438,7 +438,7 @@ pub struct Session {
   - Integration test: memory edit/delete reflected in Wakeup within one event
   - UI test: profile page renders active preferences
 
-**Sprint 3 â€” Memory Graph + Crystallize + Edges**
+**Sprint 3 - Memory Graph + Crystallize + Edges**
 - Add `derived_from`, `contradicts`, `supersedes`, `applies_to` fields
 - Store edges in HelixDB graph
 - Add `cairn memory crystallize` CLI + MCP tool
@@ -448,7 +448,7 @@ pub struct Session {
   - Integration test: crystallize promotes working memories to semantic tier
   - UI test: 50-node graph renders <1s in headless browser
 
-**Sprint 4 â€” Sessions + Reliability Center**
+**Sprint 4 - Sessions + Reliability Center**
 - Add `cairn-session` crate + CCP
 - Add `/api/sessions` + session detail + resume
 - Build `/dashboard/sessions` and `/dashboard/sessions/<id>`
@@ -459,7 +459,7 @@ pub struct Session {
   - Integration test: session auto-restore on new chat injects CCP block
   - End-to-end test: approve/reject drift event updates reliability score
 
-**Sprint 5 â€” Assembler Playground + Savings Dashboard**
+**Sprint 5 - Assembler Playground + Savings Dashboard**
 - Upgrade `/dashboard/context/assemble` with budget slider
 - Show drops + reasons + expand buttons
 - Add `/api/ledger` + signed entries
@@ -469,7 +469,7 @@ pub struct Session {
   - Integration test: assembler reports in/dropped correctly
   - UI test: savings chart updates after a cached read
 
-**Sprint 6 â€” Setup Wizard v2 + Landing Site**
+**Sprint 6 - Setup Wizard v2 + Landing Site**
 - Add embed provider picker to setup form
 - Add device-pair step + QR code
 - Green-health check on completion
@@ -479,7 +479,7 @@ pub struct Session {
   - UI test: landing page renders hero, install commands, comparison table
   - Test default embed provider is local hashing
 
-**Sprint 7 â€” Hybrid Search RRF + Rerank + CSP**
+**Sprint 7 - Hybrid Search RRF + Rerank + CSP**
 - Finish graph leg of hybrid search
 - Add rerank + MMR diversity
 - Add `/api/search` + `cairn search`
@@ -489,9 +489,9 @@ pub struct Session {
   - Unit test: rerank scores sort correctly
   - Security test: CSP nonce present on all script tags
 
-### Phase 4.0 â€” CLI + MCP Depth (5 sprints)
+### Phase 4.0 - CLI + MCP Depth (5 sprints)
 
-**Sprint 8 â€” One-Command Install**
+**Sprint 8 - One-Command Install**
 - `cairn onboard` (zero-prompt)
 - `cairn doctor --fix`
 - `install.sh` (Linux/macOS) + `install.ps1` (Windows)
@@ -501,7 +501,7 @@ pub struct Session {
   - CI job runs `install.ps1` in Windows runner
   - `cairn doctor --fix` smoke test repairs a broken `.mcp.json`
 
-**Sprint 9 â€” CLI Surface Expansion**
+**Sprint 9 - CLI Surface Expansion**
 - `cairn graph`, `cairn impact`, `cairn callgraph`
 - `cairn memory timeline`, `cairn memory crystallize`
 - `cairn session`, `cairn sessions`
@@ -511,27 +511,27 @@ pub struct Session {
   - `cairn graph related` returns nodes linked to a file
   - `cairn callgraph callers` resolves a symbol from the codebase
 
-**Sprint 10 â€” MCP Surface Expansion**
-- Expand MCP tools 16 â†’ 40+
+**Sprint 10 - MCP Surface Expansion**
+- Expand MCP tools 16 -> 40+
 - Add 5 MCP resources
 - Add 5 MCP prompts
 - Add MCP elicitation (pressure-gated)
 - **Testing:**
-  - MCP `tools/list` returns â‰¥40 tools
+  - MCP `tools/list` returns 40 tools
   - Each new tool has a round-trip integration test
   - `cairn://memory/graph` resource returns valid graph JSON
 
-**Sprint 11 â€” Context Package System**
+**Sprint 11 - Context Package System**
 - `.cairnpkg` format (adopt lean-ctx `.ctxpkg` design)
 - 9 CLI subcommands
 - Registry backend `/api/pack/*`
 - Multi-platform release binaries + SHA256SUMS
 - **Testing:**
-  - Round-trip: create â†’ export â†’ import preserves graph and signatures
+  - Round-trip: create -> export -> import preserves graph and signatures
   - `.ctxpkg` import alias loads correctly
   - Registry search returns published pack metadata
 
-**Sprint 12 â€” Distribution Polish**
+**Sprint 12 - Distribution Polish**
 - Fly/Railway/Render one-click templates
 - Non-root Docker volume init
 - OpenCode README quickstart section
@@ -539,9 +539,9 @@ pub struct Session {
   - Docker compose `up` with non-root volume succeeds
   - README install flow verified by fresh user (manual QA)
 
-### Phase 4.1 â€” Collective + Federation (3 sprints)
+### Phase 4.1 - Collective + Federation (3 sprints)
 
-**Sprint 13 â€” Pack Registry**
+**Sprint 13 - Pack Registry**
 - Self-hosted registry endpoints
 - Web UI: Collective / Federation manager
 - Pack signing (Ed25519)
@@ -550,7 +550,7 @@ pub struct Session {
   - Signature verification rejects tampered pack
   - Federation manager lists installed packs with revocation status
 
-**Sprint 14 â€” Federation Protocol**
+**Sprint 14 - Federation Protocol**
 - Trust scopes + signed packs
 - Revocation propagation (`unshare` cascades)
 - Provenance display
@@ -559,7 +559,7 @@ pub struct Session {
   - Unit test: provenance chain validates across 3 pack hops
   - Security test: untrusted scope cannot install into trusted scope
 
-**Sprint 15 â€” Privacy Hardening**
+**Sprint 15 - Privacy Hardening**
 - Offline-first sync via automerge CRDT (replace LWW)
 - Optional E2E encryption for sync
 - Updated SECURITY.md + threat model
@@ -568,14 +568,14 @@ pub struct Session {
   - Unit test: CRDT merge resolves concurrent preference edits
   - Threat model review sign-off
 
-### Phase 4.2 â€” Benchmarks + Adoption (2 sprints)
+### Phase 4.2 - Benchmarks + Adoption (2 sprints)
 
-> âœ… **Status (v0.5.0):** Both sprints shipped. `cairn-bench` crate holds the
+> [x]... **Status (v0.5.0):** Both sprints shipped. `cairn-bench` crate holds the
 > LongMemEval/horizon/retention benchmarks (`455c34b`); the public landing page
 > lives at `web/src/app/page.tsx` with token savings, comparison table, install
 > commands, and a demo placeholder.
 
-**Sprint 16 â€” Benchmarks**
+**Sprint 16 - Benchmarks**
 - LongMemEval / LoCoMo recall scores
 - Task-success horizon benchmark
 - Cairn-specific "smart memory retention" benchmark
@@ -585,27 +585,27 @@ pub struct Session {
   - LongMemEval fixture score recorded
   - Results reproducible across 3 reruns (variance <5%)
 
-**Sprint 17 â€” Marketing + Adoption**
+**Sprint 17 - Marketing + Adoption**
 - Final landing site with benchmarks
 - Demo video / GIF
 - Comparison table (honest)
 - Docs polish cross-links
 - **Testing:**
   - README install flow verified by fresh user (manual QA)
-  - Landing page Lighthouse performance score â‰¥ 80
+  - Landing page Lighthouse performance score  80
   - All docs cross-links validated by link checker
 
-### Phase 5 â€” Proactive, Service & Cross-Platform (committed)
+### Phase 5 - Proactive, Service & Cross-Platform (committed)
 
-> âœ… **Status (v0.5.0):** Sprints 18, 19, 20, 22 shipped. Sprints 21 (browser
-> extension) and 23 (mobile companion) deferred to v0.6.0 â€” both are
+> [x]... **Status (v0.5.0):** Sprints 18, 19, 20, 22 shipped. Sprints 21 (browser
+> extension) and 23 (mobile companion) deferred to v0.6.0 - both are
 > JavaScript-only artefacts that ship independently of the Rust binary, so the
 > v0.5.0 release is unblocked. See `docs/ROADMAP.md` for the verification
 > rows.
 
-Phase 5 items are no longer "future ideas" â€” they are committed v0.5.0 sprints.
+Phase 5 items are no longer "future ideas" - they are committed v0.5.0 sprints.
 
-**Sprint 18 â€” Proactive Recall**
+**Sprint 18 - Proactive Recall**
 - Intent detection hook in `cairn-mcp` before each agent turn
 - Auto-inject up to 3 relevant memories when intent is detected
 - User preference to disable per-project
@@ -614,7 +614,7 @@ Phase 5 items are no longer "future ideas" â€” they are committed v0.5.0 sp
   - Integration test: memory injected before agent turn when intent matches
   - Test opt-out: disabled project receives no proactive recall
 
-**Sprint 19 â€” Cairn-as-a-Service (`cairn.sh`)**
+**Sprint 19 - Cairn-as-a-Service (`cairn.sh`)**
 - Multi-tenant mode in `cairn-server` (organization isolation)
 - Embedded pack registry exposed at `/registry`
 - Optional public `cairn.sh` reverse proxy to self-hosted registries
@@ -623,16 +623,16 @@ Phase 5 items are no longer "future ideas" â€” they are committed v0.5.0 sp
   - Registry publish/search/install round-trip via `/registry`
   - Load test: 100 concurrent pack searches
 
-**Sprint 20 â€” PWA + Push Notifications**
+**Sprint 20 - PWA + Push Notifications**
 - Service worker for offline dashboard shell
 - Push subscription endpoint `/api/push/subscribe`
 - Push drift/revocation notifications to subscribed devices
 - **Testing:**
-  - Lighthouse PWA audit score â‰¥ 90
+  - Lighthouse PWA audit score  90
   - End-to-end push delivery for drift event
   - Offline dashboard renders cached shell
 
-**Sprint 21 â€” Browser Extension Capture Endpoint**
+**Sprint 21 - Browser Extension Capture Endpoint**
 - HTTP endpoint `POST /api/extensions/capture` accepting selection/page text
 - Loopback-only: rejects non-local Origin headers
 - "Add to Cairn" context menu support (browser extension ships separately)
@@ -641,16 +641,16 @@ Phase 5 items are no longer "future ideas" â€” they are committed v0.5.0 sp
   - Integration test: captured memory appears in `/api/memory` within 5s
   - Cross-browser smoke test (Chrome + Firefox)
 
-**Sprint 22 â€” Voice / Transcript Ingestion**
+**Sprint 22 - Voice / Transcript Ingestion**
 - `/api/ingest/transcript` endpoint accepting VTT/SRT/JSON
 - Chunk transcripts by speaker + timestamp; summarize to memories
 - CLI: `cairn ingest transcript <file>`
 - **Testing:**
   - Unit test transcript chunking boundaries
-  - Integration test: 10-minute transcript produces â‰¥3 memories
+  - Integration test: 10-minute transcript produces 3 memories
   - Test memory source link points to timestamp
 
-**Sprint 23 â€” Mobile Companion App**
+**Sprint 23 - Mobile Companion App**
 - Capacitor or PWA-standalone app for approvals and quick stats
 - Approve/reject drift, view pack installs, see savings card
 - Biometric lock option
@@ -661,7 +661,7 @@ Phase 5 items are no longer "future ideas" â€” they are committed v0.5.0 sp
 
 ---
 
-## Â§6. Design Decisions
+## S6. Design Decisions
 
 The following decisions are locked for v0.5.0:
 
@@ -682,13 +682,13 @@ The following decisions are locked for v0.5.0:
 
 ---
 
-## Â§7. Success Metrics
+## S7. Success Metrics
 
 At the end of v0.5.0:
 
-- **â‰¥40 MCP tools** exposed (up from 16)
+- **40 MCP tools** exposed (up from 16)
 - **6 MCP resources + 5 MCP prompts**
-- **â‰¤500ms** SSE event latency
+- **500ms** SSE event latency
 - **Memory Graph renders 50 nodes in <1s**
 - **Confidence reinforcement visible in UI**
 - **Drift events reviewable + approvable**
@@ -699,7 +699,7 @@ At the end of v0.5.0:
 
 ---
 
-## Â§8. Risks
+## S8. Risks
 
 | Risk | Mitigation |
 |---|---|
@@ -712,16 +712,16 @@ At the end of v0.5.0:
 
 ---
 
-## Â§9. See Also
+## S9. See Also
 
-- [PLAN.md](PLAN.md) â€” original v0.4.0 vision
-- [ROADMAP.md](ROADMAP.md) â€” what is done, what is next
-- [ARCHITECTURE.md](ARCHITECTURE.md) â€” current crate graph and API surface
-- [WEB.md](WEB.md) â€” v0.4.0 dashboard surface (will be updated for v0.5.0)
-- [BENCHMARKS.md](BENCHMARKS.md) â€” measured numbers + targets
-- [DECISIONS.md](DECISIONS.md) â€” ADRs for the v0.5.0 decisions will be added here (see planned ADR-010 through ADR-016 below)
+- [PLAN.md](PLAN.md) - original v0.4.0 vision
+- [ROADMAP.md](ROADMAP.md) - what is done, what is next
+- [ARCHITECTURE.md](ARCHITECTURE.md) - current crate graph and API surface
+- [WEB.md](WEB.md) - v0.4.0 dashboard surface (will be updated for v0.5.0)
+- [BENCHMARKS.md](BENCHMARKS.md) - measured numbers + targets
+- [DECISIONS.md](DECISIONS.md) - ADRs for the v0.5.0 decisions will be added here (see planned ADR-010 through ADR-016 below)
 
-### Â§9.1 Planned v0.5.0 ADRs
+### S9.1 Planned v0.5.0 ADRs
 
 | ADR | Decision |
 |---|---|
@@ -735,18 +735,18 @@ At the end of v0.5.0:
 
 ---
 
-## Â§10. Resolved Open Questions
+## S10. Resolved Open Questions
 
 The following questions were answered before implementation begins:
 
-1. **`.cairnpkg` vs `.ctxpkg`** â€” `.cairnpkg` is the canonical extension; `.ctxpkg` files are
+1. **`.cairnpkg` vs `.ctxpkg`** - `.cairnpkg` is the canonical extension; `.ctxpkg` files are
    accepted as an import alias for interoperability with lean-ctx.
-2. **Phase 5 items** â€” promoted to committed roadmap and mapped into the sprints below.
-3. **Default embed provider** â€” local hashing first (offline-first), with optional local ONNX and
+2. **Phase 5 items** - promoted to committed roadmap and mapped into the sprints below.
+3. **Default embed provider** - local hashing first (offline-first), with optional local ONNX and
    OpenAI-compatible endpoints selectable in the setup wizard.
-4. **Memory graph visibility** â€” exposed both in the web dashboard and as the MCP resource
+4. **Memory graph visibility** - exposed both in the web dashboard and as the MCP resource
    `cairn://memory/graph`, plus `memory_graph` and related graph tools.
-5. **`cairn.sh` registry** â€” the v0.5.0 registry is embedded in `cairn-server` for self-hosting.
+5. **`cairn.sh` registry** - the v0.5.0 registry is embedded in `cairn-server` for self-hosting.
    A public `cairn.sh` proxy can be added later without changing the protocol.
 
 These resolutions will be captured as ADRs in `docs/DECISIONS.md`.

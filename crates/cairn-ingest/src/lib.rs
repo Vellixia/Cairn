@@ -16,14 +16,14 @@
 //! ## Materialization
 //!
 //! [`ingest`] returns the raw chunks. The caller (HTTP handler or CLI
-//! subcommand) decides what to remember — we don't write to the
+//! subcommand) decides what to remember - we don't write to the
 //! memory store from this crate to keep it pure (no I/O, no store).
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
 
-/// One cue from a transcript — VTT/SRT line, JSON event entry, etc.
+/// One cue from a transcript - VTT/SRT line, JSON event entry, etc.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Cue {
     /// Speaker label when known. `None` for VTT/SRT lines without a `<v>`
@@ -38,7 +38,7 @@ pub struct Cue {
     pub text: String,
 }
 
-/// One chunk after windowing — at least one cue, contiguous in time.
+/// One chunk after windowing - at least one cue, contiguous in time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CairnChunk {
     pub id: String,
@@ -214,7 +214,7 @@ fn parse_vtt_cue<'a>(
 }
 
 fn parse_vtt_timestamp_line(line: &str) -> Option<(u64, u64)> {
-    // "00:00:01.500 --> 00:00:04.000" — both sides must parse.
+    // "00:00:01.500 --> 00:00:04.000" - both sides must parse.
     let mut parts = line.splitn(2, "-->");
     let start = parts.next()?.trim();
     let end = parts.next()?.trim();
@@ -480,7 +480,7 @@ mod tests {
             },
         ];
         let chunks = chunk_by_speaker_and_window(&cues, 60_000);
-        // 5 s apart — same speaker — collapse into one chunk.
+        // 5 s apart - same speaker - collapse into one chunk.
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].source_cues, 2);
     }
@@ -505,7 +505,7 @@ mod tests {
         assert_eq!(chunks.len(), 2, "60s boundary must split the chunk");
     }
 
-    // --- VTT edge / adversarial cases ---
+    // - VTT edge / adversarial cases ---
 
     #[test]
     fn vtt_header_only_returns_empty() {
@@ -528,7 +528,7 @@ mod tests {
 
     #[test]
     fn vtt_mm_ss_format_parses() {
-        // 2-part timestamp: MM:SS.mmm → minutes*60000 + seconds*1000 + ms
+        // 2-part timestamp: MM:SS.mmm -> minutes*60000 + seconds*1000 + ms
         let vtt = "WEBVTT\n\n01:30.500 --> 02:00.000\nhello\n";
         let cues = parse_vtt(vtt).unwrap();
         assert_eq!(cues.len(), 1);
@@ -567,7 +567,7 @@ mod tests {
         assert!(cues[0].start_ms < cues[1].start_ms);
     }
 
-    // --- SRT edge / adversarial cases ---
+    // - SRT edge / adversarial cases ---
 
     #[test]
     fn srt_empty_input_returns_empty() {
@@ -612,7 +612,7 @@ mod tests {
         assert!(cues[0].speaker.is_none(), "SRT format has no speaker field");
     }
 
-    // --- JSON edge / adversarial cases ---
+    // - JSON edge / adversarial cases ---
 
     #[test]
     fn json_empty_array_returns_no_cues() {
@@ -633,8 +633,8 @@ mod tests {
 
     #[test]
     fn json_float_times_rounded_to_ms() {
-        // 1.0005 * 1000.0 = 1000.5 → rounds to 1001
-        // 2.9995 * 1000.0 = 2999.5 → rounds to 3000 (half-up)
+        // 1.0005 * 1000.0 = 1000.5 -> rounds to 1001
+        // 2.9995 * 1000.0 = 2999.5 -> rounds to 3000 (half-up)
         let json = r#"[{"start": 1.0005, "end": 2.9995, "text": "hi"}]"#;
         let cues = parse_json(json).unwrap();
         assert_eq!(cues[0].start_ms, 1001, "1000.5 rounds to 1001");
@@ -650,7 +650,7 @@ mod tests {
         assert!(cues[1].speaker.is_none());
     }
 
-    // --- chunking edge / adversarial cases ---
+    // - chunking edge / adversarial cases ---
 
     #[test]
     fn chunking_empty_cues_returns_empty() {
@@ -711,13 +711,13 @@ mod tests {
         assert_eq!(
             chunks.len(),
             1,
-            "two None-speaker cues in window → one chunk"
+            "two None-speaker cues in window -> one chunk"
         );
     }
 
     #[test]
     fn chunking_exactly_at_window_boundary_splits() {
-        // First cue at 0ms, second cue at exactly window_ms → should split
+        // First cue at 0ms, second cue at exactly window_ms -> should split
         let window = 10_000u64;
         let cues = vec![
             Cue {
@@ -759,12 +759,12 @@ mod tests {
             text: "hi".into(),
         }];
         let chunks = chunk_by_speaker_and_window(&cues, 60_000);
-        assert!(chunks[0].id.contains("anon"), "no speaker → id has 'anon'");
+        assert!(chunks[0].id.contains("anon"), "no speaker -> id has 'anon'");
     }
 
     #[test]
     fn ten_minute_transcript_chunks_into_at_least_three() {
-        // 10 minutes of one speaker, two cues per second → 1200 cues.
+        // 10 minutes of one speaker, two cues per second -> 1200 cues.
         let mut cues = Vec::new();
         for i in 0..1200 {
             cues.push(Cue {
@@ -779,7 +779,7 @@ mod tests {
         // because the exact count depends on whether cues cross boundaries.
         assert!(
             chunks.len() >= 3,
-            "expected ≥3 chunks from a 10-minute transcript, got {}",
+            "expected >=3 chunks from a 10-minute transcript, got {}",
             chunks.len()
         );
     }

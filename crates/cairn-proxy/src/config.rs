@@ -1,11 +1,11 @@
-//! Proxy configuration — a TOML-shaped list of upstream peers + bind options.
+//! Proxy configuration - a TOML-shaped list of upstream peers + bind options.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerEntry {
-    /// Display name for the peer — used in logs and the dashboard.
+    /// Display name for the peer - used in logs and the dashboard.
     pub name: String,
     /// Base URL of the upstream registry. Must be reachable over the network
     /// (TLS in production).

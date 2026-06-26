@@ -8,7 +8,7 @@ repository.workspace = true
 
 [features]
 # `local` pulls fastembed (ONNX) for in-process all-MiniLM-L6-v2 embeddings. It's the runtime
-# default provider, but the heavy native dep is opt-in at compile time — the shipping binary turns
+# default provider, but the heavy native dep is opt-in at compile time - the shipping binary turns
 # it on; the lean workspace gate leaves it off and exercises the local path with `--features local`.
 default = []
 local = ["dep:fastembed"]

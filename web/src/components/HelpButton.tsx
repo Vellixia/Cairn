@@ -21,7 +21,7 @@ export interface HelpContent {
 
 /**
  * Compact "?" button that opens a dialog with what/how/impact help text.
- * One per page — never inline. Replaces the old InfoCard pattern.
+ * One per page --- never inline. Replaces the old InfoCard pattern.
  */
 export function HelpButton({ content }: { content: HelpContent }) {
   return (
@@ -54,7 +54,7 @@ export function HelpButton({ content }: { content: HelpContent }) {
             <ul className="space-y-1.5 text-foreground">
               {content.how.map((line, i) => (
                 <li key={i} className="flex gap-2">
-                  <span className="text-muted-foreground select-none">·</span>
+                  <span className="text-muted-foreground select-none">.</span>
                   <span>{line}</span>
                 </li>
               ))}

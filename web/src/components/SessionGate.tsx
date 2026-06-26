@@ -10,11 +10,11 @@ import { ApiError, getJSON, type AuthStatus } from "@/lib/api";
 type Phase = "loading" | "ready" | "needs-setup" | "needs-login";
 
 /**
- * SessionGate — auth gate for the dashboard layout.
+ * SessionGate --- auth gate for the dashboard layout.
  *
  * - Probes `/api/auth/status` + `/api/auth/me` on first mount.
  * - If setup is required, redirect to `/setup`.
- * - If me returns 401 (no cookie / invalid cookie), redirect to `/login?from=…`.
+ * - If me returns 401 (no cookie / invalid cookie), redirect to `/login?from=...`.
  * - Otherwise, render children and expose the `me` record via the `useMeStore` zustand store.
  *
  * The probe runs only on mount; client-side navigations within the dashboard layout do not

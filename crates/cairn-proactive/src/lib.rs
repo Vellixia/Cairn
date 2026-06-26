@@ -10,17 +10,17 @@
 //!
 //! ## Intent classifier
 //!
-//! A tiny, fully-local heuristic — no LLM call. We score a prompt on:
+//! A tiny, fully-local heuristic - no LLM call. We score a prompt on:
 //!
 //! - **Question markers** (`?`, `what/why/how/when/where`, `which`).
 //! - **Recall cues** (`remember`, `decided`, `agreed`, `last time`,
 //!   `previously`, `earlier`).
-//! - **File / path mentions** — trigger memory recall for the file's
+//! - **File / path mentions** - trigger memory recall for the file's
 //!   `applies_to` edges.
 //! - **Reference phrases** (`this`, `that`, `the api`, `the model`, pronouns
-//!   without clear antecedents — usually mean "the thing we talked about").
+//!   without clear antecedents - usually mean "the thing we talked about").
 //!
-//! Score >= threshold (default 0.4) → fire recall. Anything below is left
+//! Score >= threshold (default 0.4) -> fire recall. Anything below is left
 //! alone (the agent will still call `cairn_recall` explicitly when it
 //! wants to).
 //!
@@ -45,9 +45,9 @@ use cairn_core::Memory;
 /// (returning the memories we'd prepend) or we left the prompt alone.
 #[derive(Debug, Clone)]
 pub enum HookOutcome {
-    /// Recall fired — caller should prepend these memories to the prompt.
+    /// Recall fired - caller should prepend these memories to the prompt.
     Recalled(Vec<Memory>),
-    /// Recall skipped — either the intent classifier said no, or the per-project
+    /// Recall skipped - either the intent classifier said no, or the per-project
     /// opt-out is on. `reason` is a short string for diagnostics.
     Skipped { reason: &'static str },
 }
@@ -157,7 +157,7 @@ mod tests {
         }
     }
 
-    /// No-op recall fn that returns a fixed memory for any prompt — lets the
+    /// No-op recall fn that returns a fixed memory for any prompt - lets the
     /// tests focus on intent + opt-out logic without needing a real engine.
     fn fake_recall(_prompt: &str, _k: usize) -> Vec<Memory> {
         vec![mk_mem("m1", "the team's prior decision")]

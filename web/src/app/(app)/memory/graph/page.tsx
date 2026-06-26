@@ -65,10 +65,10 @@ export default function MemoryGraphPage() {
       </header>
 
       <section className="grid gap-4 md:grid-cols-4">
-        <Stat label="Nodes" value={stats?.nodes ?? "…"} />
-        <Stat label="Edges" value={stats?.edges ?? "…"} />
-        <Stat label="Pinned" value={stats?.pinned ?? "…"} />
-        <Stat label="Crystals" value={stats?.crystals ?? "…"} />
+        <Stat label="Nodes" value={stats?.nodes ?? "..."} />
+        <Stat label="Edges" value={stats?.edges ?? "..."} />
+        <Stat label="Pinned" value={stats?.pinned ?? "..."} />
+        <Stat label="Crystals" value={stats?.crystals ?? "..."} />
       </section>
 
       <Card>
@@ -76,10 +76,10 @@ export default function MemoryGraphPage() {
           <CardTitle>Graph</CardTitle>
           <CardDescription>
             {graph.isLoading
-              ? "Loading…"
+              ? "Loading..."
               : graph.data
-                ? `${graph.data.nodes.length} memories · ${graph.data.edges.length} edges`
-                : "—"}
+                ? `${graph.data.nodes.length} memories . ${graph.data.edges.length} edges`
+                : "---"}
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -534,17 +534,13 @@ version = "0.6.2"
 dependencies = [
  "anyhow",
  "cairn-assemble",
- "cairn-context",
  "cairn-core",
  "cairn-guard",
  "cairn-mcp",
  "cairn-memory",
- "cairn-pack",
  "cairn-profile",
- "cairn-share",
  "cairn-shell",
  "cairn-store",
- "chrono",
  "clap",
  "self_update",
  "serde_json",
@@ -552,7 +548,6 @@ dependencies = [
  "tokio",
  "tracing-subscriber",
  "ureq 2.12.1",
- "uuid",
 ]
 
 [[package]]

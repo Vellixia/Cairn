@@ -68,7 +68,7 @@ export default function SavingsPage() {
         <h1 className="text-2xl font-semibold tracking-tight">Savings &amp; recover</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Every compact read + assemble pass appends a signed entry. The ledger HMACs each row
-          against <code>CAIRN_SECRET_KEY</code> — <code>/api/ledger/verify</code> re-checks any
+          against <code>CAIRN_SECRET_KEY</code> --- <code>/api/ledger/verify</code> re-checks any
           entry offline.
         </p>
       </header>
@@ -76,11 +76,11 @@ export default function SavingsPage() {
       <section className="grid gap-4 md:grid-cols-4">
         <Stat
           label="Saved bytes"
-          value={snap ? fmtBytes(snap.saved_bytes) : "…"}
+          value={snap ? fmtBytes(snap.saved_bytes) : "..."}
         />
         <Stat
           label="Saved ratio"
-          value={snap ? `${(snap.saved_ratio * 100).toFixed(1)}%` : "…"}
+          value={snap ? `${(snap.saved_ratio * 100).toFixed(1)}%` : "..."}
         />
         <Stat
           label="USD saved (input)"
@@ -93,14 +93,14 @@ export default function SavingsPage() {
       </section>
 
       <section className="grid gap-4 md:grid-cols-3">
-        <Stat label="Reads served" value={snap?.calls ?? "…"} />
+        <Stat label="Reads served" value={snap?.calls ?? "..."} />
         <Stat
           label="Hit rate"
-          value={snap ? `${(snap.hit_rate * 100).toFixed(0)}%` : "…"}
+          value={snap ? `${(snap.hit_rate * 100).toFixed(0)}%` : "..."}
         />
         <Stat
           label="Bounce rate"
-          value={snap ? `${(snap.bounce_rate * 100).toFixed(0)}%` : "…"}
+          value={snap ? `${(snap.bounce_rate * 100).toFixed(0)}%` : "..."}
         />
       </section>
 
@@ -109,8 +109,8 @@ export default function SavingsPage() {
           <CardTitle>Recent ledger</CardTitle>
           <CardDescription>
             {ledger.data
-              ? `${ledger.data.length} entries · newest first · HMAC-signed`
-              : "Loading…"}
+              ? `${ledger.data.length} entries . newest first . HMAC-signed`
+              : "Loading..."}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -118,7 +118,7 @@ export default function SavingsPage() {
             <Skeleton className="h-72 w-full" />
           ) : ledger.data && ledger.data.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No savings yet — read a file or run an assemble to start the ledger.
+              No savings yet --- read a file or run an assemble to start the ledger.
             </p>
           ) : (
             <div className="overflow-x-auto">
@@ -156,7 +156,7 @@ export default function SavingsPage() {
                         ${e.cost_usd_saved.toFixed(4)}
                       </td>
                       <td className="py-1 pr-3 font-mono text-[10px] text-muted-foreground">
-                        {e.signature.slice(0, 16)}…
+                        {e.signature.slice(0, 16)}...
                       </td>
                     </tr>
                   ))}

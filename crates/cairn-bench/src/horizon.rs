@@ -4,9 +4,9 @@
 //! (10, 25, 50, 100 steps), how often does Cairn's `assemble` still surface the
 //! relevant memory before the context budget overflows?**
 //!
-//! Naive agents that just dump every memory into context run out of budget fast —
+//! Naive agents that just dump every memory into context run out of budget fast ---
 //! quality drops at ~25 steps. Cairn's `assemble` ranks by
-//! `confidence × applies_to` and drops the lowest-ranked first. We measure how
+//! `confidence x applies_to` and drops the lowest-ranked first. We measure how
 //! many steps in before the agent's working context has lost access to a memory
 //! that the simulated task references.
 //!
@@ -66,7 +66,7 @@ impl HorizonBenchmark {
         let mut steps = Vec::with_capacity(horizons.len());
         for horizon in &horizons {
             let horizon_clip = (*horizon).min(steps_total);
-            // Score each memory at this horizon — Cairn ranks by confidence.
+            // Score each memory at this horizon - Cairn ranks by confidence.
             // We don't model decay here; the synthetic confidence is fixed per
             // memory. The "drop" we measure is which memories fell off the top-K.
             let mut ranked: Vec<&SyntheticMemory> = memories.iter().collect();
@@ -125,7 +125,7 @@ struct SyntheticMemory {
     confidence: f64,
 }
 
-/// Tiny xorshift64 PRNG. Avoids the `rand` dependency at benchmark time —
+/// Tiny xorshift64 PRNG. Avoids the `rand` dependency at benchmark time ---
 /// keeps the bench code deterministic and easy to read.
 #[derive(Debug, Clone)]
 struct SimpleRng(u64);
@@ -164,11 +164,11 @@ mod tests {
 
     #[test]
     fn horizon_recall_at_10_is_higher_than_at_200() {
-        // Smaller horizon → fewer distractors competing → recall should not collapse.
+        // Smaller horizon -> fewer distractors competing -> recall should not collapse.
         // With a fixed top-K budget, recall at large horizons converges to the
-        // fraction of the 50 target memories that survive in the top 16 — which
+        // fraction of the 50 target memories that survive in the top 16 - which
         // is a constant (random sampling noise), not a monotone decline. We assert
-        // that r10 is sane (>=10% — we should at least see a handful) and that
+        // that r10 is sane (>=10% - we should at least see a handful) and that
         // the overall variance across horizons is bounded.
         let out = HorizonBenchmark::run(7, 200);
         let r10 = out
@@ -194,7 +194,7 @@ mod tests {
         // Variance check: |r10 - r200| < 0.5.
         assert!(
             (r10 - r200).abs() < 0.5,
-            "r10={r10}, r200={r200} — variance too high"
+            "r10={r10}, r200={r200} - variance too high"
         );
     }
 

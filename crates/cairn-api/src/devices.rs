@@ -1,6 +1,6 @@
 //! Admin-facing device management: issue device tokens + pair codes from the dashboard.
 //!
-//! The web UI (You → Tokens, You → Pair) drives these endpoints so the admin can issue
+//! The web UI (You -> Tokens, You -> Pair) drives these endpoints so the admin can issue
 //! tokens / pair codes from the browser without leaving the dashboard. The JWT is
 //! returned ONCE in the `POST /api/devices/tokens` response; subsequent reads only return the
 //! token metadata (id, name, scope, created_at, revoked). The server never persists the JWT
@@ -118,11 +118,10 @@ pub async fn create_token(
         .expires_in_days
         .filter(|d| *d > 0)
         .map(|d| Utc::now() + chrono::Duration::days(d));
-    let mut t = match state.store.create_token(&req.name) {
+    let mut t = match state.store.create_token(&req.name, scope, expires_at) {
         Ok(t) => t,
         Err(e) => return admin_error(&format!("create: {e}")),
     };
-    t.scope = scope;
     let bearer = state.sign_token(&t.id, &t.name, scope, expires_at);
     t.token = Some(bearer.clone());
     state.audit_log.record(
@@ -218,9 +217,9 @@ mod pair_code {
         let code: String = (0..8)
             .map(|_| *CHARSET.choose(&mut rng).unwrap() as char)
             .collect();
-        let token = state.store.create_token(name)?;
+        let token = state.store.create_token(name, TokenScope::Write, None)?;
         let expires_at = Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64);
-        // Store the token id (not the bearer) — `pair_claim` signs a fresh JWT at claim time, same
+        // Store the token id (not the bearer) - `pair_claim` signs a fresh JWT at claim time, same
         // pattern as the existing `/api/pair/new` flow.
         state
             .store

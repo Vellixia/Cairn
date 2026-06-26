@@ -4,10 +4,10 @@
 //! [`Memory`](crate::Memory) carries an org id; queries scope by the caller's
 //! org id (extracted from the bearer token). When `Config::multi_tenant` is
 //! `false` (the default for self-hosted installs), every org id collapses to
-//! [`OrgId::default()`] — the on-disk schema is identical to the v0.4.0 shape
+//! [`OrgId::default()`] - the on-disk schema is identical to the v0.4.0 shape
 //! and existing users see no change.
 //!
-//! Org ids are short, lower-case, ASCII-only — easy to log and to type at the
+//! Org ids are short, lower-case, ASCII-only - easy to log and to type at the
 //! CLI. They're *not* secrets: they're tenant identifiers, not credentials.
 
 use serde::{Deserialize, Serialize};

@@ -1,11 +1,11 @@
 "use client";
 
-// v2 setup wizard — five steps the new user walks through on first launch:
+// v2 setup wizard --- five steps the new user walks through on first launch:
 //   1. Admin credentials (username + password)
 //   2. Embed provider (default: local hashing; opt into local ONNX or OpenAI-compatible)
-//   3. (optional) device pair — generate a QR code to onboard a phone/tablet
+//   3. (optional) device pair --- generate a QR code to onboard a phone/tablet
 //   4. Green-health check (Helix reachable, embedder loaded, admin exists)
-//   5. Done — drop the user at /dashboard
+//   5. Done --- drop the user at /dashboard
 //
 // The existing `/setup` route stays as a v1 fallback (deprecation banner). Both POST to
 // `/api/auth/setup`, which now accepts the embed fields.
@@ -115,7 +115,7 @@ export default function SetupWizardPage() {
           Set up Cairn
         </h1>
         <p className="text-sm text-muted-foreground">
-          v2 wizard · 4 short steps. The dashboard unlocks once setup completes.
+          v2 wizard . 4 short steps. The dashboard unlocks once setup completes.
         </p>
         <div className="flex gap-1 text-[11px] text-muted-foreground">
           {(["1", "2", "3", "4"] as const).map((label, i) => {
@@ -271,7 +271,7 @@ function Step1Credentials({
         </form>
         {embedDefault && (
           <p className="mt-3 text-[11px] text-muted-foreground">
-            Default embed provider: <code>{embedDefault.provider}</code> ·{" "}
+            Default embed provider: <code>{embedDefault.provider}</code> .{" "}
             {embedDefault.description}
           </p>
         )}
@@ -321,7 +321,7 @@ function Step2Embed({
                     className="rounded-md border border-line bg-background px-3 py-2 text-sm"
                   >
                     <option value="hashing">
-                      Local hashing (default — no model, no network)
+                      Local hashing (default --- no model, no network)
                     </option>
                     <option value="local">
                       Local ONNX (all-MiniLM-L6-v2, ~90 MB download)
@@ -455,7 +455,7 @@ function Step4Health({
       <Card>
         <CardHeader>
           <CardTitle>4. Health check</CardTitle>
-          <CardDescription>Verifying everything is wired up…</CardDescription>
+          <CardDescription>Verifying everything is wired up...</CardDescription>
         </CardHeader>
         <CardContent>
           <Skeleton className="h-32 w-full" />

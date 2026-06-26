@@ -32,7 +32,7 @@ export function ReliabilitySparkline({ className }: { className?: string }) {
   }
   return (
     <div className={className}>
-      <p className="text-xs uppercase tracking-wide text-muted-foreground">Savings · last 30 min</p>
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">Savings . last 30 min</p>
       <div className="mt-1">
         <Sparkline data={series} height={48} />
       </div>

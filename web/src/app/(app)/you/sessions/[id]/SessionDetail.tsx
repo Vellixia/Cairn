@@ -62,7 +62,7 @@ function SessionView({ s }: { s: Session }) {
         <CardHeader>
           <CardTitle>CCP block</CardTitle>
           <CardDescription>
-            Compact form of this session — what `SessionStart` injects.
+            Compact form of this session --- what `SessionStart` injects.
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -88,7 +88,7 @@ function SessionView({ s }: { s: Session }) {
                     {t.id}
                   </span>
                   {t.title}{" "}
-                  <span className="text-xs text-muted-foreground">— {t.progress}</span>
+                  <span className="text-xs text-muted-foreground">--- {t.progress}</span>
                 </li>
               ))}
             </ul>
@@ -166,13 +166,13 @@ function SessionView({ s }: { s: Session }) {
 }
 
 function ccpBlock(s: Session) {
-  let out = `# Cross-Session Protocol — session ${s.id}\n`;
+  let out = `# Cross-Session Protocol --- session ${s.id}\n`;
   out += `Project: ${s.project_hash}\n`;
   out += `Started: ${s.started_at}\n`;
   if (s.ended_at) out += `Ended: ${s.ended_at}\n`;
   if (s.tasks.length) {
     out += `\n## Tasks\n`;
-    for (const t of s.tasks) out += `- [${t.id}] ${t.title} — ${t.progress}\n`;
+    for (const t of s.tasks) out += `- [${t.id}] ${t.title} --- ${t.progress}\n`;
   }
   if (s.findings.length) {
     out += `\n## Findings\n`;

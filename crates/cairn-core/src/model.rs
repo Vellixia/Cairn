@@ -106,17 +106,17 @@ pub struct Memory {
     pub org_id: OrgId,
     #[serde(default)]
     pub suspicious: bool,
-    /// Confidence score `[0.0, 1.0]` — evolves over time via the agentmemory reinforcement
+    /// Confidence score `[0.0, 1.0]` - evolves over time via the agentmemory reinforcement
     /// curve `c' = min(1.0, c + 0.1*(1.0 - c))` on each successful `recall` hit. Defaults to 0.5
     /// for new memories (neutral).
     #[serde(default = "default_confidence")]
     pub confidence: f32,
-    /// Pinned memories are kept around even when their confidence decays — they bypass the
+    /// Pinned memories are kept around even when their confidence decays - they bypass the
     /// "candidate for review" cutoff so the user can keep a memory they've explicitly marked
     /// important. Defaults to false.
     #[serde(default)]
     pub pinned: bool,
-    // ---- v0.5.0 Sprint 3: provenance edges -------------------------------------------------
+    // -- v0.5.0 Sprint 3: provenance edges -----------------------------------------------
     /// Edges to memory ids this one was derived from (crystallized from, summarized, combined).
     #[serde(default)]
     pub derived_from: Vec<String>,
@@ -133,7 +133,7 @@ pub struct Memory {
     pub updated_at: DateTime<Utc>,
 }
 
-/// Typed provenance edge between memories (or memory → file/symbol/project).
+/// Typed provenance edge between memories (or memory -> file/symbol/project).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeKind {
@@ -234,7 +234,7 @@ impl NewMemory {
         }
     }
 
-    /// Materialize into a [`Memory`] tagged with `org_id` — used by the multi-tenant
+    /// Materialize into a [`Memory`] tagged with `org_id` - used by the multi-tenant
     /// cairn-server to scope every memory at write time.
     pub fn into_memory_for_org(self, org_id: OrgId) -> Memory {
         let mut mem = self.into_memory();

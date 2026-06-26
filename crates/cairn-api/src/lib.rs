@@ -2,7 +2,7 @@
 //!
 //! Exposes health/stats plus the context (read/expand/assemble), memory (remember/recall/wakeup),
 //! and guard (verify, anchor, checkpoint/rollback) engines over REST, and serves the embedded
-//! Next.js control plane — with a built-in fallback page when the UI hasn't been built.
+//! Next.js control plane - with a built-in fallback page when the UI hasn't been built.
 
 pub mod admin;
 mod auth;
@@ -79,14 +79,14 @@ pub struct AppState {
     pub cors_origins: Vec<String>,
     pub session_signer: Option<Arc<SessionSigner>>,
     pub audit_log: Arc<admin::AuditLog>,
-    /// SSE event broker (v0.5.0 Sprint 1) — publish from mutating handlers, subscribe from
+    /// SSE event broker (v0.5.0 Sprint 1) - publish from mutating handlers, subscribe from
     /// `/api/events`.
     pub events: EventBroker,
-    /// Live cost-savings counter (v0.5.0 Sprint 1) — instrumented handlers bump it.
+    /// Live cost-savings counter (v0.5.0 Sprint 1) - instrumented handlers bump it.
     pub savings: SavingsState,
     /// Server-start timestamp (seconds since epoch) used by the metrics endpoint.
     pub started_at: i64,
-    /// Cross-Session Protocol store (v0.5.0 Sprint 4) — sessions + drift log on disk.
+    /// Cross-Session Protocol store (v0.5.0 Sprint 4) - sessions + drift log on disk.
     pub sessions: Arc<cairn_session::SessionStore>,
     /// Signed cost-savings ledger (v0.5.0 Sprint 5).
     pub ledger: LedgerState,
@@ -107,7 +107,13 @@ impl AppState {
             cfg.workspace_root.clone(),
         ));
         let mem = Arc::new(MemoryEngine::new(store.clone()));
-        let guard = Arc::new(Guard::new(store.clone()));
+        let guard = {
+            let mut g = Guard::new(store.clone());
+            if let Some(ref root) = cfg.workspace_root {
+                g = g.with_workspace(&root.to_string_lossy());
+            }
+            Arc::new(g)
+        };
         let asm = Arc::new(Assembler::new(mem.clone()));
         let shell = Arc::new(ShellCompressor::new(store.clone()));
         let profile = Arc::new(Profile::new(mem.clone()));
@@ -280,7 +286,7 @@ pub fn router(state: AppState) -> Router {
 // the existing `/api/...` chain is unaffected.
 
 /// Build the full router (API + registry). When `state.registry` is `None`, the
-/// registry routes return 404 — useful for tests that don't want a registry on disk.
+/// registry routes return 404 - useful for tests that don't want a registry on disk.
 pub fn build_router_with_registry(state: AppState) -> Router {
     let base = router(state.clone());
     match state.registry.as_ref() {
@@ -323,7 +329,7 @@ fn build_cors(origins: &[String]) -> CorsLayer {
         // ERROR-level events. We still return a restrictive layer so a misconfigured server
         // doesn't accidentally open itself up.
         tracing::error!(
-            "CAIRN_CORS_ORIGINS contains '*' — wildcard origin rejected. The Cairn API is \
+            "CAIRN_CORS_ORIGINS contains '*' - wildcard origin rejected. The Cairn API is \
              authenticated; list explicit origins instead (e.g. CAIRN_CORS_ORIGINS=https://app.example.com). \
              Falling back to same-origin-only CORS."
         );
@@ -358,10 +364,10 @@ fn build_cors(origins: &[String]) -> CorsLayer {
 /// TLS posture is driven by the bind address and the optional `tls` material on the
 /// [`AppState::config_view`]:
 ///
-/// - **Loopback bind, no TLS** → plain HTTP (dev-friendly default).
-/// - **Non-loopback bind, no TLS** → refuses to start; the caller surfaces an error explaining
+/// - **Loopback bind, no TLS** -> plain HTTP (dev-friendly default).
+/// - **Non-loopback bind, no TLS** -> refuses to start; the caller surfaces an error explaining
 ///   that network exposure requires `CAIRN_TLS_CERT` + `CAIRN_TLS_KEY`.
-/// - **TLS material present** → serves HTTPS via `axum-server` (rustls).
+/// - **TLS material present** -> serves HTTPS via `axum-server` (rustls).
 pub async fn serve(addr: SocketAddr, mut state: AppState) -> std::io::Result<()> {
     if let Some(tls) = state.tls.take() {
         return serve_https(addr, state, tls.cert, tls.key).await;
@@ -459,7 +465,7 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
                 .into_response()
         }
         None => {
-            // Fallback page — same nonce injection treatment.
+            // Fallback page - same nonce injection treatment.
             let raw = ui::INDEX_HTML.as_bytes();
             let body = inject_csp_nonce(raw, &nonce).into_owned();
             (
@@ -472,7 +478,7 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
 }
 
 /// Insert a CSP nonce into every `<script>` tag that doesn't already have one. We rewrite
-/// `<script>` → `<script nonce="{nonce}">` (preserving any other attributes) and add a
+/// `<script>` -> `<script nonce="{nonce}">` (preserving any other attributes) and add a
 /// `<meta http-equiv="Content-Security-Policy">` if none is present so the browser enforces
 /// the policy even on a bare HTML page (e.g. the fallback).
 fn inject_csp_nonce<'a>(html: &'a [u8], nonce: &Option<String>) -> std::borrow::Cow<'a, [u8]> {
@@ -523,7 +529,7 @@ fn content_type(path: &str) -> &'static str {
     }
 }
 
-// ---- handlers ----------------------------------------------------------------------------------
+// -- handlers --------------------------------------------------------------------------------
 
 async fn health() -> Json<Value> {
     Json(json!({
@@ -533,7 +539,7 @@ async fn health() -> Json<Value> {
     }))
 }
 
-/// `GET /api/health/deep` — real dependency probe. Returns 200 when all components are
+/// `GET /api/health/deep` - real dependency probe. Returns 200 when all components are
 /// reachable, 503 when any are degraded. Safe to use as a load-balancer readiness check.
 async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
     let helix_ok = s.store.count_memories().is_ok();
@@ -562,7 +568,7 @@ async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json
     )
 }
 
-/// `GET /api/setup/embed-default` — the embed provider the wizard pre-selects. Per the
+/// `GET /api/setup/embed-default` - the embed provider the wizard pre-selects. Per the
 /// v0.5.0 plan, the default is local hashing (offline-first); the wizard offers an opt-in
 /// switch to ONNX or OpenAI-compatible.
 async fn setup_embed_default() -> Json<Value> {
@@ -598,7 +604,7 @@ async fn read(
 ) -> Result<Json<ReadResult>, ApiError> {
     let mode = ReadMode::parse(q.mode.as_deref());
     let result = s.ctx.read(Path::new(&q.path), mode)?;
-    // Record a savings entry — the "compact" bytes we sent vs the "full" bytes the file
+    // Record a savings entry - the "compact" bytes we sent vs the "full" bytes the file
     // actually contains. Approximate: ReadResult exposes `bytes` (the served view); for the
     // "full" cost we use the same ReadResult (the served view IS the full bytes for
     // non-cached modes). Cache hits report savings because they reuse prior work.
@@ -662,7 +668,7 @@ struct SearchQuery {
     rerank_depth: Option<usize>,
 }
 
-/// `GET /api/search?q=...&limit=N&rerank_depth=M` — Sprint 7 hybrid search: BM25 + HNSW
+/// `GET /api/search?q=...&limit=N&rerank_depth=M` - Sprint 7 hybrid search: BM25 + HNSW
 /// + provenance graph, fused with RRF, reranked with MMR.
 async fn search_handler(
     State(s): State<AppState>,
@@ -702,7 +708,7 @@ struct MemoryEditBody {
     files: Option<Vec<String>>,
 }
 
-/// POST `/api/memory/:id` — edit a memory's mutable fields. Any field omitted from the body is
+/// POST `/api/memory/:id` - edit a memory's mutable fields. Any field omitted from the body is
 /// left unchanged. The suspicious-content scan re-runs on the new content (defense-in-depth).
 async fn edit_memory(
     State(s): State<AppState>,
@@ -724,7 +730,7 @@ async fn edit_memory(
     }
 }
 
-/// DELETE `/api/memory/:id` — remove a memory by id.
+/// DELETE `/api/memory/:id` - remove a memory by id.
 async fn delete_memory(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -742,7 +748,7 @@ struct PinBody {
     pinned: bool,
 }
 
-/// POST `/api/memory/:id/pin` — pin or unpin a memory.
+/// POST `/api/memory/:id/pin` - pin or unpin a memory.
 async fn pin_memory(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -760,7 +766,7 @@ async fn pin_memory(
     }
 }
 
-/// POST `/api/memory/:id/reinforce` — manually nudge a memory's confidence (e.g. after a
+/// POST `/api/memory/:id/reinforce` - manually nudge a memory's confidence (e.g. after a
 /// `confirm_useful` click in the dashboard). Returns the updated memory.
 async fn reinforce_memory(
     State(s): State<AppState>,
@@ -779,7 +785,7 @@ struct CrystallizeBody {
     session_id: Option<String>,
 }
 
-/// POST `/api/memory/crystallize` — promote working-tier memories into a semantic crystal.
+/// POST `/api/memory/crystallize` - promote working-tier memories into a semantic crystal.
 async fn crystallize(
     State(s): State<AppState>,
     Json(body): Json<CrystallizeBody>,
@@ -793,14 +799,14 @@ async fn crystallize(
     }
 }
 
-/// GET `/api/memory/graph` — the provenance graph (nodes + edges) for the dashboard.
+/// GET `/api/memory/graph` - the provenance graph (nodes + edges) for the dashboard.
 async fn memory_graph(
     State(s): State<AppState>,
 ) -> Result<Json<cairn_memory::MemoryGraph>, ApiError> {
     Ok(Json(s.mem.graph()?))
 }
 
-// ---- drift + sessions handlers (v0.5.0 Sprint 4) -------------------------------------------
+// -- drift + sessions handlers (v0.5.0 Sprint 4) -----------------------------------------
 
 async fn list_drift(
     State(s): State<AppState>,
@@ -887,7 +893,7 @@ async fn get_session(
     }
 }
 
-/// PATCH a session — merge in new tasks/findings/decisions/touched_files/next_steps.
+/// PATCH a session - merge in new tasks/findings/decisions/touched_files/next_steps.
 async fn update_session(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -1092,7 +1098,7 @@ async fn share_import(
 }
 
 /// Accept a contribution into this server's shared pool. The server re-sanitizes every memory
-/// itself (defense-in-depth — a client's redaction is never trusted) and rejects anything that
+/// itself (defense-in-depth - a client's redaction is never trusted) and rejects anything that
 /// still contains a hard secret; the rest is stored under `pool` provenance, deduplicated.
 async fn pool_contribute(
     State(s): State<AppState>,
@@ -1162,7 +1168,9 @@ async fn pair_new(
         .name
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| "device".to_string());
-    let token = s.store.create_token(&name)?;
+    let token = s
+        .store
+        .create_token(&name, cairn_core::TokenScope::Write, None)?;
     let code = pairing_code();
     let expires = (Utc::now() + chrono::Duration::minutes(10))
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
@@ -1203,7 +1211,7 @@ async fn pair_claim(
     }
 }
 
-// ---- sync + auth -------------------------------------------------------------------------------
+// -- sync + auth -----------------------------------------------------------------------------
 
 #[derive(Deserialize)]
 struct SyncPullQuery {
@@ -1278,13 +1286,13 @@ async fn tools_call(
 /// Authentication middleware.
 ///
 /// Composition:
-///   1. Public endpoints (`/api/health`, `/api/pair/claim`, the admin auth surface) — pass
+///   1. Public endpoints (`/api/health`, `/api/pair/claim`, the admin auth surface) - pass
 ///      through unchanged.
-///   2. Admin cookie — if `cairn_session` is present, signed, and the embedded generation
+///   2. Admin cookie - if `cairn_session` is present, signed, and the embedded generation
 ///      matches the live admin record, the request is treated as the admin (all scopes).
-///   3. Device-token bearer — the existing JWT path; respected when no admin cookie is
+///   3. Device-token bearer - the existing JWT path; respected when no admin cookie is
 ///      available so CLI / MCP clients keep working.
-///   4. Loopback fallback — when there are no device tokens AND no admin (first-run before
+///   4. Loopback fallback - when there are no device tokens AND no admin (first-run before
 ///      `/setup`), only loopback calls pass. The admin cookie path overrides this once
 ///      `/setup` has been visited.
 ///
@@ -1293,7 +1301,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let method = req.method().as_str();
 
-    // 1. Public endpoints — never require auth.
+    // 1. Public endpoints - never require auth.
     if !path.starts_with("/api/")
         || matches!(
             path,
@@ -1320,26 +1328,49 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
     }
 
     // 3. Device-token bearer.
-    // `verify_bearer_auth` returns a tri-state so we can hard-401 on a presented-but-invalid
-    // bearer instead of falling through to the loopback fallback (the previous code only
-    // distinguished `Ok(true)` from "everything else", which let a junk bearer from
-    // loopback pass when no admin/tokens were configured yet).
     match verify_bearer_auth(&s, &req, method, path) {
-        VerifyBearerOutcome::Valid => {
+        VerifyBearerOutcome::Valid(token_id) => {
             tracing::trace!(path, "auth=bearer");
+            let _ = s.store.record_token_usage(&token_id);
             return next.run(req).await;
         }
-        VerifyBearerOutcome::Invalid => {
+        VerifyBearerOutcome::BadSignature => {
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(json!({ "error": "invalid bearer token" })),
+                Json(json!({
+                    "error": "invalid bearer token",
+                    "reason": "bad_signature",
+                    "detail": "token signature verification failed (secret key may have been rotated, or the token is malformed)"
+                })),
+            )
+                .into_response();
+        }
+        VerifyBearerOutcome::UnknownToken => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": "invalid bearer token",
+                    "reason": "unknown_token",
+                    "detail": "token is cryptographically valid but was not found in the store (it may have been revoked, or HelixDB data may have been lost)"
+                })),
+            )
+                .into_response();
+        }
+        VerifyBearerOutcome::InsufficientScope => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({
+                    "error": "invalid bearer token",
+                    "reason": "insufficient_scope",
+                    "detail": "the token's scope does not permit this operation"
+                })),
             )
                 .into_response();
         }
         VerifyBearerOutcome::Absent => {} // fall through to loopback / 401 below
     }
 
-    // 4. Loopback fallback — only when there are no device tokens AND no admin.
+    // 4. Loopback fallback - only when there are no device tokens AND no admin.
     let token_count = s.store.count_tokens().unwrap_or(0);
     let admin_exists = admin_mod::load_admin(&s)
         .map(|r| r.is_some())
@@ -1386,17 +1417,22 @@ fn verify_admin_cookie(s: &AppState, req: &Request) -> Option<()> {
 /// admin / tokens are configured yet).
 enum VerifyBearerOutcome {
     /// A bearer was presented AND it verified against a trusted key with sufficient scope.
-    Valid,
-    /// A bearer was presented but did not verify (bad signature, expired, revoked, or
-    /// out-of-scope). The caller MUST reject with 401.
-    Invalid,
-    /// No `Authorization: Bearer …` header was sent at all. The caller may fall through
+    /// Carries the token id so the caller can record usage.
+    Valid(String),
+    /// Bearer present but signature/expiration check failed.
+    BadSignature,
+    /// Bearer present, signature valid, but the token id is not in the store (revoked or
+    /// data loss).
+    UnknownToken,
+    /// Bearer present, signature valid, token exists, but the scope does not permit the
+    /// requested method+path.
+    InsufficientScope,
+    /// No `Authorization: Bearer ...` header was sent at all. The caller may fall through
     /// to weaker authentication paths (loopback fallback) if appropriate.
     Absent,
 }
 
-/// Verify a device-token bearer against the request. Returns a tri-state — see
-/// [`VerifyBearerOutcome`] for why we don't collapse `Invalid` and `Absent`.
+/// Verify a device-token bearer against the request.
 fn verify_bearer_auth(
     s: &AppState,
     req: &Request,
@@ -1411,21 +1447,20 @@ fn verify_bearer_auth(
     else {
         return VerifyBearerOutcome::Absent;
     };
-    match s.verify_bearer(bearer) {
-        None => VerifyBearerOutcome::Invalid,
-        Some(info) => {
-            let allowed = info.scope.allows(method, path)
-                && s.store.validate_token_id(&info.id).unwrap_or(false);
-            if allowed {
-                VerifyBearerOutcome::Valid
-            } else {
-                VerifyBearerOutcome::Invalid
-            }
-        }
+    let info = match s.verify_bearer(bearer) {
+        Some(i) => i,
+        None => return VerifyBearerOutcome::BadSignature,
+    };
+    if !s.store.validate_token_id(&info.id).unwrap_or(false) {
+        return VerifyBearerOutcome::UnknownToken;
     }
+    if !info.scope.allows(method, path) {
+        return VerifyBearerOutcome::InsufficientScope;
+    }
+    VerifyBearerOutcome::Valid(info.id)
 }
 
-// ---- error plumbing ----------------------------------------------------------------------------
+// -- error plumbing --------------------------------------------------------------------------
 
 /// A simple API error that renders as JSON `{ "error": ... }`.
 #[derive(Debug)]
@@ -1497,7 +1532,7 @@ mod tests {
         // Track the file by reading it through the context engine (records a baseline version).
         state.ctx.read(&file, ReadMode::Full).unwrap();
 
-        // Create a checkpoint — it should capture the tracked file.
+        // Create a checkpoint - it should capture the tracked file.
         let cp = create_checkpoint(
             State(state.clone()),
             Query(CheckpointQuery {
@@ -1702,7 +1737,7 @@ mod tests {
         assert_eq!(created["name"], "laptop");
         assert_eq!(code.len(), 8);
 
-        // The new device claims it → a real, valid device token.
+        // The new device claims it -> a real, valid device token.
         let claimed = pair_claim(
             State(state.clone()),
             Json(PairClaimBody { code: code.clone() }),
@@ -1809,7 +1844,7 @@ mod tests {
         );
     }
 
-    // ---- v0.5.0 Sprint 1: SSE event broker + metrics endpoint -----------------------------
+    // -- v0.5.0 Sprint 1: SSE event broker + metrics endpoint ---------------------------
 
     #[test]
     fn event_broker_delivers_published_payloads_to_subscribers() {
@@ -1862,7 +1897,7 @@ mod tests {
         let Some((state, _dir)) = test_state() else {
             return;
         };
-        // Start the SSE handler — it returns immediately with a 200 + `text/event-stream`.
+        // Start the SSE handler - it returns immediately with a 200 + `text/event-stream`.
         let started = std::time::Instant::now();
         let resp = sse_events(
             State(state.clone()),
@@ -1935,7 +1970,7 @@ mod tests {
         assert_eq!(backfilled[1].data["kind"], "login_failed");
     }
 
-    // ---- v0.5.0 Sprint 2: memory CRUD + confidence + pin ---------------------------------
+    // -- v0.5.0 Sprint 2: memory CRUD + confidence + pin -------------------------------
 
     #[tokio::test]
     async fn memory_edit_delete_pin_round_trip() {
@@ -2021,7 +2056,7 @@ mod tests {
         assert!(!m.pinned);
     }
 
-    // ---- v0.5.0 Sprint 3: crystallize + memory graph endpoints ----------------------------
+    // -- v0.5.0 Sprint 3: crystallize + memory graph endpoints --------------------------
 
     #[tokio::test]
     async fn memory_crystallize_endpoint_promotes_working_and_publishes_event() {
@@ -2084,7 +2119,7 @@ mod tests {
         );
     }
 
-    // ---- v0.5.0 Sprint 4: sessions + drift --------------------------------------------------
+    // -- v0.5.0 Sprint 4: sessions + drift ------------------------------------------------
 
     #[tokio::test]
     async fn sessions_create_list_latest_round_trip() {
@@ -2167,7 +2202,7 @@ mod tests {
         let f = dir.path().join("drift.txt");
         let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
         std::fs::write(&f, &original).unwrap();
-        // A gutting edit — verify flags danger.
+        // A gutting edit - verify flags danger.
         verify(
             State(state.clone()),
             Json(VerifyBody {
@@ -2200,7 +2235,7 @@ mod tests {
         assert_eq!(err.0, StatusCode::NOT_FOUND);
     }
 
-    // ---- v0.5.0 Sprint 5: ledger -----------------------------------------------------------
+    // -- v0.5.0 Sprint 5: ledger ---------------------------------------------------------
 
     #[tokio::test]
     async fn ledger_records_savings_when_read_runs() {
@@ -2209,7 +2244,7 @@ mod tests {
         };
         let f = dir.path().join("big.txt");
         std::fs::write(&f, "a\n".repeat(500)).unwrap();
-        // A read in full mode → ledger gets an entry from "context.read".
+        // A read in full mode -> ledger gets an entry from "context.read".
         read(
             State(state.clone()),
             Query(ReadQuery {
@@ -2241,7 +2276,7 @@ mod tests {
         assert_eq!(v["valid"], serde_json::json!(true));
     }
 
-    // ---- v0.5.0 Sprint 6: setup wizard v2 --------------------------------------------------
+    // -- v0.5.0 Sprint 6: setup wizard v2 ------------------------------------------------
 
     #[tokio::test]
     async fn setup_wizard_default_embed_provider_is_hashing() {
@@ -2264,7 +2299,7 @@ mod tests {
         assert_eq!(h.embed_provider, "hashing");
     }
 
-    // ---- v0.5.0 Sprint 7: hybrid search + CSP nonce ---------------------------------------
+    // -- v0.5.0 Sprint 7: hybrid search + CSP nonce -------------------------------------
 
     #[tokio::test]
     async fn hybrid_search_endpoint_returns_reranked_hits() {
@@ -2402,7 +2437,7 @@ mod tests {
         assert_eq!(receipt.name, "alpha");
         assert_eq!(receipt.status, PublishStatus::Signed);
 
-        // GET /registry/packs — must include the published pack.
+        // GET /registry/packs - must include the published pack.
         let resp = app
             .clone()
             .oneshot(
@@ -2419,7 +2454,7 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].name, "alpha");
 
-        // GET /registry/packs/alpha/1.0.0/download — round-trip the bytes.
+        // GET /registry/packs/alpha/1.0.0/download - round-trip the bytes.
         let resp = app
             .clone()
             .oneshot(
@@ -2437,7 +2472,7 @@ mod tests {
             "downloaded bytes should match published tarball"
         );
 
-        // GET /registry/search?q=alp — substring match.
+        // GET /registry/search?q=alp - substring match.
         let resp = app
             .clone()
             .oneshot(
@@ -2452,7 +2487,7 @@ mod tests {
             serde_json::from_slice(&to_bytes(resp.into_body(), 1 << 20).await.unwrap()).unwrap();
         assert_eq!(hits.len(), 1);
 
-        // DELETE /registry/packs/alpha/1.0.0 — revoke.
+        // DELETE /registry/packs/alpha/1.0.0 - revoke.
         let resp = app
             .clone()
             .oneshot(
@@ -2487,9 +2522,9 @@ mod tests {
     }
 
     /// Federation scope + provenance display (Sprint 14). Publishes a pack whose
-    /// manifest declares `scope: team` but only public-scope trusts are configured —
+    /// manifest declares `scope: team` but only public-scope trusts are configured ---
     /// must be rejected with `ScopeDenied`. Then publishes with `scope: local` and
-    /// a public-scope grant — must succeed, and the cached manifest endpoint must
+    /// a public-scope grant - must succeed, and the cached manifest endpoint must
     /// return a manifest that includes `stats.graph_edges` (Sprint 14c provenance
     /// display).
     #[tokio::test]
@@ -2505,10 +2540,10 @@ mod tests {
         };
         let reg = state.registry.clone().expect("registry should be open");
 
-        // 1. team-scoped pack + public-only grant → rejected.
+        // 1. team-scoped pack + public-only grant -> rejected.
         let team_pack_path = dir.path().join("team.cairnpkg");
         let mut team_pack = Pack::new("team-only", "1.0.0");
-        team_pack.description = "scope: team — for the team".into();
+        team_pack.description = "scope: team - for the team".into();
         team_pack
             .memories
             .push(serde_json::json!({"id": "m1", "content": "x"}));
@@ -2528,7 +2563,7 @@ mod tests {
             other => panic!("expected ScopeDenied for team pack, got {other:?}"),
         }
 
-        // 2. local-scoped pack + public grant → accepted.
+        // 2. local-scoped pack + public grant -> accepted.
         let local_pack_path = dir.path().join("local.cairnpkg");
         let mut local_pack = Pack::new("local-notes", "1.0.0");
         local_pack.description = "scope: local".into();
@@ -2590,7 +2625,7 @@ mod tests {
 
     #[test]
     fn verify_bearer_distinguishes_absent_from_invalid() {
-        // The tri-state must return Absent / Invalid / Invalid respectively — collapsing
+        // The tri-state must return Absent / Invalid / Invalid respectively - collapsing
         // Invalid into Absent would let a junk bearer slip past the middleware to the
         // loopback fallback. Skipped on environments without a backend fixture.
         let Some((state, _dir)) = test_state() else {
@@ -2618,7 +2653,7 @@ mod tests {
         let bogus = mk(Some("Bearer this-is-not-a-valid-jwt"));
         assert!(matches!(
             verify_bearer_auth(&state, &bogus, "GET", "/api/memories"),
-            VerifyBearerOutcome::Invalid
+            VerifyBearerOutcome::BadSignature
         ));
     }
 }

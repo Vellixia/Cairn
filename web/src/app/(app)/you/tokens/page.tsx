@@ -210,7 +210,7 @@ export default function DevicesTokensPage() {
                 form="form-issue-token"
                 disabled={issue.isPending}
               >
-                {issue.isPending ? "…" : "Issue"}
+                {issue.isPending ? "..." : "Issue"}
               </Button>
             </FieldGroup>
           </form>
@@ -219,7 +219,7 @@ export default function DevicesTokensPage() {
             <div className="mt-4 space-y-2">
 
               <p className="text-xs text-muted-foreground">
-                Copy this token — it won&apos;t be shown again.
+                Copy this token --- it won&apos;t be shown again.
               </p>
               <div className="flex gap-2">
 
@@ -339,7 +339,7 @@ function TokensTable({
         <span className="text-muted-foreground">
           {row.original.last_used_at
             ? new Date(row.original.last_used_at).toLocaleString()
-            : "—"}
+            : "---"}
         </span>
       ),
     },
@@ -453,7 +453,7 @@ function TokensTable({
                 if (target) await onRevoke(target.id);
               }}
             >
-              {pendingRevoke !== null ? "Revoking…" : "Revoke"}
+              {pendingRevoke !== null ? "Revoking..." : "Revoke"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

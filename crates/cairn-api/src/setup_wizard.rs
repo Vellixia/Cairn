@@ -9,7 +9,7 @@
 //!    and a `health` block the dashboard uses to render the final "all-green" page.
 //! 2. The dashboard renders the wizard steps; the existing `/setup` route is kept as a
 //!    fallback (deprecation banner pointing to `/setup/wizard`).
-//! 3. After the wizard, the embed config is read at server startup — the runtime picks up
+//! 3. After the wizard, the embed config is read at server startup - the runtime picks up
 //!    the persisted choice on next launch.
 
 use crate::AppState;
@@ -30,7 +30,7 @@ pub struct SetupHealth {
     pub embed_provider: String,
 }
 
-/// `GET /api/setup/health` — the wizard's final "all green" check.
+/// `GET /api/setup/health` - the wizard's final "all green" check.
 pub async fn setup_health(State(s): State<AppState>) -> Json<SetupHealth> {
     let admin_exists = crate::admin::load_admin(&s)
         .map(|r| r.is_some())

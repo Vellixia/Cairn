@@ -5,7 +5,7 @@
 //! `data_dir`. On any failure we roll back (delete the temp dir).
 //!
 //! Ingest into the cairn-store happens after extraction via the cairn-share
-//! `ShareBundle` round-trip — that's what makes a `.cairnpkg` *Cairn*-shaped and not just
+//! `ShareBundle` round-trip - that's what makes a `.cairnpkg` *Cairn*-shaped and not just
 //! a generic tarball.
 
 use std::{
@@ -24,7 +24,7 @@ use crate::MAX_UNCOMPRESSED_BYTES;
 /// extractor. The format is documented: 512-byte header per file, then data, then
 /// 512-byte padding, then two zero blocks to mark EOF.
 pub fn install(tarball: &Path, extract_root: &Path) -> io::Result<Manifest> {
-    // Read the entire tarball up front (sized — refuse anything past MAX_UNCOMPRESSED_BYTES).
+    // Read the entire tarball up front (sized - refuse anything past MAX_UNCOMPRESSED_BYTES).
     let bytes = fs::read(tarball)?;
     if bytes.len() as u64 > MAX_UNCOMPRESSED_BYTES {
         return Err(io::Error::new(
@@ -44,7 +44,7 @@ pub fn install(tarball: &Path, extract_root: &Path) -> io::Result<Manifest> {
         ));
     }
 
-    // Find the manifest — required.
+    // Find the manifest - required.
     let manifest_entry = entries
         .iter()
         .find(|e| e.name == "manifest.json")
@@ -67,7 +67,7 @@ pub fn install(tarball: &Path, extract_root: &Path) -> io::Result<Manifest> {
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
         }
-        // Verify the entry's bytes against the manifest before writing — defense in depth
+        // Verify the entry's bytes against the manifest before writing - defense in depth
         // against a tampered tarball whose headers check out but whose content is wrong.
         if let Some(expected) = manifest.files.get(&entry.name) {
             let actual = signing::hash_bytes(&entry.body);
@@ -94,7 +94,7 @@ pub fn install(tarball: &Path, extract_root: &Path) -> io::Result<Manifest> {
     // Promote: rename the staging dir to its final name (within `extract_root`).
     let final_dir = extract_root.join(&manifest.name);
     if final_dir.exists() {
-        // Replace prior install — cairnpkg semantics are "newer version wins".
+        // Replace prior install - cairnpkg semantics are "newer version wins".
         fs::remove_dir_all(&final_dir)?;
     }
     fs::rename(&staging, &final_dir)?;
@@ -109,12 +109,12 @@ pub struct TarEntry {
 }
 
 /// Verify the Ed25519 signature on a parsed tarball, if present. Returns:
-/// - `Ok(true)` — a signature was present and verified against one of the supplied keys.
-/// - `Ok(false)` — the tarball has no `signature.ed25519` entry (legacy / unsigned pack).
+/// - `Ok(true)` - a signature was present and verified against one of the supplied keys.
+/// - `Ok(false)` - the tarball has no `signature.ed25519` entry (legacy / unsigned pack).
 ///   Integrity is still ensured by the per-file SHA-256 hashes; only authenticity is missing.
-/// - `Err(_)` — a signature was present but invalid, or referenced a key not in `trusted_keys`.
+/// - `Err(_)` - a signature was present but invalid, or referenced a key not in `trusted_keys`.
 ///
-/// `trusted_keys` is the set of author public keys the local user has chosen to trust —
+/// `trusted_keys` is the set of author public keys the local user has chosen to trust ---
 /// usually pinned once and stored alongside the registry config.
 pub fn verify_ed25519_signature(
     entries: &[TarEntry],
@@ -245,7 +245,7 @@ mod tests {
         let tarball = dir.path().join("big.cairnpkg");
         // Make a tarball > MAX_UNCOMPRESSED_BYTES. We do this by padding memory.jsonl.
         let mut pack = Pack::new("big", "1.0.0");
-        // 4 MiB per entry; 5 entries → 20 MiB.
+        // 4 MiB per entry; 5 entries -> 20 MiB.
         for _ in 0..5 {
             let big = "x".repeat(4 * 1024 * 1024);
             pack.memories.push(serde_json::json!({"content": big}));

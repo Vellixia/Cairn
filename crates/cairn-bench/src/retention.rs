@@ -5,10 +5,10 @@
 //!
 //! Two policies are compared:
 //!
-//! 1. **Naive LRU** — the memory at the back of the queue is dropped first,
+//! 1. **Naive LRU** - the memory at the back of the queue is dropped first,
 //!    regardless of confidence or pin state.
-//! 2. **Cairn policy** — `pinned: true` memories are never dropped; otherwise
-//!    memories are dropped by ascending `confidence × importance`.
+//! 2. **Cairn policy** - `pinned: true` memories are never dropped; otherwise
+//!    memories are dropped by ascending `confidence x importance`.
 //!
 //! Both start with the same pool of 100 memories (10 pinned, 90 with random
 //! importance / confidence). We run 50 cycles of "remember 10 new +
@@ -142,7 +142,7 @@ fn drop_one(pool: &mut Vec<Mem>) {
     if let Some(idx) = pool.iter().position(|m| !m.pinned) {
         pool.swap_remove(idx);
     } else {
-        // Every memory is pinned — drop the oldest.
+        // Every memory is pinned - drop the oldest.
         pool.remove(0);
     }
 }

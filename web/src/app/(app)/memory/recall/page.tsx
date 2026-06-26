@@ -118,9 +118,9 @@ export default function RecallPage() {
                       <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
                         {h.score.toFixed(2)}
                       </Badge>
-                      {h.memory.kind} · {h.memory.tier}
+                      {h.memory.kind} . {h.memory.tier}
                       {h.memory.concepts?.length > 0
-                        ? ` · ${h.memory.concepts.join(", ")}`
+                        ? ` . ${h.memory.concepts.join(", ")}`
                         : ""}
                     </ItemDescription>
                   </ItemContent>

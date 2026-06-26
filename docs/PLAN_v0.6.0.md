@@ -1,23 +1,23 @@
-# Cairn v0.6.0 — The Cleanup Plan
+# Cairn v0.6.0 - The Cleanup Plan
 
 > **Trim fat. Ship less surface. Get faster.**
 >
 > v0.6.0 = a focused cleanup sprint over the v0.5.0 release:
 > delete dead code, drop unused agent integrations, kill the host-side
 > server binary, promote env-only admin bootstrap, rename
-> `cairn-cli` → `cairn`. No new features; no new endpoints; no new
+> `cairn-cli` -> `cairn`. No new features; no new endpoints; no new
 > dependencies. Every commit must be independently buildable and
 > pass `cargo test --workspace` (343 + 5 ignored, invariant
 > preserved).
 >
 > This is a **single mega-PR** onto branch `v0.6.0`, stacked by
-> topic — not a multi-PR rollout.
+> topic - not a multi-PR rollout.
 
 ---
 
-## §0. North Star
+## S0. North Star
 
-**Goal:** make Cairn smaller, clearer, and faster to install —
+**Goal:** make Cairn smaller, clearer, and faster to install ---
 without losing any capability the user actually exercises.
 
 **Why v0.6.0 specifically:** v0.5.0 shipped 22 crates, two
@@ -28,20 +28,20 @@ six agent integrations (four of them fragile), a `Login` and
 product is good; the surface is too big.
 
 **Three sentences on what "cleanup" means here:**
-1. **One binary per role** — `cairn` (host) + `cairn-server`
+1. **One binary per role** - `cairn` (host) + `cairn-server`
    (in-container). No more `cairn-cli`, no more `cairn serve` on
    the host.
-2. **One agent set** — Claude Code, Codex CLI, OpenCode. The
+2. **One agent set** - Claude Code, Codex CLI, OpenCode. The
    other three were one-command setup over a fragile config
    schema.
-3. **One way to bootstrap admin** — env vars, set in
+3. **One way to bootstrap admin** - env vars, set in
    `docker-compose.yml`. The dashboard form was always
    unreviewed; the `cairn-server admin password` reset CLI was
    never wired to the new in-container server.
 
 ---
 
-## §1. The 11 commits
+## S1. The 11 commits
 
 Each commit is independently buildable, formatted, clippy-clean,
 and passes the test suite. Commit 4, 5, 6, and 11 additionally pass
@@ -51,17 +51,17 @@ and passes the test suite. Commit 4, 5, 6, and 11 additionally pass
 |----|-------------------------------------------------------------------------|-----------|
 | 1  | `chore(deps): remove self_update, dotenvy; drop Login + Update`         | base      |
 | 2  | `feat(env): promote CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD`        | 1         |
-| 3  | `refactor: rename crates/cairn-cli → cairn-client; binary → cairn`      | 1         |
+| 3  | `refactor: rename crates/cairn-cli -> cairn-client; binary -> cairn`      | 1         |
 | 4  | `feat: drop Cursor/VSCode/Windsurf; add Codex CLI`                      | 3         |
 | 5  | `docs(setup): confirm admin ops live in the web UI + env-only`          | 2         |
-| 6  | `refactor: delete cairn-server crate; entrypoint → cairn-api`           | 2         |
+| 6  | `refactor: delete cairn-server crate; entrypoint -> cairn-api`           | 2         |
 | 7  | `chore: drop dead code`                                                 | 6         |
 | 8  | `chore: gitignore log/txt working-tree spam`                            | 1         |
 | 9  | `docs: scrub stale cairn serve/token/pair-code/cairn-server refs`       | 6, 4      |
 | 10 | `docs: archive PLAN_v0.5.0; write PLAN_v0.6.0; add ADR 028/029/030`     | 9         |
 | 11 | `chore(release): version 0.6.0; CHANGELOG entry; Cargo.lock`            | 10        |
 
-### 1.1 Commit 1 — `chore(deps): remove self_update, dotenvy from cairn-cli; drop Login + Update subcommands`
+### 1.1 Commit 1 - `chore(deps): remove self_update, dotenvy from cairn-cli; drop Login + Update subcommands`
 
 Removes two deps that were only used by `cairn login` and
 `cairn update`. Both subcommands were in v0.5.0 but were never
@@ -72,14 +72,14 @@ exercised: `cairn login` printed "use the web UI", and
   `[workspace.dependencies]` (only `cairn-cli` was using them).
 - `crates/cairn-cli/src/main.rs`: remove `Cmd::Login`,
   `Cmd::Update`, and their match arms.
-- Test count: 343 → 343 (no test removed, no test added).
+- Test count: 343 -> 343 (no test removed, no test added).
 
-### 1.2 Commit 2 — `feat(env): promote CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD; env-only admin bootstrap`
+### 1.2 Commit 2 - `feat(env): promote CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD; env-only admin bootstrap`
 
 Promotes the two env vars from "optional override" to "the only
 way to bootstrap the admin account." Removes the dashboard
 form that pre-created the admin with a default password (a
-v0.4.0 → v0.5.0 footgun).
+v0.4.0 -> v0.5.0 footgun).
 
 - `crates/cairn-api/src/admin.rs`: new
   `pub fn bootstrap_admin_from_env(state: &AppState) -> Result<()>`.
@@ -89,23 +89,23 @@ v0.4.0 → v0.5.0 footgun).
 - `.env.example`: documents the two vars, marks them required.
 - `Dockerfile`: no change (env is set at compose time).
 
-### 1.3 Commit 3 — `refactor: rename crates/cairn-cli → cairn-client; binary cairn-cli → cairn`
+### 1.3 Commit 3 - `refactor: rename crates/cairn-cli -> cairn-client; binary cairn-cli -> cairn`
 
 The bulk rename. Touches 39 files: docs, scripts, MCP config
 examples, AGENTS.md, install scripts. Crate name changes to
 match its architectural role.
 
-- `crates/cairn-cli/` → `crates/cairn-client/`.
+- `crates/cairn-cli/` -> `crates/cairn-client/`.
 - `crates/cairn-client/Cargo.toml`: `name = "cairn-client"`,
   `[[bin]] name = "cairn"`.
 - `Cargo.toml`: `[workspace.members]` and
   `[workspace.dependencies]` updated.
-- All `cairn-cli` string references → `cairn` (scoped replace,
+- All `cairn-cli` string references -> `cairn` (scoped replace,
   no `cairn-cli-server` partial matches).
 - Historical refs in `CHANGELOG.md`, `docs/PLAN_v0.5.0.md`,
-  `docs/audits/*` left verbatim — they describe v0.5.0 reality.
+  `docs/audits/*` left verbatim - they describe v0.5.0 reality.
 
-### 1.4 Commit 4 — `feat: drop Cursor/VSCode/Windsurf; add Codex CLI`
+### 1.4 Commit 4 - `feat: drop Cursor/VSCode/Windsurf; add Codex CLI`
 
 Restricts `KNOWN` agents to three. Adds Codex CLI MCP
 integration. The four removed agents had fragile MCP config
@@ -119,20 +119,20 @@ schemas that broke with upstream changes.
 - `crates/cairn-client/src/rules.rs`: `KNOWN` matches setup.
 - New tests: `codex_round_trip`, `codex_skips_unchanged`.
 
-### 1.5 Commit 5 — `docs(setup): confirm admin ops live in the web UI + env-only bootstrap`
+### 1.5 Commit 5 - `docs(setup): confirm admin ops live in the web UI + env-only bootstrap`
 
 User-facing confirmation that admin ops (token create / revoke,
-pair-code generation) live in the dashboard under **You →
-Tokens** and **You → Pair**. The CLI never had these
+pair-code generation) live in the dashboard under **You ->
+Tokens** and **You -> Pair**. The CLI never had these
 subcommands in v0.5.0; the dashboard already drove the
 `/api/devices/*` HTTP routes.
 
 - `docs/ADMIN.md`: new file. Sections: env bootstrap, dashboard
   surface, curl equivalents, password rotation.
-- `docs/UPGRADING.md`: v0.4.0 → v0.5.0 admin-rotation note
-  updated for v0.5.0 → v0.6.0.
+- `docs/UPGRADING.md`: v0.4.0 -> v0.5.0 admin-rotation note
+  updated for v0.5.0 -> v0.6.0.
 
-### 1.6 Commit 6 — `refactor: delete cairn-server crate; entrypoint → cairn-api::bin::cairn-server`
+### 1.6 Commit 6 - `refactor: delete cairn-server crate; entrypoint -> cairn-api::bin::cairn-server`
 
 The 50-LOC wrapper crate is gone. The in-container server is a
 `[[bin]]` in `cairn-api`.
@@ -147,7 +147,7 @@ The 50-LOC wrapper crate is gone. The in-container server is a
 - `.github/workflows/release.yml`: matrix drops the second
   `bin` entry.
 
-### 1.7 Commit 7 — `chore: drop dead code`
+### 1.7 Commit 7 - `chore: drop dead code`
 
 Removes functions that no caller exercises. All removed
 functions verified by `rg` to have zero references.
@@ -160,31 +160,31 @@ functions verified by `rg` to have zero references.
   function and the `HashMap` import.
 - `crates/cairn-ingest/src/lib.rs`: drop `write_tmp` helper.
 
-### 1.8 Commit 8 — `chore: gitignore log/txt working-tree spam`
+### 1.8 Commit 8 - `chore: gitignore log/txt working-tree spam`
 
 `.gitignore` blocks `/*.log` and `/*.txt` with an explicit
 allowlist of source-of-truth files (`README.md`,
 `CHANGELOG.md`, `Cargo.toml`, etc.). Catches the
 `v060-c{N}-msg.txt` scratch files in the repo root.
 
-### 1.9 Commit 9 — `docs: scrub stale cairn serve/token/pair-code/cairn-server admin refs`
+### 1.9 Commit 9 - `docs: scrub stale cairn serve/token/pair-code/cairn-server admin refs`
 
 Touches 33 files. Pure doc/comment cleanup. No code changes.
 
-- `.claude/settings.json`: 4× `cairn-cli hook` → `cairn hook`.
-- `.mcp.json`: `command: "cairn-cli"` → `command: "cairn"`.
+- `.claude/settings.json`: 4x `cairn-cli hook` -> `cairn hook`.
+- `.mcp.json`: `command: "cairn-cli"` -> `command: "cairn"`.
 - `.env.example`: stale `cairn serve`/`cairn-server` references
-  → in-container server.
-- `docker-compose.yml`: "run `cairn serve` directly" → "terminate
+  -> in-container server.
+- `docker-compose.yml`: "run `cairn serve` directly" -> "terminate
   TLS at a reverse proxy".
-- `AGENTS.md`: 22-crate → 21-crate count, binary table
+- `AGENTS.md`: 22-crate -> 21-crate count, binary table
   rewritten, dep graph updated.
-- `CONTRIBUTING.md`: 22 → 21 crates; `cargo run -p cairn-server --
-  serve` → `docker compose up -d cairn` +
+- `CONTRIBUTING.md`: 22 -> 21 crates; `cargo run -p cairn-server --
+  serve` -> `docker compose up -d cairn` +
   `cargo run -p cairn-api --bin cairn-server -- serve`.
 - `docs/UPGRADING.md`, `docs/TESTING.md`, `docs/WEB.md`,
   `docs/PLAN.md`, `docs/ROADMAP.md`: same scrub pass.
-- `crates/cairn-mcp/src/resources.rs`: 7 "cairn-server" →
+- `crates/cairn-mcp/src/resources.rs`: 7 "cairn-server" ->
   "in-container server" in resource descriptions.
 - `crates/cairn-client/src/{onboard,pair}.rs`: drop
   `cairn serve` / `cairn pair-code` references.
@@ -197,18 +197,18 @@ Touches 33 files. Pure doc/comment cleanup. No code changes.
 Historical refs in `CHANGELOG.md`, `docs/DECISIONS.md`,
 `docs/PLAN_v0.5.0.md`, `docs/audits/*` left verbatim.
 
-### 1.10 Commit 10 — `docs: archive PLAN_v0.5.0; write PLAN_v0.6.0; add ADR 028/029/030`
+### 1.10 Commit 10 - `docs: archive PLAN_v0.5.0; write PLAN_v0.6.0; add ADR 028/029/030`
 
-- `docs/PLAN_v0.5.0.md` → `docs/archive/PLAN_v0.5.0.md`.
+- `docs/PLAN_v0.5.0.md` -> `docs/archive/PLAN_v0.5.0.md`.
 - `docs/PLAN_v0.6.0.md`: this file.
 - `docs/DECISIONS.md`:
   - **ADR-028**: drop Cursor/VSCode/Windsurf; add Codex CLI.
   - **ADR-029**: delete `cairn-server`; entrypoint in
     `cairn-api::bin::cairn-server`.
-  - **ADR-030**: rename `cairn-cli` → `cairn`; crate →
+  - **ADR-030**: rename `cairn-cli` -> `cairn`; crate ->
     `cairn-client`.
 
-### 1.11 Commit 11 — `chore(release): version 0.6.0; CHANGELOG entry; Cargo.lock`
+### 1.11 Commit 11 - `chore(release): version 0.6.0; CHANGELOG entry; Cargo.lock`
 
 Final commit for the PR.
 
@@ -219,19 +219,19 @@ Final commit for the PR.
 
 ---
 
-## §2. Test invariant
+## S2. Test invariant
 
 Across all 11 commits, `cargo test --workspace` must report
-**343 passed, 5 ignored** — no test added, no test removed, no
+**343 passed, 5 ignored** - no test added, no test removed, no
 test silently broken. Verified at commits 7 and 9 logs.
 
 Pre-existing flakes (out of scope for v0.6.0):
 - `cairn-api/src/ledger.rs:288` `ledger_detects_tampered_field`
-  — pre-dates this work, not addressed.
+  - pre-dates this work, not addressed.
 
 ---
 
-## §3. What is NOT in v0.6.0
+## S3. What is NOT in v0.6.0
 
 - **No new features.** No new endpoints, no new agent
   integrations beyond Codex, no new CLI subcommands.
@@ -251,11 +251,11 @@ Pre-existing flakes (out of scope for v0.6.0):
 
 ---
 
-## §4. Risk register
+## S4. Risk register
 
 | Risk                                                          | Mitigation                                                                  |
 |---------------------------------------------------------------|-----------------------------------------------------------------------------|
-| v0.5.0 → v0.6.0 breaks the install script                     | `scripts/install.sh` + `scripts/install.ps1` updated to use `cairn` not `cairn-cli` |
+| v0.5.0 -> v0.6.0 breaks the install script                     | `scripts/install.sh` + `scripts/install.ps1` updated to use `cairn` not `cairn-cli` |
 | CI release matrix still produces a `cairn-cli` artifact       | Verify `.github/workflows/release.yml` matrix after C6                       |
 | `cargo run -p cairn-server` fails on existing dev setups      | `CONTRIBUTING.md` updated; release notes in CHANGELOG.md                    |
 | Bulk rename misses a `cairn-cli` string                        | Verified by `rg "cairn-cli" D:/code/Cairn --type-add rust --type-add json --type-add yaml --type-add toml` returning zero non-historical hits |
@@ -264,7 +264,7 @@ Pre-existing flakes (out of scope for v0.6.0):
 
 ---
 
-## §5. Follow-ups for v0.7.0
+## S5. Follow-ups for v0.7.0
 
 - `save_admin` password rotation endpoint (currently
   `#[allow(dead_code)]`).

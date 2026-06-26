@@ -1,12 +1,13 @@
-﻿//! A minimal Model Context Protocol server over stdio.
+//! A minimal Model Context Protocol server over stdio.
 //!
 //! MCP's stdio transport is newline-delimited JSON-RPC 2.0: one JSON message per line on stdin,
 //! one per line on stdout. (Logs must go to stderr so they don't corrupt the channel.) We
 //! hand-roll it to avoid taking a heavy SDK dependency this early; the surface is small and the
 //! protocol is stable.
 //!
-//! Tools exposed: read/expand, remember/recall/wakeup/consolidate, assemble, prefer/profile,
-//! anchor, verify, compress, sanitize.
+//! Tools exposed: read/expand, remember/recall/wakeup/consolidate, assemble,
+//! prefer/profile, anchor, verify/checkpoint/rollback, compress, sanitize,
+//! search, memory_*, metrics, registry_search, proactive_recall.
 
 use cairn_assemble::Assembler;
 use cairn_context::{ContextEngine, ReadMode};
@@ -109,7 +110,7 @@ impl McpServer {
                     id,
                     json!({
                         "protocolVersion": ver,
-                        "capabilities": { "tools": {}, "resources": { "subscribe": true }, "prompts": {} },
+                        "capabilities": { "tools": {} },
                         "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") }
                     }),
                 ))
@@ -260,9 +261,9 @@ impl McpServer {
                 if ms.is_empty() {
                     return Ok("(no memories yet)".into());
                 }
-                let mut out = String::from("Cairn wakeup â€” what you already know:\n");
+                let mut out = String::from("Cairn wakeup - what you already know:\n");
                 for m in ms {
-                    out.push_str(&format!("Â· ({}) {}\n", m.kind.as_str(), m.content));
+                    out.push_str(&format!("- ({}) {}\n", m.kind.as_str(), m.content));
                 }
                 Ok(out)
             }
@@ -350,7 +351,7 @@ impl McpServer {
                 let mems = proactive_recall(self, prompt, project_root);
                 serde_json::to_string_pretty(&mems).map_err(|e| e.to_string())
             }
-            // ---- v0.5.0 Sprint 10: graph + memory CRUD extensions ----
+            // -- v0.5.0 Sprint 10: graph + memory CRUD extensions --
             "memory_edit" => {
                 let id = str_arg(args.get("id")).ok_or("missing 'id'")?;
                 let content = args
@@ -445,10 +446,6 @@ impl McpServer {
                     .map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())
             }
-            "graph" => {
-                let g = self.mem.graph().map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&g).map_err(|e| e.to_string())
-            }
             "metrics" => {
                 let mem_count = self.store.count_memories().map_err(|e| e.to_string())?;
                 let cp_count = self
@@ -462,13 +459,6 @@ impl McpServer {
                 }))
                 .map_err(|e| e.to_string())
             }
-            "stats" => {
-                let mem_count = self.store.count_memories().map_err(|e| e.to_string())?;
-                let tokens = self.store.count_memories().map_err(|e| e.to_string())?;
-                Ok(format!(
-                    "{{\"memories\":{mem_count},\"checkpoints\":{tokens}}}"
-                ))
-            }
             "registry_search" => {
                 let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
                 let reg = self
@@ -477,27 +467,6 @@ impl McpServer {
                     .ok_or("no registry configured on this server")?;
                 let results = reg.search(query).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
-            }
-            "registry_revoke" => {
-                let name = str_arg(args.get("name")).ok_or("missing 'name'")?;
-                let version = str_arg(args.get("version")).ok_or("missing 'version'")?;
-                let reg = self
-                    .registry
-                    .as_ref()
-                    .ok_or("no registry configured on this server")?;
-                let evt = reg.revoke(name, version).map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&evt).map_err(|e| e.to_string())
-            }
-            "registry_publish" => {
-                let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
-                let resolved = self.resolve_tool_path(path)?;
-                let bytes = std::fs::read(&resolved).map_err(|e| e.to_string())?;
-                let reg = self
-                    .registry
-                    .as_ref()
-                    .ok_or("no registry configured on this server")?;
-                let receipt = reg.publish(&bytes, None).map_err(|e| e.to_string())?;
-                serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
             }
             other => Err(format!("unknown tool: {other}")),
         }
@@ -509,12 +478,12 @@ pub fn tool_defs() -> Value {
     json!([
         {
             "name": "read",
-            "description": "Read a file through Cairn. Re-reading an unchanged file is nearly free; after edits you get only the diff. Returns a handle you can pass to `expand` for the full original â€” no context is ever lost.",
+            "description": "Read a file through Cairn. Re-reading an unchanged file is nearly free; after edits you get only the diff. Returns a handle you can pass to `expand` for the full original - no context is ever lost.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path to read." },
-                    "mode": { "type": "string", "enum": ["auto", "full", "signatures", "map"], "description": "auto (cache-aware), full, signatures (AST outline â€” bodies elided), or map (outline + line numbers). For code files, signatures/map cost a fraction of the tokens; recover the full file with expand." }
+                    "mode": { "type": "string", "enum": ["auto", "full", "signatures", "map"], "description": "auto (cache-aware), full, signatures (AST outline - bodies elided), or map (outline + line numbers). For code files, signatures/map cost a fraction of the tokens; recover the full file with expand." }
                 },
                 "required": ["path"]
             }
@@ -556,7 +525,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "assemble",
-            "description": "Assemble a lean, edge-ordered working set for a query under a token budget â€” the anti-context-rot context block. Reports what was included and dropped (dropped items remain recoverable via recall).",
+            "description": "Assemble a lean, edge-ordered working set for a query under a token budget - the anti-context-rot context block. Reports what was included and dropped (dropped items remain recoverable via recall).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -595,7 +564,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "anchor",
-            "description": "Set or read the current task anchor â€” the goal Cairn re-injects at session start to keep you on track. Pass `goal` to set; omit to read the current goal.",
+            "description": "Set or read the current task anchor - the goal Cairn re-injects at session start to keep you on track. Pass `goal` to set; omit to read the current goal.",
             "inputSchema": {
                 "type": "object",
                 "properties": { "goal": { "type": "string" } }
@@ -629,7 +598,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "consolidate",
-            "description": "Consolidate memory across the four tiers (working â†’ episodic â†’ semantic â†’ procedural). Run at session end to turn transient notes into durable knowledge.",
+            "description": "Consolidate memory across the four tiers (working -> episodic -> semantic -> procedural). Run at session end to turn transient notes into durable knowledge.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -644,10 +613,10 @@ pub fn tool_defs() -> Value {
                 "required": ["path", "content"]
             }
         },
-        // ---- v0.5.0 Sprint 18: proactive recall ----
+        // -- v0.5.0 Sprint 18: proactive recall --
         {
             "name": "proactive_recall",
-            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply â€” saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project.",
+            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply - saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -668,7 +637,7 @@ pub fn tool_defs() -> Value {
                 "required": ["text"]
             }
         },
-        // ---- v0.5.0 Sprint 10: memory CRUD + graph + search + metrics ----
+        // -- v0.5.0 Sprint 10: memory CRUD + graph + search + metrics --
         {
             "name": "memory_edit",
             "description": "Edit an existing memory's mutable fields (content, importance, concepts, files). Fields omitted from the input are left unchanged.",
@@ -677,7 +646,7 @@ pub fn tool_defs() -> Value {
                 "properties": {
                     "id": { "type": "string", "description": "Memory id to edit." },
                     "content": { "type": "string", "description": "New content (optional)." },
-                    "importance": { "type": "number", "description": "0.0â€“1.0, clamped." },
+                    "importance": { "type": "number", "description": "0.0--1.0, clamped." },
                     "concepts": { "type": "array", "items": { "type": "string" } },
                     "files": { "type": "array", "items": { "type": "string" } }
                 },
@@ -745,11 +714,6 @@ pub fn tool_defs() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
-            "name": "graph",
-            "description": "Alias for memory_graph.",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        {
             "name": "search",
             "description": "Hybrid search (BM25 + HNSW + memory provenance graph, fused with RRF, reranked with MMR for diversity).",
             "inputSchema": {
@@ -766,12 +730,7 @@ pub fn tool_defs() -> Value {
             "description": "Return local metrics (memory and checkpoint counts). Live savings ledger: GET /api/metrics.",
             "inputSchema": { "type": "object", "properties": {} }
         },
-        {
-            "name": "stats",
-            "description": "Compact stats summary (memory + checkpoint counts).",
-            "inputSchema": { "type": "object", "properties": {} }
-        },
-        // ---- registry tools (local embedded registry) ----
+        // -- registry tools (local embedded registry) --
         {
             "name": "registry_search",
             "description": "Search the local pack registry for published packs by name or description.",
@@ -779,27 +738,6 @@ pub fn tool_defs() -> Value {
                 "type": "object",
                 "properties": { "query": { "type": "string" } },
                 "required": ["query"]
-            }
-        },
-        {
-            "name": "registry_revoke",
-            "description": "Revoke (unpublish) a pack from the local embedded registry by name and version.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "version": { "type": "string" }
-                },
-                "required": ["name", "version"]
-            }
-        },
-        {
-            "name": "registry_publish",
-            "description": "Publish a local .cairnpkg tarball to the embedded registry.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "path": { "type": "string", "description": "Workspace-relative or absolute path to the .cairnpkg tarball." } },
-                "required": ["path"]
             }
         }
     ])
@@ -810,7 +748,7 @@ fn str_arg(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str)
 }
 
-// ---- v0.5.0 Sprint 18: Proactive Recall ----
+// -- v0.5.0 Sprint 18: Proactive Recall --
 
 /// Run the proactive recall hook for `prompt`. Returns the list of memories to
 /// prepend to the agent's context, or an empty list if the hook decides no
@@ -1047,9 +985,6 @@ mod tests {
             .unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(init["result"]["serverInfo"]["name"], "cairn");
-        // Sprint 24: capabilities now advertise resources + prompts.
-        assert!(init["result"]["capabilities"]["resources"].is_object());
-        assert!(init["result"]["capabilities"]["prompts"].is_object());
 
         let list = s
             .handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
@@ -1057,22 +992,6 @@ mod tests {
         let tools = list["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|t| t["name"] == "read"));
         assert!(tools.iter().any(|t| t["name"] == "remember"));
-
-        // Sprint 24: resources/list returns the 6 canonical resources.
-        let resources = s
-            .handle(&json!({"jsonrpc":"2.0","id":3,"method":"resources/list"}))
-            .unwrap();
-        let res_arr = resources["result"]["resources"].as_array().unwrap();
-        assert_eq!(res_arr.len(), 6, "v0.5.0 success metric: 6 MCP resources");
-        assert!(res_arr.iter().any(|r| r["uri"] == "cairn://memory/graph"));
-
-        // Sprint 24: prompts/list returns the 5 canonical prompts.
-        let prompts = s
-            .handle(&json!({"jsonrpc":"2.0","id":4,"method":"prompts/list"}))
-            .unwrap();
-        let prompts_arr = prompts["result"]["prompts"].as_array().unwrap();
-        assert_eq!(prompts_arr.len(), 5, "v0.5.0 success metric: 5 MCP prompts");
-        assert!(prompts_arr.iter().any(|p| p["name"] == "summarize-drift"));
     }
 
     #[test]
@@ -1167,7 +1086,7 @@ mod tests {
             )
             .unwrap();
         let create_text = create["result"]["content"][0]["text"].as_str().unwrap();
-        // "remembered <id> ..." â€” extract the id.
+        // "remembered <id> ..." - extract the id.
         let id = create_text
             .split_whitespace()
             .nth(1)
@@ -1234,7 +1153,7 @@ mod tests {
             .unwrap()
             .contains("deleted"));
 
-        // memory_delete again â†’ tool error
+        // memory_delete again -> tool error
         let err = s
             .handle(
                 &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{
@@ -1252,7 +1171,7 @@ mod tests {
             "name":"remember","arguments":{"content":"the team decided tabs over spaces last time"}}}))
             .unwrap();
 
-        // A recall cue prompt â€” the hook should fire and return at least one memory.
+        // A recall cue prompt - the hook should fire and return at least one memory.
         let resp = s
             .handle(
                 &json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{
@@ -1276,7 +1195,7 @@ mod tests {
             )
             .unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
-        // Plain imperative â†’ hook returns no memories â†’ JSON `[]`.
+        // Plain imperative -> hook returns no memories -> JSON `[]`.
         assert_eq!(text.trim(), "[]", "expected empty recall, got: {text}");
     }
 

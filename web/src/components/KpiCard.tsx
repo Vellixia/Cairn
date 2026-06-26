@@ -28,7 +28,7 @@ export interface KpiCardProps {
 }
 
 function fmtValue(v: string | number | null, suffix?: string): string {
-  if (v == null) return "—";
+  if (v == null) return "---";
   const base = typeof v === "number" ? v.toLocaleString() : v;
   return suffix ? `${base}${suffix}` : base;
 }

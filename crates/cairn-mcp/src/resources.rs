@@ -1,11 +1,11 @@
-﻿//! MCP resources (v0.5.0 Sprint 24).
+//! MCP resources (v0.5.0 Sprint 24).
 //!
 //! Resources are a read-only, addressable surface on top of the memory store
-//! â€” clients subscribe by URI and read the latest snapshot. Six canonical
-//! resources are listed in [`resource_defs`].
+//! - clients subscribe by URI and read the latest snapshot. Six canonical
+//!   resources are listed in [`resource_defs`].
 //!
 //! Each resource has a [`ResourceDef`] (URI + metadata) and a runtime
-//! [`read_resource`] resolver that maps URI â†’ JSON payload. Resolvers
+//! [`read_resource`] resolver that maps URI -> JSON payload. Resolvers
 //! gracefully return an empty result when the underlying data isn't available
 //! (e.g. memory graph on a fresh install), so a client can subscribe without
 //! crashing.
@@ -25,7 +25,7 @@ pub struct ResourceDef {
     pub mime_type: &'static str,
 }
 
-/// Six canonical resources. The set is locked for v0.5.0 â€” adding more is a
+/// Six canonical resources. The set is locked for v0.5.0 - adding more is a
 /// breaking change for clients that enumerate the resource list.
 pub fn resource_defs() -> &'static [ResourceDef] {
     &[
@@ -137,7 +137,7 @@ fn read_savings_today(_server: &McpServer) -> Value {
 }
 
 fn read_drift_pending(_server: &McpServer) -> Value {
-    // Same as above — drift is owned by cairn-session. The MCP surface
+    // Same as above - drift is owned by cairn-session. The MCP surface
     // exposes the URI; the actual JSON is filled by the host (cairn
     // proxy or in-container server) so the contract is honest.
     json!({
@@ -149,7 +149,7 @@ fn read_drift_pending(_server: &McpServer) -> Value {
 fn read_audit_recent(server: &McpServer) -> Value {
     // Audit events are stored in HelixDB on the in-container server. The standalone
     // MCP stdio binary (without the HTTP surface) returns an
-    // empty list — production clients should read this URI through the
+    // empty list - production clients should read this URI through the
     // server's `/api/mcp/resources/read` bridge.
     let events: Vec<Value> = Vec::new();
     let _ = server; // silence unused warning when no live store backend
@@ -165,7 +165,7 @@ fn read_config_toml(server: &McpServer) -> Value {
     let cfg = &server.config;
     let body = format!(
         "# Effective in-container server configuration (read-only snapshot)\n\
-         # This document is for diagnostics only — do not edit and re-apply.\n\
+         # This document is for diagnostics only - do not edit and re-apply.\n\
          \n\
          host = \"{}\"\n\
          port = {}\n\
@@ -185,7 +185,7 @@ fn read_config_toml(server: &McpServer) -> Value {
     json!({ "body": body, "fetched_at": Utc::now().to_rfc3339() })
 }
 
-/// Per-URI freshness â€” clients can use this to decide whether to re-read.
+/// Per-URI freshness - clients can use this to decide whether to re-read.
 pub fn resource_metadata(uri: &str) -> Option<Value> {
     let now: DateTime<Utc> = Utc::now();
     match uri {

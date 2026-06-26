@@ -77,7 +77,7 @@ export function TokensSavedHeadline({ className }: { className?: string }) {
 
   return (
     <div className={className}>
-      <p className="text-xs uppercase tracking-wide text-muted-foreground">Bytes saved · last 7 days</p>
+      <p className="text-xs uppercase tracking-wide text-muted-foreground">Bytes saved . last 7 days</p>
       <p className="mt-1 font-mono text-3xl font-semibold tabular-nums tracking-tight">
         {formatBytes(display)}
       </p>

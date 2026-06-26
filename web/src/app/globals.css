@@ -109,7 +109,7 @@
   border-radius: 9px;
 }
 
-/* Keyboard focus ring — accessible, brand-tinted. */
+/* Keyboard focus ring --- accessible, brand-tinted. */
 :focus-visible {
   outline: 2px solid hsl(var(--ring));
   outline-offset: 2px;

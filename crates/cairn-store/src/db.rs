@@ -1,6 +1,6 @@
 //! The structured store.
 //!
-//! `Store` is a thin facade over a [`StoreBackend`] — Cairn's [`HelixBackend`](crate::helix) — plus
+//! `Store` is a thin facade over a [`StoreBackend`] - Cairn's [`HelixBackend`](crate::helix) - plus
 //! the content-addressed [`BlobStore`] that holds full-fidelity originals. Keeping the public
 //! `Store` API stable means the backend never churns the engines, API, MCP, or CLI.
 
@@ -36,7 +36,7 @@ pub(crate) trait StoreBackend: Send + Sync {
         Ok(())
     }
     /// Edit a memory's mutable fields. Returns `Ok(true)` if the row was updated, `Ok(false)`
-    /// if no row exists. Only the fields that are `Some` are applied — the rest are kept.
+    /// if no row exists. Only the fields that are `Some` are applied - the rest are kept.
     fn edit_memory(
         &self,
         id: &str,
@@ -54,14 +54,24 @@ pub(crate) trait StoreBackend: Send + Sync {
         Ok(false)
     }
     /// Semantic (vector) recall, newest-relevant first, if the backend has an embedding index.
-    /// `Ok(None)` means the backend has no vectors — callers fall back to lexical ranking.
+    /// `Ok(None)` means the backend has no vectors - callers fall back to lexical ranking.
     fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
         let _ = (query, k);
         Ok(None)
     }
-    fn create_token(&self, name: &str) -> Result<DeviceToken>;
+    fn create_token(
+        &self,
+        name: &str,
+        scope: cairn_core::TokenScope,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<DeviceToken>;
     /// Check whether a token id is valid (exists and has not been revoked).
     fn validate_token_id(&self, token_id: &str) -> Result<bool>;
+    /// Record that a token was used successfully, updating its `last_used_at` timestamp.
+    fn record_token_usage(&self, token_id: &str) -> Result<()> {
+        let _ = token_id;
+        Ok(())
+    }
     fn revoke_token(&self, token_id: &str) -> Result<bool>;
     fn list_tokens(&self) -> Result<Vec<DeviceToken>>;
     fn count_tokens(&self) -> Result<i64>;
@@ -85,7 +95,7 @@ pub(crate) trait StoreBackend: Send + Sync {
     /// Atomically claim a non-expired code (single-use): returns `(token, name)` and removes it.
     fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>>;
 
-    // ---- audit log (v0.5.0 — Sprint 1) ------------------------------------------------------
+    // -- audit log (v0.5.0 - Sprint 1) ----------------------------------------------------
     /// Append an audit event to durable storage. Returns the assigned event id (a monotonically
     /// increasing integer encoded as a string, suitable for SSE `Last-Event-ID` resync).
     /// Implementations must surface failures so a torn audit trail can't go silently unrecorded.
@@ -132,7 +142,7 @@ impl Store {
     pub fn open(cfg: &Config) -> Result<Self> {
         let url = cfg.helix_url.as_deref().ok_or_else(|| {
             Error::Invalid(
-                "CAIRN_HELIX_URL is required — Cairn stores data in HelixDB. Run the docker compose \
+                "CAIRN_HELIX_URL is required - Cairn stores data in HelixDB. Run the docker compose \
                  stack (which starts one) or point CAIRN_HELIX_URL at a HelixDB server."
                     .into(),
             )
@@ -208,11 +218,19 @@ impl Store {
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
         self.backend.delete_memory(id)
     }
-    pub fn create_token(&self, name: &str) -> Result<DeviceToken> {
-        self.backend.create_token(name)
+    pub fn create_token(
+        &self,
+        name: &str,
+        scope: cairn_core::TokenScope,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<DeviceToken> {
+        self.backend.create_token(name, scope, expires_at)
     }
     pub fn validate_token_id(&self, token_id: &str) -> Result<bool> {
         self.backend.validate_token_id(token_id)
+    }
+    pub fn record_token_usage(&self, token_id: &str) -> Result<()> {
+        self.backend.record_token_usage(token_id)
     }
     pub fn revoke_token(&self, token_id: &str) -> Result<bool> {
         self.backend.revoke_token(token_id)
@@ -343,7 +361,7 @@ impl Store {
         Self::open(&cfg).ok()
     }
 
-    /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) — a fresh label
+    /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) - a fresh label
     /// namespace + the `hashing` embedder, pointed at `CAIRN_HELIX_URL`. `None` when that is unset.
     /// Components built from a `Config` (the API/MCP servers) use this directly in their tests.
     /// Data/blob dirs are created so the store opens cleanly.
@@ -420,7 +438,9 @@ mod tests {
     fn tokens_create_validate_revoke() {
         let Some(s) = store() else { return };
         assert_eq!(s.count_tokens().unwrap(), 0);
-        let t = s.create_token("laptop").unwrap();
+        let t = s
+            .create_token("laptop", cairn_core::TokenScope::Write, None)
+            .unwrap();
         assert!(s.validate_token_id(&t.id).unwrap());
         assert!(!s.validate_token_id("nope").unwrap());
         assert_eq!(s.count_tokens().unwrap(), 1);
@@ -552,7 +572,7 @@ mod tests {
         assert!(!s.reset_meta("never_set").unwrap());
     }
 
-    // ---- v0.5.0 Sprint 1: durable audit log tests ------------------------------------------
+    // -- v0.5.0 Sprint 1: durable audit log tests ----------------------------------------
 
     #[test]
     fn audit_append_assigns_monotonic_ids_and_reads_back() {
@@ -613,7 +633,7 @@ mod tests {
     #[test]
     fn audit_survives_round_trip_after_a_store_drop_and_reopen() {
         // Append a few events to one store, then close it and open a fresh one. The events
-        // should still be readable — that's the whole point of the Sprint 1 migration away
+        // should still be readable - that's the whole point of the Sprint 1 migration away
         // from the in-memory ring buffer.
         let Some(s1) = store() else { return };
         s1.append_audit(100, "login_ok", "alice", "").unwrap();

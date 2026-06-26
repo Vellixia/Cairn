@@ -6,7 +6,7 @@ export default function HomePage() {
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Now</h1>
         <p className="text-sm text-muted-foreground">
-          Server health, reliability, recent memory, and the last few admin actions — at a glance.
+          Server health, reliability, recent memory, and the last few admin actions --- at a glance.
         </p>
       </header>
       <OverviewContent />

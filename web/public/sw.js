@@ -1,4 +1,4 @@
-// Cairn Dashboard service worker (v0.5.0 Sprint 20a — PWA).
+// Cairn Dashboard service worker (v0.5.0 Sprint 20a --- PWA).
 //
 // Cache-first for static assets (the dashboard's own JS / CSS / HTML shell),
 // network-first for the `/api/*` surface so the dashboard always shows fresh
@@ -17,7 +17,7 @@ self.addEventListener("install", (event) => {
     (async () => {
       const cache = await caches.open(CACHE_VERSION);
       await cache.addAll(STATIC_ASSETS).catch(() => {
-        // Best-effort precache — server may be down at install time.
+        // Best-effort precache --- server may be down at install time.
       });
       self.skipWaiting();
     })(),

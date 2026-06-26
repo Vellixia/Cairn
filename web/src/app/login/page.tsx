@@ -145,7 +145,7 @@ function LoginForm() {
                     className="w-full"
                     disabled={login.isPending}
                   >
-                    {login.isPending ? "Signing in…" : "Sign in"}
+                    {login.isPending ? "Signing in..." : "Sign in"}
                   </Button>
                 </Field>
               </FieldGroup>
@@ -153,7 +153,7 @@ function LoginForm() {
             <p className="mt-5 text-xs text-muted-foreground">
               Default username <code>admin</code>. First run?{" "}
               <a href="/setup" className="text-primary hover:underline">
-                Create admin →
+                Create admin
               </a>
             </p>
           </CardContent>

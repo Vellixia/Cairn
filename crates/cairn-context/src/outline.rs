@@ -1,11 +1,11 @@
-//! AST-based file outlines: render a code file as just its structure — the signatures of its
-//! top-level items and their members — so a 1000-line file costs a handful of tokens instead of
+//! AST-based file outlines: render a code file as just its structure - the signatures of its
+//! top-level items and their members - so a 1000-line file costs a handful of tokens instead of
 //! a thousand lines. Lossless as always: the full original is retained in the blob store and one
 //! `expand` away.
 //!
 //! Backed by [`tree_sitter`] (real parsing, not regex/heuristics). Supported today: Rust, Python,
 //! JavaScript, TypeScript/TSX, Go, C, C++, Java, C#, Ruby, Bash. The [`LangSpec`] table makes
-//! adding a language a matter of listing its node kinds — no new traversal logic.
+//! adding a language a matter of listing its node kinds - no new traversal logic.
 
 use std::path::Path;
 use tree_sitter::{Language, Node, Parser};
@@ -16,7 +16,7 @@ pub struct Outline {
     pub lang: &'static str,
     /// How many signatures we emitted (top-level + nested members).
     pub items: usize,
-    /// The outline text — one signature per line, members indented under their container.
+    /// The outline text - one signature per line, members indented under their container.
     pub text: String,
 }
 
@@ -30,7 +30,7 @@ struct LangSpec {
     container_kinds: &'static [&'static str],
     /// Wrapper kinds we descend *through* without emitting (decorators, `export` statements).
     transparent_kinds: &'static [&'static str],
-    /// Kinds that mark the start of a "body" — the signature is cut off right before the first one.
+    /// Kinds that mark the start of a "body" - the signature is cut off right before the first one.
     body_kinds: &'static [&'static str],
 }
 
@@ -59,7 +59,7 @@ fn rust_spec() -> LangSpec {
         container_kinds: &["impl_item", "trait_item", "mod_item"],
         transparent_kinds: &[],
         // Note: tuple-struct fields (`ordered_field_declaration_list`) are intentionally *not*
-        // here — they're part of the type's identity, so we keep `struct P(i32, i32);` whole.
+        // here - they're part of the type's identity, so we keep `struct P(i32, i32);` whole.
         body_kinds: &[
             "block",
             "declaration_list",
@@ -89,7 +89,7 @@ fn javascript_spec() -> LangSpec {
             "generator_function_declaration",
             "class_declaration",
             "method_definition",
-            // top-level `const f = () => …` / data constants (one line each).
+            // top-level `const f = () => ...` / data constants (one line each).
             "lexical_declaration",
             "variable_declaration",
         ],
@@ -287,7 +287,7 @@ pub fn supported(path: &Path) -> bool {
 
 /// Outline `source` (the contents of `path`) as a signature map. `with_lines` prefixes each
 /// signature with its 1-based start line (`map` mode); without it you get bare signatures.
-/// Returns `None` for unsupported languages or unparseable input — callers fall back to a full read.
+/// Returns `None` for unsupported languages or unparseable input - callers fall back to a full read.
 pub fn outline(path: &Path, source: &str, with_lines: bool) -> Option<Outline> {
     let spec = spec_for_path(path)?;
     let mut parser = Parser::new();
@@ -308,7 +308,7 @@ pub fn outline(path: &Path, source: &str, with_lines: bool) -> Option<Outline> {
     );
 
     if items == 0 {
-        // Nothing structural to show (e.g. a file of only statements) — let the caller fall back.
+        // Nothing structural to show (e.g. a file of only statements) - let the caller fall back.
         return None;
     }
     Some(Outline {
@@ -334,7 +334,7 @@ fn walk(
         let kind = child.kind();
 
         if spec.transparent_kinds.contains(&kind) {
-            // A wrapper (e.g. `export …`, `@decorator …`) — emit its inner item at the same depth.
+            // A wrapper (e.g. `export ...`, `@decorator ...`) - emit its inner item at the same depth.
             walk(child, bytes, spec, depth, with_lines, out, count);
             continue;
         }
@@ -369,21 +369,21 @@ fn signature_text(node: Node, bytes: &[u8], spec: &LangSpec) -> String {
         .unwrap_or_else(|| node.end_byte());
     let raw = &bytes[node.start_byte()..end.max(node.start_byte())];
     let collapsed = collapse_ws(&String::from_utf8_lossy(raw));
-    // A dangling opening brace can be left when we cut just before a `{ … }` body.
+    // A dangling opening brace can be left when we cut just before a `{ ... }` body.
     let mut sig = collapsed
         .trim_end_matches(|c: char| c == '{' || c.is_whitespace())
         .to_string();
     if sig.chars().count() > MAX_SIG {
         sig = sig.chars().take(MAX_SIG).collect::<String>();
-        sig.push_str(" …");
+        sig.push_str(" ...");
     }
     sig
 }
 
 /// The first descendant of `node` (pre-order) whose kind marks the start of a body. We do not
-/// descend into nested signatures — their bodies aren't this node's. This depth-tolerant search is
-/// what lets one rule handle both direct bodies (Rust `fn … { block }`) and wrapped ones
-/// (Go `type T struct { … }`, where the field list sits two levels down).
+/// descend into nested signatures - their bodies aren't this node's. This depth-tolerant search is
+/// what lets one rule handle both direct bodies (Rust `fn ... { block }`) and wrapped ones
+/// (Go `type T struct { ... }`, where the field list sits two levels down).
 fn body_node<'a>(node: Node<'a>, spec: &LangSpec) -> Option<Node<'a>> {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -391,7 +391,7 @@ fn body_node<'a>(node: Node<'a>, spec: &LangSpec) -> Option<Node<'a>> {
             return Some(child);
         }
         if spec.sig_kinds.contains(&child.kind()) {
-            continue; // a nested item — skip its subtree
+            continue; // a nested item - skip its subtree
         }
         if let Some(found) = body_node(child, spec) {
             return Some(found);

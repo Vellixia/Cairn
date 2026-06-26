@@ -1,4 +1,4 @@
-//! Cross-Session Protocol (CCP) — durable session state.
+//! Cross-Session Protocol (CCP) - durable session state.
 //!
 //! The plan for v0.5.0 calls out the lean-ctx CCP pattern: every agent session writes a
 //! structured "where we were" record (`tasks`, `findings`, `decisions`, `touched_files`,
@@ -32,7 +32,7 @@ pub struct Task {
     pub progress: String,
 }
 
-/// A finding — a short factual observation made during the session.
+/// A finding - a short factual observation made during the session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
     pub text: String,
@@ -42,7 +42,7 @@ pub struct Finding {
     pub confidence: f32,
 }
 
-/// A decision — the agent's call (with rationale).
+/// A decision - the agent's call (with rationale).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Decision {
     pub text: String,
@@ -62,7 +62,7 @@ pub struct TouchedFile {
     pub handle: Option<String>,
 }
 
-/// The full CCP session record — what gets written to `<session_id>.json` and what the next
+/// The full CCP session record - what gets written to `<session_id>.json` and what the next
 /// session's bootstrap block is built from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -103,13 +103,13 @@ impl Session {
     /// Render the session as the compact "CCP block" that gets injected at session start.
     /// Mirrors the lean-ctx shape (~400 tokens for a typical session).
     pub fn as_block(&self) -> String {
-        let mut out = String::from("# Cross-Session Protocol — previous session\n");
+        let mut out = String::from("# Cross-Session Protocol - previous session\n");
         out.push_str(&format!("Session: {}\n", self.id));
         out.push_str(&format!("Started: {}\n", self.started_at.to_rfc3339()));
         if !self.tasks.is_empty() {
             out.push_str("\n## Tasks\n");
             for t in &self.tasks {
-                out.push_str(&format!("- [{}] {} — {}\n", t.id, t.title, t.progress));
+                out.push_str(&format!("- [{}] {} - {}\n", t.id, t.title, t.progress));
             }
         }
         if !self.findings.is_empty() {
@@ -172,7 +172,7 @@ pub struct SessionPatch {
     pub end: Option<bool>,
 }
 
-/// One drift event — a verify call flagged an edit as warn/danger, or a rollback ran.
+/// One drift event - a verify call flagged an edit as warn/danger, or a rollback ran.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DriftEvent {
     pub id: i64,
@@ -279,7 +279,7 @@ impl SessionStore {
         Ok(ids)
     }
 
-    // ---- drift log ---------------------------------------------------------------------
+    // -- drift log -------------------------------------------------------------------
 
     /// Append a drift event to the JSONL log. Returns the assigned id (1-based).
     pub fn append_drift(&self, ev: &DriftEvent) -> Result<i64> {
@@ -338,7 +338,7 @@ impl SessionStore {
             out_lines.push(serde_json::to_string(&ev)?);
         }
         if updated {
-            // Atomic write — temp + rename.
+            // Atomic write - temp + rename.
             atomic_write(&path, out_lines.join("\n").as_bytes())?;
         }
         Ok(updated)
@@ -379,7 +379,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // --- Session::as_block ---
+    // - Session::as_block ---
 
     #[test]
     fn block_empty_session_has_header_only() {
@@ -461,7 +461,7 @@ mod tests {
         assert!(block.contains("no file"));
         assert!(
             !block.contains("(from"),
-            "no source file → no 'from' annotation"
+            "no source file -> no 'from' annotation"
         );
     }
 
@@ -477,7 +477,7 @@ mod tests {
         assert!(block.contains("write"), "mode is shown in block");
     }
 
-    // --- SessionStore ---
+    // - SessionStore ---
 
     #[test]
     fn session_round_trips_through_disk() {
@@ -541,7 +541,7 @@ mod tests {
         store.save(&s2).unwrap();
         let ids = store.list().unwrap();
         assert_eq!(ids.len(), 2);
-        // Lexicographic descending — UUIDs sort the same as creation time here.
+        // Lexicographic descending - UUIDs sort the same as creation time here.
         assert!(ids[0] >= ids[1]);
     }
 
@@ -635,7 +635,7 @@ mod tests {
             status: DriftStatus::Approved,
         };
         store.append_drift(&ev).unwrap();
-        // Already Approved, not Pending → returns false
+        // Already Approved, not Pending -> returns false
         assert!(!store.set_drift_status(1, DriftStatus::Rejected).unwrap());
     }
 
@@ -663,7 +663,7 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(store.next_drift_id(), 8, "max id is 7 → next is 8");
+        assert_eq!(store.next_drift_id(), 8, "max id is 7 -> next is 8");
     }
 
     #[test]

@@ -85,7 +85,7 @@ export function OverviewContent() {
           icon={ShieldCheck}
           hint={
             rel
-              ? `${rel.samples} samples · ${rel.ok} ok · ${rel.warn} warn`
+              ? `${rel.samples} samples . ${rel.ok} ok . ${rel.warn} warn`
               : "No edit history yet"
           }
           tone={
@@ -104,8 +104,8 @@ export function OverviewContent() {
           icon={Plug}
           hint={
             metrics.data
-              ? `Wakeup ${tokensSaved.toLocaleString()} · Recall ${tokensSavedRecall.toLocaleString()}`
-              : "Last 7 days · see chart"
+              ? `Wakeup ${tokensSaved.toLocaleString()} . Recall ${tokensSavedRecall.toLocaleString()}`
+              : "Last 7 days . see chart"
           }
           tone={tokensSavedTotal > 0 ? "positive" : "info"}
         />
@@ -146,7 +146,7 @@ export function OverviewContent() {
         </Card>
         <Card className="p-5">
           <CardHeader className="p-0">
-            <CardTitle className="text-sm font-semibold tracking-tight">Source mix · 7d</CardTitle>
+            <CardTitle className="text-sm font-semibold tracking-tight">Source mix . 7d</CardTitle>
           </CardHeader>
           <CardContent className="p-0 pt-4">
             <SourceMixBar />
@@ -182,7 +182,7 @@ export function OverviewContent() {
                 href="/memory?tab=recall"
                 className="text-[hsl(var(--color-info))] hover:underline"
               >
-                Browse recent memories →
+                Browse recent memories
               </Link>
             </p>
           ) : memories.data ? (
@@ -195,7 +195,7 @@ export function OverviewContent() {
                       <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
                         {m.kind}
                       </Badge>
-                      {m.tier} · {new Date(m.created_at).toLocaleString()}
+                      {m.tier} . {new Date(m.created_at).toLocaleString()}
                     </ItemDescription>
                   </ItemContent>
                 </Item>

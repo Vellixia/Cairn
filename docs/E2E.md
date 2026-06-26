@@ -1,9 +1,9 @@
-﻿# Cairn E2E Test Harness
+# Cairn E2E Test Harness
 
 ## Overview
 
 The `scripts/e2e/` directory contains a comprehensive end-to-end smoke harness
-that exercises every Phase 3.5â€“5 surface of Cairn against the live `cairn:dev`
+that exercises every Phase 3.5--5 surface of Cairn against the live `cairn:dev`
 Docker container on `http://127.0.0.1:7777`.
 
 The harness runs **20 scenarios** covering the full v0.5.0 release:
@@ -11,7 +11,7 @@ The harness runs **20 scenarios** covering the full v0.5.0 release:
 | Sprint | Phase | What it tests |
 |--------|-------|---------------|
 | 01 | 3.5 | Health + version check |
-| 02 | 3.5 | Auth flow: login â†’ me â†’ logout â†’ re-login |
+| 02 | 3.5 | Auth flow: login -> me -> logout -> re-login |
 | 03 | 4.0 | MCP tools via HTTP `/api/tools/call` (proactive_recall, search, graph) |
 | 04 | 5.0 | MCP resources (memory/graph, config/toml) via HTTP |
 | 05 | 5.0 | MCP prompts (summarize-drift) via HTTP |
@@ -51,25 +51,25 @@ CAIRN_E2E_FAILFAST=0 ./scripts/e2e.ps1
 
 ```
 scripts/
-â”œâ”€â”€ e2e.ps1                  # entry point: preflight + setup + run all scenarios
-â””â”€â”€ e2e/
-    â”œâ”€â”€ _lib.ps1             # shared helpers (Assert, Test-Endpoint, etc.)
-    â”œâ”€â”€ 01-health.ps1
-    â”œâ”€â”€ 02-auth.ps1
-    â”œâ”€â”€ 03-mcp-tools.ps1
-    â”œâ”€â”€ ...
-    â””â”€â”€ 20-desktop-install.ps1
+""" e2e.ps1                  # entry point: preflight + setup + run all scenarios
+"""" e2e/
+    """ _lib.ps1             # shared helpers (Assert, Test-Endpoint, etc.)
+    """ 01-health.ps1
+    """ 02-auth.ps1
+    """ 03-mcp-tools.ps1
+    """ ...
+    """" 20-desktop-install.ps1
 ```
 
-### `_lib.ps1` â€” shared helpers
+### `_lib.ps1` - shared helpers
 
-- `Assert-True -Condition $x -Msg "..."` â€” pass/fail counter
-- `Assert-Eq -Expected X -Actual Y -Msg "..."` â€” equality check
-- `Assert-Contains -Haystack X -Needle Y -Msg "..."` â€” substring check
-- `Test-Endpoint -Method GET -Path /api/health [-Token $t] [-Body $obj]` â€” curl wrapper
-- `Get-BearerToken -Username admin -Password $pw` â€” captures session cookie
-- `Invoke-CairnCli remember '...'` â€” runs `cairn` against the .e2e-data dir
-- `Show-Scenario -Sprint X -Name Y -Status pass/fail` â€” final report row
+- `Assert-True -Condition $x -Msg "..."` - pass/fail counter
+- `Assert-Eq -Expected X -Actual Y -Msg "..."` - equality check
+- `Assert-Contains -Haystack X -Needle Y -Msg "..."` - substring check
+- `Test-Endpoint -Method GET -Path /api/health [-Token $t] [-Body $obj]` - curl wrapper
+- `Get-BearerToken -Username admin -Password $pw` - captures session cookie
+- `Invoke-CairnCli remember '...'` - runs `cairn` against the .e2e-data dir
+- `Show-Scenario -Sprint X -Name Y -Status pass/fail` - final report row
 
 ### Auth flow
 
@@ -80,32 +80,32 @@ the cookie so subsequent scenarios can still authenticate.
 
 ### What lives where
 
-- **01-02, 08, 09, 10, 14, 15, 16, 17, 18** â€” pure HTTP. Test-Endpoint handles
+- **01-02, 08, 09, 10, 14, 15, 16, 17, 18** - pure HTTP. Test-Endpoint handles
   curl + cookie + JSON parsing.
-- **03-06, 13** â€” MCP tools. Use the HTTP `/api/tools/call` endpoint (not the
+- **03-06, 13** - MCP tools. Use the HTTP `/api/tools/call` endpoint (not the
   MCP stdio binary) for reliability. The stdio driver was dropped because
   PowerShell's `Start-Process` + redirected I/O is fragile on Windows.
-- **07, 19** â€” CLI subprocess. `Invoke-CairnCli` shells out to
+- **07, 19** - CLI subprocess. `Invoke-CairnCli` shells out to
   `target/release/cairn.exe` with a fresh `.e2e-data` dir.
-- **11, 12** â€” registry HTTP routes under `/registry/*`.
-- **15** â€” PWA: fetches `/sw.js` and the push subscription endpoint.
-- **18** â€” SSE: opens an SSE connection with `curl -N`, triggers a memory
+- **11, 12** - registry HTTP routes under `/registry/*`.
+- **15** - PWA: fetches `/sw.js` and the push subscription endpoint.
+- **18** - SSE: opens an SSE connection with `curl -N`, triggers a memory
   write, asserts the event stream contains event lines.
-- **20** â€” filesystem: checks `scripts/install.ps1`, `scripts/install.sh`, and
+- **20** - filesystem: checks `scripts/install.ps1`, `scripts/install.sh`, and
   `docker-compose.yml` exist.
 
 ## Known limitations
 
-- **Browser extension client-side** â€” we exercise the HTTP capture endpoint,
+- **Browser extension client-side** - we exercise the HTTP capture endpoint,
   not the actual Chrome extension. A real Chrome + extension load is out of
   scope for this harness.
-- **Mobile companion biometric** â€” we don't have a real mobile device
+- **Mobile companion biometric** - we don't have a real mobile device
   emulator; the page renders but the biometric gate is untested.
-- **Multi-tenant E2E** â€” the container runs with `CAIRN_MULTI_TENANT=false` by
+- **Multi-tenant E2E** - the container runs with `CAIRN_MULTI_TENANT=false` by
   default. The Sprint 19a multi-tenant scenarios verify the default org
   path works, but a dedicated multi-tenant run would need a fresh container
   with `CAIRN_MULTI_TENANT=1`.
-- **LongMemEval numbers** â€” not re-run here; the cairn-bench crate has
+- **LongMemEval numbers** - not re-run here; the cairn-bench crate has
   its own integration tests.
 
 ## Debugging
@@ -141,6 +141,6 @@ The harness is designed to run in CI:
 ```
 
 Exit codes:
-- `0` â€” every scenario passed
-- `1` â€” at least one scenario failed (default fail-fast on)
-- `2` â€” preflight failed (stack not reachable)
+- `0` - every scenario passed
+- `1` - at least one scenario failed (default fail-fast on)
+- `2` - preflight failed (stack not reachable)

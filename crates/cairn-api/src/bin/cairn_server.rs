@@ -1,6 +1,6 @@
 //! In-container entrypoint for the Cairn server.
 //!
-//! Built into the Docker image only — not shipped to host tarballs, not
+//! Built into the Docker image only - not shipped to host tarballs, not
 //! documented as a host-installable binary. The host has one binary
 //! (`cairn`, the client) that talks to the in-container server over HTTP.
 //!
@@ -10,7 +10,7 @@
 //! 1. Resolve config (env-driven in container; `.env` not needed because
 //!    compose sets env directly via the `environment:` block).
 //! 2. Open the meta store.
-//! 3. Run `bootstrap_admin_from_env` — mint the first admin record from
+//! 3. Run `bootstrap_admin_from_env` - mint the first admin record from
 //!    `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD` if no admin exists.
 //! 4. Bind the HTTP listener and serve until SIGTERM.
 

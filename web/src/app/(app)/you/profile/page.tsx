@@ -41,8 +41,8 @@ export default function ProfilePage() {
           <CardTitle>Active preferences</CardTitle>
           <CardDescription>
             {prefs.data
-              ? `${prefs.data.length} stored · sorted newest first`
-              : "Loading…"}
+              ? `${prefs.data.length} stored . sorted newest first`
+              : "Loading..."}
           </CardDescription>
         </CardHeader>
         <CardContent>

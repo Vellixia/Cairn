@@ -1,14 +1,14 @@
-//! `cairn setup [agent|--all]` — wire AI agents up to a Cairn server.
+//! `cairn setup [agent|--all]` - wire AI agents up to a Cairn server.
 //!
 //! Every merge is **non-destructive**: existing config is preserved and our entries are added
 //! idempotently (running twice changes nothing). Each agent is configured in its own native
 //! format:
 //!
-//! - **Claude Code** — project `.mcp.json` (the `cairn` MCP server) **and** `.claude/settings.json`
+//! - **Claude Code** - project `.mcp.json` (the `cairn` MCP server) **and** `.claude/settings.json`
 //!   lifecycle hooks.
-//! - **Codex CLI** — `~/.codex/config.toml` (or `<project>/.codex/config.toml` for project-scope)
+//! - **Codex CLI** - `~/.codex/config.toml` (or `<project>/.codex/config.toml` for project-scope)
 //!   under `[mcp_servers.cairn]` with stdio transport (TOML, not JSON).
-//! - **OpenCode** — `$XDG_CONFIG_HOME/opencode/opencode.json` on Unix and
+//! - **OpenCode** - `$XDG_CONFIG_HOME/opencode/opencode.json` on Unix and
 //!   `%USERPROFILE%\.config\opencode\opencode.json` on Windows (XDG-style on both).
 //!   `mcp` top-level key with `{ type, command, environment, enabled }` entries.
 //!
@@ -22,6 +22,34 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Verify that a device token is valid before writing it to agent config files.
+/// Makes a `GET /api/auth/me` request and returns Ok(()) on success.
+fn validate_token(server: &str, token: &str) -> Result<()> {
+    let url = format!("{}/api/auth/me", server.trim_end_matches('/'));
+    match ureq::get(&url)
+        .set("Authorization", &format!("Bearer {token}"))
+        .call()
+    {
+        Ok(resp) if resp.status() == 200 => Ok(()),
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.into_string().unwrap_or_default();
+            anyhow::bail!(
+                "token rejected by server (HTTP {status}) -- the token may be expired, \
+                 revoked, or belong to a server with a different secret key.\n\
+                 Server response: {body}\n\
+                 Obtain a fresh token by pairing (`cairn pair`) or from the dashboard."
+            )
+        }
+        Err(e) => {
+            anyhow::bail!(
+                "cannot reach server at {server} to validate the token: {e}\n\
+                 Is the server running and reachable?"
+            )
+        }
+    }
+}
 
 const KNOWN: &[&str] = &["claude-code", "codex", "opencode"];
 
@@ -108,6 +136,11 @@ fn install_agent(
         .filter(|t| !t.is_empty());
     let effective_token = token.or(env_token.as_deref());
 
+    // Validate the token against the server before writing any config files.
+    if let (Some(srv), Some(tok)) = (server, effective_token) {
+        validate_token(srv, tok)?;
+    }
+
     match id {
         "claude-code" => install_claude_code(project, server, effective_token)?,
         "codex" => install_codex(home, server, effective_token)?,
@@ -140,7 +173,17 @@ fn install_opencode(server: Option<&str>, token: Option<&str>) -> Result<()> {
         .as_object_mut()
         .with_context(|| format!("{}: 'mcp' is not an object", path.display()))?;
 
+    // Preserve any existing environment variables from a previous setup run
+    // so that re-running `cairn setup` without --token does not silently drop
+    // tokens or other env vars that were there before.
     let mut env = Map::new();
+    if let Some(existing) = mcp_obj.get("cairn") {
+        if let Some(existing_env) = existing.get("environment").and_then(Value::as_object) {
+            for (k, v) in existing_env {
+                env.insert(k.clone(), v.clone());
+            }
+        }
+    }
     if let Some(s) = server {
         env.insert("CAIRN_SERVER".into(), json!(s));
     }
@@ -191,7 +234,7 @@ fn codex_config_path(home: Option<&Path>) -> PathBuf {
 ///
 /// Codex reads TOML, not JSON. We keep this dependency-free: hand-rolled merge
 /// preserves any existing mcp_servers table and only touches our entry. The
-/// block is intentionally simple — no multi-line arrays, no comments — so we
+/// block is intentionally simple - no multi-line arrays, no comments - so we
 /// don't have to round-trip a real TOML parser for one stanza.
 fn install_codex(home: Option<&Path>, server: Option<&str>, token: Option<&str>) -> Result<()> {
     let path = codex_config_path(home);
@@ -204,7 +247,10 @@ fn install_codex(home: Option<&Path>, server: Option<&str>, token: Option<&str>)
         String::new()
     };
 
-    let new_block = render_codex_block(server, token);
+    // Extract existing env vars so re-running setup without --token preserves them.
+    let existing_env = parse_codex_cairn_env(&original);
+
+    let new_block = render_codex_block(server, token, existing_env);
     let merged = merge_codex_block(&original, &new_block);
 
     fs::write(&path, merged).with_context(|| format!("writing {}", path.display()))?;
@@ -213,12 +259,21 @@ fn install_codex(home: Option<&Path>, server: Option<&str>, token: Option<&str>)
     Ok(())
 }
 
-/// Render just our `[mcp_servers.cairn]` block. The caller is responsible for
-/// inserting it into the existing TOML document.
-fn render_codex_block(server: Option<&str>, token: Option<&str>) -> String {
+/// Render just our `[mcp_servers.cairn]` block, merging in existing env vars
+/// from a previous setup run so re-running without --token does not strip them.
+fn render_codex_block(
+    server: Option<&str>,
+    token: Option<&str>,
+    existing_env: Vec<(String, String)>,
+) -> String {
     let mut env_lines = String::new();
-    if server.is_some() || token.is_some() {
-        env_lines.push('\n');
+    // Preserve existing vars not being replaced.
+    for (k, v) in &existing_env {
+        match k.as_str() {
+            "CAIRN_SERVER" if server.is_some() => {} // will be overridden below
+            "CAIRN_TOKEN" if token.is_some() => {}   // will be overridden below
+            _ => env_lines.push_str(&format!("{k} = \"{}\"\n", escape_toml(v))),
+        }
     }
     if let Some(s) = server {
         env_lines.push_str(&format!("CAIRN_SERVER = \"{}\"\n", escape_toml(s)));
@@ -240,6 +295,31 @@ fn render_codex_block(server: Option<&str>, token: Option<&str>) -> String {
          {args_line}\n\
          {env_block}",
     )
+}
+
+/// Parse the `[mcp_servers.cairn.env]` section from a Codex TOML config.
+fn parse_codex_cairn_env(toml: &str) -> Vec<(String, String)> {
+    let mut in_cairn_env = false;
+    let mut vars = Vec::new();
+    for line in toml.lines() {
+        let trimmed = line.trim();
+        if trimmed == "[mcp_servers.cairn.env]" {
+            in_cairn_env = true;
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            in_cairn_env = false;
+            continue;
+        }
+        if in_cairn_env {
+            if let Some((k, v)) = trimmed.split_once('=') {
+                let key = k.trim().to_string();
+                let val = v.trim().trim_matches('"').to_string();
+                vars.push((key, val));
+            }
+        }
+    }
+    vars
 }
 
 /// Naive merge: if `[mcp_servers]` exists in `original`, replace the
@@ -314,7 +394,7 @@ fn merge_codex_block(original: &str, new_block: &str) -> String {
     }
 
     if !replaced_cairn {
-        // No existing cairn sub-block anywhere — append at end.
+        // No existing cairn sub-block anywhere - append at end.
         if !out.ends_with('\n') && !out.is_empty() {
             out.push('\n');
         }
@@ -336,8 +416,18 @@ fn escape_toml(s: &str) -> String {
         .replace('\t', "\\t")
 }
 
-fn cairn_server(server: Option<&str>, token: Option<&str>) -> Value {
+fn cairn_server(
+    server: Option<&str>,
+    token: Option<&str>,
+    existing_env: Option<&Map<String, Value>>,
+) -> Value {
     let mut env = Map::new();
+    // Preserve any existing env vars from a previous setup run.
+    if let Some(existing) = existing_env {
+        for (k, v) in existing {
+            env.insert(k.clone(), v.clone());
+        }
+    }
     if let Some(s) = server {
         env.insert("CAIRN_SERVER".into(), json!(s));
     }
@@ -374,7 +464,7 @@ fn install_claude_code(dir: &Path, server: Option<&str>, token: Option<&str>) ->
             hooks,
             "PostToolUse",
             "cairn hook PostToolUse",
-            Some("Edit|Write|MultiEdit|NotebookEdit"),
+            Some("Edit|Write|MultiEdit|NotebookEdit|StrReplace"),
         );
         add_hook(hooks, "SessionEnd", "cairn hook SessionEnd", None);
     }
@@ -423,7 +513,14 @@ fn merge_mcp_server(
         .or_insert_with(|| json!({}))
         .as_object_mut()
         .with_context(|| format!("{}: '{schema_key}' is not an object", path.display()))?;
-    servers.insert("cairn".into(), cairn_server(server, token));
+
+    // Preserve existing env vars from a previous setup run.
+    let existing_env = servers
+        .get("cairn")
+        .and_then(|v| v.get("env"))
+        .and_then(Value::as_object);
+
+    servers.insert("cairn".into(), cairn_server(server, token, existing_env));
     write_json(path, &Value::Object(obj))
 }
 
@@ -499,7 +596,7 @@ mod tests {
 
     #[test]
     fn codex_block_renders_minimal_entry() {
-        let block = render_codex_block(None, None);
+        let block = render_codex_block(None, None, vec![]);
         assert!(block.contains("[mcp_servers.cairn]"));
         assert!(block.contains("command = \"cairn\""));
         assert!(block.contains("args = [\"mcp\"]"));
@@ -508,7 +605,7 @@ mod tests {
 
     #[test]
     fn codex_block_renders_env_when_server_or_token_set() {
-        let block = render_codex_block(Some("http://example.com:7777"), Some("tok-123"));
+        let block = render_codex_block(Some("http://example.com:7777"), Some("tok-123"), vec![]);
         assert!(block.contains("[mcp_servers.cairn.env]"));
         assert!(block.contains("CAIRN_SERVER = \"http://example.com:7777\""));
         assert!(block.contains("CAIRN_TOKEN = \"tok-123\""));
@@ -579,7 +676,7 @@ mod tests {
         } else {
             String::new()
         };
-        let new_block = render_codex_block(server, token);
+        let new_block = render_codex_block(server, token, vec![]);
         let merged = merge_codex_block(&original, &new_block);
         fs::write(path, merged)?;
         Ok(())

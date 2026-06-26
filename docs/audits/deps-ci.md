@@ -13,13 +13,13 @@
 
 No Critical vulnerabilities can be confirmed without `cargo audit` or a crates.io API check. However, the project has several supply-chain and CI hygiene issues that should be addressed before releases are considered trustworthy:
 
-1. **Install scripts download release archives from GitHub without checksum verification** → Critical.
-2. **Major-version duplicates of `ureq`, `thiserror`, and transitive `reqwest`** → Warning (binary bloat + potential API/type confusion).
-3. **Workspace pins many dependencies to loose major-only versions** → Warning (uncontrolled minor/patch drift across builds).
-4. **No `cargo audit` step in CI** → Warning.
-5. **Release workflow uses mutable `latest` download URLs while also relying on `GITHUB_TOKEN` with broad permissions** → Warning.
-6. **Web build job likely fails because `web/out` is empty in the repo and `npm ci` output is not committed** → Warning / CI reliability.
-7. **Dockerfile and release build both depend on building the web UI, but CI `rust` job claims the Rust build does not require it** → Note / inconsistency.
+1. **Install scripts download release archives from GitHub without checksum verification** -> Critical.
+2. **Major-version duplicates of `ureq`, `thiserror`, and transitive `reqwest`** -> Warning (binary bloat + potential API/type confusion).
+3. **Workspace pins many dependencies to loose major-only versions** -> Warning (uncontrolled minor/patch drift across builds).
+4. **No `cargo audit` step in CI** -> Warning.
+5. **Release workflow uses mutable `latest` download URLs while also relying on `GITHUB_TOKEN` with broad permissions** -> Warning.
+6. **Web build job likely fails because `web/out` is empty in the repo and `npm ci` output is not committed** -> Warning / CI reliability.
+7. **Dockerfile and release build both depend on building the web UI, but CI `rust` job claims the Rust build does not require it** -> Note / inconsistency.
 
 ---
 
@@ -61,9 +61,9 @@ Cargo.lock contains duplicate major versions that can increase binary size and r
 
 | Crate         | Versions            | Likely pulled in by |
 |---------------|---------------------|---------------------|
-| `reqwest`     | `0.12.28`, `0.13.4` | `hf-hub 0.4.3` → `0.12.28`; `helix-db 2.0.5`, `self_update 0.44.0` → `0.13.4` |
-| `ureq`        | `2.12.1`, `3.3.0`   | `cairn-cli`, `cairn-embed`, `hf-hub`, `ort-sys` → `2.12.1`; `self_update` → `3.3.0` |
-| `thiserror`   | `1.0.69`, `2.0.18`  | `redox_users 0.4.6` → `1.x`; many modern crates incl. `cairn-core` → `2.x` |
+| `reqwest`     | `0.12.28`, `0.13.4` | `hf-hub 0.4.3` -> `0.12.28`; `helix-db 2.0.5`, `self_update 0.44.0` -> `0.13.4` |
+| `ureq`        | `2.12.1`, `3.3.0`   | `cairn-cli`, `cairn-embed`, `hf-hub`, `ort-sys` -> `2.12.1`; `self_update` -> `3.3.0` |
+| `thiserror`   | `1.0.69`, `2.0.18`  | `redox_users 0.4.6` -> `1.x`; many modern crates incl. `cairn-core` -> `2.x` |
 | `tower-http`  | `0.5.2`, `0.6.11`   | `cairn-api` uses `0.5.2`; both `reqwest` versions depend on `0.6.11` |
 | `nom`         | `7.1.3`, `8.0.0`    | transitive |
 | `webpki-roots`| `0.26.11`, `1.0.7`  | transitive rustls ecosystem |
@@ -186,7 +186,7 @@ dotenvy = "0.15"
 | Finding | Severity | Evidence | Recommendation |
 |---------|----------|----------|----------------|
 | `release.yml` grants `contents: write` and `packages: write` at job level to the default `GITHUB_TOKEN`. | Warning | `.github/workflows/release.yml:7-9` | Scope is reasonable for a release workflow, but prefer least-privilege job-level splits (create-release only needs `contents: write`, docker only needs `packages: write`, binary upload only needs `contents: write`). |
-| `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` and `token: ${{ secrets.GITHUB_TOKEN }}` are used correctly — no third-party secrets referenced. | Note | `.github/workflows/release.yml:19`, `59`, `71` | Keep using `GITHUB_TOKEN`; no user PATs detected. |
+| `GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}` and `token: ${{ secrets.GITHUB_TOKEN }}` are used correctly - no third-party secrets referenced. | Note | `.github/workflows/release.yml:19`, `59`, `71` | Keep using `GITHUB_TOKEN`; no user PATs detected. |
 | `docker login-action` passes `github.actor` as username. OK because `GITHUB_TOKEN` is the password. | Note | `.github/workflows/release.yml:68-71` | OK. |
 
 ### 3.3. Release upload
@@ -233,7 +233,7 @@ dotenvy = "0.15"
 
 - Add `Swatinem/rust-cache@v2` to `release.yml` matrix to speed up cross-compilation, or keep it intentionally cold for reproducibility. Document the choice.
 
-### 3.6. Will the workflows pass? — web build issue
+### 3.6. Will the workflows pass? - web build issue
 
 **Finding:** The `web` CI job runs `npm ci && npm run build` inside `web/`. The repository does **not** contain a committed `web/out` build output (only `web/src/` exists). `next.config.mjs` uses `output: "export"`, which means `npm run build` should produce `web/out`. However:
 
@@ -274,7 +274,7 @@ if curl -fsSL "$url" -o "$tmp/cairn.tar.gz" 2>/dev/null; then
     mv "$tmp/$BIN" "$INSTALL_DIR/$BIN"
     chmod +x "$INSTALL_DIR/$BIN"
 elif command -v cargo >/dev/null 2>&1; then
-    say "No prebuilt release found; building from source with cargo…"
+    say "No prebuilt release found; building from source with cargo..."
     cargo install --git "https://github.com/$REPO" cairn-cli
 else
     err "no prebuilt binary available and cargo is not installed"
@@ -306,7 +306,7 @@ try {
 }
 catch {
     if (Get-Command cargo -ErrorAction SilentlyContinue) {
-        Write-Host "No prebuilt release found; building from source with cargo…"
+        Write-Host "No prebuilt release found; building from source with cargo..."
         cargo install --git "https://github.com/$Repo" cairn-cli
     }
     ...

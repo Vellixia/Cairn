@@ -30,7 +30,7 @@ export default function WakeupPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Wakeup</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            The &quot;first thing the agent reads&quot; — high-importance, recently-reinforced
+            The &quot;first thing the agent reads&quot; --- high-importance, recently-reinforced
           decisions and tasks. What every new session starts with.
           </p>
         </div>
@@ -64,8 +64,8 @@ export default function WakeupPage() {
                       <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
                         {m.kind}
                       </Badge>
-                      {m.tier} · importance {m.importance.toFixed(2)} · accessed{" "}
-                      {m.access_count}×
+                      {m.tier} . importance {m.importance.toFixed(2)} . accessed{" "}
+                      {m.access_count}x
                       <span className="inline-block h-1.5 w-16 overflow-hidden rounded bg-muted">
                         <span
                           className={`block h-full ${confidenceColor(m.confidence)}`}

@@ -71,7 +71,7 @@ export default function SettingsPage() {
               <dd className="font-mono">{me.generation}</dd>
             </dl>
           ) : (
-            <p className="text-sm text-muted-foreground">Loading…</p>
+            <p className="text-sm text-muted-foreground">Loading...</p>
           )}
           <div className="mt-4 flex gap-2">
 

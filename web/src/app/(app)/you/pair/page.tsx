@@ -63,7 +63,7 @@ export default function PairCodePage() {
         <CardHeader>
           <CardTitle>Generate</CardTitle>
           <CardDescription>
-            TTL: 1–60 minutes (default 10).
+            TTL: 1--60 minutes (default 10).
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -116,7 +116,7 @@ export default function PairCodePage() {
                 )}
               />
               <Button type="submit" form="form-pair" disabled={generate.isPending}>
-                {generate.isPending ? "…" : "Generate"}
+                {generate.isPending ? "..." : "Generate"}
               </Button>
             </FieldGroup>
           </form>
@@ -135,7 +135,7 @@ export default function PairCodePage() {
               </div>
               <div className="mt-2 text-xs text-muted-foreground">
 
-                valid until {new Date(pair.expires_at).toLocaleString()} · single use
+                valid until {new Date(pair.expires_at).toLocaleString()} . single use
               </div>
               <Button
                 variant="outline"

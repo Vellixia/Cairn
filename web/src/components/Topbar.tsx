@@ -58,7 +58,7 @@ export function Topbar() {
           ) : (
             <Badge variant="destructive" className="font-normal">
               <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-red-500" />
-              {health.isError ? "offline" : "…"}
+              {health.isError ? "offline" : "..."}
             </Badge>
           )}
           {me && (

@@ -2,7 +2,7 @@
 //
 // The dashboard is a static export served BY the cairn server, so by default it talks to
 // whatever origin it was loaded from (`window.location.origin`). That means opening the
-// dashboard at http://your-server:7777 just works — no rebuild, no hardcoded localhost.
+// dashboard at http://your-server:7777 just works --- no rebuild, no hardcoded localhost.
 //
 // All calls send `credentials: "include"` so the cairn_session cookie rides along. On a 401
 // from any non-auth endpoint, the user is bounced to /login (or /setup on first run).

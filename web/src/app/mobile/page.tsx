@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
  *   gate the page behind a fingerprint / face unlock prompt. Falls back to
  *   no lock when the API is absent (dev / desktop).
  *
- * The companion is intentionally narrow — it's NOT a Cairn dashboard. The
+ * The companion is intentionally narrow --- it's NOT a Cairn dashboard. The
  * full dashboard lives at /dashboard. The companion is for a "phone in
  * pocket" check-in.
  */
@@ -60,7 +60,7 @@ export default function MobileCompanion() {
       }
       try {
         // Real WebAuthn ceremony goes here. For v0.5.0 the companion
-        // trusts the host dashboard's session cookie — biometric is a UX
+        // trusts the host dashboard's session cookie --- biometric is a UX
         // gate (a click-to-confirm modal that imitates a fingerprint
         // prompt) so the user gets the *feel* of a locked phone even
         // when the device is offline.

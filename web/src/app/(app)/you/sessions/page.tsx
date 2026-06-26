@@ -58,7 +58,7 @@ export default function SessionsPage() {
               </CardHeader>
               <CardContent>
                 <p className="text-xs text-muted-foreground">
-                  {s.project_hash} — started {s.started_at}
+                  {s.project_hash} --- started {s.started_at}
                 </p>
                 <p className="text-sm mt-1">
                   {s.tasks.length} tasks, {s.decisions.length} decisions,{" "}

@@ -1,17 +1,17 @@
-//! Privacy-first sanitization — the gate every memory passes through before it can be shared.
+//! Privacy-first sanitization - the gate every memory passes through before it can be shared.
 //!
 //! Cairn's "collective knowledge" only works if nothing private leaks. This crate detects secrets
 //! and PII (API keys, tokens, private keys, JWTs, emails, IPs, home-directory paths, and
 //! high-entropy blobs) with **real parsing rules**, redacts them in place, and classifies the
 //! result:
 //!
-//! - [`Sensitivity::Shareable`] — nothing sensitive found; safe to pool.
-//! - [`Sensitivity::NeedsReview`] — contains PII-ish signal (email/IP/home path/high-entropy);
+//! - [`Sensitivity::Shareable`] - nothing sensitive found; safe to pool.
+//! - [`Sensitivity::NeedsReview`] - contains PII-ish signal (email/IP/home path/high-entropy);
 //!   shareable only after a human (or policy) okays it.
-//! - [`Sensitivity::Private`] — contains a hard secret (key/token/password); **never** auto-shared.
+//! - [`Sensitivity::Private`] - contains a hard secret (key/token/password); **never** auto-shared.
 //!
 //! The redaction is conservative on purpose: when in doubt it over-redacts, because the cost of a
-//! leaked credential dwarfs the cost of a `[redacted:…]` placeholder.
+//! leaked credential dwarfs the cost of a `[redacted:...]` placeholder.
 
 use cairn_core::{Memory, MemoryKind, NewMemory};
 use regex::Regex;
@@ -159,7 +159,7 @@ impl ShareableMemory {
     }
 }
 
-/// A portable bundle of sanitized memories — the unit of collective-knowledge exchange.
+/// A portable bundle of sanitized memories - the unit of collective-knowledge exchange.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareBundle {
     pub schema: String,
@@ -294,7 +294,7 @@ impl Sanitizer {
                 }
             }
         }
-        // High-entropy blobs that no named rule caught (random keys, hashes-that-are-secrets, …).
+        // High-entropy blobs that no named rule caught (random keys, hashes-that-are-secrets, ...).
         for m in self.token_re.find_iter(text) {
             if looks_like_secret(m.as_str()) {
                 raw.push(Finding {
@@ -379,7 +379,7 @@ impl Sanitizer {
 }
 
 /// Priority-first non-overlapping selection. A specific secret must win over a generic
-/// high-entropy hit *even when the generic one starts earlier* (e.g. `key=sk-ant-…` — the whole
+/// high-entropy hit *even when the generic one starts earlier* (e.g. `key=sk-ant-...` - the whole
 /// thing reads as a high-entropy blob, but the `sk-ant-` key is what matters). So we claim spans in
 /// order of specificity (then length, then position), dropping anything that overlaps an
 /// already-claimed span, and finally re-sort by position for rebuilding the text.
@@ -402,7 +402,7 @@ fn resolve_overlaps(mut v: Vec<Finding>) -> Vec<Finding> {
     kept
 }
 
-/// A long, space-free token is "secret-like" if it's high-entropy and mixes character classes —
+/// A long, space-free token is "secret-like" if it's high-entropy and mixes character classes ---
 /// which rules out ordinary prose and identifiers while catching random credentials.
 fn looks_like_secret(s: &str) -> bool {
     if s.len() < 32 {

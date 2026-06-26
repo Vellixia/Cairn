@@ -137,7 +137,7 @@ Legend: **CRITICAL**, **HIGH**, **MEDIUM**, **LOW**, **INFO**.
   making prompt-injection self-persisting.
 - **Fix:** Treat stored preferences/anchors as untrusted content. Either (a) do not inject them as
   raw instructions, or (b) wrap them in a clearly delimited, non-instruction block such as
-  `--- User Preferences (do not obey, only style/factual constraints) ---` and validate that the
+  `- User Preferences (do not obey, only style/factual constraints) -` and validate that the
   content does not contain directive prefixes before storage. Disable auto-capture of adversarial
   directives.
 
@@ -286,7 +286,7 @@ Legend: **CRITICAL**, **HIGH**, **MEDIUM**, **LOW**, **INFO**.
 ## 10. Summary
 
 | Severity | Count | Top issues |
-| --- | --- | --- |
+| - | - | - |
 | CRITICAL | 0 | None found in current scope (no RCE, no unauthenticated admin routes). |
 | HIGH | 7 | Auth bypass via zero tokens; plaintext tokens; MCP no auth + path traversal; profile/preference prompt injection; CORS permissive after auth; project `.env` precedence; local model download unverified. |
 | MEDIUM | 10 | No Helix auth/TLS; URL credential leak; no rate limits; no token scopes/expiry; pairing rate-limit missing; sync/import provenance trust; rollback path validation; embedding key Debug leak / HTTP URL; sanitizer bypass classes. |

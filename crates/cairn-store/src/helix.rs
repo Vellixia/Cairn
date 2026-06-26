@@ -6,11 +6,11 @@
 //! `Store::open_for_test`, which skips when that env var is unset (so offline `cargo test` stays
 //! green) and otherwise runs against a live server in an isolated label namespace.
 //!
-//! ## Sync ↔ async bridge
+//! ## Sync <-> async bridge
 //! `StoreBackend` is synchronous; the `helix-db` client is async (tokio). Each call hops onto a
 //! process-wide shared [`tokio::runtime::Runtime`] and `block_on`s from a *scoped OS thread* (not
 //! the caller's thread), so this is safe whether the caller is plain sync (tests) or already inside
-//! a `#[tokio::main]` runtime (the server) — the latter would otherwise panic with "Cannot start a
+//! a `#[tokio::main]` runtime (the server) - the latter would otherwise panic with "Cannot start a
 //! runtime from within a runtime". The runtime is shared (never dropped) so a backend can be
 //! created and dropped inside an async context without the "drop a runtime in async" panic.
 //!
@@ -65,7 +65,7 @@ const MEM_COLS: &[&str] = &[
 
 /// A process-wide tokio runtime that drives the async Helix client. Shared (and never dropped) so
 /// that a `HelixBackend` can be created and dropped inside an async context (axum, `#[tokio::test]`)
-/// without panicking — owning a `Runtime` and dropping it from async code is not allowed.
+/// without panicking - owning a `Runtime` and dropping it from async code is not allowed.
 fn shared_runtime() -> &'static tokio::runtime::Runtime {
     static RT: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();
     RT.get_or_init(|| {
@@ -95,7 +95,7 @@ impl HelixBackend {
                 url.contains("127.0.0.1") || url.contains("localhost") || url.contains("[::1]");
             if !is_loopback {
                 tracing::warn!(
-                    "HelixDB URL is plain HTTP ({}) — credentials travel in cleartext. \
+                    "HelixDB URL is plain HTTP ({}) - credentials travel in cleartext. \
                      Use https:// or a loopback address.",
                     redact_url(url)
                 );
@@ -366,7 +366,7 @@ impl StoreBackend for HelixBackend {
     fn upsert_memory(&self, m: &Memory) -> Result<bool> {
         if let Some(existing) = self.get_memory(&m.id)? {
             if m.updated_at < existing.updated_at {
-                return Ok(false); // incoming is older — last-writer-wins keeps the existing copy
+                return Ok(false); // incoming is older - last-writer-wins keeps the existing copy
             }
             self.drop_where(MEMORY, "id", &m.id)?; // replace in place
         }
@@ -470,7 +470,7 @@ impl StoreBackend for HelixBackend {
     fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
         let qvec = self.embed.embed_one(query)?;
         let projection: Vec<String> = MEM_COLS.iter().map(|c| c.to_string()).collect();
-        // HNSW kNN, then project the memory columns — ordering (closest first) survives `.values`.
+        // HNSW kNN, then project the memory columns - ordering (closest first) survives `.values`.
         let batch = read_batch()
             .var_as(
                 "ranked",
@@ -486,26 +486,33 @@ impl StoreBackend for HelixBackend {
         Ok(Some(mems))
     }
 
-    fn create_token(&self, name: &str) -> Result<DeviceToken> {
+    fn create_token(
+        &self,
+        name: &str,
+        scope: cairn_core::TokenScope,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<DeviceToken> {
         let id = uuid_simple();
+        let now = Utc::now();
         let token = DeviceToken {
             id: id.clone(),
             token: None,
             name: name.to_string(),
-            scope: cairn_core::TokenScope::Write,
-            expires_at: None,
+            scope,
+            expires_at,
             last_used_at: None,
-            created_at: Utc::now(),
+            created_at: now,
         };
-        self.add_node(
-            "Token",
-            vec![
-                ("id".into(), id.into()),
-                ("name".into(), token.name.clone().into()),
-                ("scope".into(), token.scope.as_str().to_string().into()),
-                ("created_at".into(), ts(token.created_at).into()),
-            ],
-        )?;
+        let mut props = vec![
+            ("id".into(), id.into()),
+            ("name".into(), token.name.clone().into()),
+            ("scope".into(), token.scope.as_str().to_string().into()),
+            ("created_at".into(), ts(now).into()),
+        ];
+        if let Some(exp) = expires_at {
+            props.push(("expires_at".into(), ts(exp).into()));
+        }
+        self.add_node("Token", props)?;
         Ok(token)
     }
 
@@ -513,6 +520,22 @@ impl StoreBackend for HelixBackend {
         Ok(!self
             .read_where("Token", "id", token_id, &["id"])?
             .is_empty())
+    }
+
+    fn record_token_usage(&self, token_id: &str) -> Result<()> {
+        let now = ts(Utc::now());
+        let batch = write_batch()
+            .var_as(
+                "u",
+                g().n_with_label_where(
+                    self.label("Token"),
+                    SourcePredicate::eq("id", token_id.to_string()),
+                )
+                .set_property("last_used_at", now),
+            )
+            .returning(["u"]);
+        self.run(DynamicQueryRequest::write(batch))?;
+        Ok(())
     }
 
     fn revoke_token(&self, token_id: &str) -> Result<bool> {
@@ -527,7 +550,17 @@ impl StoreBackend for HelixBackend {
 
     fn list_tokens(&self) -> Result<Vec<DeviceToken>> {
         Ok(self
-            .read_rows("Token", &["id", "name", "scope", "created_at"])?
+            .read_rows(
+                "Token",
+                &[
+                    "id",
+                    "name",
+                    "scope",
+                    "created_at",
+                    "expires_at",
+                    "last_used_at",
+                ],
+            )?
             .iter()
             .map(|r| {
                 let mut t = DeviceToken::meta(
@@ -538,6 +571,18 @@ impl StoreBackend for HelixBackend {
                 t.scope = get_str(r, "scope")
                     .parse()
                     .unwrap_or(cairn_core::TokenScope::Write);
+                {
+                    let exp = get_str(r, "expires_at");
+                    if !exp.is_empty() {
+                        t.expires_at = Some(parse_ts(&exp));
+                    }
+                }
+                {
+                    let lua = get_str(r, "last_used_at");
+                    if !lua.is_empty() {
+                        t.last_used_at = Some(parse_ts(&lua));
+                    }
+                }
                 t
             })
             .collect())
@@ -724,14 +769,14 @@ impl StoreBackend for HelixBackend {
         Ok(Some(claimed))
     }
 
-    // ---- audit log (v0.5.0 — Sprint 1) ------------------------------------------------------
+    // -- audit log (v0.5.0 - Sprint 1) ----------------------------------------------------
 
     fn append_audit(&self, ts: i64, kind: &str, actor: &str, detail: &str) -> Result<String> {
         // Allocate the next id from a small "AuditCounter" singleton row (created on first use).
         // This keeps the id monotonic per backend instance without needing a server-side sequence
         // and survives restarts because the row is persisted. Two concurrent writers can race to
         // read+increment; in practice audit writes are rare and the worst case is two events
-        // sharing an id (which the SSE consumer tolerates — duplicates are still distinguishable
+        // sharing an id (which the SSE consumer tolerates - duplicates are still distinguishable
         // by ts/kind/actor).
         let next = self.bump_audit_counter()?;
         self.add_node(
@@ -780,7 +825,7 @@ impl StoreBackend for HelixBackend {
 impl HelixBackend {
     /// Read+increment the persistent `AuditCounter`. Returns the post-increment value (the id
     /// assigned to the next appended audit event). Keeps the label at exactly one row by dropping
-    /// all existing rows before inserting the new value — O(1) reads after the first call.
+    /// all existing rows before inserting the new value - O(1) reads after the first call.
     fn bump_audit_counter(&self) -> Result<i64> {
         let cur = self
             .read_rows("AuditCounter", &["value"])?
@@ -798,7 +843,7 @@ impl HelixBackend {
 
 /// Helper for [`HelixBackend::edit_memory`]: drop the existing node and reinsert the edited
 /// copy atomically (so all properties land together and the vector index is re-built).
-/// Implementation note: HelixDB's append-only model means we drop + insert in sequence — the
+/// Implementation note: HelixDB's append-only model means we drop + insert in sequence - the
 /// window between the two is observable to concurrent reads, but the test suite verifies
 /// post-state; if true atomicity is needed in future, switch to a server-side update mutation.
 fn drop_where_via_reupsert(
@@ -812,7 +857,7 @@ fn drop_where_via_reupsert(
     Ok(())
 }
 
-// --- helpers -----------------------------------------------------------------------------------
+// - helpers ---------------------------------------------------------------------------------
 
 /// Pull the projected property rows out of a query response under variable `var`
 /// (`{ "<var>": { "properties": [ {..}, .. ] } }`).
@@ -914,7 +959,7 @@ fn memory_from_props(m: &Map<String, Value>) -> Memory {
 }
 
 /// Parse an edge list column stored as a JSON-encoded string of string ids. Falls back to an
-/// empty vector on missing/empty values — that's what we want for memories written before
+/// empty vector on missing/empty values - that's what we want for memories written before
 /// Sprint 3 added the columns.
 fn parse_edge_list(m: &Map<String, Value>, key: &str) -> Vec<String> {
     let raw = get_str(m, key);
@@ -935,7 +980,7 @@ mod live {
     fn backend() -> Option<HelixBackend> {
         let url = std::env::var("CAIRN_HELIX_URL").ok()?;
         // `ollama` builds without a network call, so connect + index setup work without an
-        // embedding model — enough to exercise the read/write machinery (meta, tokens).
+        // embedding model - enough to exercise the read/write machinery (meta, tokens).
         let cfg = Config {
             data_dir: std::env::temp_dir(),
             host: "127.0.0.1".into(),
@@ -985,7 +1030,9 @@ mod live {
     fn tokens_roundtrip() {
         let Some(be) = backend() else { return };
         let before = be.count_tokens().expect("count");
-        let tok = be.create_token("test-device").expect("create_token");
+        let tok = be
+            .create_token("test-device", cairn_core::TokenScope::Write, None)
+            .expect("create_token");
         assert!(be.validate_token_id(&tok.id).expect("validate"));
         assert!(be
             .list_tokens()

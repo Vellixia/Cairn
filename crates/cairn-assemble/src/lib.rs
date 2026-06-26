@@ -1,10 +1,10 @@
-//! The context assembler — Cairn's answer to context rot.
+//! The context assembler - Cairn's answer to context rot.
 //!
 //! Research shows every model degrades as input grows, and that information in the *middle* of a
 //! long context gets ignored ("lost in the middle"). So instead of dumping everything, the
 //! assembler builds the smallest high-signal working set that fits a token budget and **orders it
 //! so the best items sit at the two edges**, with weaker items in the middle. Anything that
-//! doesn't fit is reported as dropped — and is always one memory recall away, so nothing is lost.
+//! doesn't fit is reported as dropped - and is always one memory recall away, so nothing is lost.
 
 use cairn_core::Result;
 use cairn_memory::{MemoryEngine, ScoredMemory};
@@ -106,7 +106,7 @@ impl Assembler {
     }
 }
 
-/// Reorder by rank so the best items sit at both ends: `[r0, r2, r4, …, r5, r3, r1]`.
+/// Reorder by rank so the best items sit at both ends: `[r0, r2, r4, ..., r5, r3, r1]`.
 fn edge_order<T>(items: Vec<T>) -> Vec<T> {
     let mut left = Vec::new();
     let mut right = Vec::new();
@@ -129,7 +129,7 @@ fn est_tokens(s: &str) -> usize {
 fn preview(s: &str) -> String {
     let p: String = s.chars().take(80).collect();
     if s.chars().count() > 80 {
-        format!("{p}…")
+        format!("{p}...")
     } else {
         p
     }
@@ -147,7 +147,7 @@ mod tests {
         Some((Assembler::new(mem.clone()), mem))
     }
 
-    // --- edge_order ---
+    // - edge_order ---
 
     #[test]
     fn edge_order_empty() {
@@ -162,7 +162,7 @@ mod tests {
 
     #[test]
     fn edge_order_two() {
-        // items [0, 1]: left=[0], right=[1] → reversed right=[1] → [0, 1]
+        // items [0, 1]: left=[0], right=[1] -> reversed right=[1] -> [0, 1]
         assert_eq!(edge_order(vec!['a', 'b']), vec!['a', 'b']);
     }
 
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(sorted, input, "no items lost or duplicated");
     }
 
-    // --- est_tokens ---
+    // - est_tokens ---
 
     #[test]
     fn est_tokens_empty_string() {
@@ -227,11 +227,11 @@ mod tests {
         let s200 = "x".repeat(200);
         assert!(
             est_tokens(&s200) > est_tokens(&s100),
-            "longer → more tokens"
+            "longer -> more tokens"
         );
     }
 
-    // --- preview ---
+    // - preview ---
 
     #[test]
     fn preview_empty_string() {
@@ -248,24 +248,24 @@ mod tests {
         let s: String = "a".repeat(80);
         let p = preview(&s);
         assert_eq!(p, s);
-        assert!(!p.contains('…'));
+        assert!(!p.contains("..."));
     }
 
     #[test]
     fn preview_81_chars_adds_ellipsis() {
         let s: String = "a".repeat(81);
         let p = preview(&s);
-        assert!(p.ends_with('…'));
+        assert!(p.ends_with("..."));
         let char_count = p.chars().count();
-        assert_eq!(char_count, 81, "80 chars + one '…' char");
+        assert_eq!(char_count, 83, "80 chars + \"...\" (3 chars)");
     }
 
     #[test]
     fn preview_multibyte_unicode_counts_chars_not_bytes() {
-        // "é" is 2 bytes but 1 char; 80 × "é" should not add ellipsis
-        let s: String = "é".repeat(80);
+        // "e" is 2 bytes but 1 char; 80 x "e" should not add ellipsis
+        let s: String = "e".repeat(80);
         let p = preview(&s);
-        assert!(!p.contains('…'), "80 unicode chars → no ellipsis");
+        assert!(!p.contains("..."), "80 unicode chars -> no ellipsis");
     }
 
     #[test]

@@ -1,11 +1,11 @@
-//! `cairn rules` — write per-agent instruction files that tell the model to actually USE Cairn.
+//! `cairn rules` --- write per-agent instruction files that tell the model to actually USE Cairn.
 //!
 //! Registering an MCP server is not enough: the agent has to be *told* to prefer Cairn's tools
-//! (`read`/`recall`/`remember`/`sanitize`/…) over its defaults — exactly like a hand-written rules
+//! (`read`/`recall`/`remember`/`sanitize`/...) over its defaults --- exactly like a hand-written rules
 //! file. This writes that guidance into each agent's native instructions file, idempotently:
 //! shared files (CLAUDE.md, AGENTS.md) get a replaceable **managed block**.
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{bail, Result};
 use std::fs;
 use std::path::Path;
 
@@ -15,59 +15,35 @@ const KNOWN: &[&str] = &["claude-code", "codex", "opencode", "agents"];
 const BEGIN: &str = "<!-- BEGIN CAIRN (managed by `cairn rules`) -->";
 const END: &str = "<!-- END CAIRN -->";
 
-/// The instruction body — what every agent is told about using Cairn. Kept tool-name-accurate.
+/// The instruction body --- what every agent is told about using Cairn. Kept tool-name-accurate.
 const BODY: &str = "\
-## Cairn — prefer these tools
+## Cairn --- prefer these tools
 
 You have **Cairn** (MCP server `cairn`): persistent memory, lean context, and edit safety. Use it.
 
-- **Reading code/files:** use `read` instead of your default file read — unchanged re-reads are
+- **Reading code/files:** use `read` instead of your default file read - unchanged re-reads are
   nearly free, and `mode:\"signatures\"` returns a large file as just its structure (huge token
   saving). Recover any full original with `expand`.
-- **Memory:** at the start of a task, `recall` (or `assemble`) relevant past decisions and context;
-  `remember` decisions, gotchas, and rationale as you make them so the next session never starts
-  cold. Record standing user preferences with `prefer`.
+- **Verbose tool output:** run `compress` to shrink cargo/build/log output into a compact view,
+  retaining the exact original (recover with `expand`).
+- **Memory:** at the start of a task, `wakeup` auto-injects your highest-priority memories so
+  you never start cold. Use `recall` (quick) or `search` (hybrid BM25+semantic) to find relevant
+  past decisions and context; `remember` decisions, gotchas, and rationale as you make them.
+  Record standing user preferences with `prefer`. Call `proactive_recall` at the start of each
+  turn to get context automatically injected. Use `assemble` to build a context block under a
+  token budget.
 - **Before sharing, logging, or committing text:** run `sanitize` to redact secrets/PII.
 - **Risky edits:** `checkpoint` before large changes; `verify` a proposed file against its retained
   original to catch silent corruption; `rollback` to undo damage.
 - **Stay on task:** keep the current goal in `anchor`.
-- **End of session:** run `consolidate` then `memory_crystallize` to promote working notes into
+- **End of session:** run `memory_crystallize` then `consolidate` to promote working notes into
   durable knowledge. Curate with `memory_pin` (keep), `memory_reinforce` (bump confidence),
-  `memory_delete` (remove stale). On self-hosted servers use `registry_search` / `registry_revoke`
-  to manage the local pack registry.
-- **Dashboard is observability-only:** the web UI shows what exists and progress — you are the one
+  `memory_delete` (remove stale). On self-hosted servers use `registry_search` to browse
+  the local pack registry.
+- **Dashboard is observability-only:** the web UI shows what exists and progress --- you are the one
   who writes, curates, and maintains; humans watch.
 
-Everything Cairn shows is lossless — the full original is always one `expand` away.";
-
-pub fn run(agent: Option<&str>, all: bool) -> Result<()> {
-    let project = std::env::current_dir()?;
-    if all {
-        for id in KNOWN {
-            write_for(id, &project)?;
-        }
-        return Ok(());
-    }
-    let id = canonical(agent.unwrap_or("agents")).ok_or_else(|| {
-        anyhow!(
-            "unknown agent '{}'. Supported: {}.",
-            agent.unwrap_or(""),
-            KNOWN.join(", ")
-        )
-    })?;
-    write_for(id, &project)
-}
-
-/// Map an agent name (and aliases) to a canonical id.
-pub fn canonical(name: &str) -> Option<&'static str> {
-    match name.to_ascii_lowercase().as_str() {
-        "claude-code" | "claude" | "claudecode" | "cc" => Some("claude-code"),
-        "codex" => Some("codex"),
-        "opencode" | "oc" => Some("opencode"),
-        "agents" | "generic" => Some("agents"),
-        _ => None,
-    }
-}
+Everything Cairn shows is lossless --- the full original is always one `expand` away.";
 
 /// Write the Cairn rules into `id`'s native instruction file under `project`.
 pub fn write_for(id: &str, project: &Path) -> Result<()> {
@@ -149,16 +125,5 @@ mod tests {
         assert!(p.exists());
         assert!(fs::read_to_string(&p).unwrap().contains("Cairn"));
         assert!(fs::read_to_string(&p).unwrap().contains(BEGIN));
-    }
-
-    #[test]
-    fn canonical_resolves_aliases() {
-        assert_eq!(canonical("claude"), Some("claude-code"));
-        assert_eq!(canonical("CODEX"), Some("codex"));
-        assert_eq!(canonical("opencode"), Some("opencode"));
-        assert_eq!(canonical("generic"), Some("agents"));
-        assert!(canonical("cursor").is_none());
-        assert!(canonical("vscode").is_none());
-        assert!(canonical("nope").is_none());
     }
 }

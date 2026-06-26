@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// A merged pack metadata after dedup across upstreams. The `seen_at` field is
-/// the wall-clock time we observed the pack at any upstream — useful for
+/// the wall-clock time we observed the pack at any upstream - useful for
 /// freshness heuristics in the dashboard.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MergedPack {
@@ -201,7 +201,7 @@ mod tests {
             ("peer-b", vec![p.clone()]),
             ("peer-c", vec![p.clone()]),
         ]);
-        assert_eq!(r.packs.len(), 1, "same id from 3 peers → 1 pack");
+        assert_eq!(r.packs.len(), 1, "same id from 3 peers -> 1 pack");
         let merged = &r.packs[0];
         assert_eq!(merged.sources.len(), 3, "all 3 sources recorded");
     }

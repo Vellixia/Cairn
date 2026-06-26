@@ -64,14 +64,14 @@ export function DriftAnchorCard() {
               <p className="break-words text-sm text-foreground">{currentAnchor}</p>
             ) : (
               <p className="text-sm text-muted-foreground">
-                No anchor set yet — pick the project goal you want every recall and check to be measured against.
+                No anchor set yet --- pick the project goal you want every recall and check to be measured against.
               </p>
             )}
             <div className="flex gap-2">
               <Input
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                placeholder="Set or refine the anchor…"
+                placeholder="Set or refine the anchor..."
                 className="h-8 text-sm"
                 onKeyDown={(e) => {
                   if (e.key === "Enter") onSave();
@@ -82,7 +82,7 @@ export function DriftAnchorCard() {
                 onClick={onSave}
                 disabled={setAnchor.isPending || !draft.trim()}
               >
-                {setAnchor.isPending ? "Saving…" : "Update"}
+                {setAnchor.isPending ? "Saving..." : "Update"}
               </Button>
             </div>
           </div>
@@ -118,7 +118,7 @@ export function DriftAnchorCard() {
             href="/trust?tab=drift"
             className="text-[hsl(var(--color-info))] hover:underline"
           >
-            Drift center →
+            Drift center
           </Link>
         </div>
       </CardContent>

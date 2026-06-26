@@ -39,7 +39,7 @@ export function LastAdminActionCard({ className }: { className?: string }) {
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-foreground">
             <span className="font-mono text-xs text-muted-foreground">{latest.actor}</span>
-            <span className="mx-1.5 text-muted-foreground">·</span>
+            <span className="mx-1.5 text-muted-foreground">.</span>
             <span>{latest.kind.replace(/_/g, " ")}</span>
           </p>
           <p className="truncate text-xs text-muted-foreground">{latest.detail}</p>

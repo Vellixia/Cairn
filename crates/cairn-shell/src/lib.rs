@@ -1,8 +1,8 @@
-//! Shell/tool-output compression — Cairn's take on RTK.
+//! Shell/tool-output compression - Cairn's take on RTK.
 //!
 //! Verbose command output (cargo test, git status, build logs, directory listings) burns tokens.
 //! We filter the noise and collapse repetition into a compact view, while retaining the **exact**
-//! original in the blob store so it's recoverable byte-for-byte via `expand <hash>` — nothing is
+//! original in the blob store so it's recoverable byte-for-byte via `expand <hash>` - nothing is
 //! lost. The compression itself is a set of pure functions; [`ShellCompressor`] adds retention.
 
 use cairn_core::Result;
@@ -14,7 +14,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize)]
 pub struct Compressed {
     pub command: String,
-    /// Handle to the retained full original — recover it with `expand`.
+    /// Handle to the retained full original - recover it with `expand`.
     pub original_hash: String,
     pub original_lines: usize,
     pub compressed_lines: usize,
@@ -76,7 +76,7 @@ fn categorize(command: &str) -> Category {
     }
 }
 
-/// The compression pipeline: category-specific filter → collapse consecutive repeats →
+/// The compression pipeline: category-specific filter -> collapse consecutive repeats ->
 /// head/tail truncate if still huge.
 fn compress_output(command: &str, output: &str) -> String {
     let lines: Vec<&str> = output.lines().collect();
@@ -121,7 +121,7 @@ fn filter_drop(lines: &[&str], prefixes: &[&str]) -> Vec<String> {
         .collect()
 }
 
-/// Collapse runs of identical consecutive lines into `line  (×N)`.
+/// Collapse runs of identical consecutive lines into `line  (xN)`.
 fn dedup_consecutive(lines: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(lines.len());
     let mut i = 0;
@@ -132,7 +132,7 @@ fn dedup_consecutive(lines: &[String]) -> Vec<String> {
         }
         let count = j - i;
         if count > 1 {
-            out.push(format!("{}  (×{count})", lines[i]));
+            out.push(format!("{}  (x{count})", lines[i]));
         } else {
             out.push(lines[i].clone());
         }
@@ -150,7 +150,7 @@ fn truncate_head_tail(lines: &[String], limit: usize, head: usize, tail: usize) 
     let mut out = Vec::with_capacity(head + tail + 1);
     out.extend(lines[..head].iter().cloned());
     out.push(format!(
-        "… {omitted} lines omitted (recover the full output with `expand`) …"
+        "... {omitted} lines omitted (recover the full output with `expand`) ..."
     ));
     out.extend(lines[lines.len() - tail..].iter().cloned());
     out
@@ -160,7 +160,7 @@ fn truncate_head_tail(lines: &[String], limit: usize, head: usize, tail: usize) 
 mod tests {
     use super::*;
 
-    // --- filter_keep ---
+    // - filter_keep ---
 
     #[test]
     fn filter_keep_empty_input_returns_empty() {
@@ -194,7 +194,7 @@ mod tests {
         assert_eq!(out.len(), 1);
     }
 
-    // --- filter_drop ---
+    // - filter_drop ---
 
     #[test]
     fn filter_drop_empty_input_returns_empty() {
@@ -221,7 +221,7 @@ mod tests {
         assert_eq!(out, vec!["keep this", "also keep"]);
     }
 
-    // --- dedup_consecutive ---
+    // - dedup_consecutive ---
 
     #[test]
     fn dedup_empty() {
@@ -245,7 +245,7 @@ mod tests {
         let lines: Vec<String> = ["x"; 5].iter().map(|s| s.to_string()).collect();
         let out = dedup_consecutive(&lines);
         assert_eq!(out.len(), 1);
-        assert!(out[0].contains("×5"));
+        assert!(out[0].contains("x5"));
     }
 
     #[test]
@@ -253,7 +253,7 @@ mod tests {
         let lines = vec!["same".to_string(), "same".to_string()];
         let out = dedup_consecutive(&lines);
         assert_eq!(out.len(), 1);
-        assert!(out[0].contains("×2"));
+        assert!(out[0].contains("x2"));
     }
 
     #[test]
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(dedup_consecutive(&lines).len(), 3);
     }
 
-    // --- truncate_head_tail ---
+    // - truncate_head_tail ---
 
     #[test]
     fn truncate_below_limit_unchanged() {
@@ -311,7 +311,7 @@ mod tests {
         );
     }
 
-    // --- compress_output ---
+    // - compress_output ---
 
     #[test]
     fn cargo_test_keeps_failures_drops_passes() {
@@ -338,7 +338,7 @@ mod tests {
             .collect();
         assert_eq!(
             dedup_consecutive(&lines),
-            vec!["same  (×3)".to_string(), "diff".to_string()]
+            vec!["same  (x3)".to_string(), "diff".to_string()]
         );
     }
 
@@ -425,7 +425,7 @@ mod tests {
         };
         let sc = ShellCompressor::new(Arc::new(store));
         let c = sc.compress("ls", "").unwrap();
-        assert_eq!(c.saved_ratio, 0.0, "empty output → 0 ratio");
+        assert_eq!(c.saved_ratio, 0.0, "empty output -> 0 ratio");
         assert_eq!(c.original_lines, 0);
     }
 

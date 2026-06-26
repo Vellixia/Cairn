@@ -2,12 +2,12 @@
 //!
 //! **Re-read killer.** Files are read through a cache keyed by path + mtime. If a file hasn't
 //! changed since the agent last read it, the re-read returns a tiny "unchanged" view (a handle +
-//! line count) instead of the whole file — cheap re-reads instead of dumping 1000 lines again. If
+//! line count) instead of the whole file - cheap re-reads instead of dumping 1000 lines again. If
 //! it *has* changed, we return only the diff.
 //!
 //! **No context loss.** Every time we read a file we stash its exact bytes in the blob store,
 //! addressed by content hash. So whatever compact view the agent gets, the original is one
-//! [`ContextEngine::expand`] call away — byte-identical.
+//! [`ContextEngine::expand`] call away - byte-identical.
 
 use cairn_core::{ContentHash, Error, Result};
 use cairn_store::Store;
@@ -25,7 +25,7 @@ pub enum ReadMode {
     Auto,
     /// Always return the whole file (still cached + retained).
     Full,
-    /// AST signature outline — top-level items and their members, bodies elided (huge token saver).
+    /// AST signature outline - top-level items and their members, bodies elided (huge token saver).
     Signatures,
     /// Like `Signatures`, with each item prefixed by its start line number.
     Map,
@@ -47,7 +47,7 @@ impl ReadMode {
     }
 }
 
-/// The status of a read — how the engine answered.
+/// The status of a read - how the engine answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReadStatus {
@@ -65,7 +65,7 @@ pub enum ReadStatus {
 #[derive(Debug, Clone, Serialize)]
 pub struct ReadResult {
     pub path: String,
-    /// Full content hash — the handle you pass to `expand` to recover the exact original.
+    /// Full content hash - the handle you pass to `expand` to recover the exact original.
     pub hash: String,
     /// Short, human-friendly form of the handle.
     pub handle: String,
@@ -456,7 +456,7 @@ mod tests {
             "diff should be smaller than full"
         );
 
-        // Both versions' originals are retained — nothing is ever lost.
+        // Both versions' originals are retained - nothing is ever lost.
         assert_eq!(eng.expand(&r1.hash).unwrap().unwrap(), original);
         assert_eq!(eng.expand(&r3.hash).unwrap().unwrap(), changed);
     }
@@ -501,7 +501,7 @@ pub fn build() -> Widget { Widget::new(1) }
         let body = "plain prose, no code here\nsecond line\n";
         std::fs::write(&file, body).unwrap();
 
-        // Unsupported language → graceful fall-through to a full read.
+        // Unsupported language -> graceful fall-through to a full read.
         let r = eng.read(&file, ReadMode::Signatures).unwrap();
         assert_eq!(r.status, ReadStatus::Full);
         assert_eq!(r.view, body);
@@ -532,7 +532,7 @@ pub fn build() -> Widget { Widget::new(1) }
 
         // Keep the TempDir alive in a named binding so the directory is not deleted before
         // the read attempt (Windows deletes the directory immediately on TempDir drop).
-        // The file need not exist — the engine rejects outside paths before any filesystem op.
+        // The file need not exist - the engine rejects outside paths before any filesystem op.
         let _outside_dir = tempfile::tempdir().unwrap();
         let outside = _outside_dir.path().join("outside.txt");
         let err = eng

@@ -1,6 +1,6 @@
 //! Intent classifier for proactive recall (v0.5.0 Sprint 18a).
 //!
-//! Tiny, fully-local heuristic — no LLM call. The classifier runs on every
+//! Tiny, fully-local heuristic - no LLM call. The classifier runs on every
 //! agent turn; if it costs 10 ms we'd feel it. So:
 //!
 //! - **O(n) in prompt length**, single pass.
@@ -19,11 +19,11 @@ pub enum IntentSignal {
     RecallCue,
     FileMention,
     ReferencePronoun,
-    /// Plain imperative ("Add a print") or statement — not a recall trigger.
+    /// Plain imperative ("Add a print") or statement - not a recall trigger.
     Imperative,
 }
 
-/// The features extracted from a prompt — used internally to score; also
+/// The features extracted from a prompt - used internally to score; also
 /// surfaced in `IntentDecision::Fire.features` for observability.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IntentFeatures {
@@ -80,7 +80,7 @@ pub fn classify(prompt: &str, threshold: f32) -> IntentDecision {
         }
     }
 
-    // File / path mentions — looks for `/` or `.rs` / `.ts` / `.py` patterns.
+    // File / path mentions - looks for `/` or `.rs` / `.ts` / `.py` patterns.
     // Cheap, won't trigger on a casual mention of "the file" but catches paths.
     let mut slash_count = 0;
     let mut ext_seen = false;
@@ -113,7 +113,7 @@ pub fn classify(prompt: &str, threshold: f32) -> IntentDecision {
         f.file_mention_count += 1;
     }
 
-    // Reference pronouns — "this", "that", "the api", "the model" without
+    // Reference pronouns - "this", "that", "the api", "the model" without
     // a clear antecedent usually means "the thing we talked about".
     for pronoun in &[
         " this ",
@@ -130,7 +130,7 @@ pub fn classify(prompt: &str, threshold: f32) -> IntentDecision {
         }
     }
 
-    // Word count — used to suppress recall on very short prompts that fire
+    // Word count - used to suppress recall on very short prompts that fire
     // on a stray question mark.
     f.word_count = lower.split_whitespace().count();
 
@@ -148,7 +148,7 @@ pub fn classify(prompt: &str, threshold: f32) -> IntentDecision {
         + f.recall_cue_count as f32 * 0.6
         + f.file_mention_count as f32 * 0.3
         + f.reference_pronoun_count as f32 * 0.3;
-    // Saturate at raw >= 1.2 → score 1.0 (so a prompt with two cues still hits
+    // Saturate at raw >= 1.2 -> score 1.0 (so a prompt with two cues still hits
     // the threshold deterministically).
     let score = (raw / 1.2).clamp(0.0, 1.0);
 
@@ -195,7 +195,7 @@ mod tests {
 
     #[test]
     fn threshold_controls_fire() {
-        // Same prompt, two thresholds — high threshold should skip.
+        // Same prompt, two thresholds - high threshold should skip.
         let prompt = "Why?";
         assert!(matches!(classify(prompt, 0.9), IntentDecision::Skip(_)));
         // (Low threshold on a 1-word question still suppresses via the word-count

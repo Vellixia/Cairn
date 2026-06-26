@@ -2,7 +2,7 @@
 //!
 //! Keeps a `VecDeque<Instant>` per IP address. On each request, entries older than
 //! `window` are pruned; if the remaining count >= `max_requests` the middleware
-//! returns 429. The inner map is never explicitly pruned of stale keys — auth
+//! returns 429. The inner map is never explicitly pruned of stale keys - auth
 //! endpoints are low-volume so memory growth is negligible.
 
 use axum::{
@@ -59,7 +59,7 @@ impl AuthRateLimiter {
     }
 }
 
-/// Axum middleware function — wrap with `middleware::from_fn` plus a captured `Arc<AuthRateLimiter>`.
+/// Axum middleware function - wrap with `middleware::from_fn` plus a captured `Arc<AuthRateLimiter>`.
 pub async fn rate_limit_middleware(
     limiter: Arc<AuthRateLimiter>,
     req: Request<Body>,
@@ -75,7 +75,7 @@ pub async fn rate_limit_middleware(
         return (
             StatusCode::TOO_MANY_REQUESTS,
             [("Retry-After", "60")],
-            "Too many requests — please wait before retrying",
+            "Too many requests - please wait before retrying",
         )
             .into_response();
     }

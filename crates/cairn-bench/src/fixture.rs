@@ -2,9 +2,9 @@
 //!
 //! We deliberately do NOT redistribute the upstream LongMemEval or LoCoMo
 //! datasets. They are large (10k+ dialogs) and have redistribution
-//! restrictions. Instead, we capture the *shape* of those benchmarks — a
+//! restrictions. Instead, we capture the *shape* of those benchmarks - a
 //! handful of multi-session dialogs with entity-resolution and temporal
-//! questions — so the harness has something reproducible to run.
+//! questions - so the harness has something reproducible to run.
 //!
 //! Numbers published in `docs/BENCHMARKS.md` are from these fixtures. For
 //! cross-comparison with published agentmemory numbers, run the upstream
@@ -30,7 +30,7 @@ pub struct Question {
     pub id: String,
     pub text: String,
     pub expected_fact_ids: Vec<String>,
-    /// Loose semantic check — useful for grading when fact IDs differ across
+    /// Loose semantic check - useful for grading when fact IDs differ across
     /// harness implementations.
     pub keywords: Vec<String>,
 }

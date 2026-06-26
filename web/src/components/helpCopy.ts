@@ -51,7 +51,7 @@ export const HELP: Record<string, HelpCopy> = {
       "Click Verify to re-check the chain. Any mismatch means the ledger was tampered with.",
     ],
     impact:
-      "Bytes saved → tokens saved → USD saved. This page is the proof that the read modes are actually doing their job.",
+      "Bytes saved -> tokens saved -> USD saved. This page is the proof that the read modes are actually doing their job.",
   },
   "/trust": {
     title: "Reliability score",
@@ -77,7 +77,7 @@ export const HELP: Record<string, HelpCopy> = {
     title: "Your profile",
     what: "Standing preferences Cairn-backed agents honor, plus device tokens and settings.",
     how: [
-      "Profile is read-only here — use `cairn prefer` or the prefer MCP tool to add rules.",
+      "Profile is read-only here --- use `cairn prefer` or the prefer MCP tool to add rules.",
       "Issue and revoke device tokens under Tokens.",
     ],
     impact:
@@ -88,7 +88,7 @@ export const HELP: Record<string, HelpCopy> = {
     what: "Issue, list, and revoke the tokens your CLI / MCP clients use to talk to this server.",
     how: [
       "Click Issue token. Pick a name and scope (admin / write / read).",
-      "Copy the token from the response — it is shown once. Revoke here when a device is lost.",
+      "Copy the token from the response --- it is shown once. Revoke here when a device is lost.",
     ],
     impact:
       "Tokens are bearer credentials. Revoke immediately on loss; expired tokens are rejected, not auto-rotated.",
@@ -128,7 +128,7 @@ export const HELP: Record<string, HelpCopy> = {
     what: "Server info, your admin session, and the sign-out button.",
     how: [
       "View the server version and uptime. Sign out to invalidate this browser's session cookie.",
-      "Rotate your admin password from the CLI — invalidates all sessions.",
+      "Rotate your admin password from the CLI --- invalidates all sessions.",
     ],
     impact:
       "Settings here are minimal because most config lives server-side. Sign out from a shared browser, not just close the tab.",

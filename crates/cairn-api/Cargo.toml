@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# In-container entrypoint — built into the Docker image, never shipped to
+# In-container entrypoint - built into the Docker image, never shipped to
 # the host. The host runs `cairn` (the renamed client binary); the
 # container runs `cairn-server` (this bin).
 [[bin]]

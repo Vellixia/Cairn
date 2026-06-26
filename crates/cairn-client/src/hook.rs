@@ -58,7 +58,7 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
                 .map(|m| format!("- ({}) {}\n", m.kind.as_str(), m.content))
                 .collect();
             if !lines.is_empty() {
-                ctx.push_str("Cairn memory — what you already know here:\n");
+                ctx.push_str("Cairn memory - what you already know here:\n");
                 for l in lines {
                     ctx.push_str(&l);
                 }
@@ -84,7 +84,7 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
             nm.tier = Some(MemoryTier::Episodic);
             nm.importance = Some(0.3);
             let _ = state.mem.remember(nm);
-            // Learn standing preferences stated in the prompt ("always use X", …).
+            // Learn standing preferences stated in the prompt ("always use X", ...).
             let _ = state.profile.capture_from_prompt(prompt);
         }
         "PostToolUse" => {
@@ -92,7 +92,10 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
                 .get("tool_name")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if matches!(tool, "Edit" | "Write" | "MultiEdit" | "NotebookEdit") {
+            if matches!(
+                tool,
+                "Edit" | "Write" | "MultiEdit" | "NotebookEdit" | "StrReplace"
+            ) {
                 if let Some(file) = payload
                     .get("tool_input")
                     .and_then(|t| t.get("file_path"))
@@ -103,7 +106,7 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
                         let _ = state.guard.note_verify(&report);
                         if !report.is_clean() {
                             let ctx = format!(
-                                "⚠ Cairn guard ({:?}): {}. The pre-edit original is retained — recover it with Cairn `expand {}` if this was unintended.",
+                                "[!] Cairn guard ({:?}): {}. The pre-edit original is retained - recover it with Cairn `expand {}` if this was unintended.",
                                 report.risk,
                                 report.message,
                                 report.baseline_hash.as_deref().unwrap_or("")
@@ -123,10 +126,10 @@ fn run_inner(cfg: &Config, event: &str) -> Result<()> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 // Remote-proxy mode: when CAIRN_SERVER is set the client has no local store.
 // We replicate the hook behaviour over HTTP instead.
-// ---------------------------------------------------------------------------
+// -------------------------------------------------------------------------
 
 struct RemoteClient {
     server: String,
@@ -141,9 +144,7 @@ impl RemoteClient {
         }
         Some(Self {
             server,
-            token: std::env::var("CAIRN_TOKEN")
-                .ok()
-                .filter(|t| !t.is_empty()),
+            token: std::env::var("CAIRN_TOKEN").ok().filter(|t| !t.is_empty()),
         })
     }
 
@@ -196,17 +197,13 @@ fn run_remote(rc: &RemoteClient, event: &str, payload: &Value) -> Result<()> {
                 if let Ok(mems) = resp.into_json::<Vec<Value>>() {
                     let non_pref: Vec<_> = mems
                         .iter()
-                        .filter(|m| {
-                            m.get("kind").and_then(Value::as_str) != Some("preference")
-                        })
+                        .filter(|m| m.get("kind").and_then(Value::as_str) != Some("preference"))
                         .collect();
                     if !non_pref.is_empty() {
-                        ctx.push_str("Cairn memory — what you already know here:\n");
+                        ctx.push_str("Cairn memory - what you already know here:\n");
                         for m in non_pref {
-                            let kind =
-                                m.get("kind").and_then(Value::as_str).unwrap_or("note");
-                            let content =
-                                m.get("content").and_then(Value::as_str).unwrap_or("");
+                            let kind = m.get("kind").and_then(Value::as_str).unwrap_or("note");
+                            let content = m.get("content").and_then(Value::as_str).unwrap_or("");
                             ctx.push_str(&format!("- ({kind}) {content}\n"));
                         }
                     }

@@ -13,7 +13,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 /// Build the proxy router bound to the given config. The router's state type
-/// is `Arc<ProxyConfig>` — handlers derive any per-request state from it.
+/// is `Arc<ProxyConfig>` - handlers derive any per-request state from it.
 pub fn build(config: Arc<ProxyConfig>) -> Router {
     Router::new()
         .route("/registry/packs", get(list_packs))

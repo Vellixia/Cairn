@@ -1,9 +1,9 @@
-# Cairn v6.1.0 — Test & Security Audit Report
+# Cairn v6.1.0 - Test & Security Audit Report
 
 **Date:** 2026-06-24  
 **Branch:** `v6.1.0`  
 **Auditor:** Claude Opus 4.8 (automated sprint)  
-**Scope:** full workspace — 21 crates, ~25.6k LOC, MSRV 1.85
+**Scope:** full workspace - 21 crates, ~25.6k LOC, MSRV 1.85
 
 ---
 
@@ -17,20 +17,20 @@ and adversarial/edge-case paths. `cargo fmt`, `cargo clippy -D warnings`, and `c
 
 ---
 
-## Phase 0 — Baseline (before any edits)
+## Phase 0 - Baseline (before any edits)
 
 | Check | Result |
 |---|---|
-| `cargo fmt --all -- --check` | **FAIL** — 24 diffs in newly-written tests (resolved by `cargo fmt`) |
-| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** — 0 warnings |
+| `cargo fmt --all -- --check` | **FAIL** - 24 diffs in newly-written tests (resolved by `cargo fmt`) |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** - 0 warnings |
 | `cargo build --workspace --locked` | **PASS** |
-| `cargo test --workspace` | **FAIL** — 7 test failures (detailed below) |
+| `cargo test --workspace` | **FAIL** - 7 test failures (detailed below) |
 | `cargo audit` | not installed locally; `deny.toml` in CI covers advisories |
-| `cargo deny check` | not installed locally; configuration reviewed manually (see §5) |
+| `cargo deny check` | not installed locally; configuration reviewed manually (see S5) |
 
 ---
 
-## Phase 1 — Real Failures Fixed
+## Phase 1 - Real Failures Fixed
 
 ### 1. `sse_backfill_replays_audit_events_with_since_id` (cairn-api)
 
@@ -44,7 +44,7 @@ with `.first()`. HelixDB stores rows in ascending insertion order, so `.first()`
 **Fix:** replaced `.first()` with `.iter().map(|r| get_i64(r, "value")).max().unwrap_or(0)` in
 both functions.
 
-**File:** `crates/cairn-store/src/helix.rs:740–760`
+**File:** `crates/cairn-store/src/helix.rs:740--760`
 
 ---
 
@@ -57,9 +57,9 @@ rank(pack)` check for `Team`-scoped packs (rank 1), allowing a `Public` user to 
 `Team`-restricted packs.
 
 **Fix:** corrected ranking to `Local=0, Public=1, Team=2` so `Public (1) >= Team (2)` = false
-→ `ScopeDenied`.
+-> `ScopeDenied`.
 
-**File:** `crates/cairn-registry/src/store.rs:679–691`
+**File:** `crates/cairn-registry/src/store.rs:679--691`
 
 ---
 
@@ -83,7 +83,7 @@ pass as valid.
 **Fix:** replaced with `entry.signature = "0".repeat(entry.signature.len())` which is always
 invalid.
 
-**File:** `crates/cairn-api/src/ledger.rs:294–298`
+**File:** `crates/cairn-api/src/ledger.rs:294--298`
 
 ---
 
@@ -110,7 +110,7 @@ to both `root` and `resolved` in `resolve_within_root`.
 
 ### 7. `rooted_read_allows_inside_and_rejects_outside` (cairn-context)
 
-**Root cause:** `tempfile::tempdir().unwrap().path().join("outside.txt")` — the `TempDir` was
+**Root cause:** `tempfile::tempdir().unwrap().path().join("outside.txt")` - the `TempDir` was
 a temporary expression, immediately dropped on Windows, deleting the directory before the read
 attempt.
 
@@ -121,18 +121,18 @@ test.
 
 ---
 
-## Phase 2 — Security Hardening
+## Phase 2 - Security Hardening
 
 ### S-1: Model integrity strict mode (`cairn-embed`)
 
-**Finding:** `CAIRN_EMBED_FASTEMBED_SHA256` unset → warning only. No way to enforce a pin at
+**Finding:** `CAIRN_EMBED_FASTEMBED_SHA256` unset -> warning only. No way to enforce a pin at
 the deployment level without modifying code.
 
 **Fix:** Added `CAIRN_EMBED_REQUIRE_PINNED=1` env var. When set and no SHA-256 pin is
 configured, startup hard-errors with the current model hash in the message so the operator can
 set the pin immediately.
 
-**File:** `crates/cairn-embed/src/lib.rs:317–332`  
+**File:** `crates/cairn-embed/src/lib.rs:317--332`  
 **Tests:** `require_pinned_errors_when_pin_absent` (requires `--features local`)
 
 ---
@@ -146,7 +146,7 @@ symlink-loop or maliciously crafted cache directory could cause a stack overflow
 guard. Directories beyond depth 8 are silently skipped. The legitimate HF cache structure is at
 most 5 levels deep (`hub/models--*/snapshots/<rev>/onnx/model.onnx`).
 
-**File:** `crates/cairn-embed/src/lib.rs:362–400`  
+**File:** `crates/cairn-embed/src/lib.rs:362--400`  
 **Tests:** `newest_onnx_depth_cap_prevents_infinite_walk` (requires `--features local`)
 
 ---
@@ -159,7 +159,7 @@ leakage path found.
 
 ---
 
-### S-4: Scope-gate bug → privilege escalation (covered under §Fixes #2)
+### S-4: Scope-gate bug -> privilege escalation (covered under SFixes #2)
 
 The `scope_allows` rank inversion was a **privilege escalation**: any `Public`-trusted agent
 could publish `Team`-scoped packs, bypassing the team isolation boundary. Fixed as described
@@ -167,9 +167,9 @@ above.
 
 ---
 
-## Phase 3 — Deep Test Expansion
+## Phase 3 - Deep Test Expansion
 
-Test count: **~330 baseline → 464 after sprint** (+134 tests, +41%).
+Test count: **~330 baseline -> 464 after sprint** (+134 tests, +41%).
 
 ### Crates expanded
 
@@ -177,7 +177,7 @@ Test count: **~330 baseline → 464 after sprint** (+134 tests, +41%).
 |---|---|---|
 | `cairn-assemble` | +10 | empty/whitespace/huge input, token budget edge cases, idempotence |
 | `cairn-guard` | +14 | rate-limit boundary, zero-window, concurrent access, rule ordering |
-| `cairn-ingest` | +42 | VTT/SRT/JSON parsers — truncated, binary garbage, encoding errors, round-trips |
+| `cairn-ingest` | +42 | VTT/SRT/JSON parsers - truncated, binary garbage, encoding errors, round-trips |
 | `cairn-proxy` | +8 | fanout with slow/failing targets, empty pool, response merging |
 | `cairn-session` | +16 | generation-counter invalidation, concurrent ops, expiry, empty state |
 | `cairn-shell` | +18 | argument injection, empty command, env passthrough |
@@ -191,37 +191,37 @@ Test count: **~330 baseline → 464 after sprint** (+134 tests, +41%).
 - **Trivial/degenerate:** empty strings, zero values, single-element inputs, no-op calls
 - **Boundary:** off-by-one limits, max/min values, exactly-at vs one-over caps
 - **Error paths:** every major `Result::Err` branch, malformed input, bad signatures
-- **Round-trip:** serialize→deserialize, sign→verify, compress→expand
+- **Round-trip:** serialize->deserialize, sign->verify, compress->expand
 - **Adversarial:** parser fuzzing (truncated, binary garbage, oversized inputs)
 - **Concurrency:** parallel operations on shared state with `#[tokio::test]`
 - **Property-style:** commutativity, associativity, idempotence on CRDTs
 
 ---
 
-## Phase 4 — Dependency Audit
+## Phase 4 - Dependency Audit
 
 `cargo-audit` and `cargo-deny` are not installed in the local environment; both run in CI.
 `deny.toml` was reviewed manually:
 
 | Advisory | Crate | Status |
 |---|---|---|
-| RUSTSEC-2024-0436 | `paste` (via rust-embed 8.x) | Documented ignore — requires breaking upgrade |
-| RUSTSEC-2025-0119 | `number_prefix` (via indicatif) | Documented ignore — no maintained fork |
-| RUSTSEC-2025-0134 | `rustls-pemfile` (via axum-server 0.7.x) | Documented ignore — bounded startup-only risk |
+| RUSTSEC-2024-0436 | `paste` (via rust-embed 8.x) | Documented ignore - requires breaking upgrade |
+| RUSTSEC-2025-0119 | `number_prefix` (via indicatif) | Documented ignore - no maintained fork |
+| RUSTSEC-2025-0134 | `rustls-pemfile` (via axum-server 0.7.x) | Documented ignore - bounded startup-only risk |
 
 All three documented ignores have written rationale in `deny.toml`. No new advisories
 identified in this sprint.
 
 ---
 
-## Phase 5 — Code Quality
+## Phase 5 - Code Quality
 
 | Check | Result |
 |---|---|
 | `cargo fmt --all -- --check` | **PASS** (clean after `cargo fmt --all`) |
-| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** — 0 errors, 0 warnings |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **PASS** - 0 errors, 0 warnings |
 | `cargo build --workspace --locked` | **PASS** |
-| `cargo test --workspace` | **PASS** — 464 passed, 0 failed, 5 ignored |
+| `cargo test --workspace` | **PASS** - 464 passed, 0 failed, 5 ignored |
 
 ---
 
@@ -237,7 +237,7 @@ identified in this sprint.
 
 ---
 
-## Phase 6 — Web Dashboard Testing
+## Phase 6 - Web Dashboard Testing
 
 The Next.js dashboard at `web/` was exercised end-to-end against a live Cairn backend
 (Docker, `CAIRN_HOST=0.0.0.0`). All core flows were verified:
@@ -245,14 +245,14 @@ The Next.js dashboard at `web/` was exercised end-to-end against a live Cairn ba
 | Page / Flow | Result |
 |---|---|
 | Login (admin) | PASS |
-| Now — KPI overview (memories, reliability, health indicators) | PASS |
-| Memory → Recall (vector search, scored results) | PASS |
-| Trust → Score (100/100, sample count) | PASS |
-| Trust → Sanitize (secret redaction scan) | PASS — detects `named_secret`, `open_ai_key`, `jwt` |
-| You → Tokens (issue device token) | PASS — toast confirms issuance |
-| You → Audit (audit event log, timestamps) | PASS — timestamps correct after `bump_audit_counter` fix |
+| Now - KPI overview (memories, reliability, health indicators) | PASS |
+| Memory -> Recall (vector search, scored results) | PASS |
+| Trust -> Score (100/100, sample count) | PASS |
+| Trust -> Sanitize (secret redaction scan) | PASS - detects `named_secret`, `open_ai_key`, `jwt` |
+| You -> Tokens (issue device token) | PASS - toast confirms issuance |
+| You -> Audit (audit event log, timestamps) | PASS - timestamps correct after `bump_audit_counter` fix |
 
-### W-1: React hydration error — `<div>` inside `<p>` (fixed)
+### W-1: React hydration error - `<div>` inside `<p>` (fixed)
 
 **Finding:** `Badge` in [`web/src/components/ui/badge.tsx`](../web/src/components/ui/badge.tsx)
 rendered a `<div>`, which is invalid HTML inside `<p>`. `ItemDescription` renders `<p>`, and
@@ -272,7 +272,7 @@ Cairn backend. The static-export build works fine (the binary serves both), but 
 development was unusable.
 
 **Fix:** Added `rewrites()` to [`web/next.config.mjs`](../web/next.config.mjs) forwarding
-`/api/:path*` → `http://127.0.0.1:7777` in development only. Rewrites are ignored by
+`/api/:path*` -> `http://127.0.0.1:7777` in development only. Rewrites are ignored by
 `output: "export"` so the production build is unaffected.
 
 ---

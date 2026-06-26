@@ -1,6 +1,6 @@
 [package]
 name = "cairn-ingest"
-description = "Transcript ingestion — VTT/SRT/JSON parsers + chunking + memory materialization (v0.5.0 Sprint 22)."
+description = "Transcript ingestion - VTT/SRT/JSON parsers + chunking + memory materialization (v0.5.0 Sprint 22)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

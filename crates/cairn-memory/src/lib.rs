@@ -2,7 +2,7 @@
 //!
 //! Dedup on exact content; recall ranked by BM25 over the corpus, blended with Ebbinghaus
 //! retention (memories decay unless reinforced) and importance. Consolidation moves memories
-//! across the four tiers (working → episodic → semantic → procedural). Vector/graph hybrid
+//! across the four tiers (working -> episodic -> semantic -> procedural). Vector/graph hybrid
 //! retrieval builds on this foundation.
 
 use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result};
@@ -57,9 +57,9 @@ impl MemoryEngine {
     /// Recall the most relevant memories for a query.
     ///
     /// **Hybrid retrieval:** lexical relevance (BM25 over the corpus) and, when the backend has a
-    /// vector index, semantic relevance (HNSW kNN) are fused with Reciprocal Rank Fusion — a
+    /// vector index, semantic relevance (HNSW kNN) are fused with Reciprocal Rank Fusion - a
     /// scale-free combination of the two rankings. Importance and Ebbinghaus recency break ties.
-    /// On a lexical-only backend (`semantic_recall` → `None`) this degrades to pure BM25.
+    /// On a lexical-only backend (`semantic_recall` -> `None`) this degrades to pure BM25.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>> {
         // Single-tenant: scope everything to the implicit default org.
         self.recall_for_org(query, limit, OrgId::default())
@@ -97,7 +97,7 @@ impl MemoryEngine {
         let bm25_scores: Vec<f32> = (0..mems.len()).map(|i| bm25.score(i, &q_terms)).collect();
         let bm25_rank = ranks_desc(&bm25_scores);
 
-        // Semantic ranking (vector kNN) as id → rank, when the backend supports it.
+        // Semantic ranking (vector kNN) as id -> rank, when the backend supports it.
         let sem_rank: HashMap<String, usize> = self
             .store
             .semantic_recall(query, limit.max(SEMANTIC_K))?
@@ -135,7 +135,7 @@ impl MemoryEngine {
             let _ = self.store.touch_memory(&s.memory.id);
         }
         // Apply the agentmemory reinforcement curve on each returned memory. The bump is best-
-        // effort — a transient store error must not break recall (the agent still gets its
+        // effort - a transient store error must not break recall (the agent still gets its
         // answer; we just lose a small confidence nudge for this turn).
         for s in &scored {
             if let Err(e) = self.store.reinforce_memory(&s.memory.id) {
@@ -172,7 +172,7 @@ impl MemoryEngine {
         Ok(all)
     }
 
-    /// Consolidate memory across the four tiers (working → episodic → semantic → procedural),
+    /// Consolidate memory across the four tiers (working -> episodic -> semantic -> procedural),
     /// the way human memory turns transient experience into durable knowledge. Returns how many
     /// memories were promoted. Idempotent: a memory only advances when it meets the next bar.
     pub fn consolidate(&self) -> Result<usize> {
@@ -190,7 +190,7 @@ impl MemoryEngine {
     }
 
     /// Edit a memory's content/importance/concepts/files. Pass `None` to leave a field alone.
-    /// `confidence` and `pinned` are deliberately NOT editable here — they have their own
+    /// `confidence` and `pinned` are deliberately NOT editable here - they have their own
     /// helpers (`reinforce` happens on recall, `pin` is a single toggle).
     pub fn edit(
         &self,
@@ -213,7 +213,7 @@ impl MemoryEngine {
     /// via Reciprocal Rank Fusion, then re-ranked with MMR diversity.
     ///
     /// `rerank_depth` controls how many top hits get re-ranked (MMR is O(n²) per top result;
-    /// 20 is a good default — small enough to be cheap, large enough for a real "smallest
+    /// 20 is a good default - small enough to be cheap, large enough for a real "smallest
     /// high-signal working set").
     pub fn hybrid_search(
         &self,
@@ -221,7 +221,7 @@ impl MemoryEngine {
         limit: usize,
         rerank_depth: usize,
     ) -> Result<Vec<ScoredMemory>> {
-        // Pull a wider candidate set than the user asked for — RRF + MMR both need more
+        // Pull a wider candidate set than the user asked for - RRF + MMR both need more
         // than the final limit to work well.
         let candidates = self.recall(query, (limit + rerank_depth).max(50))?;
         Ok(mmr_rerank(candidates, limit, 0.7))
@@ -240,7 +240,7 @@ impl MemoryEngine {
     }
 
     /// Crystallize working-tier memories for `session_id` (or all working memories if `None`)
-    /// into a single semantic-tier "crystal" memory — the agentmemory pattern. The crystal's
+    /// into a single semantic-tier "crystal" memory - the agentmemory pattern. The crystal's
     /// content is a deterministic summary (first content + count + latest timestamps), its
     /// `derived_from` edge links to every input, and each input gets a `supersedes` edge back.
     /// Returns the crystal's id.
@@ -269,7 +269,7 @@ impl MemoryEngine {
         nm.derived_from = inputs.iter().map(|m| m.id.clone()).collect();
         nm.concepts = inputs[0].concepts.clone();
         let crystal = self.remember(nm)?;
-        // Mark each input as superseded by the crystal — this is the per-input edge update.
+        // Mark each input as superseded by the crystal - this is the per-input edge update.
         for input in inputs {
             let mut updated = input.clone();
             updated.supersedes.push(crystal.id.clone());
@@ -320,7 +320,7 @@ impl MemoryEngine {
                 });
             }
             for target in &m.applies_to {
-                // applies_to points at a file/symbol/project, not a memory id — we model it
+                // applies_to points at a file/symbol/project, not a memory id - we model it
                 // as a graph node with kind "external" so the dashboard can render it.
                 edges.push(MemoryGraphEdge {
                     source: m.id.clone(),
@@ -333,7 +333,7 @@ impl MemoryEngine {
     }
 }
 
-/// A trimmed memory for graph rendering — keeps the payload small for the dashboard.
+/// A trimmed memory for graph rendering - keeps the payload small for the dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryGraphNode {
     pub id: String,
@@ -363,7 +363,7 @@ fn preview(content: &str, max: usize) -> String {
         content.to_string()
     } else {
         let mut out: String = content.chars().take(max).collect();
-        out.push('…');
+        out.push_str("...");
         out
     }
 }
@@ -400,10 +400,10 @@ pub fn reinforce(c: f32) -> f32 {
 
 /// Maximum Marginal Relevance (MMR) rerank. Trades off relevance vs diversity:
 ///
-/// `score(i) = λ * relevance(i) - (1-λ) * max_{j in selected} sim(i, j)`
+/// `score(i) = lambda * relevance(i) - (1-lambda) * max_{j in selected} sim(i, j)`
 ///
-/// `λ=1.0` is pure relevance (no diversity); `λ=0.0` is pure diversity (max-spanning).
-/// We default to `0.7` — strongly relevance-biased but breaks up obvious duplicates.
+/// `lambda=1.0` is pure relevance (no diversity); `lambda=0.0` is pure diversity (max-spanning).
+/// We default to `0.7` - strongly relevance-biased but breaks up obvious duplicates.
 /// `sim` here is a cheap lexical similarity on the first 200 chars of content; in practice
 /// cosine over embeddings would be better, but this keeps MMR self-contained and avoids an
 /// embed round-trip per rerank step.
@@ -412,7 +412,7 @@ pub fn mmr_rerank(items: Vec<ScoredMemory>, limit: usize, lambda: f32) -> Vec<Sc
         return Vec::new();
     }
     if items.len() < limit {
-        // Not enough candidates to make a choice — just return them in score-desc order
+        // Not enough candidates to make a choice - just return them in score-desc order
         // so the caller gets a stable, sensible result.
         let mut sorted = items;
         sorted.sort_by(|a, b| {
@@ -540,7 +540,7 @@ fn tiebreak(m: &Memory, now: DateTime<Utc>) -> f32 {
 
 /// The tier a memory should advance to on consolidation, or `None` if it stays put. Working
 /// memories survive their session into episodic; reinforced episodic memories (accessed again)
-/// become durable — facts/decisions/preferences become semantic knowledge, and gotchas (hard-won
+/// become durable - facts/decisions/preferences become semantic knowledge, and gotchas (hard-won
 /// "avoid X" lessons) become procedural.
 fn next_tier(m: &Memory) -> Option<MemoryTier> {
     match m.tier {
@@ -739,7 +739,7 @@ mod tests {
         );
     }
 
-    // ---- v0.5.0 Sprint 2: confidence + edit/delete/pin -------------------------------------
+    // -- v0.5.0 Sprint 2: confidence + edit/delete/pin -----------------------------------
 
     #[test]
     fn reinforce_curve_matches_agentmemory_formula() {
@@ -837,7 +837,7 @@ mod tests {
         assert!(w.iter().any(|x| x.id == important.id));
     }
 
-    // ---- v0.5.0 Sprint 3: crystallize + memory graph ---------------------------------------
+    // -- v0.5.0 Sprint 3: crystallize + memory graph -------------------------------------
 
     #[test]
     fn crystallize_promotes_working_into_a_crystal_with_derived_from_edges() {
@@ -902,11 +902,11 @@ mod tests {
         assert!(g.nodes.iter().any(|n| n.id == b.id));
     }
 
-    // ---- v0.5.0 Sprint 7: hybrid search + MMR + graph boost --------------------------------
+    // -- v0.5.0 Sprint 7: hybrid search + MMR + graph boost ------------------------------
 
     #[test]
     fn mmr_rerank_returns_diverse_top_results() {
-        // Two near-duplicate high-relevance hits plus one orthogonal hit. MMR (λ=0.5) should
+        // Two near-duplicate high-relevance hits plus one orthogonal hit. MMR (lambda=0.5) should
         // prefer diversity and pick both halves rather than both near-duplicates.
         let mut hits = vec![
             ScoredMemory {
@@ -926,7 +926,7 @@ mod tests {
         assert_eq!(reranked.len(), 2);
         // The first pick is the highest-scorer (sqlite blob store).
         assert!(reranked[0].memory.content.contains("blob store"));
-        // The second pick should NOT be the near-duplicate sqlite hit — it's too similar.
+        // The second pick should NOT be the near-duplicate sqlite hit - it's too similar.
         assert!(
             reranked[1].memory.content.contains("ownership"),
             "MMR should break near-duplicates; got {}",
@@ -937,7 +937,7 @@ mod tests {
     #[test]
     fn mmr_lambda_one_is_pure_relevance() {
         // Three hits so MMR actually has to choose (the early-return when len<=limit doesn't
-        // fire). Lambda 1.0 = relevance only — the top two by score should win.
+        // fire). Lambda 1.0 = relevance only - the top two by score should win.
         let hits = vec![
             ScoredMemory {
                 memory: synth("alpha"),
@@ -990,7 +990,7 @@ mod tests {
             .unwrap();
         mem.remember(NewMemory::new("rust async runtime tokio selection"))
             .unwrap();
-        // Two near-duplicates + one orthogonal — MMR should give us one of the duplicates
+        // Two near-duplicates + one orthogonal - MMR should give us one of the duplicates
         // and the orthogonal result, not both duplicates.
         let hits = mem
             .hybrid_search("cairn embedding configuration", 2, 20)

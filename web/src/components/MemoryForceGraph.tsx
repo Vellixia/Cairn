@@ -5,7 +5,7 @@
 // We *could* use `react-force-graph-2d`, but it pulls in d3-force + canvas and complicates the
 // Next.js static export (ssr: false, layout shifts, etc.). This implementation uses pure
 // React + SVG, with a small iterative Verlet-style layout. For the dashboard's target of
-// 50–200 nodes it's more than fast enough — and the test plan's "<1s for 50 nodes" budget is
+// 50--200 nodes it's more than fast enough --- and the test plan's "<1s for 50 nodes" budget is
 // trivial to hit when there's no d3-force dependency to bootstrap.
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -186,7 +186,7 @@ export function MemoryForceGraph({ data }: { data: GraphData }) {
 
         {placed.map((n) => {
           // Skip rendering nodes that are external targets of `applies_to` (they aren't
-          // memories — just file/symbol references). We still render the edge, but the
+          // memories --- just file/symbol references). We still render the edge, but the
           // external target is drawn as a small square so it's visually distinct.
           const isExternal = !data.nodes.some((dn) => dn.id === n.id);
           if (isExternal) return null;
@@ -278,7 +278,7 @@ export function MemoryForceGraph({ data }: { data: GraphData }) {
                       style={{ paintOrder: "stroke", stroke: "#0B0F14", strokeWidth: 3 }}
                     >
                       {n.content_preview.length > 60
-                        ? n.content_preview.slice(0, 60) + "…"
+                        ? n.content_preview.slice(0, 60) + "..."
                         : n.content_preview}
                     </text>
                   </g>
@@ -310,7 +310,7 @@ export function MemoryForceGraph({ data }: { data: GraphData }) {
         ))}
         {selected && (
           <span className="ml-auto text-[11px]">
-            <b>{selected.kind}</b> · {selected.tier} · conf {selected.confidence.toFixed(2)} ·{" "}
+            <b>{selected.kind}</b> . {selected.tier} . conf {selected.confidence.toFixed(2)} .{" "}
             {selected.content_preview}
           </span>
         )}

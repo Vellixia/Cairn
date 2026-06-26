@@ -27,7 +27,7 @@ pub struct PromptDef {
     pub template: fn(&Value) -> String,
 }
 
-/// Five canonical prompts. The set is locked for v0.5.0 — adding more is a
+/// Five canonical prompts. The set is locked for v0.5.0 - adding more is a
 /// breaking change for clients that enumerate the prompt list.
 pub fn prompt_defs() -> &'static [PromptDef] {
     &[

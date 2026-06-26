@@ -16,7 +16,7 @@ export default function TrustPage() {
       <HubTabs
         view="trust"
         title="Trust"
-        description="Reliability score and drift samples — the agent maintains checkpoints and anchors."
+        description="Reliability score and drift samples --- the agent maintains checkpoints and anchors."
         tabs={TRUST_TABS}
         defaultTab="score"
       />

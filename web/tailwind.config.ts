@@ -1,7 +1,7 @@
 import type { Config } from "tailwindcss";
 
 // Cairn brand tokens, mapped to shadcn's CSS-variable theme.
-// Dark-only dashboard — both :root and .dark are wired so light mode would
+// Dark-only dashboard --- both :root and .dark are wired so light mode would
 // also work, but <html color-scheme="dark"> keeps the renderer in dark.
 export default {
   darkMode: ["class"],
@@ -47,7 +47,7 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
-        // Cairn brand aliases — keep inline references working alongside shadcn.
+        // Cairn brand aliases --- keep inline references working alongside shadcn.
         ink: "#0B0F14",
         surface: "#12181F",
         surface2: "#1A2129",

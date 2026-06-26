@@ -1,4 +1,4 @@
-﻿//! Live cost-savings metrics.
+//! Live cost-savings metrics.
 //!
 //! The Cairn context engine's [`cairn_context`] and shell compressor already emit savings data
 //! through the API and through the `cairn bench` tool. This module aggregates those signals
@@ -11,8 +11,8 @@
 //!   approximated via access_count > 0 in the memory engine)
 //! - **total memories, total checkpoints** (the headline trust counters)
 //!
-//! The numbers are best-effort and intentionally cheap â€” no on-the-fly recomputation across
-//! millions of records. The point is "did the user's token spend go down?" â€” a running tally
+//! The numbers are best-effort and intentionally cheap - no on-the-fly recomputation across
+//! millions of records. The point is "did the user's token spend go down?" - a running tally
 //! updated on every read.
 
 use crate::AppState;
@@ -22,8 +22,8 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-/// Live counter â€” `bytes_in` is the compact payload we served the agent, `bytes_out_full` is
-/// what we *would* have sent uncompressed (so saved = full âˆ’ compact, divided by `full`).
+/// Live counter - `bytes_in` is the compact payload we served the agent, `bytes_out_full` is
+/// what we *would* have sent uncompressed (so saved = full ' compact, divided by `full`).
 #[derive(Debug, Default)]
 pub struct SavingsCounter {
     pub compact: AtomicU64,
@@ -52,7 +52,7 @@ impl SavingsCounter {
         }
     }
 
-    /// Record one assembler pass â€” its `used_tokens` and dropped-token counts add to the ledger
+    /// Record one assembler pass - its `used_tokens` and dropped-token counts add to the ledger
     /// so the savings dashboard can show "I assembled N queries, kept M tokens, dropped K".
     pub fn record_assemble(&self, r: &AssemblyReport) {
         self.wakeup_tokens
@@ -107,14 +107,14 @@ pub struct SavingsSnapshot {
     pub compact_bytes: u64,
     pub full_bytes: u64,
     pub saved_bytes: u64,
-    /// 0.0â€“1.0 fraction of full bytes saved by compaction.
+    /// 0.0--1.0 fraction of full bytes saved by compaction.
     pub saved_ratio: f64,
     pub calls: u64,
     pub hits: u64,
     pub bounces: u64,
-    /// 0.0â€“1.0 â€” share of read calls that returned something.
+    /// 0.0--1.0 - share of read calls that returned something.
     pub hit_rate: f64,
-    /// 0.0â€“1.0 â€” share of read calls that returned nothing.
+    /// 0.0--1.0 - share of read calls that returned nothing.
     pub bounce_rate: f64,
     pub wakeup_tokens: u64,
     pub recall_tokens: u64,
@@ -130,7 +130,7 @@ impl SavingsSnapshot {
     }
 }
 
-/// `GET /api/metrics` â€” live savings + hit-rate + bounce-rate.
+/// `GET /api/metrics` - live savings + hit-rate + bounce-rate.
 pub async fn metrics(State(s): State<AppState>) -> Result<Json<MetricsResponse>, crate::ApiError> {
     let snap = s.savings.snapshot();
     let memories = s.store.count_memories().unwrap_or(0);
@@ -159,9 +159,9 @@ pub struct MetricsResponse {
     pub server: serde_json::Value,
 }
 
-// ---- wire type so the metric counter survives in AppState ------------------------------------
+// -- wire type so the metric counter survives in AppState ----------------------------------
 
-/// Thread-safe handle to the live savings counter â€” held in [`AppState`] and incremented by
+/// Thread-safe handle to the live savings counter - held in [`AppState`] and incremented by
 /// instrumented handlers. Lives next to AppState so the metrics endpoint can read it cheaply.
 #[derive(Clone, Default)]
 pub struct SavingsState(pub Arc<SavingsCounter>);
@@ -181,7 +181,7 @@ pub fn server_started() -> i64 {
     *STARTED.get_or_init(|| chrono::Utc::now().timestamp())
 }
 
-// ---- tests ----------------------------------------------------------------------------------
+// -- tests --------------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -241,7 +241,7 @@ mod tests {
             usd > 0.0,
             "usd_saved should be > 0 for non-zero savings; got {usd}"
         );
-        // Sanity bound â€” 9900 bytes â‰ˆ 2475 tokens â‰ˆ $0.074.
+        // Sanity bound - 9900 bytes  2475 tokens  $0.074.
         assert!(usd < 1.0);
     }
 }

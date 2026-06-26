@@ -9,7 +9,7 @@ import SessionDetail from "./SessionDetail";
  * `output: "export"` pre-renders one shell page. Real session ids are loaded
  * client-side via `react-query`, so the dashboard's
  * `/dashboard/sessions/<id>` URL works whether or not a static shell exists
- * for that exact id — the cairn-server static-fallback serves the page if
+ * for that exact id --- the cairn-server static-fallback serves the page if
  * Next's export hasn't pre-rendered it.
  */
 export function generateStaticParams() {

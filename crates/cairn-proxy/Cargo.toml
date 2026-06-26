@@ -1,6 +1,6 @@
 [package]
 name = "cairn-proxy"
-description = "cairn.sh reverse proxy — fan-out across self-hosted cairn registries (v0.5.0 Sprint 19b)."
+description = "cairn.sh reverse proxy - fan-out across self-hosted cairn registries (v0.5.0 Sprint 19b)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -78,8 +78,8 @@ export default function DriftCenterPage() {
           <CardTitle>Pending &amp; resolved</CardTitle>
           <CardDescription>
             {drifts.data
-              ? `${drifts.data.length} event(s) · newest first`
-              : "Loading…"}
+              ? `${drifts.data.length} event(s) . newest first`
+              : "Loading..."}
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -92,7 +92,7 @@ export default function DriftCenterPage() {
             </div>
           ) : drifts.data && drifts.data.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No drift events yet — that&apos;s a good thing.
+              No drift events yet --- that&apos;s a good thing.
             </p>
           ) : (
             <ul className="space-y-2">
@@ -100,7 +100,7 @@ export default function DriftCenterPage() {
                 <Item key={d.id} variant="outline" size="sm">
                   <ItemContent>
                     <ItemTitle className="font-mono text-xs">
-                      #{d.id} · {d.path}
+                      #{d.id} . {d.path}
                     </ItemTitle>
                     <ItemDescription>
                       <Badge
@@ -115,7 +115,7 @@ export default function DriftCenterPage() {
                         {d.status}
                       </Badge>
                       <span className="text-[10px] text-muted-foreground">
-                        {d.detail} · {new Date(d.ts).toLocaleString()}
+                        {d.detail} . {new Date(d.ts).toLocaleString()}
                       </span>
                     </ItemDescription>
                   </ItemContent>

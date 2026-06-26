@@ -15,7 +15,7 @@ import { SidebarProvider } from "@/components/ui/sidebar";
  * shortcuts modal are mounted here so they're available on every dashboard page.
  *
  * v0.5.0 Sprint 20: also registers the service worker (PWA) on first paint. The SW is
- * a no-op when the page is opened without HTTPS (browsers require secure context) — the
+ * a no-op when the page is opened without HTTPS (browsers require secure context) --- the
  * dashboard itself still works, just without offline cache + push.
  */
 export default function DashboardLayout({

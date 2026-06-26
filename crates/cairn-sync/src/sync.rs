@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-/// Vector clock for tracking causal order across replicas. Each entry is "actor name →
+/// Vector clock for tracking causal order across replicas. Each entry is "actor name ->
 /// events seen from that actor". Two events are concurrent iff their clocks are
 /// incomparable (neither dominates the other).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,7 +82,7 @@ pub enum MemoryOp {
         id: String,
         content: String,
         importance: f32,
-        /// Tags and concepts are OR-Sets — concurrent adds on different sides merge.
+        /// Tags and concepts are OR-Sets - concurrent adds on different sides merge.
         tags: BTreeSet<String>,
         concepts: BTreeSet<String>,
         confidence: f64,
@@ -123,7 +123,7 @@ impl MemoryOp {
 }
 
 /// What one device sends to another during a sync round. The `clock` field is the
-/// sender's current vector clock — the receiver merges it to update its own view of
+/// sender's current vector clock - the receiver merges it to update its own view of
 /// the world before applying any ops.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncEnvelope {
@@ -134,7 +134,7 @@ pub struct SyncEnvelope {
 }
 
 /// The outcome of applying a remote envelope on the local store. `concurrent` lists
-/// the ids where the remote op happened in parallel with a local op — those need
+/// the ids where the remote op happened in parallel with a local op - those need
 /// conflict-resolution handling before they're truly "merged".
 #[derive(Debug, Clone, Default)]
 pub struct SyncResult {
@@ -143,7 +143,7 @@ pub struct SyncResult {
     pub skipped: Vec<String>,
 }
 
-/// State carried on each side of a sync — the actor's own name + its clock.
+/// State carried on each side of a sync - the actor's own name + its clock.
 #[derive(Debug, Clone)]
 pub struct SyncPeer {
     pub name: String,
@@ -159,7 +159,7 @@ impl SyncPeer {
     }
 
     /// Apply a single remote op to the local store model. This is where the CRDT
-    /// merge logic lives — the caller hands us a function that knows how to read /
+    /// merge logic lives - the caller hands us a function that knows how to read /
     /// write the local memory store.
     ///
     /// Returns the action taken: applied / concurrent / skipped.
@@ -260,7 +260,7 @@ mod tests {
         assert!(alice.dominates(&bob));
         assert!(!bob.dominates(&alice));
 
-        // Now bob ticks once more — concurrent with alice's view of bob@2.
+        // Now bob ticks once more - concurrent with alice's view of bob@2.
         bob.tick("bob");
         assert!(!alice.dominates(&bob));
         assert!(!bob.dominates(&alice));
@@ -276,7 +276,7 @@ mod tests {
         let mut alice = SyncPeer::new("alice");
         let _bob = SyncPeer::new("bob");
 
-        // Each side applies its own put — locally it's "applied".
+        // Each side applies its own put - locally it's "applied".
         let r_alice_self = alice.apply_envelope(
             &SyncEnvelope {
                 from: "alice".into(),
@@ -288,7 +288,7 @@ mod tests {
         );
         assert_eq!(r_alice_self.applied, vec!["memory-1"]);
 
-        // Bob sends his put to alice. The clock is concurrent — neither dominates.
+        // Bob sends his put to alice. The clock is concurrent - neither dominates.
         let r = alice.apply_envelope(
             &SyncEnvelope {
                 from: "bob".into(),
@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn sync_bump_concurrent_with_put_is_concurrent() {
         // alice creates memory-1, then bob bumps access_count. The clocks are
-        // concurrent — neither dominates the other because alice bumped her clock
+        // concurrent - neither dominates the other because alice bumped her clock
         // for the put but not for the bump she hasn't seen yet.
         let mut alice = SyncPeer::new("alice");
         let alice_put = put("memory-1", "alice", "hello");
@@ -325,7 +325,7 @@ mod tests {
             |_| None,
         );
 
-        // Bob's bump with his own clock — alice doesn't know about bob yet.
+        // Bob's bump with his own clock - alice doesn't know about bob yet.
         let mut bob_clock = VectorClock::new();
         bob_clock.tick("bob");
         let bob_bump = MemoryOp::Bump {
