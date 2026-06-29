@@ -384,16 +384,20 @@ fn install_opencode(server: Option<&str>, token: Option<&str>) -> Result<()> {
 /// so we strip the config's parent directory from the absolute plugin path and forward-
 /// slash the separator (Windows paths use `\` which OpenCode does not parse).
 fn relative_plugin_path(plugin_abs: &str, config_path: &Path) -> String {
-    let config_dir = config_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
     // String-based path handling: tests + cross-platform configs use both `/` and `\`
-    // separators. Normalize to forward slashes and do string strip_prefix so Windows-
-    // style paths behave the same on Linux CI.
+    // separators. We operate entirely on the string form so Windows-style absolute
+    // paths behave the same on Linux CI (where `Path::parent()` would lose the
+    // backslash-separated components).
     let plugin_norm = plugin_abs.replace('\\', "/");
-    let config_dir_norm = config_dir.to_string_lossy().replace('\\', "/");
-    let prefix = if config_dir_norm.ends_with('/') {
+    let config_norm = config_path.to_string_lossy().replace('\\', "/");
+    // Strip the basename from the config path to recover the directory.
+    let config_dir_norm = match config_norm.rsplit_once('/') {
+        Some((dir, _)) => dir.to_string(),
+        None => String::new(),
+    };
+    let prefix = if config_dir_norm.is_empty() {
+        String::new()
+    } else if config_dir_norm.ends_with('/') {
         config_dir_norm.clone()
     } else {
         format!("{config_dir_norm}/")
