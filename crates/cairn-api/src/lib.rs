@@ -107,6 +107,13 @@ pub struct AppState {
 impl AppState {
     pub fn new(cfg: &Config) -> cairn_core::Result<Self> {
         let store = Arc::new(Store::open(cfg)?);
+        Self::with_store(cfg, store)
+    }
+
+    /// Construct `AppState` from a caller-supplied `Arc<Store>`. Used by the hermetic
+    /// test bucket to wire a fully-in-memory store; production callers should keep using
+    /// `new`.
+    pub fn with_store(cfg: &Config, store: Arc<Store>) -> cairn_core::Result<Self> {
         let ctx = Arc::new(ContextEngine::new_with_root(
             store.clone(),
             cfg.workspace_root.clone(),
@@ -132,9 +139,6 @@ impl AppState {
             .secret_key
             .as_ref()
             .map(|k| Arc::new(SessionSigner::new(k.clone())));
-        // Seed the synthetic-event counter from the durable audit log so SSE ids for
-        // `stats-`/`drift-` events never collide with replayed audit-log ids.
-        // Performed before `store` is moved into `Self`.
         let events = {
             let seed = store
                 .max_audit_event_id()

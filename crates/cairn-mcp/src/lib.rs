@@ -53,6 +53,13 @@ impl McpServer {
 
     pub fn new(cfg: &Config) -> Result<Self> {
         let store = Arc::new(Store::open(cfg)?);
+        Self::with_store(cfg, store)
+    }
+
+    /// Construct an `McpServer` from a caller-supplied `Arc<Store>`. Used by the hermetic
+    /// test bucket to wire a fully-in-memory store; production callers should keep using
+    /// `new`.
+    pub fn with_store(cfg: &Config, store: Arc<Store>) -> Result<Self> {
         let mem = Arc::new(MemoryEngine::new(store.clone()));
         Ok(Self {
             ctx: Arc::new(ContextEngine::new_with_root(
