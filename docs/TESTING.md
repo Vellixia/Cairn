@@ -1,10 +1,112 @@
 # Cairn End-to-End Testing
 
-> **Note:** This document records test results from v0.5.0-v0.6.1. CLI commands like
+> **Note:** This document records test results from v0.5.0-v0.7.1. CLI commands like
 > `cairn pair`, `cairn sync`, `cairn export`, `cairn import`, `cairn contribute`,
 > `cairn pull`, and `cairn bench` have been removed in v0.6.4. The equivalent
 > functionality is now available via MCP tools (for AI agents) or the dashboard
 > (for humans). See `AGENTS.md` for the current CLI command set.
+
+## Two test layers
+
+Cairn v0.7.1 ships two complementary test buckets. Both are **local-only and AI-verified**;
+the CI does not run either. Every Rust test exercises a real Cairn crate against a real
+`Store::open_in_memory()` instance; every dashboard flow is driven by an AI agent using the
+`chrome-devtools` MCP server against the live dashboard.
+
+### 1. Rust integration tests - `crates/cairn-tests/`
+
+A workspace member hosting 17 hermetic integration test files under
+`crates/cairn-tests/tests/<NN>_<topic>.rs`. Each file is a separate `cargo test` binary,
+all run by `cargo test -p cairn-tests` (or `cargo test --workspace`). Tests use **no
+network and no live HelixDB** - they construct a real `cairn_store::Store` backed by a
+new in-memory `MemoryBackend` (added in 0.7.1) and exercise every engine.
+
+```sh
+cargo test -p cairn-tests                       # all 17 files, 134 tests
+cargo test -p cairn-tests --test 19_memory_engine     # one
+```
+
+Coverage (17 files, 134 tests):
+
+| # | File | Real crate surface |
+|---|------|-------------------|
+| 01 | `01_memory_tiers.rs` | `cairn_memory` followup/gotcha trackers, `analysis::{activity_heatmap, generate_architecture_report}`, `serde` round-trip for `NewMemory` |
+| 04 | `04_rerank.rs` | `cairn_rerank::{NullReranker, from_config}` + end-to-end `MemoryEngine::hybrid_search_with_rerank` over the in-memory store |
+| 05 | `05_guardrails.rs` | `cairn_guard::Guard::{verify_edit, set_anchor, anchor}` against the in-memory store (clean / large-deletion / suspicious-anchor paths) |
+| 06 | `06_shell_profiles.rs` | `cairn_shell::{compress_output, find_match, REGISTRY}` |
+| 07 | `07_share.rs` | `cairn_share::Sanitizer` (all secret kinds, sensitivity, idempotence) |
+| 08 | `08_pack_registry.rs` | `cairn_pack` Ed25519 sign/verify, `cairn_registry::TrustScope` |
+| 09 | `09_session.rs` | `cairn_session::SessionStore` save/load + drift append/approve + `latest_id` |
+| 10 | `10_sync_crypto.rs` | `cairn_sync::{GCounter, ORSet, VectorClock}` + `cairn_sync::crypto::{encrypt_envelope, decrypt_envelope}` round-trip |
+| 12 | `12_proactive.rs` | `cairn_proactive::intent::classify` (recall cues, file paths, suppression) |
+| 13 | `13_ingest.rs` | `cairn_ingest::{parse_vtt, parse_srt, parse_json, chunk_by_speaker_and_window}` |
+| 16 | `16_config.rs` | `Config::resolve(None)` env-driven, `OrgId` validation, `RerankConfig` redacted Debug |
+| 17 | `17_workspace_invariants.rs` | workspace member list, tilde constraints, hermetic-deps rule |
+| 18 | `18_context_engine.rs` | real `cairn_context::ContextEngine` over `Store::open_in_memory` - Full / Cached / Diff / Outline / anti-inflation / auto-delta |
+| 19 | `19_memory_engine.rs` | real `cairn_memory::MemoryEngine` - remember dedup, recall ranking, hybrid_search, gotcha promotion, crystallize, consolidate |
+| 20 | `20_assembler.rs` | real `cairn_assemble::Assembler::assemble` - budget enforcement, dropped items, JSON shape |
+| 22 | `22_mcp_dispatch.rs` | real `cairn_mcp::McpServer::dispatch` - tool list, remember/recall round-trip, assemble, sanitize, unknown-tool error |
+| 23 | `23_api_envelope.rs` | real `cairn_api::router` mounted via `tower::ServiceExt::oneshot` - /api/health, /api/capabilities, /api/openapi.json, /api/stats (auth-gated), 404 envelope |
+
+**Hermetic boundary:** the test bucket never talks to HelixDB. `Store::open_in_memory()`
+constructs a fully in-memory `Store` whose every operation matches the Helix backend's
+semantics (last-write-wins on `upsert_memory`, monotonic audit ids, single-use pairing codes,
+`__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)` so
+`MemoryEngine` falls back to lexical ranking, identical to the offline behaviour of the
+production server when `CAIRN_HELIX_URL` is unset.
+
+**Bugs surfaced by this bucket in 0.7.1:**
+- `crates/cairn-memory/src/gotcha_tracker.rs:122` and `followup_tracker.rs:56` panic on
+  freshly-booted systems (`Instant::now() - window` overflow when `window` exceeds system
+  uptime). Fixed in 0.7.1 via `checked_sub`. See
+  `web/test/findings/tracker-overflow-on-fresh-boot.md`.
+
+Add a new flow by dropping a `tests/<NN>_<topic>.rs` file - cargo discovers it. Tests must
+exercise a real Cairn crate API; hand-coded JSON literals and re-implementations of
+functions already in the crate are explicitly rejected (the previous 0.7.0 bucket had
+several such tautological tests; they were deleted).
+
+### 2. Web dashboard flow tests - `web/test/`
+
+The dashboard is driven by an AI agent using the `chrome-devtools` MCP server. No
+PowerShell, no agent-browser, no scripted assertions. The agent drives Chrome and asserts
+on real DOM state via accessibility snapshots + console messages.
+
+Read `web/test/flows.md` for the 13 flow checklists (login, recall, anchor, compression,
+tokens, audit, palette, etc.). Read `web/test/run-agent-tests.md` for the meta-instruction
+that drives the AI agent.
+
+When a flow fails for a real-product reason (a TypeError, a 404, a JSON parse error), write
+a finding to `web/test/findings/<slug>.md` using the template in `flows.md`. The findings
+folder is the durable artifact - bugs surface here, they are never silently fixed.
+Screenshots land in `web/test/screenshots/<NN>-<flow>/*.png`; the run summary in
+`web/test/findings/SUMMARY.md`.
+
+The 13 flows cover: login + overview, recall, wakeup + graph, anchor + drift, registry
+trust + packs, architecture + heatmap, compression lab, token issue/revoke, sessions +
+audit, assemble budget, PWA shell, command palette, and the error-envelope contract.
+
+**Findings from the 0.7.1 run:**
+- `tracker-overflow-on-fresh-boot.md` - production panic in `GotchaTracker` /
+  `FollowupTracker` (also surfaced in the Rust bucket).
+- `no-trust-anchor-route.md` - `/trust/anchor` does not exist; anchor widget is on `/`.
+- `registry-page-crash.md` - `/registry` client-side TypeError on `.title`.
+- `architecture-page-crash.md` - `/memory/architecture` client-side TypeError on `.title`.
+- `heatmap-page-crash.md` - `/memory/heatmap` client-side TypeError on `.title`.
+- `no-assemble-route.md` - no UI for the assemble budget API.
+- `mobile-pack-installs-json-error.md` - `/mobile` shows `SyntaxError: Unexpected token
+  '<', "<!DOCTYPE "... is not valid JSON` for RECENT PACK INSTALLS.
+- `command-palette-needs-ctrl-k.md` - bare `K` does not open the palette; `Ctrl+K` does.
+
+These are real product bugs. They are surfaced as findings, not fixed in 0.7.1 (a
+follow-up branch will repair them).
+
+**Hard rules (enforced via the `chrome-devtools` MCP):**
+- A step that times out, returns no snapshot, or returns an identical-looking screenshot
+  to the previous step is a **failure**. Write a finding. Never "PASS" the flow.
+- **No fake passes.** If you can't confirm, write a finding.
+
+## Historical context (pre-v0.7.0)
 
 Live testing of every Cairn use case through OpenCode MCP, direct MCP stdio, and the CLI.
 Tests run against the Docker-backed Cairn server (`http://localhost:7777`).
@@ -16,6 +118,12 @@ For the 0.5.0 release we also ship a **PowerShell scenario harness** at
 `scripts/e2e.ps1` covering 20 flows (memory, context, guardrails, sessions, sync,
 federation, registry, ingest, proactive, mobile companion). 67/69 assertions pass against
 a fresh `docker compose up`. See `docs/E2E.md` for the full list.
+
+For v0.7.0 we also ship the **agent-browser PowerShell harness** that the 0.7.1
+chrome-devtools flow layer replaced. The agent-browser harness produced 13/13 "PASS" but
+its assertions were URL-pattern only, so it missed the `/memory/architecture` and
+`/mobile` crashes. Replaced because the chrome-devtools version is AI-driven and asserts
+on real DOM state, not URL string matches.
 
 ---
 

@@ -52,6 +52,64 @@ docker compose up -d
 cd web && npm install && npm run dev   # :3000 -> API on :7777
 ```
 
+## Local testing (dev + AI verification, NOT in CI)
+
+Two hermetic test buckets live alongside the production code. Both are **local-only**; the
+CI does not run them.
+
+### Rust integration tests - `crates/cairn-tests/`
+
+A single workspace member (`cairn-tests`) that hosts `tests/<NN>_<topic>.rs` files - one
+integration test binary per file. Every test calls a real Cairn crate function against a
+real `Store::open_in_memory()` instance (no network, no HelixDB). The hermetic boundary is
+maintained by a per-test in-memory `cairn_store::Store`, exercising every engine without a
+running backend.
+
+```sh
+cargo test -p cairn-tests                 # 17 files, 134 tests
+cargo test -p cairn-tests --test 18_context_engine  # just one
+```
+
+Coverage (17 files): memory tiers, followup + gotcha trackers, activity heatmap, architecture
+report, **real `MemoryEngine` end-to-end (remember / recall / hybrid_search / consolidate /
+crystallize / gotcha promotion)**, **real `ContextEngine` (Full / Cached / Diff / Outline +
+anti-inflation + auto-delta fallbacks)**, **real `Assembler` (budget + dropped items)**,
+**real `Guard` (verify_edit risk + anchor round-trip + suspicious-anchor prefix)**,
+**real `McpServer::dispatch` (remember / recall / assemble / sanitize round-trip)**,
+**real `cairn_api` router mounted in-process via `tower::ServiceExt::oneshot`**, shell+profiles,
+share sanitization, pack+registry crypto, session persistence, sync CRDTs, proactive intent,
+transcript ingest, config env precedence, and workspace invariants.
+
+Add a new flow by dropping a `tests/<NN>_<topic>.rs` file - cargo discovers it. Tests must
+exercise a real Cairn crate API, not hand-coded literals or re-implementations of functions
+already in the crate.
+
+### Web dashboard flow tests - `web/test/`
+
+The dashboard is driven by an AI agent using the **chrome-devtools** MCP server. No
+PowerShell, no agent-browser, no scripted assertions. The agent drives Chrome and asserts
+on real DOM state via accessibility snapshots + console messages.
+
+Read `web/test/flows.md` for the 13 flow checklists (login, recall, anchor, compression,
+tokens, audit, palette, etc.). Read `web/test/run-agent-tests.md` for the meta-instruction.
+
+When a flow fails for a real-product reason (a TypeError, a 404, a JSON parse error), write
+a finding to `web/test/findings/<slug>.md` using the template in `flows.md`. The findings
+folder is the durable artifact — bugs surface here, they are never silently fixed.
+
+Screenshots land in `web/test/screenshots/<NN>-<flow>/*.png`. The run summary goes in
+`web/test/findings/SUMMARY.md`.
+
+**Hard rules:**
+
+- A step that times out, returns no snapshot, or returns an identical-looking screenshot
+  to the previous step is a **failure**. Write a finding. Never "PASS" the flow.
+- Two findings are confirmed real bugs from previous runs: `/memory/architecture` Next.js
+  client-side crash, `/mobile` JSON parse error. Both surface when the agent actually
+  inspects the page; they were missed by the old PowerShell harness because URL pattern +
+  exit code 0 was the only "assertion".
+- **No fake passes.** If you can't confirm, write a finding.
+
 ## Architecture
 
 21-crate Rust workspace (MSRV 1.85) + Next.js static-export web UI. Two binaries:
