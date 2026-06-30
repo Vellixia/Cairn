@@ -183,7 +183,7 @@ export default function PacksContent() {
   const searched = useQuery({
     queryKey: qk.registrySearch(search),
     queryFn: () =>
-      getJSON<RegistryPackMeta[]>(`/registry/search?q=${encodeURIComponent(search)}`),
+      getJSON<RegistryPackMeta[]>(`/api/registry/search?q=${encodeURIComponent(search)}`),
     enabled: search.length > 0,
   });
 

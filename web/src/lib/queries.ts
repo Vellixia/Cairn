@@ -201,7 +201,7 @@ export function useRevokePackMutation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: { name: string; version: string }) =>
-      delJSON<unknown>(`/registry/packs/${encodeURIComponent(input.name)}/${encodeURIComponent(input.version)}`),
+      delJSON<unknown>(`/api/registry/packs/${encodeURIComponent(input.name)}/${encodeURIComponent(input.version)}`),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: qk.registryPacks });
       await qc.invalidateQueries({ queryKey: qk.registryRevocations });
@@ -226,7 +226,7 @@ export function useRemoveTrustedKeyMutation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (key: string) =>
-      delJSON<unknown>(`/registry/trusted-keys?key=${encodeURIComponent(key)}`),
+      delJSON<unknown>(`/api/registry/trusted-keys?key=${encodeURIComponent(key)}`),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: qk.registryTrustedKeys });
       toast.success("Trusted key removed");

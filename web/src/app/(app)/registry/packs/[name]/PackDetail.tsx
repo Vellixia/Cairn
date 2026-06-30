@@ -57,7 +57,7 @@ export default function PackDetail({ name }: { name: string }) {
   const versions = useQuery({
     queryKey: qk.registryPack(name),
     queryFn: () =>
-      getJSON<RegistryPackMeta[]>(`/registry/packs/${encodeURIComponent(name)}`),
+      getJSON<RegistryPackMeta[]>(`/api/registry/packs/${encodeURIComponent(name)}`),
     enabled: name !== "new",
   });
 
@@ -177,7 +177,7 @@ export default function PackDetail({ name }: { name: string }) {
                       <div className="flex items-center justify-end gap-1">
                         <Button variant="ghost" size="icon" asChild>
                           <Link
-                            href={`/registry/packs/${encodeURIComponent(name)}/${encodeURIComponent(v.version)}/download`}
+                            href={`/api/registry/packs/${encodeURIComponent(name)}/${encodeURIComponent(v.version)}/download`}
                           >
                             <Download className="h-4 w-4" />
                           </Link>

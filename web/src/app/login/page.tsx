@@ -37,7 +37,7 @@ export default function LoginPage() {
 function LoginForm() {
   const router = useRouter();
   const search = useSearchParams();
-  const from = search?.get("from") ?? "/dashboard";
+  const from = search?.get("from") ?? "/";
   const login = useLoginMutation();
 
   const form = useForm<LoginInput>({
