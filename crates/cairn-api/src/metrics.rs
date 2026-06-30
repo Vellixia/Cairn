@@ -236,6 +236,50 @@ pub struct MetricsResponse {
     pub server: serde_json::Value,
 }
 
+/// Shape returned by `/api/metrics/savings` - the small subset the mobile companion
+/// surfaces on `/mobile`. Smaller than the full `/api/metrics` payload so a phone
+/// on a flaky network can render quickly.
+#[derive(Debug, Serialize)]
+pub struct MobileSavingsResponse {
+    /// Tokens the server has served to clients via recall + wakeup reads in the
+    /// last 24 hours. Approximate, summed from `SavingsCounter`.
+    pub tokens_saved_today: u64,
+    /// Number of drift events currently in `pending` status.
+    pub drift_pending: u64,
+    /// Number of pack installs recorded in the last 7 days. The mobile page renders
+    /// this as a flat "how active is the team" stat; the underlying data lives on
+    /// the registry's revocations log (which the install code currently does not
+    /// append to) so we report 0 for now.
+    pub recent_pack_installs: u64,
+}
+
+/// `GET /api/metrics/savings` - the mobile companion's three stats.
+pub async fn mobile_savings(
+    State(s): State<AppState>,
+) -> Result<Json<MobileSavingsResponse>, crate::ApiError> {
+    let snap = s.savings.snapshot();
+    let tokens_saved_today = snap.recall_tokens.saturating_add(snap.wakeup_tokens);
+    let drift_pending = s
+        .sessions
+        .recent_drift(200, None)
+        .map(|events| {
+            events
+                .iter()
+                .filter(|e| e.status == cairn_session::DriftStatus::Pending)
+                .count() as u64
+        })
+        .unwrap_or(0);
+    // The registry does not yet emit an "install" event the metrics endpoint can
+    // count, so `recent_pack_installs` stays 0 until the registry gains an install
+    // hook. Documented in the response shape so the client can render 0 cleanly.
+    let recent_pack_installs = 0u64;
+    Ok(Json(MobileSavingsResponse {
+        tokens_saved_today,
+        drift_pending,
+        recent_pack_installs,
+    }))
+}
+
 // -- wire type so the metric counter survives in AppState ----------------------------------
 
 /// Thread-safe handle to the live savings counter - held in [`AppState`] and incremented by

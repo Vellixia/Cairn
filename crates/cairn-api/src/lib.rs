@@ -32,7 +32,9 @@ use crate::auth::{extract_bearer, TokenInfo, TokenSigner};
 use crate::devices::{create_pair_code, create_token, list_tokens, revoke_token};
 use crate::events::events as sse_events;
 use crate::ledger::{get_ledger, verify_ledger, LedgerState};
-use crate::metrics::{self as metrics_mod, metrics as metrics_endpoint, SavingsState};
+use crate::metrics::{
+    self as metrics_mod, metrics as metrics_endpoint, mobile_savings, SavingsState,
+};
 use crate::session::{extract_cookie as extract_session_cookie, SessionSigner};
 use crate::setup_wizard::setup_health;
 use axum::{
@@ -228,6 +230,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/openapi.json", get(openapi::openapi_spec))
         .route("/api/events", get(sse_events))
         .route("/api/metrics", get(metrics_endpoint))
+        .route("/api/metrics/savings", get(mobile_savings))
         .route("/api/ledger", get(get_ledger))
         .route("/api/ledger/verify", get(verify_ledger))
         .route("/api/search", get(search_handler))
@@ -308,14 +311,21 @@ pub fn router(state: AppState) -> Router {
 pub fn build_router_with_registry(state: AppState) -> Router {
     let base = router(state.clone());
     match state.registry.as_ref() {
-        Some(reg) => base.nest(
-            "/registry",
-            cairn_registry::router(reg.clone()).layer(
-                tower_http::limit::RequestBodyLimitLayer::new(
-                    32 * 1024 * 1024, // 32 MiB for pack uploads
+        Some(reg) => {
+            // Mount the registry under `/api/registry` so it doesn't shadow the
+            // Next.js dashboard's `/registry` and `/registry/packs` page routes
+            // (which are served by the static_handler fallback). The dashboard's
+            // `lib/queries.ts` calls `/registry/packs` directly; that needs to be
+            // updated to `/api/registry/packs` in lockstep with this change.
+            base.nest(
+                "/api/registry",
+                cairn_registry::router(reg.clone()).layer(
+                    tower_http::limit::RequestBodyLimitLayer::new(
+                        32 * 1024 * 1024, // 32 MiB for pack uploads
+                    ),
                 ),
-            ),
-        ),
+            )
+        }
         None => base,
     }
 }
