@@ -144,4 +144,69 @@ export const HELP: Record<string, HelpCopy> = {
     impact:
       "Settings here are minimal because most config lives server-side. Sign out from a shared browser, not just close the tab.",
   },
+  "/memory/architecture": {
+    title: "Architecture report",
+    what: "Structural analysis of the memory graph as code: nodes (files/memories), edges (relationships), communities, bridges, and cycles.",
+    how: [
+      "Open /memory?tab=architecture or click the Architecture tab.",
+      "Read the four KPIs (Nodes / Edges / Communities / Isolation) for a quick read.",
+      "Click .md to download the full report as markdown.",
+    ],
+    impact:
+      "Surfaces god nodes (high centrality), bridges (cut vertices), and cycles --- all candidates for refactoring.",
+  },
+  "/memory/heatmap": {
+    title: "Activity heatmap",
+    what: "Daily memory creation over the last 52 weeks, GitHub-style. Hover a cell to see the date and count.",
+    how: [
+      "Open /memory?tab=heatmap.",
+      "Hover any cell to read the day + count.",
+      "Compare against the recent activity card on / for spot trends.",
+    ],
+    impact:
+      "Lets you see drift in memory-write cadence without scrolling the audit log.",
+  },
+  "/registry/packs": {
+    title: "Pack registry",
+    what: "Published .cairnpkg packs. Search, publish new ones, click a row to see versions and download.",
+    how: [
+      "Publish a pack via the Publish button (upload a .cairnpkg tarball).",
+      "Click a pack name to see all its versions and download counts.",
+      "Use the search box to filter by name or description.",
+    ],
+    impact:
+      "Packs ship context, prompts, and tool configs to cairn-backed agents. Signed packs are trusted; unsigned are visible but flagged.",
+  },
+  "/registry": {
+    title: "Pack registry",
+    what: "Self-hosted .cairnpkg registry. Three sections: Packs (browse/publish), Trusted Keys (signing authorities), Revocations (audit trail).",
+    how: [
+      "Use the tab bar above to switch between Packs, Trusted Keys, and Revocations.",
+      "Publish on the Packs tab. Manage signing keys on the Trusted Keys tab. Read the audit trail on Revocations.",
+    ],
+    impact:
+      "Trust flows top-down: add a trusted key, then publish packs signed with it. Revocations are append-only.",
+  },
+  "/registry/trust": {
+    title: "Trusted signing keys",
+    what: "Ed25519 public keys the registry trusts to sign packs. Packs signed by unlisted keys still upload but are flagged unsigned.",
+    how: [
+      "Add a key by pasting its 64-char hex public key.",
+      "Revoke a key to mark its signed packs as untrusted (the packs remain on disk).",
+      "Rotate by adding a new key then revoking the old one.",
+    ],
+    impact:
+      "Compromised key? Revoke first, then rotate. Revocations are append-only and surface in the revocations tab.",
+  },
+  "/registry/revocations": {
+    title: "Revocation log",
+    what: "Append-only record of every pack unpublish and key revoke. Audit trail for trust changes.",
+    how: [
+      "Read-only --- new revocations appear here automatically.",
+      "Filter by kind (pack unpublish vs key revoke) or actor.",
+      "Use this page to answer 'who removed X and when'.",
+    ],
+    impact:
+      "Revocations cannot be undone. Operators should record the reason in the audit log before revoking.",
+  },
 };

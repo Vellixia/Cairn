@@ -24,8 +24,6 @@ import {
   History,
   Network,
   ShieldCheck,
-  Package,
-  Users,
   KeyRound,
   UserPlus,
   FileClock,
@@ -34,6 +32,7 @@ import {
   ShieldAlert,
   MessagesSquare,
   PiggyBank,
+  Smartphone,
 } from "lucide-react";
 import { useUIStore } from "@/lib/stores/ui";
 
@@ -42,7 +41,7 @@ interface Item {
   label: string;
   hint?: string;
   shortcut?: string;
-  group: "Navigate" | "Memory" | "Reliability" | "Devices" | "Share" | "Personalization" | "Sessions";
+  group: "Navigate" | "Memory" | "Devices" | "Personalization";
   icon: React.ComponentType<{ className?: string }>;
   action: () => void;
 }
@@ -70,34 +69,35 @@ export function CommandPalette() {
   };
 
   const items: Item[] = [
-    { id: "nav-overview", label: "Overview", group: "Navigate", icon: LayoutDashboard, action: nav("/dashboard") },
-    { id: "nav-settings", label: "Settings", group: "Navigate", icon: Settings, action: nav("/dashboard/settings") },
-    { id: "nav-mem", label: "Memories . Remember", group: "Navigate", icon: Brain, action: nav("/dashboard/memory") },
-    { id: "nav-recall", label: "Memories . Recall", group: "Navigate", icon: Search, action: nav("/dashboard/memory/recall") },
-    { id: "nav-wakeup", label: "Memories . Wakeup", group: "Navigate", icon: Sparkles, action: nav("/dashboard/memory/wakeup") },
-    { id: "nav-graph", label: "Memories . Graph", group: "Navigate", icon: Network, action: nav("/dashboard/memory/graph") },
-    { id: "nav-ctx", label: "Context . Inspector", group: "Navigate", icon: FileSearch, action: nav("/dashboard/context") },
-    { id: "nav-asm", label: "Context . Assemble", group: "Navigate", icon: Layers, action: nav("/dashboard/context/assemble") },
-    { id: "nav-savings", label: "Savings & recover", group: "Navigate", icon: PiggyBank, action: nav("/dashboard/savings") },
-    { id: "nav-rel", label: "Reliability . Score", group: "Navigate", icon: Activity, action: nav("/dashboard/reliability") },
-    { id: "nav-anchor", label: "Reliability . Anchor", group: "Navigate", icon: Target, action: nav("/dashboard/reliability/anchor") },
-    { id: "nav-cp", label: "Reliability . Checkpoints", group: "Navigate", icon: History, action: nav("/dashboard/reliability/checkpoints") },
-    { id: "nav-drift", label: "Reliability . Drift center", group: "Navigate", icon: ShieldAlert, action: nav("/dashboard/reliability/drift") },
-    { id: "nav-sessions", label: "Sessions", group: "Navigate", icon: MessagesSquare, action: nav("/dashboard/sessions") },
-    { id: "nav-san", label: "Share . Sanitize", group: "Navigate", icon: ShieldCheck, action: nav("/dashboard/share/sanitize") },
-    { id: "nav-bun", label: "Share . Bundles", group: "Navigate", icon: Package, action: nav("/dashboard/share/export") },
-    { id: "nav-pool", label: "Pool", group: "Navigate", icon: Users, action: nav("/dashboard/pool") },
-    { id: "nav-registry", label: "Pack registry", group: "Navigate", icon: Library, action: nav("/dashboard/registry") },
-    { id: "nav-devs", label: "Devices . Tokens", group: "Navigate", icon: KeyRound, action: nav("/dashboard/devices") },
-    { id: "nav-pair", label: "Devices . Pair new", group: "Navigate", icon: UserPlus, action: nav("/dashboard/devices/pair") },
-    { id: "nav-audit", label: "Devices . Audit", group: "Navigate", icon: FileClock, action: nav("/dashboard/devices/audit") },
-    { id: "act-remember", label: "Remember something", hint: "jump to Memories", group: "Memory", icon: Brain, action: nav("/dashboard/memory") },
-    { id: "act-recall", label: "Recall a memory", hint: "jump to Recall", group: "Memory", icon: Search, action: nav("/dashboard/memory/recall") },
-    { id: "act-cp", label: "Create a checkpoint", hint: "jump to Checkpoints", group: "Reliability", icon: History, action: nav("/dashboard/reliability/checkpoints") },
-    { id: "act-issue", label: "Issue a device token", hint: "jump to Tokens", group: "Devices", icon: KeyRound, action: nav("/dashboard/devices") },
-    { id: "act-san", label: "Sanitize text", hint: "jump to Sanitize", group: "Share", icon: ShieldCheck, action: nav("/dashboard/share/sanitize") },
-    { id: "nav-profile", label: "Profile", group: "Personalization", icon: UserCircle, action: nav("/dashboard/profile") },
-    { id: "act-prefer", label: "Add a preference", hint: "jump to Profile", group: "Personalization", icon: UserCircle, action: nav("/dashboard/profile") },
+    // --- Navigate ---
+    { id: "nav-now", label: "Now", group: "Navigate", icon: LayoutDashboard, action: nav("/") },
+    { id: "nav-mem", label: "Memory hub", group: "Navigate", icon: Brain, action: nav("/memory") },
+    { id: "nav-wakeup", label: "Memory . Wakeup", group: "Navigate", icon: Sparkles, action: nav("/memory?tab=wakeup") },
+    { id: "nav-recall", label: "Memory . Recall", group: "Navigate", icon: Search, action: nav("/memory?tab=recall") },
+    { id: "nav-graph", label: "Memory . Graph", group: "Navigate", icon: Network, action: nav("/memory?tab=graph") },
+    { id: "nav-arch", label: "Memory . Architecture report", group: "Navigate", icon: FileSearch, action: nav("/memory?tab=architecture") },
+    { id: "nav-heat", label: "Memory . Activity heatmap", group: "Navigate", icon: Activity, action: nav("/memory?tab=heatmap") },
+    { id: "nav-compress", label: "Memory . Compression lab", group: "Navigate", icon: Layers, action: nav("/memory?tab=compression") },
+    { id: "nav-savings", label: "Memory . Savings", group: "Navigate", icon: PiggyBank, action: nav("/memory?tab=savings") },
+    { id: "nav-trust", label: "Trust hub", group: "Navigate", icon: ShieldCheck, action: nav("/trust") },
+    { id: "nav-score", label: "Trust . Reliability score", group: "Navigate", icon: Target, action: nav("/trust?tab=score") },
+    { id: "nav-drift", label: "Trust . Drift center", group: "Navigate", icon: ShieldAlert, action: nav("/trust?tab=drift") },
+    { id: "nav-you", label: "You hub", group: "Navigate", icon: UserCircle, action: nav("/you") },
+    { id: "nav-profile", label: "You . Profile", group: "Navigate", icon: UserCircle, action: nav("/you?tab=profile") },
+    { id: "nav-tokens", label: "You . Device tokens", group: "Navigate", icon: KeyRound, action: nav("/you?tab=tokens") },
+    { id: "nav-pair", label: "You . Pair device", group: "Navigate", icon: UserPlus, action: nav("/you?tab=pair") },
+    { id: "nav-audit", label: "You . Audit log", group: "Navigate", icon: FileClock, action: nav("/you?tab=audit") },
+    { id: "nav-sessions", label: "You . Sessions", group: "Navigate", icon: MessagesSquare, action: nav("/you?tab=sessions") },
+    { id: "nav-settings", label: "You . Settings", group: "Navigate", icon: Settings, action: nav("/you?tab=settings") },
+    { id: "nav-registry", label: "Pack registry", group: "Navigate", icon: Library, action: nav("/registry/packs") },
+    { id: "nav-trustk", label: "Registry . Trusted keys", group: "Navigate", icon: KeyRound, action: nav("/registry/trust") },
+    { id: "nav-rev", label: "Registry . Revocations", group: "Navigate", icon: History, action: nav("/registry/revocations") },
+    { id: "nav-mobile", label: "Mobile companion (PWA)", group: "Navigate", icon: Smartphone, action: nav("/mobile") },
+    // --- Actions ---
+    { id: "act-remember", label: "Remember something", hint: "jump to Memories", group: "Memory", icon: Brain, action: nav("/memory?tab=wakeup") },
+    { id: "act-recall", label: "Recall a memory", hint: "jump to Recall", group: "Memory", icon: Search, action: nav("/memory?tab=recall") },
+    { id: "act-issue", label: "Issue a device token", hint: "jump to Tokens", group: "Devices", icon: KeyRound, action: nav("/you?tab=tokens") },
+    { id: "act-prefer", label: "Add a preference", hint: "jump to Profile", group: "Personalization", icon: UserCircle, action: nav("/you?tab=profile") },
   ];
 
   return (
@@ -105,7 +105,7 @@ export function CommandPalette() {
       <CommandInput placeholder="Jump to a section, run an action..." />
       <CommandList>
         <CommandEmpty>No matches. Try a section name like &quot;memory&quot; or &quot;tokens&quot;.</CommandEmpty>
-        {(["Navigate", "Memory", "Reliability", "Devices", "Share", "Personalization", "Sessions"] as const).map((group) => {
+        {(["Navigate", "Memory", "Devices", "Personalization"] as const).map((group) => {
           const filtered = items.filter((i) => i.group === group);
           if (filtered.length === 0) return null;
           return (

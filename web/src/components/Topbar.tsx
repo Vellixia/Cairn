@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { Smartphone } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -48,6 +49,16 @@ export function Topbar() {
             <Kbd>⌘K</Kbd>
             <span className="ml-1.5 hidden sm:inline">jump to anything</span>
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 px-2"
+            onClick={() => router.push("/mobile")}
+            aria-label="Open mobile companion"
+            title="Mobile companion"
+          >
+            <Smartphone className="h-3.5 w-3.5" />
+          </Button>
         </div>
         <div className="flex items-center gap-4">
           {healthy ? (
@@ -83,10 +94,10 @@ export function Topbar() {
                 {me ? `Signed in as ${me.username}` : "Account"}
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={() => router.replace("/dashboard/settings")}>
+              <DropdownMenuItem onSelect={() => router.replace("/you?tab=settings")}>
                 Settings
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={() => router.replace("/dashboard/devices/audit")}>
+              <DropdownMenuItem onSelect={() => router.replace("/you?tab=audit")}>
                 Audit log
               </DropdownMenuItem>
               <DropdownMenuSeparator />

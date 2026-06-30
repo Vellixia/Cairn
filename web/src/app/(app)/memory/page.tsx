@@ -7,6 +7,8 @@ import WakeupPage from "./wakeup/page";
 import GraphPage from "./graph/page";
 import SavingsPage from "./savings/page";
 import CompressionPage from "./compression/page";
+import ArchitecturePage from "./architecture/page";
+import HeatmapPage from "./heatmap/page";
 
 const MEMORY_TABS: HubTab[] = [
   { id: "wakeup", label: "Wakeup", content: <WakeupPage /> },
@@ -14,6 +16,8 @@ const MEMORY_TABS: HubTab[] = [
   { id: "graph", label: "Graph", content: <GraphPage /> },
   { id: "compression", label: "Compression Lab", content: <CompressionPage /> },
   { id: "savings", label: "Savings", content: <SavingsPage /> },
+  { id: "architecture", label: "Architecture", content: <ArchitecturePage /> },
+  { id: "heatmap", label: "Activity", content: <HeatmapPage /> },
 ];
 
 export default function MemoryPage() {

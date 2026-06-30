@@ -130,7 +130,7 @@ export default function SettingsPage() {
         </CardHeader>
         <CardContent>
           <Button asChild variant="outline" size="sm">
-            <Link href="/dashboard/profile">Open profile</Link>
+            <Link href="/you?tab=profile">Open profile</Link>
           </Button>
         </CardContent>
       </Card>

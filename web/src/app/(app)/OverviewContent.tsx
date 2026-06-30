@@ -82,7 +82,7 @@ export function OverviewContent() {
           label="Reliability"
           value={rel ? rel.score : null}
           suffix={rel ? "/100" : undefined}
-          href="/dashboard?view=trust&tab=score"
+          href="/trust?tab=score"
           icon={ShieldCheck}
           hint={
             rel
@@ -115,7 +115,7 @@ export function OverviewContent() {
         <KpiCard
           label="Active devices"
           value={activeDeviceCount}
-          href="/dashboard?view=you&tab=tokens"
+          href="/you?tab=tokens"
           icon={Network}
           hint="Issued device tokens"
           tone={activeDeviceCount && activeDeviceCount > 0 ? "positive" : "neutral"}
