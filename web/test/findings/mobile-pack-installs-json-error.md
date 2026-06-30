@@ -1,37 +1,57 @@
-# Finding: `/mobile` PWA renders "RECENT PACK INSTALLS" as JSON parse error
+# Fix: `/mobile` no longer shows JSON parse errors
 
 **Flow:** 11 pwa-install-prompt
-**Severity:** high
-**Discovered:** 2026-06-30 (re-confirmed; previously found by the agent-browser harness)
+**Severity:** resolved
+**Discovered:** 2026-06-30
+**Fixed:** 2026-06-30 (commit pending on `0.7.1`)
 
-## What happened
+## Root cause
 
-The `/mobile` route renders the mobile shell, but the "RECENT PACK INSTALLS (7D)" tile shows the raw JS error:
+The mobile page was hitting three endpoints that did not exist (or were
+at the wrong path):
 
-```
-SyntaxError: Unexpected token '<', "<!DOCTYPE "... is not valid JSON
-```
+1. `GET /api/drift` -- this was a guess. The actual drift endpoints are
+   `GET /api/guard/drift?status=pending` and
+   `GET /api/guard/drift/:id/{approve,reject}`.
+2. `GET /api/metrics/savings` -- endpoint did not exist at all. The
+   `RECENT PACK INSTALLS (7D)` tile had no real data source.
+3. The drift-approve/reject endpoints -- same as above, wrong paths.
 
-This is the dashboard's `.json()` call failing on what the server returned — almost certainly an HTML error page (the Next.js 404 page or a default HTML response). The other two tiles (TOKENS SAVED TODAY = 0, DRIFT PENDING = 0) render fine.
+The cairn-server returns the Next.js HTML shell for any unknown path
+under the dashboard (the `static_handler` fallback), so each `.json()`
+call hit `<!DOCTYPE html>` and threw `SyntaxError`.
 
-## Steps to reproduce
+## Fix
 
-1. Log into the dashboard.
-2. Navigate to `http://127.0.0.1:7777/mobile`.
-3. Look at the RECENT PACK INSTALLS tile — JSON parse error.
+1. New endpoint `GET /api/metrics/savings` in `crates/cairn-api/src/metrics.rs`:
+   - `tokens_saved_today` -- from `AppState::savings.snapshot()`
+   - `drift_pending` -- count of items in
+     `AppState::sessions.recent_drift(200, None)` filtered by
+     `DriftStatus::Pending`
+   - `recent_pack_installs` -- count placeholder. The registry does
+     not yet emit install events; tracked as a follow-up.
+2. `crates/cairn-api/src/lib.rs` -- route wired alongside `/api/metrics`.
+3. `web/src/app/mobile/page.tsx` -- calls the correct paths:
+   - `/api/metrics/savings`
+   - `/api/guard/drift?status=pending`
+   - `/api/guard/drift/:id/approve` (POST)
+   - `/api/guard/drift/:id/reject` (POST)
+   `loadDrift` now accepts both flat-array and `{items: [...]}` shapes
+   for forward-compat.
 
-## Expected
+## Verification
 
-A `0` value or an empty-state ("No pack installs in the last 7 days").
+After the cairn-server rebuild:
 
-## Actual
+- `GET /api/metrics/savings` with a cairn_session cookie returns
+  `{"tokens_saved_today":0,"drift_pending":0,"recent_pack_installs":0}`.
+- `GET /api/guard/drift?status=pending` returns `[]`.
+- `/mobile` renders all three tiles with numeric values and an empty
+  "Drift to review" message. No `SyntaxError` in the console.
 
-Raw JS error visible in the UI.
+## Follow-up
 
-## Suggested fix
-
-Find the API call behind the RECENT PACK INSTALLS tile. Most likely a path like `/api/registry/installs` or similar, hitting a route that returns HTML on the cairn server. Either:
-- The route doesn't exist (404 returns the Next.js HTML page), or
-- The path is wrong (relative vs absolute).
-
-The fix is in the mobile page's data fetch: catch the JSON parse error and fall back to `0`, while also logging the actual HTTP status so the real bug surfaces in the server logs.
+The registry should emit a structured "pack install" event when
+`POST /api/registry/packs/:name/:version` is consumed. Wire that into
+the existing event log so `recent_pack_installs` becomes non-zero in
+production. Tracked separately.

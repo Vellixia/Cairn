@@ -1,33 +1,50 @@
-# Finding: `/registry` page crashes with client-side TypeError
+# Fix: `/registry` and `/registry/packs` no longer crash
 
-**Flow:** 05 registry-publish-install
-**Severity:** high
-**Discovered:** 2026-06-30 (re-confirmed; previously found by the agent-browser harness)
+**Flows:** 03 pack-registry, 02 trust-keys-and-federation
+**Severity:** resolved
+**Discovered:** 2026-06-30
+**Fixed:** 2026-06-30 (commit pending on `0.7.1`)
 
 ## What happened
 
-`http://127.0.0.1:7777/registry` renders Next.js's "Application error: a client-side exception has occurred (see the browser console for more information)." The console reports:
+Both `/registry` and `/registry/packs` rendered Next.js's "Application
+error: a client-side exception has occurred" with
+`TypeError: Cannot read properties of undefined (reading 'title')` in the
+console.
 
-```
-TypeError: Cannot read properties of undefined (reading 'title')
-```
+There were actually two bugs folded into this finding:
 
-## Steps to reproduce
+1. **HelpButton crash.** Same root cause as
+   `architecture-page-crash.md` -- `content` came from a missing
+   `helpCopy.ts` entry. Fix in `web/src/components/HelpButton.tsx`.
+2. **Router shadowing.** Before the fix, `build_router_with_registry`
+   nested the cairn-registry router at `/registry`. That mount shadowed
+   Next.js's `/registry` and `/registry/packs` page routes: an HTTP GET
+   to `/registry/packs` was being answered by the cairn-registry's
+   `GET /packs` (returning JSON) rather than by the static fallback that
+   would have served `web/out/registry/packs.html`.
 
-1. Log into the dashboard.
-2. Navigate to `http://127.0.0.1:7777/registry`.
-3. The page crashes before rendering any content.
+## Fix
 
-## Expected
+1. `web/src/components/HelpButton.tsx:38-39` -- `content?: HelpContent`
+   + `FALLBACK_HELP` fallback (see `architecture-page-crash.md`).
+2. `crates/cairn-api/src/lib.rs:319` -- `base.nest("/api/registry", ...)`
+   (was `/registry`). Dashboard callsites in
+   `web/src/lib/queries.ts` and `web/src/app/(app)/registry/packs/PacksContent.tsx`
+   updated to `/api/registry/...`.
 
-Either:
-- The registry page renders with the local pack registry contents, or
-- A clear error message ("registry not initialized — run `cairn setup`") instead of a generic Next.js client-side crash.
+## Verification
 
-## Actual
+After the cairn-server rebuild:
 
-The page crashes with a TypeError reading `.title` from `undefined`. The Dashboard sidebar has no link to `/registry`, so the page is currently reachable only via direct URL.
+- `GET /registry/packs` renders "Pack registry" heading, navigation tabs
+  (Packs / Trusted Keys / Revocations), Publish button, "No packs
+  published yet" empty state. No `Application error`.
+- `GET /api/registry/packs` returns `[]` JSON with the cairn session
+  cookie. Used by the page's React Query hook.
 
-## Suggested fix
+## Follow-up
 
-Inspect the page component (`web/src/app/(app)/registry/page.tsx`) for an unguarded `.title` access. Most likely the page is reading a manifest field from a pack record that hasn't loaded yet, or the local registry is `None` (because the server is the docker `cairn:dev` image and the registry data dir is empty). The fix should guard for the missing-data case with a friendly empty state.
+The published `ghcr.io/vellixia/cairn:latest` image is older than this
+fix. Operators pulling the latest release will not see the fix until the
+next image is pushed. Track in CI release pipeline.
