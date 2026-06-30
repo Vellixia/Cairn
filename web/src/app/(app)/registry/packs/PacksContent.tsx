@@ -176,7 +176,7 @@ export default function PacksContent() {
 
   const allPacks = useQuery({
     queryKey: qk.registryPacks,
-    queryFn: () => getJSON<RegistryPackMeta[]>("/registry/packs"),
+    queryFn: () => getJSON<RegistryPackMeta[]>("/api/registry/packs"),
     refetchInterval: 30_000,
   });
 

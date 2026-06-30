@@ -160,7 +160,7 @@ export function useHeatmapQuery(days = 365) {
 export function useRegistryPacksQuery() {
   return useQuery({
     queryKey: qk.registryPacks,
-    queryFn: () => getJSON<unknown[]>("/registry/packs"),
+    queryFn: () => getJSON<unknown[]>("/api/registry/packs"),
     staleTime: 30_000,
   });
 }
@@ -168,7 +168,7 @@ export function useRegistryPacksQuery() {
 export function useRegistryRevocationsQuery() {
   return useQuery({
     queryKey: qk.registryRevocations,
-    queryFn: () => getJSON<RegistryRevocation[]>("/registry/revocations"),
+    queryFn: () => getJSON<RegistryRevocation[]>("/api/registry/revocations"),
     staleTime: 30_000,
   });
 }
@@ -176,7 +176,7 @@ export function useRegistryRevocationsQuery() {
 export function useRegistryTrustedKeysQuery() {
   return useQuery({
     queryKey: qk.registryTrustedKeys,
-    queryFn: () => getJSON<RegistryTrustGrant[]>("/registry/trusted-keys"),
+    queryFn: () => getJSON<RegistryTrustGrant[]>("/api/registry/trusted-keys"),
     staleTime: 30_000,
   });
 }
@@ -186,7 +186,7 @@ export function usePublishPackMutation() {
   return useMutation({
     mutationFn: (input: { tarball: ArrayBuffer | Uint8Array; trusted?: string }) =>
       postBinary<unknown>(
-        "/registry/packs",
+        "/api/registry/packs",
         input.tarball,
         "application/octet-stream",
       ),
@@ -213,7 +213,7 @@ export function useAddTrustedKeyMutation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (input: { key: string; allows: string; label?: string }) =>
-      postJSON<RegistryTrustGrant>("/registry/trusted-keys", input),
+      postJSON<RegistryTrustGrant>("/api/registry/trusted-keys", input),
     onSuccess: async () => {
       await qc.invalidateQueries({ queryKey: qk.registryTrustedKeys });
       toast.success("Trusted key added");
