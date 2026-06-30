@@ -462,13 +462,44 @@ fn is_loopback_addr(addr: SocketAddr) -> bool {
 struct WebAssets;
 
 async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
-    let path = uri.path().trim_start_matches('/');
+    let raw_path = uri.path().trim_start_matches('/');
+    // Bug fix (BUG-2026-06-30-C): browsers URL-encode characters in chunk paths
+    // (e.g. `%5Bname%5D` for `[name]`, `%28app%29` for `(app)`). The embedded
+    // WebAssets key uses the decoded form, so we percent-decode the request
+    // path before lookup. Without this, every dynamic-route chunk 404s and the
+    // dashboard throws ChunkLoadError.
+    let path = match percent_decode(raw_path) {
+        Some(p) => p,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("invalid path: {raw_path}"),
+            )
+                .into_response();
+        }
+    };
+    // Bug fix (BUG-2026-06-30-C): if the request path looks like a static asset
+    // (has a non-HTML file extension), never fall back to index.html. Doing so
+    // serves the dashboard shell HTML with a JS/CSS MIME, which the browser then
+    // tries to parse as that asset and surfaces a confusing ChunkLoadError. Return
+    // 404 instead so the failure is observable and recoverable.
+    let looks_like_asset = std::path::Path::new(&path)
+        .extension()
+        .is_some_and(|ext| !ext.eq_ignore_ascii_case("html") && !ext.eq_ignore_ascii_case("htm"));
     let key = if path.is_empty() {
         "index.html".to_string()
-    } else if <WebAssets as RustEmbed>::get(path).is_some() {
-        path.to_string()
+    } else if <WebAssets as RustEmbed>::get(&path).is_some() {
+        path.clone()
     } else if <WebAssets as RustEmbed>::get(&format!("{path}.html")).is_some() {
         format!("{path}.html")
+    } else if looks_like_asset {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            format!("not found: {path}"),
+        )
+            .into_response();
     } else {
         "index.html".to_string()
     };
@@ -554,6 +585,38 @@ fn content_type(path: &str) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+/// Percent-decode a URL path. Returns `None` if the input contains an
+/// invalid percent-escape or a non-UTF-8 byte sequence.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = hex_digit(bytes[i + 1])?;
+                let lo = hex_digit(bytes[i + 2])?;
+                out.push((hi << 4) | lo);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
