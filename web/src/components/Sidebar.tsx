@@ -8,6 +8,7 @@ import {
   Brain,
   ShieldCheck,
   UserCircle,
+  Library,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -29,6 +30,7 @@ const ITEMS: Item[] = [
   { href: "/", label: "Now", icon: LayoutDashboard },
   { href: "/memory", label: "Memory", icon: Brain },
   { href: "/trust", label: "Trust", icon: ShieldCheck },
+  { href: "/registry/packs", label: "Registry", icon: Library },
   { href: "/you", label: "You", icon: UserCircle },
 ];
 
