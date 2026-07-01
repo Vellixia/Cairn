@@ -51,7 +51,7 @@ days.
 ## Current scope & hardening status
 
 This is mature but still-evolving software. Areas still being hardened (tracked
-on the [Roadmap](docs/ROADMAP.md)):
+on the [Roadmap](docs/planning/roadmap.md)):
 
 - **CAIRN_INSECURE=1 escape hatch** - only for trusted local/private networks.
   Bypasses the TLS gate; do not use on a public network.

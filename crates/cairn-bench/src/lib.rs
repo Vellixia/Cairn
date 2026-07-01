@@ -5,7 +5,7 @@
 //! - **LongMemEval / LoCoMo** - synthetic recall tasks. We hand-build a small
 //!   fixture set that captures the *shape* of those benchmarks (multi-session
 //!   memories with entity-resolution and temporal questions). The numbers we
-//!   publish in `docs/BENCHMARKS.md` are from this fixture, not the full
+//!   publish in `docs/testing/benchmarks.md` are from this fixture, not the full
 //!   external benchmark (we don't redistribute that data here).
 //!
 //! - **Task-success horizon** - runs a synthetic task pipeline at increasing
@@ -18,7 +18,7 @@
 //!   `reinforce` cycles vs. naive LRU eviction.
 //!
 //! All three produce a [`BenchResult`] that the harness can serialize to JSON
-//! for CI ingestion and `docs/BENCHMARKS.md` rendering. See ADR-023 for the
+//! for CI ingestion and `docs/testing/benchmarks.md` rendering. See ADR-023 for the
 //! methodology choices (why we hand-build fixtures rather than redistribute the
 //! external benchmarks verbatim).
 

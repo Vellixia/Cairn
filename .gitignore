@@ -17,6 +17,14 @@
 /docs/img
 !/docs/img/.gitkeep
 
+# Live E2E walk + dashboard flow test screenshots and evidence captures —
+# regenerated on every test run, not for the public repo (same policy as
+# /docs/img above).
+/docs/testing/live-e2e/screenshots/*
+!/docs/testing/live-e2e/screenshots/.gitkeep
+/docs/testing/live-e2e/evidence/
+/web/test/screenshots/
+
 # Local dogfood testing artifacts
 /dogfood-output
 

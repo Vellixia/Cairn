@@ -1,1 +1,1 @@
-For project conventions, dev commands, and architecture, see [AGENTS.md](AGENTS.md).
+For project conventions, dev commands, and architecture, see [AGENTS.md](../AGENTS.md).

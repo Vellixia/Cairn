@@ -40,6 +40,8 @@ cargo test --workspace
 - Keep changes focused; one logical change per PR.
 - Match the surrounding style. New behavior gets a test.
 - Dependencies use tilde constraints (`~major.minor`); build with `--locked` to catch drift.
+- Adding or moving a doc? Read [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) first - it says
+  which folder and template to use.
 - CI runs `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`, and `cargo build --workspace` on every PR via `.github/workflows/ci.yml`. Run the same commands locally before pushing.
 
 ## Workspace layout

@@ -162,7 +162,7 @@ async fn stats_endpoint_returns_401_without_auth() {
     // /api/stats is auth-gated; an unauthenticated request must return 401.
     // A positive-path test would need to mint a session token, which is
     // out of scope for this envelope test - that contract is exercised by
-    // the dashboard flow tests in web/test/flows.md.
+    // the dashboard flow tests in docs/testing/flows.md.
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,

@@ -221,7 +221,7 @@ services:
       # authenticated and must not travel in cleartext over a public network. For production
       # deployments, terminate TLS at a reverse proxy (Caddy/Traefik/nginx) in front of the
       # cairn container, and set CAIRN_TLS_CERT + CAIRN_TLS_KEY on that proxy. See
-      # docs/ARCHITECTURE.md for the recommended topology.
+      # docs/reference/architecture.md for the recommended topology.
       CAIRN_INSECURE: "1"
       # Mount the host project so cairn read/verify/checkpoint tools can access local files.
       CAIRN_WORKSPACE_ROOT: /workspace

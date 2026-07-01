@@ -22,7 +22,7 @@ export interface HelpContent {
 const FALLBACK_HELP: HelpContent = {
   title: "Help",
   what: "This page is part of the Cairn dashboard.",
-  how: ["Refer to docs/TESTING.md and docs/ARCHITECTURE.md for the full surface."],
+  how: ["Refer to docs/testing/overview.md and docs/reference/architecture.md for the full surface."],
   impact: "Adding a route-specific entry in web/src/components/helpCopy.ts gives this button a real tooltip.",
 };
 

@@ -1,4 +1,6 @@
-
+You are an AI agent working in the Cairn repo. This file routes you: dev commands and
+architecture below, a docs map + task playbooks further down, and your standing tool
+preferences in the managed block at the end.
 
 ## Dev commands
 
@@ -62,15 +64,15 @@ The dashboard is driven by an AI agent using the **chrome-devtools** MCP server.
 PowerShell, no agent-browser, no scripted assertions. The agent drives Chrome and asserts
 on real DOM state via accessibility snapshots + console messages.
 
-Read `web/test/flows.md` for the 13 flow checklists (login, recall, anchor, compression,
-tokens, audit, palette, etc.). Read `web/test/run-agent-tests.md` for the meta-instruction.
+Read `docs/testing/flows.md` for the 13 flow checklists (login, recall, anchor, compression,
+tokens, audit, palette, etc.). Read `docs/testing/run-agent-tests.md` for the meta-instruction.
 
 When a flow fails for a real-product reason (a TypeError, a 404, a JSON parse error), write
-a finding to `web/test/findings/<slug>.md` using the template in `flows.md`. The findings
-folder is the durable artifact — bugs surface here, they are never silently fixed.
+a finding to `docs/testing/findings/open/<slug>.md` using `docs/_templates/finding-template.md`.
+The findings folder is the durable artifact — bugs surface here, they are never silently fixed.
 
-Screenshots land in `web/test/screenshots/<NN>-<flow>/*.png`. The run summary goes in
-`web/test/findings/SUMMARY.md`.
+Screenshots land in `web/test/screenshots/<NN>-<flow>/*.png`. The registry of every open and
+resolved finding is `docs/testing/findings/README.md`.
 
 **Hard rules:**
 
@@ -97,19 +99,38 @@ Screenshots land in `web/test/screenshots/<NN>-<flow>/*.png`. The run summary go
 
 **Web UI:** Next.js static export (`output: "export"`), embedded via `rust-embed` in `cairn-api`.
 
-## Documentation
+## Docs map for agents
 
-> For detailed architecture, MCP tool surface, API endpoints, Docker topology, config reference, and CLI commands, read:
-> - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+| To... | Go to |
+|-------|-------|
+| Understand a subsystem | [`docs/reference/architecture.md`](docs/reference/architecture.md) - full crate graph, MCP tools, API endpoints, Docker, config, CLI |
+| Learn *why* something is so | [`docs/reference/decisions.md`](docs/reference/decisions.md) - ADR log |
+| See product direction / active plan | [`docs/planning/roadmap.md`](docs/planning/roadmap.md) - status; [`docs/planning/plans/`](docs/planning/plans/) - version implementation plans |
+| Understand or add tests | [`docs/testing/overview.md`](docs/testing/overview.md) - live-suite coverage; [`docs/testing/live-e2e/`](docs/testing/live-e2e/) - walk docs; [`docs/testing/findings/`](docs/testing/findings/) - bug registry |
+| Set up or upgrade an install | [`docs/guides/admin.md`](docs/guides/admin.md), [`docs/guides/upgrading.md`](docs/guides/upgrading.md) |
+| **Write a new doc** | [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) - pick a template from `docs/_templates/` |
+| Browse everything | [`docs/README.md`](docs/README.md) - full docs catalog |
 
-| Doc | What |
-|-----|------|
-| `CONTRIBUTING.md` | Dev setup, PR checklist, workspace layout |
-| `docs/ARCHITECTURE.md` | Full crate graph, MCP tools, API endpoints, Docker, config, CLI |
-| `docs/DECISIONS.md` | Architecture decision records |
-| `docs/TESTING.md` | End-to-end live-suite coverage (20 e2e scenarios; cargo test --workspace reports 330 passed + 5 ignored) |
-| `docs/ROADMAP.md` | Development status and phases |
-| `docs/BENCHMARKS.md` | Token savings benchmarks |
+## Task playbooks
+
+- **Add a feature:** read `docs/reference/architecture.md` + the active plan in
+  `docs/planning/plans/` -> implement -> add tests (`crates/cairn-tests/` or `web/test/`) ->
+  append an ADR to `docs/reference/decisions.md` if the design is non-obvious -> update `CHANGELOG.md`.
+- **File a dashboard bug:** copy `docs/_templates/finding-template.md` into
+  `docs/testing/findings/open/` -> when fixed, move it to `resolved/` and update
+  `docs/testing/findings/README.md`.
+- **Start a new version's plan:** copy `docs/_templates/plan-template.md` into
+  `docs/planning/plans/vX.Y.Z.md`.
+- **Write any other doc:** check `docs/CONVENTIONS.md` for which folder and template apply
+  before creating the file - don't guess at structure.
+
+## House rules
+
+- Keep PRs focused; one logical change per PR. Match the surrounding style.
+- Never hand-edit inside `<!-- BEGIN CAIRN -->` / `<!-- END CAIRN -->` markers (this file,
+  `CLAUDE.md`) - they're rewritten by `cairn rules` on every run.
+- Doc authoring conventions (folder structure, templates, naming, frontmatter) live in
+  [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) - read it before adding a new doc.
 
 ## Runtime prerequisites
 
