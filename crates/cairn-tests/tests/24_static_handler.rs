@@ -58,12 +58,7 @@ fn state() -> Option<axum::Router> {
 
 async fn get(app: axum::Router, path: &str) -> (StatusCode, String, Vec<u8>) {
     let resp = app
-        .oneshot(
-            Request::builder()
-                .uri(path)
-                .body(Body::empty())
-                .unwrap(),
-        )
+        .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
         .await
         .unwrap();
     let status = resp.status();
@@ -111,8 +106,7 @@ async fn missing_css_asset_returns_404_not_html_fallback() {
         eprintln!("skip: state() init failed");
         return;
     };
-    let (status, _ct, body) =
-        get(app, "/_next/static/css/nonexistent-feedface.css").await;
+    let (status, _ct, body) = get(app, "/_next/static/css/nonexistent-feedface.css").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert!(!has_any_marker(&body));
 }

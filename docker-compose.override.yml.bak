@@ -1,6 +1,0 @@
-# Override: use published GHCR image instead of local build.
-# Remove this file to return to building cairn:dev locally.
-services:
-  cairn:
-    build: !reset null
-    image: ghcr.io/vellixia/cairn:latest

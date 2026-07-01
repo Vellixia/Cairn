@@ -52,7 +52,7 @@ For the walk, the default is (1). Direct Helix is reserved for the few cases whe
 
 ## UI verification strategy
 
-One browser session, all 29 docs. Per step:
+One browser session, all 30 docs. Per step:
 
 1. `chrome-devtools_navigate_page type=url url=<route>?nocache=<step-id>`.
 2. `chrome-devtools_take_snapshot` to read the a11y tree.
@@ -72,7 +72,7 @@ If the page returns a Next.js error envelope (look for "Application error" or st
 
 A doc with any P0 finding is treated as failed for the walk summary. A doc with only P1+P2 findings passes.
 
-## Index (29 docs)
+## Index (30 docs; doc 30 walked ⭐)
 
 | # | Doc | Surface | Key endpoints / tools |
 |---|---|---|---|
@@ -105,6 +105,7 @@ A doc with any P0 finding is treated as failed for the walk summary. A doc with 
 | 27 | `27-settings.md` | Settings page (read-only session info) | `/you?tab=settings` |
 | 28 | `28-edge-cases.md` | Rate limit, CORS, env precedence, session expiry, scope denied, TLS refusal, secret-key guard, dashboard 404, content-hash dedup, multi-tenant, opt-in context injection, suspicious preference | invariant assertions |
 | 29 | `29-stubs-and-gaps.md` | Known unimplemented (WebSocket, `cairn pair`, `cairn pack`, `cairn-bench`, Web Push relay) | n/a — gap record |
+| 30 | `30-mcp-transport.md` | MCP JSON-RPC transport (stdio, the real agent surface) | `cairn mcp` over stdio; `initialize`, `tools/list`, `tools/call`, `ping`, `notifications/initialized` | **Walked** ⭐ |
 
 ## How to run a walk
 

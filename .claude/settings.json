@@ -4,7 +4,7 @@
       {
         "hooks": [
           {
-            "command": "cairn hook PostToolUse",
+            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook PostToolUse",
             "type": "command"
           }
         ],
@@ -15,7 +15,7 @@
       {
         "hooks": [
           {
-            "command": "cairn hook SessionEnd",
+            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook SessionEnd",
             "type": "command"
           }
         ]
@@ -25,7 +25,7 @@
       {
         "hooks": [
           {
-            "command": "cairn hook SessionStart",
+            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook SessionStart",
             "type": "command"
           }
         ]
@@ -35,7 +35,7 @@
       {
         "hooks": [
           {
-            "command": "cairn hook UserPromptSubmit",
+            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook UserPromptSubmit",
             "type": "command"
           }
         ]
