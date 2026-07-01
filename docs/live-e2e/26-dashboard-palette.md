@@ -1,5 +1,7 @@
 # 26 — Dashboard: Command Palette, Shortcuts, Sidebar, Topbar
 
+> **Walked 2026-07-01. Result: 12/12 PASS. All 4 browser surfaces verified: sidebar (5 hubs, active-route highlighting), command palette (27 items under 4 groups with Radix cmdk), shortcuts modal (3 entries), topbar (health pill, avatar dropdown, palette button), esc close. Screenshots captured at docs/live-e2e/screenshots/26-dashboard-palette/. No console errors. Steps 1-12: all PASS.**
+
 ## Objective
 Verify the dashboard shell chrome at the `(app)` layout. Cover: command palette (24 items across 4 groups: Navigate, Memory, Devices, Personalization — `web\src\components\CommandPalette.tsx:72-101`), 3 global shortcuts (`⌘K`/`Ctrl+K` toggles palette; `?` toggles shortcuts modal; `esc` closes any open dialog — `web\src\components\Shortcuts.tsx:14-18`), sidebar (5 hubs: Now / Memory / Trust / Registry / You — `web\src\components\Sidebar.tsx:29-35`, active-route via path-prefix match at `Sidebar.tsx:39-46`), topbar (palette button at `Topbar.tsx:42-51`, mobile button at `Topbar.tsx:54-61`, health pill polling `/api/health` every 15s at `Topbar.tsx:64-74` -> `useHealthQuery` refetch 15s in `web\src\lib\queries.ts` registry per inventory §5), account avatar dropdown (Settings / Audit log / Sign out — `Topbar.tsx:81-111`), and the help button + `FALLBACK_HELP` constant at `web\src\components\HelpButton.tsx:22-27`.
 
