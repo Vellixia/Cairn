@@ -1,5 +1,7 @@
 # 16 — Pair + PWA Mobile: Codes, Claim, Biometric Gate, Approve/Reject
 
+> **Walked 2026-07-01. Result: 1/6 PASS (POST pair-code 201), 5/6 DEFERRED (detailed fill pending). Key: GET /api/devices/pair-codes 405 (no read), POST 201 code RA3ZPTPT. /mobile renders OK (doc 26). Pair claim, MCP pair tool, biometric gate not tested.**
+
 ## Objective
 Verify the pair-code surface (host issues an 8-char code + JWT atomically via `POST /api/pair/new`; device claims it via `POST /api/pair/claim`; admin issues a code-only version via `POST /api/devices/pair-codes`) and the PWA mobile companion (`/mobile`, biometric gate, savings card, pending drift with approve/reject). Cover the uppercased + trimmed input normalization, the 10-minute default TTL (clamped 1-60), single-use enforcement, and the no-0/O/1/I/L alphabet.
 

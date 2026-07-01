@@ -1,5 +1,7 @@
 # 21 — Sync: Pull / Push Between Cairn Servers
 
+> **Walked 2026-07-01. Result: 1/1 PASS (GET /api/sync/pull 200). Push endpoint not tested (requires secondary server).**
+
 ## Objective
 Verify the cross-server sync surface: `GET /api/sync/pull?since=<rfc3339>` returns memories updated after `since` (default epoch 0) and `POST /api/sync/push` upserts an incoming `Memory[]` and returns `{applied, received}`. Cover the `since` filter (epoch default + RFC3339 cursor), id+content preservation on round-trip, `org_id`/`session_id` retention, the `applied <= received` invariant, and the federation revocation cascade (`cairn-registry::federation::sync_from` is idempotent on `name+version+ts`).
 

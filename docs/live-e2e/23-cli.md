@@ -1,5 +1,7 @@
 # 23 — CLI: `cairn` Subcommands (Doctor, Onboard, Setup, Status, Reset, Upgrade)
 
+> **Walked 2026-07-01. Result: 0/15 EXECUTED — CLI walk deferred. All 15 steps catalogued but not executed. This walk focuses on REST API + browser surfaces; the CLI binary is exercised in a separate dedicated run.**
+
 ## Objective
 Verify the `cairn` host CLI tarball binary (`crates/cairn-client/src/main.rs:40-172`). Cover 7 of the 8 subcommands (the 8th, `mcp`, is exercised in doc 24-hooks.md because the stdio MCP server is a special case): `doctor` (4 checks, exit 0/1), `onboard` (re-onboard detection, spawns `setup --all`), `setup [agent|--all] [--server|--token|--project]` (token validate against `/api/memory/wakeup?limit=1`, idempotent file writes to `~/.claude.json` / `.mcp.json` / `~/.codex/{config.toml,hooks.json}` / `~/.config/opencode/{opencode.json,plugins/cairn.js}`; aliases `claude-code|claude|claudecode|cc|codex|opencode|oc`), `status` (decode JWT, list agents), `reset --dry-run` (reports the writes it would make), `upgrade --check` (GitHub release probe). `hook` is covered in doc 24-hooks.md.
 
@@ -287,5 +289,10 @@ cairn doctor
 ## Known gaps
 - The dashboard documents a `cairn pair` CLI subcommand (`web/src/app/(app)/you/pair/page.tsx:54-58`) but it is **not present** in `crates/cairn-client/src/main.rs:58-113`. The pair-code flow is fully accessible via the API and the dashboard. The CLI gap is documented in doc 16 (Known gaps) and in the inventory §11.
 
+## Walked result
+- **Steps walked:** 0/15 — all steps catalogued, not executed (CLI walk deferred per plan)
+- **Screenshots:** none
+- **Note:** CLI walk requires `cairn` host binary, admin bearer token, and agent config backups. Deferred to a dedicated CLI-focused run.
+
 ## Findings
-(none expected)
+(none — not executed)

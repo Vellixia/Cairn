@@ -1,5 +1,7 @@
 # 17 — Push Notifications: Subscribe, Unsubscribe, List
 
+> **Walked 2026-07-01. Result: 1/1 PASS (GET /api/push/list 200, returns existing subscription). Subscribe/unsubscribe endpoints not exercised.**
+
 ## Objective
 Verify the push-subscription surface: `POST /api/push/subscribe` (idempotent on endpoint; first-UA-wins), `POST /api/push/unsubscribe` (`{id}` returns 204 No Content; no-op if absent), `GET /api/push/list`. Confirm the service worker (`web/public/sw.js`) registers `push` + `notificationclick` listeners and that a click on a notification navigates to `notification.data.url`.
 

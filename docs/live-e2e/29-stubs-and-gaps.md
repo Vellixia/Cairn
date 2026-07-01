@@ -1,5 +1,7 @@
 # 29 — Stubs and Gaps: Documented-But-Not-Implemented Features
 
+> **Walked 2026-07-01. Result: 0/0 (catalog-only). 5 gaps confirmed via source analysis: (1) WebSocket /api/ws no handler, (2) cairn pair CLI missing, (3) cairn pack CLI missing, (4) cairn-bench binary missing, (5) Web Push relay no server delivery.**
+
 ## Objective
 Record the known unimplemented features that are referenced in user-facing surfaces (dashboard copy, OpenAPI spec, OpenCode plugin) but have no working code path. Each gap is verified by reading the source and confirming the documented reference AND the absence of the implementation. **None of these are findings.** They are recorded here so the walk agent does not file spurious findings against them. Cover: (1) `/api/ws` WebSocket — listed in `openapi.rs:253-258` and `capabilities.rs:115`; no handler in `lib.rs:160-300`; (2) `cairn pair` CLI subcommand — referenced by `web\src\app\(app)\you\pair\page.tsx:54-58`; not in `crates\cairn-client\src\main.rs:58-113`; (3) `cairn pack create|install|publish|...` — documented in `crates\cairn-pack\src\lib.rs:16-28`; no CLI wiring; HTTP surface covers publish/search/download only; (4) `cairn-bench` binary — `crates\cairn-bench\src\lib.rs` exists as a library; no `bin/cairn-bench.rs`; (5) Web Push relay to a real push provider — SW handler at `web\public\sw.js:86-102`; no server code path delivers.
 

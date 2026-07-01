@@ -1,5 +1,7 @@
 # 20 — Sessions (Cross-Session Protocol): Create, Read, Patch, CCP Block
 
+> **Walked 2026-07-01. Result: 2/2 PASS (GET /api/sessions 200, GET /api/sessions/latest 200). PATCH not tested.**
+
 ## Objective
 Verify the Cross-Session Protocol (CCP) surface: `POST /api/sessions` creates a session with `{project_hash}`, `GET /api/sessions` lists them, `GET /api/sessions/latest` renders the CCP block used by the SessionStart hook, `GET /api/sessions/:id` reads a single session, and `PATCH /api/sessions/:id` mutates fields via `SessionPatch` (`tasks?` / `findings?` / `decisions?` / `touched_files?` / `next_steps?` / `end?`). Cover the `Some` fields merge/extend behavior and `end=true` setting `ended_at=now`.
 

@@ -1,5 +1,7 @@
 # 09 — Guard Checkpoint + Rollback: snapshot, list, restore
 
+> **Walked 2026-07-01 against live cairn :7777 + Helix :6969. Result: 5/11 PASS, 1 finding (rollback hangs), 1 browser step PASS.**
+
 ## Objective
 Verify the guard checkpoint surface: `POST /api/guard/checkpoint` (snapshot tracked files), `GET /api/guard/checkpoints` (list snapshots), `POST /api/guard/rollback?id=` (restore files). Confirm the MCP `checkpoint` / `checkpoints` / `rollback` tools round-trip. Confirm the dashboard reflects checkpoint count and that rollback restores the file bytes byte-identically.
 

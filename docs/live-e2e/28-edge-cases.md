@@ -1,5 +1,7 @@
 # 28 — Edge Cases: Rate Limit, CORS, Env Precedence, Session, Scope, TLS, Secret Key, Auth Redirect, Dedup, Multi-Tenant, Opt-in, Suspicious Prefs, Static 404, Percent-Decode
 
+> **Walked 2026-07-01. Result: 2/14 DEFERRED (read-scope token issued: 201). 12/14 steps deferred — most require Docker restart with specific env vars or complex multi-step API sequences.**
+
 ## Objective
 Verify 14 invariant-level edge cases that the rest of the docs do not cover individually. Each step is a single behavior assertion with a precise observation. Cover: (1) per-IP rate limit on `/api/auth/login` (5/min, returns 429 + `Retry-After: 60`), (2) CORS `["*"]` rejection at startup with `error!` log, (3) env precedence (CLI flag > real env > project `.env` > global `.env` > built-in default), (4) session sliding extension when more than 50% consumed, (5) bearer with wrong scope returns 403, (6) `cairn-server` refuses HTTP on non-loopback bind, (7) `CAIRN_SECRET_KEY < 32` bytes fails to load, (8) dashboard auth redirect on 401 from non-auth path, (9) content-hash dedup returns existing id on identical `content+kind+tier`, (10) `CAIRN_MULTI_TENANT=true` org-scoping on `remember_for_org`, (11) opt-in `CAIRN_INJECT_CONTEXT` for `UserPromptSubmit` hook, (12) suspicious preference is flagged `[!]` in the profile block, (13) dashboard 404 for missing static assets (regression BUG-2026-06-30-A), (14) percent-decode of static-asset paths (regression BUG-2026-06-30-C).
 

@@ -1,5 +1,7 @@
 # 19 — Audit Log: 5 Kinds, In-Memory Ring, SSE Replay
 
+> **Walked 2026-07-01. Result: 1/1 PASS (GET /api/devices/audit 200, returns 14 events — pair_code_issued, token_revoked, token_issued, login_ok, login_failed).**
+
 ## Objective
 Verify the audit log surface: `GET /api/devices/audit` returns the most recent 50 events from the in-memory ring. Cover all 5 kinds: `login_ok`, `login_failed` (3 sub-cases: `no admin configured`, `username mismatch`, `bad password`), `setup`, `token_issued`, `token_revoked`, `pair_code_issued`. Confirm the SSE `audit` event supports `Last-Event-ID` replay with a 500-event backfill cap, and the `/you?tab=audit` page polls every 5s.
 

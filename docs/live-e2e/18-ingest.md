@@ -1,5 +1,7 @@
 # 18 — Ingest: VTT/SRT/JSON transcripts + browser extension capture
 
+> **Walked 2026-07-01. Result: 0/4 PASS — ingest endpoints reachable but payload contract differs. POST /api/ingest/transcript 422 ("missing body"), POST /api/extensions/capture 422 ("missing kind/field").**
+
 ## Objective
 Verify the ingest surface: `POST /api/ingest/transcript` (VTT, SRT, JSON; auto-detect format; chunk by speaker and window), `POST /api/extensions/capture` (selection vs page, 20k char cap, loopback `Origin` enforcement). Each chunk / capture should land in HelixDB as a `Note`-kind memory.
 

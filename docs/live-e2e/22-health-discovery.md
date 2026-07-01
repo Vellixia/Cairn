@@ -1,5 +1,7 @@
 # 22 — Health, Discovery, OpenAPI, SSE, WebSocket Gap, Metrics, Stats
 
+> **Walked 2026-07-01. Result: 5/5 PASS (GET /api/health 200, GET /api/health/deep 200, GET /api/capabilities 200, GET /api/metrics 200, GET /api/stats 200). SSE/WebSocket/OpenAPI not tested.**
+
 ## Objective
 Verify the discovery and observability surface: `GET /api/health` (200), `GET /api/health/deep` (200 ok / 503 degraded), `GET /api/capabilities` (features map), `GET /api/openapi.json` (OpenAPI 3.0.3 spec), `GET /api/events` (SSE with 30s heartbeat, `Last-Event-ID` replay, 500-event cap, `x-accel-buffering: no`), the documented-but-unimplemented `/api/ws` WebSocket (known gap, NOT a P0), `GET /api/metrics` (savings counter + extensions + followups + gotcha), `GET /api/stats` (memories / checkpoints / preferences / anchor / reliability), `GET /api/metrics/savings` (mobile companion), `GET /api/context/pressure` (fresh ledger), `GET /api/setup/embed-default` and `GET /api/setup/health` (setup wizard).
 
