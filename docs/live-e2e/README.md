@@ -126,7 +126,7 @@ A doc with any P0 finding is treated as failed for the walk summary. A doc with 
 ## How to add a new doc
 
 1. Pick a free number 30+.
-2. Copy the template below into `web/test/live-e2e/<NN>-<name>.md`.
+2. Copy the template below into `docs/live-e2e/<NN>-<name>.md`.
 3. Add a row to the index above.
 4. Open a PR. No code change required.
 
