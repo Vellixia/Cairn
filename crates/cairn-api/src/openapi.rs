@@ -241,6 +241,29 @@ pub fn build_spec(version: &str) -> Value {
         "post" => _,
     });
 
+    // ---- Registry (pack publishing / discovery) ---------------------------
+    path!("/api/registry/packs", "List or publish packs", ["registry"], {
+        "get" => _, "post" => _,
+    });
+    path!("/api/registry/packs/{name}", "List versions of a pack", ["registry"], {
+        "get" => _,
+    });
+    path!("/api/registry/packs/{name}/{version}/download", "Download a pack tarball", ["registry"], {
+        "get" => _,
+    });
+    path!("/api/registry/packs/{name}/{version}/manifest.json", "Fetch pack manifest", ["registry"], {
+        "get" => _,
+    });
+    path!("/api/registry/packs/{name}/{version}", "Revoke a pack version", ["registry"], {
+        "delete" => _,
+    });
+    path!("/api/registry/search", "Search published packs", ["registry"], {
+        "get" => _,
+    });
+    path!("/api/registry/revocations", "List revoked pack ids", ["registry"], {
+        "get" => _,
+    });
+
     // ---- Tools (MCP) ------------------------------------------------------
     path!("/api/tools/list", "List MCP tools", ["tools"], {
         "get" => _,
@@ -281,6 +304,7 @@ pub fn build_spec(version: &str) -> Value {
             {"name": "sessions"}, {"name": "auth"}, {"name": "devices"},
             {"name": "sync"}, {"name": "push"}, {"name": "extensions"},
             {"name": "ingest"}, {"name": "tools"}, {"name": "live"}, {"name": "setup"},
+            {"name": "registry"},
         ],
         "components": {
             "securitySchemes": {
@@ -339,6 +363,9 @@ mod tests {
             "/api/auth/status",
             "/api/tools/list",
             "/api/tools/call",
+            "/api/registry/packs",
+            "/api/registry/search",
+            "/api/registry/revocations",
         ];
         for path in expected {
             assert!(paths.contains(path), "spec missing {path}");

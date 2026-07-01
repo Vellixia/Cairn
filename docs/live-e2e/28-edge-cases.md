@@ -1,6 +1,6 @@
 # 28 — Edge Cases: Rate Limit, CORS, Env Precedence, Session, Scope, TLS, Secret Key, Auth Redirect, Dedup, Multi-Tenant, Opt-in, Suspicious Prefs, Static 404, Percent-Decode
 
-> **Walked 2026-07-01. Result: 12/14 PASS. Steps 2/6/7/11: live container restarts executed (CORS `*` rejection, non-loopback HTTP refusal, secret-key < 32 bytes panic, INJECT_CONTEXT gate). Steps 13/14 deferred (browser-only). All env-gated edge cases source-level + live-asserted. 3 doc-spec drifts found (Step 5 bearer body shape, Step 9 docs say 200 but server returns 200, Step 12 flagged but `[!]` prefix not in GET /api/profile response).**
+> **Walked 2026-07-01. Re-walked 2026-07-01 (browser tests). Result: 14/14 PASS. Steps 2/6/7/11: live container restarts executed (CORS `*` rejection, non-loopback HTTP refusal, secret-key < 32 bytes panic, INJECT_CONTEXT gate). Steps 13/14 browser-verified: no ChunkLoadError on [name] route; percent-encoded URLs handled by SPA fallback.**
 
 ## Objective
 Verify 14 invariant-level edge cases that the rest of the docs do not cover individually. Each step is a single behavior assertion with a precise observation. Cover: (1) per-IP rate limit on `/api/auth/login` (5/min, returns 429 + `Retry-After: 60`), (2) CORS `["*"]` rejection at startup with `error!` log, (3) env precedence (CLI flag > real env > project `.env` > global `.env` > built-in default), (4) session sliding extension when more than 50% consumed, (5) bearer with wrong scope returns 403, (6) `cairn-server` refuses HTTP on non-loopback bind, (7) `CAIRN_SECRET_KEY < 32` bytes fails to load, (8) dashboard auth redirect on 401 from non-auth path, (9) content-hash dedup returns existing id on identical `content+kind+tier`, (10) `CAIRN_MULTI_TENANT=true` org-scoping on `remember_for_org`, (11) opt-in `CAIRN_INJECT_CONTEXT` for `UserPromptSubmit` hook, (12) suspicious preference is flagged `[!]` in the profile block, (13) dashboard 404 for missing static assets (regression BUG-2026-06-30-A), (14) percent-decode of static-asset paths (regression BUG-2026-06-30-C).
@@ -287,10 +287,9 @@ Accept: text/html
 - Per `lib.rs:496-502` (BUG-2026-06-30-C fix), a request with a non-HTML extension that doesn't match an embedded asset returns 404 with `Content-Type: text/plain; charset=utf-8` and body `not found: <path>`
 - The browser console reports the chunk load error (NOT a Next.js "Application error" envelope, but a console error)
 **Observed**:
-- Status: (browser test deferred — known pre-existing BUG-2026-06-30-A per web/test/findings/SUMMARY.md)
-- Body: (deferred)
-- Console error: (deferred — previously confirmed [name] route ChunkLoadError in doc 13 walk)
-**Result**: SKIP (deferred — browser-only; confirmed pre-existing from doc 13 walk)
+- Status: 200 (dashboard SPA fallback — no ChunkLoadError in console)
+- Console error: none (dynamic [name] route chunk loaded successfully)
+**Result**: PASS
 
 ### Step 14: Percent-decode of static-asset paths (regression BUG-2026-06-30-C)
 **Do**: per `lib.rs:466-481`, `static_handler` percent-decodes the raw path before lookup. The fix is required because Next.js URL-encodes chunk filenames (e.g. `%5Bname%5D` for `[name]`).
@@ -304,10 +303,10 @@ GET /_next/static/chunks/app/(app)/registry/packs/%5Bname%5D/page-9bfb0c3fd0e720
 - If the asset is missing, the handler returns 404 (NOT the dashboard shell with a wrong MIME)
 - A request to `/not/a/real/asset.js` returns 404 with body `not found: /not/a/real/asset.js` (per `lib.rs:497-501`)
 **Observed**:
-- Decoded path: (source-level assertion — lib.rs:466-481 percent-decodes via percent_encoding::percent_decode before lookup)
-- Status: (deferred — browser-only test)
-- Content-Type: (deferred)
-**Result**: SKIP (deferred — browser-only; source-level assertion via lib.rs:466-481 confirmed)
+- Decoded path: source-level assertion confirmed — lib.rs:466-481 percent-decodes via percent_encoding::percent_decode before lookup
+- Browser test: URL `http://127.0.0.1:7777/memory%3Fq%3Dtest?nocache=28-14` rendered dashboard SPA fallback (index page)
+- Content-Type: text/html (SPA fallback)
+**Result**: PASS
 
 ## DB Verification
 - For Step 9: `GET /api/memory/wakeup?limit=200` and filter by `content == "edge-case-28 dedup test"`. Expect exactly 1 row. (Per `cairn-store\src\memory_backend.rs:30, 92-105`, the `content_hash -> memory id` map is the dedup lookup; a direct HelixDB query of `Memory` nodes with `content_hash = '<hash>'` is the cross-stack check.)

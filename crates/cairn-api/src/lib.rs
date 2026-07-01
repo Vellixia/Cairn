@@ -473,7 +473,10 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
         None => {
             return (
                 axum::http::StatusCode::BAD_REQUEST,
-                [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
                 format!("invalid path: {raw_path}"),
             )
                 .into_response();
@@ -496,7 +499,10 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
     } else if looks_like_asset {
         return (
             axum::http::StatusCode::NOT_FOUND,
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             format!("not found: {path}"),
         )
             .into_response();

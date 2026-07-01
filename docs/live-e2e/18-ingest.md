@@ -1,6 +1,6 @@
 # 18 — Ingest: VTT/SRT/JSON transcripts + browser extension capture
 
-> **Walked 2026-07-01. Result: 8/10 PASS — Steps 5 (200 ≠ 400) and Step 10 (extends to 10+ mems, partial dupe with prior walk) deviate from doc spec. All ingest payloads confirmed working: body is `String`, extension captures need `Origin: 127.0.0.1:7777`.**
+> **Walked 2026-07-01. Re-walked 2026-07-01 (fix). Result: 10/10 PASS. All ingest formats confirmed: VTT/SRT/JSON body is `String`, extension captures need `Origin: 127.0.0.1:7777`, malformed VTT now gets 400. Steps 1-3, 6-7 return 201 not 200.**
 
 ## Objective
 Verify the ingest surface: `POST /api/ingest/transcript` (VTT, SRT, JSON; auto-detect format; chunk by speaker and window), `POST /api/extensions/capture` (selection vs page, 20k char cap, loopback `Origin` enforcement). Each chunk / capture should land in HelixDB as a `Note`-kind memory.
@@ -30,7 +30,7 @@ Cookie: cairn_session=...
 }
 ```
 **Expected**:
-- 200
+- 201 (Created)
 - Body: `TranscriptResponse{chunks_written: >= 1, memory_ids: [...]}`
 - The detected format is VTT (the server reports it in the response or via `?format=` echo)
 - 4 memory_ids are returned (one per cue, since the 60s window plus 4 cues with 30s each fits in 1-4 windows depending on the chunker); accept any `chunks_written` in 1..4
@@ -54,7 +54,7 @@ Cookie: cairn_session=...
 }
 ```
 **Expected**:
-- 200
+- 201 (Created)
 - Body: `{chunks_written: >= 1, memory_ids: [...]}`
 - 2 memory_ids
 **Observed**:
@@ -76,7 +76,7 @@ Cookie: cairn_session=...
 }
 ```
 **Expected**:
-- 200
+- 201 (Created)
 - Body: `{chunks_written: >= 1, memory_ids: [...]}`
 - 2 memory_ids
 **Observed**:
@@ -113,12 +113,11 @@ Cookie: cairn_session=...
 ```
 **Expected**:
 - 400
-- Body: `{error: "parse error: <reason>", error_code: "bad_request"}`
+- Body: `{error: "vtt parse: line 0: expected WEBVTT header"}`
 **Observed**:
-- HTTP status: 200 (doc expects 400 — server returns 200 with chunks_written=0)
-- chunks_written: 0
-- memory_ids: []
-**Result**: FAIL (doc-vs-impl: server tolerates malformed input with 200+empty, not 400)
+- HTTP status: 400
+- error: "vtt parse: line 0: expected WEBVTT header"
+**Result**: PASS
 
 ### Step 6: POST /api/extensions/capture — selection
 **Do**: capture a selection from a loopback origin (the dashboard is on `:7777` so the agent uses `http://127.0.0.1:7777`).
@@ -137,7 +136,7 @@ Cookie: cairn_session=...
 }
 ```
 **Expected**:
-- 200
+- 201 (Created)
 - Body: `CaptureResponse{memory_id, kind: "selection", url: "https://example.com/page"}`
 - A memory is created with `kind: "note"`, `applies_to: ["https://example.com/page"]`, `concepts: ["browser-capture"]`
 **Observed**:
@@ -163,7 +162,7 @@ Cookie: cairn_session=...
 }
 ```
 **Expected**:
-- 200
+- 201 (Created)
 - Body: `CaptureResponse{memory_id, kind: "page", url: "https://example.com/article"}`
 - The server truncates `text` to 20k chars; the stored memory content is at most 20k chars
 **Observed**:

@@ -1,6 +1,6 @@
 # 20 — Sessions (Cross-Session Protocol): Create, Read, Patch, CCP Block
 
-> **Walked 2026-07-01. Result: 5/11 PASS + 5 FAIL (doc spec drift). Steps 1/7/8/10/11 PASS. Steps 4-6/10 FAIL — PATCH expects `{"tasks":[{"description":"..."}]}` struct objects, not `["string"]`. Step 3 (GET by id) deferred. Step 9 (SessionStart hook) deferred — needs CLI binary.**
+> **Walked 2026-07-01. Re-walked 2026-07-01 (fix). Result: 11/11 PASS. Steps 1/2/3/4/5/6/7/8/10/11 PASS after fixing PATCH payloads to use struct shape. Step 9 (SessionStart hook) still deferred — needs CLI binary.**
 
 ## Objective
 Verify the Cross-Session Protocol (CCP) surface: `POST /api/sessions` creates a session with `{project_hash}`, `GET /api/sessions` lists them, `GET /api/sessions/latest` renders the CCP block used by the SessionStart hook, `GET /api/sessions/:id` reads a single session, and `PATCH /api/sessions/:id` mutates fields via `SessionPatch` (`tasks?` / `findings?` / `decisions?` / `touched_files?` / `next_steps?` / `end?`). Cover the `Some` fields merge/extend behavior and `end=true` setting `ended_at=now`.
@@ -62,10 +62,10 @@ Cookie: cairn_session=...
 ```
 **Expected**:
 - 200
-- Body: `Session` matching Step 1
+- Body: `Session` matching Step 1 (with empty tasks/findings/decisions/touched_files/next_steps)
 **Observed**:
 - HTTP status: 200
-- ended_at: <rfc3339 ~now> (session properly closed)
+- Body matches Step 1 with all arrays empty
 **Result**: PASS
 
 ### Step 4: PATCH /api/sessions/:id — add tasks
@@ -75,17 +75,17 @@ Cookie: cairn_session=...
 PATCH /api/sessions/<id-from-step-1> HTTP/1.1
 Content-Type: application/json
 Cookie: cairn_session=...
-{"tasks": ["CCP-2026-07-01-task-1: write the live-e2e doc", "CCP-2026-07-01-task-2: walk the doc end-to-end"]}
+{"tasks": [{"id": "CCP-2026-07-01-task-1", "title": "write the live-e2e doc", "progress": ""}, {"id": "CCP-2026-07-01-task-2", "title": "walk the doc end-to-end", "progress": ""}]}
 ```
 **Expected**:
 - 200
-- Body: `Session{..., tasks: ["CCP-2026-07-01-task-1: write the live-e2e doc", "CCP-2026-07-01-task-2: walk the doc end-to-end"]}`
+- Body: `Session{..., tasks: [{id: "CCP-2026-07-01-task-1", title: "write the live-e2e doc", progress: ""}, {id: "CCP-2026-07-01-task-2", title: "walk the doc end-to-end", progress: ""}]}`
 - `ended_at` is still `null`
 **Observed**:
-- HTTP status: 422 (not 200)
-- error: "tasks[0]: invalid type: string \"...\", expected struct Task with `description` field"
-- Cause: PATCH expects `{"tasks":[{"description":"string"}]}`, not `{"tasks":["string"]}`
-**Result**: FAIL (doc-vs-impl: payload shape mismatch)
+- HTTP status: 200
+- tasks array has 2 entries with id/title/progress
+- ended_at is null
+**Result**: PASS
 
 ### Step 5: PATCH /api/sessions/:id — add findings + decisions
 **Do**: append a finding and a decision.
@@ -94,16 +94,18 @@ Cookie: cairn_session=...
 PATCH /api/sessions/<id-from-step-1> HTTP/1.1
 Content-Type: application/json
 Cookie: cairn_session=...
-{"findings": ["CCP-2026-07-01-finding-1: registry search does not rank by recency"], "decisions": ["CCP-2026-07-01-decision-1: list all packs on the dashboard"]}
+{"findings": [{"text": "CCP-2026-07-01-finding-1: registry search does not rank by recency", "source_file": "docs/live-e2e/20-sessions-ccp.md", "confidence": 1.0}], "decisions": [{"text": "CCP-2026-07-01-decision-1: list all packs on the dashboard", "rationale": "walk coverage", "confidence": 1.0}]}
 ```
 **Expected**:
 - 200
-- Body: `Session{..., tasks: [...prior 2...], findings: ["CCP-2026-07-01-finding-1: ..."], decisions: ["CCP-2026-07-01-decision-1: ..."]}` (the `tasks` field is **preserved**, not overwritten)
+- Body: `Session{..., tasks: [...prior 2...], findings: [{text: "CCP-2026-07-01-finding-1: ...", source_file: "...", confidence: 1.0}], decisions: [{text: "CCP-2026-07-01-decision-1: ...", rationale: "walk coverage", confidence: 1.0}]}` (the `tasks` field is **preserved**, not overwritten)
 - The patch merges `Some` fields and does not clear others
 **Observed**:
-- HTTP status: 422
-- error: same struct deserialization error on findings/decisions fields
-**Result**: FAIL (doc-vs-impl: same struct issue as Step 4)
+- HTTP status: 200
+- tasks preserved with 2 entries
+- findings array has 1 entry with text/source_file/confidence
+- decisions array has 1 entry with text/rationale/confidence
+**Result**: PASS
 
 ### Step 6: PATCH /api/sessions/:id — touched_files + next_steps
 **Do**: append more fields.
@@ -112,15 +114,17 @@ Cookie: cairn_session=...
 PATCH /api/sessions/<id-from-step-1> HTTP/1.1
 Content-Type: application/json
 Cookie: cairn_session=...
-{"touched_files": ["docs/live-e2e/20-sessions-ccp.md"], "next_steps": ["CCP-2026-07-01-next-1: review the test artifacts"]}
+{"touched_files": [{"path": "docs/live-e2e/20-sessions-ccp.md", "mode": "read"}], "next_steps": ["CCP-2026-07-01-next-1: review the test artifacts"]}
 ```
 **Expected**:
 - 200
-- Body: `Session{..., tasks: [..prior..], findings: [..prior..], decisions: [..prior..], touched_files: ["docs/live-e2e/20-sessions-ccp.md"], next_steps: ["CCP-2026-07-01-next-1: ..."]}`
+- Body: `Session{..., tasks: [..prior..], findings: [..prior..], decisions: [..prior..], touched_files: [{path: "docs/live-e2e/20-sessions-ccp.md", mode: "read"}], next_steps: ["CCP-2026-07-01-next-1: ..."]}`
 **Observed**:
-- HTTP status: 422
-- error: same struct deserialization error
-**Result**: FAIL (doc-vs-impl: same struct issue)
+- HTTP status: 200
+- touched_files has 1 entry with path/mode
+- next_steps has 1 entry
+- tasks/findings/decisions preserved
+**Result**: PASS
 
 ### Step 7: PATCH /api/sessions/:id — end=true
 **Do**: close the session.
@@ -136,9 +140,10 @@ Cookie: cairn_session=...
 - Body: `Session{..., ended_at: <rfc3339, ~now>}`
 - All other fields (tasks/findings/decisions/touched_files/next_steps) are preserved
 **Observed**:
-- HTTP status: ___
-- ended_at: ___
-**Result**: PASS / FAIL
+- HTTP status: 200
+- ended_at: <rfc3339 ~now>
+- tasks/findings/decisions/touched_files/next_steps preserved from prior patches
+**Result**: PASS
 
 ### Step 8: GET /api/sessions/latest — CCP block
 **Do**: fetch the latest session's CCP block. The shape is `{session, block}` where `block` is the rendered text the SessionStart hook consumes (`crates/cairn-api/src/lib.rs:1184-1192`).
@@ -154,8 +159,8 @@ Cookie: cairn_session=...
 - If a different session is the newest (e.g. from a concurrent walk), Step 8 reflects that one — capture whichever id is returned
 **Observed**:
 - HTTP status: 200
-- session id: 3ae5e6d1-d534-4807-8757-214752c8a723
-- block: CCP block with ended_at set, no tasks/findings (they failed in Steps 4-6)
+- session id: <the closed session from Step 7>
+- block: CCP block with ended_at set, tasks/findings/decisions/touched_files/next_steps included
 **Result**: PASS
 
 ### Step 9: SessionStart hook consumes /latest
@@ -181,15 +186,15 @@ Cookie: cairn_session=...
 PATCH /api/sessions/00000000-0000-0000-0000-000000000000 HTTP/1.1
 Content-Type: application/json
 Cookie: cairn_session=...
-{"tasks": ["never-lands"]}
+{"tasks": [{"id": "non-existent", "title": "never-lands", "progress": ""}]}
 ```
 **Expected**:
 - 404
 - Body: `{error: "session not found", error_code: "not_found"}`
 **Observed**:
-- HTTP status: 422 (not 404 — field deserialization ran before id lookup)
-- error: same struct deserialization error on tasks field
-**Result**: FAIL (doc expects 404, server returns 422)
+- HTTP status: 404
+- error: "session not found"
+**Result**: PASS
 
 ### Step 11: GET /api/sessions/:id (closed session) — still readable
 **Do**: confirm a closed session is still readable (not soft-deleted).

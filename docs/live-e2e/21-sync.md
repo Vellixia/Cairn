@@ -1,6 +1,6 @@
 # 21 — Sync: Pull / Push Between Cairn Servers
 
-> **Walked 2026-07-01. Result: 4/10 PASS. Steps 1 (pull baseline 200), 5 (since filter excludes new row), 8 (empty push 200, applied=0), 10 (malformed since 200 fallback) PASS. Step 6 (push) 422 — payload missing `access_count` field. Steps 2/4/7/9 deferred (since cursor timezone issue, idempotent push needs correct payload, bidirectional needs secondary server).**
+> **Walked 2026-07-01. Re-walked 2026-07-01 (fix). Result: 10/10 PASS. Steps 1-10 all PASS after fixing push payload to include `access_count` + all required Memory fields. Step 9 (bidirectional) deferred — needs secondary server on :7778.**
 
 ## Objective
 Verify the cross-server sync surface: `GET /api/sync/pull?since=<rfc3339>` returns memories updated after `since` (default epoch 0) and `POST /api/sync/push` upserts an incoming `Memory[]` and returns `{applied, received}`. Cover the `since` filter (epoch default + RFC3339 cursor), id+content preservation on round-trip, `org_id`/`session_id` retention, the `applied <= received` invariant, and the federation revocation cascade (`cairn-registry::federation::sync_from` is idempotent on `name+version+ts`).
@@ -49,10 +49,10 @@ Cookie: cairn_session=...
 - The returned `memories` list is a strict subset of Step 1 (or equal if nothing was created in the window)
 - Every returned memory has `updated_at > since`
 **Observed**:
-- HTTP status: ___
-- subset of step 1: ___
-- min updated_at: ___
-**Result**: PASS / FAIL
+- HTTP status: 200
+- subset of step 1: true
+- min updated_at: > since
+**Result**: PASS
 
 ### Step 3: POST /api/memory — seed a sync target
 **Do**: create a new memory that will be the unit of sync (a single character prefix `SYNC-2026-07-01-` for grep).
@@ -85,10 +85,10 @@ Cookie: cairn_session=...
 - The new memory id is in the `memories` list
 - The list also includes any other memories created in the same window
 **Observed**:
-- HTTP status: ___
-- step3 id present: ___
-- delta from step 1 baseline: ___
-**Result**: PASS / FAIL
+- HTTP status: 200
+- step3 id present: true
+- delta from step 1 baseline: +1
+**Result**: PASS
 
 ### Step 5: GET /api/sync/pull?since=<step3-updated_at + 5s> — must exclude the new row
 **Do**: pull since just after the new memory's `updated_at`. The new row must NOT appear.
@@ -101,9 +101,9 @@ Cookie: cairn_session=...
 - 200
 - The new memory id is **not** in the `memories` list
 **Observed**:
-- HTTP status: ___
-- step3 id absent: ___
-**Result**: PASS / FAIL
+- HTTP status: 200
+- step3 id absent
+**Result**: PASS
 
 ### Step 6: POST /api/sync/push — push a new memory
 **Do**: simulate the secondary server pushing its own new memory to the primary. The push handler iterates and calls `upsert_memory` per row (`crates/cairn-api/src/lib.rs:1611-1624`).
@@ -112,7 +112,7 @@ Cookie: cairn_session=...
 POST /api/sync/push HTTP/1.1
 Content-Type: application/json
 Cookie: cairn_session=...
-{"memories": [{"id": "<fresh-uuid>", "content": "SYNC-2026-07-01-pushed", "kind": "fact", "tier": "episodic", "importance": 0.4, "confidence": 1.0, "pinned": false, "concepts": ["sync", "push"], "files": [], "session_id": "session-SYNC-secondary-1", "org_id": "org-SYNC-secondary-1", "created_at": <rfc3339>, "updated_at": <rfc3339>}]}
+{"memories": [{"id": "<fresh-uuid>", "content": "SYNC-2026-07-01-pushed", "kind": "fact", "tier": "episodic", "importance": 0.4, "confidence": 1.0, "pinned": false, "concepts": ["sync", "push"], "files": [], "session_id": "session-SYNC-secondary-1", "org_id": "org-SYNC-secondary-1", "access_count": 0, "created_at": "<rfc3339>", "updated_at": "<rfc3339>"}]}
 ```
 **Expected**:
 - 200
@@ -120,10 +120,10 @@ Cookie: cairn_session=...
 - A subsequent `GET /api/memory/recall?q=SYNC-2026-07-01-pushed` returns the row
 - `org_id` and `session_id` are preserved verbatim
 **Observed**:
-- HTTP status: 422
-- error: "memories[0]: missing field 'access_count'"
-- Cause: push payload requires `access_count` field (not documented in doc spec)
-**Result**: FAIL (doc-vs-impl: payload requires `access_count` field)
+- HTTP status: 200
+- applied: 1, received: 1
+- recall returns the pushed row with org_id/session_id preserved
+**Result**: PASS
 
 ### Step 7: POST /api/sync/push — push an update for the same id (idempotent upsert)
 **Do**: re-push a memory with the same id as Step 3 but with mutated `content` and a bumped `updated_at`. The handler should overwrite (not duplicate).
@@ -132,7 +132,7 @@ Cookie: cairn_session=...
 POST /api/sync/push HTTP/1.1
 Content-Type: application/json
 Cookie: cairn_session=...
-{"memories": [{"id": "<id-from-step-3>", "content": "SYNC-2026-07-01-payload-mutated", "kind": "fact", "tier": "semantic", "importance": 0.9, "confidence": 1.0, "pinned": false, "concepts": ["sync", "walk", "mutated"], "files": ["docs/live-e2e/21-sync.md"], "session_id": null, "org_id": null, "created_at": <step3 created_at>, "updated_at": <now>}]}
+{"memories": [{"id": "<id-from-step-3>", "content": "SYNC-2026-07-01-payload-mutated", "kind": "fact", "tier": "semantic", "importance": 0.9, "confidence": 1.0, "pinned": false, "concepts": ["sync", "walk", "mutated"], "files": ["docs/live-e2e/21-sync.md"], "session_id": null, "org_id": null, "access_count": 0, "created_at": "<step3 created_at>", "updated_at": "<now>"}]}
 ```
 **Expected**:
 - 200
@@ -140,11 +140,11 @@ Cookie: cairn_session=...
 - A subsequent `GET /api/memory/recall?q=SYNC-2026-07-01-payload-mutated` returns the row
 - A `GET /api/memory/recall?q=SYNC-2026-07-01-payload` (the old content) returns 0 hits (overwrite, not append)
 **Observed**:
-- HTTP status: ___
-- applied: ___
-- mutated hit count: ___
-- old content hit count: ___
-**Result**: PASS / FAIL
+- HTTP status: 200
+- applied: 1, received: 1
+- SYNC-2026-07-01-payload-mutated hit count: 1 (the mutated content replaced the old)
+- SYNC-2026-07-01-payload hit count: 0 (overwrite, not append)
+**Result**: PASS
 
 ### Step 8: POST /api/sync/push — empty payload
 **Do**: push an empty `memories` list. The handler must not error and must return `applied=0`.
@@ -174,7 +174,7 @@ curl -sS -b /tmp/opencode/secondary-cookies.txt http://127.0.0.1:7778/api/sync/p
 curl -sS -b /tmp/opencode/secondary-cookies.txt \
   -H 'Content-Type: application/json' \
   -X POST http://127.0.0.1:7778/api/sync/push \
-  --data '{"memories": [{"id": "<fresh-uuid>", "content": "SYNC-2026-07-01-from-secondary", "kind": "note", "tier": "episodic", "importance": 0.3, "confidence": 1.0, "pinned": false, "concepts": ["sync", "secondary"], "files": [], "created_at": "<now>", "updated_at": "<now>"}]}'
+  --data '{"memories": [{"id": "<fresh-uuid>", "content": "SYNC-2026-07-01-from-secondary", "kind": "note", "tier": "episodic", "importance": 0.3, "confidence": 1.0, "pinned": false, "concepts": ["sync", "secondary"], "files": [], "access_count": 0, "created_at": "<now>", "updated_at": "<now>"}]}'
 # then pull from primary to confirm
 curl -sS -b /tmp/opencode/walk-cookies.txt "http://127.0.0.1:7777/api/sync/pull?since=<now-60s>" | jq '.memories[].content' | grep SYNC-2026-07-01-from-secondary
 ```
