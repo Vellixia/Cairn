@@ -88,6 +88,9 @@ ureq = { version = "~2.12", features = ["json"] }
 dotenvy = "~0.15"
 jsonwebtoken = "~9.3"
 regex = "~1.12"
+# Format- and comment-preserving TOML editor for Codex config.toml merges (already in the
+# lockfile transitively at 0.22.x, so this adds no new version).
+toml_edit = "~0.22"
 helix-db = "~2.0"
 self_update = { version = "~0.44", default-features = false, features = ["ureq", "rustls", "archive-tar", "compression-flate2", "archive-zip", "compression-zip-deflate"] }
 url = "~2.5"

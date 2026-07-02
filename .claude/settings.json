@@ -8,7 +8,7 @@
             "type": "command"
           }
         ],
-        "matcher": "Edit|Write|MultiEdit|NotebookEdit|StrReplace"
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit"
       }
     ],
     "SessionEnd": [

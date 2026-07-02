@@ -543,6 +543,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "toml_edit",
  "tracing-subscriber",
  "ureq 2.12.1",
 ]

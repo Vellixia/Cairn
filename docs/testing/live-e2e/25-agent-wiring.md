@@ -10,7 +10,7 @@ updated: 2026-07-01
 > **Walked 2026-07-01. Result: 12/12 EXECUTED. All 12 steps walked against cairn CLI v0.7.1 + server v0.7.1 (local Docker). Pre-existing issue: `~/.claude.json` has duplicate keys (case variants of `D:/code/pc-monitoring`) causing `ConvertFrom-Json` to fail — the cairn config writes are still correct. Reset + restore round-trip verified.**
 
 ## Objective
-Verify the multi-agent config writes performed by `cairn setup [agent]`. Three agents, one row per agent. Cover: Claude Code (`mcpServers.cairn` in `~/.claude.json` global or `.mcp.json` project; hooks in `<scope>/.claude/settings.json` for `SessionStart` / `UserPromptSubmit` / `PostToolUse` with matcher `Edit|Write|MultiEdit|NotebookEdit|StrReplace` / `SessionEnd`), Codex (`[mcp_servers.cairn]` TOML in `~/.codex/config.toml` with `CAIRN_SERVER` / `CAIRN_TOKEN` env; `~/.codex/hooks.json` with matchers `startup|resume|clear|compact` / `apply_patch|Edit|Write` / `Stop`), OpenCode (`mcp.cairn` + `plugin` array entry in `~/.config/opencode/opencode.json`; the plugin at `~/.config/opencode/plugins/cairn.js` translates OpenCode events to hook events: `event({event})` for `session.created` -> `SessionStart`, `session.deleted|idle` -> `SessionEnd`, `message.part.updated` tool completed -> `PostToolUse`, `chat.message` -> `UserPromptSubmit`). The dedup logic in `crates/cairn-client/src/setup.rs:107-123` strips prior cairn entries before writing, so re-runs are safe. Cover: re-run `setup` -> no duplicate entries; `reset` -> clean removal.
+Verify the multi-agent config writes performed by `cairn setup [agent]`. Three agents, one row per agent. Cover: Claude Code (`mcpServers.cairn` in `~/.claude.json` global or `.mcp.json` project; hooks in `<scope>/.claude/settings.json` for `SessionStart` / `UserPromptSubmit` / `PostToolUse` with matcher `Edit|Write|MultiEdit|NotebookEdit` / `SessionEnd`), Codex (`[mcp_servers.cairn]` TOML in `~/.codex/config.toml` with `CAIRN_SERVER` / `CAIRN_TOKEN` env; `~/.codex/hooks.json` with matchers `startup|resume|clear|compact` / `apply_patch|Edit|Write` / `Stop`), OpenCode (`mcp.cairn` + `plugin` array entry in `~/.config/opencode/opencode.json`; the plugin at `~/.config/opencode/plugins/cairn.js` translates OpenCode events to hook events: `event({event})` for `session.created` -> `SessionStart`, `session.deleted|idle` -> `SessionEnd`, `message.part.updated` tool completed -> `PostToolUse`, `chat.message` -> `UserPromptSubmit`). The dedup logic in `crates/cairn-client/src/setup.rs:107-123` strips prior cairn entries before writing, so re-runs are safe. Cover: re-run `setup` -> no duplicate entries; `reset` -> clean removal.
 
 ## Preconditions
 - [ ] cairn :7777 healthy
@@ -43,14 +43,14 @@ Get-Content -Raw -LiteralPath $claude | ConvertFrom-Json | ConvertTo-Json -Depth
 - Exit code 0
 - `~/.claude.json` contains `mcpServers.cairn` with `command: "cairn"` and `args: ["mcp"]`
 - The `env` block (if present) carries `CAIRN_SERVER` and `CAIRN_TOKEN`
-- `~/.claude/settings.json` (or project equivalent) contains four `hooks` entries: `SessionStart`, `UserPromptSubmit`, `PostToolUse` (matcher `Edit|Write|MultiEdit|NotebookEdit|StrReplace`), `SessionEnd`
+- `~/.claude/settings.json` (or project equivalent) contains four `hooks` entries: `SessionStart`, `UserPromptSubmit`, `PostToolUse` (matcher `Edit|Write|MultiEdit|NotebookEdit`), `SessionEnd`
 - Each hook's `command` is `cairn hook <event>`
 **Observed**:
 - Exit code: 0
 - mcpServers.cairn.command: "C:\Users\andre\.local\bin\cairn.exe"
 - mcpServers.cairn.args: ["mcp"]
 - hooks.SessionStart command: "cairn hook SessionStart" (in settings.json)
-- hooks.PostToolUse matcher: "Edit|Write|MultiEdit|NotebookEdit|StrReplace"
+- hooks.PostToolUse matcher: "Edit|Write|MultiEdit|NotebookEdit"
 - Note: ~/.claude.json has pre-existing duplicate keys, but cairn entry written successfully
 **Result**: PASS
 
