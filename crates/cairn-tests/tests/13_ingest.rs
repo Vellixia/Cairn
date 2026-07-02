@@ -57,9 +57,16 @@ fn chunk_by_speaker_short_window_splits_per_cue() {
 }
 
 #[test]
-fn vtt_empty_input_returns_empty_cues() {
-    let cues = parse_vtt("").expect("empty is not an error");
-    assert!(cues.is_empty());
+fn vtt_empty_input_is_rejected() {
+    // Empty input has no WEBVTT header and no cues. The parser treats "nothing to
+    // ingest" as an error (matching cairn-ingest's own unit tests, where `WEBVTT\n`
+    // with no cues also returns `IngestError::Empty`), rather than silently producing
+    // an empty transcript.
+    let err = parse_vtt("").expect_err("empty input must be rejected");
+    assert!(
+        matches!(err, cairn_ingest::IngestError::Empty),
+        "expected IngestError::Empty, got {err:?}"
+    );
 }
 
 #[test]
