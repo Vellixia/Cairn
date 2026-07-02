@@ -4,7 +4,7 @@
 //! [`AdminRecord`](cairn_core::AdminRecord). Two concurrent `/setup` requests can't both win
 //! because [`Store::set_meta_if_absent`](cairn_store::Store::set_meta_if_absent) is atomic. The
 //! in-memory [`AuditLog`] is best-effort - restart loses it - which keeps the surface small and
-//! avoids a HelixDB schema migration for 0.4.0.
+//! avoids a database schema migration for 0.4.0.
 
 use crate::session::{build_clear_cookie, build_set_cookie, extract_cookie, SessionPayload};
 use crate::AppState;
@@ -555,7 +555,7 @@ mod tests {
 
     /// A helper for tests that don't care about durable persistence - the production `record`
     /// writes to the store, but tests run with `cairn_store::Store` and that requires a live
-    /// HelixDB. Tests want to assert in-memory ring behavior, so they use this stub.
+    /// database. Tests want to assert in-memory ring behavior, so they use this stub.
     impl AuditLog {
         pub fn record_dummy(&self, detail: String) {
             let mut q = self.inner.lock().expect("audit log mutex");
@@ -605,7 +605,7 @@ mod tests {
 
     /// `bootstrap_admin_from_env` validation is independent of the live Store - these tests
     /// cover the static rules. The full integration test (real bootstrap, then reload) runs in
-    /// the cairn-api crate's tests/ dir because it needs a HelixDB fixture.
+    /// the cairn-api crate's tests/ dir because it needs a live-database fixture.
     #[test]
     fn bootstrap_input_rules_password_too_short() {
         assert!("1234567".len() < 8);

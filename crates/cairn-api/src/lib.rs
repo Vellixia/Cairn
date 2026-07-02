@@ -639,12 +639,12 @@ async fn health() -> Json<Value> {
 /// `GET /api/health/deep` - real dependency probe. Returns 200 when all components are
 /// reachable, 503 when any are degraded. Safe to use as a load-balancer readiness check.
 async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
-    let helix_ok = s.store.count_memories().is_ok();
+    let db_ok = s.store.count_memories().is_ok();
     let embedder_ok = cairn_embed::from_config(&s.cfg.embed).is_ok();
     let admin_ok = admin_mod::load_admin(&s)
         .map(|r| r.is_some())
         .unwrap_or(false);
-    let all_ok = helix_ok && embedder_ok;
+    let all_ok = db_ok && embedder_ok;
     let code = if all_ok {
         axum::http::StatusCode::OK
     } else {
@@ -657,7 +657,7 @@ async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json
             "name": "cairn",
             "version": env!("CARGO_PKG_VERSION"),
             "components": {
-                "helix": if helix_ok { "ok" } else { "unreachable" },
+                "db": if db_ok { "ok" } else { "unreachable" },
                 "embedder": if embedder_ok { "ok" } else { "unavailable" },
                 "admin": if admin_ok { "configured" } else { "not_configured" },
             }
@@ -915,7 +915,18 @@ async fn gotcha_wakeup(
     Query(q): Query<GotchaWakeupQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = q.limit.unwrap_or(5).clamp(1, 50);
-    let clusters = s.mem.top_gotcha_clusters(limit)?;
+    let clusters: Vec<Value> = s
+        .mem
+        .top_gotcha_clusters(limit)?
+        .iter()
+        .map(|c| {
+            let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
+            if let Value::Object(ref mut m) = v {
+                m.insert("size".into(), json!(c.size()));
+            }
+            v
+        })
+        .collect();
     let total = s
         .mem
         .gotcha_tracker()
@@ -1727,7 +1738,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
                     "error": "invalid bearer token",
                     "error_code": "unauthenticated",
                     "reason": "unknown_token",
-                    "detail": "token is cryptographically valid but was not found in the store (it may have been revoked, or HelixDB data may have been lost)"
+                    "detail": "token is cryptographically valid but was not found in the store (it may have been revoked, or the database data may have been lost)"
                 })),
             )
                 .into_response();
@@ -2063,7 +2074,7 @@ mod tests {
         assert_eq!(sigs.est_tokens, full.est_tokens);
     }
 
-    /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
+    /// `None` when `CAIRN_DB_URL` is unset or SurrealDB is unreachable (tests skip gracefully).
     /// The temp dir is a scratch workspace for the test's files (separate from the store).
     pub(crate) fn test_state() -> Option<(AppState, tempfile::TempDir)> {
         let cfg = cairn_store::Store::test_config()?;
@@ -2910,7 +2921,7 @@ mod tests {
         };
         let h = setup_health(State(state.clone())).await.0;
         let v = serde_json::to_value(&h.health).unwrap();
-        assert!(v.get("helix_reachable").is_some());
+        assert!(v.get("db_reachable").is_some());
         assert!(v.get("admin_exists").is_some());
         assert!(v.get("embedder_loaded").is_some());
         assert!(v.get("secret_key_configured").is_some());
@@ -3102,7 +3113,7 @@ mod tests {
 
     /// Registry HTTP integration: publish a signed pack, list it, download the tarball
     /// back, then revoke and confirm the revocations log records it. Skips when
-    /// `CAIRN_HELIX_URL` is unset.
+    /// `CAIRN_DB_URL` is unset.
     #[tokio::test]
     async fn registry_publish_list_download_revoke_end_to_end() {
         use axum::body::{to_bytes, Body};
@@ -3138,7 +3149,7 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .method("POST")
-                    .uri("/registry/packs")
+                    .uri("/api/registry/packs")
                     .header("content-type", cairn_pack::MIME)
                     .body(Body::from(tar_bytes.clone()))
                     .unwrap(),
@@ -3156,7 +3167,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs")
+                    .uri("/api/registry/packs")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3173,7 +3184,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs/alpha/1.0.0/download")
+                    .uri("/api/registry/packs/alpha/1.0.0/download")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3191,7 +3202,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/search?q=alp")
+                    .uri("/api/registry/search?q=alp")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3207,7 +3218,7 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .method("DELETE")
-                    .uri("/registry/packs/alpha/1.0.0")
+                    .uri("/api/registry/packs/alpha/1.0.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3223,7 +3234,7 @@ mod tests {
         let resp = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/revocations")
+                    .uri("/api/registry/revocations")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3304,7 +3315,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs")
+                    .uri("/api/registry/packs")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3324,7 +3335,7 @@ mod tests {
         let resp = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs/local-notes/1.0.0/manifest.json")
+                    .uri("/api/registry/packs/local-notes/1.0.0/manifest.json")
                     .body(Body::empty())
                     .unwrap(),
             )

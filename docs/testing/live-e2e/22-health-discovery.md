@@ -43,19 +43,19 @@ GET /api/health HTTP/1.1
 **Result**: PASS / FAIL
 
 ### Step 2: GET /api/health/deep
-**Do**: probe the deep health endpoint. Per `crates/cairn-api/src/lib.rs:635-660` it returns 200 when `helix` and `embedder` are reachable, 503 otherwise; `admin` is informational.
+**Do**: probe the deep health endpoint. Per `crates/cairn-api/src/lib.rs:635-660` it returns 200 when `db` and `embedder` are reachable, 503 otherwise; `admin` is informational.
 **Request**:
 ```http
 GET /api/health/deep HTTP/1.1
 ```
 **Expected**:
 - 200 (cairn is healthy on the walk)
-- Body: `{"status": "ok"|"degraded", "name": "cairn", "version": ..., "components": {"helix": "ok"|"unreachable", "embedder": "ok"|"unavailable", "admin": "configured"|"not_configured"}}`
-- `helix: ok` and `embedder: ok` in a healthy environment
+- Body: `{"status": "ok"|"degraded", "name": "cairn", "version": ..., "components": {"db": "ok"|"unreachable", "embedder": "ok"|"unavailable", "admin": "configured"|"not_configured"}}`
+- `db: ok` and `embedder: ok` in a healthy environment
 - `admin: configured` because the walk's env bootstrap minted one
 **Observed**:
 - HTTP status: ___
-- helix: ___
+- db: ___
 - embedder: ___
 - admin: ___
 **Result**: PASS / FAIL
@@ -246,18 +246,18 @@ GET /api/setup/embed-default HTTP/1.1
 **Result**: PASS / FAIL
 
 ### Step 13: GET /api/setup/health (public)
-**Do**: the setup wizard calls this on step 4. Per `crates/cairn-api/src/setup_wizard.rs:34-49` the response shape is `{health: {helix_reachable, admin_exists, embedder_loaded, secret_key_configured}, embed_provider}`.
+**Do**: the setup wizard calls this on step 4. Per `crates/cairn-api/src/setup_wizard.rs:34-49` the response shape is `{health: {db_reachable, admin_exists, embedder_loaded, secret_key_configured}, embed_provider}`.
 **Request**:
 ```http
 GET /api/setup/health HTTP/1.1
 ```
 **Expected**:
 - 200
-- `health.helix_reachable: true` and `health.admin_exists: true` on a walked server
+- `health.db_reachable: true` and `health.admin_exists: true` on a walked server
 - `embed_provider` is the configured provider (default `local`)
 **Observed**:
 - HTTP status: ___
-- helix_reachable: ___
+- db_reachable: ___
 - admin_exists: ___
 - secret_key_configured: ___
 - embed_provider: ___

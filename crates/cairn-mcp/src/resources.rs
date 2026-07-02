@@ -56,7 +56,7 @@ pub fn resource_defs() -> &'static [ResourceDef] {
         ResourceDef {
             uri: "cairn://audit/recent",
             name: "Recent Audit Events",
-            description: "Most recent N audit events (durable HelixDB ring), newest first.",
+            description: "Most recent N audit events (durable SurrealDB ring), newest first.",
             mime_type: "application/json",
         },
         ResourceDef {
@@ -147,7 +147,7 @@ fn read_drift_pending(_server: &McpServer) -> Value {
 }
 
 fn read_audit_recent(server: &McpServer) -> Value {
-    // Audit events are stored in HelixDB on the in-container server. The standalone
+    // Audit events are stored in SurrealDB on the in-container server. The standalone
     // MCP stdio binary (without the HTTP surface) returns an
     // empty list - production clients should read this URI through the
     // server's `/api/mcp/resources/read` bridge.
@@ -170,14 +170,14 @@ fn read_config_toml(server: &McpServer) -> Value {
          host = \"{}\"\n\
          port = {}\n\
          multi_tenant = {}\n\
-         helix_url = {}\n\
+         db_url = \"{}\"\n\
          embed_provider = \"{}\"\n\
          admin_username = \"{}\"\n\
          cors_origins = {:?}\n",
         cfg.host,
         cfg.port,
         cfg.multi_tenant,
-        cfg.helix_url.as_deref().unwrap_or("(none)"),
+        cfg.db_url,
         cfg.embed.provider,
         cfg.admin.username,
         cfg.cors_origins,

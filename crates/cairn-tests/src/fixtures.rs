@@ -2,7 +2,7 @@
 //!
 //! Every constructor here is pure (no I/O, no clock dependency other than
 //! `Utc::now()` for stable timestamps). Tests should never reach for a real
-//! filesystem, network, or HelixDB — that boundary is enforced by *what* this
+//! filesystem, network, or a live database — that boundary is enforced by *what* this
 //! module exports, not by discipline.
 //!
 //! Conventions:

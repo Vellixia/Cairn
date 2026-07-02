@@ -1,6 +1,6 @@
 [package]
 name = "cairn-store"
-description = "HelixDB-backed structured store + content-hash blob store for Cairn (full-fidelity originals)."
+description = "SurrealDB-backed structured store + content-hash blob store for Cairn (full-fidelity originals)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -20,9 +20,9 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 tokio.workspace = true
-helix-db.workspace = true
 url.workspace = true
 tracing.workspace = true
+surrealdb.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

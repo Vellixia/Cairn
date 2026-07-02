@@ -14,8 +14,8 @@
 //! `cairn` binary loads both `.env` files at startup via `dotenvy` (see
 //! `crates/cairn/src/main.rs`). `dotenvy` only fills variables that are not already set, so
 //! real env always wins over a project `.env`, and a project `.env` always wins over the global
-//! one. A machine-global `.env` lets you configure embeddings/Helix once for every project on the
-//! device ("global cairn").
+//! one. A machine-global `.env` lets you configure embeddings/the database connection once for
+//! every project on the device ("global cairn").
 
 use std::path::{Path, PathBuf};
 
@@ -49,7 +49,7 @@ impl Default for AdminConfig {
     }
 }
 
-/// Embedding-model settings (used to vectorize memories for Helix's vector search).
+/// Embedding-model settings (used to vectorize memories for the store's vector search).
 #[derive(Clone)]
 pub struct EmbedConfig {
     /// `local` (default), `openai`, or `ollama`.
@@ -164,14 +164,20 @@ pub struct Config {
     pub host: String,
     /// Serve bind port (`CAIRN_PORT`, default `7777`).
     pub port: u16,
-    /// HelixDB server URL (`CAIRN_HELIX_URL`).
-    pub helix_url: Option<String>,
-    /// HelixDB bearer API key (`CAIRN_HELIX_TOKEN`). Sent as `Authorization: Bearer <token>` on
-    /// every HelixDB request. Optional - HelixDB instances without auth don't need it.
-    pub helix_token: Option<String>,
-    /// Label-namespace prefix for the HelixDB backend (`CAIRN_HELIX_NS`). Lets multiple Cairn
-    /// instances - or isolated tests - share one Helix server without colliding. Default `cairn_`.
-    pub helix_ns: Option<String>,
+    /// SurrealDB connection URL (`CAIRN_DB_URL`, default `ws://localhost:8000`). In the bundled
+    /// docker-compose stack this is `ws://surreal:8000` (Docker-internal network name; SurrealDB
+    /// is never exposed to the host).
+    pub db_url: String,
+    /// SurrealDB root/auth username (`CAIRN_DB_USER`, default `root`).
+    pub db_user: String,
+    /// SurrealDB root/auth password (`CAIRN_DB_PASS`).
+    pub db_pass: String,
+    /// SurrealDB namespace (`CAIRN_DB_NS`, default `cairn`). Lets multiple Cairn instances - or
+    /// isolated tests - share one SurrealDB server without colliding (SurrealDB's namespace is
+    /// the natural isolation boundary, replacing HelixDB's label-prefix scheme).
+    pub db_ns: String,
+    /// Per-query deadline for the SurrealDB client (`CAIRN_DB_TIMEOUT_SECS`, default `10`).
+    pub db_timeout_secs: u64,
     /// Default remote Cairn server for `sync` / `pull` / `contribute` (`CAIRN_SERVER`).
     pub default_server: Option<String>,
     /// HMAC secret used to sign device-token JWTs (`CAIRN_SECRET_KEY`).
@@ -221,9 +227,13 @@ impl Config {
             port: env_str("CAIRN_PORT")
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777),
-            helix_url: env_str("CAIRN_HELIX_URL"),
-            helix_token: env_str("CAIRN_HELIX_TOKEN"),
-            helix_ns: env_str("CAIRN_HELIX_NS"),
+            db_url: env_str("CAIRN_DB_URL").unwrap_or_else(|| "ws://localhost:8000".to_string()),
+            db_user: env_str("CAIRN_DB_USER").unwrap_or_else(|| "root".to_string()),
+            db_pass: env_str("CAIRN_DB_PASS").unwrap_or_default(),
+            db_ns: env_str("CAIRN_DB_NS").unwrap_or_else(|| "cairn".to_string()),
+            db_timeout_secs: env_str("CAIRN_DB_TIMEOUT_SECS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
             default_server: env_str("CAIRN_SERVER"),
             secret_key: env_str("CAIRN_SECRET_KEY").map(|s| s.into_bytes()),
             tls: match (env_path("CAIRN_TLS_CERT"), env_path("CAIRN_TLS_KEY")) {
@@ -355,9 +365,11 @@ mod tests {
             // placeholders so the struct literal stays exhaustive.
             data_dir: std::env::temp_dir(),
             port: 7777,
-            helix_url: None,
-            helix_token: None,
-            helix_ns: None,
+            db_url: "ws://localhost:8000".into(),
+            db_user: "root".into(),
+            db_pass: String::new(),
+            db_ns: "cairn".into(),
+            db_timeout_secs: 10,
             default_server: None,
             secret_key: None,
             tls: None,

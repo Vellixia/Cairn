@@ -997,7 +997,7 @@ impl RemoteProxy {
 mod tests {
     use super::*;
 
-    /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
+    /// `None` when `CAIRN_DB_URL` is unset or the database is unreachable (tests skip gracefully).
     fn server() -> Option<McpServer> {
         let cfg = cairn_store::Store::test_config()?;
         McpServer::new(&cfg).ok()

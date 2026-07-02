@@ -4,7 +4,7 @@
 //! remember, edit, delete, pin, reinforce, recall, graph. Auth flow:
 //! POST `/api/auth/setup` -> POST `/api/auth/login` -> `cairn_session=<value>` cookie.
 //!
-//! Hermetic: no network, no HelixDB, no docker. In-memory `cairn_store::Store` +
+//! Hermetic: no network, no live database, no docker. In-memory `cairn_store::Store` +
 //! `cairn_api::router` (state from `AppState::with_store`).
 
 use axum::body::Body;
@@ -26,9 +26,11 @@ fn state() -> Option<(axum::Router, Arc<Store>, tempfile::TempDir)> {
         data_dir: dir.path().to_path_buf(),
         host: "127.0.0.1".into(),
         port: 7777,
-        helix_url: None,
-        helix_token: None,
-        helix_ns: None,
+        db_url: "ws://localhost:8000".into(),
+        db_user: "root".into(),
+        db_pass: String::new(),
+        db_ns: "cairn".into(),
+        db_timeout_secs: 10,
         default_server: None,
         secret_key: Some(b"cairn-api-tests-secret-key-32!!!".to_vec()),
         tls: None,

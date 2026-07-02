@@ -406,7 +406,7 @@ fn assess(
 #[cfg(test)]
 mod tests {
     use super::*;
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these). The returned temp dir is a
+    /// `None` when `CAIRN_DB_URL` is unset (offline runs skip these). The returned temp dir is a
     /// scratch workspace for the test's files (separate from the store).
     fn guard() -> Option<(Guard, tempfile::TempDir)> {
         let store = Store::open_for_test()?;

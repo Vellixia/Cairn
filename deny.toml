@@ -10,17 +10,20 @@ yanked = "deny"
 unmaintained = "workspace"
 # Each ignore below is a transitive dependency we can't easily upgrade without breaking the
 # workspace's pinned minor-version policy. The advisory database entry is linked in each line.
+#
+# NOTE: RUSTSEC-2024-0436 (`paste` via rust-embed), RUSTSEC-2025-0119 (`number_prefix` via
+# indicatif/human-panic), and RUSTSEC-2025-0134 (`rustls-pemfile` via axum-server 0.7.x) were
+# removed here in v0.8.0 Sprint 1 - re-resolving Cargo.lock for the SurrealDB addition bumped
+# these transitive deps past the affected versions, so the ignores are now dead (`cargo deny`
+# reports "advisory was not encountered" if they're kept).
 ignore = [
-    # RUSTSEC-2024-0436 - `paste`: unmaintained; transitive via rust-embed 8.x.
-    # Replacement requires rust-embed 9.x which would bump our workspace minor pin.
-    "RUSTSEC-2024-0436",
-    # RUSTSEC-2025-0119 - `number_prefix`: unmaintained; transitive via indicatif / human-panic.
-    # No maintained fork upstream; deprecation warning is acceptable for an internal CLI dep.
-    "RUSTSEC-2025-0119",
-    # RUSTSEC-2025-0134 - `rustls-pemfile`: unmaintained; transitive via axum-server 0.7.x.
-    # axum-server has not bumped to a maintained fork yet; we re-evaluate at the next workspace
-    # bump. Risk is bounded - rustls-pemfile only reads PEM files at startup.
-    "RUSTSEC-2025-0134",
+    # RUSTSEC-2023-0071 - `rsa`: Marvin Attack timing side-channel (no safe upgrade available
+    # upstream). Transitive via surrealdb-core -> jsonwebtoken 10.x (used for SurrealDB's own
+    # JWKS/RSA auth token verification). Cairn's bundled docker-compose stack authenticates to
+    # SurrealDB with root user/pass, never RSA-signed tokens, so this code path is unreached in
+    # our deployment; re-evaluate when surrealdb-core migrates off the vulnerable jsonwebtoken
+    # version or the `rsa` crate ships a constant-time implementation.
+    "RUSTSEC-2023-0071",
 ]
 
 [bans]
@@ -70,6 +73,69 @@ skip = [
     { name = "webpki-roots", version = "0.x" },
     { name = "tower-http", version = "0.x" },
     { name = "wit-bindgen", version = "0.x" },
+
+    # --- surrealdb (v0.8.0 Sprint 1) ---------------------------------------------------------
+    # SurrealDB (`surrealdb ~3.1`, client-only via `protocol-ws`) brings its own large,
+    # independently-versioned dependency universe (surrealdb-core bundles a gRPC stack via
+    # tonic, its own rand/crypto/hash pins, and the rkyv zero-copy serialization family). None
+    # of these overlap with anything security-sensitive Cairn calls directly; they're isolated
+    # inside surrealdb-core's internals. Re-evaluate this block whenever surrealdb is bumped -
+    # a later release may unify some of these with the rest of the workspace.
+
+    # surrealdb-core's own web/RPC stack (tonic pulls a newer axum than our `~0.7` pin).
+    { name = "axum", version = "0.x" },
+    { name = "axum-core", version = "0.x" },
+    { name = "matchit", version = "0.x" },
+    { name = "reqwest", version = "0.x" },
+    { name = "jsonwebtoken", version = "*" }, # 9.x (ours) vs 10.x (surrealdb-core)
+    { name = "syn", version = "*" },          # 1.x (older transitive) vs 2.x (surrealdb-core)
+    { name = "heck", version = "0.x" },
+
+    # surrealdb-core's own rand/hash/crypto pins (independent of our `rand ~0.8` workspace pin).
+    { name = "rand", version = "0.x" },
+    { name = "rand_chacha", version = "0.x" },
+    { name = "rand_core", version = "0.x" },
+    { name = "ahash", version = "0.x" },
+    { name = "foldhash", version = "0.x" },
+    { name = "hashbrown", version = "0.x" },
+    { name = "cpufeatures", version = "0.x" },
+    { name = "untrusted", version = "0.x" },
+    { name = "base64", version = "0.x" }, # our workspace pin is `base64 ~0.22`; this is the 0.13 outlier
+
+    # rkyv zero-copy serialization family - used internally by surrealkv/surrealdb-core for its
+    # storage layer. All entries here belong to the same rkyv 0.7-vs-0.8 major-version split.
+    { name = "rkyv", version = "0.x" },
+    { name = "rkyv_derive", version = "0.x" },
+    { name = "ptr_meta", version = "0.x" },
+    { name = "ptr_meta_derive", version = "0.x" },
+    { name = "rend", version = "0.x" },
+    { name = "as-slice", version = "0.x" },
+    { name = "generic-array", version = "0.x" },
+    { name = "hash32", version = "0.x" },
+    { name = "heapless", version = "0.x" },
+
+    # TOML/parser-combinator stack - surrealdb-core parses its own config with a newer
+    # toml_edit/winnow than our direct `toml_edit ~0.22` dep (added alongside this).
+    { name = "winnow", version = "*" },
+    { name = "toml_edit", version = "*" },
+    { name = "toml_datetime", version = "*" },
+    { name = "nom", version = "*" },
+
+    # Misc surrealdb-core internals: geo-index (rstar), CLI progress (console/indicatif),
+    # vector/array math (ndarray/itertools), platform dirs (dirs-sys/redox_users), and a
+    # trailing batch of `windows-*` crates pulled by a newer `windows-rs` than our other deps use.
+    { name = "rstar", version = "0.x" },
+    { name = "console", version = "0.x" },
+    { name = "indicatif", version = "0.x" },
+    { name = "ndarray", version = "0.x" },
+    { name = "itertools", version = "0.x" },
+    { name = "dirs-sys", version = "0.x" },
+    { name = "redox_users", version = "0.x" },
+    { name = "windows-core", version = "0.x" },
+    { name = "windows-link", version = "0.x" },
+    { name = "windows-result", version = "0.x" },
+    { name = "windows-strings", version = "0.x" },
+    { name = "windows_i686_gnullvm", version = "0.x" },
 ]
 
 [sources]

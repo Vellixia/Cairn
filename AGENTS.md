@@ -16,7 +16,7 @@ cargo build --workspace
 - Run a single crate's tests: `cargo test -p cairn-core` (substitute any crate name).
 - `cargo build --workspace` does **not** require the web UI; `crates/cairn-api/build.rs` creates `web/out/` at compile time when missing so the binary falls back to its built-in page.
 
-**Server (requires HelixDB):**
+**Server (requires SurrealDB):**
 ```sh
 docker compose up -d
 ```
@@ -35,7 +35,7 @@ CI does not run them.
 
 A single workspace member (`cairn-tests`) that hosts `tests/<NN>_<topic>.rs` files - one
 integration test binary per file. Every test calls a real Cairn crate function against a
-real `Store::open_in_memory()` instance (no network, no HelixDB). The hermetic boundary is
+real `Store::open_in_memory()` instance (no network, no live database). The hermetic boundary is
 maintained by a per-test in-memory `cairn_store::Store`, exercising every engine without a
 running backend.
 
@@ -134,9 +134,9 @@ resolved finding is `docs/testing/findings/README.md`.
 
 ## Runtime prerequisites
 
-- **HelixDB required.** Set `CAIRN_HELIX_URL` or use `docker compose up -d helix`.
+- **SurrealDB required.** Set `CAIRN_DB_URL` (default `ws://localhost:8000`) or use `docker compose up -d surreal`.
 - **Production:** set `CAIRN_SECRET_KEY` (32+ bytes), `CAIRN_TLS_CERT` + `CAIRN_TLS_KEY`.
-- **Docker compose:** requires `.env` with non-default `MINIO_ROOT_USER` + `MINIO_ROOT_PASSWORD` (startup guard refuses `minioadmin`).
+- **Docker compose:** requires `.env` with a non-default `SURREAL_PASS` (startup guard refuses `root`/`secret`/`changeme`/`password`).
 
 ## Key files
 

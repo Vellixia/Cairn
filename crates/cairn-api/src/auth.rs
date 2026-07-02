@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Claims embedded in a device-token JWT.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Claims {
-    /// Token identifier (matches the metadata stored in HelixDB).
+    /// Token identifier (matches the metadata stored in the database).
     jti: String,
     /// Human-readable device name.
     sub: String,

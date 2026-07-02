@@ -88,11 +88,13 @@ fn cairn_tests_crate_declares_path_deps_for_what_it_uses() {
 #[test]
 fn cairn_tests_crate_does_not_pull_in_heavy_runtime_engines() {
     // The hermetic test bucket must not enable the runtime features
-    // that need HelixDB / ONNX / a live embedder. cairn-embed and
+    // that need ONNX / a live embedder / a live database. cairn-embed and
     // cairn-store are present as type-only deps — fine — but the
-    // `local` feature on cairn-embed (fastembed/ONNX) must stay off
-    // and cairn-store must not pull helix-db into the test compile
-    // graph.
+    // `local` feature on cairn-embed (fastembed/ONNX) must stay off,
+    // and cairn-store must never gain a direct helix-db dependency again
+    // (removed entirely in v0.8.0 Sprint 1 - SurrealDB doesn't need
+    // hermetic tests to talk to a live server; `Store::open_in_memory`
+    // covers that).
     let manifest = std::fs::read_to_string(
         workspace_root()
             .join("crates")

@@ -13,7 +13,7 @@
 //!   `mcp` top-level key with `{ type, command, environment, enabled }` entries.
 //!
 //! When `--server` is passed, the MCP server entry includes `CAIRN_SERVER` and `CAIRN_TOKEN` env
-//! vars so `cairn mcp` runs in remote-proxy mode; otherwise it runs in local HelixDB mode.
+//! vars so `cairn mcp` runs in remote-proxy mode; otherwise it runs in local mode.
 //!
 //! `--all` configures only the agents it actually detects (project markers or home-dir install);
 //! naming an agent explicitly configures it regardless.

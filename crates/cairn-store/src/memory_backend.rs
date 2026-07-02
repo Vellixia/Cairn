@@ -1,8 +1,8 @@
 //! In-memory [`StoreBackend`](crate::db::StoreBackend) implementation.
 //!
 //! Used by the hermetic test bucket (`crates/cairn-tests/`) and any other
-//! caller that wants a `Store` without standing up HelixDB. The semantics
-//! match the Helix backend wherever it matters for engine correctness:
+//! caller that wants a `Store` without standing up a database. The semantics
+//! match the SurrealDB backend wherever it matters for engine correctness:
 //!
 //! - last-write-wins on `upsert_memory` (older `updated_at` is dropped).
 //! - monotonic `AuditRecord` ids so SSE replay works the same.
@@ -11,7 +11,7 @@
 //!
 //! No vector index: `semantic_recall` returns `Ok(None)` so `MemoryEngine`
 //! falls back to lexical ranking, identical to the offline behaviour of
-//! the production server when `CAIRN_HELIX_URL` is unset.
+//! the production server when `CAIRN_DB_URL` is unset.
 
 use crate::db::{AuditRecord, StoreBackend};
 use crate::Store;
@@ -327,7 +327,7 @@ impl StoreBackend for MemoryBackend {
 
     fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>> {
         let g = self.inner.lock().map_err(poisoned)?;
-        // Helix returns newest first; match that ordering.
+        // The real backend returns newest first; match that ordering.
         let mut v: Vec<_> = g
             .checkpoints
             .iter()

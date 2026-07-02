@@ -2,7 +2,7 @@
 title: "Architecture"
 type: reference
 status: living
-updated: 2026-07-01
+updated: 2026-07-02
 ---
 
 # Architecture
@@ -19,15 +19,13 @@ graph TD
     Agent["AI Agent<br/>Claude Code Codex CLI OpenCode"]
     CLI["cairn (host binary)<br/>McpServer / RemoteProxy<br/>setup run hook sync pair pack"]
     Server["cairn-server (in-container bin)<br/>cairn-api axum REST + web UI<br/>auth cookie + JWT + CORS + CSP nonce"]
-    Store["cairn-store<br/>HelixBackend + BlobStore"]
-    Helix["HelixDB<br/>graph + HNSW vectors"]
-    MinIO["MinIO<br/>S3 persistence"]
+    Store["cairn-store<br/>SurrealStore + BlobStore"]
+    Surreal["SurrealDB<br/>graph + HNSW vectors, RocksDB-backed"]
 
     Agent -->|"MCP stdio<br/>+ lifecycle hooks"| CLI
     CLI -->|"HTTP<br/>CAIRN_SERVER + CAIRN_TOKEN"| Server
     Server --> Store
-    Store --> Helix
-    Helix --> MinIO
+    Store --> Surreal
 ```
 
 ---
@@ -52,7 +50,7 @@ rebuilt only when the Docker image is rebuilt. See ADR-029.
 ```mermaid
 graph BT
     core["cairn-core<br/>types - config - OrgId - errors"]
-    store["cairn-store<br/>HelixDB + BlobStore"]
+    store["cairn-store<br/>SurrealDB + BlobStore"]
     context["cairn-context<br/>read - cache - AST - assemble"]
     memory["cairn-memory<br/>4-tier - recall - RRF - MMR - graph - crystallize"]
     guard["cairn-guard<br/>verify - anchor - checkpoint"]
@@ -110,7 +108,7 @@ graph BT
 | Crate | Role |
 |---|---|
 | `cairn-core` | Domain types, config resolution, errors, hashing, `OrgId`. No deps on other cairn crates. |
-| `cairn-store` | HelixDB backend (graph + vector) + content-hash `BlobStore`. Token/memory/checkpoint/audit persistence. |
+| `cairn-store` | SurrealDB backend (graph + vector) + content-hash `BlobStore`. Token/memory/checkpoint/audit persistence. |
 | `cairn-context` | Read modes (full/signatures/map/auto), content-hash + mtime cache (~13-tok re-reads), tree-sitter AST outlines (11 languages), `expand` recovery, `Assembler` (token-budgeted context). |
 | `cairn-memory` | 4-tier memory (working/episodic/semantic/procedural), consolidation, Ebbinghaus decay, SHA-256 dedup, BM25 + semantic fusion via RRF, MMR diversity rerank, crystallize, provenance graph. |
 | `cairn-assemble` | Edge-ordered context assembly under a token budget. Anti-context-rot. |
@@ -121,13 +119,13 @@ graph BT
 | `cairn-embed` | Pluggable embeddings: local (fastembed/ONNX all-MiniLM-L6-v2), OpenAI, Ollama, hashing fallback. |
 | `cairn-session` | Cross-Session Protocol (JSONL sessions + drift log), approve/reject workflow. |
 | `cairn-pack` | `.cairnpkg` format - hand-rolled ustar, SHA-256 per-file integrity, HMAC signature, Ed25519 signing. |
-| `cairn-registry` | Self-hosted pack registry: HTTP endpoints under `/registry/*`, trust scopes, revocation cascade. |
+| `cairn-registry` | Self-hosted pack registry: HTTP endpoints under `/api/registry/*`, trust scopes, revocation cascade. |
 | `cairn-sync` | Offline-first CRDT sync: `GCounter` + `ORSet` + vector clocks + Argon2id/ChaCha20-Poly1305 E2E encryption. |
 | `cairn-bench` | LongMemEval + horizon + retention benchmarks with hand-built fixtures. |
 | `cairn-proactive` | Intent classifier (local heuristic, sub-ms), `ProactiveHook`, per-project opt-out. |
 | `cairn-proxy` | `cairn.sh` reverse proxy: parallel fan-out to multiple registries, best-effort merge. |
 | `cairn-ingest` | VTT/SRT/JSON transcript parsers + speaker-window chunking (default 60s). |
-| `cairn-mcp` | MCP server over stdio. Local mode (opens HelixDB store) or remote proxy mode (forwards to `cairn-api`). 29 tools + 10 graph actions = 39, 6 resources, 5 prompts. |
+| `cairn-mcp` | MCP server over stdio. Local mode (opens the SurrealDB store) or remote proxy mode (forwards to `cairn-api`). 29 tools + 10 graph actions = 39, 6 resources, 5 prompts. |
 | `cairn-api` | Axum REST API + embedded web UI (rust-embed). Auth middleware (cookie session + JWT device tokens), CORS, per-request CSP nonce. Registry + extensions + push + ingest routes. |
 | `cairn-api` (bin `cairn-server`) | In-container entrypoint. Resolves config, opens the store, runs `bootstrap_admin_from_env`, binds :7777, serves the API + web UI. Built into the Docker image; never ships in host tarballs. |
 | `cairn-client` | Host binary `cairn`: `mcp`, `setup`, `run`, `hook`, `sync`, `pair`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
@@ -217,19 +215,22 @@ All tools are exposed via `cairn mcp` (stdio) and mirrored at `/api/tools/list` 
 | POST | `/api/extensions/capture` | Browser extension capture (loopback-only) |
 | POST | `/api/ingest/transcript` | Ingest a transcript (VTT/SRT/JSON) |
 
-### Registry (`/registry/*`)
+### Registry (`/api/registry/*`)
+
+Mounted under `/api/registry` (not `/registry`) so it doesn't shadow the dashboard's own
+`/registry` and `/registry/packs` page routes, which are served by the static-file fallback.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/registry/packs` | List all packs |
-| POST | `/registry/packs` | Publish a pack (raw tarball) |
-| GET | `/registry/packs/:name` | List versions of a pack |
-| GET | `/registry/packs/:name/:version/download` | Download a pack tarball |
-| GET | `/registry/packs/:name/:version/manifest.json` | Fetch cached manifest |
-| DELETE | `/registry/packs/:name/:version` | Revoke a pack |
-| GET | `/registry/search` | Search packs (`?q=...`) |
-| GET | `/registry/trusted-keys` | List trust grants |
-| GET | `/registry/revocations` | Revocation log (`?since=<unix>`) |
+| GET | `/api/registry/packs` | List all packs |
+| POST | `/api/registry/packs` | Publish a pack (raw tarball) |
+| GET | `/api/registry/packs/:name` | List versions of a pack |
+| GET | `/api/registry/packs/:name/:version/download` | Download a pack tarball |
+| GET | `/api/registry/packs/:name/:version/manifest.json` | Fetch cached manifest |
+| DELETE | `/api/registry/packs/:name/:version` | Revoke a pack |
+| GET | `/api/registry/search` | Search packs (`?q=...`) |
+| GET | `/api/registry/trusted-keys` | List trust grants |
+| GET | `/api/registry/revocations` | Revocation log (`?since=<unix>`) |
 
 ---
 
@@ -242,9 +243,11 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 | `CAIRN_DATA_DIR` | OS data dir | Data directory |
 | `CAIRN_HOST` | `127.0.0.1` | Serve bind host |
 | `CAIRN_PORT` | `7777` | Serve bind port |
-| `CAIRN_HELIX_URL` | (none) | HelixDB server URL |
-| `CAIRN_HELIX_TOKEN` | (none) | HelixDB bearer API key |
-| `CAIRN_HELIX_NS` | `cairn_` | HelixDB label namespace prefix |
+| `CAIRN_DB_URL` | `ws://localhost:8000` | SurrealDB server URL |
+| `CAIRN_DB_USER` | `root` | SurrealDB root/auth username |
+| `CAIRN_DB_PASS` | (empty) | SurrealDB root/auth password |
+| `CAIRN_DB_NS` | `cairn` | SurrealDB namespace (isolation boundary for multi-instance/tests) |
+| `CAIRN_DB_TIMEOUT_SECS` | `10` | Per-query deadline for SurrealDB |
 | `CAIRN_SECRET_KEY` | (required) | HMAC secret for JWTs ( 32 bytes) |
 | `CAIRN_TLS_CERT` / `CAIRN_TLS_KEY` | (none) | TLS material for HTTPS |
 | `CAIRN_INSECURE` | `0` | Allow plain HTTP on non-loopback |
@@ -264,10 +267,8 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 
 ```
 docker compose up -d
-  -> minio-guard   (one-shot: validates MinIO creds)
-  -> minio         (S3-compatible storage for HelixDB persistence)
-  -> minio-init    (one-shot: creates helix-db bucket)
-  -> helix         (HelixDB graph + vector datastore, :6969)
+  -> surreal-guard (one-shot: validates SURREAL_PASS)
+  -> surreal       (SurrealDB graph + vector datastore, no host port)
   -> cairn-init    (one-shot: chowns /data to uid 10001)
   -> cairn         (Cairn server + web UI, 127.0.0.1:7777, non-root)
 ```

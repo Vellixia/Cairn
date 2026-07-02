@@ -7,7 +7,7 @@
 //! signed, so the verifier doesn't need access to the runtime).
 //!
 //! Persistence: in-memory by default. A future iteration can mirror the audit log to
-//! HelixDB - the signature scheme is the same so the two backends stay interchangeable.
+//! SurrealDB - the signature scheme is the same so the two backends stay interchangeable.
 
 use crate::AppState;
 use axum::{

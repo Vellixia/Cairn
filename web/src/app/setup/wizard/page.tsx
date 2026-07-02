@@ -40,7 +40,7 @@ import { toast } from "sonner";
 
 interface SetupHealth {
   health: {
-    helix_reachable: boolean;
+    db_reachable: boolean;
     admin_exists: boolean;
     embedder_loaded: boolean;
     secret_key_configured: boolean;
@@ -474,7 +474,7 @@ function Step4Health({
       </CardHeader>
       <CardContent className="space-y-3">
         <ul className="space-y-2">
-          <Health label="HelixDB reachable" ok={health.health.helix_reachable} />
+          <Health label="Database reachable" ok={health.health.db_reachable} />
           <Health label="Admin account" ok={health.health.admin_exists} />
           <Health label="Embedder loaded" ok={health.health.embedder_loaded} />
           <Health

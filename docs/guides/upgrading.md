@@ -2,7 +2,7 @@
 title: "Upgrading to 0.5.0"
 type: guide
 status: living
-updated: 2026-07-01
+updated: 2026-07-02
 ---
 
 # Upgrading to 0.5.0
@@ -29,10 +29,11 @@ crates). The single-admin/cookie-session model from 0.4.0 is unchanged - this re
 - 21 crates in the workspace. The old 14-crate dep graph is gone - `cairn-session`,
   `cairn-pack`, `cairn-registry`, `cairn-sync`, `cairn-bench`, `cairn-proactive`,
   `cairn-proxy`, and `cairn-ingest` are new.
-- **HelixDB is required.** `cairn-store` ships a pluggable backend (HelixDB +
-  in-memory). If you were on the 0.4 SQLite backend, run a HelixDB container and
-  `docker compose up -d helix` before restarting Cairn. The server refuses to start
-  when `CAIRN_HELIX_URL` is unset (or unreachable from the bound interface).
+- **A datastore is required.** `cairn-store` ships a pluggable backend (currently
+  SurrealDB, plus an in-memory backend for hermetic tests). If you were on the 0.4
+  SQLite backend, run `docker compose up -d surreal` before restarting Cairn. As of
+  v0.8.0 the datastore is SurrealDB, not HelixDB - see "Upgrading to 0.8.0" below if
+  you're coming from a HelixDB-backed 0.5.0-0.7.x install.
 - `deploy/` templates and the Chrome extension under `extensions/chrome/` were removed.
   Use `cairn onboard` (or the new `cairn install --docker` subcommand) to bootstrap
   a fresh stack.
@@ -50,17 +51,18 @@ crates). The single-admin/cookie-session model from 0.4.0 is unchanged - this re
 
 Use the dashboard export feature or the `GET /api/share/export` API endpoint.
 
-### 2. Point at HelixDB
+### 2. Point at SurrealDB
 
-`docker compose up -d helix` starts HelixDB on `:6969`. Set in `.env`:
+`docker compose up -d surreal` starts SurrealDB (no host port - reachable only over the
+compose network). Set in `.env`:
 
 ```sh
-CAIRN_HELIX_URL=http://localhost:6969
+CAIRN_DB_URL=ws://localhost:8000
 ```
 
-When the URL is unset *and* the bind address is non-loopback, the server refuses to start.
-This is intentional - running the audit pipeline against an in-memory backend would lose
-data on restart.
+`CAIRN_DB_URL` defaults to `ws://localhost:8000` if unset. Running the audit pipeline
+against an in-memory backend would lose data on restart, so production installs should
+always point this at a real, persistent SurrealDB server.
 
 ### 3. Upgrade the binary
 
@@ -80,7 +82,7 @@ The 0.4.0 device tokens still authenticate - JWTs are HS256 and the secret is th
 pwsh scripts/e2e.ps1            # 20 scenarios, ~67/69 assertions pass
 ```
 
-The harness needs `cairn` and `cairn` on `$PATH` plus a running HelixDB. It exercises
+The harness needs `cairn` and `cairn` on `$PATH` plus a running SurrealDB. It exercises
 memory, context, guardrails, sessions, sync, federation, registry, sync, ingest,
 proactive, and the mobile companion.
 
@@ -95,7 +97,7 @@ proactive, and the mobile companion.
 
 | Key | Default | Notes |
 |---|---|---|
-| `CAIRN_HELIX_URL` | `http://localhost:6969` | Required for non-loopback binds |
+| `CAIRN_DB_URL` | `ws://localhost:8000` | SurrealDB server URL |
 | `CAIRN_EMBED_PROVIDER` | `hashing` | `onnx` opt-in via `cairn-embed` feature |
 | `CAIRN_PROACTIVE_DEFAULT` | `on` | Set `off` to disable auto-inject for all users |
 | `CAIRN_REGISTRY_URL` | _(unset)_ | Enables federation; pull-based, cursor: `revocations_since(since)` |
@@ -106,7 +108,7 @@ proactive, and the mobile companion.
 
 ```sh
 cargo build --workspace
-cargo test --workspace         # 330 lib tests pass; 5 ignored are live-HelixDB ones
+cargo test --workspace         # 330 lib tests pass; 5 ignored are live-SurrealDB ones
 docker compose up -d           # in-container cairn-server now resolves config + bootstrap from .env
 pwsh scripts/e2e.ps1           # end-to-end harness
 ```
@@ -118,11 +120,11 @@ Cairn's `docker-compose.yml` uses **two** Docker volumes:
 | Volume | Persists | Notes |
 |---|---|---|
 | `cairn-data` | Admin record, audit log, sessions, ledger, push subscriptions | Mounted at `/data` inside the cairn container |
-| `helix-minio` | **All HelixDB data** - memories, device tokens, sync state, pairing codes, checkpoint metadata | Backed by the MinIO bucket `helix-db` |
+| `cairn-surreal-data` | **All SurrealDB data** - memories, device tokens, sync state, pairing codes, checkpoint metadata | RocksDB-backed, mounted at `/data` inside the surreal container |
 
 **Critical:** `docker compose down` preserves both volumes. `docker compose down -v`
-**wipes both**. Losing `helix-minio` silently invalidates every device token (the JWT
-signatures still pass, but the token ids no longer exist in HelixDB - every request
+**wipes both**. Losing `cairn-surreal-data` silently invalidates every device token (the
+JWT signatures still pass, but the token ids no longer exist in SurrealDB - every request
 returns 401 `"unknown_token"`). Recovery: mint new tokens via the dashboard,
 then re-run `cairn setup --server <url> --token <jwt>` on each device.
 
@@ -134,8 +136,31 @@ When a device token returns 401, the error body now includes a machine-readable
 | `reason` | Cause | Fix |
 |---|---|---|
 | `bad_signature` | `CAIRN_SECRET_KEY` rotated | Restore the old key, or mint a fresh token |
-| `unknown_token` | Token revoked or HelixDB data lost | Mint a new token and re-run `cairn setup` |
+| `unknown_token` | Token revoked or SurrealDB data lost | Mint a new token and re-run `cairn setup` |
 | `insufficient_scope` | Token scope does not permit the endpoint | Upgrade token scope in the dashboard |
+
+## Upgrading to 0.8.0
+
+v0.8.0 replaces the HelixDB + MinIO datastore with SurrealDB (Sprint 1). This is a
+storage-engine swap, not a config-compatible upgrade:
+
+- **No data migration path.** Old HelixDB/MinIO data is not carried forward - a fresh
+  SurrealDB instance starts empty. If you need your existing memories, export them first
+  with the dashboard's export feature (or `GET /api/share/export`) *before* upgrading,
+  then re-import after (`cairn import` / `POST /api/share/import`).
+- `CAIRN_HELIX_URL`, `CAIRN_HELIX_TOKEN`, `CAIRN_HELIX_NS`, `HELIX_PORT`,
+  `MINIO_ROOT_USER`, and `MINIO_ROOT_PASSWORD` are gone. Replace them with `CAIRN_DB_URL`
+  (default `ws://localhost:8000`), `CAIRN_DB_USER` (default `root`), `CAIRN_DB_PASS`,
+  `CAIRN_DB_NS` (default `cairn`), `CAIRN_DB_TIMEOUT_SECS` (default `10`), and, for the
+  bundled docker-compose stack, `SURREAL_USER` / `SURREAL_PASS`.
+- `docker-compose.yml`'s `minio-guard`, `minio`, `minio-init`, and `helix` services are
+  replaced by `surreal-guard` and `surreal`. The `helix-minio` volume is replaced by
+  `cairn-surreal-data`. Run `docker compose down` (not `-v`, unless you've already
+  exported) before pulling, then `docker compose up -d` to bring up the new stack.
+- The SurrealDB Rust SDK and server major versions must match (both `3.x`) - the bundled
+  compose stack pins `surrealdb/surrealdb:v3`. A `v2.x` server rejects the `v3.x`
+  client's WebSocket subprotocol handshake.
+- MSRV bumped 1.85 -> 1.89 (required by `surrealdb ~3.1`).
 
 `cairn doctor` now validates the token with a real server request (not just a
 presence check), and `cairn setup` refuses to write an invalid token to agent config

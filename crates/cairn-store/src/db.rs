@@ -1,20 +1,21 @@
 //! The structured store.
 //!
-//! `Store` is a thin facade over a [`StoreBackend`] - Cairn's [`HelixBackend`](crate::helix) - plus
-//! the content-addressed [`BlobStore`] that holds full-fidelity originals. Keeping the public
-//! `Store` API stable means the backend never churns the engines, API, MCP, or CLI.
+//! `Store` is a thin facade over a [`StoreBackend`] - Cairn's [`SurrealStore`](crate::surreal) -
+//! plus the content-addressed [`BlobStore`] that holds full-fidelity originals. Keeping the
+//! public `Store` API stable means the backend never churns the engines, API, MCP, or CLI.
 
 use crate::blob::BlobStore;
-use cairn_core::{Config, DeviceToken, Error, Memory, Result};
+use cairn_core::{Config, DeviceToken, Memory, Result};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-/// Tombstone value written by [`Store::reset_meta`]. HelixDB's append-only schema can't
-/// physically remove rows, so this sentinel signals "logically absent" to readers.
+/// Tombstone value written by [`Store::reset_meta`]. SurrealDB rows are mutable, but Cairn keeps
+/// this sentinel so tombstone semantics stay identical across backends: this sentinel signals
+/// "logically absent" to readers.
 pub(crate) const META_TOMBSTONE: &str = "__deleted__";
 
 /// The structured-storage operations Cairn needs from a backend, implemented by
-/// [`HelixBackend`](crate::helix::HelixBackend).
+/// [`SurrealStore`](crate::surreal::SurrealStore).
 pub(crate) trait StoreBackend: Send + Sync {
     fn insert_memory(&self, m: &Memory) -> Result<()>;
     fn get_memory(&self, id: &str) -> Result<Option<Memory>>;
@@ -136,19 +137,12 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open the store described by `cfg`. Cairn uses **HelixDB** as its datastore, so
-    /// `CAIRN_HELIX_URL` (`cfg.helix_url`) must be set; the bundled `docker compose` stack provides
+    /// Open the store described by `cfg`. Cairn uses **SurrealDB** as its datastore
+    /// (`cfg.db_url`, default `ws://localhost:8000`); the bundled `docker compose` stack starts
     /// one. The content-addressed blob store lives under the data dir.
     pub fn open(cfg: &Config) -> Result<Self> {
-        let url = cfg.helix_url.as_deref().ok_or_else(|| {
-            Error::Invalid(
-                "CAIRN_HELIX_URL is required - Cairn stores data in HelixDB. Run the docker compose \
-                 stack (which starts one) or point CAIRN_HELIX_URL at a HelixDB server."
-                    .into(),
-            )
-        })?;
         let backend: Box<dyn StoreBackend> =
-            Box::new(crate::helix::HelixBackend::connect(url, cfg)?);
+            Box::new(crate::surreal::SurrealStore::connect(cfg)?);
         Ok(Self {
             backend,
             blobs: BlobStore::new(cfg.blobs_dir()),
@@ -295,9 +289,9 @@ impl Store {
         self.backend.max_audit_event_id()
     }
 
-    /// Mark `key` as deleted by appending the tombstone sentinel. The append-only HelixDB
-    /// schema can't physically remove rows, so future reads will see this as absent via
-    /// [`get_meta`] and [`set_meta_if_absent`]. Returns `Ok(true)` if a record existed.
+    /// Mark `key` as deleted by writing the tombstone sentinel (rather than physically removing
+    /// the row), so future reads see this as absent via [`get_meta`] and [`set_meta_if_absent`]
+    /// while the row itself still carries an audit trail. Returns `Ok(true)` if a record existed.
     pub fn reset_meta(&self, key: &str) -> Result<bool> {
         let existed = self.backend.get_meta(key)?.is_some();
         self.backend.set_meta(key, META_TOMBSTONE)?;
@@ -348,11 +342,11 @@ impl Store {
         self.backend.claim_pairing(code, now)
     }
 
-    /// Open an **isolated** store for tests against a HelixDB server.
+    /// Open an **isolated** store for tests against a SurrealDB server.
     ///
-    /// Returns `None` when `CAIRN_HELIX_URL` is unset, so the offline suite simply skips
-    /// Helix-backed tests; when it *is* set but the server can't be reached, this panics so CI
-    /// surfaces the failure rather than skipping silently. Each call gets a fresh label namespace
+    /// Returns `None` when `CAIRN_DB_URL` is unset, so the offline suite simply skips
+    /// Surreal-backed tests; when it *is* set but the server can't be reached, this panics so CI
+    /// surfaces the failure rather than skipping silently. Each call gets a fresh namespace
     /// (so concurrent tests never collide on the shared server) and the dependency-free `hashing`
     /// embedder (no model download, no network).
     #[doc(hidden)]
@@ -363,23 +357,23 @@ impl Store {
 
     /// Open a fully in-memory `Store` with no network or filesystem dependency beyond the
     /// supplied `blobs_dir` (which the content-addressed blob store uses as its root; pass a
-    /// tempdir to keep a test hermetic). All semantic operations match the Helix backend
+    /// tempdir to keep a test hermetic). All semantic operations match the Surreal backend
     /// (last-write-wins on `upsert_memory`, monotonic audit ids, single-use pairing codes,
     /// `__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)` — same as the
     /// offline fallback on the production server when no vector index is available.
     ///
-    /// Use this in any test bucket that needs a real `Store` without standing up HelixDB.
+    /// Use this in any test bucket that needs a real `Store` without standing up SurrealDB.
     pub fn open_in_memory(blobs_dir: std::path::PathBuf) -> Result<Self> {
         crate::memory_backend::build(blobs_dir)
     }
 
-    /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) - a fresh label
-    /// namespace + the `hashing` embedder, pointed at `CAIRN_HELIX_URL`. `None` when that is unset.
+    /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) - a fresh
+    /// namespace + the `hashing` embedder, pointed at `CAIRN_DB_URL`. `None` when that is unset.
     /// Components built from a `Config` (the API/MCP servers) use this directly in their tests.
     /// Data/blob dirs are created so the store opens cleanly.
     #[doc(hidden)]
     pub fn test_config() -> Option<Config> {
-        let url = std::env::var("CAIRN_HELIX_URL")
+        let url = std::env::var("CAIRN_DB_URL")
             .ok()
             .filter(|s| !s.trim().is_empty())?;
         let id = Uuid::new_v4().simple().to_string();
@@ -387,9 +381,11 @@ impl Store {
             data_dir: std::env::temp_dir().join(format!("cairn-test-{id}")),
             host: "127.0.0.1".into(),
             port: 7777,
-            helix_url: Some(url),
-            helix_token: None,
-            helix_ns: Some(format!("t{id}_")),
+            db_url: url,
+            db_user: std::env::var("CAIRN_DB_USER").unwrap_or_else(|_| "root".into()),
+            db_pass: std::env::var("CAIRN_DB_PASS").unwrap_or_default(),
+            db_ns: format!("t{id}"),
+            db_timeout_secs: 10,
             default_server: None,
             secret_key: Some(b"test-secret-key-must-be-32-bytes!!".to_vec()),
             tls: None,
@@ -423,8 +419,8 @@ mod tests {
     use cairn_core::{MemoryKind, MemoryTier};
     use chrono::Duration;
 
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these); otherwise an isolated
-    /// Helix-backed store.
+    /// `None` when `CAIRN_DB_URL` is unset (offline runs skip these); otherwise an isolated
+    /// Surreal-backed store.
     fn store() -> Option<Store> {
         Store::open_for_test()
     }
@@ -651,16 +647,20 @@ mod tests {
 
     #[test]
     fn audit_survives_round_trip_after_a_store_drop_and_reopen() {
-        // Append a few events to one store, then close it and open a fresh one. The events
-        // should still be readable - that's the whole point of the Sprint 1 migration away
-        // from the in-memory ring buffer.
-        let Some(s1) = store() else { return };
+        // Append a few events to one store, then close it and open a fresh one *against the
+        // same config* (same namespace) - that's the whole point of the Sprint 1 migration away
+        // from the in-memory ring buffer. `store()` can't be reused here: it calls
+        // `open_for_test`, which mints a brand new isolated namespace on every call.
+        let Some(cfg) = Store::test_config() else {
+            return;
+        };
+        let s1 = Store::open(&cfg).expect("open s1");
         s1.append_audit(100, "login_ok", "alice", "").unwrap();
         s1.append_audit(200, "token_issued", "alice", "laptop")
             .unwrap();
         drop(s1);
 
-        let Some(s2) = store() else { return };
+        let s2 = Store::open(&cfg).expect("open s2");
         let recent = s2.recent_audit(10, None).unwrap();
         let kinds: Vec<&str> = recent.iter().map(|r| r.kind.as_str()).collect();
         assert!(

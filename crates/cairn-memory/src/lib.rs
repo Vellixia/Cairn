@@ -1105,7 +1105,7 @@ mod tests {
     use cairn_core::{MemoryKind, MemoryTier};
     use cairn_store::Store;
 
-    /// An engine backed by an isolated Helix store, or `None` when `CAIRN_HELIX_URL` is unset
+    /// An engine backed by an isolated database, or `None` when `CAIRN_DB_URL` is unset
     /// (offline runs skip these integration tests; CI sets the URL and runs them for real).
     fn engine() -> Option<MemoryEngine> {
         Some(MemoryEngine::new(Arc::new(Store::open_for_test()?)))

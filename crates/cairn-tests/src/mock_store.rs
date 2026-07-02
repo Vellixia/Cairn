@@ -1,5 +1,5 @@
 //! In-memory mock of `cairn-store` for tests that need a real `Store`
-//! reference but cannot talk to HelixDB.
+//! reference but cannot talk to a live database.
 //!
 //! Most integration tests in this crate construct `Memory` / `NewMemory`
 //! values directly and exercise crate functions that accept typed input

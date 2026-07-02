@@ -1,6 +1,6 @@
 //! The `cairn` binary - connects AI agents to a remote Cairn server.
 //!
-//! All operations go through the server API. No local HelixDB, no local
+//! All operations go through the server API. No local database, no local
 //! store, no local engines. The client is a thin HTTP wrapper with agent
 //! config management.
 //!

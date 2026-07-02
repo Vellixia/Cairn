@@ -1,22 +1,21 @@
 # Cairn — self-host the whole stack with one command:  docker compose up -d
 #
-#   minio        S3-compatible storage that HelixDB persists to (so data survives restarts)
-#   minio-init   one-shot: creates the `helix-db` bucket, then exits
-#   helix        HelixDB graph + vector datastore — Cairn's backend
-#   cairn        the Cairn server + dashboard            ->  http://localhost:7777
-#   helix host   the HelixDB query API (direct access)   ->  http://localhost:6969
+#   surreal-guard   refuses to boot if SURREAL_PASS is missing or the insecure default
+#   surreal         SurrealDB — Cairn's structured store (graph + vector search)
+#   cairn           the Cairn server + dashboard            ->  http://localhost:7777
 #
+# SurrealDB is never exposed to the host - only `cairn` reaches it, over the compose network.
 # Configure by copying .env.example to .env (embeddings, ports, credentials). Everything below has
 # sensible defaults, so a bare `docker compose up` works out of the box.
 name: cairn
 
 services:
-  # Startup guard: refuse to bring up the MinIO stack if credentials are missing or still set
-  # to the well-known `minioadmin/minioadmin` defaults. Keeps compose from silently booting an
-  # insecure server when `.env` is empty.
-  minio-guard:
+  # Startup guard: refuse to bring up SurrealDB if the root password is missing or still
+  # set to the well-known insecure default. Keeps compose from silently booting an
+  # unauthenticated-in-practice database when `.env` is empty.
+  surreal-guard:
     image: alpine:3.19
-    container_name: cairn-minio-guard
+    container_name: cairn-surreal-guard
     env_file:
       - path: .env
         required: true
@@ -24,101 +23,44 @@ services:
     command:
       - |
         set -eu
-        : "$${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set in .env (see .env.example)}"
-        : "$${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env (see .env.example)}"
-        case "$${MINIO_ROOT_USER}" in minioadmin)
-          echo "FATAL: MINIO_ROOT_USER is the insecure default 'minioadmin'." >&2
+        : "$${SURREAL_PASS:?SURREAL_PASS must be set in .env (see .env.example)}"
+        case "$${SURREAL_PASS}" in root|secret|changeme|password)
+          echo "FATAL: SURREAL_PASS is the insecure placeholder '$${SURREAL_PASS}'." >&2
           echo "       Set a strong value in .env (see .env.example)." >&2
           exit 1 ;;
         esac
-        case "$${MINIO_ROOT_PASSWORD}" in minioadmin|"")
-          echo "FATAL: MINIO_ROOT_PASSWORD is empty or the insecure default 'minioadmin'." >&2
-          echo "       Set a strong value in .env (see .env.example)." >&2
-          exit 1 ;;
-        esac
-        echo "minio credentials OK"
+        echo "surreal credentials OK"
 
-  minio:
-    image: minio/minio:latest
-    container_name: cairn-minio
-    command: server /data --console-address ":9001"
+  surreal:
+    image: surrealdb/surrealdb:v3
+    container_name: cairn-surreal
     depends_on:
-      minio-guard:
+      surreal-guard:
         condition: service_completed_successfully
-    environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
-    volumes:
-      - helix-minio:/data
-    restart: unless-stopped
-    # Readiness gate: MinIO must answer its /minio/health/live endpoint before dependents
-    # start. Without this, helix and minio-init can race the S3 listener on cold starts.
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 12
-      start_period: 15s
-
-  # Create the bucket HelixDB writes to, then exit. Retries until MinIO accepts connections.
-  # We pin this on the minio `service_healthy` condition so the bucket always exists before
-  # helix tries to read or write against it.
-  minio-init:
-    image: minio/mc:latest
-    container_name: cairn-minio-init
-    env_file:
-      - path: .env
-        required: true
-    depends_on:
-      minio:
-        condition: service_healthy
-    entrypoint: ["sh", "-c"]
-    # Single-line shell: the `until` block must live entirely in one command string because
-    # YAML folded scalars can collapse newlines in a way that breaks the loop's `done` keyword.
-    # The retry bound (30) is generous enough to ride out MinIO's cold-start latency.
+    # The official image's default `nonroot` user can't write into a freshly-mounted
+    # anonymous volume (same class of problem `cairn-init` works around for `cairn-data`
+    # below). Running this container as root is a smaller footprint than adding a second
+    # chown-init service, and it's never reachable from outside the compose network.
+    user: "0:0"
     command:
-      - >-
-        i=0;
-        until mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" 2>/dev/null; do
-          i=$$((i+1));
-          if [ $$i -ge 30 ]; then
-            echo "minio-init: giving up after 30 attempts" >&2;
-            exit 1;
-          fi;
-          echo "minio-init: waiting for minio (attempt $$i/30)...";
-          sleep 1;
-        done &&
-        mc mb --ignore-existing local/helix-db &&
-        echo "helix-db bucket ready"
-    restart: "no"
-
-  helix:
-    image: ghcr.io/helixdb/enterprise-dev:latest
-    container_name: cairn-helix
-    depends_on:
-      minio-init:
-        condition: service_completed_successfully
-    environment:
-      S3_BUCKET: helix-db
-      S3_REGION: us-east-1
-      DB_PATH: db/
-      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
-      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
-      AWS_ENDPOINT: http://minio:9000
-      AWS_ALLOW_HTTP: "true"
-    ports:
-      - "${HELIX_PORT:-6969}:8080" # host:container — the HelixDB API listens on 8080 inside
+      - start
+      - --user
+      - ${SURREAL_USER:-root}
+      - --pass
+      - ${SURREAL_PASS:?SURREAL_PASS must be set in .env (see .env.example)}
+      - rocksdb:/data/cairn.db
+    volumes:
+      - cairn-surreal-data:/data
     restart: unless-stopped
-    # Readiness gate: the HelixDB gateway must be accepting TCP on 8080 before cairn starts.
-    # The helix image is minimal — no wget/curl/busybox/nc — so we use the shell's built-in
-    # /dev/tcp pseudo-device. Any exit code 0 means the listener is up; non-zero means down.
-    # The wider interval + retry window tolerates cold-start cache warm (~1-2s of post-listener work).
+    # Readiness gate: SurrealDB must accept TCP on 8000 before cairn starts. The image is
+    # distroless (no shell utilities beyond `surreal` itself), so healthchecks that need a
+    # shell built-in run through `sh -c` explicitly rather than assuming wget/curl exist.
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8080 || exit 1"]
+      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8000 || exit 1"]
       interval: 5s
       timeout: 3s
       retries: 24
-      start_period: 30s
+      start_period: 10s
 
   # v0.5.0 Sprint 12: proper non-root volume init. Pre-0.5.0 the cairn container ran as
   # root (`user: "0"`) because the Docker image's user (`cairn`, uid 10001) couldn't
@@ -203,7 +145,7 @@ services:
         condition: service_completed_successfully
       cairn-admin-guard:
         condition: service_completed_successfully
-      helix:
+      surreal:
         condition: service_healthy
     environment:
       # Inside the container, bind to all interfaces so Docker's userspace proxy can forward
@@ -215,8 +157,12 @@ services:
       # CAIRN_ADMIN_PASSWORD in .env to fall back to the dashboard /setup wizard.
       CAIRN_ADMIN_USERNAME: ${CAIRN_ADMIN_USERNAME:-admin}
       CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:-}
-      # Cairn reaches Helix over the compose network on its internal port (8080), not the host map.
-      CAIRN_HELIX_URL: http://helix:8080
+      # Cairn reaches SurrealDB over the compose network on its internal port (8000) - it is
+      # never exposed to the host.
+      CAIRN_DB_URL: ws://surreal:8000
+      CAIRN_DB_USER: ${SURREAL_USER:-root}
+      CAIRN_DB_PASS: ${SURREAL_PASS}
+      CAIRN_DB_TIMEOUT_SECS: ${CAIRN_DB_TIMEOUT_SECS:-10}
       # CAIRN_INSECURE=1 is intentional for the local-dev compose stack: the Cairn API is
       # authenticated and must not travel in cleartext over a public network. For production
       # deployments, terminate TLS at a reverse proxy (Caddy/Traefik/nginx) in front of the
@@ -249,4 +195,4 @@ services:
 
 volumes:
   cairn-data:
-  helix-minio:
+  cairn-surreal-data:
