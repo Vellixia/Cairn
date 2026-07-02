@@ -52,7 +52,7 @@ Living docs, edited in place as the system evolves.
 | [roadmap.md](planning/roadmap.md) | Status tracker: done, in progress, next, per phase |
 | [plans/v0.6.0.md](planning/plans/v0.6.0.md) | Released — the cleanup sprint |
 | [plans/v0.7.0.md](planning/plans/v0.7.0.md) | Released — engine intelligence + dashboard UX |
-| [plans/v0.8.0.md](planning/plans/v0.8.0.md) | Draft — scoped memory, SurrealDB, LLM intelligence, RAG |
+| [plans/v0.8.0.md](planning/plans/v0.8.0.md) | Draft — scoped memory, SurrealDB, LLM intelligence, RAG, autopilot |
 
 ## Audits — point-in-time reviews
 
