@@ -37,6 +37,20 @@ pub(crate) trait StoreBackend: Send + Sync {
         let _ = (id, pinned);
         Ok(())
     }
+    /// Change a memory's scope in place (v0.8.0 Sprint 4 - used by the `session-gc` cron job
+    /// to promote expired `Session`-scoped memories to `Global`). Deliberately separate from
+    /// [`edit_memory`](Self::edit_memory), which only touches content/importance/concepts/
+    /// files - scope is an access-control boundary, not a content edit. Idempotent; missing
+    /// rows are no-ops (`Ok(false)`).
+    fn reassign_scope(
+        &self,
+        id: &str,
+        scope_type: cairn_core::ScopeType,
+        scope_id: Option<String>,
+    ) -> Result<bool> {
+        let _ = (id, scope_type, scope_id);
+        Ok(false)
+    }
     /// Edit a memory's mutable fields. Returns `Ok(true)` if the row was updated, `Ok(false)`
     /// if no row exists. Only the fields that are `Some` are applied - the rest are kept.
     fn edit_memory(
@@ -128,6 +142,14 @@ pub(crate) trait StoreBackend: Send + Sync {
     fn record_access_batch(&self, entries: &[(String, Option<String>, Option<String>)]) -> Result<()> {
         let _ = entries;
         Ok(())
+    }
+    /// Delete `access_log` rows older than `before` (v0.8.0 Sprint 4 - the monthly
+    /// `access-log-prune` cron job). Returns the number of rows removed where the backend can
+    /// report it (`0` from the default no-op, matching `record_access_batch`'s hermetic-backend
+    /// boundary - the in-memory backend never stores access-log rows in the first place).
+    fn prune_access_log_before(&self, before: DateTime<Utc>) -> Result<u64> {
+        let _ = before;
+        Ok(0)
     }
 
     // -- projects (v0.8.0 - Sprint 3) -----------------------------------------------------
@@ -236,6 +258,15 @@ impl Store {
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
         self.backend.set_pinned(id, pinned)
     }
+    /// Change a memory's scope in place (v0.8.0 Sprint 4).
+    pub fn reassign_scope(
+        &self,
+        id: &str,
+        scope_type: cairn_core::ScopeType,
+        scope_id: Option<String>,
+    ) -> Result<bool> {
+        self.backend.reassign_scope(id, scope_type, scope_id)
+    }
     /// Edit a memory's mutable fields. Only the `Some` values are applied.
     pub fn edit_memory(
         &self,
@@ -336,6 +367,10 @@ impl Store {
         entries: &[(String, Option<String>, Option<String>)],
     ) -> Result<()> {
         self.backend.record_access_batch(entries)
+    }
+    /// Delete `access_log` rows older than `before` (v0.8.0 Sprint 4).
+    pub fn prune_access_log_before(&self, before: DateTime<Utc>) -> Result<u64> {
+        self.backend.prune_access_log_before(before)
     }
 
     /// Create or update a project's `last_active` timestamp (v0.8.0 Sprint 3).
@@ -469,6 +504,10 @@ impl Store {
             rerank: cairn_core::RerankConfig::default(),
             admin: cairn_core::AdminConfig::default(),
             multi_tenant: false,
+        session_ttl_days: 2,
+        decay_period_days: 30,
+        access_log_retention_days: 90,
+        cron_enabled: true,
         };
         std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
         Some(cfg)

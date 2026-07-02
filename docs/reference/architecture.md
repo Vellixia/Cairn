@@ -258,6 +258,10 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 | `CAIRN_ADMIN_PASSWORD` | (none) | Admin password (plaintext; loopback dev only) |
 | `CAIRN_ADMIN_PASSWORD_HASH` | (none) | Admin password hash (Argon2id PHC; production) |
 | `CAIRN_MULTI_TENANT` | `0` | Enable multi-tenant org isolation |
+| `CAIRN_SESSION_TTL_DAYS` | `2` | Days a `Session`-scoped memory can go untouched before the nightly `session-gc` cron job promotes it to `Global` (v0.8.0). `0` disables the job. |
+| `CAIRN_DECAY_PERIOD_DAYS` | `30` | Confidence half-life for the weekly `memory-decay` cron job (v0.8.0) |
+| `CAIRN_ACCESS_LOG_RETENTION_DAYS` | `90` | How long `access_log` rows are kept before the monthly `access-log-prune` cron job deletes them (v0.8.0) |
+| `CAIRN_CRON_ENABLED` | `1` | Whether the in-process cron scheduler runs at all (v0.8.0). Set `0` on a horizontally-scaled deployment where only one replica should run cron. |
 | `CAIRN_SERVER` | (none) | Remote cairn-server URL for `cairn mcp` proxy mode |
 | `CAIRN_TOKEN` | (none) | Bearer token for remote proxy mode |
 

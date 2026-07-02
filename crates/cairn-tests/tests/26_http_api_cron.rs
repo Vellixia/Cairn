@@ -1,6 +1,7 @@
-//! 25 — cairn-api `/api/projects/*` HTTP routes (v0.8.0 Sprint 3), mounted in-process via
-//! tower::oneshot. Mirrors `02_http_api_memory.rs`'s auth flow: POST `/api/auth/setup` ->
-//! POST `/api/auth/login` -> `cairn_session=<value>` cookie.
+//! 26 — cairn-api `/api/cron/*` HTTP routes (v0.8.0 Sprint 4), mounted in-process via
+//! tower::oneshot. The manual-trigger endpoint calls `cron::run_job_now` directly (the same
+//! function the scheduler's own ticks use) - no `JobScheduler` needs to be running for these
+//! tests, only the HTTP layer + an in-memory store.
 //!
 //! Hermetic: no network, no live database, no docker. In-memory `cairn_store::Store` +
 //! `cairn_api::router` (state from `AppState::with_store`).
@@ -57,9 +58,18 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
     Some((router(state), dir))
 }
 
-async fn read_body(
-    resp: axum::response::Response,
+async fn request_json(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    cookie: Option<&str>,
 ) -> (StatusCode, serde_json::Value, Vec<axum::http::HeaderValue>) {
+    let mut b = Request::builder().method(method).uri(path);
+    if let Some(c) = cookie {
+        b = b.header("cookie", format!("cairn_session={c}"));
+    }
+    let req = b.body(Body::empty()).expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
     let status = resp.status();
     let headers: Vec<_> = resp
         .headers()
@@ -81,45 +91,59 @@ async fn read_body(
     (status, json, headers)
 }
 
-async fn request_json(
+async fn post_json(
     app: axum::Router,
-    method: &str,
     path: &str,
-    body: Option<serde_json::Value>,
+    body: serde_json::Value,
     cookie: Option<&str>,
 ) -> (StatusCode, serde_json::Value, Vec<axum::http::HeaderValue>) {
-    let mut b = Request::builder().method(method).uri(path);
+    let mut b = Request::builder().method("POST").uri(path);
     if let Some(c) = cookie {
         b = b.header("cookie", format!("cairn_session={c}"));
     }
-    let req = match body {
-        Some(v) => b
-            .header("content-type", "application/json")
-            .body(Body::from(v.to_string())),
-        None => b.body(Body::empty()),
-    }
-    .expect("build request");
+    let req = b
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("build request");
     let resp = app.oneshot(req).await.expect("oneshot");
-    read_body(resp).await
+    let status = resp.status();
+    let headers: Vec<_> = resp
+        .headers()
+        .get_all(axum::http::header::SET_COOKIE)
+        .iter()
+        .cloned()
+        .collect();
+    let bytes = resp
+        .into_body()
+        .collect()
+        .await
+        .expect("collect")
+        .to_bytes();
+    let json: serde_json::Value = if bytes.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null)
+    };
+    (status, json, headers)
 }
 
 /// Setup admin + login -> return the session cookie value.
 async fn login_cookie(app: axum::Router) -> String {
-    let body = serde_json::json!({
-        "username": "admin",
-        "password": "supersecret-admin-pass",
-    });
-    let (status, json, _headers) =
-        request_json(app.clone(), "POST", "/api/auth/setup", Some(body), None).await;
+    let (status, json, _) = post_json(
+        app.clone(),
+        "/api/auth/setup",
+        serde_json::json!({"username": "admin", "password": "supersecret-admin-pass"}),
+        None,
+    )
+    .await;
     assert!(
         status.is_success() || status == StatusCode::CONFLICT,
         "setup must succeed or already-exist; got {status} body={json}"
     );
-    let (lstatus, ljson, lheaders) = request_json(
+    let (lstatus, ljson, lheaders) = post_json(
         app,
-        "POST",
         "/api/auth/login",
-        Some(serde_json::json!({"username": "admin", "password": "supersecret-admin-pass"})),
+        serde_json::json!({"username": "admin", "password": "supersecret-admin-pass"}),
         None,
     )
     .await;
@@ -127,7 +151,6 @@ async fn login_cookie(app: axum::Router) -> String {
         lstatus.is_success(),
         "login must succeed; got {lstatus} body={ljson}"
     );
-    assert!(!lheaders.is_empty(), "login must set a cookie header");
     let raw = lheaders[0].to_str().expect("ascii").to_string();
     raw.split(';')
         .next()
@@ -137,104 +160,94 @@ async fn login_cookie(app: axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn upsert_then_get_returns_the_project() {
+async fn list_jobs_shows_all_three_with_no_prior_run() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    let (status, body, _) = request_json(app, "GET", "/api/cron/jobs", Some(&cookie)).await;
+    assert!(status.is_success());
+    let jobs = body.as_array().expect("array");
+    assert_eq!(jobs.len(), 3, "session-gc, memory-decay, access-log-prune");
+    let names: Vec<&str> = jobs.iter().filter_map(|j| j["name"].as_str()).collect();
+    assert!(names.contains(&"session-gc"));
+    assert!(names.contains(&"memory-decay"));
+    assert!(names.contains(&"access-log-prune"));
+    for j in jobs {
+        assert!(j["last_run"].is_null(), "no job has run yet");
+    }
+}
+
+#[tokio::test]
+async fn manual_trigger_runs_the_job_and_records_history() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
     let (status, body, _) = request_json(
         app.clone(),
-        "PATCH",
-        "/api/projects/upsert",
-        Some(serde_json::json!({
-            "id": "proj-alpha-hash",
-            "name": "proj-alpha",
-            "path": "/home/dev/proj-alpha",
-        })),
+        "POST",
+        "/api/cron/run/session-gc",
         Some(&cookie),
     )
     .await;
-    assert!(status.is_success(), "upsert should succeed; got {status} body={body}");
-    assert_eq!(body["id"], "proj-alpha-hash");
-    assert_eq!(body["name"], "proj-alpha");
-    assert!(body["first_seen"].is_string());
-    assert!(body["last_active"].is_string());
+    assert!(status.is_success(), "got {status} body={body}");
+    assert_eq!(body["job"], "session-gc");
+    assert_eq!(body["outcome"], "ok");
 
-    let (status, body, _) = request_json(
-        app,
-        "GET",
-        "/api/projects/proj-alpha-hash",
-        None,
-        Some(&cookie),
-    )
-    .await;
-    assert!(status.is_success(), "get should succeed; got {status} body={body}");
-    assert_eq!(body["name"], "proj-alpha");
-    assert_eq!(body["path"], "/home/dev/proj-alpha");
+    let (status, history, _) =
+        request_json(app.clone(), "GET", "/api/cron/history", Some(&cookie)).await;
+    assert!(status.is_success());
+    let runs = history.as_array().expect("array");
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0]["job"], "session-gc");
+
+    // GET /api/cron/jobs should now show the last_run for session-gc.
+    let (_, jobs, _) = request_json(app, "GET", "/api/cron/jobs", Some(&cookie)).await;
+    let session_gc = jobs
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["name"] == "session-gc")
+        .expect("session-gc listed");
+    assert!(!session_gc["last_run"].is_null());
 }
 
 #[tokio::test]
-async fn repeated_upsert_preserves_first_seen_and_updates_name() {
+async fn history_filters_by_job() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
-    let (_, first, _) = request_json(
-        app.clone(),
-        "PATCH",
-        "/api/projects/upsert",
-        Some(serde_json::json!({"id": "proj-x", "name": "old-name", "path": "/p"})),
-        Some(&cookie),
-    )
-    .await;
-    let (_, second, _) = request_json(
-        app,
-        "PATCH",
-        "/api/projects/upsert",
-        Some(serde_json::json!({"id": "proj-x", "name": "new-name", "path": "/p"})),
-        Some(&cookie),
-    )
-    .await;
-    assert_eq!(second["name"], "new-name", "name must update on re-upsert");
-    assert_eq!(
-        first["first_seen"], second["first_seen"],
-        "first_seen must survive a repeated upsert"
-    );
-}
-
-#[tokio::test]
-async fn list_includes_every_upserted_project() {
-    let Some((app, _dir)) = state() else { return };
-    let cookie = login_cookie(app.clone()).await;
-
-    for id in ["proj-a", "proj-b"] {
+    for job in ["session-gc", "memory-decay", "session-gc"] {
         let (status, _, _) = request_json(
             app.clone(),
-            "PATCH",
-            "/api/projects/upsert",
-            Some(serde_json::json!({"id": id, "name": id, "path": "/p"})),
+            "POST",
+            &format!("/api/cron/run/{job}"),
             Some(&cookie),
         )
         .await;
         assert!(status.is_success());
     }
 
-    let (status, body, _) =
-        request_json(app, "GET", "/api/projects", None, Some(&cookie)).await;
+    let (status, filtered, _) = request_json(
+        app,
+        "GET",
+        "/api/cron/history?job=session-gc",
+        Some(&cookie),
+    )
+    .await;
     assert!(status.is_success());
-    let list = body.as_array().expect("list is a JSON array");
-    let ids: Vec<&str> = list.iter().filter_map(|p| p["id"].as_str()).collect();
-    assert!(ids.contains(&"proj-a"));
-    assert!(ids.contains(&"proj-b"));
+    let runs = filtered.as_array().expect("array");
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().all(|r| r["job"] == "session-gc"));
 }
 
 #[tokio::test]
-async fn get_unknown_project_returns_404() {
+async fn triggering_an_unknown_job_returns_404() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
     let (status, _, _) = request_json(
         app,
-        "GET",
-        "/api/projects/does-not-exist",
-        None,
+        "POST",
+        "/api/cron/run/does-not-exist",
         Some(&cookie),
     )
     .await;
@@ -242,8 +255,8 @@ async fn get_unknown_project_returns_404() {
 }
 
 #[tokio::test]
-async fn project_routes_require_authentication() {
+async fn cron_routes_require_authentication() {
     let Some((app, _dir)) = state() else { return };
-    let (status, _, _) = request_json(app, "GET", "/api/projects", None, None).await;
+    let (status, _, _) = request_json(app, "GET", "/api/cron/jobs", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

@@ -52,6 +52,10 @@ fn state() -> Option<(axum::Router, Arc<Store>, tempfile::TempDir)> {
         rerank: cairn_core::RerankConfig::default(),
         admin: cairn_core::AdminConfig::default(),
         multi_tenant: false,
+        session_ttl_days: 2,
+        decay_period_days: 30,
+        access_log_retention_days: 90,
+        cron_enabled: true,
     };
     let state = AppState::with_store(&cfg, store.clone()).ok()?;
     Some((router(state), store, dir))

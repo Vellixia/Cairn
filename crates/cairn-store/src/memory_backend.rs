@@ -165,6 +165,22 @@ impl StoreBackend for MemoryBackend {
         Ok(())
     }
 
+    fn reassign_scope(
+        &self,
+        id: &str,
+        scope_type: cairn_core::ScopeType,
+        scope_id: Option<String>,
+    ) -> Result<bool> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        let Some(m) = g.memories.get_mut(id) else {
+            return Ok(false);
+        };
+        m.scope_type = scope_type;
+        m.scope_id = scope_id;
+        m.updated_at = Utc::now();
+        Ok(true)
+    }
+
     fn edit_memory(
         &self,
         id: &str,

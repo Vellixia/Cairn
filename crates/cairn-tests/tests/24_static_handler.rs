@@ -53,6 +53,10 @@ fn state() -> Option<axum::Router> {
         rerank: cairn_core::RerankConfig::default(),
         admin: cairn_core::AdminConfig::default(),
         multi_tenant: false,
+        session_ttl_days: 2,
+        decay_period_days: 30,
+        access_log_retention_days: 90,
+        cron_enabled: true,
     };
     let s = AppState::with_store(&cfg, store).ok()?;
     Some(build_router_with_registry(s))

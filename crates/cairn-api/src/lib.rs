@@ -7,6 +7,7 @@
 pub mod admin;
 mod auth;
 mod capabilities;
+pub mod cron;
 mod devices;
 mod events;
 mod extensions;
@@ -104,6 +105,9 @@ pub struct AppState {
     /// file per subscription under `<data_dir>/push/`. Optional so the API can
     /// run without a writable data dir (some embedded test harnesses).
     pub push: Option<Arc<push::PushStore>>,
+    /// Recent cron job runs (v0.8.0 Sprint 4) - see `cron.rs`. Populated by both the
+    /// scheduler's own ticks and the manual `POST /api/cron/run/:job` trigger.
+    pub cron_history: Arc<cron::CronHistory>,
     signer: Option<Arc<TokenSigner>>,
 }
 
@@ -174,6 +178,7 @@ impl AppState {
                 .ok()
                 .map(Arc::new),
             push: push::PushStore::open(&cfg.data_dir).ok().map(Arc::new),
+            cron_history: Arc::new(cron::CronHistory::default()),
             signer,
             version: env!("CARGO_PKG_VERSION").to_string(),
         })
@@ -256,6 +261,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/projects/upsert", patch(upsert_project))
         .route("/api/projects", get(list_projects))
         .route("/api/projects/:id", get(get_project))
+        .route("/api/cron/jobs", get(list_cron_jobs))
+        .route("/api/cron/run/:job", post(run_cron_job))
+        .route("/api/cron/history", get(cron_history))
         .route("/api/memory/heatmap", get(memory_heatmap))
         .route("/api/guard/verify", post(verify))
         .route("/api/guard/anchor", get(get_anchor).post(post_anchor))
@@ -1023,6 +1031,60 @@ async fn get_project(
         Some(p) => Ok(Json(p)),
         None => Err(ApiError::not_found("no such project")),
     }
+}
+
+/// v0.8.0 Sprint 4: one entry in `GET /api/cron/jobs` - the job's static schedule plus whatever
+/// its last recorded run looked like (`None` if it has never run since server start).
+#[derive(Serialize)]
+struct CronJobStatus {
+    name: &'static str,
+    schedule: &'static str,
+    last_run: Option<cron::CronRun>,
+}
+
+/// GET `/api/cron/jobs` - every background job, its cron schedule, and its last run.
+async fn list_cron_jobs(State(s): State<AppState>) -> Json<Vec<CronJobStatus>> {
+    Json(
+        cron::JOBS
+            .iter()
+            .map(|(name, schedule)| CronJobStatus {
+                name,
+                schedule,
+                last_run: s.cron_history.last_run(name),
+            })
+            .collect(),
+    )
+}
+
+/// POST `/api/cron/run/:job` - trigger a job immediately, same auth as every other `/api/*`
+/// route. Goes through the same [`cron::run_job_now`] the scheduler itself calls, so a manual
+/// run and a scheduled run are indistinguishable in `GET /api/cron/history`.
+async fn run_cron_job(
+    State(s): State<AppState>,
+    axum::extract::Path(job): axum::extract::Path<String>,
+) -> Result<Json<cron::CronRun>, ApiError> {
+    let name = cron::JOBS
+        .iter()
+        .find(|(n, _)| *n == job)
+        .map(|(n, _)| *n)
+        .ok_or_else(|| ApiError::not_found(format!("no such cron job: {job}")))?;
+    cron::run_job_now(&s, name)
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+#[derive(Deserialize)]
+struct CronHistoryQuery {
+    #[serde(default)]
+    job: Option<String>,
+}
+
+/// GET `/api/cron/history` - recent runs, optionally filtered to one job (`?job=session-gc`).
+async fn cron_history(
+    State(s): State<AppState>,
+    Query(q): Query<CronHistoryQuery>,
+) -> Json<Vec<cron::CronRun>> {
+    Json(s.cron_history.recent(q.job.as_deref()))
 }
 
 #[derive(Deserialize)]

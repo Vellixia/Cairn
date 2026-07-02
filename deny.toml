@@ -136,6 +136,14 @@ skip = [
     { name = "windows-result", version = "0.x" },
     { name = "windows-strings", version = "0.x" },
     { name = "windows_i686_gnullvm", version = "0.x" },
+
+    # --- tokio-cron-scheduler (v0.8.0 Sprint 4) ----------------------------------------------
+    # The in-process cron scheduler's `chrono-tz` dependency pins `phf`/`phf_shared` 0.12.x,
+    # one major behind the 0.13.x that surrealdb-core's stack already put in the skip list
+    # above. Same story as everything else here: an internal, non-security-sensitive dep of a
+    # dep, isolated inside chrono-tz's own timezone-table lookups.
+    { name = "phf", version = "0.x" },
+    { name = "phf_shared", version = "0.x" },
 ]
 
 [sources]

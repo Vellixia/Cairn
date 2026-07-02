@@ -370,6 +370,25 @@ impl StoreBackend for SurrealStore {
         Ok(!rows.is_empty())
     }
 
+    fn reassign_scope(
+        &self,
+        id: &str,
+        scope_type: ScopeType,
+        scope_id: Option<String>,
+    ) -> Result<bool> {
+        let rows = self.read_rows(
+            "UPDATE type::record('memory', $id) SET \
+             scope_type = $scope_type, scope_id = $scope_id, updated_at = $now RETURN AFTER",
+            json!({
+                "id": id,
+                "scope_type": scope_type.as_str(),
+                "scope_id": scope_id.unwrap_or_default(),
+                "now": ts(Utc::now()),
+            }),
+        )?;
+        Ok(!rows.is_empty())
+    }
+
     fn semantic_recall(&self, query: &str, k: usize) -> Result<Option<Vec<Memory>>> {
         let qvec = self.embed.embed_one(query)?;
         // `<|k,ef|>` is the HNSW approximate-nearest-neighbor operator; k/ef are internally
@@ -713,6 +732,14 @@ impl StoreBackend for SurrealStore {
         Ok(())
     }
 
+    fn prune_access_log_before(&self, before: DateTime<Utc>) -> Result<u64> {
+        let rows = self.read_rows(
+            "DELETE access_log WHERE ts < $before RETURN BEFORE",
+            json!({ "before": ts(before) }),
+        )?;
+        Ok(rows.len() as u64)
+    }
+
     fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
         let now = ts(Utc::now());
         // `first_seen ?? $now` preserves the original value across repeated upserts (the
@@ -896,6 +923,10 @@ mod live {
             rerank: cairn_core::RerankConfig::default(),
             admin: cairn_core::AdminConfig::default(),
             multi_tenant: false,
+        session_ttl_days: 2,
+        decay_period_days: 30,
+        access_log_retention_days: 90,
+        cron_enabled: true,
         };
         Some(SurrealStore::connect(&cfg).expect("connect to live SurrealDB"))
     }

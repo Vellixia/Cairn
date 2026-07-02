@@ -9,7 +9,7 @@ use cairn_core::{
     ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result, ScopeCtx, ScopeType,
 };
 use cairn_store::Store;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -416,6 +416,49 @@ impl MemoryEngine {
         });
         all.truncate(limit);
         Ok(all)
+    }
+
+    /// v0.8.0 Sprint 4 `session-gc` cron job: promote every `Session`-scoped memory that
+    /// hasn't been touched in `ttl_days` days to `Global` scope, so it doesn't stay silently
+    /// walled off once its session is long gone (Sprint 2's isolation rules mean a
+    /// `Session`-scoped memory is otherwise invisible to every future session, forever).
+    /// `ttl_days == 0` disables the sweep. Returns the number of memories promoted.
+    pub fn run_session_gc(&self, ttl_days: u32) -> Result<usize> {
+        if ttl_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - Duration::days(ttl_days as i64);
+        let mut promoted = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type == ScopeType::Session && m.updated_at < cutoff {
+                match self.store.reassign_scope(&m.id, ScopeType::Global, None) {
+                    Ok(true) => promoted += 1,
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!(memory_id = %m.id, error = %e, "session-gc: reassign_scope failed"),
+                }
+            }
+        }
+        Ok(promoted)
+    }
+
+    /// v0.8.0 Sprint 4 `memory-decay` cron job: apply the agentmemory confidence-decay curve
+    /// (see [`apply_decay`]) to every memory, persisting only the ones whose confidence
+    /// actually moved this run. `updated_at` is preserved on write (not bumped to "now") -
+    /// `apply_decay` measures elapsed time *from* `updated_at`, so touching it here would
+    /// silently reset the decay clock on every run and nothing would ever decay past the
+    /// first period. Returns the number of memories whose confidence changed.
+    pub fn run_decay(&self, decay_period_days: u32) -> Result<usize> {
+        let now = Utc::now();
+        let mut decayed = 0;
+        for mut m in self.store.all_memories()? {
+            let before = m.confidence;
+            apply_decay(&mut m, decay_period_days as f64, now);
+            if m.confidence != before {
+                self.store.upsert_memory(&m)?;
+                decayed += 1;
+            }
+        }
+        Ok(decayed)
     }
 
     /// Fetch a memory by id.
@@ -1814,6 +1857,82 @@ mod tests {
                 .unwrap();
             assert_eq!(hits.len(), 1, "global memory must be visible from {ctx:?}");
         }
+    }
+
+    // --- v0.8.0 Sprint 4: session-gc + decay cron drivers ---
+
+    #[test]
+    fn session_gc_promotes_stale_session_memories_to_global() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("session scratch note for gc");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("session-old".to_string());
+        m.updated_at = Utc::now() - Duration::days(10);
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_session_gc(2).unwrap(), 1);
+
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Global);
+        assert!(after.scope_id.is_none());
+    }
+
+    #[test]
+    fn session_gc_leaves_fresh_session_memories_alone() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("fresh session note");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("session-fresh".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_session_gc(2).unwrap(), 0);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Session);
+    }
+
+    #[test]
+    fn session_gc_disabled_when_ttl_is_zero() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("ancient session note");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("session-ancient".to_string());
+        m.updated_at = Utc::now() - Duration::days(365);
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_session_gc(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn decay_reduces_confidence_of_stale_memories_and_preserves_updated_at() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("old fact that should decay");
+        m.confidence = 0.9;
+        let backdated = Utc::now() - Duration::days(90);
+        m.updated_at = backdated;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_decay(30).unwrap(), 1);
+
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert!(
+            after.confidence < 0.9,
+            "confidence should have decayed, got {}",
+            after.confidence
+        );
+        assert_eq!(
+            after.updated_at.timestamp_millis(),
+            backdated.timestamp_millis(),
+            "updated_at must not be bumped by decay - it's the clock apply_decay measures from"
+        );
+    }
+
+    #[test]
+    fn decay_leaves_fresh_memories_untouched() {
+        let Some(mem) = engine() else { return };
+        let m = synth("brand new fact");
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_decay(30).unwrap(), 0);
     }
 
     // --- P1.3 Triple-Stream tests ---

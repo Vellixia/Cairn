@@ -211,6 +211,22 @@ pub struct Config {
     /// a single implicit org - `OrgId::default()` - so the on-disk schema doesn't
     /// change for existing users.
     pub multi_tenant: bool,
+    /// Days a `Session`-scoped memory can go untouched before the nightly `session-gc` cron
+    /// job promotes it to `Global` scope (`CAIRN_SESSION_TTL_DAYS`, default `2`). `0` disables
+    /// the job - Session-scoped memories are then kept forever unless promoted manually.
+    pub session_ttl_days: u32,
+    /// Confidence half-life for the weekly `memory-decay` cron job
+    /// (`CAIRN_DECAY_PERIOD_DAYS`, default `30`) - see
+    /// [`cairn_memory::apply_decay`](../../cairn_memory/fn.apply_decay.html).
+    pub decay_period_days: u32,
+    /// How long `access_log` rows (v0.8.0 Sprint 2) are kept before the monthly
+    /// `access-log-prune` cron job deletes them (`CAIRN_ACCESS_LOG_RETENTION_DAYS`, default
+    /// `90`).
+    pub access_log_retention_days: u32,
+    /// Whether the in-process cron scheduler runs at all (`CAIRN_CRON_ENABLED`, default
+    /// `true`). Set `false` to disable every background job - useful for a horizontally-scaled
+    /// deployment where only one replica should run cron.
+    pub cron_enabled: bool,
 }
 
 impl Config {
@@ -292,6 +308,19 @@ impl Config {
                     .unwrap_or(24),
             },
             multi_tenant: env_bool("CAIRN_MULTI_TENANT"),
+            session_ttl_days: env_str("CAIRN_SESSION_TTL_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2),
+            decay_period_days: env_str("CAIRN_DECAY_PERIOD_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+            access_log_retention_days: env_str("CAIRN_ACCESS_LOG_RETENTION_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(90),
+            cron_enabled: std::env::var("CAIRN_CRON_ENABLED")
+                .ok()
+                .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+                .unwrap_or(true),
             data_dir,
         };
         std::fs::create_dir_all(cfg.blobs_dir())?;
@@ -398,6 +427,10 @@ mod tests {
             },
             admin: AdminConfig::default(),
             multi_tenant: false,
+            session_ttl_days: 2,
+            decay_period_days: 30,
+            access_log_retention_days: 90,
+            cron_enabled: true,
         }
     }
 
