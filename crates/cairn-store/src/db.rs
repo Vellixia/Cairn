@@ -131,8 +131,8 @@ pub struct AuditRecord {
 
 /// The structured store plus the content-addressed blob store. Backend-agnostic public API.
 pub struct Store {
-    backend: Box<dyn StoreBackend>,
-    blobs: BlobStore,
+    pub(crate) backend: Box<dyn StoreBackend>,
+    pub(crate) blobs: BlobStore,
 }
 
 impl Store {
@@ -361,6 +361,18 @@ impl Store {
         Self::open(&cfg).ok()
     }
 
+    /// Open a fully in-memory `Store` with no network or filesystem dependency beyond the
+    /// supplied `blobs_dir` (which the content-addressed blob store uses as its root; pass a
+    /// tempdir to keep a test hermetic). All semantic operations match the Helix backend
+    /// (last-write-wins on `upsert_memory`, monotonic audit ids, single-use pairing codes,
+    /// `__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)` — same as the
+    /// offline fallback on the production server when no vector index is available.
+    ///
+    /// Use this in any test bucket that needs a real `Store` without standing up HelixDB.
+    pub fn open_in_memory(blobs_dir: std::path::PathBuf) -> Result<Self> {
+        crate::memory_backend::build(blobs_dir)
+    }
+
     /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) - a fresh label
     /// namespace + the `hashing` embedder, pointed at `CAIRN_HELIX_URL`. `None` when that is unset.
     /// Components built from a `Config` (the API/MCP servers) use this directly in their tests.
@@ -390,6 +402,13 @@ impl Store {
                 url: None,
                 api_key: None,
             },
+            llm_consolidation: cairn_core::LlmConsolidationConfig {
+                enabled: false,
+                url: "http://localhost:11434/v1/chat/completions".into(),
+                model: "llama3.2".into(),
+                api_key: None,
+            },
+            rerank: cairn_core::RerankConfig::default(),
             admin: cairn_core::AdminConfig::default(),
             multi_tenant: false,
         };

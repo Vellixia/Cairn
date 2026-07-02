@@ -55,7 +55,7 @@ pub async fn transcript(
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("vtt parse: {e}")})),
+                    Json(serde_json::json!({"error": e.to_string()})),
                 )
                     .into_response();
             }
@@ -65,7 +65,7 @@ pub async fn transcript(
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("srt parse: {e}")})),
+                    Json(serde_json::json!({"error": e.to_string()})),
                 )
                     .into_response();
             }
@@ -75,7 +75,7 @@ pub async fn transcript(
             Err(e) => {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("json parse: {e}")})),
+                    Json(serde_json::json!({"error": e.to_string()})),
                 )
                     .into_response();
             }

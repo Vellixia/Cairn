@@ -22,10 +22,12 @@ members = [
     "crates/cairn-api",
     "crates/cairn-mcp",
     "crates/cairn-client",
+    "crates/cairn-rerank",
+    "crates/cairn-tests",
 ]
 
 [workspace.package]
-version = "0.6.6"
+version = "0.7.1"
 edition = "2021"
 license = "Apache-2.0"
 authors = ["Cairn contributors"]
@@ -58,6 +60,7 @@ cairn-embed = { path = "crates/cairn-embed" }
 cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
 cairn-client = { path = "crates/cairn-client" }
+cairn-rerank = { path = "crates/cairn-rerank" }
 
 # Pinned to specific minor versions via tilde (~major.minor) so CI can fail
 # loudly via `cargo build --locked` if Cargo.lock drifts outside that minor.
@@ -85,6 +88,9 @@ ureq = { version = "~2.12", features = ["json"] }
 dotenvy = "~0.15"
 jsonwebtoken = "~9.3"
 regex = "~1.12"
+# Format- and comment-preserving TOML editor for Codex config.toml merges (already in the
+# lockfile transitively at 0.22.x, so this adds no new version).
+toml_edit = "~0.22"
 helix-db = "~2.0"
 self_update = { version = "~0.44", default-features = false, features = ["ureq", "rustls", "archive-tar", "compression-flate2", "archive-zip", "compression-zip-deflate"] }
 url = "~2.5"

@@ -98,6 +98,7 @@ pub fn parse_vtt(input: &str) -> Result<Vec<Cue>, IngestError> {
 
     // Skip WEBVTT header + any NOTE / STYLE / REGION metadata until we hit a
     // real cue line.
+    let mut found_webvtt = false;
     let mut first_idx: Option<usize> = None;
     // Track whether we're inside a multi-line NOTE/STYLE/REGION block. A blank line
     // terminates the block; otherwise every non-blank line in the block is skipped.
@@ -108,6 +109,7 @@ pub fn parse_vtt(input: &str) -> Result<Vec<Cue>, IngestError> {
             continue;
         }
         if line.starts_with("WEBVTT") {
+            found_webvtt = true;
             continue;
         }
         if in_meta_block {
@@ -119,6 +121,15 @@ pub fn parse_vtt(input: &str) -> Result<Vec<Cue>, IngestError> {
         }
         first_idx = Some(i);
         break;
+    }
+    if !found_webvtt {
+        if input.trim().is_empty() {
+            return Err(IngestError::Empty);
+        }
+        return Err(IngestError::Vtt {
+            line: 0,
+            msg: "expected WEBVTT header".into(),
+        });
     }
     if let Some(start) = first_idx {
         // Build an iterator over the *remaining* lines (start+1 .. end).
@@ -442,6 +453,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_vtt_rejects_garbage() {
+        assert!(
+            parse_vtt("this is not vtt").is_err(),
+            "garbage input should be rejected"
+        );
+        assert!(parse_vtt("").is_err(), "empty input should be rejected");
+    }
+
+    #[test]
+    fn parse_vtt_accepts_webvtt_header() {
+        assert!(
+            parse_vtt("WEBVTT\n\n00:00:01.000 --> 00:00:02.000\nhello\n").is_ok(),
+            "valid VTT with header should be accepted"
+        );
+    }
+
+    #[test]
     fn chunking_splits_on_speaker_change() {
         let cues = vec![
             Cue {
@@ -516,7 +544,7 @@ mod tests {
     #[test]
     fn vtt_whitespace_only_returns_empty() {
         let result = parse_vtt("   \n\n\t\n");
-        assert!(result.unwrap().is_empty());
+        assert!(matches!(result, Err(IngestError::Empty)));
     }
 
     #[test]

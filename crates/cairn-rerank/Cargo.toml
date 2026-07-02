@@ -1,0 +1,28 @@
+[package]
+name = "cairn-rerank"
+description = "Cross-encoder reranking for Cairn hybrid search (P4.2). Local in-process via fastembed when enabled."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cairn-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+# `local` feature pulls in fastembed (and its ONNX runtime tree) and enables the
+# `LocalReranker` backend. Default off so the lean build path stays small.
+[features]
+default = []
+local = ["dep:fastembed"]
+
+[dependencies.fastembed]
+version = "~4.9"
+optional = true
+default-features = false
+features = ["ort-download-binaries", "hf-hub-native-tls"]
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,6 +1,13 @@
+---
+title: "Cairn Dependency + CI/Supply-Chain Audit"
+type: audit
+status: released
+updated: 2026-07-01
+---
+
 # Cairn Dependency + CI/Supply-Chain Audit
 
-> **Historical snapshot (2026-06-15, commit `be30239`).** See [REPORT.md](REPORT.md) for
+> **Historical snapshot (2026-06-15, commit `be30239`).** See [report.md](report.md) for
 > current fix status. This file is kept as the raw detail behind the consolidated report.
 
 **Scope:** repo `/home/andres/Cairn` (commit `be30239`, branch `main`)  

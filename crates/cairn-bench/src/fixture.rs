@@ -6,9 +6,9 @@
 //! handful of multi-session dialogs with entity-resolution and temporal
 //! questions - so the harness has something reproducible to run.
 //!
-//! Numbers published in `docs/BENCHMARKS.md` are from these fixtures. For
+//! Numbers published in `docs/testing/benchmarks.md` are from these fixtures. For
 //! cross-comparison with published agentmemory numbers, run the upstream
-//! benchmarks manually against this harness (instructions in BENCHMARKS.md).
+//! benchmarks manually against this harness (instructions in benchmarks.md).
 
 use serde::{Deserialize, Serialize};
 

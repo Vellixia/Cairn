@@ -16,7 +16,13 @@ use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+pub mod bounce_tracker;
+pub mod context_ledger;
 mod outline;
+pub use bounce_tracker::{BounceStats, BounceTracker};
+pub use context_ledger::{
+    ContextLedger, ContextPressure, LedgerEntry, PressureAction, DEFAULT_WINDOW_SIZE,
+};
 
 /// How to render a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +98,7 @@ pub struct ContextEngine {
     store: Arc<Store>,
     root: Option<PathBuf>,
     cache: Mutex<HashMap<String, CacheEntry>>,
+    bounce_tracker: Mutex<BounceTracker>,
 }
 
 impl ContextEngine {
@@ -104,7 +111,13 @@ impl ContextEngine {
             store,
             root,
             cache: Mutex::new(HashMap::new()),
+            bounce_tracker: Mutex::new(BounceTracker::new()),
         }
+    }
+
+    /// Access the bounce tracker (for inspection by the API layer / metrics endpoint).
+    pub fn bounce_tracker(&self) -> &Mutex<BounceTracker> {
+        &self.bounce_tracker
     }
 
     /// Canonicalize `path` and ensure it stays inside the configured workspace root.
@@ -187,6 +200,7 @@ impl ContextEngine {
         let content = String::from_utf8_lossy(&bytes).into_owned();
         let hash = self.store.blobs().put(&bytes)?;
         let lines = content.lines().count();
+        let original_tokens = estimate_tokens(&content);
 
         // Record this version as the agent's edit baseline so the PostToolUse guard can later
         // detect silent corruption (a large unreplaced deletion vs. what was read).
@@ -199,36 +213,44 @@ impl ContextEngine {
 
         // Structural (AST) views: render the file as just its signatures. Falls through to a full
         // read for unsupported languages or unparseable input.
+        //
+        // P1.1 anti-inflation guard: a structural view is only worth shipping when it's
+        // cheaper than the raw file. If `outline()` produces something bigger than the
+        // original (e.g. heavily-macroed Rust, a single mega-line file), we fall through
+        // to the Full branch below rather than waste tokens on a "compression" that isn't.
         if mode.is_structural() {
             if let Some(o) = outline::outline(&path, &content, mode == ReadMode::Map) {
                 let est = estimate_tokens(&o.text);
-                let note = format!(
-                    "{} signature outline ({} items); `expand {}` for the full {lines} lines",
-                    o.lang,
-                    o.items,
-                    hash.short()
-                );
-                let result = ReadResult {
-                    path: key.clone(),
-                    hash: hash.0.clone(),
-                    handle: hash.short().to_string(),
-                    status: ReadStatus::Outline,
-                    lines,
-                    bytes: content.len(),
-                    view: o.text,
-                    note,
-                    est_tokens: est,
-                };
-                cache.insert(
-                    key,
-                    CacheEntry {
-                        mtime_ns,
-                        hash,
-                        content,
+                if est < original_tokens {
+                    let note = format!(
+                        "{} signature outline ({} items); `expand {}` for the full {lines} lines",
+                        o.lang,
+                        o.items,
+                        hash.short()
+                    );
+                    let result = ReadResult {
+                        path: key.clone(),
+                        hash: hash.0.clone(),
+                        handle: hash.short().to_string(),
+                        status: ReadStatus::Outline,
                         lines,
-                    },
-                );
-                return Ok(result);
+                        bytes: content.len(),
+                        view: o.text,
+                        note,
+                        est_tokens: est,
+                    };
+                    cache.insert(
+                        key,
+                        CacheEntry {
+                            mtime_ns,
+                            hash,
+                            content,
+                            lines,
+                        },
+                    );
+                    return Ok(result);
+                }
+                // Outline is no cheaper than raw - fall through to Full below.
             }
         }
 
@@ -237,20 +259,44 @@ impl ContextEngine {
         let result = match (&prev, mode) {
             (Some(prev_content), ReadMode::Auto) if *prev_content != content => {
                 let diff = diff_only(prev_content, &content);
-                let note = format!(
-                    "changed since last read; showing diff only; `expand {}` for the full file",
-                    hash.short()
-                );
-                ReadResult {
-                    path: key.clone(),
-                    hash: hash.0.clone(),
-                    handle: hash.short().to_string(),
-                    status: ReadStatus::Diff,
-                    lines,
-                    bytes: content.len(),
-                    est_tokens: estimate_tokens(&diff),
-                    view: diff,
-                    note,
+                let diff_tokens = estimate_tokens(&diff);
+                let full_tokens = original_tokens;
+                // P1.2 auto-delta threshold: if the diff is >= 60% of the full file,
+                // the delta is so noisy that the full file is actually cheaper to ship.
+                // This guards against the "rewrote 90% of the file" case where the diff
+                // would just be the new file with a few `-` lines at the top.
+                if diff_tokens >= (full_tokens as f64 * 0.6) as usize {
+                    let mut note = format!("full file; {lines} lines; handle {}", hash.short());
+                    if lines > 40 && outline::supported(&path) {
+                        note.push_str("; try mode=signatures for a structural outline");
+                    }
+                    ReadResult {
+                        path: key.clone(),
+                        hash: hash.0.clone(),
+                        handle: hash.short().to_string(),
+                        status: ReadStatus::Full,
+                        lines,
+                        bytes: content.len(),
+                        est_tokens: full_tokens,
+                        view: content.clone(),
+                        note,
+                    }
+                } else {
+                    let note = format!(
+                        "changed since last read; showing diff only; `expand {}` for the full file",
+                        hash.short()
+                    );
+                    ReadResult {
+                        path: key.clone(),
+                        hash: hash.0.clone(),
+                        handle: hash.short().to_string(),
+                        status: ReadStatus::Diff,
+                        lines,
+                        bytes: content.len(),
+                        est_tokens: diff_tokens,
+                        view: diff,
+                        note,
+                    }
                 }
             }
             _ => {
@@ -274,13 +320,27 @@ impl ContextEngine {
         };
 
         cache.insert(
-            key,
+            key.clone(),
             CacheEntry {
                 mtime_ns,
                 hash,
                 content,
                 lines,
             },
+        );
+        // Record this read with the bounce tracker (P1.7). Compressed modes will register
+        // as compressed; the next full read within BOUNCE_WINDOW triggers a bounce.
+        let mode_label = match mode {
+            ReadMode::Auto => "auto",
+            ReadMode::Full => "full",
+            ReadMode::Signatures => "signatures",
+            ReadMode::Map => "map",
+        };
+        self.bounce_tracker.lock().unwrap().record_read(
+            &key,
+            mode_label,
+            result.est_tokens,
+            original_tokens,
         );
         Ok(result)
     }
@@ -459,6 +519,73 @@ mod tests {
         // Both versions' originals are retained - nothing is ever lost.
         assert_eq!(eng.expand(&r1.hash).unwrap().unwrap(), original);
         assert_eq!(eng.expand(&r3.hash).unwrap().unwrap(), changed);
+    }
+
+    /// P1.2: a near-total rewrite (diff >= 60% of full) must fall back to Full,
+    /// not ship a diff that's noisier than the original.
+    #[test]
+    fn auto_delta_falls_back_to_full_when_diff_too_large() {
+        let Some((eng, dir)) = engine() else { return };
+        let file = dir.path().join("rewritten.txt");
+        let original: String = (0..1000)
+            .map(|i| format!("line {i}: lorem ipsum dolor sit amet\n"))
+            .collect();
+        std::fs::write(&file, &original).unwrap();
+
+        // First read seeds the cache.
+        let r1 = eng.read(&file, ReadMode::Auto).unwrap();
+        assert_eq!(r1.status, ReadStatus::Full);
+
+        // Rewrite ~90% of the lines - the diff will be larger than 60% of full.
+        let rewritten: String = (0..1000)
+            .map(|i| format!("line {i}: completely different content here now\n"))
+            .collect();
+        std::fs::write(&file, &rewritten).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&file)
+            .unwrap()
+            .set_modified(SystemTime::now() + Duration::from_secs(2))
+            .unwrap();
+
+        // Re-read must fall back to Full, not inflate with a giant diff.
+        let r2 = eng.read(&file, ReadMode::Auto).unwrap();
+        assert_eq!(
+            r2.status,
+            ReadStatus::Full,
+            "diff >= 60% of full should fall back to Full"
+        );
+        assert_eq!(
+            r2.est_tokens, r1.est_tokens,
+            "Full fall-back should equal original tokens"
+        );
+        // The view must NOT contain the +/- diff markers - it must be the raw file.
+        assert!(!r2.view.starts_with('+') && !r2.view.starts_with('-'));
+    }
+
+    /// P1.1: an outline that's no cheaper than the raw file must fall through to Full,
+    /// not waste tokens shipping a "compression" that's actually larger.
+    #[test]
+    fn outline_falls_back_to_full_when_no_smaller() {
+        let Some((eng, dir)) = engine() else { return };
+        let file = dir.path().join("tiny.rs");
+        // A single-line file - the outline of one item is unlikely to be smaller than
+        // the raw file with all its whitespace. The anti-inflation guard should kick in
+        // and return Full instead of an inflated Outline.
+        let src = "pub fn tiny() -> i32 { 42 }\n";
+        std::fs::write(&file, src).unwrap();
+
+        let r = eng.read(&file, ReadMode::Signatures).unwrap();
+        // Either Outline (if outline() returned something cheaper) or Full (anti-inflation).
+        // The invariant we care about: est_tokens <= estimate_tokens(src) AND
+        // the original is recoverable.
+        assert!(
+            r.est_tokens <= estimate_tokens(src),
+            "anti-inflation guard: shipping est_tokens={} for raw of {} tokens",
+            r.est_tokens,
+            estimate_tokens(src)
+        );
+        assert_eq!(eng.expand(&r.hash).unwrap().unwrap(), src);
     }
 
     #[test]

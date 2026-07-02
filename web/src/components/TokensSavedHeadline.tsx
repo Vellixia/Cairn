@@ -66,6 +66,7 @@ export function TokensSavedHeadline({ className }: { className?: string }) {
 
   const headline = metrics.data?.savings?.saved_bytes ?? 0;
   const display = Math.max(current, headline);
+  const usd = metrics.data?.usd_saved ?? 0;
   const direction = delta > 0 ? "up" : delta < 0 ? "down" : "flat";
   const Icon = direction === "up" ? ArrowUpRight : direction === "down" ? ArrowDownRight : Minus;
   const tint =
@@ -74,6 +75,11 @@ export function TokensSavedHeadline({ className }: { className?: string }) {
       : direction === "down"
         ? "text-[hsl(var(--color-danger))]"
         : "text-muted-foreground";
+
+  // P2.2: USD equivalent, formatted to two decimals (per the plan: "$X.XX or N cents").
+  const usdFormatted = usd >= 0.01
+    ? `$${usd.toFixed(2)}`
+    : `${Math.round(usd * 100)}¢`;
 
   return (
     <div className={className}>
@@ -92,6 +98,11 @@ export function TokensSavedHeadline({ className }: { className?: string }) {
           {deltaPct.toFixed(0)}%) vs prior 7 days
         </span>
       </p>
+      {usd > 0 && (
+        <p className="mt-1 text-xs text-muted-foreground">
+          ≈ <span className="font-mono tabular-nums">{usdFormatted}</span> saved
+        </p>
+      )}
     </div>
   );
 }

@@ -1001,6 +1001,13 @@ mod live {
                 url: None,
                 api_key: None,
             },
+            llm_consolidation: cairn_core::LlmConsolidationConfig {
+                enabled: false,
+                url: "http://localhost:11434/v1/chat/completions".into(),
+                model: "llama3.2".into(),
+                api_key: None,
+            },
+            rerank: cairn_core::RerankConfig::default(),
             admin: cairn_core::AdminConfig::default(),
             multi_tenant: false,
         };

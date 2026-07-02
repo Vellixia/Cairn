@@ -1,0 +1,73 @@
+[package]
+name = "cairn-tests"
+description = "Local business-flow integration tests for every Cairn crate. Mock-data only; never touches the network or the live docker stack."
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# This crate is a `cargo test` integration-test bucket for the whole workspace.
+# It's a real workspace member so `cargo test --workspace` picks it up; its
+# runtime types come in as dev-dependencies and never link into a release graph.
+#
+# Boundary: tests must be hermetic. No network. No real HelixDB. No real docker.
+# Mock data lives in `src/fixtures.rs`; an in-memory cairn-store shim lives in
+# `src/mock_store.rs`. Add a new test file under `tests/<topic>.rs` to cover
+# another business flow.
+#
+# Note: package name is `cairn-tests`, not `test`, to avoid clashing with the
+# built-in `test` crate that the `#[test]` attribute macro relies on. Run with
+# `cargo test -p cairn-tests`.
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# All workspace crates we exercise from these tests. Each is a dev-only dep:
+# only `cargo test -p test` (or `cargo test --workspace`) compiles them.
+cairn-core = { path = "../cairn-core" }
+cairn-store = { path = "../cairn-store" }
+cairn-context = { path = "../cairn-context" }
+cairn-memory = { path = "../cairn-memory" }
+cairn-guard = { path = "../cairn-guard" }
+cairn-assemble = { path = "../cairn-assemble" }
+cairn-shell = { path = "../cairn-shell" }
+cairn-profile = { path = "../cairn-profile" }
+cairn-share = { path = "../cairn-share" }
+cairn-session = { path = "../cairn-session" }
+cairn-pack = { path = "../cairn-pack" }
+cairn-registry = { path = "../cairn-registry" }
+cairn-sync = { path = "../cairn-sync" }
+cairn-bench = { path = "../cairn-bench" }
+cairn-proactive = { path = "../cairn-proactive" }
+cairn-ingest = { path = "../cairn-ingest" }
+cairn-embed = { path = "../cairn-embed" }
+cairn-mcp = { path = "../cairn-mcp" }
+cairn-rerank = { path = "../cairn-rerank" }
+cairn-api = { path = "../cairn-api" }
+
+# chrono / serde used by fixtures + assertions. Same workspace versions
+# everywhere else so lockfile stays quiet.
+chrono = { version = "~0.4", features = ["serde"] }
+serde = { version = "~1", features = ["derive"] }
+serde_json = "~1"
+uuid = { version = "~1", features = ["v4", "serde"] }
+
+# `mock_store` is hermetic — uses hmac + sha2 directly for deterministic audit
+# signatures. Pinning to the workspace's hmac/sha2 keeps the lockfile quiet.
+hmac = "~0.12"
+sha2 = "~0.10"
+anyhow = "~1"
+tempfile = "~3"
+
+# `tests/23_api_envelope.rs` mounts the cairn-api axum router in-process
+# and drives it via `tower::ServiceExt::oneshot`.
+axum = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+http-body-util = "~0.1"
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[dev-dependencies]
+# `tests/*.rs` is an integration-test binary per file. Nothing extra needed
+# beyond the lib's exports; keep this empty so adding tests doesn't require
+# touching this file.

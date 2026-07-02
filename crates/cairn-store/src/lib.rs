@@ -6,6 +6,7 @@
 mod blob;
 mod db;
 mod helix;
+pub mod memory_backend;
 
 pub use blob::BlobStore;
 pub use db::{AuditRecord, Store};

@@ -9,10 +9,13 @@ repository.workspace = true
 [dependencies]
 cairn-core.workspace = true
 cairn-store.workspace = true
+cairn-rerank.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 chrono.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+ureq.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

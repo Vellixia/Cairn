@@ -336,7 +336,7 @@ require a live HelixDB.
 as of this release (up from 118 in 0.3.0). The 5 ignored tests require a
 live HelixDB.
 
-See [ADR-010 through ADR-016](docs/DECISIONS.md) for the full reasoning behind
+See [ADR-010 through ADR-016](docs/reference/decisions.md) for the full reasoning behind
 each decision.
 
 ---

@@ -46,7 +46,7 @@ use axum::{
     routing::{delete, get},
     Json, Router,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Build the axum router. Mount under `/registry` so the rest of the cairn API keeps
@@ -59,7 +59,12 @@ pub fn router(registry: Arc<Registry>) -> Router {
         .route("/packs/:name/:version/manifest.json", get(fetch_manifest))
         .route("/packs/:name/:version", delete(revoke_pack))
         .route("/search", get(search_packs))
-        .route("/trusted-keys", get(list_trusted_keys))
+        .route(
+            "/trusted-keys",
+            get(list_trusted_keys)
+                .post(add_trusted_key)
+                .delete(delete_trusted_key),
+        )
         .route("/revocations", get(list_revocations))
         .with_state(registry)
 }
@@ -184,8 +189,39 @@ async fn search_packs(
 /// accept signatures from.
 async fn list_trusted_keys(
     State(reg): State<Arc<Registry>>,
-) -> Result<Json<Vec<TrustGrant>>, Response> {
-    reg.trust_grants().map(Json).map_err(|e| e.into_response())
+) -> Result<Json<Vec<TrustGrantDto>>, Response> {
+    reg.trust_grants()
+        .map(|gs| gs.into_iter().map(TrustGrantDto::from).collect())
+        .map(Json)
+        .map_err(|e| e.into_response())
+}
+
+/// Wire DTO for trust grants. The inner `cairn_pack::PublicKey` serializes as raw
+/// bytes (for signing compat); the dashboard wants a hex string it can paste into
+/// a `cairn pack trust <hex>` CLI invocation, so we encode it here.
+#[derive(Debug, Serialize)]
+pub struct TrustGrantDto {
+    pub key: String,
+    pub allows: String,
+    pub label: Option<String>,
+    pub granted_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<TrustGrant> for TrustGrantDto {
+    fn from(g: TrustGrant) -> Self {
+        let allows = match g.allows {
+            TrustScope::Local => "local",
+            TrustScope::Team => "team",
+            TrustScope::Public => "public",
+        }
+        .to_string();
+        Self {
+            key: g.key.to_hex(),
+            allows,
+            label: g.label,
+            granted_at: g.granted_at,
+        }
+    }
 }
 
 /// `GET /registry/revocations[?since=<unix_seconds>]` - the append-only log of
@@ -213,6 +249,114 @@ pub struct RevocationsQuery {
 /// Convenience impl so axum can convert a [`RegistryError`] into a response.
 trait IntoResponseExt {
     fn into_response(self) -> Response;
+}
+
+/// Body for `POST /registry/trusted-keys` - register a new (or update an existing)
+/// trusted author key. The `key` is the 64-char hex form of the Ed25519 public key
+/// (see `cairn_pack::PublicKey::to_hex`).
+#[derive(Debug, Deserialize)]
+pub struct AddTrustedKeyBody {
+    pub key: String,
+    /// Trust scope: `local` (default), `team`, or `public`. Free-form string here;
+    /// unknown values are rejected by the store.
+    #[serde(default = "default_scope")]
+    pub allows: String,
+    /// Optional human-readable label (e.g. "alice@vellixia").
+    #[serde(default)]
+    pub label: Option<String>,
+}
+
+fn default_scope() -> String {
+    "public".to_string()
+}
+
+/// `POST /registry/trusted-keys` - add or update a trust grant.
+async fn add_trusted_key(
+    State(reg): State<Arc<Registry>>,
+    Json(body): Json<AddTrustedKeyBody>,
+) -> Result<Json<TrustGrantDto>, Response> {
+    let bytes = hex::decode(body.key.trim()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(RegistryApiError {
+                error: format!("invalid hex public key: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+    let pk = cairn_pack::PublicKey::from_bytes(&bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(RegistryApiError {
+                error: format!("invalid Ed25519 public key: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+    let scope = match body.allows.to_ascii_lowercase().as_str() {
+        "local" => TrustScope::Local,
+        "team" => TrustScope::Team,
+        "public" => TrustScope::Public,
+        other => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(RegistryApiError {
+                    error: format!("unknown trust scope '{other}' (expected: local|team|public)"),
+                }),
+            )
+                .into_response());
+        }
+    };
+    reg.trust(pk, scope, body.label.clone())
+        .map_err(|e| e.into_response())?;
+    let grant = reg
+        .trust_grants()
+        .map_err(|e| e.into_response())?
+        .into_iter()
+        .find(|g| g.key.to_hex() == body.key.to_ascii_lowercase())
+        .ok_or_else(|| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(RegistryApiError {
+                    error: "trust grant not visible after write".into(),
+                }),
+            )
+                .into_response()
+        })?;
+    Ok(Json(TrustGrantDto::from(grant)))
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct DeleteTrustedKeyQuery {
+    pub key: String,
+}
+
+/// `DELETE /registry/trusted-keys?key=<hex>` - drop a trust grant by key. No-op 200
+/// if the key wasn't trusted (so the UI can retry safely).
+async fn delete_trusted_key(
+    State(reg): State<Arc<Registry>>,
+    Query(q): Query<DeleteTrustedKeyQuery>,
+) -> Result<StatusCode, Response> {
+    let bytes = hex::decode(q.key.trim()).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(RegistryApiError {
+                error: format!("invalid hex public key: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+    let pk = cairn_pack::PublicKey::from_bytes(&bytes).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(RegistryApiError {
+                error: format!("invalid Ed25519 public key: {e}"),
+            }),
+        )
+            .into_response()
+    })?;
+    reg.untrust(&pk).map_err(|e| e.into_response())?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 impl IntoResponseExt for RegistryError {

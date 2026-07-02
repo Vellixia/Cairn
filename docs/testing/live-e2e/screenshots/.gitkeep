@@ -1,0 +1,3 @@
+# Per-step screenshots from the live-e2e walks live here.
+# Naming: <NN>-<surface>/<step>.png (e.g. 01-auth/login.png).
+# Created at walk time; not committed unless they capture a finding.

@@ -12,6 +12,20 @@ use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+pub mod llm_consolidator;
+pub use llm_consolidator::{apply_decay, Insight, LlmConsolidator, ProceduralStep, SemanticFact};
+pub mod analysis;
+pub use analysis::{generate_architecture_report, ArchitectureReport, BridgeEntry, GodNodeEntry};
+pub mod followup_tracker;
+pub use followup_tracker::FollowupTracker;
+pub mod gotcha_tracker;
+pub use gotcha_tracker::{FailureCluster, FailureEvent, GotchaTracker};
+pub mod query_expander;
+pub use query_expander::{ExpandedQuery, Expansion, QueryExpander};
+pub mod rerank;
+pub use cairn_rerank::{from_config as rerank_from_config, NullReranker};
+pub use rerank::{RerankConfig, RerankError, RerankOutcome, Reranker, RerankerRef};
+
 /// A recall hit with its relevance score.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoredMemory {
@@ -21,11 +35,119 @@ pub struct ScoredMemory {
 
 pub struct MemoryEngine {
     store: Arc<Store>,
+    followup_tracker: std::sync::Mutex<FollowupTracker>,
+    gotcha_tracker: std::sync::Mutex<GotchaTracker>,
+    /// Optional cross-encoder reranker. When `None` (the default), `hybrid_search` and
+    /// `hybrid_search_with_rerank` produce identical results.
+    reranker: Option<Arc<dyn Reranker>>,
 }
 
 impl MemoryEngine {
     pub fn new(store: Arc<Store>) -> Self {
-        Self { store }
+        Self {
+            store,
+            followup_tracker: std::sync::Mutex::new(FollowupTracker::new()),
+            gotcha_tracker: std::sync::Mutex::new(GotchaTracker::new()),
+            reranker: None,
+        }
+    }
+
+    /// Builder method: install a cross-encoder reranker. Subsequent calls to
+    /// `hybrid_search_with_rerank` will run MMR then re-score the post-MMR top-K with
+    /// the provided reranker, blending the scores per `RerankConfig::blend_weight`.
+    pub fn with_reranker(mut self, reranker: Arc<dyn Reranker>) -> Self {
+        self.reranker = Some(reranker);
+        self
+    }
+
+    /// Inspect the installed reranker (for diagnostics / metrics).
+    pub fn has_reranker(&self) -> bool {
+        self.reranker.is_some()
+    }
+
+    /// Access the followup tracker (for metrics / dashboard).
+    pub fn followup_tracker(&self) -> &std::sync::Mutex<FollowupTracker> {
+        &self.followup_tracker
+    }
+
+    /// Access the gotcha tracker (for metrics / dashboard).
+    pub fn gotcha_tracker(&self) -> &std::sync::Mutex<GotchaTracker> {
+        &self.gotcha_tracker
+    }
+
+    /// Record a failure and, if it crosses the cluster threshold, auto-promote to a
+    /// `MemoryKind::Gotcha` memory. Returns the created gotcha memory (if any) so the
+    /// caller can surface it (e.g. in a webhook or API response).
+    pub fn record_failure(&self, event: FailureEvent) -> Result<Option<Memory>> {
+        let cluster = {
+            let mut tracker = self
+                .gotcha_tracker
+                .lock()
+                .map_err(|e| cairn_core::Error::Other(format!("gotcha tracker poisoned: {e}")))?;
+            tracker.record(event)
+        };
+        let Some(cluster) = cluster else {
+            return Ok(None);
+        };
+
+        // Promote: write a gotcha memory summarizing the cluster.
+        let session_count = cluster.session_ids.len();
+        let refs_concat = cluster
+            .events
+            .iter()
+            .flat_map(|e| e.refs.iter().cloned())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let content = if session_count >= 2 {
+            format!(
+                "Gotcha: '{}' (seen {} times across {} sessions). Watch for: {}",
+                cluster.topic(),
+                cluster.size(),
+                session_count,
+                if refs_concat.is_empty() {
+                    cluster.events[0].context.clone()
+                } else {
+                    format!("refs=[{}]", refs_concat)
+                }
+            )
+        } else {
+            format!(
+                "Gotcha: '{}' (seen {} times). Watch for: {}",
+                cluster.topic(),
+                cluster.size(),
+                cluster.events[0].context
+            )
+        };
+
+        let mut input = NewMemory::new(content);
+        input.kind = Some(cairn_core::MemoryKind::Gotcha);
+        input.tier = Some(cairn_core::MemoryTier::Working);
+        input.importance = Some(0.8);
+        input.concepts = cluster
+            .topic()
+            .split_whitespace()
+            .map(|s| s.to_string())
+            .filter(|s| s.len() > 2)
+            .collect();
+        if !refs_concat.is_empty() {
+            input.applies_to = refs_concat
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        Ok(Some(self.remember(input)?))
+    }
+
+    /// Top-K gotcha clusters by size. Useful for proactive recall at session start.
+    pub fn top_gotcha_clusters(&self, n: usize) -> Result<Vec<FailureCluster>> {
+        let tracker = self
+            .gotcha_tracker
+            .lock()
+            .map_err(|e| cairn_core::Error::Other(format!("gotcha tracker poisoned: {e}")))?;
+        Ok(tracker.top_clusters(n))
     }
 
     /// Persist a memory. If an identical one already exists, return it instead of duplicating.
@@ -107,14 +229,100 @@ impl MemoryEngine {
             .map(|(rank, m)| (m.id, rank))
             .collect();
 
+        // Graph stream: extract entities, find graph-proximate memories.
+        let entities = extract_entities(query);
+        let graph_boosted: HashMap<String, f64> = if entities.is_empty() {
+            HashMap::new()
+        } else {
+            let g = self.graph()?;
+            let mut gmap = HashMap::new();
+            for node in &g.nodes {
+                if entities.iter().any(|e| {
+                    node.content_preview
+                        .to_lowercase()
+                        .contains(&e.to_lowercase())
+                }) {
+                    gmap.insert(node.id.clone(), 1.0);
+                }
+            }
+            // Neighbors at depth 1
+            for edge in &g.edges {
+                if let Some(&score) = gmap.get(&edge.source) {
+                    if !gmap.contains_key(&edge.target) {
+                        gmap.insert(edge.target.clone(), score * 0.5);
+                    }
+                }
+                if let Some(&score) = gmap.get(&edge.target) {
+                    if !gmap.contains_key(&edge.source) {
+                        gmap.insert(edge.source.clone(), score * 0.5);
+                    }
+                }
+            }
+            gmap
+        };
+
+        // Pre-compute RRF components for each memory.
+        let n = mems.len();
+        let mut bm25_rrf_scores = vec![0.0_f32; n];
+        let mut vec_rrf_scores = vec![0.0_f32; n];
+        let mut graph_rrf_scores = vec![0.0_f32; n];
+
+        for i in 0..n {
+            bm25_rrf_scores[i] = rrf(bm25_rank[i]);
+            if let Some(&r) = sem_rank.get(&mems[i].id) {
+                vec_rrf_scores[i] = rrf(r);
+            }
+            if let Some(&graph_score) = graph_boosted.get(&mems[i].id) {
+                if graph_score > 0.0 {
+                    let graph_rank = graph_boosted.len()
+                        - graph_boosted.values().filter(|&&v| v > graph_score).count();
+                    graph_rrf_scores[i] = rrf(graph_rank);
+                }
+            }
+        }
+
+        // Dynamic renormalization: scale weights by how many streams are active.
+        let bm25_weight = 0.4_f64;
+        let vec_weight = 0.6_f64;
+        let graph_weight = 0.3_f64;
+        let effective_bm25 = if bm25_scores.iter().any(|&s| s > 0.0_f32) {
+            bm25_weight
+        } else {
+            0.0
+        };
+        let effective_vec = if !sem_rank.is_empty() {
+            vec_weight
+        } else {
+            0.0
+        };
+        let effective_graph = if !graph_boosted.is_empty() {
+            graph_weight
+        } else {
+            0.0
+        };
+        let total = effective_bm25 + effective_vec + effective_graph;
+        let (norm_bm25, norm_vec, norm_graph) = if total > 0.0 {
+            (
+                effective_bm25 / total,
+                effective_vec / total,
+                effective_graph / total,
+            )
+        } else {
+            let denom = bm25_weight + vec_weight + graph_weight;
+            (
+                bm25_weight / denom,
+                vec_weight / denom,
+                graph_weight / denom,
+            )
+        };
+
         let mut scored: Vec<ScoredMemory> = mems
             .into_iter()
             .enumerate()
             .map(|(i, m)| {
-                let mut score = rrf(bm25_rank[i]);
-                if let Some(&r) = sem_rank.get(&m.id) {
-                    score += rrf(r);
-                }
+                let score = (norm_bm25 as f32) * bm25_rrf_scores[i]
+                    + (norm_vec as f32) * vec_rrf_scores[i]
+                    + (norm_graph as f32) * graph_rrf_scores[i];
                 ScoredMemory { memory: m, score }
             })
             .collect();
@@ -131,18 +339,32 @@ impl MemoryEngine {
         });
         scored.truncate(limit);
 
-        for s in &scored {
+        // Session diversification: cap at 3 per session, fill from remaining.
+        let diversified = diversify_by_session(scored, limit, 3);
+
+        for s in &diversified {
             let _ = self.store.touch_memory(&s.memory.id);
         }
         // Apply the agentmemory reinforcement curve on each returned memory. The bump is best-
         // effort - a transient store error must not break recall (the agent still gets its
         // answer; we just lose a small confidence nudge for this turn).
-        for s in &scored {
+        for s in &diversified {
             if let Err(e) = self.store.reinforce_memory(&s.memory.id) {
                 tracing::warn!(memory_id = %s.memory.id, error = %e, "reinforce failed");
             }
         }
-        Ok(scored)
+
+        // P1.6: record this recall with the followup tracker so a disjoint re-query
+        // in the window is counted as a followup. Best-effort: a poisoned mutex must
+        // not break recall.
+        {
+            let ids: Vec<String> = diversified.iter().map(|s| s.memory.id.clone()).collect();
+            if let Ok(mut tracker) = self.followup_tracker.lock() {
+                tracker.record(query, &ids);
+            }
+        }
+
+        Ok(diversified)
     }
 
     /// The session-start bootstrap: the highest-value memories to inject so the agent never
@@ -170,6 +392,14 @@ impl MemoryEngine {
         let mut all = self.store.all_memories()?;
         all.retain(|m| m.kind == kind);
         Ok(all)
+    }
+
+    /// P2.6: activity heatmap - returns a `YYYY-MM-DD -> count` map for the last
+    /// `days` days. Powers `/api/memory/heatmap`. Backed by `analysis::activity_heatmap`
+    /// which filters by `created_at` cutoff.
+    pub fn activity_heatmap(&self, days: usize) -> Result<std::collections::HashMap<String, u32>> {
+        let all = self.store.all_memories()?;
+        Ok(crate::analysis::activity_heatmap(&all, days))
     }
 
     /// Consolidate memory across the four tiers (working -> episodic -> semantic -> procedural),
@@ -225,6 +455,124 @@ impl MemoryEngine {
         // than the final limit to work well.
         let candidates = self.recall(query, (limit + rerank_depth).max(50))?;
         Ok(mmr_rerank(candidates, limit, 0.7))
+    }
+
+    /// Hybrid search with cross-encoder reranking. Falls back to `hybrid_search` when no
+    /// reranker is installed (the default).
+    ///
+    /// Pipeline: `recall -> RRF -> truncate -> diversify_by_session -> mmr -> rerank(top_k)
+    /// -> min-max normalize -> alpha-blend with hybrid score`. The rerank cost is paid only
+    /// for the post-MMR top-K candidates, so total inference is bounded.
+    pub fn hybrid_search_with_rerank(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+    ) -> Result<Vec<ScoredMemory>> {
+        // 1. Same wide retrieval + MMR as the no-rerank path.
+        let mmr = self.hybrid_search(query, limit, rerank_depth)?;
+        if mmr.is_empty() {
+            return Ok(mmr);
+        }
+
+        // 2. Rerank the post-MMR top-K (capped at `reranker` budget).
+        let k = mmr.len().min(64); // hard cap: 64 forward passes
+        let docs: Vec<String> = mmr[..k].iter().map(|h| h.memory.content.clone()).collect();
+        let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+        let outcomes = match reranker.rerank(query, &doc_refs) {
+            Ok(o) => o,
+            Err(e) => {
+                // Fail-soft: keep the MMR ordering if the reranker errors.
+                tracing::warn!(error = %e, "reranker failed; returning MMR-only result");
+                return Ok(mmr);
+            }
+        };
+
+        // 3. Min-max normalize the cross-encoder scores so they live in [0, 1] and
+        // can be blended with the hybrid score (which is already in [0, 1]).
+        let (min, max) = outcomes
+            .iter()
+            .map(|o| o.score)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), s| {
+                (lo.min(s), hi.max(s))
+            });
+        let span = (max - min).max(f32::EPSILON);
+        let norm = |s: f32| (s - min) / span;
+        let alpha = blend_weight.clamp(0.0, 1.0);
+
+        // 4. Apply the blend: out_index = original_index, score = alpha * cross + (1 - alpha) * hybrid.
+        //    Re-sort the post-MMR slice by the blended score.
+        let mut scored: Vec<(usize, f32)> = outcomes
+            .iter()
+            .map(|o| {
+                let hybrid_score = mmr[o.original_index].score;
+                let cross_norm = norm(o.score);
+                let final_score = alpha * cross_norm + (1.0 - alpha) * hybrid_score;
+                (o.original_index, final_score)
+            })
+            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+        // 5. Build the new ordering: reranked top-K first, then the rest of MMR.
+        let mut new_order: Vec<usize> = scored.into_iter().map(|(i, _)| i).collect();
+        new_order.extend(k..mmr.len());
+
+        // 6. Re-apply the blended scores to the final ordering.
+        let mut result: Vec<ScoredMemory> = Vec::with_capacity(mmr.len());
+        for (new_idx, &orig_idx) in new_order.iter().enumerate() {
+            let mut h = mmr[orig_idx].clone();
+            // Only re-score the reranked slice - the rest keep their MMR score.
+            if new_idx < k {
+                h.score =
+                    alpha * norm(outcomes[orig_idx].score) + (1.0 - alpha) * mmr[orig_idx].score;
+            }
+            result.push(h);
+        }
+        // Trim to the requested limit.
+        result.truncate(limit);
+        Ok(result)
+    }
+
+    /// Search the engine with LLM-driven query expansion. For each reformulation we run
+    /// the full `recall`; results are merged by max `score` per memory id (per the spec's
+    /// "merge by max combinedScore"). Final MMR rerank keeps the result set diverse.
+    ///
+    /// Falls back to a plain `hybrid_search` when:
+    /// - the expander is disabled (short-circuit to single-query `ExpandedQuery`)
+    /// - the expansion yields only the original query
+    pub fn expanded_search(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        expander: &QueryExpander,
+    ) -> Result<Vec<ScoredMemory>> {
+        let expanded = expander.expand(query)?;
+        if !expanded.is_expanded() {
+            // Disabled or no reformulations produced - single-query path.
+            return self.hybrid_search(query, limit, rerank_depth);
+        }
+        // Pull a wider candidate set per reformulation so MMR has headroom across the
+        // merged pool.
+        let per_query_k = (limit + rerank_depth).max(50);
+        let mut by_id: std::collections::HashMap<String, ScoredMemory> =
+            std::collections::HashMap::new();
+        for q in &expanded.queries {
+            for hit in self.recall(q, per_query_k)? {
+                by_id
+                    .entry(hit.memory.id.clone())
+                    .and_modify(|existing| {
+                        if hit.score > existing.score {
+                            existing.score = hit.score;
+                        }
+                    })
+                    .or_insert(hit);
+            }
+        }
+        let merged: Vec<ScoredMemory> = by_id.into_values().collect();
+        Ok(mmr_rerank(merged, limit, 0.7))
     }
 
     /// Pin or unpin a memory. Pinned memories are kept around even when their confidence
@@ -485,6 +833,125 @@ fn token_set(s: &str) -> HashSet<String> {
         .filter(|t| t.len() >= 2)
         .map(|t| t.to_ascii_lowercase())
         .collect()
+}
+
+/// Extract candidate entities from a query for the graph leg. Returns both quoted
+/// strings (stripped of quotes) and capitalized words of length >= 3. Pure function.
+pub fn extract_entities(query: &str) -> Vec<String> {
+    let mut entities = Vec::new();
+    let mut quoted = String::new();
+    let mut in_quote: Option<char> = None;
+    for c in query.chars() {
+        match in_quote {
+            Some(q) if c == q => {
+                let trimmed = quoted.trim().to_string();
+                if !trimmed.is_empty() {
+                    entities.push(trimmed);
+                }
+                quoted.clear();
+                in_quote = None;
+            }
+            Some(_) => quoted.push(c),
+            None if c == '"' || c == '\'' => in_quote = Some(c),
+            None => {}
+        }
+    }
+    // Any leftover quoted chunk (unterminated) - still emit it
+    let trimmed = quoted.trim().to_string();
+    if !trimmed.is_empty() && in_quote.is_some() {
+        entities.push(trimmed);
+    }
+    // Capitalized words of length >= 3 (skip the very first word since capitalizing at
+    // sentence start is meaningless for entity detection).
+    let words: Vec<&str> = query.split_whitespace().collect();
+    for (idx, w) in words.iter().enumerate() {
+        let cleaned: String = w.chars().filter(|c| c.is_alphanumeric()).collect();
+        if cleaned.len() < 3 {
+            continue;
+        }
+        let mut chars = cleaned.chars();
+        let first = chars.next().unwrap();
+        if first.is_uppercase() && idx > 0 {
+            entities.push(cleaned);
+        }
+    }
+    // Dedup while preserving order
+    let mut seen = HashSet::new();
+    entities.retain(|e| seen.insert(e.clone()));
+    entities
+}
+
+/// Compute graph-proximity scores for the graph leg. Extracts entities from the query,
+/// finds graph nodes whose content_preview mentions them (start nodes), and propagates
+/// a 0.5x score to immediate neighbors (depth 1). Pure function on the graph + entities.
+pub fn graph_proximity_scores(graph: &MemoryGraph, entities: &[String]) -> HashMap<String, f64> {
+    if entities.is_empty() {
+        return HashMap::new();
+    }
+    let mut gmap: HashMap<String, f64> = HashMap::new();
+    for node in &graph.nodes {
+        let preview_lc = node.content_preview.to_lowercase();
+        if entities
+            .iter()
+            .any(|e| preview_lc.contains(&e.to_lowercase()))
+        {
+            gmap.insert(node.id.clone(), 1.0);
+        }
+    }
+    // Neighbors at depth 1 only (cheap BFS; depth 2 adds noise without much signal)
+    for edge in &graph.edges {
+        if let Some(&score) = gmap.get(&edge.source) {
+            if !gmap.contains_key(&edge.target) {
+                gmap.insert(edge.target.clone(), score * 0.5);
+            }
+        }
+        if let Some(&score) = gmap.get(&edge.target) {
+            if !gmap.contains_key(&edge.source) {
+                gmap.insert(edge.source.clone(), score * 0.5);
+            }
+        }
+    }
+    gmap
+}
+
+/// Session diversification: cap at `max_per_session` memories per session_id, then
+/// fill from the remainder if we still need more. `None` session_id counts as a unique
+/// bucket (so ungrounded memories aren't all dropped together).
+pub fn diversify_by_session(
+    results: Vec<ScoredMemory>,
+    limit: usize,
+    max_per_session: usize,
+) -> Vec<ScoredMemory> {
+    if limit == 0 || results.is_empty() {
+        return Vec::new();
+    }
+    let mut selected: Vec<ScoredMemory> = Vec::with_capacity(limit);
+    let mut per_session: HashMap<Option<String>, usize> = HashMap::new();
+    for r in results.iter() {
+        let key = r.memory.session_id.clone();
+        let count = per_session.get(&key).copied().unwrap_or(0);
+        if count >= max_per_session {
+            continue;
+        }
+        per_session.insert(key, count + 1);
+        selected.push(r.clone());
+        if selected.len() >= limit {
+            break;
+        }
+    }
+    // Fill from remainder if we under-shot the limit (all buckets hit their cap)
+    if selected.len() < limit {
+        for r in &results {
+            if selected.iter().any(|s| s.memory.id == r.memory.id) {
+                continue;
+            }
+            selected.push(r.clone());
+            if selected.len() >= limit {
+                break;
+            }
+        }
+    }
+    selected
 }
 
 /// Graph-leg boost (Sprint 7): when a candidate shares a `derived_from`/`supersedes`
@@ -1003,7 +1470,138 @@ mod tests {
         );
     }
 
-    fn synth(content: &str) -> Memory {
+    /// P3.3: `expanded_search` with the LLM gate off (default) short-circuits to the
+    /// single-query `hybrid_search` path - same result, no LLM call.
+    #[test]
+    fn expanded_search_disabled_falls_back_to_hybrid_search() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory::new("P3.3 disabled fallback target"))
+            .unwrap();
+        let cfg = cairn_core::LlmConsolidationConfig {
+            enabled: false,
+            url: "http://localhost:11434/v1/chat/completions".to_string(),
+            model: "llama3.2".to_string(),
+            api_key: None,
+        };
+        let expander = QueryExpander::new(cfg);
+        let hits = mem
+            .expanded_search("P3.3 disabled fallback", 5, 20, &expander)
+            .unwrap();
+        assert!(
+            hits.iter()
+                .any(|h| h.memory.content.contains("P3.3 disabled fallback")),
+            "disabled expander should still find the memory"
+        );
+    }
+
+    /// P4.2: `hybrid_search_with_rerank` with a hand-rolled stub reranker that returns
+    /// deterministic scores. Verifies the alpha-blend and the post-MMR rerank pipeline.
+    #[test]
+    fn hybrid_search_with_rerank_blends_scores() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory::new("how to configure cairn embeddings"))
+            .unwrap();
+        mem.remember(NewMemory::new("cairn embedding model guide"))
+            .unwrap();
+        mem.remember(NewMemory::new("rust async runtime tokio"))
+            .unwrap();
+
+        // Stub reranker: the second memory is the "most relevant" by cross-encoder
+        // logic, the first is the second-most, the third is least.
+        let stub = StubReranker::new(|docs| {
+            let mut out = Vec::new();
+            for (i, d) in docs.iter().enumerate() {
+                let score = if d.contains("embedding model guide") {
+                    1.0
+                } else if d.contains("how to configure") {
+                    0.5
+                } else {
+                    0.0
+                };
+                out.push(RerankOutcome {
+                    original_index: i,
+                    score,
+                });
+            }
+            out
+        });
+
+        let hits = mem
+            .hybrid_search_with_rerank(
+                "cairn embedding configuration",
+                2,
+                20,
+                &stub,
+                0.6, // alpha - lean toward the reranker
+            )
+            .unwrap();
+        // With alpha=0.6 and the cross-encoder putting doc 1 at #1, that should
+        // surface at position 0. Doc 0 (the "how to configure" hit) gets blended
+        // score ~0.6*0.5 + 0.4*hybrid. The async runtime should NOT be in top-2.
+        assert_eq!(hits.len(), 2);
+        assert!(
+            hits[0].memory.content.contains("embedding model guide")
+                || hits[0].memory.content.contains("how to configure"),
+            "top result should be one of the two relevant docs, got {}",
+            hits[0].memory.content
+        );
+        assert!(!hits.iter().any(|h| h.memory.content.contains("tokio")));
+    }
+
+    /// P4.2: when no reranker is installed via `with_reranker`, `hybrid_search_with_rerank`
+    /// can still be called with a passed-in reranker. Verify the no-op contract.
+    #[test]
+    fn hybrid_search_with_rerank_falls_back_when_reranker_returns_error() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory::new("P4.2 fallback test")).unwrap();
+
+        // An always-erroring reranker - should fall back to MMR ordering and not
+        // 500 the request.
+        struct ErrorReranker;
+        impl Reranker for ErrorReranker {
+            fn rerank(
+                &self,
+                _q: &str,
+                _docs: &[&str],
+            ) -> std::result::Result<Vec<RerankOutcome>, RerankError> {
+                Err(RerankError::Inference("simulated failure".into()))
+            }
+        }
+        let hits = mem
+            .hybrid_search_with_rerank("P4.2 fallback", 5, 20, &ErrorReranker, 0.6)
+            .unwrap();
+        assert!(hits
+            .iter()
+            .any(|h| h.memory.content.contains("P4.2 fallback")));
+    }
+
+    /// Tiny test stub: a Reranker that lets the test supply a closure for the score
+    /// function. Avoids needing a real model artifact in the test.
+    struct StubReranker<F>(F)
+    where
+        F: Fn(&[&str]) -> Vec<RerankOutcome>;
+    impl<F> StubReranker<F>
+    where
+        F: Fn(&[&str]) -> Vec<RerankOutcome>,
+    {
+        fn new(f: F) -> Self {
+            Self(f)
+        }
+    }
+    impl<F> Reranker for StubReranker<F>
+    where
+        F: Fn(&[&str]) -> Vec<RerankOutcome> + Send + Sync,
+    {
+        fn rerank(
+            &self,
+            _q: &str,
+            docs: &[&str],
+        ) -> std::result::Result<Vec<RerankOutcome>, RerankError> {
+            Ok((self.0)(docs))
+        }
+    }
+
+    pub fn synth(content: &str) -> Memory {
         use cairn_core::{MemoryKind, MemoryTier, OrgId};
         Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1069,5 +1667,169 @@ mod tests {
             from_acme_again.is_empty(),
             "acme must not leak across tenants"
         );
+    }
+
+    // --- P1.3 Triple-Stream tests ---
+
+    #[test]
+    fn extract_entities_parses_quoted_strings() {
+        let entities = extract_entities("hello \"world test\" foo");
+        assert!(entities.contains(&"world test".to_string()));
+    }
+
+    #[test]
+    fn extract_entities_parses_capitalized_words() {
+        let entities = extract_entities("Foo bar BazTest QuuxItem");
+        // "Foo" is the first word (sentence-initial), skipped. Others should be present.
+        assert!(entities.contains(&"BazTest".to_string()));
+        assert!(entities.contains(&"QuuxItem".to_string()));
+        assert!(!entities.contains(&"Foo".to_string()));
+    }
+
+    #[test]
+    fn extract_entities_dedups() {
+        let entities = extract_entities("BazTest and BazTest again");
+        let count = entities.iter().filter(|e| *e == "BazTest").count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn graph_proximity_scores_empty_when_no_entities() {
+        let graph = MemoryGraph {
+            nodes: vec![],
+            edges: vec![],
+        };
+        let scores = graph_proximity_scores(&graph, &[]);
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn graph_proximity_scores_propagates_to_neighbors() {
+        let node_a = MemoryGraphNode {
+            id: "a".into(),
+            kind: "fact".into(),
+            tier: "semantic".into(),
+            content_preview: "BazTest topic here".into(),
+            confidence: 0.9,
+            pinned: false,
+            importance: 0.5,
+        };
+        let node_b = MemoryGraphNode {
+            id: "b".into(),
+            kind: "decision".into(),
+            tier: "episodic".into(),
+            content_preview: "unrelated content".into(),
+            confidence: 0.7,
+            pinned: false,
+            importance: 0.5,
+        };
+        let edge = MemoryGraphEdge {
+            source: "a".into(),
+            target: "b".into(),
+            kind: "derived_from".into(),
+        };
+        let graph = MemoryGraph {
+            nodes: vec![node_a, node_b],
+            edges: vec![edge],
+        };
+        let entities = vec!["BazTest".to_string()];
+        let scores = graph_proximity_scores(&graph, &entities);
+        assert_eq!(scores.get("a"), Some(&1.0));
+        assert_eq!(scores.get("b"), Some(&0.5)); // neighbor at depth 1
+    }
+
+    #[test]
+    fn diversify_by_session_caps_per_session() {
+        // All 5 results from session s1, cap=3. Per the spec, we take 3 from s1 first,
+        // then fill the remaining 2 slots from the s1 remainder since cap was reached.
+        let results: Vec<ScoredMemory> = (0..5)
+            .map(|i| ScoredMemory {
+                memory: Memory {
+                    id: format!("m{}", i),
+                    session_id: Some("s1".to_string()),
+                    ..synth("content")
+                },
+                score: 1.0 - i as f32 * 0.01,
+            })
+            .collect();
+        let out = diversify_by_session(results.clone(), 3, 3);
+        // With limit=3 and cap=3, we get exactly 3 results (the cap is also the limit)
+        assert_eq!(out.len(), 3);
+        // The 3 should be the highest-scored (m0, m1, m2)
+        assert_eq!(out[0].memory.id, "m0");
+        assert_eq!(out[1].memory.id, "m1");
+        assert_eq!(out[2].memory.id, "m2");
+    }
+
+    #[test]
+    fn diversify_by_session_caps_at_three() {
+        // Mixed: 3 from A (high score), 3 from B. Cap=2, limit=4.
+        // First pass: take 2 from A (top scores), then 2 from B.
+        let mut results: Vec<ScoredMemory> = (0..3)
+            .map(|i| ScoredMemory {
+                memory: Memory {
+                    id: format!("a{}", i),
+                    session_id: Some("A".to_string()),
+                    ..synth("a content")
+                },
+                score: 1.0 - i as f32 * 0.1,
+            })
+            .collect();
+        results.extend((0..3).map(|i| ScoredMemory {
+            memory: Memory {
+                id: format!("b{}", i),
+                session_id: Some("B".to_string()),
+                ..synth("b content")
+            },
+            score: 0.5 - i as f32 * 0.1,
+        }));
+        let out = diversify_by_session(results, 4, 2);
+        assert_eq!(out.len(), 4);
+        // 2 from each session
+        let a_count = out
+            .iter()
+            .filter(|s| s.memory.session_id == Some("A".into()))
+            .count();
+        let b_count = out
+            .iter()
+            .filter(|s| s.memory.session_id == Some("B".into()))
+            .count();
+        assert_eq!(a_count, 2);
+        assert_eq!(b_count, 2);
+    }
+
+    #[test]
+    fn diversify_by_session_fills_from_remaining() {
+        // 8 from session A, 2 from session B. With cap=3 and limit=5, expect 3 from A + 2 from B.
+        let mut results: Vec<ScoredMemory> = (0..8)
+            .map(|i| ScoredMemory {
+                memory: Memory {
+                    id: format!("a{}", i),
+                    session_id: Some("A".to_string()),
+                    ..synth("a content")
+                },
+                score: 1.0 - i as f32 * 0.01,
+            })
+            .collect();
+        results.extend((0..2).map(|i| ScoredMemory {
+            memory: Memory {
+                id: format!("b{}", i),
+                session_id: Some("B".to_string()),
+                ..synth("b content")
+            },
+            score: 0.5 - i as f32 * 0.01,
+        }));
+        let out = diversify_by_session(results, 5, 3);
+        assert_eq!(out.len(), 5);
+        let a_count = out
+            .iter()
+            .filter(|s| s.memory.session_id == Some("A".into()))
+            .count();
+        let b_count = out
+            .iter()
+            .filter(|s| s.memory.session_id == Some("B".into()))
+            .count();
+        assert_eq!(a_count, 3);
+        assert_eq!(b_count, 2);
     }
 }

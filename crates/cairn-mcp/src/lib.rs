@@ -41,8 +41,25 @@ pub struct McpServer {
 }
 
 impl McpServer {
+    /// P3.3: is the LLM consolidation flag on? Cached to avoid repeated config reads.
+    fn llm_consolidation_enabled(&self) -> bool {
+        self.config.llm_consolidation.enabled
+    }
+
+    /// P3.3: clone of the LLM consolidation config (used to construct `QueryExpander`).
+    fn llm_consolidation_config(&self) -> cairn_core::LlmConsolidationConfig {
+        self.config.llm_consolidation.clone()
+    }
+
     pub fn new(cfg: &Config) -> Result<Self> {
         let store = Arc::new(Store::open(cfg)?);
+        Self::with_store(cfg, store)
+    }
+
+    /// Construct an `McpServer` from a caller-supplied `Arc<Store>`. Used by the hermetic
+    /// test bucket to wire a fully-in-memory store; production callers should keep using
+    /// `new`.
+    pub fn with_store(cfg: &Config, store: Arc<Store>) -> Result<Self> {
         let mem = Arc::new(MemoryEngine::new(store.clone()));
         Ok(Self {
             ctx: Arc::new(ContextEngine::new_with_root(
@@ -440,10 +457,18 @@ impl McpServer {
             "search" => {
                 let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
                 let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize;
-                let hits = self
-                    .mem
-                    .hybrid_search(query, limit, 20)
-                    .map_err(|e| e.to_string())?;
+                let expand = args.get("expand").and_then(Value::as_bool).unwrap_or(false);
+                let hits = if expand && self.llm_consolidation_enabled() {
+                    let expander =
+                        cairn_memory::QueryExpander::new(self.llm_consolidation_config().clone());
+                    self.mem
+                        .expanded_search(query, limit, 20, &expander)
+                        .map_err(|e| e.to_string())?
+                } else {
+                    self.mem
+                        .hybrid_search(query, limit, 20)
+                        .map_err(|e| e.to_string())?
+                };
                 serde_json::to_string_pretty(&hits).map_err(|e| e.to_string())
             }
             "metrics" => {
@@ -715,12 +740,13 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "search",
-            "description": "Hybrid search (BM25 + HNSW + memory provenance graph, fused with RRF, reranked with MMR for diversity).",
+            "description": "Hybrid search (BM25 + HNSW + memory provenance graph, fused with RRF, reranked with MMR for diversity). With expand=true the engine first asks an LLM for 3-5 reformulations and merges results by max score (gated by CAIRN_LLM_CONSOLIDATION).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "query": { "type": "string" },
-                    "limit": { "type": "integer", "minimum": 1 }
+                    "limit": { "type": "integer", "minimum": 1 },
+                    "expand": { "type": "boolean", "description": "Enable LLM-driven query expansion (P3.3)." }
                 },
                 "required": ["query"]
             }

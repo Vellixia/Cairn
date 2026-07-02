@@ -52,10 +52,10 @@ fn hook_suffix(command: &str) -> String {
         None => return command.to_string(),
     };
     let first_lower = first.to_ascii_lowercase();
-    let basename = std::path::Path::new(&first_lower)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| first_lower.clone());
+    let basename = first_lower
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(&first_lower);
     let is_cairn_exe = basename == "cairn" || basename == "cairn.exe";
     if !is_cairn_exe {
         return command.to_string();
@@ -92,10 +92,7 @@ pub fn is_any_cairn_hook(command: &str) -> bool {
     // one, it returns the full command unchanged -- in which case this returns false.
     let original = command.trim_start().to_ascii_lowercase();
     let first = original.split_whitespace().next().unwrap_or("");
-    let basename = std::path::Path::new(first)
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let basename = first.rsplit(['\\', '/']).next().unwrap_or(first);
     basename == "cairn" || basename == "cairn.exe"
 }
 
@@ -126,7 +123,8 @@ fn dedup_cairn_hooks(arr: &mut Vec<Value>, _event: &str) -> usize {
 }
 
 /// Verify that a device token is valid before writing it to agent config files.
-/// Makes a `GET /api/auth/me` request and returns Ok(()) on success.
+/// Makes an authenticated `GET /api/memory/wakeup?limit=1` request and returns Ok(())
+/// when the server answers 200.
 fn validate_token(server: &str, token: &str) -> Result<()> {
     let url = format!("{}/api/memory/wakeup?limit=1", server.trim_end_matches('/'));
     match ureq::get(&url)
@@ -365,69 +363,45 @@ fn install_opencode(server: Option<&str>, token: Option<&str>) -> Result<()> {
     };
     mcp_obj.insert("cairn".into(), entry);
 
-    // Write the plugin file first so we can compute its relative path, then register
-    // the path in `opencode.json`'s `plugin` array. Without the registry entry the
-    // plugin file is dead code that OpenCode never loads.
+    // Write the plugin file. OpenCode auto-loads every .js/.ts file in its `plugins/`
+    // directory at startup, so there is nothing to register in opencode.json. The
+    // `plugin` array is for npm packages; listing a local path there makes OpenCode
+    // load the plugin twice (every lifecycle hook would fire twice). Strip any such
+    // entry an older cairn version may have written so upgrades self-heal.
     let plugin_path = write_opencode_plugin()?;
-    let plugin_rel = relative_plugin_path(&plugin_path.to_string_lossy(), &path);
-    register_opencode_plugin(&path, &mut cfg, &plugin_rel)?;
+    strip_cairn_plugin_entries(&mut cfg);
 
     write_json(&path, &Value::Object(cfg))?;
     println!("✓ Configured OpenCode:");
     println!("  - {}  (MCP server: {})", path.display(), cli_exe);
-    println!("  - {}  (plugin: session + tool hooks)", plugin_rel);
+    println!(
+        "  - {}  (plugin: session + tool hooks, auto-loaded)",
+        plugin_path.display()
+    );
 
     let _ = (server, token);
     Ok(())
 }
 
-/// Compute the plugin path as written into `opencode.json`'s `plugin` array.
+/// Remove any cairn plugin entries from opencode.json's `plugin` array.
 ///
-/// OpenCode's plugin loader resolves entries relative to the location of `opencode.json`,
-/// so we strip the config's parent directory from the absolute plugin path and forward-
-/// slash the separator (Windows paths use `\` which OpenCode does not parse).
-fn relative_plugin_path(plugin_abs: &str, config_path: &Path) -> String {
-    let config_dir = config_path
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    let plugin_path = PathBuf::from(plugin_abs);
-    match plugin_path.strip_prefix(&config_dir) {
-        Ok(rel) => rel
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy().into_owned())
-            .collect::<Vec<_>>()
-            .join("/"),
-        Err(_) => plugin_abs.replace('\\', "/"),
+/// OpenCode auto-loads every local plugin file in `~/.config/opencode/plugins/` at
+/// startup, so the cairn plugin must NOT be listed here — that array is for npm
+/// packages, and a local path in it makes OpenCode load the plugin a second time
+/// (firing every lifecycle hook twice). Older cairn versions wrote such an entry;
+/// stripping it on every `setup` makes upgrades self-heal. Only touches the array
+/// when it already exists (never creates an empty `plugin` key).
+fn strip_cairn_plugin_entries(cfg: &mut Map<String, Value>) {
+    if let Some(plugins) = cfg.get_mut("plugin").and_then(Value::as_array_mut) {
+        plugins.retain(|p| {
+            p.as_str()
+                .map(|s| {
+                    let normalized = s.replace('\\', "/").to_ascii_lowercase();
+                    !normalized.ends_with("/plugins/cairn.js") && normalized != "plugins/cairn.js"
+                })
+                .unwrap_or(true)
+        });
     }
-}
-
-/// Add the cairn plugin entry to opencode.json's `plugin` array, idempotently.
-/// Strips prior cairn plugin entries (case-insensitive) so re-runs do not stack
-/// duplicates alongside any user-installed plugins.
-fn register_opencode_plugin(
-    config_path: &Path,
-    cfg: &mut Map<String, Value>,
-    plugin_rel: &str,
-) -> Result<()> {
-    let plugins = cfg
-        .entry("plugin")
-        .or_insert_with(|| json!([]))
-        .as_array_mut()
-        .with_context(|| format!("{}: 'plugin' is not an array", config_path.display()))?;
-    let target = plugin_rel.replace('\\', "/");
-    plugins.retain(|p| {
-        p.as_str()
-            .map(|s| {
-                let normalized = s.replace('\\', "/").to_ascii_lowercase();
-                normalized != target.to_ascii_lowercase()
-                    && !normalized.ends_with("/plugins/cairn.js")
-                    && normalized != "plugins/cairn.js"
-            })
-            .unwrap_or(true)
-    });
-    plugins.push(json!(target));
-    Ok(())
 }
 
 /// Write a minimal OpenCode plugin that bridges lifecycle events to `cairn hook`.
@@ -541,11 +515,8 @@ fn install_codex(home: Option<&Path>, server: Option<&str>, token: Option<&str>)
         String::new()
     };
 
-    // Extract existing env vars so re-running setup without --token preserves them.
-    let existing_env = parse_codex_cairn_env(&original);
-
-    let new_block = render_codex_block(server, token, existing_env);
-    let merged = merge_codex_block(&original, &new_block);
+    let merged = upsert_codex_cairn(&original, server, token)
+        .with_context(|| format!("editing {}", path.display()))?;
 
     fs::write(&path, merged).with_context(|| format!("writing {}", path.display()))?;
     println!("\u{2713} Configured Codex CLI:");
@@ -625,162 +596,61 @@ fn write_codex_hooks(home: &Path, server: Option<&str>, token: Option<&str>) -> 
     Ok(())
 }
 
-/// Render just our `[mcp_servers.cairn]` block, merging in existing env vars
-/// from a previous setup run so re-running without --token does not strip them.
-fn render_codex_block(
-    server: Option<&str>,
-    token: Option<&str>,
-    existing_env: Vec<(String, String)>,
-) -> String {
-    let mut env_lines = String::new();
-    // Preserve existing vars not being replaced.
-    for (k, v) in &existing_env {
-        match k.as_str() {
-            "CAIRN_SERVER" if server.is_some() => {} // will be overridden below
-            "CAIRN_TOKEN" if token.is_some() => {}   // will be overridden below
-            _ => env_lines.push_str(&format!("{k} = \"{}\"\n", escape_toml(v))),
-        }
-    }
-    if let Some(s) = server {
-        env_lines.push_str(&format!("CAIRN_SERVER = \"{}\"\n", escape_toml(s)));
-    }
-    if let Some(t) = token {
-        env_lines.push_str(&format!("CAIRN_TOKEN = \"{}\"\n", escape_toml(t)));
-    }
+/// Upsert the `[mcp_servers.cairn]` table into a Codex `config.toml`, preserving every other
+/// table, comment, and whitespace via `toml_edit`. Existing vars in `[mcp_servers.cairn.env]`
+/// are kept unless `server`/`token` override them. Idempotent: running twice on the same
+/// inputs yields byte-identical output. Replaces the previous hand-rolled string surgery,
+/// which mishandled inline comments, `=`/`#` inside quoted values, and multi-line strings.
+fn upsert_codex_cairn(original: &str, server: Option<&str>, token: Option<&str>) -> Result<String> {
+    use toml_edit::{value, Array, DocumentMut, Item, Table};
 
-    let args_line = r#"args = ["mcp"]"#;
-    let env_block = if env_lines.is_empty() {
-        String::new()
-    } else {
-        format!("[mcp_servers.cairn.env]\n{env_lines}")
-    };
+    let mut doc = original
+        .parse::<DocumentMut>()
+        .context("Codex config.toml is not valid TOML; refusing to overwrite it")?;
 
-    format!(
-        "[mcp_servers.cairn]\n\
-         command = \"{}\"\n\
-         {args_line}\n\
-         {env_block}",
-        escape_toml(&cairn_exe())
-    )
-}
-
-/// Parse the `[mcp_servers.cairn.env]` section from a Codex TOML config.
-fn parse_codex_cairn_env(toml: &str) -> Vec<(String, String)> {
-    let mut in_cairn_env = false;
-    let mut vars = Vec::new();
-    for line in toml.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[mcp_servers.cairn.env]" {
-            in_cairn_env = true;
-            continue;
-        }
-        if trimmed.starts_with('[') {
-            in_cairn_env = false;
-            continue;
-        }
-        if in_cairn_env {
-            if let Some((k, v)) = trimmed.split_once('=') {
-                let key = k.trim().to_string();
-                let val = v.trim().trim_matches('"').to_string();
-                vars.push((key, val));
-            }
-        }
-    }
-    vars
-}
-
-/// Naive merge: if `[mcp_servers]` exists in `original`, replace the
-/// `[mcp_servers.cairn]` sub-block (or append ours if absent). If a bare
-/// `[mcp_servers.cairn]` sub-block exists at top level, replace it. If no
-/// `[mcp_servers]` table or cairn sub-block exists, append our block.
-/// Other tables and content are preserved verbatim.
-fn merge_codex_block(original: &str, new_block: &str) -> String {
-    let mut out = String::with_capacity(original.len() + new_block.len() + 2);
-    let mut in_mcp_servers = false;
-    let mut replaced_cairn = false;
-
-    for line in original.split_inclusive('\n') {
-        let trimmed = line.trim_start();
-        let is_table_header = trimmed.starts_with('[') && !trimmed.starts_with("[[");
-        let is_cairn_header = trimmed.starts_with("[mcp_servers.cairn]");
-        let is_root_header = trimmed.starts_with("[mcp_servers]");
-
-        if in_mcp_servers && is_table_header && !is_cairn_header {
-            // Leaving the [mcp_servers] table for a new top-level table.
-            in_mcp_servers = false;
-            if !replaced_cairn {
-                out.push('\n');
-                out.push_str(new_block);
-                if !out.ends_with('\n') {
-                    out.push('\n');
-                }
-            }
-        }
-
-        if is_root_header {
-            in_mcp_servers = true;
-            out.push_str(line);
-            continue;
-        }
-
-        // Skip either a cairn root sub-block (replace it) or any cairn-owned
-        // sub-table after replacement (so the cairn.env block goes too).
-        let is_cairn_subtable = trimmed.starts_with("[mcp_servers.cairn.");
-        let is_cairn_owned = is_cairn_header || is_cairn_subtable;
-        let should_replace = is_cairn_header && !replaced_cairn;
-        let should_skip_cairn_subtable = replaced_cairn && is_cairn_subtable;
-
-        if should_replace {
-            replaced_cairn = true;
-            out.push_str(new_block);
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out.push_str("<<CAIRN_SKIP>>");
-            continue;
-        }
-        if should_skip_cairn_subtable {
-            // The cairn.env (or any future cairn.X) sub-table is being
-            // absorbed by the replacement; set a sentinel so the body
-            // lines under it also get skipped.
-            out.push_str("<<CAIRN_SKIP>>");
-            continue;
-        }
-        if is_cairn_owned {
-            // Orphan cairn block already handled above; reach here only
-            // if we somehow see a cairn header before replacement triggers,
-            // which shouldn't happen with should_replace above. Be safe.
-            continue;
-        }
-
-        if out.ends_with("<<CAIRN_SKIP>>") && !is_table_header {
-            continue;
-        }
-
-        out.push_str(line);
+    // Create `[mcp_servers]` only if absent; when we create it, mark it implicit so we emit
+    // `[mcp_servers.cairn]` without a bare empty `[mcp_servers]` header. If it already exists
+    // (possibly with other servers or direct keys), leave its formatting untouched.
+    let created_servers = !doc.contains_key("mcp_servers");
+    let servers = doc
+        .entry("mcp_servers")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .context("config.toml: `mcp_servers` is not a table")?;
+    if created_servers {
+        servers.set_implicit(true);
     }
 
-    if !replaced_cairn {
-        // No existing cairn sub-block anywhere - append at end.
-        if !out.ends_with('\n') && !out.is_empty() {
-            out.push('\n');
+    let cairn = servers
+        .entry("cairn")
+        .or_insert(Item::Table(Table::new()))
+        .as_table_mut()
+        .context("config.toml: `mcp_servers.cairn` is not a table")?;
+
+    cairn["command"] = value(cairn_exe());
+    let mut args = Array::new();
+    args.push("mcp");
+    cairn["args"] = value(args);
+
+    // Materialize the env sub-table only when there's something to store — either an override
+    // to write or a pre-existing env to preserve. Setting only the given keys keeps any other
+    // env vars the user added.
+    let has_existing_env = cairn.get("env").and_then(Item::as_table).is_some();
+    if server.is_some() || token.is_some() || has_existing_env {
+        let env = cairn
+            .entry("env")
+            .or_insert(Item::Table(Table::new()))
+            .as_table_mut()
+            .context("config.toml: `mcp_servers.cairn.env` is not a table")?;
+        if let Some(s) = server {
+            env["CAIRN_SERVER"] = value(s);
         }
-        out.push('\n');
-        out.push_str(new_block);
-        if !out.ends_with('\n') {
-            out.push('\n');
+        if let Some(t) = token {
+            env["CAIRN_TOKEN"] = value(t);
         }
     }
 
-    out.replace("<<CAIRN_SKIP>>", "")
-}
-
-fn escape_toml(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
-        .replace('\t', "\\t")
+    Ok(doc.to_string())
 }
 
 fn cairn_server(
@@ -863,7 +733,9 @@ fn install_claude_code(
             hooks,
             "PostToolUse",
             &format!("{exe} hook PostToolUse"),
-            Some("Edit|Write|MultiEdit|NotebookEdit|StrReplace"),
+            // Claude Code's edit-family tool names. `StrReplace` was never a real tool, so it
+            // matched nothing; the file-mutating tools are Edit, Write, MultiEdit, NotebookEdit.
+            Some("Edit|Write|MultiEdit|NotebookEdit"),
         );
         add_hook(hooks, "SessionEnd", &format!("{exe} hook SessionEnd"), None);
     }
@@ -1003,56 +875,107 @@ mod tests {
     }
 
     #[test]
-    fn codex_block_renders_minimal_entry() {
+    fn codex_upsert_writes_cairn_table_and_env() {
         let exe = super::cairn_exe();
-        let exe_escaped = escape_toml(&exe);
-        let block = render_codex_block(None, None, vec![]);
-        assert!(block.contains("[mcp_servers.cairn]"));
-        assert!(block.contains(&format!("command = \"{exe_escaped}\"")));
-        assert!(block.contains("args = [\"mcp\"]"));
-        assert!(!block.contains("[mcp_servers.cairn.env]"));
-    }
-
-    #[test]
-    fn codex_block_renders_env_when_server_or_token_set() {
-        let block = render_codex_block(Some("http://example.com:7777"), Some("tok-123"), vec![]);
-        assert!(block.contains("[mcp_servers.cairn.env]"));
-        assert!(block.contains("CAIRN_SERVER = \"http://example.com:7777\""));
-        assert!(block.contains("CAIRN_TOKEN = \"tok-123\""));
-    }
-
-    #[test]
-    fn codex_merge_appends_when_no_existing_table() {
-        let exe = super::cairn_exe();
-        let exe_escaped = escape_toml(&exe);
-        let merged = merge_codex_block(
-            "# existing config\nmodel = \"opus\"\n",
-            &format!("[mcp_servers.cairn]\ncommand = \"{exe_escaped}\"\nargs = [\"mcp\"]\n"),
+        let out = upsert_codex_cairn("", Some("http://example.com:7777"), Some("tok-123")).unwrap();
+        let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["command"].as_str(),
+            Some(exe.as_str())
         );
-        assert!(merged.contains("model = \"opus\""));
-        assert!(merged.contains("[mcp_servers.cairn]"));
-        assert!(merged.contains(&format!("command = \"{exe_escaped}\"")));
+        assert_eq!(doc["mcp_servers"]["cairn"]["args"][0].as_str(), Some("mcp"));
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["env"]["CAIRN_SERVER"].as_str(),
+            Some("http://example.com:7777")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["env"]["CAIRN_TOKEN"].as_str(),
+            Some("tok-123")
+        );
     }
 
     #[test]
-    fn codex_merge_replaces_existing_cairn_block() {
-        let exe = super::cairn_exe();
-        let exe_escaped = escape_toml(&exe);
-        let original = "# head\n[mcp_servers]\n[mcp_servers.cairn]\ncommand = \"stale\"\nargs = [\"old\"]\n[other_table]\nx = 1\n";
-        let merged = merge_codex_block(
-            original,
-            &format!("[mcp_servers.cairn]\ncommand = \"{exe_escaped}\"\nargs = [\"mcp\"]\n"),
+    fn codex_upsert_omits_env_when_no_server_or_token() {
+        let out = upsert_codex_cairn("", None, None).unwrap();
+        let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
+        assert!(
+            doc["mcp_servers"]["cairn"].get("env").is_none(),
+            "no env sub-table when there is nothing to put in it"
         );
-        assert!(!merged.contains("command = \"stale\""));
-        assert!(merged.contains(&format!("command = \"{exe_escaped}\"")));
-        assert!(merged.contains("[other_table]"));
-        assert!(merged.contains("x = 1"));
+    }
+
+    #[test]
+    fn codex_upsert_replaces_stale_cairn_but_keeps_other_servers() {
+        let exe = super::cairn_exe();
+        let original = "# head\n[mcp_servers.cairn]\ncommand = \"stale\"\nargs = [\"old\"]\n\n[mcp_servers.other]\ncommand = \"foo\"\n";
+        let out = upsert_codex_cairn(original, None, None).unwrap();
+        let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["command"].as_str(),
+            Some(exe.as_str())
+        );
+        assert_ne!(
+            doc["mcp_servers"]["cairn"]["command"].as_str(),
+            Some("stale")
+        );
+        // A foreign MCP server is untouched.
+        assert_eq!(doc["mcp_servers"]["other"]["command"].as_str(), Some("foo"));
+    }
+
+    #[test]
+    fn codex_upsert_preserves_comments_other_tables_and_quoted_specials() {
+        // The old hand-rolled parser mangled inline comments and `=`/`#` inside quoted values.
+        let original = "\
+# user preferences — keep me!
+model = \"opus\"  # inline comment
+
+[tui]
+theme = \"dark\"
+
+[mcp_servers.other]
+command = \"foo\"
+
+[mcp_servers.other.env]
+WEIRD = \"a=b#c\"
+";
+        let out = upsert_codex_cairn(original, Some("http://h:7777"), None).unwrap();
+        assert!(out.contains("# user preferences — keep me!"));
+        assert!(out.contains("model = \"opus\"  # inline comment"));
+        assert!(out.contains("[tui]"));
+        let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
+        // The tricky quoted value survives byte-for-byte.
+        assert_eq!(
+            doc["mcp_servers"]["other"]["env"]["WEIRD"].as_str(),
+            Some("a=b#c")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["env"]["CAIRN_SERVER"].as_str(),
+            Some("http://h:7777")
+        );
+    }
+
+    #[test]
+    fn codex_upsert_is_idempotent() {
+        let first = upsert_codex_cairn("", Some("http://h:7777"), Some("t-1")).unwrap();
+        let second = upsert_codex_cairn(&first, Some("http://h:7777"), Some("t-1")).unwrap();
+        assert_eq!(first, second, "re-running upsert must be byte-identical");
+    }
+
+    #[test]
+    fn codex_upsert_preserves_existing_token_when_omitted() {
+        // First run sets the token; a later run without --token must not drop it.
+        let first = upsert_codex_cairn("", Some("http://h:7777"), Some("keep-me")).unwrap();
+        let second = upsert_codex_cairn(&first, Some("http://h:7777"), None).unwrap();
+        let doc = second.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["env"]["CAIRN_TOKEN"].as_str(),
+            Some("keep-me")
+        );
     }
 
     #[test]
     fn codex_setup_writes_to_xdg_path_and_preserves_existing_keys() {
         let exe = super::cairn_exe();
-        let exe_escaped = escape_toml(&exe);
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
         fs::write(&cfg, "# user prefs\ntui = { theme = \"dark\" }\n").unwrap();
@@ -1060,11 +983,21 @@ mod tests {
         install_codex_at(&cfg, Some("http://example.com:7777"), Some("tok-xyz")).unwrap();
 
         let out = read_text(&cfg);
+        assert!(out.contains("# user prefs"));
         assert!(out.contains("tui = { theme = \"dark\" }"));
-        assert!(out.contains("[mcp_servers.cairn]"));
-        assert!(out.contains(&format!("command = \"{exe_escaped}\"")));
-        assert!(out.contains("CAIRN_SERVER = \"http://example.com:7777\""));
-        assert!(out.contains("CAIRN_TOKEN = \"tok-xyz\""));
+        let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["command"].as_str(),
+            Some(exe.as_str())
+        );
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["env"]["CAIRN_SERVER"].as_str(),
+            Some("http://example.com:7777")
+        );
+        assert_eq!(
+            doc["mcp_servers"]["cairn"]["env"]["CAIRN_TOKEN"].as_str(),
+            Some("tok-xyz")
+        );
     }
 
     #[test]
@@ -1092,8 +1025,7 @@ mod tests {
         } else {
             String::new()
         };
-        let new_block = render_codex_block(server, token, vec![]);
-        let merged = merge_codex_block(&original, &new_block);
+        let merged = upsert_codex_cairn(&original, server, token)?;
         fs::write(path, merged)?;
         Ok(())
     }
@@ -1164,6 +1096,8 @@ mod tests {
             })
         };
         mcp_obj.insert("cairn".into(), entry);
+        // Mirror production install_opencode: strip any stale cairn plugin-array entry.
+        strip_cairn_plugin_entries(&mut cfg);
         write_json(path, &Value::Object(cfg))
     }
 
@@ -1310,25 +1244,11 @@ mod tests {
     }
 
     #[test]
-    fn register_opencode_plugin_idempotent() {
-        let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
-        fs::create_dir_all(cfg.parent().unwrap()).unwrap();
-        let mut root = Map::new();
-        let target = "./plugins/cairn.js";
-
-        register_opencode_plugin(&cfg, &mut root, target).unwrap();
-        register_opencode_plugin(&cfg, &mut root, target).unwrap();
-        register_opencode_plugin(&cfg, &mut root, target).unwrap();
-
-        let plugins = root["plugin"].as_array().unwrap();
-        assert_eq!(plugins.len(), 1, "re-registering must not stack duplicates");
-        assert_eq!(plugins[0], json!(target));
-    }
-
-    #[test]
-    fn register_opencode_plugin_strips_absolute_and_bare_duplicates() {
-        let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
-        fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+    fn strip_cairn_plugin_entries_removes_all_cairn_paths_keeps_foreign() {
+        // A config left double-registered by an older cairn version: the plugin
+        // appears both as an absolute path and a bare relative path, alongside a
+        // user's own plugin. Stripping must remove every cairn entry and keep the
+        // foreign one — OpenCode auto-loads the local file, so none should remain.
         let mut root = Map::new();
         root.insert(
             "plugin".into(),
@@ -1339,10 +1259,9 @@ mod tests {
             ]),
         );
 
-        register_opencode_plugin(&cfg, &mut root, "./plugins/cairn.js").unwrap();
+        strip_cairn_plugin_entries(&mut root);
 
         let plugins = root["plugin"].as_array().unwrap();
-        // Only the canonical relative entry + the user's foreign plugin should remain.
         let cairn_count = plugins
             .iter()
             .filter(|p| {
@@ -1351,20 +1270,48 @@ mod tests {
                     .unwrap_or(false)
             })
             .count();
-        assert_eq!(
-            cairn_count, 1,
-            "absolute + bare cairn plugin entries must coalesce"
-        );
+        assert_eq!(cairn_count, 0, "every cairn plugin entry must be stripped");
         assert!(plugins
             .iter()
             .any(|p| p.as_str() == Some("./plugins/agentmemory-capture.ts")));
     }
 
     #[test]
-    fn relative_plugin_path_strips_config_dir_using_forward_slashes() {
-        let cfg = PathBuf::from("C:\\Users\\foo\\.config\\opencode\\opencode.json");
-        let plugin = "C:\\Users\\foo\\.config\\opencode\\plugins\\cairn.js";
-        let rel = relative_plugin_path(plugin, &cfg);
-        assert_eq!(rel, "plugins/cairn.js");
+    fn strip_cairn_plugin_entries_leaves_missing_key_absent() {
+        // Never create an empty `plugin` key when there wasn't one.
+        let mut root = Map::new();
+        strip_cairn_plugin_entries(&mut root);
+        assert!(!root.contains_key("plugin"));
+    }
+
+    #[test]
+    fn install_opencode_strips_stale_plugin_entry_and_never_adds_one() {
+        let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
+        fs::create_dir_all(cfg.parent().unwrap()).unwrap();
+        // Simulate a config left double-registered by an older cairn version.
+        fs::write(
+            &cfg,
+            r#"{"plugin":["plugins/cairn.js","./plugins/agentmemory-capture.ts"]}"#,
+        )
+        .unwrap();
+
+        install_opencode_with_path(Some("http://example.com:7777"), Some("tok-123"), &cfg).unwrap();
+
+        let v: Value = serde_json::from_str(&read_text(&cfg)).unwrap();
+        // The MCP server is registered...
+        assert_eq!(v["mcp"]["cairn"]["command"][0], super::cairn_exe());
+        // ...the stale cairn plugin entry is gone (OpenCode auto-loads the local file)...
+        let plugins = v["plugin"].as_array().unwrap();
+        assert!(
+            !plugins.iter().any(|p| p
+                .as_str()
+                .map(|s| s.to_ascii_lowercase().contains("cairn.js"))
+                .unwrap_or(false)),
+            "setup must strip the local cairn plugin from the `plugin` array"
+        );
+        // ...and the user's own plugin survives.
+        assert!(plugins
+            .iter()
+            .any(|p| p.as_str() == Some("./plugins/agentmemory-capture.ts")));
     }
 }

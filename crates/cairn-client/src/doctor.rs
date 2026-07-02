@@ -253,38 +253,36 @@ fn check_config_health() -> Check {
         }
     }
 
-    // OpenCode plugin file present but not registered in opencode.json
-    if let Some(h) = home.as_deref() {
-        let plugin_path = h
-            .join(".config")
-            .join("opencode")
-            .join("plugins")
-            .join("cairn.js");
-        if plugin_path.exists() {
-            let cfg = opencode_config_path();
-            let registered = cfg
-                .as_path()
-                .exists()
-                .then(|| std::fs::read_to_string(&cfg).ok())
-                .flatten()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                .and_then(|v| {
-                    v.get("plugin").and_then(|p| p.as_array()).map(|arr| {
-                        arr.iter().any(|p| {
-                            p.as_str().is_some_and(|s| {
-                                let n = s.replace('\\', "/").to_ascii_lowercase();
-                                n.ends_with("/plugins/cairn.js") || n == "plugins/cairn.js"
-                            })
+    // OpenCode auto-loads local plugin files from its `plugins/` directory. The cairn
+    // plugin must therefore NOT appear in opencode.json's `plugin` array (that array is
+    // for npm packages) — a local path there makes OpenCode load the plugin twice, so
+    // every lifecycle hook fires twice. Older cairn versions wrote such an entry; flag
+    // it so `cairn setup opencode` can strip it.
+    {
+        let cfg = opencode_config_path();
+        let double_registered = cfg
+            .as_path()
+            .exists()
+            .then(|| std::fs::read_to_string(&cfg).ok())
+            .flatten()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| {
+                v.get("plugin").and_then(|p| p.as_array()).map(|arr| {
+                    arr.iter().any(|p| {
+                        p.as_str().is_some_and(|s| {
+                            let n = s.replace('\\', "/").to_ascii_lowercase();
+                            n.ends_with("/plugins/cairn.js") || n == "plugins/cairn.js"
                         })
                     })
                 })
-                .unwrap_or(false);
-            if !registered {
-                issues.push(
-                    "opencode plugin on disk but not registered in opencode.json (`cairn setup opencode` to fix)"
-                        .to_string(),
-                );
-            }
+            })
+            .unwrap_or(false);
+        if double_registered {
+            issues.push(
+                "opencode.json lists the cairn plugin in its `plugin` array; it already \
+                 auto-loads from plugins/ and will double-fire (`cairn setup opencode` to fix)"
+                    .to_string(),
+            );
         }
     }
 

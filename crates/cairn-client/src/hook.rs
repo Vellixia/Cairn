@@ -110,20 +110,26 @@ impl RemoteClient {
                 if prompt.trim().is_empty() {
                     return Ok(());
                 }
-                if let Ok(resp) = self
-                    .get("/api/context/assemble")
-                    .query("q", prompt)
-                    .query("budget", "1200")
-                    .call()
-                {
-                    if let Ok(v) = resp.into_json::<Value>() {
-                        if v.get("included")
-                            .and_then(Value::as_array)
-                            .is_some_and(|a| !a.is_empty())
-                        {
-                            if let Some(ctx) = v.get("context").and_then(Value::as_str) {
-                                if !ctx.is_empty() {
-                                    emit(event, ctx);
+                // P1.8: default-off context injection. Opt-in via `CAIRN_INJECT_CONTEXT=true`.
+                // Without this gate, every prompt burns ~1000 tokens on a /api/context/assemble
+                // call - silent burn. Recording the prompt to memory still happens below
+                // regardless, so the system stays useful even when injection is off.
+                if inject_context_enabled() {
+                    if let Ok(resp) = self
+                        .get("/api/context/assemble")
+                        .query("q", prompt)
+                        .query("budget", "1200")
+                        .call()
+                    {
+                        if let Ok(v) = resp.into_json::<Value>() {
+                            if v.get("included")
+                                .and_then(Value::as_array)
+                                .is_some_and(|a| !a.is_empty())
+                            {
+                                if let Some(ctx) = v.get("context").and_then(Value::as_str) {
+                                    if !ctx.is_empty() {
+                                        emit(event, ctx);
+                                    }
                                 }
                             }
                         }
@@ -156,4 +162,67 @@ fn emit(event: &str, context: &str) {
         }
     });
     println!("{out}");
+}
+
+/// P1.8: opt-in context injection gate. Returns `true` only when the user has explicitly
+/// enabled it via `CAIRN_INJECT_CONTEXT=true|1|yes|on`. Defaults to OFF so that the hook
+/// doesn't silently burn ~1000 tokens per prompt when the user hasn't asked for it.
+fn inject_context_enabled() -> bool {
+    matches!(
+        std::env::var("CAIRN_INJECT_CONTEXT").ok().as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Env-var manipulation is process-global and not thread-safe in Rust.
+    /// Serialize tests that touch the environment through this mutex.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn with_env<T>(key: &str, value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let result = f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        result
+    }
+
+    #[test]
+    fn injection_disabled_when_env_unset() {
+        with_env("CAIRN_INJECT_CONTEXT", None, || {
+            assert!(!inject_context_enabled(), "default must be off");
+        });
+    }
+
+    #[test]
+    fn injection_enabled_when_env_true() {
+        for v in ["true", "1", "yes", "on"] {
+            with_env("CAIRN_INJECT_CONTEXT", Some(v), || {
+                assert!(inject_context_enabled(), "{v} should enable injection");
+            });
+        }
+    }
+
+    #[test]
+    fn injection_disabled_for_unrecognized_values() {
+        for v in ["", "false", "0", "no", "off", "TRUE"] {
+            with_env("CAIRN_INJECT_CONTEXT", Some(v), || {
+                assert!(
+                    !inject_context_enabled(),
+                    "{v:?} should NOT enable injection (case-sensitive; only true/1/yes/on)"
+                );
+            });
+        }
+    }
 }

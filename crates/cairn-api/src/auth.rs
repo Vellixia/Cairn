@@ -2,7 +2,7 @@
 //!
 //! Device tokens are signed JWTs (HS256). The backend stores only token metadata (id, name,
 //! scope, created_at); the bearer value itself is never persisted. This aligns the implementation
-//! with the auth architecture promised in `docs/PLAN.md`.
+//! with the auth architecture promised in `docs/reference/vision.md`.
 
 use cairn_core::TokenScope;
 use chrono::Utc;

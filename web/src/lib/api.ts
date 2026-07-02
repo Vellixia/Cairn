@@ -285,3 +285,90 @@ export interface LedgerEntry {
   cost_usd_saved: number;
   signature: string;
 }
+
+// P2.3 Compression Lab - one response carries all 4 read modes for side-by-side.
+export interface CompressionModeView {
+  mode: "auto" | "full" | "signatures" | "map";
+  status: string;
+  view: string;
+  note: string;
+  bytes: number;
+  est_tokens: number;
+  savings_vs_full: number;
+  hash: string;
+}
+
+export interface CompressionDemo {
+  path: string;
+  language: string | null;
+  raw_bytes: number;
+  raw_lines: number;
+  raw_tokens: number;
+  views: CompressionModeView[];
+  best_mode: string;
+  total_savings_tokens: number;
+  savings_ratio: number;
+}
+
+export interface ArchitectureGodNode {
+  name: string;
+  edge_count: number;
+  kind: string;
+}
+
+export interface ArchitectureBridge {
+  name: string;
+  centrality: number;
+  kind: string;
+}
+
+export interface ArchitectureReport {
+  project: string;
+  file_count: number;
+  edge_count: number;
+  community_count: number;
+  god_nodes: ArchitectureGodNode[];
+  bridges: ArchitectureBridge[];
+  cycles: string[][];
+  isolation_ratio: number;
+  markdown: string;
+  language_breakdown: Record<string, number>;
+  surprising_connections: string[];
+}
+
+export interface RegistryTrustGrant {
+  key: string;
+  allows: "local" | "team" | "public" | string;
+  label: string | null;
+  granted_at: string;
+}
+
+export interface RegistryRevocation {
+  name: string;
+  version: string;
+  revoked_at: string;
+  reason: string | null;
+}
+
+// Alias kept for callers that import by the more verbose name.
+export type RegistryRevocationEvent = RegistryRevocation;
+
+export interface RegistryPackMeta {
+  name: string;
+  version: string;
+  description?: string;
+  scope?: string;
+  published_at?: string;
+  stored_at?: string;
+  size_bytes?: number;
+  memory_count?: number;
+  // Optional manifest fields surfaced by `GET /registry/packs/:name` (the most
+  // recent pack is at index 0 of the response array).
+  author?: string;
+  origin?: string;
+  has_ed25519_signature?: boolean;
+  signer_pubkey?: string;
+  provenance_edge_count?: number;
+  download_count?: number;
+  [k: string]: unknown;
+}

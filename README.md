@@ -103,7 +103,7 @@ Measured on Cairn's own `crates/` (25 files):
 | Re-reading an unchanged file | ~6,506 tok | ~19 tok | **99.7%** |
 | Shell output (verbose test log) | 153 lines | 1 line | **99%** |
 
-All lossless - the full original is retained and one `expand` away. See [Benchmarks](docs/BENCHMARKS.md).
+All lossless - the full original is retained and one `expand` away. See [Benchmarks](docs/testing/benchmarks.md).
 
 ## Getting started
 
@@ -135,7 +135,7 @@ cargo install --git https://github.com/Vellixia/Cairn cairn
 
 `docker compose up -d` brings up Cairn + HelixDB + MinIO. The admin record
 is bootstrapped from `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD` in
-`.env` on first boot. See [docs/ADMIN.md](docs/ADMIN.md) for the full
+`.env` on first boot. See [docs/guides/admin.md](docs/guides/admin.md) for the full
 admin surface (mint tokens, pair codes, password rotation).
 
 ### 3. Connect an agent
@@ -147,7 +147,7 @@ cairn setup opencode --server http://localhost:7777 --token <token>
 ```
 
 Supports Claude Code (MCP + lifecycle hooks), Codex CLI, and OpenCode.
-See [Architecture - Connecting an agent](docs/ARCHITECTURE.md#connecting-an-agent-by-hand) for manual setup.
+See [Architecture - Connecting an agent](docs/reference/architecture.md#connecting-an-agent-by-hand) for manual setup.
 
 ### 4. Verify
 
@@ -180,7 +180,7 @@ cairn setup opencode --server http://localhost:7777
 
 After that, OpenCode's tool palette includes `cairn_recall`, `cairn_remember`, `cairn_read`,
 `cairn_verify`, `cairn_assemble`, `proactive_recall`, `memory_graph`, `memory_crystallize`,
-`search`, `metrics`, and 30+ more - see [MCP tools](docs/ARCHITECTURE.md#mcp-tool-surface).
+`search`, `metrics`, and 30+ more - see [MCP tools](docs/reference/architecture.md#mcp-tool-surface).
 
 ### What Cairn gives OpenCode out of the box
 
@@ -197,22 +197,25 @@ After that, OpenCode's tool palette includes `cairn_recall`, `cairn_remember`, `
 
 ## Status
 
-šS Active development - v0.5.0 is feature-complete. See [Roadmap](docs/ROADMAP.md) for
+šS Active development - v0.5.0 is feature-complete. See [Roadmap](docs/planning/roadmap.md) for
 what's done and what's next.
 
-## Documentation
+## Where to go next
 
-| Doc | Description |
+| I want to... | Read |
 |---|---|
-| [Architecture](docs/ARCHITECTURE.md) | Crate graph, MCP tools, API endpoints, Docker, config, CLI commands |
-| [Plan v0.5.0](docs/PLAN_v0.5.0.md) | 23-sprint plan, success metrics, risks |
-| [Roadmap](docs/ROADMAP.md) | Development status - done, in progress, next |
-| [Benchmarks](docs/BENCHMARKS.md) | Token savings methodology + measured results |
-| [Decisions](docs/DECISIONS.md) | 26 ADRs covering every architecture decision |
-| [Security](docs/SECURITY.md) | Threat model + hardening checklist |
-| [E2E Tests](docs/E2E.md) | 20-scenario end-to-end test harness |
-| [Changelog](CHANGELOG.md) | Release notes for every version |
-| [Contributing](CONTRIBUTING.md) | Dev setup, PR checklist, workspace layout |
+| Install & operate the server | [docs/guides/admin.md](docs/guides/admin.md) |
+| Upgrade an existing install | [docs/guides/upgrading.md](docs/guides/upgrading.md) |
+| Understand how it works | [docs/reference/architecture.md](docs/reference/architecture.md) |
+| Connect my AI tool / IDE | [docs/guides/ide-integration.md](docs/guides/ide-integration.md) |
+| Web dashboard & auth | [docs/guides/web-auth.md](docs/guides/web-auth.md) |
+| See the roadmap / vision | [Roadmap](docs/planning/roadmap.md) / [Vision](docs/reference/vision.md) |
+| Why decisions were made | [docs/reference/decisions.md](docs/reference/decisions.md) (ADRs) |
+| Measured token savings | [docs/testing/benchmarks.md](docs/testing/benchmarks.md) |
+| Security policy | [SECURITY.md](SECURITY.md) |
+| Browse the full docs library | [docs/README.md](docs/README.md) |
+
+Release notes: [CHANGELOG.md](CHANGELOG.md). Contributing: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

@@ -73,6 +73,32 @@ impl std::fmt::Debug for EmbedConfig {
     }
 }
 
+/// LLM-driven consolidation settings (P1.4). Gated behind `CAIRN_LLM_CONSOLIDATION=true`
+/// (opt-in due to LLM call cost). When enabled, consolidation runs an LLM over session
+/// summaries to extract stable facts, reusable procedures, and cross-cutting insights.
+#[derive(Clone)]
+pub struct LlmConsolidationConfig {
+    /// Master gate. `CAIRN_LLM_CONSOLIDATION=true`. Off by default.
+    pub enabled: bool,
+    /// OpenAI-compatible chat completion endpoint (`CAIRN_LLM_CONSOLIDATION_URL`).
+    pub url: String,
+    /// Model name (`CAIRN_LLM_CONSOLIDATION_MODEL`).
+    pub model: String,
+    /// API key for hosted providers (`CAIRN_LLM_CONSOLIDATION_API_KEY`).
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for LlmConsolidationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConsolidationConfig")
+            .field("enabled", &self.enabled)
+            .field("url", &self.url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
 /// TLS material for HTTPS serve. Both `cert` and `key` must be present to enable TLS; partial
 /// configuration (e.g. cert without key) is rejected by the API layer at startup.
 #[derive(Debug, Clone)]
@@ -81,6 +107,52 @@ pub struct TlsConfig {
     pub cert: PathBuf,
     /// PEM-encoded TLS private key (`CAIRN_TLS_KEY`).
     pub key: PathBuf,
+}
+
+/// Cross-encoder reranking settings (P4.2). The default backend is `none` (no-op pass-through);
+/// set `provider=local` + `enabled=true` to enable in-process fastembed-based reranking.
+#[derive(Clone)]
+pub struct RerankConfig {
+    /// Reranking backend. `none` (no-op), `local` (fastembed cross-encoder, gated by
+    /// `cairn-rerank/local` feature).
+    pub provider: String,
+    /// Model id (used by `local` backend). Default: `jina-reranker-v1-turbo-en`.
+    pub model: Option<String>,
+    /// API key for hosted rerank providers (e.g. Cohere). Reserved for future `http` provider.
+    pub api_key: Option<String>,
+    /// Master gate (`CAIRN_RERANKER_ENABLED`).
+    pub enabled: bool,
+    /// How many of the top-MMR results to rerank (`CAIRN_RERANKER_TOP_K`, default 20).
+    pub top_k: usize,
+    /// Blend weight for cross-encoder vs hybrid score, in [0, 1]
+    /// (`CAIRN_RERANKER_BLEND_WEIGHT`, default 0.6). 0 = pure hybrid, 1 = pure cross-encoder.
+    pub blend_weight: f32,
+}
+
+impl std::fmt::Debug for RerankConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RerankConfig")
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[REDACTED]"))
+            .field("enabled", &self.enabled)
+            .field("top_k", &self.top_k)
+            .field("blend_weight", &self.blend_weight)
+            .finish()
+    }
+}
+
+impl Default for RerankConfig {
+    fn default() -> Self {
+        Self {
+            provider: "none".to_string(),
+            model: None,
+            api_key: None,
+            enabled: false,
+            top_k: 20,
+            blend_weight: 0.6,
+        }
+    }
 }
 
 /// Where Cairn keeps its data and how it's reached. Defaults to the OS data dir
@@ -121,6 +193,10 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     /// Embedding settings.
     pub embed: EmbedConfig,
+    /// LLM-driven consolidation settings (P1.4). Disabled by default.
+    pub llm_consolidation: LlmConsolidationConfig,
+    /// Cross-encoder reranking settings (P4.2). Disabled by default.
+    pub rerank: RerankConfig,
     /// Admin account settings.
     pub admin: AdminConfig,
     /// Multi-tenant mode (v0.5.0 Sprint 19). When `true`, every memory is
@@ -176,6 +252,26 @@ impl Config {
                 model: env_str("CAIRN_EMBED_MODEL"),
                 url: env_str("CAIRN_EMBED_URL"),
                 api_key: env_str("CAIRN_EMBED_API_KEY"),
+            },
+            llm_consolidation: LlmConsolidationConfig {
+                enabled: env_str("CAIRN_LLM_CONSOLIDATION").as_deref() == Some("true"),
+                url: env_str("CAIRN_LLM_CONSOLIDATION_URL")
+                    .unwrap_or_else(|| "http://localhost:11434/v1/chat/completions".to_string()),
+                model: env_str("CAIRN_LLM_CONSOLIDATION_MODEL")
+                    .unwrap_or_else(|| "llama3.2".to_string()),
+                api_key: env_str("CAIRN_LLM_CONSOLIDATION_API_KEY"),
+            },
+            rerank: RerankConfig {
+                provider: env_str("CAIRN_RERANKER_PROVIDER").unwrap_or_else(|| "none".to_string()),
+                model: env_str("CAIRN_RERANKER_MODEL"),
+                api_key: env_str("CAIRN_RERANKER_API_KEY"),
+                enabled: env_bool("CAIRN_RERANKER_ENABLED"),
+                top_k: env_str("CAIRN_RERANKER_TOP_K")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(20),
+                blend_weight: env_str("CAIRN_RERANKER_BLEND_WEIGHT")
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(0.6),
             },
             admin: AdminConfig {
                 username: env_str("CAIRN_ADMIN_USERNAME").unwrap_or_else(|| "admin".to_string()),
@@ -273,6 +369,20 @@ mod tests {
                 model: None,
                 url: None,
                 api_key: None,
+            },
+            llm_consolidation: LlmConsolidationConfig {
+                enabled: false,
+                url: "http://localhost:11434/v1/chat/completions".into(),
+                model: "llama3.2".into(),
+                api_key: None,
+            },
+            rerank: RerankConfig {
+                provider: "none".into(),
+                model: None,
+                api_key: None,
+                enabled: false,
+                top_k: 20,
+                blend_weight: 0.6,
             },
             admin: AdminConfig::default(),
             multi_tenant: false,

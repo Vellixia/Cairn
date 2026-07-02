@@ -94,10 +94,15 @@ export default function MobileCompanion() {
 
   const loadDrift = useCallback(async () => {
     try {
-      const res = await fetch("/api/drift?status=pending", { credentials: "include" });
+      const res = await fetch("/api/guard/drift?status=pending", {
+        credentials: "include",
+      });
       if (res.ok) {
         const j = await res.json();
-        setDrift(j.items ?? []);
+        // `/api/guard/drift` returns a flat array; accept both shapes so a
+        // future `{items: [...]}` shape doesn't break the mobile page.
+        const list: PendingDrift[] = Array.isArray(j) ? j : j.items ?? [];
+        setDrift(list);
       }
     } catch (e) {
       setError(String(e));
@@ -197,14 +202,14 @@ export default function MobileCompanion() {
 }
 
 async function approveDrift(id: string) {
-  await fetch(`/api/drift/${id}/approve`, {
+  await fetch(`/api/guard/drift/${id}/approve`, {
     method: "POST",
     credentials: "include",
   });
 }
 
 async function rejectDrift(id: string) {
-  await fetch(`/api/drift/${id}/reject`, {
+  await fetch(`/api/guard/drift/${id}/reject`, {
     method: "POST",
     credentials: "include",
   });

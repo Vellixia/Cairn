@@ -248,28 +248,21 @@ fn remove_managed_block(text: &str) -> Option<String> {
     }
 }
 
+/// Remove the `[mcp_servers.cairn]` table (and its `.env` sub-table) from a Codex
+/// `config.toml`, preserving all other tables, comments, and formatting via `toml_edit`.
+/// If the file is not valid TOML, it is returned unchanged rather than risking corruption.
 fn remove_codex_cairn_block(toml: &str) -> String {
-    let mut out = String::new();
-    let mut skip = false;
-    for line in toml.lines() {
-        let trimmed = line.trim();
-        if trimmed == "[mcp_servers.cairn]" {
-            skip = true;
-            continue;
+    let mut doc = match toml.parse::<toml_edit::DocumentMut>() {
+        Ok(d) => d,
+        Err(_) => return toml.to_string(),
+    };
+    if let Some(servers) = doc.get_mut("mcp_servers").and_then(|i| i.as_table_mut()) {
+        servers.remove("cairn");
+        if servers.is_empty() {
+            doc.as_table_mut().remove("mcp_servers");
         }
-        if skip && trimmed.starts_with('[') && trimmed != "[mcp_servers.cairn.env]" {
-            skip = false;
-            out.push_str(line);
-            out.push('\n');
-            continue;
-        }
-        if skip {
-            continue;
-        }
-        out.push_str(line);
-        out.push('\n');
     }
-    out.trim_end().to_string()
+    doc.to_string()
 }
 
 fn read_object(path: &Path) -> Result<serde_json::Map<String, serde_json::Value>> {

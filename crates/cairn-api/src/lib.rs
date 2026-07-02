@@ -6,12 +6,14 @@
 
 pub mod admin;
 mod auth;
+mod capabilities;
 mod devices;
 mod events;
 mod extensions;
 mod ingest;
 mod ledger;
 mod metrics;
+mod openapi;
 mod push;
 mod rate_limit;
 mod security_headers;
@@ -30,7 +32,9 @@ use crate::auth::{extract_bearer, TokenInfo, TokenSigner};
 use crate::devices::{create_pair_code, create_token, list_tokens, revoke_token};
 use crate::events::events as sse_events;
 use crate::ledger::{get_ledger, verify_ledger, LedgerState};
-use crate::metrics::{self as metrics_mod, metrics as metrics_endpoint, SavingsState};
+use crate::metrics::{
+    self as metrics_mod, metrics as metrics_endpoint, mobile_savings, SavingsState,
+};
 use crate::session::{extract_cookie as extract_session_cookie, SessionSigner};
 use crate::setup_wizard::setup_health;
 use axum::{
@@ -51,7 +55,7 @@ use cairn_shell::{Compressed, ShellCompressor};
 use cairn_store::Store;
 use chrono::{DateTime, Utc};
 use rust_embed::RustEmbed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -92,6 +96,9 @@ pub struct AppState {
     pub ledger: LedgerState,
     /// Self-hosted pack registry (v0.5.0 Sprint 13). Mounted under `/registry`.
     pub registry: Option<Arc<cairn_registry::Registry>>,
+    /// Server package version (CARGO_PKG_VERSION) - exposed via `/api/capabilities` and
+    /// `/api/openapi.json`.
+    pub version: String,
     /// Push notification subscription store (v0.5.0 Sprint 20b). One JSON
     /// file per subscription under `<data_dir>/push/`. Optional so the API can
     /// run without a writable data dir (some embedded test harnesses).
@@ -102,6 +109,13 @@ pub struct AppState {
 impl AppState {
     pub fn new(cfg: &Config) -> cairn_core::Result<Self> {
         let store = Arc::new(Store::open(cfg)?);
+        Self::with_store(cfg, store)
+    }
+
+    /// Construct `AppState` from a caller-supplied `Arc<Store>`. Used by the hermetic
+    /// test bucket to wire a fully-in-memory store; production callers should keep using
+    /// `new`.
+    pub fn with_store(cfg: &Config, store: Arc<Store>) -> cairn_core::Result<Self> {
         let ctx = Arc::new(ContextEngine::new_with_root(
             store.clone(),
             cfg.workspace_root.clone(),
@@ -127,9 +141,6 @@ impl AppState {
             .secret_key
             .as_ref()
             .map(|k| Arc::new(SessionSigner::new(k.clone())));
-        // Seed the synthetic-event counter from the durable audit log so SSE ids for
-        // `stats-`/`drift-` events never collide with replayed audit-log ids.
-        // Performed before `store` is moved into `Self`.
         let events = {
             let seed = store
                 .max_audit_event_id()
@@ -163,6 +174,7 @@ impl AppState {
                 .map(Arc::new),
             push: push::PushStore::open(&cfg.data_dir).ok().map(Arc::new),
             signer,
+            version: env!("CARGO_PKG_VERSION").to_string(),
         })
     }
 
@@ -214,8 +226,11 @@ pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/health/deep", get(health_deep))
+        .route("/api/capabilities", get(capabilities::capabilities))
+        .route("/api/openapi.json", get(openapi::openapi_spec))
         .route("/api/events", get(sse_events))
         .route("/api/metrics", get(metrics_endpoint))
+        .route("/api/metrics/savings", get(mobile_savings))
         .route("/api/ledger", get(get_ledger))
         .route("/api/ledger/verify", get(verify_ledger))
         .route("/api/search", get(search_handler))
@@ -223,7 +238,11 @@ pub fn router(state: AppState) -> Router {
         .route("/api/context/read", get(read))
         .route("/api/context/expand", get(expand))
         .route("/api/context/assemble", get(assemble))
+        .route("/api/context/compression-demo", get(compression_demo))
+        .route("/api/context/pressure", get(context_pressure))
         .route("/api/memory", post(remember))
+        .route("/api/memory/gotcha", post(record_gotcha))
+        .route("/api/memory/gotcha/wakeup", get(gotcha_wakeup))
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/wakeup", get(wakeup))
         .route("/api/memory/consolidate", post(consolidate_memory))
@@ -232,6 +251,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/:id/reinforce", post(reinforce_memory))
         .route("/api/memory/crystallize", post(crystallize))
         .route("/api/memory/graph", get(memory_graph))
+        .route("/api/memory/architecture-report", get(architecture_report))
+        .route("/api/memory/heatmap", get(memory_heatmap))
         .route("/api/guard/verify", post(verify))
         .route("/api/guard/anchor", get(get_anchor).post(post_anchor))
         .route("/api/guard/checkpoint", post(create_checkpoint))
@@ -290,14 +311,21 @@ pub fn router(state: AppState) -> Router {
 pub fn build_router_with_registry(state: AppState) -> Router {
     let base = router(state.clone());
     match state.registry.as_ref() {
-        Some(reg) => base.nest(
-            "/registry",
-            cairn_registry::router(reg.clone()).layer(
-                tower_http::limit::RequestBodyLimitLayer::new(
-                    32 * 1024 * 1024, // 32 MiB for pack uploads
+        Some(reg) => {
+            // Mount the registry under `/api/registry` so it doesn't shadow the
+            // Next.js dashboard's `/registry` and `/registry/packs` page routes
+            // (which are served by the static_handler fallback). The dashboard's
+            // `lib/queries.ts` calls `/registry/packs` directly; that needs to be
+            // updated to `/api/registry/packs` in lockstep with this change.
+            base.nest(
+                "/api/registry",
+                cairn_registry::router(reg.clone()).layer(
+                    tower_http::limit::RequestBodyLimitLayer::new(
+                        32 * 1024 * 1024, // 32 MiB for pack uploads
+                    ),
                 ),
-            ),
-        ),
+            )
+        }
         None => base,
     }
 }
@@ -434,13 +462,50 @@ fn is_loopback_addr(addr: SocketAddr) -> bool {
 struct WebAssets;
 
 async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
-    let path = uri.path().trim_start_matches('/');
+    let raw_path = uri.path().trim_start_matches('/');
+    // Bug fix (BUG-2026-06-30-C): browsers URL-encode characters in chunk paths
+    // (e.g. `%5Bname%5D` for `[name]`, `%28app%29` for `(app)`). The embedded
+    // WebAssets key uses the decoded form, so we percent-decode the request
+    // path before lookup. Without this, every dynamic-route chunk 404s and the
+    // dashboard throws ChunkLoadError.
+    let path = match percent_decode(raw_path) {
+        Some(p) => p,
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                format!("invalid path: {raw_path}"),
+            )
+                .into_response();
+        }
+    };
+    // Bug fix (BUG-2026-06-30-C): if the request path looks like a static asset
+    // (has a non-HTML file extension), never fall back to index.html. Doing so
+    // serves the dashboard shell HTML with a JS/CSS MIME, which the browser then
+    // tries to parse as that asset and surfaces a confusing ChunkLoadError. Return
+    // 404 instead so the failure is observable and recoverable.
+    let looks_like_asset = std::path::Path::new(&path)
+        .extension()
+        .is_some_and(|ext| !ext.eq_ignore_ascii_case("html") && !ext.eq_ignore_ascii_case("htm"));
     let key = if path.is_empty() {
         "index.html".to_string()
-    } else if <WebAssets as RustEmbed>::get(path).is_some() {
-        path.to_string()
+    } else if <WebAssets as RustEmbed>::get(&path).is_some() {
+        path.clone()
     } else if <WebAssets as RustEmbed>::get(&format!("{path}.html")).is_some() {
         format!("{path}.html")
+    } else if looks_like_asset {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
+            format!("not found: {path}"),
+        )
+            .into_response();
     } else {
         "index.html".to_string()
     };
@@ -526,6 +591,38 @@ fn content_type(path: &str) -> &'static str {
         Some("woff2") => "font/woff2",
         Some("txt") => "text/plain; charset=utf-8",
         _ => "application/octet-stream",
+    }
+}
+
+/// Percent-decode a URL path. Returns `None` if the input contains an
+/// invalid percent-escape or a non-UTF-8 byte sequence.
+fn percent_decode(input: &str) -> Option<String> {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hi = hex_digit(bytes[i + 1])?;
+                let lo = hex_digit(bytes[i + 2])?;
+                out.push((hi << 4) | lo);
+                i += 3;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
     }
 }
 
@@ -629,8 +726,136 @@ async fn expand(
 ) -> Result<Json<Value>, ApiError> {
     match s.ctx.expand(&q.hash)? {
         Some(content) => Ok(Json(json!({ "hash": q.hash, "content": content }))),
-        None => Err(ApiError(StatusCode::NOT_FOUND, "unknown handle".into())),
+        None => Err(ApiError::not_found("unknown handle")),
     }
+}
+
+/// P2.3 Compression Lab. Returns all 4 read modes (auto/full/signatures/map) for a single
+/// file in one response so the dashboard can show a side-by-side comparison with token
+/// counts. The cheapest mode is marked `best_mode` for the UI to highlight.
+#[derive(Deserialize)]
+struct CompressionDemoQuery {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct ModeView {
+    mode: &'static str,
+    status: String,
+    view: String,
+    note: String,
+    bytes: usize,
+    est_tokens: usize,
+    savings_vs_full: f64,
+    hash: String,
+}
+
+#[derive(Serialize)]
+struct CompressionDemo {
+    path: String,
+    language: Option<String>,
+    raw_bytes: usize,
+    raw_lines: usize,
+    raw_tokens: usize,
+    views: Vec<ModeView>,
+    best_mode: String,
+    total_savings_tokens: usize,
+    savings_ratio: f64,
+}
+
+async fn compression_demo(
+    State(s): State<AppState>,
+    Query(q): Query<CompressionDemoQuery>,
+) -> Result<Json<CompressionDemo>, ApiError> {
+    let path = Path::new(&q.path);
+    // Call the engine once per mode. Errors per-mode are recorded as a fallback view
+    // so the dashboard never sees a partial result.
+    let modes = [
+        ("auto", cairn_context::ReadMode::Auto),
+        ("full", cairn_context::ReadMode::Full),
+        ("signatures", cairn_context::ReadMode::Signatures),
+        ("map", cairn_context::ReadMode::Map),
+    ];
+    let mut views = Vec::with_capacity(modes.len());
+    for (name, mode) in modes {
+        match s.ctx.read(path, mode) {
+            Ok(r) => views.push(ModeView {
+                mode: name,
+                status: format!("{:?}", r.status),
+                view: r.view,
+                note: r.note,
+                bytes: r.bytes,
+                est_tokens: r.est_tokens,
+                savings_vs_full: 0.0, // filled below
+                hash: r.hash,
+            }),
+            Err(e) => views.push(ModeView {
+                mode: name,
+                status: "Error".into(),
+                view: format!("error reading file: {e}"),
+                note: String::new(),
+                bytes: 0,
+                est_tokens: 0,
+                savings_vs_full: 0.0,
+                hash: String::new(),
+            }),
+        }
+    }
+
+    // Identify the full-mode view as the baseline for savings comparison.
+    let full_tokens = views
+        .iter()
+        .find(|v| v.mode == "full")
+        .map(|v| v.est_tokens)
+        .unwrap_or(0);
+    for v in &mut views {
+        if full_tokens > 0 {
+            v.savings_vs_full = 1.0 - (v.est_tokens as f64 / full_tokens as f64);
+        }
+    }
+    let best_mode = views
+        .iter()
+        .min_by_key(|v| v.est_tokens)
+        .map(|v| v.mode.to_string())
+        .unwrap_or_else(|| "auto".to_string());
+    let total_savings_tokens = full_tokens.saturating_sub(
+        views
+            .iter()
+            .find(|v| v.mode == "auto")
+            .map(|v| v.est_tokens)
+            .unwrap_or(full_tokens),
+    );
+    let savings_ratio = if full_tokens > 0 {
+        total_savings_tokens as f64 / full_tokens as f64
+    } else {
+        0.0
+    };
+
+    // Use the full view's lines as the canonical "raw_lines" + tokens.
+    let (raw_lines, raw_bytes) = views
+        .iter()
+        .find(|v| v.mode == "full")
+        .map(|v| (v.view.lines().count(), v.bytes))
+        .unwrap_or((0, 0));
+
+    // Language hint from the file extension (the engine already picks a parser;
+    // we surface a friendlier label).
+    let language = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_string());
+
+    Ok(Json(CompressionDemo {
+        path: q.path,
+        language,
+        raw_bytes,
+        raw_lines,
+        raw_tokens: full_tokens,
+        views,
+        best_mode,
+        total_savings_tokens,
+        savings_ratio,
+    }))
 }
 
 async fn remember(
@@ -643,6 +868,71 @@ async fn remember(
     input.suspicious =
         Some(input.suspicious.unwrap_or(false) || cairn_profile::is_suspicious(&input.content));
     Ok(Json(s.mem.remember(input)?))
+}
+
+/// P4.3: `POST /api/memory/gotcha` - record a failure event. The gotcha tracker
+/// auto-promotes to a `MemoryKind::Gotcha` memory when the cluster threshold is met.
+#[derive(Deserialize, Clone)]
+struct GotchaBody {
+    topic: String,
+    #[serde(default)]
+    context: Option<String>,
+    #[serde(default)]
+    refs: Vec<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+}
+
+async fn record_gotcha(
+    State(s): State<AppState>,
+    Json(b): Json<GotchaBody>,
+) -> Result<Json<Value>, ApiError> {
+    let mut event =
+        cairn_memory::FailureEvent::new(b.topic.clone(), b.context.clone().unwrap_or_default());
+    if !b.refs.is_empty() {
+        event = event.with_refs(b.refs.clone());
+    }
+    if let Some(sid) = b.session_id {
+        event = event.with_session(sid);
+    }
+    let promoted = s.mem.record_failure(event)?;
+    Ok(Json(json!({
+        "ok": true,
+        "promoted": promoted.is_some(),
+        "memory": promoted,
+    })))
+}
+
+/// P4.3: `GET /api/memory/gotcha/wakeup` - top-K gotcha clusters for proactive recall.
+#[derive(Deserialize)]
+struct GotchaWakeupQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+async fn gotcha_wakeup(
+    State(s): State<AppState>,
+    Query(q): Query<GotchaWakeupQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let limit = q.limit.unwrap_or(5).clamp(1, 50);
+    let clusters = s.mem.top_gotcha_clusters(limit)?;
+    let total = s
+        .mem
+        .gotcha_tracker()
+        .lock()
+        .map(|t| t.total_failures)
+        .unwrap_or(0);
+    let promoted = s
+        .mem
+        .gotcha_tracker()
+        .lock()
+        .map(|t| t.promoted_clusters)
+        .unwrap_or(0);
+    Ok(Json(json!({
+        "clusters": clusters,
+        "total_failures": total,
+        "promoted_clusters": promoted,
+    })))
 }
 
 #[derive(Deserialize)]
@@ -666,17 +956,61 @@ struct SearchQuery {
     limit: Option<usize>,
     #[serde(default)]
     rerank_depth: Option<usize>,
+    /// P3.3: when `true` and `LlmConsolidationConfig::enabled`, runs the query through
+    /// `QueryExpander` and merges by max combinedScore across reformulations.
+    #[serde(default)]
+    expand: Option<bool>,
+    /// P4.2: when `local` and `RerankConfig::enabled`, installs a cross-encoder
+    /// reranker at search time. Other values: `none` (default, no-op).
+    #[serde(default)]
+    rerank: Option<String>,
 }
 
-/// `GET /api/search?q=...&limit=N&rerank_depth=M` - Sprint 7 hybrid search: BM25 + HNSW
-/// + provenance graph, fused with RRF, reranked with MMR.
+/// `GET /api/search?q=...&limit=N&rerank_depth=M&expand=true&rerank=local` - hybrid search:
+/// BM25 + HNSW + memory provenance graph, fused with RRF, reranked with MMR. With
+/// `expand=true` the engine first asks an LLM for 3-5 reformulations and merges results.
+/// With `rerank=local` the post-MMR top-K is re-scored by a cross-encoder.
 async fn search_handler(
     State(s): State<AppState>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<ScoredMemory>>, ApiError> {
     let limit = q.limit.unwrap_or(20);
-    let rerank = q.rerank_depth.unwrap_or(20);
-    Ok(Json(s.mem.hybrid_search(&q.q, limit, rerank)?))
+    let rerank_depth = q.rerank_depth.unwrap_or(20);
+
+    // P3.3 query expansion: when `expand=true` and the LLM gate is on.
+    if q.expand.unwrap_or(false) && s.cfg.llm_consolidation.enabled {
+        let expander = cairn_memory::QueryExpander::new(s.cfg.llm_consolidation.clone());
+        let mut hits = s
+            .mem
+            .expanded_search(&q.q, limit, rerank_depth, &expander)?;
+        // P4.2 rerank: post-expansion cross-encoder pass.
+        if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
+            let reranker = cairn_memory::rerank_from_config(&s.cfg.rerank);
+            hits = s.mem.hybrid_search_with_rerank(
+                &q.q,
+                limit,
+                rerank_depth,
+                &*reranker,
+                s.cfg.rerank.blend_weight,
+            )?;
+        }
+        return Ok(Json(hits));
+    }
+
+    // P4.2 rerank only (no expansion).
+    if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
+        let reranker = cairn_memory::rerank_from_config(&s.cfg.rerank);
+        return Ok(Json(s.mem.hybrid_search_with_rerank(
+            &q.q,
+            limit,
+            rerank_depth,
+            &*reranker,
+            s.cfg.rerank.blend_weight,
+        )?));
+    }
+
+    // Default path: plain hybrid search.
+    Ok(Json(s.mem.hybrid_search(&q.q, limit, rerank_depth)?))
 }
 
 #[derive(Deserialize)]
@@ -726,7 +1060,7 @@ async fn edit_memory(
             crate::events::publish_memory(&s.events, "edited", &m.id);
             Ok(Json(m))
         }
-        None => Err(ApiError(StatusCode::NOT_FOUND, "no such memory".into())),
+        None => Err(ApiError::not_found("no such memory")),
     }
 }
 
@@ -739,7 +1073,7 @@ async fn delete_memory(
         crate::events::publish_memory(&s.events, "deleted", &id);
         Ok(Json(json!({ "deleted": true })))
     } else {
-        Err(ApiError(StatusCode::NOT_FOUND, "no such memory".into()))
+        Err(ApiError::not_found("no such memory"))
     }
 }
 
@@ -762,7 +1096,7 @@ async fn pin_memory(
         );
         Ok(Json(s.mem.get(&id)?.unwrap()))
     } else {
-        Err(ApiError(StatusCode::NOT_FOUND, "no such memory".into()))
+        Err(ApiError::not_found("no such memory"))
     }
 }
 
@@ -775,7 +1109,7 @@ async fn reinforce_memory(
     s.store.reinforce_memory(&id)?;
     match s.mem.get(&id)? {
         Some(m) => Ok(Json(m)),
-        None => Err(ApiError(StatusCode::NOT_FOUND, "no such memory".into())),
+        None => Err(ApiError::not_found("no such memory")),
     }
 }
 
@@ -806,6 +1140,29 @@ async fn memory_graph(
     Ok(Json(s.mem.graph()?))
 }
 
+// P2.6: heatmap (last 365 days by default, ?days=N to override).
+async fn memory_heatmap(
+    State(s): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<HeatmapQuery>,
+) -> Result<Json<std::collections::HashMap<String, u32>>, ApiError> {
+    let days = q.days.unwrap_or(365).clamp(1, 3650);
+    Ok(Json(s.mem.activity_heatmap(days)?))
+}
+
+// P2.4: structural analysis of the memory graph.
+async fn architecture_report(
+    State(s): State<AppState>,
+) -> Result<Json<cairn_memory::ArchitectureReport>, ApiError> {
+    let graph = s.mem.graph()?;
+    Ok(Json(cairn_memory::generate_architecture_report(&graph)))
+}
+
+#[derive(Default, Deserialize)]
+struct HeatmapQuery {
+    /// Window size in days. Default 365. Capped to 3650 (10y).
+    days: Option<usize>,
+}
+
 // -- drift + sessions handlers (v0.5.0 Sprint 4) -----------------------------------------
 
 async fn list_drift(
@@ -823,9 +1180,8 @@ async fn approve_drift(
     {
         Ok(Json(json!({ "ok": true, "status": "approved" })))
     } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            "drift event not found or already resolved".into(),
+        Err(ApiError::not_found(
+            "drift event not found or already resolved",
         ))
     }
 }
@@ -839,9 +1195,8 @@ async fn reject_drift(
     {
         Ok(Json(json!({ "ok": true, "status": "rejected" })))
     } else {
-        Err(ApiError(
-            StatusCode::NOT_FOUND,
-            "drift event not found or already resolved".into(),
+        Err(ApiError::not_found(
+            "drift event not found or already resolved",
         ))
     }
 }
@@ -889,7 +1244,7 @@ async fn get_session(
 ) -> Result<Json<cairn_session::Session>, ApiError> {
     match s.sessions.load(&id)? {
         Some(sess) => Ok(Json(sess)),
-        None => Err(ApiError(StatusCode::NOT_FOUND, "no such session".into())),
+        None => Err(ApiError::not_found("no such session")),
     }
 }
 
@@ -900,7 +1255,7 @@ async fn update_session(
     Json(patch): Json<cairn_session::SessionPatch>,
 ) -> Result<Json<cairn_session::Session>, ApiError> {
     let Some(mut sess) = s.sessions.load(&id)? else {
-        return Err(ApiError(StatusCode::NOT_FOUND, "no such session".into()));
+        return Err(ApiError::not_found("no such session"));
     };
     if let Some(t) = patch.tasks {
         sess.tasks.extend(t);
@@ -1025,6 +1380,27 @@ async fn assemble(
             .append("context.assemble", bytes_in, bytes_out, key);
     }
     Ok(Json(report))
+}
+
+/// `GET /api/context/pressure` (P2.5) - returns the current context window utilization,
+/// recommendation (NoAction / SuggestCompression / ForceCompression / EvictLeastRelevant),
+/// and the top eviction candidates ranked by phi.
+async fn context_pressure(
+    State(s): State<AppState>,
+) -> Result<Json<cairn_context::ContextPressure>, ApiError> {
+    // For now, the ContextLedger isn't wired into AppState (it'd need to accumulate
+    // entries from every `read`/`assemble` call). To make the endpoint and frontend
+    // live immediately, we instantiate a fresh ledger with a sensible default window.
+    // A future sprint will move this to AppState for real-time tracking.
+    let window = s
+        .cfg
+        .embed
+        .api_key
+        .as_ref()
+        .map(|_| 128_000)
+        .unwrap_or(cairn_context::DEFAULT_WINDOW_SIZE);
+    let ledger = cairn_context::ContextLedger::with_window_size(window);
+    Ok(Json(ledger.pressure()))
 }
 
 #[derive(Deserialize)]
@@ -1203,10 +1579,7 @@ async fn pair_claim(
         }
         None => {
             tracing::warn!(code = %b.code, "failed pairing claim attempt (invalid or expired code)");
-            Err(ApiError(
-                StatusCode::NOT_FOUND,
-                "invalid or expired pairing code".into(),
-            ))
+            Err(ApiError::not_found("invalid or expired pairing code"))
         }
     }
 }
@@ -1271,8 +1644,7 @@ async fn tools_call(
     State(s): State<AppState>,
     Json(b): Json<ToolCallBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mcp = cairn_mcp::McpServer::new(&s.cfg)
-        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    let mcp = cairn_mcp::McpServer::new(&s.cfg).map_err(|e| ApiError::internal(e.to_string()))?;
     match mcp.dispatch(&b.name, &b.arguments) {
         Ok(text) => Ok(Json(
             json!({ "content": [{ "type": "text", "text": text }] }),
@@ -1306,6 +1678,8 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
         || matches!(
             path,
             "/api/health"
+                | "/api/capabilities"
+                | "/api/openapi.json"
                 | "/api/pair/claim"
                 | "/api/auth/login"
                 | "/api/auth/logout"
@@ -1339,6 +1713,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
                     "error": "invalid bearer token",
+                    "error_code": "unauthenticated",
                     "reason": "bad_signature",
                     "detail": "token signature verification failed (secret key may have been rotated, or the token is malformed)"
                 })),
@@ -1350,6 +1725,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
                 StatusCode::UNAUTHORIZED,
                 Json(json!({
                     "error": "invalid bearer token",
+                    "error_code": "unauthenticated",
                     "reason": "unknown_token",
                     "detail": "token is cryptographically valid but was not found in the store (it may have been revoked, or HelixDB data may have been lost)"
                 })),
@@ -1358,9 +1734,10 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
         }
         VerifyBearerOutcome::InsufficientScope => {
             return (
-                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
                 Json(json!({
                     "error": "invalid bearer token",
+                    "error_code": "forbidden",
                     "reason": "insufficient_scope",
                     "detail": "the token's scope does not permit this operation"
                 })),
@@ -1387,7 +1764,8 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
         return (
             StatusCode::UNAUTHORIZED,
             Json(json!({
-                "error": "no admin or device tokens configured; create an admin via /setup on localhost"
+                "error": "no admin or device tokens configured; create an admin via /setup on localhost",
+                "error_code": "unauthenticated"
             })),
         )
             .into_response();
@@ -1395,7 +1773,10 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
 
     (
         StatusCode::UNAUTHORIZED,
-        Json(json!({ "error": "invalid or missing credentials" })),
+        Json(json!({
+            "error": "invalid or missing credentials",
+            "error_code": "unauthenticated"
+        })),
     )
         .into_response()
 }
@@ -1462,25 +1843,80 @@ fn verify_bearer_auth(
 
 // -- error plumbing --------------------------------------------------------------------------
 
-/// A simple API error that renders as JSON `{ "error": ... }`.
+/// A simple API error that renders as JSON `{ "error": "...", "error_code": "stable_code" }`.
+///
+/// `error_code` is a stable machine-readable identifier that SDKs/agents can branch on
+/// without parsing prose. The set of codes is documented and stable across versions:
+/// `not_found`, `bad_request`, `unauthenticated`, `forbidden`, `conflict`, `internal_error`.
 #[derive(Debug)]
-struct ApiError(StatusCode, String);
+pub struct ApiError {
+    pub status: StatusCode,
+    pub message: String,
+    pub code: &'static str,
+}
+
+impl ApiError {
+    /// Construct an error with an explicit stable code.
+    pub fn new(status: StatusCode, message: impl Into<String>, code: &'static str) -> Self {
+        Self {
+            status,
+            message: message.into(),
+            code,
+        }
+    }
+
+    /// Convenience: 404 with `error_code: "not_found"`.
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::NOT_FOUND, message, "not_found")
+    }
+
+    /// Convenience: 400 with `error_code: "bad_request"`.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, message, "bad_request")
+    }
+
+    /// Convenience: 500 with `error_code: "internal_error"`.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message, "internal_error")
+    }
+
+    /// Convenience: 401 with `error_code: "unauthenticated"`.
+    pub fn unauthenticated(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::UNAUTHORIZED, message, "unauthenticated")
+    }
+
+    /// Convenience: 403 with `error_code: "forbidden"`.
+    pub fn forbidden(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::FORBIDDEN, message, "forbidden")
+    }
+}
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (self.0, Json(json!({ "error": self.1 }))).into_response()
+        (
+            self.status,
+            Json(json!({
+                "error": self.message,
+                "error_code": self.code,
+            })),
+        )
+            .into_response()
     }
 }
 
 impl From<cairn_core::Error> for ApiError {
     fn from(e: cairn_core::Error) -> Self {
         use cairn_core::Error::*;
-        let code = match e {
-            NotFound(_) => StatusCode::NOT_FOUND,
-            Invalid(_) => StatusCode::BAD_REQUEST,
-            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        let (status, code) = match e {
+            NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            Invalid(_) => (StatusCode::BAD_REQUEST, "bad_request"),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
         };
-        ApiError(code, e.to_string())
+        ApiError {
+            status,
+            message: e.to_string(),
+            code,
+        }
     }
 }
 
@@ -1492,6 +1928,50 @@ impl From<cairn_core::Error> for ApiError {
 )]
 mod tests {
     use super::*;
+
+    /// P3.1: ApiError renders as `{ "error": "...", "error_code": "..." }`.
+    #[tokio::test]
+    async fn api_error_envelope_has_error_code() {
+        let resp = ApiError::not_found("no such memory").into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["error"], "no such memory");
+        assert_eq!(v["error_code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn api_error_envelope_codes_per_constructor() {
+        let cases: [(ApiError, StatusCode, &str); 5] = [
+            (ApiError::not_found("n"), StatusCode::NOT_FOUND, "not_found"),
+            (
+                ApiError::bad_request("b"),
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+            ),
+            (
+                ApiError::internal("i"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+            ),
+            (
+                ApiError::unauthenticated("u"),
+                StatusCode::UNAUTHORIZED,
+                "unauthenticated",
+            ),
+            (ApiError::forbidden("f"), StatusCode::FORBIDDEN, "forbidden"),
+        ];
+        for (err, expected_status, expected_code) in cases {
+            let resp = err.into_response();
+            assert_eq!(resp.status(), expected_status);
+            let body = axum::body::to_bytes(resp.into_body(), 4096).await.unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                v["error_code"], expected_code,
+                "wrong code for {expected_status}"
+            );
+        }
+    }
 
     #[test]
     fn content_type_maps_common_extensions() {
@@ -1512,6 +1992,75 @@ mod tests {
             .unwrap();
         let resp = static_handler("/".parse().unwrap(), req).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    /// P2.3: compression-demo returns all 4 modes + correct savings math.
+    #[tokio::test]
+    async fn compression_demo_returns_all_four_modes() {
+        let Some((state, dir)) = test_state() else {
+            return;
+        };
+        let file = dir.path().join("widget.rs");
+        std::fs::write(
+            &file,
+            "pub fn hi() -> u32 { 1 }\npub fn bye() -> u32 { 2 }\n",
+        )
+        .unwrap();
+
+        let resp = compression_demo(
+            axum::extract::State(state),
+            axum::extract::Query(CompressionDemoQuery {
+                path: file.to_string_lossy().into_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let demo = resp.0;
+        assert_eq!(demo.views.len(), 4);
+        let labels: Vec<&str> = demo.views.iter().map(|v| v.mode).collect();
+        assert!(labels.contains(&"auto"));
+        assert!(labels.contains(&"full"));
+        assert!(labels.contains(&"signatures"));
+        assert!(labels.contains(&"map"));
+
+        // full should be the baseline; signatures must be <= full tokens.
+        let full = demo.views.iter().find(|v| v.mode == "full").unwrap();
+        let sigs = demo.views.iter().find(|v| v.mode == "signatures").unwrap();
+        assert!(sigs.est_tokens <= full.est_tokens);
+
+        // best_mode must match the cheapest view.
+        let cheapest_tokens = demo.views.iter().map(|v| v.est_tokens).min().unwrap();
+        let best = demo
+            .views
+            .iter()
+            .find(|v| v.est_tokens == cheapest_tokens)
+            .unwrap();
+        assert_eq!(demo.best_mode, best.mode);
+    }
+
+    /// P2.3: an unsupported language falls back to Full for signatures/map.
+    #[tokio::test]
+    async fn compression_demo_falls_back_for_unsupported_language() {
+        let Some((state, dir)) = test_state() else {
+            return;
+        };
+        let file = dir.path().join("notes.txt");
+        std::fs::write(&file, "plain prose line 1\nplain prose line 2\n").unwrap();
+
+        let resp = compression_demo(
+            axum::extract::State(state),
+            axum::extract::Query(CompressionDemoQuery {
+                path: file.to_string_lossy().into_owned(),
+            }),
+        )
+        .await
+        .unwrap();
+        let demo = resp.0;
+        // For .txt, the engine falls through to Full for signatures + map. They should
+        // be roughly equal in tokens.
+        let full = demo.views.iter().find(|v| v.mode == "full").unwrap();
+        let sigs = demo.views.iter().find(|v| v.mode == "signatures").unwrap();
+        assert_eq!(sigs.est_tokens, full.est_tokens);
     }
 
     /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
@@ -1571,7 +2120,7 @@ mod tests {
         .await
         .err()
         .unwrap();
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1757,7 +2306,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2020,7 +2569,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2091,6 +2640,75 @@ mod tests {
         .unwrap()
         .0;
         assert_eq!(second["crystallized"], serde_json::json!(false));
+    }
+
+    /// P4.3: `/api/memory/gotcha` records a failure, and the second one on the same
+    /// topic auto-promotes to a `MemoryKind::Gotcha` memory.
+    #[tokio::test]
+    async fn gotcha_endpoint_promotes_on_second_failure() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let body1 = GotchaBody {
+            topic: "E0308 type mismatch".into(),
+            context: Some("src/foo.rs:10".into()),
+            refs: vec!["src/foo.rs".into()],
+            session_id: Some("s1".into()),
+        };
+        let r1 = record_gotcha(State(state.clone()), Json(body1.clone()))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(r1["promoted"], serde_json::json!(false));
+
+        // Second failure on the same topic - this is the one that promotes.
+        let body2 = GotchaBody {
+            topic: "E0308 type mismatch".into(),
+            context: Some("src/bar.rs:5".into()),
+            refs: vec!["src/bar.rs".into()],
+            session_id: Some("s2".into()),
+        };
+        let r2 = record_gotcha(State(state.clone()), Json(body2))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(r2["promoted"], serde_json::json!(true));
+        let memory = r2["memory"].as_object().expect("memory present");
+        assert_eq!(memory["kind"].as_str().expect("kind present"), "gotcha");
+        assert!(memory["content"]
+            .as_str()
+            .expect("content present")
+            .contains("E0308"));
+    }
+
+    /// P4.3: `/api/memory/gotcha/wakeup` returns the top clusters.
+    #[tokio::test]
+    async fn gotcha_wakeup_returns_top_clusters() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        // Two failures on topic-A, one on topic-B. A is the larger cluster.
+        for _ in 0..2 {
+            let _ = state.mem.record_failure(cairn_memory::FailureEvent::new(
+                "E0308 type mismatch",
+                "ctx",
+            ));
+        }
+        let _ = state
+            .mem
+            .record_failure(cairn_memory::FailureEvent::new("E0432 unresolved", "ctx"));
+
+        let resp = gotcha_wakeup(
+            State(state.clone()),
+            axum::extract::Query(GotchaWakeupQuery { limit: Some(5) }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let clusters = resp["clusters"].as_array().expect("clusters present");
+        assert_eq!(clusters.len(), 2);
+        assert_eq!(clusters[0]["size"].as_u64().unwrap(), 2);
+        assert_eq!(resp["total_failures"].as_u64().unwrap(), 3);
     }
 
     #[tokio::test]
@@ -2232,7 +2850,7 @@ mod tests {
             .await
             .err()
             .unwrap();
-        assert_eq!(err.0, StatusCode::NOT_FOUND);
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     // -- v0.5.0 Sprint 5: ledger ---------------------------------------------------------
@@ -2327,6 +2945,8 @@ mod tests {
                 q: "hybrid search test query".into(),
                 limit: Some(2),
                 rerank_depth: Some(20),
+                expand: None,
+                rerank: None,
             }),
         )
         .await
@@ -2339,6 +2959,100 @@ mod tests {
                 .any(|h| h.memory.content.contains("async runtime")),
             "MMR should diversify; got {:?}",
             resp.iter().map(|h| &h.memory.content).collect::<Vec<_>>()
+        );
+    }
+
+    /// P3.3: `expand=true` with the LLM gate off (default) short-circuits to the same
+    /// single-query path - so the response shape and contents are unchanged.
+    #[tokio::test]
+    async fn search_endpoint_expand_true_with_llm_disabled_falls_back() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        // LLMs are off by default - cfg.llm_consolidation.enabled is false.
+        assert!(!state.cfg.llm_consolidation.enabled);
+
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("P3.3 expand fallback test"))
+            .unwrap();
+        let resp = search_handler(
+            State(state.clone()),
+            axum::extract::Query(SearchQuery {
+                q: "P3.3 expand fallback".into(),
+                limit: Some(5),
+                rerank_depth: Some(20),
+                expand: Some(true),
+                rerank: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            resp.iter()
+                .any(|h| h.memory.content.contains("P3.3 expand fallback")),
+            "expand=true with LLM off should still find the memory"
+        );
+    }
+
+    /// P3.3: `expand=false` (or omitted) is the default path - regression test.
+    #[tokio::test]
+    async fn search_endpoint_expand_false_matches_default() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("P3.3 default path"))
+            .unwrap();
+        let resp = search_handler(
+            State(state.clone()),
+            axum::extract::Query(SearchQuery {
+                q: "P3.3 default".into(),
+                limit: Some(5),
+                rerank_depth: Some(20),
+                expand: Some(false),
+                rerank: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(!resp.is_empty());
+    }
+
+    /// P4.2: `?rerank=local` with the rerank gate off (default) falls back to plain
+    /// hybrid search - never errors, just bypasses the rerank.
+    #[tokio::test]
+    async fn search_endpoint_rerank_local_disabled_falls_back() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        // Default config has rerank.enabled = false.
+        assert!(!state.cfg.rerank.enabled);
+
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("P4.2 rerank fallback test"))
+            .unwrap();
+        let resp = search_handler(
+            State(state.clone()),
+            axum::extract::Query(SearchQuery {
+                q: "P4.2 rerank fallback".into(),
+                limit: Some(5),
+                rerank_depth: Some(20),
+                expand: None,
+                rerank: Some("local".into()),
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            resp.iter()
+                .any(|h| h.memory.content.contains("P4.2 rerank fallback")),
+            "rerank=local with config off should still find the memory"
         );
     }
 
