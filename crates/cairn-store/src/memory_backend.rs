@@ -13,7 +13,7 @@
 //! falls back to lexical ranking, identical to the offline behaviour of
 //! the production server when `CAIRN_DB_URL` is unset.
 
-use crate::db::{AuditRecord, StoreBackend};
+use crate::db::{AuditRecord, ProjectRecord, StoreBackend};
 use crate::Store;
 use cairn_core::{ContentHash, DeviceToken, Error, Memory, Result, TokenScope};
 use chrono::{DateTime, Utc};
@@ -47,6 +47,8 @@ struct Inner {
     next_audit_id: i64,
     /// (ts, kind, risk, path) append-only, newest first when read
     guard_events: Vec<(String, String, String, String)>,
+    /// id -> ProjectRecord (v0.8.0 Sprint 3)
+    projects: HashMap<String, ProjectRecord>,
 }
 
 impl MemoryBackend {
@@ -64,6 +66,7 @@ impl MemoryBackend {
                 audit: Vec::new(),
                 next_audit_id: 1,
                 guard_events: Vec::new(),
+                projects: HashMap::new(),
             }),
         }
     }
@@ -411,6 +414,38 @@ impl StoreBackend for MemoryBackend {
     fn max_audit_event_id(&self) -> Result<i64> {
         let g = self.inner.lock().map_err(poisoned)?;
         Ok(g.next_audit_id - 1)
+    }
+
+    fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        let now = Utc::now();
+        g.projects
+            .entry(id.to_string())
+            .and_modify(|p| {
+                p.name = name.to_string();
+                p.path = path.to_string();
+                p.last_active = now;
+            })
+            .or_insert_with(|| ProjectRecord {
+                id: id.to_string(),
+                name: name.to_string(),
+                path: path.to_string(),
+                first_seen: now,
+                last_active: now,
+            });
+        Ok(())
+    }
+
+    fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        let mut v: Vec<ProjectRecord> = g.projects.values().cloned().collect();
+        v.sort_by_key(|p| std::cmp::Reverse(p.last_active));
+        Ok(v)
+    }
+
+    fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        Ok(g.projects.get(id).cloned())
     }
 }
 

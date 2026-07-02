@@ -16,6 +16,7 @@ local = ["cairn-embed/local"]
 [dependencies]
 cairn-core.workspace = true
 cairn-embed.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true

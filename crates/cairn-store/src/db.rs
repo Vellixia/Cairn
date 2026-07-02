@@ -7,6 +7,7 @@
 use crate::blob::BlobStore;
 use cairn_core::{Config, DeviceToken, Memory, Result};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Tombstone value written by [`Store::reset_meta`]. SurrealDB rows are mutable, but Cairn keeps
@@ -128,6 +129,35 @@ pub(crate) trait StoreBackend: Send + Sync {
         let _ = entries;
         Ok(())
     }
+
+    // -- projects (v0.8.0 - Sprint 3) -----------------------------------------------------
+    /// Create or update a project's `last_active` timestamp (and `name`/`path`, in case they
+    /// changed - e.g. a repo renamed or moved). `first_seen` is preserved across upserts.
+    fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
+        let _ = (id, name, path);
+        Ok(())
+    }
+    /// All known projects, most-recently-active first.
+    fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        Ok(Vec::new())
+    }
+    /// A single project by id.
+    fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        let _ = id;
+        Ok(None)
+    }
+}
+
+/// A registered project (v0.8.0 Sprint 3): the repos/directories an agent has run in,
+/// auto-detected by the `SessionStart` hook (see `cairn-client`'s `project::detect_project`)
+/// and used to power a "which projects has this agent touched" dashboard view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRecord {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub first_seen: DateTime<Utc>,
+    pub last_active: DateTime<Utc>,
 }
 
 /// A single audit event read from durable storage.
@@ -306,6 +336,19 @@ impl Store {
         entries: &[(String, Option<String>, Option<String>)],
     ) -> Result<()> {
         self.backend.record_access_batch(entries)
+    }
+
+    /// Create or update a project's `last_active` timestamp (v0.8.0 Sprint 3).
+    pub fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
+        self.backend.upsert_project(id, name, path)
+    }
+    /// All known projects, most-recently-active first.
+    pub fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        self.backend.list_projects()
+    }
+    /// A single project by id.
+    pub fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        self.backend.get_project(id)
     }
 
     /// Mark `key` as deleted by writing the tombstone sentinel (rather than physically removing

@@ -7,6 +7,7 @@
 //! Hooks must never break the agent: errors go to stderr, exit code is
 //! always 0.
 
+use crate::project::{current_dir_str, detect_project};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::Read;
@@ -33,13 +34,31 @@ fn run_inner(event: &str) -> Result<()> {
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(input.trim()).unwrap_or(Value::Null);
 
-    let rc = RemoteClient::new(&server, &token);
+    // v0.8.0 Sprint 3: detect the project on every hook invocation (each `cairn hook <event>`
+    // call is its own process - there's no in-memory state to carry a project id across
+    // SessionStart and later events), so every request this process makes carries
+    // `X-Cairn-Project` and gets scoped recall/remember for free (Sprint 2's scope model).
+    let (project_id, project_name) = detect_project();
+    let mut rc = RemoteClient::new(&server, &token);
+    rc.project_id = project_id.clone();
+
+    if event == "SessionStart" {
+        if let Some(pid) = &project_id {
+            let _ = rc.post("/api/projects/upsert").send_json(json!({
+                "id": pid,
+                "name": project_name,
+                "path": current_dir_str(),
+            }));
+        }
+    }
+
     rc.dispatch(event, &payload)
 }
 
 struct RemoteClient {
     server: String,
     token: String,
+    project_id: Option<String>,
 }
 
 impl RemoteClient {
@@ -47,17 +66,27 @@ impl RemoteClient {
         Self {
             server: server.trim_end_matches('/').to_string(),
             token: token.to_string(),
+            project_id: None,
         }
     }
 
     fn get(&self, path: &str) -> ureq::Request {
-        ureq::get(&format!("{}{}", self.server, path))
-            .set("Authorization", &format!("Bearer {}", self.token))
+        let req = ureq::get(&format!("{}{}", self.server, path))
+            .set("Authorization", &format!("Bearer {}", self.token));
+        self.with_project_header(req)
     }
 
     fn post(&self, path: &str) -> ureq::Request {
-        ureq::post(&format!("{}{}", self.server, path))
-            .set("Authorization", &format!("Bearer {}", self.token))
+        let req = ureq::post(&format!("{}{}", self.server, path))
+            .set("Authorization", &format!("Bearer {}", self.token));
+        self.with_project_header(req)
+    }
+
+    fn with_project_header(&self, req: ureq::Request) -> ureq::Request {
+        match &self.project_id {
+            Some(pid) => req.set("X-Cairn-Project", pid),
+            None => req,
+        }
     }
 
     fn dispatch(&self, event: &str, payload: &Value) -> Result<()> {

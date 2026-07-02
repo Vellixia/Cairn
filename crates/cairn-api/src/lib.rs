@@ -43,7 +43,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, patch, post},
     Json, Router,
 };
 use cairn_assemble::{Assembler, AssemblyReport};
@@ -253,6 +253,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/crystallize", post(crystallize))
         .route("/api/memory/graph", get(memory_graph))
         .route("/api/memory/architecture-report", get(architecture_report))
+        .route("/api/projects/upsert", patch(upsert_project))
+        .route("/api/projects", get(list_projects))
+        .route("/api/projects/:id", get(get_project))
         .route("/api/memory/heatmap", get(memory_heatmap))
         .route("/api/guard/verify", post(verify))
         .route("/api/guard/anchor", get(get_anchor).post(post_anchor))
@@ -977,6 +980,49 @@ async fn recall(
         OrgId::default(),
         &scope,
     )?))
+}
+
+/// v0.8.0 Sprint 3: the project registry populated by the `SessionStart` hook's auto-detection
+/// (`cairn-client`'s `project::detect_project`), so the dashboard can show which repos an agent
+/// has actually worked in. Registration is independent of scope isolation itself - Sprint 2's
+/// recall filtering only needs the `X-Cairn-Project` header, not a matching registry row.
+#[derive(Deserialize)]
+struct ProjectUpsertBody {
+    id: String,
+    name: String,
+    #[serde(default)]
+    path: String,
+}
+
+/// PATCH `/api/projects/upsert` - create or update a project's `last_active` timestamp.
+async fn upsert_project(
+    State(s): State<AppState>,
+    Json(body): Json<ProjectUpsertBody>,
+) -> Result<Json<cairn_store::ProjectRecord>, ApiError> {
+    s.store.upsert_project(&body.id, &body.name, &body.path)?;
+    let project = s
+        .store
+        .get_project(&body.id)?
+        .ok_or_else(|| ApiError::not_found("project vanished immediately after upsert"))?;
+    Ok(Json(project))
+}
+
+/// GET `/api/projects` - every known project, most-recently-active first.
+async fn list_projects(
+    State(s): State<AppState>,
+) -> Result<Json<Vec<cairn_store::ProjectRecord>>, ApiError> {
+    Ok(Json(s.store.list_projects()?))
+}
+
+/// GET `/api/projects/:id` - a single project's details.
+async fn get_project(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<cairn_store::ProjectRecord>, ApiError> {
+    match s.store.get_project(&id)? {
+        Some(p) => Ok(Json(p)),
+        None => Err(ApiError::not_found("no such project")),
+    }
 }
 
 #[derive(Deserialize)]

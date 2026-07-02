@@ -36,3 +36,7 @@ DEFINE TABLE IF NOT EXISTS audit_counter SCHEMALESS;
 -- table without bound.
 DEFINE TABLE IF NOT EXISTS access_log SCHEMALESS;
 DEFINE INDEX IF NOT EXISTS access_log_ts ON access_log FIELDS ts;
+
+-- v0.8.0 Sprint 3: registered projects, auto-detected by the SessionStart hook.
+DEFINE TABLE IF NOT EXISTS project SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS project_last_active ON project FIELDS last_active;

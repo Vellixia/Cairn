@@ -16,6 +16,7 @@ use clap::{Parser, Subcommand};
 mod doctor;
 mod hook;
 mod onboard;
+mod project;
 mod reset;
 mod rules;
 mod setup;

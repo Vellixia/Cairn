@@ -25,7 +25,7 @@
 //! Vector search runs through a `DEFINE INDEX ... HNSW` index over `memory.embedding` (see
 //! `schema.surql`), queried with the `<|k,ef|>` approximate-nearest-neighbor operator.
 
-use crate::db::{AuditRecord, StoreBackend};
+use crate::db::{AuditRecord, ProjectRecord, StoreBackend};
 use cairn_core::{
     Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, OrgId, Result,
     ScopeType, TokenScope,
@@ -712,6 +712,34 @@ impl StoreBackend for SurrealStore {
         self.q("INSERT INTO access_log $rows", json!({ "rows": rows }))?;
         Ok(())
     }
+
+    fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
+        let now = ts(Utc::now());
+        // `first_seen ?? $now` preserves the original value across repeated upserts (the
+        // field is absent on the very first upsert, when `??`'s left side is NONE).
+        self.q(
+            "UPSERT type::record('project', $id) SET \
+             name = $name, path = $path, last_active = $now, first_seen = (first_seen ?? $now)",
+            json!({ "id": id, "name": name, "path": path, "now": now }),
+        )?;
+        Ok(())
+    }
+
+    fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        let rows = self.read_rows(
+            "SELECT *, record::id(id) AS rid FROM project ORDER BY last_active DESC",
+            json!({}),
+        )?;
+        Ok(rows.iter().map(project_from_row).collect())
+    }
+
+    fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        let rows = self.read_rows(
+            "SELECT *, record::id(id) AS rid FROM type::record('project', $id)",
+            json!({ "id": id }),
+        )?;
+        Ok(rows.first().map(project_from_row))
+    }
 }
 
 // - helpers ---------------------------------------------------------------------------------
@@ -755,6 +783,16 @@ fn parse_ts(s: &str) -> DateTime<Utc> {
 
 fn uuid_simple() -> String {
     uuid::Uuid::new_v4().simple().to_string()
+}
+
+fn project_from_row(m: &Map<String, Json>) -> ProjectRecord {
+    ProjectRecord {
+        id: get_str(m, "rid"),
+        name: get_str(m, "name"),
+        path: get_str(m, "path"),
+        first_seen: parse_ts(&get_str(m, "first_seen")),
+        last_active: parse_ts(&get_str(m, "last_active")),
+    }
 }
 
 fn get_str(m: &Map<String, Json>, k: &str) -> String {

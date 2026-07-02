@@ -1075,6 +1075,7 @@ dependencies = [
  "cairn-core",
  "cairn-embed",
  "chrono",
+ "serde",
  "serde_json",
  "surrealdb",
  "tempfile",

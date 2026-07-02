@@ -70,6 +70,7 @@ pub fn run(opts: DoctorOptions) -> Diagnosis {
     checks.push(check_data_dir(&cfg, opts.fix));
     checks.push(check_remote_server());
     checks.push(check_agents());
+    checks.push(check_project());
     checks.push(check_config_health());
 
     finalize(checks)
@@ -201,6 +202,24 @@ fn check_agents() -> Check {
             ok: true,
             detail: format!("detected: {}", found.join(", ")),
         }
+    }
+}
+
+/// v0.8.0 Sprint 3: show what the `SessionStart` hook would auto-detect as the current
+/// project, using the same `detect_project()` the hook itself calls.
+fn check_project() -> Check {
+    let (id, name) = crate::project::detect_project();
+    match id {
+        Some(id) => Check {
+            name: "project",
+            ok: true,
+            detail: format!("{name} (hash: {id})"),
+        },
+        None => Check {
+            name: "project",
+            ok: true,
+            detail: "(no project detected - using global scope)".into(),
+        },
     }
 }
 
