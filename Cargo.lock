@@ -917,6 +917,7 @@ version = "0.7.1"
 dependencies = [
  "cairn-core",
  "cairn-rerank",
+ "cairn-share",
  "cairn-store",
  "chrono",
  "serde",

@@ -41,6 +41,13 @@ fn run_inner(event: &str) -> Result<()> {
     let (project_id, project_name) = detect_project();
     let mut rc = RemoteClient::new(&server, &token);
     rc.project_id = project_id.clone();
+    // v0.8.0 Sprint 5: every hook JSON payload carries the agent's session id - forward it as
+    // `X-Cairn-Session` so `SessionEnd`'s session-summary call (and any future session-scoped
+    // request) hits the right session without a second round-trip to look it up.
+    rc.session_id = payload
+        .get("session_id")
+        .and_then(Value::as_str)
+        .map(String::from);
 
     if event == "SessionStart" {
         if let Some(pid) = &project_id {
@@ -59,6 +66,7 @@ struct RemoteClient {
     server: String,
     token: String,
     project_id: Option<String>,
+    session_id: Option<String>,
 }
 
 impl RemoteClient {
@@ -67,24 +75,29 @@ impl RemoteClient {
             server: server.trim_end_matches('/').to_string(),
             token: token.to_string(),
             project_id: None,
+            session_id: None,
         }
     }
 
     fn get(&self, path: &str) -> ureq::Request {
         let req = ureq::get(&format!("{}{}", self.server, path))
             .set("Authorization", &format!("Bearer {}", self.token));
-        self.with_project_header(req)
+        self.with_scope_headers(req)
     }
 
     fn post(&self, path: &str) -> ureq::Request {
         let req = ureq::post(&format!("{}{}", self.server, path))
             .set("Authorization", &format!("Bearer {}", self.token));
-        self.with_project_header(req)
+        self.with_scope_headers(req)
     }
 
-    fn with_project_header(&self, req: ureq::Request) -> ureq::Request {
-        match &self.project_id {
+    fn with_scope_headers(&self, req: ureq::Request) -> ureq::Request {
+        let req = match &self.project_id {
             Some(pid) => req.set("X-Cairn-Project", pid),
+            None => req,
+        };
+        match &self.session_id {
+            Some(sid) => req.set("X-Cairn-Session", sid),
             None => req,
         }
     }
@@ -173,6 +186,11 @@ impl RemoteClient {
             }
             "SessionEnd" => {
                 let _ = self.post("/api/memory/consolidate").send_json(json!({}));
+                // v0.8.0 Sprint 5: ask the server to synthesize this session's memories into a
+                // project-scoped summary. `X-Cairn-Session`/`X-Cairn-Project` (set above) tell
+                // the server which session/project - no body needed. Best-effort like every
+                // other hook call: a disabled LLM or a network hiccup just skips it.
+                let _ = self.post("/api/memory/session-summary").call();
             }
             _ => {
                 // PostToolUse and other events are not proxied in remote-only mode.

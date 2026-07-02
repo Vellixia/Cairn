@@ -81,6 +81,8 @@ pub fn mock_memory_at(
         applies_to: vec![],
         scope_type: cairn_core::ScopeType::Global,
         scope_id: None,
+        promo_score: 0.0,
+        promo_locked: false,
         created_at: when,
         updated_at: when,
     }

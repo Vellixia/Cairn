@@ -151,6 +151,21 @@ pub(crate) trait StoreBackend: Send + Sync {
         let _ = before;
         Ok(0)
     }
+    /// Count `access_log` rows for `memory_id` from any project other than `exclude_project_id`
+    /// since `since` (v0.8.0 Sprint 5 - the promotion-scoring "cross-project popularity"
+    /// signal: a `Project`-scoped memory that keeps getting hit from *other* projects is a
+    /// candidate for `Global` promotion). Same hermetic-backend boundary as
+    /// `record_access_batch`/`prune_access_log_before` - the in-memory backend never stores
+    /// access-log rows, so this is `0` there by design, not an oversight.
+    fn count_cross_project_access(
+        &self,
+        memory_id: &str,
+        exclude_project_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64> {
+        let _ = (memory_id, exclude_project_id, since);
+        Ok(0)
+    }
 
     // -- projects (v0.8.0 - Sprint 3) -----------------------------------------------------
     /// Create or update a project's `last_active` timestamp (and `name`/`path`, in case they
@@ -372,6 +387,16 @@ impl Store {
     pub fn prune_access_log_before(&self, before: DateTime<Utc>) -> Result<u64> {
         self.backend.prune_access_log_before(before)
     }
+    /// Count cross-project `access_log` hits for a memory (v0.8.0 Sprint 5).
+    pub fn count_cross_project_access(
+        &self,
+        memory_id: &str,
+        exclude_project_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64> {
+        self.backend
+            .count_cross_project_access(memory_id, exclude_project_id, since)
+    }
 
     /// Create or update a project's `last_active` timestamp (v0.8.0 Sprint 3).
     pub fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
@@ -547,6 +572,8 @@ mod tests {
             applies_to: vec![],
             scope_type: cairn_core::ScopeType::Global,
             scope_id: None,
+            promo_score: 0.0,
+            promo_locked: false,
             created_at: updated,
             updated_at: updated,
         }

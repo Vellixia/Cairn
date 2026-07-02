@@ -241,6 +241,8 @@ impl StoreBackend for SurrealStore {
                 "applies_to": m.applies_to,
                 "scope_type": m.scope_type.as_str(),
                 "scope_id": m.scope_id.clone().unwrap_or_default(),
+                "promo_score": m.promo_score,
+                "promo_locked": m.promo_locked,
                 "created_at": ts(m.created_at),
                 "updated_at": ts(m.updated_at),
                 "embedding": embedding,
@@ -740,6 +742,20 @@ impl StoreBackend for SurrealStore {
         Ok(rows.len() as u64)
     }
 
+    fn count_cross_project_access(
+        &self,
+        memory_id: &str,
+        exclude_project_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64> {
+        let rows = self.read_rows(
+            "SELECT count() AS c FROM access_log WHERE memory_id = $mid \
+             AND project_id != $exclude AND project_id != '' AND ts > $since GROUP ALL",
+            json!({ "mid": memory_id, "exclude": exclude_project_id, "since": ts(since) }),
+        )?;
+        Ok(rows.first().map(|r| get_i64(r, "c")).unwrap_or(0))
+    }
+
     fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
         let now = ts(Utc::now());
         // `first_seen ?? $now` preserves the original value across repeated upserts (the
@@ -878,6 +894,8 @@ fn memory_from_props(m: &Map<String, Json>) -> Memory {
                 Some(sid)
             }
         },
+        promo_score: get_f64(m, "promo_score") as f32,
+        promo_locked: get_bool(m, "promo_locked"),
         created_at: parse_ts(&get_str(m, "created_at")),
         updated_at: parse_ts(&get_str(m, "updated_at")),
     }
@@ -1030,6 +1048,8 @@ mod live {
             applies_to: vec![],
             scope_type: ScopeType::Global,
             scope_id: None,
+            promo_score: 0.0,
+            promo_locked: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

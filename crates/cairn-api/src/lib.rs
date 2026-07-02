@@ -255,6 +255,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/:id", post(edit_memory).delete(delete_memory))
         .route("/api/memory/:id/pin", post(pin_memory))
         .route("/api/memory/:id/reinforce", post(reinforce_memory))
+        .route("/api/memory/:id/promote", post(promote_memory))
+        .route("/api/memory/:id/dismiss-promotion", post(dismiss_promotion))
+        .route(
+            "/api/memory/promotion-candidates",
+            get(promotion_candidates),
+        )
+        .route("/api/memory/session-summary", post(session_summary))
         .route("/api/memory/crystallize", post(crystallize))
         .route("/api/memory/graph", get(memory_graph))
         .route("/api/memory/architecture-report", get(architecture_report))
@@ -1255,6 +1262,64 @@ async fn reinforce_memory(
 struct CrystallizeBody {
     #[serde(default)]
     session_id: Option<String>,
+}
+
+/// GET `/api/memory/promotion-candidates` - v0.8.0 Sprint 5: `Project`-scoped memories whose
+/// `promo_score` (written by the `llm-intelligence` cron job) falls in the human-review band.
+async fn promotion_candidates(State(s): State<AppState>) -> Result<Json<Vec<Memory>>, ApiError> {
+    Ok(Json(s.mem.promotion_candidates()?))
+}
+
+/// POST `/api/memory/:id/promote` - v0.8.0 Sprint 5: approve a promotion candidate. Moves the
+/// memory to `Global` scope and locks it against further promotion scoring.
+async fn promote_memory(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    if s.mem.promote_memory(&id)? {
+        crate::events::publish_memory(&s.events, "promoted", &id);
+        Ok(Json(s.mem.get(&id)?.unwrap()))
+    } else {
+        Err(ApiError::not_found("no such memory"))
+    }
+}
+
+/// POST `/api/memory/:id/dismiss-promotion` - v0.8.0 Sprint 5: "don't ask again". Locks the
+/// memory against further promotion scoring/suggestions without changing its scope.
+async fn dismiss_promotion(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    if s.mem.dismiss_promotion(&id)? {
+        Ok(Json(s.mem.get(&id)?.unwrap()))
+    } else {
+        Err(ApiError::not_found("no such memory"))
+    }
+}
+
+/// POST `/api/memory/session-summary` - v0.8.0 Sprint 5: called by the `SessionEnd` hook.
+/// Summarizes the current session's memories (from `X-Cairn-Session`) into one `Project`-scoped
+/// `Episodic` note via the LLM. A safe no-op (`{"summarized": false}`) when the LLM is disabled,
+/// there's no session id, or the session has no memories yet - the hook never treats this as an
+/// error either way.
+async fn session_summary(
+    State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
+) -> Result<Json<Value>, ApiError> {
+    let Some(session_id) = scope.session_id else {
+        return Ok(Json(json!({ "summarized": false })));
+    };
+    match s.mem.synthesize_session(
+        &s.cfg.llm_consolidation,
+        &session_id,
+        scope.project_id,
+    )? {
+        Some(m) => {
+            crate::events::publish_memory(&s.events, "created", &m.id);
+            Ok(Json(json!({ "summarized": true, "memory": m })))
+        }
+        None => Ok(Json(json!({ "summarized": false }))),
+    }
 }
 
 /// POST `/api/memory/crystallize` - promote working-tier memories into a semantic crystal.

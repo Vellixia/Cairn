@@ -262,6 +262,10 @@ CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 | `CAIRN_DECAY_PERIOD_DAYS` | `30` | Confidence half-life for the weekly `memory-decay` cron job (v0.8.0) |
 | `CAIRN_ACCESS_LOG_RETENTION_DAYS` | `90` | How long `access_log` rows are kept before the monthly `access-log-prune` cron job deletes them (v0.8.0) |
 | `CAIRN_CRON_ENABLED` | `1` | Whether the in-process cron scheduler runs at all (v0.8.0). Set `0` on a horizontally-scaled deployment where only one replica should run cron. |
+| `CAIRN_LLM_CONSOLIDATION` | `0` | Master gate for every LLM-driven background job: consolidation, query expansion, and (v0.8.0) the daily `llm-intelligence` cron job (concept extraction, contradiction detection, promotion scoring, session synthesis) |
+| `CAIRN_LLM_CONSOLIDATION_URL` | `http://localhost:11434/v1/chat/completions` | OpenAI-compatible chat completion endpoint |
+| `CAIRN_LLM_CONSOLIDATION_MODEL` | `llama3.2` | Model name sent in the chat completion request |
+| `CAIRN_LLM_CONSOLIDATION_API_KEY` | (none) | API key for hosted providers (unset = no `Authorization` header, e.g. local Ollama) |
 | `CAIRN_SERVER` | (none) | Remote cairn-server URL for `cairn mcp` proxy mode |
 | `CAIRN_TOKEN` | (none) | Bearer token for remote proxy mode |
 

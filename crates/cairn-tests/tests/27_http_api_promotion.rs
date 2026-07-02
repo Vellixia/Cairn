@@ -1,7 +1,12 @@
-//! 26 — cairn-api `/api/cron/*` HTTP routes (v0.8.0 Sprint 4), mounted in-process via
-//! tower::oneshot. The manual-trigger endpoint calls `cron::run_job_now` directly (the same
-//! function the scheduler's own ticks use) - no `JobScheduler` needs to be running for these
-//! tests, only the HTTP layer + an in-memory store.
+//! 27 — cairn-api `/api/memory/promotion-candidates`, `/api/memory/:id/promote`,
+//! `/api/memory/:id/dismiss-promotion`, and `/api/memory/session-summary` (v0.8.0 Sprint 5),
+//! mounted in-process via tower::oneshot.
+//!
+//! `promo_score`/`promo_locked` are cron/LLM-computed only - there's no HTTP way to set them
+//! directly (by design, same as `access_log`), so tests that need a memory already in a given
+//! promotion state seed it through the `Arc<Store>` returned by `state()`, then exercise the
+//! HTTP surface against it. This mirrors `02_http_api_memory.rs`'s use of the store handle for
+//! post-write assertions, just used for setup instead.
 //!
 //! Hermetic: no network, no live database, no docker. In-memory `cairn_store::Store` +
 //! `cairn_api::router` (state from `AppState::with_store`).
@@ -9,13 +14,13 @@
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cairn_api::{router, AppState};
-use cairn_core::Config;
+use cairn_core::{Config, Memory, MemoryKind, MemoryTier, NewMemory, ScopeType};
 use cairn_store::Store;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn state() -> Option<(axum::Router, tempfile::TempDir)> {
+fn state() -> Option<(axum::Router, Arc<Store>, tempfile::TempDir)> {
     let dir = tempfile::tempdir().ok()?;
     let blobs = dir.path().join("blobs");
     let store = Arc::new(Store::open_in_memory(blobs).ok()?);
@@ -54,8 +59,26 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         access_log_retention_days: 90,
         cron_enabled: true,
     };
-    let state = AppState::with_store(&cfg, store).ok()?;
-    Some((router(state), dir))
+    let state = AppState::with_store(&cfg, store.clone()).ok()?;
+    Some((router(state), store, dir))
+}
+
+/// Seed a `Project`-scoped memory at a given `promo_score`/`promo_locked`, directly through the
+/// store (see module docs for why).
+fn seed_candidate(store: &Store, content: &str, promo_score: f32, promo_locked: bool) -> Memory {
+    let mut m = NewMemory {
+        content: content.to_string(),
+        kind: Some(MemoryKind::Fact),
+        tier: Some(MemoryTier::Semantic),
+        scope_type: ScopeType::Project,
+        scope_id: Some("proj-alpha".to_string()),
+        ..Default::default()
+    }
+    .into_memory();
+    m.promo_score = promo_score;
+    m.promo_locked = promo_locked;
+    store.insert_memory(&m).expect("seed candidate");
+    m
 }
 
 async fn request_json(
@@ -127,7 +150,6 @@ async fn post_json(
     (status, json, headers)
 }
 
-/// Setup admin + login -> return the session cookie value.
 async fn login_cookie(app: axum::Router) -> String {
     let (status, json, _) = post_json(
         app.clone(),
@@ -160,120 +182,54 @@ async fn login_cookie(app: axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn list_jobs_shows_all_four_with_no_prior_run() {
-    let Some((app, _dir)) = state() else { return };
+async fn candidates_lists_only_the_review_band_and_excludes_locked() {
+    let Some((app, store, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
-    let (status, body, _) = request_json(app, "GET", "/api/cron/jobs", Some(&cookie)).await;
-    assert!(status.is_success());
-    let jobs = body.as_array().expect("array");
-    assert_eq!(
-        jobs.len(),
-        4,
-        "session-gc, memory-decay, access-log-prune, llm-intelligence"
-    );
-    let names: Vec<&str> = jobs.iter().filter_map(|j| j["name"].as_str()).collect();
-    assert!(names.contains(&"session-gc"));
-    assert!(names.contains(&"memory-decay"));
-    assert!(names.contains(&"access-log-prune"));
-    assert!(names.contains(&"llm-intelligence"));
-    for j in jobs {
-        assert!(j["last_run"].is_null(), "no job has run yet");
-    }
-}
-
-#[tokio::test]
-async fn llm_intelligence_job_is_a_noop_when_llm_disabled() {
-    let Some((app, _dir)) = state() else { return };
-    let cookie = login_cookie(app.clone()).await;
+    let in_band = seed_candidate(&store, "in the review band", 0.80, false);
+    seed_candidate(&store, "below the band", 0.50, false);
+    seed_candidate(&store, "in band but locked", 0.85, true);
 
     let (status, body, _) = request_json(
-        app,
-        "POST",
-        "/api/cron/run/llm-intelligence",
-        Some(&cookie),
-    )
-    .await;
-    assert!(status.is_success(), "got {status} body={body}");
-    assert_eq!(body["job"], "llm-intelligence");
-    assert_eq!(body["outcome"], "ok");
-    assert!(body["detail"]
-        .as_str()
-        .unwrap()
-        .contains("CAIRN_LLM_CONSOLIDATION disabled"));
-}
-
-#[tokio::test]
-async fn manual_trigger_runs_the_job_and_records_history() {
-    let Some((app, _dir)) = state() else { return };
-    let cookie = login_cookie(app.clone()).await;
-
-    let (status, body, _) = request_json(
-        app.clone(),
-        "POST",
-        "/api/cron/run/session-gc",
-        Some(&cookie),
-    )
-    .await;
-    assert!(status.is_success(), "got {status} body={body}");
-    assert_eq!(body["job"], "session-gc");
-    assert_eq!(body["outcome"], "ok");
-
-    let (status, history, _) =
-        request_json(app.clone(), "GET", "/api/cron/history", Some(&cookie)).await;
-    assert!(status.is_success());
-    let runs = history.as_array().expect("array");
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0]["job"], "session-gc");
-
-    // GET /api/cron/jobs should now show the last_run for session-gc.
-    let (_, jobs, _) = request_json(app, "GET", "/api/cron/jobs", Some(&cookie)).await;
-    let session_gc = jobs
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|j| j["name"] == "session-gc")
-        .expect("session-gc listed");
-    assert!(!session_gc["last_run"].is_null());
-}
-
-#[tokio::test]
-async fn history_filters_by_job() {
-    let Some((app, _dir)) = state() else { return };
-    let cookie = login_cookie(app.clone()).await;
-
-    for job in ["session-gc", "memory-decay", "session-gc"] {
-        let (status, _, _) = request_json(
-            app.clone(),
-            "POST",
-            &format!("/api/cron/run/{job}"),
-            Some(&cookie),
-        )
-        .await;
-        assert!(status.is_success());
-    }
-
-    let (status, filtered, _) = request_json(
         app,
         "GET",
-        "/api/cron/history?job=session-gc",
+        "/api/memory/promotion-candidates",
         Some(&cookie),
     )
     .await;
     assert!(status.is_success());
-    let runs = filtered.as_array().expect("array");
-    assert_eq!(runs.len(), 2);
-    assert!(runs.iter().all(|r| r["job"] == "session-gc"));
+    let list = body.as_array().expect("array");
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["id"], in_band.id);
 }
 
 #[tokio::test]
-async fn triggering_an_unknown_job_returns_404() {
-    let Some((app, _dir)) = state() else { return };
+async fn promote_moves_to_global_and_locks() {
+    let Some((app, store, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+    let candidate = seed_candidate(&store, "promotable fact", 0.80, false);
+
+    let (status, body, _) = request_json(
+        app,
+        "POST",
+        &format!("/api/memory/{}/promote", candidate.id),
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "got {status} body={body}");
+    assert_eq!(body["scope_type"], "global");
+    assert!(body["scope_id"].is_null());
+    assert_eq!(body["promo_locked"], true);
+}
+
+#[tokio::test]
+async fn promote_unknown_id_returns_404() {
+    let Some((app, _store, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
     let (status, _, _) = request_json(
         app,
         "POST",
-        "/api/cron/run/does-not-exist",
+        "/api/memory/does-not-exist/promote",
         Some(&cookie),
     )
     .await;
@@ -281,8 +237,53 @@ async fn triggering_an_unknown_job_returns_404() {
 }
 
 #[tokio::test]
-async fn cron_routes_require_authentication() {
-    let Some((app, _dir)) = state() else { return };
-    let (status, _, _) = request_json(app, "GET", "/api/cron/jobs", None).await;
+async fn dismiss_promotion_locks_without_changing_scope() {
+    let Some((app, store, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+    let candidate = seed_candidate(&store, "dismissable candidate", 0.80, false);
+
+    let (status, body, _) = request_json(
+        app.clone(),
+        "POST",
+        &format!("/api/memory/{}/dismiss-promotion", candidate.id),
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "got {status} body={body}");
+    assert_eq!(body["scope_type"], "project");
+    assert_eq!(body["promo_locked"], true);
+
+    // Dismissed candidates no longer show up in the review list.
+    let (_, list, _) = request_json(
+        app,
+        "GET",
+        "/api/memory/promotion-candidates",
+        Some(&cookie),
+    )
+    .await;
+    assert!(list.as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn session_summary_is_a_safe_noop_with_llm_disabled() {
+    let Some((app, _store, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    let (status, body, _) = request_json(
+        app,
+        "POST",
+        "/api/memory/session-summary",
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "got {status} body={body}");
+    assert_eq!(body["summarized"], false);
+}
+
+#[tokio::test]
+async fn promotion_routes_require_authentication() {
+    let Some((app, _store, _dir)) = state() else { return };
+    let (status, _, _) =
+        request_json(app, "GET", "/api/memory/promotion-candidates", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

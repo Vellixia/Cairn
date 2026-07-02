@@ -6,7 +6,8 @@
 //! retrieval builds on this foundation.
 
 use cairn_core::{
-    ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result, ScopeCtx, ScopeType,
+    ContentHash, LlmConsolidationConfig, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result,
+    ScopeCtx, ScopeType,
 };
 use cairn_store::Store;
 use chrono::{DateTime, Duration, Utc};
@@ -16,6 +17,7 @@ use std::sync::Arc;
 
 pub mod llm_consolidator;
 pub use llm_consolidator::{apply_decay, Insight, LlmConsolidator, ProceduralStep, SemanticFact};
+mod llm_intelligence;
 pub mod analysis;
 pub use analysis::{generate_architecture_report, ArchitectureReport, BridgeEntry, GodNodeEntry};
 pub mod followup_tracker;
@@ -459,6 +461,219 @@ impl MemoryEngine {
             }
         }
         Ok(decayed)
+    }
+
+    /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 1: fill in `concepts` for any memory
+    /// that doesn't have any yet. A no-op when the LLM is disabled - `concepts` simply stays
+    /// empty, exactly like a pre-Sprint-5 install. Returns the number of memories updated.
+    pub fn run_concept_extraction(&self, llm_cfg: &LlmConsolidationConfig) -> Result<usize> {
+        if !llm_cfg.enabled {
+            return Ok(0);
+        }
+        let mut updated = 0;
+        for m in self.store.all_memories()? {
+            if !m.concepts.is_empty() {
+                continue;
+            }
+            let concepts = llm_intelligence::extract_concepts_via_llm(llm_cfg, &m.content);
+            if concepts.is_empty() {
+                continue;
+            }
+            if self
+                .store
+                .edit_memory(&m.id, None, None, Some(concepts), None)?
+            {
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
+    /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 2: for every not-yet-`suspicious`
+    /// memory, pull its top-10 semantically similar neighbors (`Store::semantic_recall` - a
+    /// no-op when the backend has no vector index, e.g. the hermetic in-memory backend used by
+    /// tests) and ask the LLM whether any of them directly contradicts it. On the first
+    /// contradiction found, records the edge and flags `suspicious`, then moves on - one
+    /// confirmed contradiction is enough to surface the memory for review; there's no need to
+    /// keep spending LLM calls looking for more. Returns the number of memories flagged.
+    pub fn run_contradiction_detection(&self, llm_cfg: &LlmConsolidationConfig) -> Result<usize> {
+        if !llm_cfg.enabled {
+            return Ok(0);
+        }
+        let mut flagged = 0;
+        for m in self.store.all_memories()? {
+            if m.suspicious {
+                continue;
+            }
+            let Some(similar) = self.store.semantic_recall(&m.content, 10)? else {
+                continue;
+            };
+            for candidate in similar {
+                if candidate.id == m.id {
+                    continue;
+                }
+                if llm_intelligence::check_contradiction_via_llm(
+                    llm_cfg,
+                    &m.content,
+                    &candidate.content,
+                ) {
+                    let mut updated = m.clone();
+                    updated.contradicts.push(candidate.id);
+                    updated.suspicious = true;
+                    updated.updated_at = Utc::now();
+                    self.store.upsert_memory(&updated)?;
+                    flagged += 1;
+                    break;
+                }
+            }
+        }
+        Ok(flagged)
+    }
+
+    /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 3: score every `Project`-scoped,
+    /// not-yet-`promo_locked` `Semantic`/`Procedural` memory for how promotion-worthy it is.
+    /// Deliberately does **not** auto-promote anything, even at a very high score - that's
+    /// Sprint 8's "autopilot" job (`CAIRN_PROMOTE_THRESHOLD`). Sprint 5 only ever writes
+    /// `promo_score`; a human reviews the `[0.70, 0.90]` band via
+    /// `GET /api/memory/promotion-candidates` and calls `/promote` or `/dismiss-promotion`.
+    /// Returns the number of memories scored.
+    pub fn run_promotion_scoring(&self, llm_cfg: &LlmConsolidationConfig) -> Result<usize> {
+        let sanitizer = cairn_share::Sanitizer::new();
+        let mut scored = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type != ScopeType::Project || m.promo_locked {
+                continue;
+            }
+            if !matches!(m.tier, MemoryTier::Semantic | MemoryTier::Procedural) {
+                continue;
+            }
+            // Hard blocklist: never promote anything that looks like it carries a secret,
+            // an email, an IP, or a home path - reuses cairn-share's battle-tested sanitizer
+            // instead of a second, weaker regex.
+            if !sanitizer.sanitize(&m.content).sensitivity.is_shareable() {
+                continue;
+            }
+            let cross_hits = m
+                .scope_id
+                .as_deref()
+                .map(|pid| {
+                    self.store
+                        .count_cross_project_access(&m.id, pid, Utc::now() - Duration::days(30))
+                })
+                .transpose()?
+                .unwrap_or(0);
+            let mut score = llm_intelligence::fast_promotion_score(m.kind, cross_hits);
+            // LLM judgment only for genuinely borderline cases - cheap fast_score handles the
+            // clear-cut ones (a `Task` never gets there; a heavily cross-project `Fact` is
+            // already obviously promotable) without spending a call on every candidate.
+            if (0.40..=0.85).contains(&score) && llm_cfg.enabled {
+                if let Ok(text) = llm_consolidator::chat_with_config(
+                    llm_cfg,
+                    &format!(
+                        "Is this knowledge specific to one project, or universally applicable \
+                         to any software project? Answer with exactly one word, PROJECT or \
+                         UNIVERSAL.\n\n{}",
+                        m.content
+                    ),
+                ) {
+                    let llm_score = if text.trim().eq_ignore_ascii_case("universal") {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    score = score * 0.5 + llm_score * 0.5;
+                }
+            }
+            let mut updated = m.clone();
+            updated.promo_score = score.clamp(0.0, 1.0);
+            updated.updated_at = Utc::now();
+            self.store.upsert_memory(&updated)?;
+            scored += 1;
+        }
+        Ok(scored)
+    }
+
+    /// Memories currently suggested for promotion (v0.8.0 Sprint 5): `Project`-scoped, not
+    /// locked, with `promo_score` in the human-review band `[0.70, 0.90]`. Above `0.90` a
+    /// human should almost certainly just approve it; below `0.70` it isn't a strong enough
+    /// signal to bother asking about.
+    pub fn promotion_candidates(&self) -> Result<Vec<Memory>> {
+        Ok(self
+            .store
+            .all_memories()?
+            .into_iter()
+            .filter(|m| {
+                m.scope_type == ScopeType::Project
+                    && !m.promo_locked
+                    && (0.70..=0.90).contains(&m.promo_score)
+            })
+            .collect())
+    }
+
+    /// Promote a memory to `Global` scope and lock it against further promotion scoring -
+    /// once promoted there's nothing left to suggest. Returns `Ok(false)` if the id doesn't
+    /// exist.
+    pub fn promote_memory(&self, id: &str) -> Result<bool> {
+        let Some(mut m) = self.store.get_memory(id)? else {
+            return Ok(false);
+        };
+        m.scope_type = ScopeType::Global;
+        m.scope_id = None;
+        m.promo_locked = true;
+        m.updated_at = Utc::now();
+        self.store.upsert_memory(&m)
+    }
+
+    /// Dismiss a promotion suggestion ("don't ask again") without changing scope. Returns
+    /// `Ok(false)` if the id doesn't exist.
+    pub fn dismiss_promotion(&self, id: &str) -> Result<bool> {
+        let Some(mut m) = self.store.get_memory(id)? else {
+            return Ok(false);
+        };
+        m.promo_locked = true;
+        m.updated_at = Utc::now();
+        self.store.upsert_memory(&m)
+    }
+
+    /// v0.8.0 Sprint 5 `SessionEnd` hook: summarize a session's memories into a single
+    /// `Project`-scoped `Episodic` note. `Ok(None)` (a safe no-op, not an error) when the LLM
+    /// is disabled, the session has no memories, or the LLM call fails/returns nothing usable.
+    pub fn synthesize_session(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        session_id: &str,
+        project_id: Option<String>,
+    ) -> Result<Option<Memory>> {
+        if !llm_cfg.enabled {
+            return Ok(None);
+        }
+        let contents: Vec<String> = self
+            .store
+            .all_memories()?
+            .into_iter()
+            .filter(|m| m.scope_type == ScopeType::Session && m.scope_id.as_deref() == Some(session_id))
+            .map(|m| m.content)
+            .collect();
+        if contents.is_empty() {
+            return Ok(None);
+        }
+        let Some(summary) = llm_intelligence::summarize_session_via_llm(llm_cfg, &contents) else {
+            return Ok(None);
+        };
+        let memory = self.remember(NewMemory {
+            content: summary,
+            kind: Some(MemoryKind::Note),
+            tier: Some(MemoryTier::Episodic),
+            importance: Some(0.6),
+            scope_type: if project_id.is_some() {
+                ScopeType::Project
+            } else {
+                ScopeType::Global
+            },
+            scope_id: project_id,
+            ..Default::default()
+        })?;
+        Ok(Some(memory))
     }
 
     /// Fetch a memory by id.
@@ -1712,6 +1927,8 @@ mod tests {
             applies_to: vec![],
             scope_type: cairn_core::ScopeType::Global,
             scope_id: None,
+            promo_score: 0.0,
+            promo_locked: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1933,6 +2150,194 @@ mod tests {
         mem.store.insert_memory(&m).unwrap();
 
         assert_eq!(mem.run_decay(30).unwrap(), 0);
+    }
+
+    // --- v0.8.0 Sprint 5: LLM intelligence tests ---
+
+    fn disabled_llm_cfg() -> cairn_core::LlmConsolidationConfig {
+        cairn_core::LlmConsolidationConfig {
+            enabled: false,
+            url: "http://localhost:11434/v1/chat/completions".to_string(),
+            model: "llama3.2".to_string(),
+            api_key: None,
+        }
+    }
+
+    #[test]
+    fn concept_extraction_is_a_noop_when_llm_disabled() {
+        let Some(mem) = engine() else { return };
+        let m = synth("some fact with no concepts yet");
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_concept_extraction(&disabled_llm_cfg()).unwrap(), 0);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert!(after.concepts.is_empty());
+    }
+
+    #[test]
+    fn contradiction_detection_is_a_noop_when_llm_disabled() {
+        let Some(mem) = engine() else { return };
+        let m = synth("the sky is blue");
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(
+            mem.run_contradiction_detection(&disabled_llm_cfg())
+                .unwrap(),
+            0
+        );
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert!(!after.suspicious);
+    }
+
+    #[test]
+    fn promotion_scoring_scores_eligible_project_memories() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("rust ownership prevents use-after-free bugs");
+        m.kind = cairn_core::MemoryKind::Fact;
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 1);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        let expected = llm_intelligence::fast_promotion_score(cairn_core::MemoryKind::Fact, 0);
+        assert_eq!(after.promo_score, expected);
+        assert!(after.promo_score > 0.0);
+    }
+
+    #[test]
+    fn promotion_scoring_skips_non_project_scope_and_wrong_tier() {
+        let Some(mem) = engine() else { return };
+        let mut global_fact = synth("a global fact");
+        global_fact.kind = cairn_core::MemoryKind::Fact;
+        global_fact.tier = cairn_core::MemoryTier::Semantic;
+        mem.store.insert_memory(&global_fact).unwrap();
+
+        let mut working_tier = synth("a working-tier project note");
+        working_tier.kind = cairn_core::MemoryKind::Fact;
+        working_tier.scope_type = ScopeType::Project;
+        working_tier.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&working_tier).unwrap();
+
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 0);
+    }
+
+    #[test]
+    fn promotion_scoring_skips_locked_memories() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("a locked candidate");
+        m.kind = cairn_core::MemoryKind::Fact;
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_locked = true;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 0);
+    }
+
+    #[test]
+    fn promotion_scoring_skips_content_with_secrets() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("contact admin@example.com for the api key sk_live_1234567890abcdef");
+        m.kind = cairn_core::MemoryKind::Fact;
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 0);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.promo_score, 0.0);
+    }
+
+    #[test]
+    fn promotion_candidates_filters_to_review_band_and_excludes_locked() {
+        let Some(mem) = engine() else { return };
+        let mut in_band = synth("in the review band");
+        in_band.scope_type = ScopeType::Project;
+        in_band.scope_id = Some("proj-a".to_string());
+        in_band.promo_score = 0.80;
+        mem.store.insert_memory(&in_band).unwrap();
+
+        let mut too_low = synth("below the band");
+        too_low.scope_type = ScopeType::Project;
+        too_low.scope_id = Some("proj-a".to_string());
+        too_low.promo_score = 0.50;
+        mem.store.insert_memory(&too_low).unwrap();
+
+        let mut locked = synth("in band but locked");
+        locked.scope_type = ScopeType::Project;
+        locked.scope_id = Some("proj-a".to_string());
+        locked.promo_score = 0.85;
+        locked.promo_locked = true;
+        mem.store.insert_memory(&locked).unwrap();
+
+        let candidates = mem.promotion_candidates().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, in_band.id);
+    }
+
+    #[test]
+    fn promote_memory_moves_to_global_and_locks() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("promotable fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert!(mem.promote_memory(&m.id).unwrap());
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Global);
+        assert!(after.scope_id.is_none());
+        assert!(after.promo_locked);
+    }
+
+    #[test]
+    fn promote_memory_missing_id_returns_false() {
+        let Some(mem) = engine() else { return };
+        assert!(!mem.promote_memory("does-not-exist").unwrap());
+    }
+
+    #[test]
+    fn dismiss_promotion_locks_without_changing_scope() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("dismissable candidate");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert!(mem.dismiss_promotion(&m.id).unwrap());
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+        assert_eq!(after.scope_id, Some("proj-a".to_string()));
+        assert!(after.promo_locked);
+    }
+
+    #[test]
+    fn synthesize_session_is_a_noop_when_llm_disabled() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("something that happened this session");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("sess-1".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        let result = mem
+            .synthesize_session(&disabled_llm_cfg(), "sess-1", Some("proj-a".to_string()))
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn synthesize_session_is_a_noop_when_session_has_no_memories() {
+        let Some(mem) = engine() else { return };
+        let mut enabled_cfg = disabled_llm_cfg();
+        enabled_cfg.enabled = true;
+        let result = mem
+            .synthesize_session(&enabled_cfg, "empty-session", None)
+            .unwrap();
+        assert!(result.is_none());
     }
 
     // --- P1.3 Triple-Stream tests ---

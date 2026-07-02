@@ -21,6 +21,7 @@ pub const JOBS: &[(&str, &str)] = &[
     ("session-gc", "0 0 2 * * *"),       // daily at 02:00
     ("memory-decay", "0 0 3 * * Sun"),   // weekly, Sunday 03:00
     ("access-log-prune", "0 0 4 1 * *"), // monthly, 1st at 04:00
+    ("llm-intelligence", "0 30 3 * * *"), // daily at 03:30 (v0.8.0 Sprint 5)
 ];
 
 const MAX_HISTORY_PER_JOB: usize = 10;
@@ -101,6 +102,36 @@ pub fn run_job_now(state: &AppState, job: &'static str) -> Result<CronRun, Strin
                     ),
                 ),
                 Err(e) => ("err", e.to_string()),
+            }
+        }
+        "llm-intelligence" => {
+            if !state.cfg.llm_consolidation.enabled {
+                (
+                    "ok",
+                    "skipped - CAIRN_LLM_CONSOLIDATION disabled".to_string(),
+                )
+            } else {
+                let concepts = state.mem.run_concept_extraction(&state.cfg.llm_consolidation);
+                let contradictions = state
+                    .mem
+                    .run_contradiction_detection(&state.cfg.llm_consolidation);
+                let scored = state.mem.run_promotion_scoring(&state.cfg.llm_consolidation);
+                match (concepts, contradictions, scored) {
+                    (Ok(c), Ok(x), Ok(s)) => (
+                        "ok",
+                        format!(
+                            "extracted concepts on {c} memories, flagged {x} contradictions, \
+                             scored {s} promotion candidates"
+                        ),
+                    ),
+                    (c, x, s) => (
+                        "err",
+                        format!(
+                            "concept_extraction={c:?} contradiction_detection={x:?} \
+                             promotion_scoring={s:?}"
+                        ),
+                    ),
+                }
             }
         }
         // Unreachable: the JOBS membership check above already rejected anything else.

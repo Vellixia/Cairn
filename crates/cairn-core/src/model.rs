@@ -185,6 +185,17 @@ pub struct Memory {
     /// `None` for `Global`; the project id or session id for `Project`/`Session` respectively.
     #[serde(default)]
     pub scope_id: Option<String>,
+    /// `Project`-scope promotion-worthiness, `[0.0, 1.0]` (v0.8.0 Sprint 5). Written by the
+    /// `llm-intelligence` cron job's promotion-scoring pass; `0.0` for a memory that has never
+    /// been scored. A score in `[0.70, 0.90]` surfaces the memory at
+    /// `GET /api/memory/promotion-candidates` for human review.
+    #[serde(default)]
+    pub promo_score: f32,
+    /// Once `true`, this memory is permanently excluded from promotion scoring/suggestions -
+    /// set by `POST /api/memory/:id/dismiss-promotion` ("don't ask again") or implicitly once
+    /// `POST /api/memory/:id/promote` has already promoted it. Defaults to `false`.
+    #[serde(default)]
+    pub promo_locked: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -293,6 +304,8 @@ impl NewMemory {
             applies_to: self.applies_to,
             scope_type: self.scope_type,
             scope_id: self.scope_id,
+            promo_score: 0.0,
+            promo_locked: false,
             created_at: now,
             updated_at: now,
         }
