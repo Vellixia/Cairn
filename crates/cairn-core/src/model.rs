@@ -88,6 +88,55 @@ impl std::str::FromStr for MemoryKind {
     }
 }
 
+/// A memory's visibility boundary (v0.8.0 Sprint 2). Recall always includes `Global`, plus
+/// `Project`/`Session` memories whose `scope_id` matches the caller's current project/session -
+/// this is an access-control boundary, distinct from `Memory::session_id` (which just records
+/// provenance/diversity metadata and never hides a memory from other sessions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeType {
+    #[default]
+    Global,
+    Project,
+    Session,
+}
+
+impl ScopeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScopeType::Global => "global",
+            ScopeType::Project => "project",
+            ScopeType::Session => "session",
+        }
+    }
+}
+
+impl std::str::FromStr for ScopeType {
+    type Err = crate::Error;
+    fn from_str(s: &str) -> crate::Result<Self> {
+        Ok(match s {
+            "global" => Self::Global,
+            "project" => Self::Project,
+            "session" => Self::Session,
+            other => {
+                return Err(crate::Error::Invalid(format!(
+                    "unknown scope type: {other}"
+                )))
+            }
+        })
+    }
+}
+
+/// The caller's current project/session context for scope-aware recall (v0.8.0 Sprint 2).
+/// Built by `cairn-api` from `X-Cairn-Project`/`X-Cairn-Session` request headers today;
+/// `cairn-mcp`'s stdio server has no per-request headers, so it passes `ScopeCtx::default()`
+/// (Global-only) until Sprint 3's auto project detection wires a real value through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScopeCtx {
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
 /// A persisted memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
@@ -129,6 +178,13 @@ pub struct Memory {
     /// Edges to file paths / symbols / projects this memory applies to (code-graph-style relevance).
     #[serde(default)]
     pub applies_to: Vec<String>,
+    /// Visibility boundary (v0.8.0 Sprint 2). Defaults to `Global` so pre-Sprint-2 records and
+    /// callers that don't care about scoping keep working unchanged.
+    #[serde(default)]
+    pub scope_type: ScopeType,
+    /// `None` for `Global`; the project id or session id for `Project`/`Session` respectively.
+    #[serde(default)]
+    pub scope_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -198,6 +254,12 @@ pub struct NewMemory {
     pub supersedes: Vec<String>,
     #[serde(default)]
     pub applies_to: Vec<String>,
+    /// Visibility boundary for the new memory (v0.8.0 Sprint 2). Defaults to `Global`.
+    #[serde(default)]
+    pub scope_type: ScopeType,
+    /// Required (and meaningful) only when `scope_type` is `Project` or `Session`.
+    #[serde(default)]
+    pub scope_id: Option<String>,
 }
 
 impl NewMemory {
@@ -229,6 +291,8 @@ impl NewMemory {
             contradicts: self.contradicts,
             supersedes: self.supersedes,
             applies_to: self.applies_to,
+            scope_type: self.scope_type,
+            scope_id: self.scope_id,
             created_at: now,
             updated_at: now,
         }

@@ -28,7 +28,7 @@
 use crate::db::{AuditRecord, StoreBackend};
 use cairn_core::{
     Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, OrgId, Result,
-    TokenScope,
+    ScopeType, TokenScope,
 };
 use cairn_embed::Embedder;
 use chrono::{DateTime, Utc};
@@ -239,6 +239,8 @@ impl StoreBackend for SurrealStore {
                 "contradicts": m.contradicts,
                 "supersedes": m.supersedes,
                 "applies_to": m.applies_to,
+                "scope_type": m.scope_type.as_str(),
+                "scope_id": m.scope_id.clone().unwrap_or_default(),
                 "created_at": ts(m.created_at),
                 "updated_at": ts(m.updated_at),
                 "embedding": embedding,
@@ -685,6 +687,31 @@ impl StoreBackend for SurrealStore {
         let rows = self.read_rows("SELECT val FROM audit_counter:current", json!({}))?;
         Ok(rows.first().map(|r| get_i64(r, "val")).unwrap_or(0))
     }
+
+    fn record_access_batch(
+        &self,
+        entries: &[(String, Option<String>, Option<String>)],
+    ) -> Result<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let now = ts(Utc::now());
+        let rows: Vec<Json> = entries
+            .iter()
+            .map(|(memory_id, project_id, session_id)| {
+                json!({
+                    "memory_id": memory_id,
+                    "project_id": project_id.clone().unwrap_or_default(),
+                    "session_id": session_id.clone().unwrap_or_default(),
+                    "ts": now,
+                })
+            })
+            .collect();
+        // One statement, N rows - one round-trip regardless of how many memories recall
+        // returned this call.
+        self.q("INSERT INTO access_log $rows", json!({ "rows": rows }))?;
+        Ok(())
+    }
 }
 
 // - helpers ---------------------------------------------------------------------------------
@@ -777,6 +804,15 @@ fn memory_from_props(m: &Map<String, Json>) -> Memory {
         contradicts: get_str_vec(m, "contradicts"),
         supersedes: get_str_vec(m, "supersedes"),
         applies_to: get_str_vec(m, "applies_to"),
+        scope_type: ScopeType::from_str(&get_str(m, "scope_type")).unwrap_or(ScopeType::Global),
+        scope_id: {
+            let sid = get_str(m, "scope_id");
+            if sid.is_empty() {
+                None
+            } else {
+                Some(sid)
+            }
+        },
         created_at: parse_ts(&get_str(m, "created_at")),
         updated_at: parse_ts(&get_str(m, "updated_at")),
     }
@@ -923,6 +959,8 @@ mod live {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            scope_type: ScopeType::Global,
+            scope_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };

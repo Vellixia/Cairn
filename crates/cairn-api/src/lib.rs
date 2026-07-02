@@ -16,6 +16,7 @@ mod metrics;
 mod openapi;
 mod push;
 mod rate_limit;
+mod scope;
 mod security_headers;
 mod session;
 mod setup_wizard;
@@ -38,7 +39,7 @@ use crate::metrics::{
 use crate::session::{extract_cookie as extract_session_cookie, SessionSigner};
 use crate::setup_wizard::setup_health;
 use axum::{
-    extract::{Query, Request, State},
+    extract::{Extension, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -47,7 +48,7 @@ use axum::{
 };
 use cairn_assemble::{Assembler, AssemblyReport};
 use cairn_context::{ContextEngine, ReadMode, ReadResult};
-use cairn_core::{Config, Memory, NewMemory, TlsConfig};
+use cairn_core::{Config, Memory, NewMemory, OrgId, ScopeCtx, TlsConfig};
 use cairn_guard::{Checkpoint, Guard, RollbackReport, VerifyReport};
 use cairn_memory::{MemoryEngine, ScoredMemory};
 use cairn_profile::Profile;
@@ -296,6 +297,7 @@ pub fn router(state: AppState) -> Router {
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(middleware::from_fn(security_headers::security_headers))
+        .layer(middleware::from_fn(scope::scope_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
@@ -860,6 +862,7 @@ async fn compression_demo(
 
 async fn remember(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Json(mut input): Json<NewMemory>,
 ) -> Result<Json<Memory>, ApiError> {
     // Strip injected preference delimiter blocks so memory content cannot smuggle itself back
@@ -867,6 +870,16 @@ async fn remember(
     input.content = cairn_profile::strip_preference_blocks(&input.content);
     input.suspicious =
         Some(input.suspicious.unwrap_or(false) || cairn_profile::is_suspicious(&input.content));
+    // v0.8.0 Sprint 2: a caller that sets `scope_type` without an explicit `scope_id` gets the
+    // current request's project/session (from `X-Cairn-Project`/`X-Cairn-Session`) - so the
+    // client doesn't have to repeat the id it already sent as a header.
+    if input.scope_id.is_none() {
+        input.scope_id = match input.scope_type {
+            cairn_core::ScopeType::Project => scope.project_id.clone(),
+            cairn_core::ScopeType::Session => scope.session_id.clone(),
+            cairn_core::ScopeType::Global => None,
+        };
+    }
     Ok(Json(s.mem.remember(input)?))
 }
 
@@ -955,9 +968,15 @@ struct RecallQuery {
 
 async fn recall(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<Vec<ScoredMemory>>, ApiError> {
-    Ok(Json(s.mem.recall(&q.q, q.limit.unwrap_or(10))?))
+    Ok(Json(s.mem.recall_for_org(
+        &q.q,
+        q.limit.unwrap_or(10),
+        OrgId::default(),
+        &scope,
+    )?))
 }
 
 #[derive(Deserialize)]

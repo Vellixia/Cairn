@@ -16,5 +16,7 @@ pub use config::{
 };
 pub use error::{Error, Result};
 pub use hash::ContentHash;
-pub use model::{DeviceToken, Memory, MemoryKind, MemoryTier, NewMemory, TokenScope};
+pub use model::{
+    DeviceToken, Memory, MemoryKind, MemoryTier, NewMemory, ScopeCtx, ScopeType, TokenScope,
+};
 pub use tenant::{OrgId, OrgIdError};

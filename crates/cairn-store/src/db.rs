@@ -118,6 +118,16 @@ pub(crate) trait StoreBackend: Send + Sync {
     fn max_audit_event_id(&self) -> Result<i64> {
         Ok(0)
     }
+
+    // -- access log (v0.8.0 - Sprint 2) ---------------------------------------------------
+    /// Record that `recall` returned each of these memories, in one batched write - not one
+    /// query per memory. Each entry is `(memory_id, project_id, session_id)`. Default no-op:
+    /// the in-memory backend (hermetic tests) doesn't need a real access log, and this must
+    /// never fail a recall call over a logging write.
+    fn record_access_batch(&self, entries: &[(String, Option<String>, Option<String>)]) -> Result<()> {
+        let _ = entries;
+        Ok(())
+    }
 }
 
 /// A single audit event read from durable storage.
@@ -289,6 +299,15 @@ impl Store {
         self.backend.max_audit_event_id()
     }
 
+    /// Record a batch of recall hits to the access log (v0.8.0 Sprint 2). Best-effort - see
+    /// [`StoreBackend::record_access_batch`].
+    pub fn record_access_batch(
+        &self,
+        entries: &[(String, Option<String>, Option<String>)],
+    ) -> Result<()> {
+        self.backend.record_access_batch(entries)
+    }
+
     /// Mark `key` as deleted by writing the tombstone sentinel (rather than physically removing
     /// the row), so future reads see this as absent via [`get_meta`] and [`set_meta_if_absent`]
     /// while the row itself still carries an audit trail. Returns `Ok(true)` if a record existed.
@@ -444,6 +463,8 @@ mod tests {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            scope_type: cairn_core::ScopeType::Global,
+            scope_id: None,
             created_at: updated,
             updated_at: updated,
         }

@@ -173,6 +173,8 @@ mod tests {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            scope_type: cairn_core::ScopeType::Global,
+            scope_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

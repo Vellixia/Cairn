@@ -29,3 +29,10 @@ DEFINE TABLE IF NOT EXISTS audit_event SCHEMALESS;
 DEFINE INDEX IF NOT EXISTS audit_event_seq ON audit_event FIELDS seq;
 
 DEFINE TABLE IF NOT EXISTS audit_counter SCHEMALESS;
+
+-- v0.8.0 Sprint 2: recall access log. Written as one batched multi-row INSERT per recall
+-- call (never one row-per-memory query). Pruned by the S4 access-log-prune cron job
+-- (CAIRN_ACCESS_LOG_RETENTION_DAYS, default 90) so unbounded write volume never grows the
+-- table without bound.
+DEFINE TABLE IF NOT EXISTS access_log SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS access_log_ts ON access_log FIELDS ts;

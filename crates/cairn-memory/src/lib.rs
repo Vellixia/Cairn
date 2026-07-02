@@ -5,7 +5,9 @@
 //! across the four tiers (working -> episodic -> semantic -> procedural). Vector/graph hybrid
 //! retrieval builds on this foundation.
 
-use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result};
+use cairn_core::{
+    ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result, ScopeCtx, ScopeType,
+};
 use cairn_store::Store;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -183,25 +185,40 @@ impl MemoryEngine {
     /// scale-free combination of the two rankings. Importance and Ebbinghaus recency break ties.
     /// On a lexical-only backend (`semantic_recall` -> `None`) this degrades to pure BM25.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>> {
-        // Single-tenant: scope everything to the implicit default org.
-        self.recall_for_org(query, limit, OrgId::default())
+        // Single-tenant, Global-only scope: today's behavior for every caller that doesn't
+        // have a project/session context (MCP stdio mode, existing tests). `cairn-api`'s HTTP
+        // recall handler is the first caller to pass a real `ScopeCtx`.
+        self.recall_for_org(query, limit, OrgId::default(), &ScopeCtx::default())
     }
 
-    /// Tenant-scoped recall (v0.5.0 Sprint 19). Only memories with matching
-    /// `org_id` (or the implicit default for self-hosted installs) are
-    /// considered.
+    /// Tenant- and scope-aware recall (v0.5.0 Sprint 19 org isolation + v0.8.0 Sprint 2 scope
+    /// model). Only memories with matching `org_id` (or the implicit default for self-hosted
+    /// installs) **and** matching scope are considered: every `Global` memory, plus `Project`/
+    /// `Session` memories whose `scope_id` matches `scope.project_id`/`scope.session_id`.
     pub fn recall_for_org(
         &self,
         query: &str,
         limit: usize,
         org_id: OrgId,
+        scope: &ScopeCtx,
     ) -> Result<Vec<ScoredMemory>> {
         let all = self.store.all_memories()?;
         // Tenant isolation: filter by org_id before any ranking work.
         let mems: Vec<Memory> = all
             .into_iter()
             .filter(|m| {
-                m.org_id == org_id || m.org_id == OrgId::default() && org_id == OrgId::default()
+                let org_ok = m.org_id == org_id
+                    || (m.org_id == OrgId::default() && org_id == OrgId::default());
+                let scope_ok = match m.scope_type {
+                    ScopeType::Global => true,
+                    ScopeType::Project => {
+                        scope.project_id.is_some() && m.scope_id == scope.project_id
+                    }
+                    ScopeType::Session => {
+                        scope.session_id.is_some() && m.scope_id == scope.session_id
+                    }
+                };
+                org_ok && scope_ok
             })
             .collect();
         if mems.is_empty() {
@@ -320,9 +337,10 @@ impl MemoryEngine {
             .into_iter()
             .enumerate()
             .map(|(i, m)| {
-                let score = (norm_bm25 as f32) * bm25_rrf_scores[i]
+                let score = ((norm_bm25 as f32) * bm25_rrf_scores[i]
                     + (norm_vec as f32) * vec_rrf_scores[i]
-                    + (norm_graph as f32) * graph_rrf_scores[i];
+                    + (norm_graph as f32) * graph_rrf_scores[i])
+                    * scope_weight(m.scope_type);
                 ScoredMemory { memory: m, score }
             })
             .collect();
@@ -361,6 +379,24 @@ impl MemoryEngine {
             let ids: Vec<String> = diversified.iter().map(|s| s.memory.id.clone()).collect();
             if let Ok(mut tracker) = self.followup_tracker.lock() {
                 tracker.record(query, &ids);
+            }
+        }
+
+        // v0.8.0 Sprint 2: batched access-log write (one round-trip for the whole recall
+        // call, not one per memory). Best-effort - a logging failure must not break recall.
+        if !diversified.is_empty() {
+            let entries: Vec<(String, Option<String>, Option<String>)> = diversified
+                .iter()
+                .map(|s| {
+                    (
+                        s.memory.id.clone(),
+                        scope.project_id.clone(),
+                        scope.session_id.clone(),
+                    )
+                })
+                .collect();
+            if let Err(e) = self.store.record_access_batch(&entries) {
+                tracing::warn!(error = %e, "access log write failed");
             }
         }
 
@@ -982,6 +1018,16 @@ const SEMANTIC_K: usize = 50;
 /// Reciprocal-rank-fusion contribution of a 0-based rank (the standard `k = 60`).
 fn rrf(rank: usize) -> f32 {
     1.0 / (60.0 + rank as f32)
+}
+
+/// Scope multiplier applied to a memory's fused score (v0.8.0 Sprint 2): the narrower the
+/// scope, the more likely it's exactly what the current project/session needs right now.
+fn scope_weight(scope_type: ScopeType) -> f32 {
+    match scope_type {
+        ScopeType::Session => 1.5,
+        ScopeType::Project => 1.2,
+        ScopeType::Global => 1.0,
+    }
 }
 
 /// Dense 0-based ranks (highest score = rank 0) for a score vector, by index.
@@ -1621,6 +1667,8 @@ mod tests {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            scope_type: cairn_core::ScopeType::Global,
+            scope_id: None,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1646,7 +1694,7 @@ mod tests {
         .unwrap();
 
         let from_acme = mem
-            .recall_for_org("secret", 10, OrgId::new("acme").unwrap())
+            .recall_for_org("secret", 10, OrgId::new("acme").unwrap(), &ScopeCtx::default())
             .unwrap();
         assert_eq!(from_acme.len(), 1, "acme should see only acme's memory");
         assert!(from_acme[0].memory.content.contains("unicorns"));
@@ -1661,12 +1709,111 @@ mod tests {
 
         // Acme can never see default's memory, even with a known-keyword query.
         let from_acme_again = mem
-            .recall_for_org("dragons", 10, OrgId::new("acme").unwrap())
+            .recall_for_org("dragons", 10, OrgId::new("acme").unwrap(), &ScopeCtx::default())
             .unwrap();
         assert!(
             from_acme_again.is_empty(),
             "acme must not leak across tenants"
         );
+    }
+
+    /// v0.8.0 Sprint 2: a `Project`-scoped memory is invisible to a caller whose `ScopeCtx`
+    /// names a different project, and invisible with no project context at all - it is not
+    /// `Global`, so absence of a project header must not fall back to showing it.
+    #[test]
+    fn project_scope_isolates_recall_by_project_id() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory {
+            scope_type: cairn_core::ScopeType::Project,
+            scope_id: Some("proj-alpha".to_string()),
+            ..NewMemory::new("proj-alpha secret: the launch code is banana")
+        })
+        .unwrap();
+
+        let other_project = ScopeCtx {
+            project_id: Some("proj-beta".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .recall_for_org("launch code", 10, OrgId::default(), &other_project)
+            .unwrap();
+        assert!(hits.is_empty(), "proj-beta must not see proj-alpha's memory");
+
+        let no_project = ScopeCtx::default();
+        let hits = mem
+            .recall_for_org("launch code", 10, OrgId::default(), &no_project)
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "no project context must not fall back to showing project-scoped memories"
+        );
+
+        let same_project = ScopeCtx {
+            project_id: Some("proj-alpha".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .recall_for_org("launch code", 10, OrgId::default(), &same_project)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "proj-alpha must see its own memory");
+    }
+
+    /// Mirrors `project_scope_isolates_recall_by_project_id` for `Session` scope - a second
+    /// session must not see the first session's Session-scoped rows, the same way Project
+    /// scope isolates by project id.
+    #[test]
+    fn session_scope_isolates_recall_by_session_id() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory {
+            scope_type: cairn_core::ScopeType::Session,
+            scope_id: Some("session-a".to_string()),
+            ..NewMemory::new("session-a scratch note: temp password is hunter2")
+        })
+        .unwrap();
+
+        let session_b = ScopeCtx {
+            project_id: None,
+            session_id: Some("session-b".to_string()),
+        };
+        let hits = mem
+            .recall_for_org("temp password", 10, OrgId::default(), &session_b)
+            .unwrap();
+        assert!(hits.is_empty(), "session-b must not see session-a's memory");
+
+        let session_a = ScopeCtx {
+            project_id: None,
+            session_id: Some("session-a".to_string()),
+        };
+        let hits = mem
+            .recall_for_org("temp password", 10, OrgId::default(), &session_a)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "session-a must see its own memory");
+    }
+
+    /// A `Global` memory is visible from every scope context - the default for memories that
+    /// don't set `scope_type` at all.
+    #[test]
+    fn global_scope_is_visible_from_every_context() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory::new("global fact: rust compiles to native code"))
+            .unwrap();
+
+        for ctx in [
+            ScopeCtx::default(),
+            ScopeCtx {
+                project_id: Some("any-project".to_string()),
+                session_id: None,
+            },
+            ScopeCtx {
+                project_id: None,
+                session_id: Some("any-session".to_string()),
+            },
+        ] {
+            let hits = mem
+                .recall_for_org("rust compiles", 10, OrgId::default(), &ctx)
+                .unwrap();
+            assert_eq!(hits.len(), 1, "global memory must be visible from {ctx:?}");
+        }
     }
 
     // --- P1.3 Triple-Stream tests ---
