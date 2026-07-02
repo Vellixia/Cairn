@@ -209,6 +209,38 @@ pub(crate) trait StoreBackend: Send + Sync {
         let _ = source;
         Ok(false)
     }
+
+    // -- promotion log (v0.8.0 - Sprint 8) -------------------------------------------------
+    /// Append a promotion-related event (auto-promote, manual promote, auto-demote, manual
+    /// demote/undo) - a real, user-visible, testable feature like `ProjectRecord`/
+    /// `DocumentChunkRecord` above, not a no-op-default telemetry sink like `access_log`.
+    fn record_promotion_event(&self, entry: &PromotionLogEntry) -> Result<()> {
+        let _ = entry;
+        Ok(())
+    }
+    /// Recent promotion-log entries, newest first.
+    fn list_promotion_log(&self, limit: usize) -> Result<Vec<PromotionLogEntry>> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+    /// The most recent log entry for `memory_id` whose `action` matches, if any - used by
+    /// `/demote` (Undo) to find where a promoted memory should go back to.
+    fn last_promotion_event(
+        &self,
+        memory_id: &str,
+        action: &str,
+    ) -> Result<Option<PromotionLogEntry>> {
+        let _ = (memory_id, action);
+        Ok(None)
+    }
+    /// Count `access_log` rows for `memory_id` from any project, since `since` (v0.8.0
+    /// Sprint 8 - the auto-demote "has this Global memory been used lately" check). Unlike
+    /// `count_cross_project_access`, there's no project to exclude - a `Global` memory has no
+    /// single "home" project once promoted, so any access at all counts.
+    fn count_any_access(&self, memory_id: &str, since: DateTime<Utc>) -> Result<i64> {
+        let _ = (memory_id, since);
+        Ok(0)
+    }
 }
 
 /// A registered project (v0.8.0 Sprint 3): the repos/directories an agent has run in,
@@ -235,6 +267,24 @@ pub struct DocumentChunkRecord {
     pub chunk_index: usize,
     pub content: String,
     pub created_at: DateTime<Utc>,
+}
+
+/// One promotion-related event (v0.8.0 Sprint 8): powers `GET /api/memory/promotion-log` (the
+/// dashboard's audit trail) and `/demote`'s Undo (`old_scope_id` is where the most recent
+/// `"promote"` entry for a memory sends it back to - once promoted to `Global`,
+/// `Memory.scope_id` itself is wiped, so this is the only record of where it came from).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionLogEntry {
+    pub id: String,
+    pub memory_id: String,
+    /// `"promote"` | `"demote"`.
+    pub action: String,
+    pub old_scope_type: cairn_core::ScopeType,
+    pub old_scope_id: Option<String>,
+    pub score: f32,
+    /// `"auto-threshold"` | `"manual"` | `"auto-demote"` | `"manual-undo"`.
+    pub reason: String,
+    pub ts: DateTime<Utc>,
 }
 
 /// One ingested document's summary (v0.8.0 Sprint 6) - what `GET /api/documents` and
@@ -482,6 +532,27 @@ impl Store {
         self.backend.delete_document(source)
     }
 
+    /// Append a promotion-log entry (v0.8.0 Sprint 8).
+    pub fn record_promotion_event(&self, entry: &PromotionLogEntry) -> Result<()> {
+        self.backend.record_promotion_event(entry)
+    }
+    /// Recent promotion-log entries, newest first (v0.8.0 Sprint 8).
+    pub fn list_promotion_log(&self, limit: usize) -> Result<Vec<PromotionLogEntry>> {
+        self.backend.list_promotion_log(limit)
+    }
+    /// The most recent `action` log entry for a memory (v0.8.0 Sprint 8).
+    pub fn last_promotion_event(
+        &self,
+        memory_id: &str,
+        action: &str,
+    ) -> Result<Option<PromotionLogEntry>> {
+        self.backend.last_promotion_event(memory_id, action)
+    }
+    /// Count any `access_log` hits for a memory since `since` (v0.8.0 Sprint 8).
+    pub fn count_any_access(&self, memory_id: &str, since: DateTime<Utc>) -> Result<i64> {
+        self.backend.count_any_access(memory_id, since)
+    }
+
     /// Mark `key` as deleted by writing the tombstone sentinel (rather than physically removing
     /// the row), so future reads see this as absent via [`get_meta`] and [`set_meta_if_absent`]
     /// while the row itself still carries an audit trail. Returns `Ok(true)` if a record existed.
@@ -604,6 +675,11 @@ impl Store {
         decay_period_days: 30,
         access_log_retention_days: 90,
         cron_enabled: true,
+        promote_threshold: 0.85,
+        demote_idle_days: 45,
+        drift_autopilot: "safe".to_string(),
+        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        auto_anchor: true,
         };
         std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
         Some(cfg)

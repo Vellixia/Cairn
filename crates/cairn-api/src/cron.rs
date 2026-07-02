@@ -18,10 +18,11 @@ use tokio_cron_scheduler::{Job, JobScheduler, JobSchedulerError};
 
 /// The fixed set of background jobs and their (6-field, seconds-first) cron schedules.
 pub const JOBS: &[(&str, &str)] = &[
-    ("session-gc", "0 0 2 * * *"),       // daily at 02:00
-    ("memory-decay", "0 0 3 * * Sun"),   // weekly, Sunday 03:00
-    ("access-log-prune", "0 0 4 1 * *"), // monthly, 1st at 04:00
+    ("session-gc", "0 0 2 * * *"),        // daily at 02:00
+    ("memory-decay", "0 0 3 * * Sun"),    // weekly, Sunday 03:00
+    ("access-log-prune", "0 0 4 1 * *"),  // monthly, 1st at 04:00
     ("llm-intelligence", "0 30 3 * * *"), // daily at 03:30 (v0.8.0 Sprint 5)
+    ("memory-demote", "0 0 4 * * *"),     // daily at 04:00 (v0.8.0 Sprint 8)
 ];
 
 const MAX_HISTORY_PER_JOB: usize = 10;
@@ -116,24 +117,32 @@ pub fn run_job_now(state: &AppState, job: &'static str) -> Result<CronRun, Strin
                     .mem
                     .run_contradiction_detection(&state.cfg.llm_consolidation);
                 let scored = state.mem.run_promotion_scoring(&state.cfg.llm_consolidation);
-                match (concepts, contradictions, scored) {
-                    (Ok(c), Ok(x), Ok(s)) => (
+                // v0.8.0 Sprint 8: full-auto promotion runs last, on the scores this same tick
+                // just computed - a memory that clears CAIRN_PROMOTE_THRESHOLD is promoted
+                // immediately rather than waiting for a human to notice it in the candidates list.
+                let promoted = state.mem.run_auto_promote(state.cfg.promote_threshold);
+                match (concepts, contradictions, scored, promoted) {
+                    (Ok(c), Ok(x), Ok(s), Ok(p)) => (
                         "ok",
                         format!(
-                            "extracted concepts on {c} memories, flagged {x} contradictions, \
-                             scored {s} promotion candidates"
+                            "extracted concepts on {c} memories, resolved/flagged {x} \
+                             contradictions, scored {s} promotion candidates, auto-promoted {p}"
                         ),
                     ),
-                    (c, x, s) => (
+                    (c, x, s, p) => (
                         "err",
                         format!(
                             "concept_extraction={c:?} contradiction_detection={x:?} \
-                             promotion_scoring={s:?}"
+                             promotion_scoring={s:?} auto_promote={p:?}"
                         ),
                     ),
                 }
             }
         }
+        "memory-demote" => match state.mem.run_auto_demote(state.cfg.demote_idle_days) {
+            Ok(n) => ("ok", format!("demoted {n} stale auto-promoted memories")),
+            Err(e) => ("err", e.to_string()),
+        },
         // Unreachable: the JOBS membership check above already rejected anything else.
         other => ("err", format!("unknown job: {other}")),
     };

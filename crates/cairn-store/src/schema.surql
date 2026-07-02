@@ -50,3 +50,10 @@ DEFINE TABLE IF NOT EXISTS document_chunk SCHEMALESS;
 DEFINE INDEX IF NOT EXISTS document_chunk_source ON document_chunk FIELDS source;
 DEFINE INDEX IF NOT EXISTS document_chunk_embedding_hnsw ON document_chunk FIELDS embedding
     HNSW DIMENSION {dim} DIST COSINE TYPE F32;
+
+-- v0.8.0 Sprint 8: promotion/demotion audit trail (auto and manual). `/demote` (Undo) looks up
+-- the most recent `action = 'promote'` row for a memory to find `old_scope_id` - once promoted,
+-- `memory.scope_id` itself is wiped, so this is the only record of where it came from.
+DEFINE TABLE IF NOT EXISTS promotion_log SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS promotion_log_memory_id ON promotion_log FIELDS memory_id;
+DEFINE INDEX IF NOT EXISTS promotion_log_ts ON promotion_log FIELDS ts;

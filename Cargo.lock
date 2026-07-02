@@ -881,6 +881,7 @@ dependencies = [
  "cairn-profile",
  "cairn-store",
  "chrono",
+ "regex",
  "serde",
  "serde_json",
  "similar",

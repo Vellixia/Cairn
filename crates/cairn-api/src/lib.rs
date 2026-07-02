@@ -258,10 +258,13 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/:id/reinforce", post(reinforce_memory))
         .route("/api/memory/:id/promote", post(promote_memory))
         .route("/api/memory/:id/dismiss-promotion", post(dismiss_promotion))
+        .route("/api/memory/:id/demote", post(demote_memory))
         .route(
             "/api/memory/promotion-candidates",
             get(promotion_candidates),
         )
+        .route("/api/memory/promotion-log", get(promotion_log))
+        .route("/api/memory/autopilot-digest", get(autopilot_digest))
         .route("/api/memory/session-summary", post(session_summary))
         .route("/api/memory/crystallize", post(crystallize))
         .route("/api/memory/graph", get(memory_graph))
@@ -275,6 +278,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/heatmap", get(memory_heatmap))
         .route("/api/guard/verify", post(verify))
         .route("/api/guard/anchor", get(get_anchor).post(post_anchor))
+        .route("/api/guard/anchor/auto", post(auto_anchor))
         .route("/api/guard/checkpoint", post(create_checkpoint))
         .route("/api/guard/checkpoints", get(list_checkpoints))
         .route("/api/guard/rollback", post(rollback_checkpoint))
@@ -1302,6 +1306,39 @@ async fn dismiss_promotion(
     }
 }
 
+/// GET `/api/memory/promotion-log` - v0.8.0 Sprint 8: recent promotion/demotion events, auto
+/// and manual alike, newest first. The dashboard's audit trail for full-auto promotion.
+#[derive(Deserialize)]
+struct PromotionLogQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+async fn promotion_log(
+    State(s): State<AppState>,
+    Query(q): Query<PromotionLogQuery>,
+) -> Result<Json<Vec<cairn_store::PromotionLogEntry>>, ApiError> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    Ok(Json(s.store.list_promotion_log(limit)?))
+}
+
+/// POST `/api/memory/:id/demote` - v0.8.0 Sprint 8 (Undo): revert a promotion back to the
+/// scope it was promoted from, using the promotion log. Works for both auto-promotions and
+/// human `/promote` calls. 404 if the memory doesn't exist or was never promoted through this
+/// pipeline (nothing recorded to revert to).
+async fn demote_memory(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    if s.mem.demote_memory(&id)? {
+        crate::events::publish_memory(&s.events, "demoted", &id);
+        Ok(Json(s.mem.get(&id)?.unwrap()))
+    } else {
+        Err(ApiError::not_found(
+            "no such memory, or it was never promoted",
+        ))
+    }
+}
+
 /// POST `/api/memory/session-summary` - v0.8.0 Sprint 5: called by the `SessionEnd` hook.
 /// Summarizes the current session's memories (from `X-Cairn-Session`) into one `Project`-scoped
 /// `Episodic` note via the LLM. A safe no-op (`{"summarized": false}`) when the LLM is disabled,
@@ -1504,14 +1541,28 @@ async fn verify(
         report.risk,
         cairn_guard::Risk::Warn | cairn_guard::Risk::Danger
     ) {
+        // v0.8.0 Sprint 8: drift autopilot. A `risk=ok` edit never even reaches this branch (no
+        // event is created for it at all - it was already a zero-interaction case before this
+        // sprint); this only decides whether a `warn` under `CAIRN_DRIFT_AUTOPILOT` gets
+        // auto-approved instead of sitting `Pending`. `danger` never auto-approves.
+        let mode = cairn_guard::DriftAutopilot::parse(&s.cfg.drift_autopilot);
+        let decision =
+            cairn_guard::autopilot_decision(mode, report.risk, &b.path, &s.cfg.drift_safe_globs);
+        let (status, detail) = match decision {
+            Some(reason) => (
+                cairn_session::DriftStatus::Approved,
+                format!("{} (auto-approved: {reason})", report.message),
+            ),
+            None => (cairn_session::DriftStatus::Pending, report.message.clone()),
+        };
         let ev = cairn_session::DriftEvent {
             id: s.sessions.next_drift_id(),
             ts: Utc::now(),
             path: b.path.clone(),
             risk: report.risk.as_str().to_string(),
             kind: "verify".into(),
-            detail: report.message.clone(),
-            status: cairn_session::DriftStatus::Pending,
+            detail,
+            status,
         };
         let _ = s.sessions.append_drift(&ev);
         crate::events::publish_drift(&s.events, &b.path, report.risk.as_str());
@@ -1536,6 +1587,70 @@ async fn post_anchor(
     Ok(Json(
         json!({ "anchor": meta.goal, "suspicious": meta.suspicious }),
     ))
+}
+
+#[derive(Deserialize)]
+struct AutoAnchorBody {
+    prompt: String,
+}
+
+/// POST `/api/guard/anchor/auto` - v0.8.0 Sprint 8: called by the `UserPromptSubmit` hook on
+/// every prompt. A no-op (`"derived": false`) once an anchor already exists (whether set
+/// manually or auto-derived earlier this session) or when `CAIRN_AUTO_ANCHOR` is off - cheap
+/// to call unconditionally since the common case after the first prompt is an immediate no-op.
+async fn auto_anchor(
+    State(s): State<AppState>,
+    Json(b): Json<AutoAnchorBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !s.cfg.auto_anchor {
+        return Ok(Json(json!({ "anchor": s.guard.anchor()?, "derived": false })));
+    }
+    match s.guard.auto_anchor_if_unset(&b.prompt)? {
+        Some(meta) => Ok(Json(
+            json!({ "anchor": meta.goal, "derived": true, "suspicious": meta.suspicious }),
+        )),
+        None => Ok(Json(json!({ "anchor": s.guard.anchor()?, "derived": false }))),
+    }
+}
+
+#[derive(Deserialize)]
+struct DigestQuery {
+    #[serde(default)]
+    hours: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct AutopilotDigest {
+    promoted: usize,
+    demoted: usize,
+    drift_auto_approved: usize,
+}
+
+/// GET `/api/memory/autopilot-digest?hours=24` - v0.8.0 Sprint 8: what autopilot did while the
+/// human was away, for the `SessionStart` hook's "since you were away" summary line. Looks
+/// back a fixed window (default 24h) rather than tracking a precise "since last session ended"
+/// timestamp - each hook invocation is a stateless process (v0.8.0 Sprint 3), so there's no
+/// cheap place to persist that client-side, and "in the last day" is close enough for a
+/// human-facing digest.
+async fn autopilot_digest(
+    State(s): State<AppState>,
+    Query(q): Query<DigestQuery>,
+) -> Result<Json<AutopilotDigest>, ApiError> {
+    let since = Utc::now() - chrono::Duration::hours(q.hours.unwrap_or(24));
+    let log = s.store.list_promotion_log(500)?;
+    let promoted = log.iter().filter(|e| e.action == "promote" && e.ts > since).count();
+    let demoted = log.iter().filter(|e| e.action == "demote" && e.ts > since).count();
+    let drift_auto_approved = s
+        .sessions
+        .recent_drift(500, None)?
+        .into_iter()
+        .filter(|d| d.ts > since && d.detail.contains("(auto-approved:"))
+        .count();
+    Ok(Json(AutopilotDigest {
+        promoted,
+        demoted,
+        drift_auto_approved,
+    }))
 }
 
 #[derive(Deserialize)]

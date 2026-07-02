@@ -499,14 +499,23 @@ impl MemoryEngine {
     /// memory, pull its top-10 semantically similar neighbors (`Store::semantic_recall` - a
     /// no-op when the backend has no vector index, e.g. the hermetic in-memory backend used by
     /// tests) and ask the LLM whether any of them directly contradicts it. On the first
-    /// contradiction found, records the edge and flags `suspicious`, then moves on - one
-    /// confirmed contradiction is enough to surface the memory for review; there's no need to
-    /// keep spending LLM calls looking for more. Returns the number of memories flagged.
+    /// contradiction found:
+    ///
+    /// - v0.8.0 Sprint 8 **auto-resolve**: if one side is unambiguously better on *both* axes
+    ///   (newer by `updated_at` *and* higher `confidence`), the newer memory's `supersedes`
+    ///   gains an edge to the older one and neither is flagged `suspicious` - there's nothing
+    ///   left for a human to adjudicate.
+    /// - Otherwise (a genuine tie on either axis), both stay ambiguous: the current memory
+    ///   records the `contradicts` edge and is flagged `suspicious`, same as before Sprint 8.
+    ///
+    /// Either way, one confirmed contradiction is enough to act on; there's no need to keep
+    /// spending LLM calls looking for more on the same memory. Returns the number of
+    /// contradiction pairs acted on (resolved or flagged).
     pub fn run_contradiction_detection(&self, llm_cfg: &LlmConsolidationConfig) -> Result<usize> {
         if !llm_cfg.enabled {
             return Ok(0);
         }
-        let mut flagged = 0;
+        let mut handled = 0;
         for m in self.store.all_memories()? {
             if m.suspicious {
                 continue;
@@ -523,17 +532,29 @@ impl MemoryEngine {
                     &m.content,
                     &candidate.content,
                 ) {
-                    let mut updated = m.clone();
-                    updated.contradicts.push(candidate.id);
-                    updated.suspicious = true;
-                    updated.updated_at = Utc::now();
-                    self.store.upsert_memory(&updated)?;
-                    flagged += 1;
+                    let (newer, older) = if m.updated_at >= candidate.updated_at {
+                        (&m, &candidate)
+                    } else {
+                        (&candidate, &m)
+                    };
+                    if newer.confidence > older.confidence {
+                        let mut updated_newer = newer.clone();
+                        updated_newer.supersedes.push(older.id.clone());
+                        updated_newer.updated_at = Utc::now();
+                        self.store.upsert_memory(&updated_newer)?;
+                    } else {
+                        let mut updated = m.clone();
+                        updated.contradicts.push(candidate.id);
+                        updated.suspicious = true;
+                        updated.updated_at = Utc::now();
+                        self.store.upsert_memory(&updated)?;
+                    }
+                    handled += 1;
                     break;
                 }
             }
         }
-        Ok(flagged)
+        Ok(handled)
     }
 
     /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 3: score every `Project`-scoped,
@@ -623,11 +644,141 @@ impl MemoryEngine {
         let Some(mut m) = self.store.get_memory(id)? else {
             return Ok(false);
         };
+        let (old_scope_type, old_scope_id) = (m.scope_type, m.scope_id.clone());
+        let score = m.promo_score;
         m.scope_type = ScopeType::Global;
         m.scope_id = None;
         m.promo_locked = true;
         m.updated_at = Utc::now();
-        self.store.upsert_memory(&m)
+        let ok = self.store.upsert_memory(&m)?;
+        if ok {
+            self.log_promotion(id, "promote", old_scope_type, old_scope_id, score, "manual");
+        }
+        Ok(ok)
+    }
+
+    /// v0.8.0 Sprint 8: best-effort append to the promotion log (see [`cairn_store::
+    /// PromotionLogEntry`]) - a logging failure must never fail the promotion/demotion itself,
+    /// same "warn and move on" precedent as `recall_for_org`'s reinforcement bump.
+    fn log_promotion(
+        &self,
+        memory_id: &str,
+        action: &'static str,
+        old_scope_type: ScopeType,
+        old_scope_id: Option<String>,
+        score: f32,
+        reason: &'static str,
+    ) {
+        let entry = cairn_store::PromotionLogEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            memory_id: memory_id.to_string(),
+            action: action.to_string(),
+            old_scope_type,
+            old_scope_id,
+            score,
+            reason: reason.to_string(),
+            ts: Utc::now(),
+        };
+        if let Err(e) = self.store.record_promotion_event(&entry) {
+            tracing::warn!(memory_id = %memory_id, action, error = %e, "failed to record promotion log entry");
+        }
+    }
+
+    /// v0.8.0 Sprint 8 `llm-intelligence` cron job, phase 4: promote every `Project`-scoped,
+    /// unlocked memory whose `promo_score` exceeds `threshold` straight to `Global`, logging
+    /// where it came from so `/demote` can undo it later. Runs after `run_promotion_scoring`
+    /// in the same cron tick, so a memory that clears the threshold never lingers in the
+    /// human-review `promotion_candidates()` band - the scope-type change this makes removes
+    /// it from that filter immediately. Returns the number of memories auto-promoted.
+    pub fn run_auto_promote(&self, threshold: f32) -> Result<usize> {
+        let mut promoted = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type != ScopeType::Project || m.promo_locked {
+                continue;
+            }
+            if m.promo_score <= threshold {
+                continue;
+            }
+            let (old_scope_type, old_scope_id) = (m.scope_type, m.scope_id.clone());
+            let mut updated = m.clone();
+            updated.scope_type = ScopeType::Global;
+            updated.scope_id = None;
+            updated.promo_locked = true;
+            updated.updated_at = Utc::now();
+            if self.store.upsert_memory(&updated)? {
+                self.log_promotion(
+                    &m.id,
+                    "promote",
+                    old_scope_type,
+                    old_scope_id,
+                    m.promo_score,
+                    "auto-threshold",
+                );
+                promoted += 1;
+            }
+        }
+        Ok(promoted)
+    }
+
+    /// v0.8.0 Sprint 8 `memory-demote` cron job: reverse an auto-promotion that isn't earning
+    /// its keep - the safety net that makes full-auto promotion (`run_auto_promote`) safe to
+    /// leave unattended. A `Global` memory is only ever a candidate if its most recent
+    /// `"promote"` log entry has `reason = "auto-threshold"` - a human's explicit
+    /// `promote_memory`/`pinned` call is never second-guessed by this job. Among those,
+    /// demotes anything `suspicious` (flagged by contradiction detection) OR unused by any
+    /// project for `idle_days`, reverting to the scope recorded at promotion time. Returns the
+    /// number of memories demoted.
+    pub fn run_auto_demote(&self, idle_days: u32) -> Result<usize> {
+        let cutoff = Utc::now() - Duration::days(idle_days as i64);
+        let mut demoted = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type != ScopeType::Global || m.pinned {
+                continue;
+            }
+            let Some(promo) = self.store.last_promotion_event(&m.id, "promote")? else {
+                continue; // never promoted through this pipeline - nothing recorded to revert to
+            };
+            if promo.reason != "auto-threshold" {
+                continue; // a human explicitly promoted this - never auto-reverted
+            }
+            let idle = self.store.count_any_access(&m.id, cutoff).unwrap_or(0) == 0;
+            if !m.suspicious && !idle {
+                continue;
+            }
+            let mut updated = m.clone();
+            updated.scope_type = promo.old_scope_type;
+            updated.scope_id = promo.old_scope_id.clone();
+            updated.promo_locked = true;
+            updated.updated_at = Utc::now();
+            if self.store.upsert_memory(&updated)? {
+                self.log_promotion(&m.id, "demote", ScopeType::Global, None, 0.0, "auto-demote");
+                demoted += 1;
+            }
+        }
+        Ok(demoted)
+    }
+
+    /// v0.8.0 Sprint 8 `/api/memory/:id/demote` (Undo): revert a promotion back to where it
+    /// came from, using the most recent `"promote"` log entry for this memory - works for both
+    /// auto-promotions and human-driven `promote_memory` calls, since both now log. Returns
+    /// `Ok(false)` if the memory doesn't exist, or was never promoted through this pipeline
+    /// (e.g. promoted before Sprint 8 shipped, so there's no log entry to revert to).
+    pub fn demote_memory(&self, id: &str) -> Result<bool> {
+        let Some(mut m) = self.store.get_memory(id)? else {
+            return Ok(false);
+        };
+        let Some(promo) = self.store.last_promotion_event(id, "promote")? else {
+            return Ok(false);
+        };
+        m.scope_type = promo.old_scope_type;
+        m.scope_id = promo.old_scope_id.clone();
+        m.promo_locked = true;
+        m.updated_at = Utc::now();
+        let ok = self.store.upsert_memory(&m)?;
+        if ok {
+            self.log_promotion(id, "demote", ScopeType::Global, None, 0.0, "manual-undo");
+        }
+        Ok(ok)
     }
 
     /// Dismiss a promotion suggestion ("don't ask again") without changing scope. Returns
@@ -2345,6 +2496,186 @@ mod tests {
             .unwrap();
         assert!(result.is_none());
     }
+
+    // --- v0.8.0 Sprint 8: autopilot tests ---
+
+    #[test]
+    fn promote_memory_records_a_promotion_log_entry() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("manually promotable fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.95;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert!(mem.promote_memory(&m.id).unwrap());
+        let entry = mem
+            .store
+            .last_promotion_event(&m.id, "promote")
+            .unwrap()
+            .expect("logged");
+        assert_eq!(entry.action, "promote");
+        assert_eq!(entry.reason, "manual");
+        assert_eq!(entry.old_scope_type, ScopeType::Project);
+        assert_eq!(entry.old_scope_id, Some("proj-a".to_string()));
+    }
+
+    #[test]
+    fn run_auto_promote_promotes_above_threshold_and_logs() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("clearly universal fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.promo_score = 0.90;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 1);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Global);
+        assert!(after.promo_locked);
+        let entry = mem
+            .store
+            .last_promotion_event(&m.id, "promote")
+            .unwrap()
+            .expect("logged");
+        assert_eq!(entry.reason, "auto-threshold");
+        assert_eq!(entry.old_scope_id, Some("proj-a".to_string()));
+    }
+
+    #[test]
+    fn run_auto_promote_skips_at_or_below_threshold() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("borderline fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.85;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 0, "score equal to threshold must not promote");
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+    }
+
+    #[test]
+    fn run_auto_promote_skips_locked_and_non_project_memories() {
+        let Some(mem) = engine() else { return };
+        let mut locked = synth("locked candidate");
+        locked.scope_type = ScopeType::Project;
+        locked.scope_id = Some("proj-a".to_string());
+        locked.promo_score = 0.99;
+        locked.promo_locked = true;
+        mem.store.insert_memory(&locked).unwrap();
+
+        let mut global = synth("already global");
+        global.promo_score = 0.99;
+        mem.store.insert_memory(&global).unwrap();
+
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 0);
+    }
+
+    #[test]
+    fn demote_memory_reverts_to_the_logged_scope() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("promoted then undone");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+        assert!(mem.promote_memory(&m.id).unwrap());
+
+        assert!(mem.demote_memory(&m.id).unwrap());
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+        assert_eq!(after.scope_id, Some("proj-a".to_string()));
+        assert!(after.promo_locked, "undo still locks it against re-suggestion");
+
+        let entry = mem
+            .store
+            .last_promotion_event(&m.id, "demote")
+            .unwrap()
+            .expect("logged");
+        assert_eq!(entry.reason, "manual-undo");
+    }
+
+    #[test]
+    fn demote_memory_false_when_never_promoted() {
+        let Some(mem) = engine() else { return };
+        let m = synth("never promoted");
+        mem.store.insert_memory(&m).unwrap();
+        assert!(!mem.demote_memory(&m.id).unwrap());
+    }
+
+    #[test]
+    fn demote_memory_false_for_unknown_id() {
+        let Some(mem) = engine() else { return };
+        assert!(!mem.demote_memory("does-not-exist").unwrap());
+    }
+
+    #[test]
+    fn run_auto_demote_reverts_a_suspicious_auto_promoted_memory() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("auto-promoted but now suspicious");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.95;
+        mem.store.insert_memory(&m).unwrap();
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 1);
+
+        // Flag it suspicious after the fact (as contradiction detection would).
+        let mut flagged = mem.store.get_memory(&m.id).unwrap().unwrap();
+        flagged.suspicious = true;
+        mem.store.upsert_memory(&flagged).unwrap();
+
+        assert_eq!(mem.run_auto_demote(45).unwrap(), 1);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+        assert_eq!(after.scope_id, Some("proj-a".to_string()));
+    }
+
+    #[test]
+    fn run_auto_demote_never_touches_a_pinned_memory() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("auto-promoted then pinned by a human");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.95;
+        mem.store.insert_memory(&m).unwrap();
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 1);
+
+        let mut pinned = mem.store.get_memory(&m.id).unwrap().unwrap();
+        pinned.pinned = true;
+        pinned.suspicious = true; // would otherwise qualify for demotion
+        mem.store.upsert_memory(&pinned).unwrap();
+
+        assert_eq!(mem.run_auto_demote(45).unwrap(), 0, "pinned memories are exempt");
+    }
+
+    #[test]
+    fn run_auto_demote_never_touches_a_manually_promoted_memory() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("manually promoted, never auto");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+        assert!(mem.promote_memory(&m.id).unwrap()); // reason = "manual", not "auto-threshold"
+
+        let mut suspicious = mem.store.get_memory(&m.id).unwrap().unwrap();
+        suspicious.suspicious = true;
+        mem.store.upsert_memory(&suspicious).unwrap();
+
+        assert_eq!(
+            mem.run_auto_demote(45).unwrap(),
+            0,
+            "a human's explicit promotion is never second-guessed by the safety net"
+        );
+    }
+
+    // Note: the hermetic in-memory backend's `count_any_access` always reports `0` (same
+    // no-op boundary as `count_cross_project_access` - it never stores `access_log` rows), so
+    // every auto-promoted memory looks "idle" here regardless of `idle_days`. That's enough to
+    // test the `suspicious`/`pinned`/`manual` gates above, but a "not suspicious AND actively
+    // used, so left alone" case needs a real `access_log` - see `crates/cairn-store/src/
+    // surreal.rs`'s `live::` tests for that against a real SurrealDB.
 
     // --- P1.3 Triple-Stream tests ---
 

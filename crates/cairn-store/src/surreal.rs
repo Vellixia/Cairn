@@ -25,7 +25,10 @@
 //! Vector search runs through a `DEFINE INDEX ... HNSW` index over `memory.embedding` (see
 //! `schema.surql`), queried with the `<|k,ef|>` approximate-nearest-neighbor operator.
 
-use crate::db::{AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, StoreBackend};
+use crate::db::{
+    AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, PromotionLogEntry,
+    StoreBackend,
+};
 use cairn_core::{
     Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, OrgId, Result,
     ScopeType, TokenScope,
@@ -863,6 +866,54 @@ impl StoreBackend for SurrealStore {
         )?;
         Ok(!rows.is_empty())
     }
+
+    fn record_promotion_event(&self, entry: &PromotionLogEntry) -> Result<()> {
+        self.q(
+            "CREATE type::record('promotion_log', $id) CONTENT $data",
+            json!({
+                "id": &entry.id,
+                "data": {
+                    "memory_id": entry.memory_id,
+                    "action": entry.action,
+                    "old_scope_type": entry.old_scope_type.as_str(),
+                    "old_scope_id": entry.old_scope_id.clone().unwrap_or_default(),
+                    "score": entry.score,
+                    "reason": entry.reason,
+                    "ts": ts(entry.ts),
+                },
+            }),
+        )?;
+        Ok(())
+    }
+
+    fn list_promotion_log(&self, limit: usize) -> Result<Vec<PromotionLogEntry>> {
+        let rows = self.read_rows(
+            "SELECT *, record::id(id) AS rid FROM promotion_log ORDER BY ts DESC LIMIT $limit",
+            json!({ "limit": limit as i64 }),
+        )?;
+        Ok(rows.iter().map(promotion_log_from_row).collect())
+    }
+
+    fn last_promotion_event(
+        &self,
+        memory_id: &str,
+        action: &str,
+    ) -> Result<Option<PromotionLogEntry>> {
+        let rows = self.read_rows(
+            "SELECT *, record::id(id) AS rid FROM promotion_log \
+             WHERE memory_id = $mid AND action = $action ORDER BY ts DESC LIMIT 1",
+            json!({ "mid": memory_id, "action": action }),
+        )?;
+        Ok(rows.first().map(promotion_log_from_row))
+    }
+
+    fn count_any_access(&self, memory_id: &str, since: DateTime<Utc>) -> Result<i64> {
+        let rows = self.read_rows(
+            "SELECT count() AS c FROM access_log WHERE memory_id = $mid AND ts > $since GROUP ALL",
+            json!({ "mid": memory_id, "since": ts(since) }),
+        )?;
+        Ok(rows.first().map(|r| get_i64(r, "c")).unwrap_or(0))
+    }
 }
 
 // - helpers ---------------------------------------------------------------------------------
@@ -926,6 +977,25 @@ fn document_chunk_from_row(m: &Map<String, Json>) -> DocumentChunkRecord {
         chunk_index: get_i64(m, "chunk_index") as usize,
         content: get_str(m, "content"),
         created_at: parse_ts(&get_str(m, "created_at")),
+    }
+}
+
+fn promotion_log_from_row(m: &Map<String, Json>) -> PromotionLogEntry {
+    let old_scope_id = get_str(m, "old_scope_id");
+    PromotionLogEntry {
+        id: get_str(m, "rid"),
+        memory_id: get_str(m, "memory_id"),
+        action: get_str(m, "action"),
+        old_scope_type: ScopeType::from_str(&get_str(m, "old_scope_type"))
+            .unwrap_or(ScopeType::Global),
+        old_scope_id: if old_scope_id.is_empty() {
+            None
+        } else {
+            Some(old_scope_id)
+        },
+        score: get_f64(m, "score") as f32,
+        reason: get_str(m, "reason"),
+        ts: parse_ts(&get_str(m, "ts")),
     }
 }
 
@@ -1036,6 +1106,11 @@ mod live {
         decay_period_days: 30,
         access_log_retention_days: 90,
         cron_enabled: true,
+        promote_threshold: 0.85,
+        demote_idle_days: 45,
+        drift_autopilot: "safe".to_string(),
+        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        auto_anchor: true,
         };
         Some(SurrealStore::connect(&cfg).expect("connect to live SurrealDB"))
     }
@@ -1219,5 +1294,84 @@ mod live {
         assert!(store.delete_document(source).expect("delete_document"));
         let docs = store.list_documents().expect("list_documents3");
         assert!(!docs.iter().any(|d| d.source == source));
+    }
+
+    #[test]
+    #[ignore = "requires a live SurrealDB server (set CAIRN_DB_URL)"]
+    fn promotion_log_roundtrip_via_store() {
+        let Some(store) = crate::Store::open_for_test() else {
+            return;
+        };
+        let memory_id = uuid_simple();
+
+        let promote = PromotionLogEntry {
+            id: uuid_simple(),
+            memory_id: memory_id.clone(),
+            action: "promote".to_string(),
+            old_scope_type: ScopeType::Project,
+            old_scope_id: Some("proj-alpha".to_string()),
+            score: 0.92,
+            reason: "auto-threshold".to_string(),
+            ts: Utc::now(),
+        };
+        store
+            .record_promotion_event(&promote)
+            .expect("record promote");
+
+        let last = store
+            .last_promotion_event(&memory_id, "promote")
+            .expect("query")
+            .expect("present");
+        assert_eq!(last.old_scope_id, Some("proj-alpha".to_string()));
+        assert_eq!(last.reason, "auto-threshold");
+        assert!(store
+            .last_promotion_event(&memory_id, "demote")
+            .expect("query2")
+            .is_none());
+
+        let demote = PromotionLogEntry {
+            id: uuid_simple(),
+            memory_id: memory_id.clone(),
+            action: "demote".to_string(),
+            old_scope_type: ScopeType::Global,
+            old_scope_id: None,
+            score: 0.0,
+            reason: "auto-demote".to_string(),
+            ts: Utc::now(),
+        };
+        store.record_promotion_event(&demote).expect("record demote");
+
+        let log = store.list_promotion_log(10).expect("list");
+        assert!(log.iter().any(|e| e.memory_id == memory_id && e.action == "promote"));
+        assert!(log.iter().any(|e| e.memory_id == memory_id && e.action == "demote"));
+    }
+
+    #[test]
+    #[ignore = "requires a live SurrealDB server (set CAIRN_DB_URL)"]
+    fn count_any_access_counts_regardless_of_project() {
+        let Some(store) = crate::Store::open_for_test() else {
+            return;
+        };
+        let memory_id = uuid_simple();
+        store
+            .record_access_batch(&[
+                (memory_id.clone(), Some("proj-a".to_string()), None),
+                (memory_id.clone(), Some("proj-b".to_string()), None),
+                (memory_id.clone(), None, Some("sess-1".to_string())),
+            ])
+            .expect("seed access log");
+
+        let since = Utc::now() - chrono::Duration::minutes(5);
+        let count = store
+            .count_any_access(&memory_id, since)
+            .expect("count_any_access");
+        assert_eq!(count, 3, "counts every access regardless of project");
+
+        let future = Utc::now() + chrono::Duration::minutes(5);
+        assert_eq!(
+            store.count_any_access(&memory_id, future).expect("count2"),
+            0,
+            "nothing is newer than a future cutoff"
+        );
     }
 }

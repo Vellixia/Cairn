@@ -113,6 +113,26 @@ impl RemoteClient {
                         }
                     }
                 }
+                // v0.8.0 Sprint 8: "since you were away" - what autopilot (promotion, drift)
+                // did overnight, so a human learns about it here instead of having to visit
+                // the dashboard. Omitted entirely when every count is zero - a quiet night
+                // shouldn't manufacture a line of noise in every session's context.
+                if let Ok(resp) = self.get("/api/memory/autopilot-digest").call() {
+                    if let Ok(v) = resp.into_json::<Value>() {
+                        let promoted = v.get("promoted").and_then(Value::as_u64).unwrap_or(0);
+                        let demoted = v.get("demoted").and_then(Value::as_u64).unwrap_or(0);
+                        let drift = v
+                            .get("drift_auto_approved")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0);
+                        if promoted + demoted + drift > 0 {
+                            ctx.push_str(&format!(
+                                "Since you were away: {promoted} memories auto-promoted, \
+                                 {demoted} demoted, {drift} drift events auto-approved.\n\n"
+                            ));
+                        }
+                    }
+                }
                 if let Ok(resp) = self.get("/api/profile").call() {
                     if let Ok(mems) = resp.into_json::<Vec<Value>>() {
                         if !mems.is_empty() {
@@ -152,6 +172,13 @@ impl RemoteClient {
                 if prompt.trim().is_empty() {
                     return Ok(());
                 }
+                // v0.8.0 Sprint 8: derive a task anchor from the first prompt if none is set
+                // yet. Cheap to call on every prompt - the server no-ops immediately once an
+                // anchor already exists (manual or auto-derived), so this is a live network
+                // call only on the very first prompt of a session.
+                let _ = self
+                    .post("/api/guard/anchor/auto")
+                    .send_json(json!({ "prompt": prompt }));
                 // P1.8: default-off context injection. Opt-in via `CAIRN_INJECT_CONTEXT=true`.
                 // Without this gate, every prompt burns ~1000 tokens on a /api/context/assemble
                 // call - silent burn. Recording the prompt to memory still happens below

@@ -53,6 +53,11 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         decay_period_days: 30,
         access_log_retention_days: 90,
         cron_enabled: true,
+        promote_threshold: 0.85,
+        demote_idle_days: 45,
+        drift_autopilot: "safe".to_string(),
+        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        auto_anchor: true,
     };
     let state = AppState::with_store(&cfg, store).ok()?;
     Some((router(state), dir))
@@ -160,7 +165,7 @@ async fn login_cookie(app: axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn list_jobs_shows_all_four_with_no_prior_run() {
+async fn list_jobs_shows_all_five_with_no_prior_run() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
@@ -169,17 +174,35 @@ async fn list_jobs_shows_all_four_with_no_prior_run() {
     let jobs = body.as_array().expect("array");
     assert_eq!(
         jobs.len(),
-        4,
-        "session-gc, memory-decay, access-log-prune, llm-intelligence"
+        5,
+        "session-gc, memory-decay, access-log-prune, llm-intelligence, memory-demote"
     );
     let names: Vec<&str> = jobs.iter().filter_map(|j| j["name"].as_str()).collect();
     assert!(names.contains(&"session-gc"));
     assert!(names.contains(&"memory-decay"));
     assert!(names.contains(&"access-log-prune"));
     assert!(names.contains(&"llm-intelligence"));
+    assert!(names.contains(&"memory-demote"));
     for j in jobs {
         assert!(j["last_run"].is_null(), "no job has run yet");
     }
+}
+
+#[tokio::test]
+async fn memory_demote_job_runs_and_reports_zero_on_an_empty_store() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    let (status, body, _) = request_json(
+        app,
+        "POST",
+        "/api/cron/run/memory-demote",
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "got {status} body={body}");
+    assert_eq!(body["job"], "memory-demote");
+    assert_eq!(body["outcome"], "ok");
 }
 
 #[tokio::test]

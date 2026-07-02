@@ -227,6 +227,27 @@ pub struct Config {
     /// `true`). Set `false` to disable every background job - useful for a horizontally-scaled
     /// deployment where only one replica should run cron.
     pub cron_enabled: bool,
+    /// Promotion auto-threshold (v0.8.0 Sprint 8). A `Project`-scoped memory whose
+    /// `promo_score` exceeds this auto-promotes to `Global` on the next `llm-intelligence`
+    /// cron run - the `[0.70, 0.90]` human-review band from Sprint 5 only ever applies below
+    /// this threshold. (`CAIRN_PROMOTE_THRESHOLD`, default `0.85`).
+    pub promote_threshold: f32,
+    /// Days an auto-promoted `Global` memory can go unused (by any project) before the nightly
+    /// `memory-demote` cron job reverts it back to its original `Project` scope
+    /// (`CAIRN_DEMOTE_IDLE_DAYS`, default `45`). Human-promoted/pinned memories are exempt.
+    pub demote_idle_days: u32,
+    /// Drift auto-approval policy (v0.8.0 Sprint 8): `"safe"` (default - `ok` always
+    /// auto-approves, `warn` auto-approves only under `drift_safe_globs`, `danger` never
+    /// auto-approves), `"off"` (fully manual), or `"all"` (`ok`+`warn` always auto-approve;
+    /// `danger` still never does). (`CAIRN_DRIFT_AUTOPILOT`)
+    pub drift_autopilot: String,
+    /// Glob patterns considered low-stakes enough for a `warn`-risk drift event to auto-approve
+    /// under the `"safe"` policy (`CAIRN_DRIFT_SAFE_GLOBS`, comma-separated, default
+    /// `docs/**,*.md,**/tests/**,**/*.test.*`).
+    pub drift_safe_globs: Vec<String>,
+    /// Whether a session with no manually-set anchor gets one derived automatically from its
+    /// first substantive prompt (`CAIRN_AUTO_ANCHOR`, default `true`).
+    pub auto_anchor: bool,
 }
 
 impl Config {
@@ -318,6 +339,25 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(90),
             cron_enabled: std::env::var("CAIRN_CRON_ENABLED")
+                .ok()
+                .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+                .unwrap_or(true),
+            promote_threshold: env_str("CAIRN_PROMOTE_THRESHOLD")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.85),
+            demote_idle_days: env_str("CAIRN_DEMOTE_IDLE_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(45),
+            drift_autopilot: env_str("CAIRN_DRIFT_AUTOPILOT").unwrap_or_else(|| "safe".to_string()),
+            drift_safe_globs: env_str("CAIRN_DRIFT_SAFE_GLOBS")
+                .map(|s| s.split(',').map(|g| g.trim().to_string()).collect())
+                .unwrap_or_else(|| {
+                    ["docs/**", "*.md", "**/tests/**", "**/*.test.*"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect()
+                }),
+            auto_anchor: std::env::var("CAIRN_AUTO_ANCHOR")
                 .ok()
                 .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
                 .unwrap_or(true),
@@ -431,6 +471,14 @@ mod tests {
             decay_period_days: 30,
             access_log_retention_days: 90,
             cron_enabled: true,
+            promote_threshold: 0.85,
+            demote_idle_days: 45,
+            drift_autopilot: "safe".to_string(),
+            drift_safe_globs: ["docs/**", "*.md", "**/tests/**", "**/*.test.*"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            auto_anchor: true,
         }
     }
 

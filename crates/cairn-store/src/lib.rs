@@ -9,4 +9,6 @@ mod surreal;
 pub mod memory_backend;
 
 pub use blob::BlobStore;
-pub use db::{AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, Store};
+pub use db::{
+    AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, PromotionLogEntry, Store,
+};

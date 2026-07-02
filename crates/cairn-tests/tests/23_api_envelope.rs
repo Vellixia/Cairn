@@ -53,6 +53,11 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         decay_period_days: 30,
         access_log_retention_days: 90,
         cron_enabled: true,
+        promote_threshold: 0.85,
+        demote_idle_days: 45,
+        drift_autopilot: "safe".to_string(),
+        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        auto_anchor: true,
     };
     let state = AppState::with_store(&cfg, store).ok()?;
     Some((router(state), dir))

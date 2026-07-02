@@ -13,7 +13,10 @@
 //! falls back to lexical ranking, identical to the offline behaviour of
 //! the production server when `CAIRN_DB_URL` is unset.
 
-use crate::db::{AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, StoreBackend};
+use crate::db::{
+    AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, PromotionLogEntry,
+    StoreBackend,
+};
 use crate::Store;
 use cairn_core::{ContentHash, DeviceToken, Error, Memory, Result, TokenScope};
 use chrono::{DateTime, Utc};
@@ -51,6 +54,8 @@ struct Inner {
     projects: HashMap<String, ProjectRecord>,
     /// chunk id -> DocumentChunkRecord (v0.8.0 Sprint 6)
     document_chunks: HashMap<String, DocumentChunkRecord>,
+    /// append-only promotion log, oldest first (v0.8.0 Sprint 8)
+    promotion_log: Vec<PromotionLogEntry>,
 }
 
 impl MemoryBackend {
@@ -70,6 +75,7 @@ impl MemoryBackend {
                 guard_events: Vec::new(),
                 projects: HashMap::new(),
                 document_chunks: HashMap::new(),
+                promotion_log: Vec::new(),
             }),
         }
     }
@@ -546,6 +552,35 @@ impl StoreBackend for MemoryBackend {
         g.document_chunks.retain(|_, c| c.source != source);
         Ok(g.document_chunks.len() < before)
     }
+
+    fn record_promotion_event(&self, entry: &PromotionLogEntry) -> Result<()> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        g.promotion_log.push(entry.clone());
+        Ok(())
+    }
+
+    fn list_promotion_log(&self, limit: usize) -> Result<Vec<PromotionLogEntry>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        Ok(g.promotion_log.iter().rev().take(limit).cloned().collect())
+    }
+
+    fn last_promotion_event(
+        &self,
+        memory_id: &str,
+        action: &str,
+    ) -> Result<Option<PromotionLogEntry>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        Ok(g
+            .promotion_log
+            .iter()
+            .rev()
+            .find(|e| e.memory_id == memory_id && e.action == action)
+            .cloned())
+    }
+
+    // `count_any_access` keeps the trait's no-op default (`Ok(0)`) - same hermetic-backend
+    // boundary as `count_cross_project_access`: the in-memory backend never stores access_log
+    // rows in the first place.
 }
 
 fn poisoned(e: std::sync::PoisonError<std::sync::MutexGuard<'_, Inner>>) -> Error {

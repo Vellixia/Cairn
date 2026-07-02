@@ -18,12 +18,44 @@ use std::path::Path;
 use std::sync::Arc;
 use uuid::Uuid;
 
+pub mod autopilot;
+pub use autopilot::{autopilot_decision, DriftAutopilot};
+
 fn simple_hash(s: &str) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     s.hash(&mut h);
     format!("{:016x}", h.finish())
+}
+
+/// Maximum length of a heuristically-derived task anchor (v0.8.0 Sprint 8).
+const MAX_AUTO_ANCHOR_CHARS: usize = 140;
+
+/// A one-line task anchor from the first substantive prompt of a session, no LLM call: the
+/// first sentence (split on `.`/`!`/`?`/newline), truncated to a sane length if there's no
+/// clear sentence boundary. `None` for empty/whitespace-only input.
+fn derive_anchor_from_prompt(prompt: &str) -> Option<String> {
+    let trimmed = prompt.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let first_sentence = trimmed
+        .split(['.', '!', '?', '\n'])
+        .find(|s| !s.trim().is_empty())
+        .unwrap_or(trimmed)
+        .trim();
+    let candidate = if first_sentence.is_empty() {
+        trimmed
+    } else {
+        first_sentence
+    };
+    let truncated: String = candidate.chars().take(MAX_AUTO_ANCHOR_CHARS).collect();
+    if truncated.is_empty() {
+        None
+    } else {
+        Some(truncated)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -213,6 +245,21 @@ impl Guard {
             meta.goal
         };
         Ok(Some(out))
+    }
+
+    /// v0.8.0 Sprint 8: derive and set a task anchor from `prompt` if - and only if - none is
+    /// set yet. A no-op (`Ok(None)`) once a session already has an anchor, whether that anchor
+    /// was set manually or by an earlier auto-derivation this same session - this only ever
+    /// fires once per anchor lifetime. Returns the newly-set anchor, or `None` if one already
+    /// existed or `prompt` had nothing usable to derive from.
+    pub fn auto_anchor_if_unset(&self, prompt: &str) -> Result<Option<AnchorMeta>> {
+        if self.anchor()?.is_some() {
+            return Ok(None);
+        }
+        let Some(derived) = derive_anchor_from_prompt(prompt) else {
+            return Ok(None);
+        };
+        Ok(Some(self.set_anchor(&derived)?))
     }
 
     /// Snapshot the files Cairn has tracked (path -> content hash) as a named checkpoint.
@@ -480,6 +527,67 @@ mod tests {
         assert!(g.anchor().unwrap().is_none());
         g.set_anchor("  ship Cairn v0.2  ").unwrap();
         assert_eq!(g.anchor().unwrap().unwrap(), "ship Cairn v0.2");
+    }
+
+    // --- v0.8.0 Sprint 8: auto-anchor ---
+
+    #[test]
+    fn derive_anchor_from_prompt_takes_the_first_sentence() {
+        assert_eq!(
+            derive_anchor_from_prompt("Fix the login bug. Then write tests."),
+            Some("Fix the login bug".to_string())
+        );
+    }
+
+    #[test]
+    fn derive_anchor_from_prompt_truncates_long_single_sentence() {
+        let long = "a".repeat(200);
+        let derived = derive_anchor_from_prompt(&long).unwrap();
+        assert_eq!(derived.chars().count(), MAX_AUTO_ANCHOR_CHARS);
+    }
+
+    #[test]
+    fn derive_anchor_from_prompt_none_for_empty_or_whitespace() {
+        assert_eq!(derive_anchor_from_prompt(""), None);
+        assert_eq!(derive_anchor_from_prompt("   \n  "), None);
+    }
+
+    #[test]
+    fn derive_anchor_from_prompt_skips_leading_empty_sentences() {
+        // A prompt starting with punctuation shouldn't derive an empty anchor.
+        assert_eq!(
+            derive_anchor_from_prompt("... actually, fix the auth flow first"),
+            Some("actually, fix the auth flow first".to_string())
+        );
+    }
+
+    #[test]
+    fn auto_anchor_sets_one_when_none_exists() {
+        let Some((g, _dir)) = guard() else { return };
+        let result = g
+            .auto_anchor_if_unset("Refactor the parser module. It's getting unwieldy.")
+            .unwrap();
+        assert_eq!(result.unwrap().goal, "Refactor the parser module");
+        assert_eq!(
+            g.anchor().unwrap().unwrap(),
+            "Refactor the parser module"
+        );
+    }
+
+    #[test]
+    fn auto_anchor_is_a_noop_once_any_anchor_is_set() {
+        let Some((g, _dir)) = guard() else { return };
+        g.set_anchor("manually set goal").unwrap();
+        let result = g.auto_anchor_if_unset("a completely different prompt").unwrap();
+        assert!(result.is_none(), "must not override an existing anchor");
+        assert_eq!(g.anchor().unwrap().unwrap(), "manually set goal");
+    }
+
+    #[test]
+    fn auto_anchor_is_a_noop_for_an_empty_prompt() {
+        let Some((g, _dir)) = guard() else { return };
+        assert!(g.auto_anchor_if_unset("   ").unwrap().is_none());
+        assert!(g.anchor().unwrap().is_none());
     }
 
     #[test]
