@@ -21,7 +21,7 @@ export const HELP: Record<string, HelpCopy> = {
       "Click a result to expand it.",
     ],
     impact:
-      "Recall runs against the local Helix index in <50ms for 10k items.",
+      "Recall runs against the local SurrealDB index in <50ms for 10k items.",
   },
   "/memory/wakeup": {
     title: "Wakeup",
@@ -32,6 +32,17 @@ export const HELP: Record<string, HelpCopy> = {
     ],
     impact:
       "Wakeup is the default context Cairn loads for a fresh agent. Trimming here directly shrinks every future session's token bill.",
+  },
+  "/memory/promotion": {
+    title: "Promotion & Intelligence",
+    what: "v0.8.0: memories the nightly llm-intelligence job thinks are broadly useful enough to promote to Global scope, plus a log of recent background-job runs.",
+    how: [
+      "Promote moves a memory to Global scope and locks it against future suggestions.",
+      "Dismiss locks it without changing scope (\"don't ask again\").",
+      "The Intelligence Log shows what session-gc/memory-decay/access-log-prune/llm-intelligence did on their last run.",
+    ],
+    impact:
+      "Nothing here is automatic yet - every promotion still needs a human click. Auto-promotion with an Undo is a future sprint (v0.8.0 Sprint 8).",
   },
   "/memory/compression": {
     title: "Compression Lab",

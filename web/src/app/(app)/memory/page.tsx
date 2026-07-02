@@ -9,10 +9,12 @@ import SavingsPage from "./savings/page";
 import CompressionPage from "./compression/page";
 import ArchitecturePage from "./architecture/page";
 import HeatmapPage from "./heatmap/page";
+import PromotionPage from "./promotion/page";
 
 const MEMORY_TABS: HubTab[] = [
   { id: "wakeup", label: "Wakeup", content: <WakeupPage /> },
   { id: "recall", label: "Recall", content: <RecallPage /> },
+  { id: "promotion", label: "Promotion", content: <PromotionPage /> },
   { id: "graph", label: "Graph", content: <GraphPage /> },
   { id: "compression", label: "Compression Lab", content: <CompressionPage /> },
   { id: "savings", label: "Savings", content: <SavingsPage /> },

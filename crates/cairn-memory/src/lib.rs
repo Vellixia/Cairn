@@ -357,10 +357,16 @@ impl MemoryEngine {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
-        scored.truncate(limit);
+
+        // v0.8.0 Sprint 7: MMR diversification, on the full (tiebreak-sorted) candidate pool
+        // rather than an already-truncated top-`limit` slice - `hybrid_search`/
+        // `hybrid_search_with_rerank` already apply `mmr_rerank` this way; `recall_for_org` was
+        // the one remaining path doing a plain score-sort-and-cut. For a corpus smaller than
+        // `limit`, `mmr_rerank` degrades to the same score-sorted order this used to produce.
+        let mmr_selected = mmr_rerank(scored, limit, 0.7);
 
         // Session diversification: cap at 3 per session, fill from remaining.
-        let diversified = diversify_by_session(scored, limit, 3);
+        let diversified = diversify_by_session(mmr_selected, limit, 3);
 
         for s in &diversified {
             let _ = self.store.touch_memory(&s.memory.id);

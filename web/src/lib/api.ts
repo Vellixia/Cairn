@@ -229,12 +229,25 @@ export interface Memory {
   confidence: number;
   /** Pinned memories always surface first in wakeup regardless of score. */
   pinned: boolean;
+  /** v0.8.0 Sprint 5: promotion-worthiness score in [0.0, 1.0]; 0.70-0.90 is the review band. */
+  promo_score: number;
+  /** v0.8.0 Sprint 5: once true, excluded from promotion scoring/suggestions. */
+  promo_locked: boolean;
   created_at: string;
   updated_at: string;
 }
 export interface ScoredMemory {
   memory: Memory;
   score: number;
+}
+
+/** v0.8.0 Sprint 4/5: one entry in `GET /api/cron/history`. */
+export interface CronRun {
+  job: string;
+  started_at: string;
+  duration_ms: number;
+  outcome: "ok" | "err";
+  detail: string;
 }
 
 export interface ReadResult {

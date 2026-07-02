@@ -54,6 +54,8 @@ describe("API type shapes", () => {
       access_count: 0,
       confidence: 0.5,
       pinned: false,
+      promo_score: 0,
+      promo_locked: false,
       created_at: "2025-01-01T00:00:00Z",
       updated_at: "2025-01-01T00:00:00Z",
     }
@@ -72,6 +74,8 @@ describe("API type shapes", () => {
       access_count: 0,
       confidence: 0.5,
       pinned: false,
+      promo_score: 0,
+      promo_locked: false,
       created_at: "2025-01-01T00:00:00Z",
       updated_at: "2025-01-01T00:00:00Z",
     }

@@ -11,6 +11,7 @@ import {
   type ArchitectureReport,
   type AuditEvent,
   type CompressionDemo,
+  type CronRun,
   type DeviceTokenMeta,
   type Health,
   type IssuedToken,
@@ -50,6 +51,8 @@ export const qk = {
   registrySearch: (q: string) => ["registry", "search", q] as const,
   registryRevocations: ["registry", "revocations"] as const,
   registryTrustedKeys: ["registry", "trusted-keys"] as const,
+  promotionCandidates: ["memory", "promotion-candidates"] as const,
+  cronHistory: ["cron", "history"] as const,
 };
 
 // ---- queries ----------------------------------------------------------------
@@ -153,6 +156,25 @@ export function useHeatmapQuery(days = 365) {
     queryFn: () =>
       getJSON<Record<string, number>>(`/api/memory/heatmap?days=${days}`),
     staleTime: 60_000,
+  });
+}
+
+// v0.8.0 Sprint 5: memories in the [0.70, 0.90] promotion review band.
+export function usePromotionCandidatesQuery() {
+  return useQuery({
+    queryKey: qk.promotionCandidates,
+    queryFn: () => getJSON<Memory[]>("/api/memory/promotion-candidates"),
+    refetchInterval: 30_000,
+  });
+}
+
+// v0.8.0 Sprint 4/5: recent background-job runs (session-gc, memory-decay,
+// access-log-prune, llm-intelligence).
+export function useCronHistoryQuery() {
+  return useQuery({
+    queryKey: qk.cronHistory,
+    queryFn: () => getJSON<CronRun[]>("/api/cron/history"),
+    refetchInterval: 30_000,
   });
 }
 
@@ -367,6 +389,33 @@ export function useSetAnchorMutation() {
       qc.invalidateQueries({ queryKey: qk.anchor });
       qc.invalidateQueries({ queryKey: qk.stats });
       toast.success("Anchor set");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+// v0.8.0 Sprint 5: approve a promotion candidate (-> Global scope, locked).
+export function usePromoteMemoryMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/promote`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.promotionCandidates });
+      toast.success("Promoted to Global");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+// v0.8.0 Sprint 5: dismiss a promotion candidate ("don't ask again").
+export function useDismissPromotionMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/dismiss-promotion`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.promotionCandidates });
+      toast("Dismissed");
     },
     onError: (e) => toast.error(errMessage(e)),
   });
