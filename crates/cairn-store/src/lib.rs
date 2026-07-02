@@ -9,4 +9,4 @@ mod surreal;
 pub mod memory_backend;
 
 pub use blob::BlobStore;
-pub use db::{AuditRecord, ProjectRecord, Store};
+pub use db::{AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, Store};

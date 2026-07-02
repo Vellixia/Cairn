@@ -25,7 +25,7 @@
 //! Vector search runs through a `DEFINE INDEX ... HNSW` index over `memory.embedding` (see
 //! `schema.surql`), queried with the `<|k,ef|>` approximate-nearest-neighbor operator.
 
-use crate::db::{AuditRecord, ProjectRecord, StoreBackend};
+use crate::db::{AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, StoreBackend};
 use cairn_core::{
     Config, ContentHash, DeviceToken, Error, Memory, MemoryKind, MemoryTier, OrgId, Result,
     ScopeType, TokenScope,
@@ -783,6 +783,86 @@ impl StoreBackend for SurrealStore {
         )?;
         Ok(rows.first().map(project_from_row))
     }
+
+    fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
+        // Idempotent re-ingest: wipe whatever's there first, so an edited/shrunk source never
+        // leaves stale trailing chunks behind.
+        self.q(
+            "DELETE document_chunk WHERE source = $source",
+            json!({ "source": source }),
+        )?;
+        let base_id = ContentHash::of_str(source).short().to_string();
+        let now = ts(Utc::now());
+        for (i, content) in chunks.iter().enumerate() {
+            let embedding = self.embed.embed_one(content)?;
+            self.q(
+                "CREATE type::record('document_chunk', $id) CONTENT $data",
+                json!({
+                    "id": format!("{base_id}-{i}"),
+                    "data": {
+                        "source": source,
+                        "title": title,
+                        "chunk_index": i,
+                        "content": content,
+                        "created_at": now,
+                        "embedding": embedding,
+                    },
+                }),
+            )?;
+        }
+        Ok(chunks.len())
+    }
+
+    fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
+        // Grouped/aggregated in Rust rather than SurrealQL - same "pull it all, fold in Rust"
+        // convention used everywhere else in this file for anything beyond a flat SELECT.
+        let rows = self.read_rows(
+            "SELECT source, title, created_at FROM document_chunk",
+            json!({}),
+        )?;
+        let mut by_source: std::collections::HashMap<String, DocumentSummary> =
+            std::collections::HashMap::new();
+        for r in &rows {
+            let source = get_str(r, "source");
+            let created_at = parse_ts(&get_str(r, "created_at"));
+            by_source
+                .entry(source.clone())
+                .and_modify(|d| {
+                    d.chunk_count += 1;
+                    if created_at > d.updated_at {
+                        d.updated_at = created_at;
+                    }
+                })
+                .or_insert_with(|| DocumentSummary {
+                    id: ContentHash::of_str(&source).short().to_string(),
+                    source,
+                    title: get_str(r, "title"),
+                    chunk_count: 1,
+                    updated_at: created_at,
+                });
+        }
+        let mut out: Vec<DocumentSummary> = by_source.into_values().collect();
+        out.sort_by_key(|d| std::cmp::Reverse(d.updated_at));
+        Ok(out)
+    }
+
+    fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
+        let qvec = self.embed.embed_one(query)?;
+        let ef = (k as u32).saturating_mul(4).max(40);
+        let sql = format!(
+            "SELECT *, record::id(id) AS rid FROM document_chunk WHERE embedding <|{k},{ef}|> $qvec"
+        );
+        let rows = self.read_rows(sql, json!({ "qvec": qvec }))?;
+        Ok(rows.iter().map(document_chunk_from_row).collect())
+    }
+
+    fn delete_document(&self, source: &str) -> Result<bool> {
+        let rows = self.read_rows(
+            "DELETE document_chunk WHERE source = $source RETURN BEFORE",
+            json!({ "source": source }),
+        )?;
+        Ok(!rows.is_empty())
+    }
 }
 
 // - helpers ---------------------------------------------------------------------------------
@@ -835,6 +915,17 @@ fn project_from_row(m: &Map<String, Json>) -> ProjectRecord {
         path: get_str(m, "path"),
         first_seen: parse_ts(&get_str(m, "first_seen")),
         last_active: parse_ts(&get_str(m, "last_active")),
+    }
+}
+
+fn document_chunk_from_row(m: &Map<String, Json>) -> DocumentChunkRecord {
+    DocumentChunkRecord {
+        id: get_str(m, "rid"),
+        source: get_str(m, "source"),
+        title: get_str(m, "title"),
+        chunk_index: get_i64(m, "chunk_index") as usize,
+        content: get_str(m, "content"),
+        created_at: parse_ts(&get_str(m, "created_at")),
     }
 }
 
@@ -1082,5 +1173,51 @@ mod live {
             store.get_memory(&m.id).expect("get3").unwrap().content,
             m.content
         );
+    }
+
+    #[test]
+    #[ignore = "requires a live SurrealDB server (set CAIRN_DB_URL)"]
+    fn document_chunks_roundtrip_via_store() {
+        let Some(store) = crate::Store::open_for_test() else {
+            return;
+        };
+        let source = "https://example.com/docs/cairn-rag-test.md";
+        let chunks = vec![
+            "cairn's scope model has Global, Project, and Session levels.".to_string(),
+            "the surrealdb backend uses an HNSW index for semantic search.".to_string(),
+        ];
+        let inserted = store
+            .replace_document(source, "Cairn RAG test doc", &chunks)
+            .expect("replace_document");
+        assert_eq!(inserted, 2);
+
+        let docs = store.list_documents().expect("list_documents");
+        let doc = docs
+            .iter()
+            .find(|d| d.source == source)
+            .expect("document listed");
+        assert_eq!(doc.title, "Cairn RAG test doc");
+        assert_eq!(doc.chunk_count, 2);
+
+        let hits = store
+            .search_documents("HNSW semantic search index", 5)
+            .expect("search_documents");
+        assert!(
+            hits.iter().any(|c| c.source == source),
+            "search should surface a chunk from the ingested document"
+        );
+
+        // Re-ingesting the same source replaces its chunks rather than accumulating.
+        let single = vec!["just one chunk now.".to_string()];
+        store
+            .replace_document(source, "Cairn RAG test doc", &single)
+            .expect("re-ingest");
+        let docs = store.list_documents().expect("list_documents2");
+        let doc = docs.iter().find(|d| d.source == source).expect("present");
+        assert_eq!(doc.chunk_count, 1, "re-ingest must replace, not append");
+
+        assert!(store.delete_document(source).expect("delete_document"));
+        let docs = store.list_documents().expect("list_documents3");
+        assert!(!docs.iter().any(|d| d.source == source));
     }
 }

@@ -13,7 +13,7 @@
 //! falls back to lexical ranking, identical to the offline behaviour of
 //! the production server when `CAIRN_DB_URL` is unset.
 
-use crate::db::{AuditRecord, ProjectRecord, StoreBackend};
+use crate::db::{AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, StoreBackend};
 use crate::Store;
 use cairn_core::{ContentHash, DeviceToken, Error, Memory, Result, TokenScope};
 use chrono::{DateTime, Utc};
@@ -49,6 +49,8 @@ struct Inner {
     guard_events: Vec<(String, String, String, String)>,
     /// id -> ProjectRecord (v0.8.0 Sprint 3)
     projects: HashMap<String, ProjectRecord>,
+    /// chunk id -> DocumentChunkRecord (v0.8.0 Sprint 6)
+    document_chunks: HashMap<String, DocumentChunkRecord>,
 }
 
 impl MemoryBackend {
@@ -67,6 +69,7 @@ impl MemoryBackend {
                 next_audit_id: 1,
                 guard_events: Vec::new(),
                 projects: HashMap::new(),
+                document_chunks: HashMap::new(),
             }),
         }
     }
@@ -462,6 +465,86 @@ impl StoreBackend for MemoryBackend {
     fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
         let g = self.inner.lock().map_err(poisoned)?;
         Ok(g.projects.get(id).cloned())
+    }
+
+    fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        g.document_chunks.retain(|_, c| c.source != source);
+        let base_id = ContentHash::of_str(source).short().to_string();
+        let now = Utc::now();
+        for (i, content) in chunks.iter().enumerate() {
+            let id = format!("{base_id}-{i}");
+            g.document_chunks.insert(
+                id.clone(),
+                DocumentChunkRecord {
+                    id,
+                    source: source.to_string(),
+                    title: title.to_string(),
+                    chunk_index: i,
+                    content: content.clone(),
+                    created_at: now,
+                },
+            );
+        }
+        Ok(chunks.len())
+    }
+
+    fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        let mut by_source: HashMap<String, DocumentSummary> = HashMap::new();
+        for c in g.document_chunks.values() {
+            by_source
+                .entry(c.source.clone())
+                .and_modify(|d| {
+                    d.chunk_count += 1;
+                    if c.created_at > d.updated_at {
+                        d.updated_at = c.created_at;
+                    }
+                })
+                .or_insert_with(|| DocumentSummary {
+                    id: ContentHash::of_str(&c.source).short().to_string(),
+                    source: c.source.clone(),
+                    title: c.title.clone(),
+                    chunk_count: 1,
+                    updated_at: c.created_at,
+                });
+        }
+        let mut out: Vec<DocumentSummary> = by_source.into_values().collect();
+        out.sort_by_key(|d| std::cmp::Reverse(d.updated_at));
+        Ok(out)
+    }
+
+    /// No vector index in the hermetic backend - falls back to a naive lexical match count
+    /// (case-insensitive substring hits per query word), same "good enough offline" spirit as
+    /// `semantic_recall` returning `None` for lexical-only fallback elsewhere.
+    fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        let terms: Vec<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut scored: Vec<(usize, &DocumentChunkRecord)> = g
+            .document_chunks
+            .values()
+            .filter_map(|c| {
+                let lower = c.content.to_lowercase();
+                let hits = terms.iter().filter(|t| lower.contains(t.as_str())).count();
+                (hits > 0).then_some((hits, c))
+            })
+            .collect();
+        scored.sort_by_key(|(hits, _)| std::cmp::Reverse(*hits));
+        Ok(scored.into_iter().take(k).map(|(_, c)| c.clone()).collect())
+    }
+
+    fn delete_document(&self, source: &str) -> Result<bool> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        let before = g.document_chunks.len();
+        g.document_chunks.retain(|_, c| c.source != source);
+        Ok(g.document_chunks.len() < before)
     }
 }
 

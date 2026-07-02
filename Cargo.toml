@@ -18,6 +18,7 @@ members = [
     "crates/cairn-proxy",
     "crates/cairn-proactive",
     "crates/cairn-ingest",
+    "crates/cairn-document",
     "crates/cairn-embed",
     "crates/cairn-api",
     "crates/cairn-mcp",
@@ -51,6 +52,7 @@ cairn-pack = { path = "crates/cairn-pack" }
 cairn-registry = { path = "crates/cairn-registry" }
 cairn-proactive = { path = "crates/cairn-proactive" }
 cairn-ingest = { path = "crates/cairn-ingest" }
+cairn-document = { path = "crates/cairn-document" }
 cairn-embed = { path = "crates/cairn-embed" }
 cairn-mcp = { path = "crates/cairn-mcp" }
 cairn-rerank = { path = "crates/cairn-rerank" }

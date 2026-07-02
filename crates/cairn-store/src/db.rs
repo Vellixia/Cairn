@@ -183,6 +183,32 @@ pub(crate) trait StoreBackend: Send + Sync {
         let _ = id;
         Ok(None)
     }
+
+    // -- RAG documents (v0.8.0 - Sprint 6) ------------------------------------------------
+    /// Replace every chunk belonging to `source` (delete + reinsert) - `cairn documents ingest`
+    /// is idempotent, so re-ingesting an updated file/URL always reflects its latest content
+    /// rather than accumulating stale chunks alongside fresh ones. Returns the number of chunks
+    /// inserted. Unlike `record_access_batch`/`prune_access_log_before`, this is a real,
+    /// user-visible, testable feature - both backends implement it for real (no no-op default),
+    /// same precedent as `ProjectRecord` above.
+    fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
+        let _ = (source, title, chunks);
+        Ok(0)
+    }
+    /// Every ingested document, most-recently-updated first.
+    fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
+        Ok(Vec::new())
+    }
+    /// The top `k` chunks most relevant to `query`, across every ingested document.
+    fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
+        let _ = (query, k);
+        Ok(Vec::new())
+    }
+    /// Delete every chunk belonging to `source`. Returns `Ok(true)` if any chunk was removed.
+    fn delete_document(&self, source: &str) -> Result<bool> {
+        let _ = source;
+        Ok(false)
+    }
 }
 
 /// A registered project (v0.8.0 Sprint 3): the repos/directories an agent has run in,
@@ -195,6 +221,34 @@ pub struct ProjectRecord {
     pub path: String,
     pub first_seen: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
+}
+
+/// One chunk of an ingested document (v0.8.0 Sprint 6) - see `cairn-document::chunk_text` for
+/// how the source text is split. `source` is the literal path/URL the caller ingested; `id` is
+/// `{source_hash}-{chunk_index}` so re-ingesting the same source deterministically overwrites
+/// the same chunk ids rather than growing the table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentChunkRecord {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub chunk_index: usize,
+    pub content: String,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One ingested document's summary (v0.8.0 Sprint 6) - what `GET /api/documents` and
+/// `cairn documents list` show, without pulling every chunk's full content over the wire.
+/// `id` is a short content-hash of `source` (same "hash it for a URL-safe id" idea as Sprint
+/// 3's project ids) - `source` itself is a path/URL and may contain characters unsafe for a
+/// REST path segment, so `DELETE /api/documents/:id` routes on this instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSummary {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub chunk_count: usize,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A single audit event read from durable storage.
@@ -409,6 +463,23 @@ impl Store {
     /// A single project by id.
     pub fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
         self.backend.get_project(id)
+    }
+
+    /// Replace every chunk belonging to `source` (v0.8.0 Sprint 6).
+    pub fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
+        self.backend.replace_document(source, title, chunks)
+    }
+    /// Every ingested document, most-recently-updated first (v0.8.0 Sprint 6).
+    pub fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
+        self.backend.list_documents()
+    }
+    /// The top `k` document chunks most relevant to `query` (v0.8.0 Sprint 6).
+    pub fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
+        self.backend.search_documents(query, k)
+    }
+    /// Delete every chunk belonging to `source` (v0.8.0 Sprint 6).
+    pub fn delete_document(&self, source: &str) -> Result<bool> {
+        self.backend.delete_document(source)
     }
 
     /// Mark `key` as deleted by writing the tombstone sentinel (rather than physically removing

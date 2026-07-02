@@ -19,9 +19,9 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 fn workspace_manifest_lists_all_members() {
-    // The workspace has 23 crates: 21 domain crates + cairn-tests +
-    // cairn-client (the host CLI binary). The 23-crate target is
-    // the v0.7.0 audit count.
+    // The workspace has 24 crates: 22 domain crates + cairn-tests +
+    // cairn-client (the host CLI binary). Bumped from 23 to 24 in
+    // v0.8.0 Sprint 6 for the new `cairn-document` crate (RAG ingestion).
     let manifest =
         std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("workspace Cargo.toml");
     // The workspace member list is the only place "crates/X" appears
@@ -32,7 +32,7 @@ fn workspace_manifest_lists_all_members() {
         .lines()
         .filter(|l| l.starts_with("    \"crates/") && l.ends_with("\","))
         .count();
-    assert_eq!(count, 23, "expected 23 workspace members, got {count}");
+    assert_eq!(count, 24, "expected 24 workspace members, got {count}");
 }
 
 #[test]

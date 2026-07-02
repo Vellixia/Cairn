@@ -732,6 +732,7 @@ dependencies = [
  "cairn-assemble",
  "cairn-context",
  "cairn-core",
+ "cairn-document",
  "cairn-embed",
  "cairn-guard",
  "cairn-ingest",
@@ -796,6 +797,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "cairn-core",
+ "cairn-document",
  "cairn-mcp",
  "chrono",
  "clap",
@@ -847,6 +849,16 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "uuid",
+]
+
+[[package]]
+name = "cairn-document"
+version = "0.7.1"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+ "ureq 2.12.1",
+ "url",
 ]
 
 [[package]]

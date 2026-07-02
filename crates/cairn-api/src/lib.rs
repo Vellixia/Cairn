@@ -9,6 +9,7 @@ mod auth;
 mod capabilities;
 pub mod cron;
 mod devices;
+mod documents;
 mod events;
 mod extensions;
 mod ingest;
@@ -44,7 +45,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use cairn_assemble::{Assembler, AssemblyReport};
@@ -133,7 +134,7 @@ impl AppState {
             }
             Arc::new(g)
         };
-        let asm = Arc::new(Assembler::new(mem.clone()));
+        let asm = Arc::new(Assembler::new(mem.clone(), store.clone()));
         let shell = Arc::new(ShellCompressor::new(store.clone()));
         let profile = Arc::new(Profile::new(mem.clone()));
         let san = Arc::new(cairn_share::Sanitizer::new());
@@ -310,6 +311,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/list", get(push::list_subscriptions))
         .route("/api/extensions/capture", post(extensions::capture))
         .route("/api/ingest/transcript", post(ingest::transcript))
+        .route("/api/documents/ingest", post(documents::ingest))
+        .route("/api/documents", get(documents::list))
+        .route("/api/documents/search", get(documents::search))
+        .route("/api/documents/:id", delete(documents::delete))
         .fallback(static_handler)
         .merge(auth_routes)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))

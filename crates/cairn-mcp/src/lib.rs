@@ -67,7 +67,7 @@ impl McpServer {
                 cfg.workspace_root.clone(),
             )),
             guard: Arc::new(Guard::new(store.clone())),
-            asm: Arc::new(Assembler::new(mem.clone())),
+            asm: Arc::new(Assembler::new(mem.clone(), store.clone())),
             shell: Arc::new(ShellCompressor::new(store.clone())),
             profile: Arc::new(Profile::new(mem.clone())),
             san: cairn_share::Sanitizer::new(),

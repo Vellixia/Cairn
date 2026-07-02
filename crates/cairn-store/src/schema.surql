@@ -40,3 +40,13 @@ DEFINE INDEX IF NOT EXISTS access_log_ts ON access_log FIELDS ts;
 -- v0.8.0 Sprint 3: registered projects, auto-detected by the SessionStart hook.
 DEFINE TABLE IF NOT EXISTS project SCHEMALESS;
 DEFINE INDEX IF NOT EXISTS project_last_active ON project FIELDS last_active;
+
+-- v0.8.0 Sprint 6: RAG document chunks (`cairn documents ingest <file|url>`). `source` is the
+-- literal path/URL the caller gave; re-ingesting the same source replaces its chunks (delete +
+-- reinsert), same idempotent-upsert idea as `project`'s `first_seen ?? $now`. Embedded and
+-- HNSW-indexed exactly like `memory` so document search reuses the same vector infrastructure
+-- instead of a second one.
+DEFINE TABLE IF NOT EXISTS document_chunk SCHEMALESS;
+DEFINE INDEX IF NOT EXISTS document_chunk_source ON document_chunk FIELDS source;
+DEFINE INDEX IF NOT EXISTS document_chunk_embedding_hnsw ON document_chunk FIELDS embedding
+    HNSW DIMENSION {dim} DIST COSINE TYPE F32;

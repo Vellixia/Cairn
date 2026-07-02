@@ -14,6 +14,7 @@ use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
 mod doctor;
+mod documents;
 mod hook;
 mod onboard;
 mod project;
@@ -111,6 +112,32 @@ enum Cmd {
         #[arg(long)]
         check: bool,
     },
+    /// Ingest, search, list, or delete RAG documents.
+    Documents {
+        #[command(subcommand)]
+        cmd: DocumentsCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocumentsCmd {
+    /// Ingest a local file or an http(s) URL as searchable chunks.
+    Ingest {
+        source: String,
+        /// Defaults to `source` when omitted.
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Search ingested document chunks.
+    Search {
+        query: String,
+        #[arg(long, default_value_t = 5)]
+        limit: usize,
+    },
+    /// List every ingested document.
+    List,
+    /// Delete a document (id from `cairn documents list`).
+    Delete { id: String },
 }
 
 #[tokio::main]
@@ -169,6 +196,14 @@ async fn main() -> Result<()> {
         }
         Cmd::Hook { event } => hook::run(&event)?,
         Cmd::Upgrade { check } => update::run(check)?,
+        Cmd::Documents { cmd } => match cmd {
+            DocumentsCmd::Ingest { source, title } => {
+                documents::ingest(&source, title.as_deref())?
+            }
+            DocumentsCmd::Search { query, limit } => documents::search(&query, limit)?,
+            DocumentsCmd::List => documents::list()?,
+            DocumentsCmd::Delete { id } => documents::delete(&id)?,
+        },
     }
     Ok(())
 }

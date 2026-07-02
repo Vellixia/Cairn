@@ -9,8 +9,8 @@ repository.workspace = true
 [dependencies]
 cairn-core.workspace = true
 cairn-memory.workspace = true
+cairn-store.workspace = true
 serde.workspace = true
 
 [dev-dependencies]
-cairn-store.workspace = true
 tempfile.workspace = true

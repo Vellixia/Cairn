@@ -7,7 +7,8 @@
 //! doesn't fit is reported as dropped - and is always one memory recall away, so nothing is lost.
 
 use cairn_core::Result;
-use cairn_memory::{MemoryEngine, ScoredMemory};
+use cairn_memory::MemoryEngine;
+use cairn_store::Store;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -19,6 +20,17 @@ pub struct AssembledItem {
     pub content: String,
     pub score: f32,
     pub est_tokens: usize,
+}
+
+/// A recall hit, memory or document chunk, normalized to a common shape before packing. Memory
+/// and document scores come from unrelated scales (a tiny RRF-fused value vs. a raw HNSW cosine
+/// similarity) - see [`normalize`] - so nothing downstream of this point needs to know which
+/// modality a candidate came from.
+struct Candidate {
+    source: &'static str,
+    kind: String,
+    content: String,
+    score: f32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -42,30 +54,67 @@ pub struct AssemblyReport {
 
 pub struct Assembler {
     mem: Arc<MemoryEngine>,
+    store: Arc<Store>,
 }
 
 impl Assembler {
-    pub fn new(mem: Arc<MemoryEngine>) -> Self {
-        Self { mem }
+    pub fn new(mem: Arc<MemoryEngine>, store: Arc<Store>) -> Self {
+        Self { mem, store }
     }
 
-    /// Build the working set for `query` under `budget_tokens`.
+    /// Build the working set for `query` under `budget_tokens`. Merges two modalities -
+    /// memories (`MemoryEngine::recall`) and RAG document chunks (v0.8.0 Sprint 6,
+    /// `Store::search_documents`) - into one ranked, budget-packed, edge-ordered context.
+    /// Both calls are synchronous; `cairn-assemble` has no async runtime of its own (every
+    /// engine it wraps is sync, by design - see the crate's other engines).
     pub fn assemble(&self, query: &str, budget_tokens: usize) -> Result<AssemblyReport> {
-        let hits = self.mem.recall(query, 50)?;
+        let mem_hits = self.mem.recall(query, 50)?;
+        // Document search is supplementary - a hiccup there (e.g. an embedder error) degrades
+        // to memory-only results instead of failing the whole assembly.
+        let doc_hits = self.store.search_documents(query, 20).unwrap_or_default();
+
+        // Memory scores are a tiny RRF-fused value (bounded well under 1.0 in practice) while
+        // document scores are reciprocal-rank over an unrelated HNSW cosine ranking - mixing
+        // them unnormalized would let one modality systematically drown out the other
+        // regardless of true relevance. Normalize each list independently to [0, 1] first.
+        let mem_scores = normalize(&mem_hits.iter().map(|h| h.score).collect::<Vec<_>>());
+        let doc_scores = normalize(
+            &(0..doc_hits.len())
+                .map(|rank| 1.0 / (1.0 + rank as f32))
+                .collect::<Vec<_>>(),
+        );
+
+        let mut candidates: Vec<Candidate> = mem_hits
+            .into_iter()
+            .zip(mem_scores)
+            .map(|(h, score)| Candidate {
+                source: "memory",
+                kind: h.memory.kind.as_str().to_string(),
+                content: h.memory.content,
+                score,
+            })
+            .collect();
+        candidates.extend(doc_hits.into_iter().zip(doc_scores).map(|(c, score)| Candidate {
+            source: "doc",
+            kind: "doc".to_string(),
+            content: c.content,
+            score,
+        }));
+        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
 
         // Greedily pack the highest-ranked items until the budget is exhausted.
-        let mut packed: Vec<(ScoredMemory, usize)> = Vec::new();
+        let mut packed: Vec<(Candidate, usize)> = Vec::new();
         let mut dropped = Vec::new();
         let mut used = 0usize;
-        for h in hits {
-            let est = est_tokens(&h.memory.content);
+        for c in candidates {
+            let est = est_tokens(&c.content);
             if used + est <= budget_tokens {
                 used += est;
-                packed.push((h, est));
+                packed.push((c, est));
             } else {
                 dropped.push(DroppedItem {
-                    preview: preview(&h.memory.content),
-                    score: h.score,
+                    preview: preview(&c.content),
+                    score: c.score,
                     est_tokens: est,
                     reason: "over token budget".to_string(),
                 });
@@ -77,20 +126,14 @@ impl Assembler {
 
         let mut included = Vec::with_capacity(ordered.len());
         let mut context = format!("# Cairn context for: {query}\n");
-        for (position, (h, est)) in ordered.into_iter().enumerate() {
-            let ScoredMemory { memory, score } = h;
-            context.push_str(&format!(
-                "\n[{}] ({}) {}\n",
-                position + 1,
-                memory.kind.as_str(),
-                memory.content
-            ));
+        for (position, (c, est)) in ordered.into_iter().enumerate() {
+            context.push_str(&format!("\n[{}] ({}) {}\n", position + 1, c.kind, c.content));
             included.push(AssembledItem {
                 position,
-                source: "memory".to_string(),
-                kind: memory.kind.as_str().to_string(),
-                content: memory.content,
-                score,
+                source: c.source.to_string(),
+                kind: c.kind,
+                content: c.content,
+                score: c.score,
                 est_tokens: est,
             });
         }
@@ -104,6 +147,22 @@ impl Assembler {
             context,
         })
     }
+}
+
+/// Min-max normalize to `[0, 1]`. A single-item (or all-equal) list normalizes to `1.0` for
+/// every item - there's no useful relative ordering to preserve, and `1.0` keeps it competitive
+/// against the other modality rather than collapsing to `0.0`.
+fn normalize(scores: &[f32]) -> Vec<f32> {
+    if scores.is_empty() {
+        return Vec::new();
+    }
+    let min = scores.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let range = max - min;
+    if range <= f32::EPSILON {
+        return vec![1.0; scores.len()];
+    }
+    scores.iter().map(|s| (s - min) / range).collect()
 }
 
 /// Reorder by rank so the best items sit at both ends: `[r0, r2, r4, ..., r5, r3, r1]`.
@@ -143,8 +202,9 @@ mod tests {
 
     /// `None` when `CAIRN_DB_URL` is unset (offline runs skip these integration tests).
     fn setup() -> Option<(Assembler, Arc<MemoryEngine>)> {
-        let mem = Arc::new(MemoryEngine::new(Arc::new(Store::open_for_test()?)));
-        Some((Assembler::new(mem.clone()), mem))
+        let store = Arc::new(Store::open_for_test()?);
+        let mem = Arc::new(MemoryEngine::new(store.clone()));
+        Some((Assembler::new(mem.clone(), store), mem))
     }
 
     // - edge_order ---
@@ -192,6 +252,38 @@ mod tests {
         let mut sorted = result.clone();
         sorted.sort();
         assert_eq!(sorted, input, "no items lost or duplicated");
+    }
+
+    // - normalize ---
+
+    #[test]
+    fn normalize_empty_is_empty() {
+        assert!(normalize(&[]).is_empty());
+    }
+
+    #[test]
+    fn normalize_single_value_is_one() {
+        assert_eq!(normalize(&[0.003]), vec![1.0]);
+    }
+
+    #[test]
+    fn normalize_all_equal_values_are_one() {
+        assert_eq!(normalize(&[0.5, 0.5, 0.5]), vec![1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn normalize_spreads_to_full_zero_one_range() {
+        let out = normalize(&[0.01, 0.02, 0.03]);
+        assert_eq!(out[0], 0.0);
+        assert_eq!(out[2], 1.0);
+        assert!((out[1] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn normalize_preserves_relative_order() {
+        let out = normalize(&[0.1, 0.9, 0.5]);
+        assert!(out[1] > out[2]);
+        assert!(out[2] > out[0]);
     }
 
     // - est_tokens ---
@@ -309,5 +401,45 @@ mod tests {
             "best item should be at an edge, was {} of {n}",
             best.position
         );
+    }
+
+    #[test]
+    fn assemble_merges_document_chunks_alongside_memories() {
+        let Some(store) = Store::open_for_test() else {
+            return;
+        };
+        let store = Arc::new(store);
+        let mem = Arc::new(MemoryEngine::new(store.clone()));
+        let asm = Assembler::new(mem.clone(), store.clone());
+
+        mem.remember(NewMemory::new(
+            "the zephyrium project uses rust for its core engine",
+        ))
+        .unwrap();
+        store
+            .replace_document(
+                "docs/zephyrium.md",
+                "Zephyrium docs",
+                &["zephyrium's architecture is a rust workspace with several crates.".to_string()],
+            )
+            .unwrap();
+
+        let report = asm.assemble("zephyrium rust architecture", 10_000).unwrap();
+        assert!(
+            report.included.iter().any(|i| i.source == "doc"),
+            "expected at least one [doc] item in {:?}",
+            report.included
+        );
+        assert!(report.included.iter().any(|i| i.source == "memory"));
+        assert!(report.context.contains("(doc)"));
+    }
+
+    #[test]
+    fn assemble_still_works_with_no_documents_ingested() {
+        let Some((a, mem)) = setup() else { return };
+        mem.remember(NewMemory::new("a plain memory with no documents around"))
+            .unwrap();
+        let report = a.assemble("plain memory", 500).unwrap();
+        assert!(report.included.iter().all(|i| i.source == "memory"));
     }
 }

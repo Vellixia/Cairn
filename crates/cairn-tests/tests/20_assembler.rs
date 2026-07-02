@@ -15,8 +15,8 @@ fn assembler() -> Option<(Assembler, Arc<MemoryEngine>, tempfile::TempDir)> {
     let dir = tempfile::tempdir().ok()?;
     let blobs = dir.path().join("blobs");
     let store = Arc::new(Store::open_in_memory(blobs).ok()?);
-    let mem = Arc::new(MemoryEngine::new(store));
-    let asm = Assembler::new(mem.clone());
+    let mem = Arc::new(MemoryEngine::new(store.clone()));
+    let asm = Assembler::new(mem.clone(), store);
     Some((asm, mem, dir))
 }
 
@@ -62,7 +62,7 @@ fn assemble_drops_when_input_exceeds_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
     let blobs = dir.path().join("blobs");
     let store = Arc::new(Store::open_in_memory(blobs).expect("open"));
-    let mem = Arc::new(MemoryEngine::new(store));
+    let mem = Arc::new(MemoryEngine::new(store.clone()));
     for i in 0..4 {
         let mut content = format!("FACT {i}: ");
         content.push_str(&"x".repeat(400));
@@ -73,7 +73,7 @@ fn assemble_drops_when_input_exceeds_budget() {
         })
         .expect("remember");
     }
-    let asm = Assembler::new(mem.clone());
+    let asm = Assembler::new(mem.clone(), store);
     let report = asm.assemble("FACT", 100).expect("assemble");
     assert!(
         !report.dropped.is_empty(),
