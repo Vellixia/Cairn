@@ -22,18 +22,21 @@ the CI does not run either. Every Rust test exercises a real Cairn crate against
 
 ### 1. Rust integration tests - `crates/cairn-tests/`
 
-A workspace member hosting 17 hermetic integration test files under
+A workspace member hosting hermetic integration test files under
 `crates/cairn-tests/tests/<NN>_<topic>.rs`. Each file is a separate `cargo test` binary,
 all run by `cargo test -p cairn-tests` (or `cargo test --workspace`). Tests use **no
 network and no live database** - they construct a real `cairn_store::Store` backed by a
 new in-memory `MemoryBackend` (added in 0.7.1) and exercise every engine.
 
 ```sh
-cargo test -p cairn-tests                       # all 17 files, 134 tests
+cargo test -p cairn-tests                       # 26 files, 204 tests (as of v0.8.0)
 cargo test -p cairn-tests --test 19_memory_engine     # one
 ```
 
-Coverage (17 files, 134 tests):
+Coverage (17 of 26 files itemized below; v0.8.0 added 9 more HTTP-API-focused files -
+`02, 14, 21, 24-29` - not yet itemized here in detail, see
+`crates/cairn-tests/tests/<NN>_*.rs` directly or `docs/planning/plans/v0.8.0.md`'s per-sprint
+"What shipped" sections for what each one covers):
 
 | # | File | Real crate surface |
 |---|------|-------------------|

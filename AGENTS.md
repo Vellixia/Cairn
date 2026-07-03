@@ -40,11 +40,11 @@ maintained by a per-test in-memory `cairn_store::Store`, exercising every engine
 running backend.
 
 ```sh
-cargo test -p cairn-tests                 # 17 files, 134 tests
+cargo test -p cairn-tests                 # 26 files, 204 tests (as of v0.8.0)
 cargo test -p cairn-tests --test 18_context_engine  # just one
 ```
 
-Coverage (17 files): memory tiers, followup + gotcha trackers, activity heatmap, architecture
+Coverage: memory tiers, followup + gotcha trackers, activity heatmap, architecture
 report, **real `MemoryEngine` end-to-end (remember / recall / hybrid_search / consolidate /
 crystallize / gotcha promotion)**, **real `ContextEngine` (Full / Cached / Diff / Outline +
 anti-inflation + auto-delta fallbacks)**, **real `Assembler` (budget + dropped items)**,
@@ -86,14 +86,14 @@ resolved finding is `docs/testing/findings/README.md`.
 
 ## Architecture
 
-21-crate Rust workspace (MSRV 1.85) + Next.js static-export web UI. Two binaries:
+23-crate Rust workspace (MSRV 1.89) + Next.js static-export web UI. Two binaries:
 
 | Binary | Lives in | Purpose |
 |--------|----------|---------|
 | `cairn-server` (in-container) | Docker image (`cairn-api` bin) | Long-lived server: binds :7777, serves the API + web UI, runs env-only admin bootstrap |
 | `cairn` (host) | release tarball (`cairn-client` crate) | Client: `mcp`, `setup`, `onboard`, `doctor`, `hook`, `status`, `reset`, `upgrade` |
 
-**Dep graph:** `cairn-core` -> `cairn-store` -> domain crates (`context`, `memory`, `guard`, `shell`, `profile`, `embed`, `share`, `assemble`) -> `cairn-mcp` -> `cairn-api`. `cairn-client` is a thin remote-only HTTP wrapper (no local engines).
+**Dep graph:** `cairn-core` -> `cairn-store` -> domain crates (`context`, `memory`, `guard`, `shell`, `profile`, `embed`, `share`, `assemble`, `document`) -> `cairn-mcp` -> `cairn-api`. `cairn-client` is a thin remote-only HTTP wrapper (no local engines).
 
 **Config precedence:** CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 

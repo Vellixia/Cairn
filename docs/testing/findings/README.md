@@ -18,6 +18,8 @@ into `open/`. See [docs/CONVENTIONS.md](../../CONVENTIONS.md) for the full autho
 
 | Finding | Severity | Discovered | Notes |
 |---|---|---|---|
+| [hook-session-start-wrong-http-method](open/hook-session-start-wrong-http-method.md) | high | 2026-07-03 | `cairn hook SessionStart` POSTs to `/api/projects/upsert`, a PATCH-only route - 405, silently dropped; auto project detection (v0.8.0 Sprint 3) has never worked end-to-end |
+| [promotion-scoring-ceiling-unreachable](open/promotion-scoring-ceiling-unreachable.md) | high | 2026-07-03 | `promo_score` can never exceed 0.36 (`cross_project_hits` is always 0 by construction) - promotion candidates `[0.70,0.90]`, the LLM tie-break `[0.40,0.85]`, and full-auto promotion (`>=0.85`, or the Sprint 9 self-tuned floor of `0.5`) are all unreachable in practice |
 | [drift-log-filter-bug](open/drift-log-filter-bug.md) | medium (functional) | 2026-06-30 | `GET /api/guard/drift?status=` query param ignored by handler; documented, not fixed by decision (no mid-run rebuilds rule) |
 | [pack-detail-static-fallback](open/pack-detail-static-fallback.md) | high | 2026-06-30 | Pack detail page unreachable for any slug other than `new`; `static_handler` fallback serves the wrong shell |
 | [palette-trust-crash](open/palette-trust-crash.md) | high (P1) | 2026-06-30 | Command-palette `Enter` navigation to `/registry/trust` or `/registry/revocations` crashes on production build only (0% repro on dev) |
