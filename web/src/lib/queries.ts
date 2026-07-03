@@ -1,16 +1,15 @@
-import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
-  API_BASE,
   delJSON,
   getJSON,
-  postBinary,
   postJSON,
   type ArchitectureReport,
   type AuditEvent,
+  type AutopilotDigest,
   type CompressionDemo,
+  type CronJobStatus,
   type CronRun,
   type DeviceTokenMeta,
   type Health,
@@ -19,14 +18,18 @@ import {
   type Me,
   type Memory,
   type PairCode,
+  type DocumentSummary,
+  type DocumentChunkRecord,
+  type PromotionLogEntry,
+  type ProjectWithStats,
   type RegistryRevocation,
   type RegistryTrustGrant,
   type ScoredMemory,
   type Stats,
 } from "@/lib/api";
 import { useMeStore } from "@/lib/stores/me";
+import { pollWhenOffline } from "@/lib/stores/events";
 import type {
-  AnchorInput,
   IssueTokenInput,
   PairCodeInput,
   RecallInput,
@@ -52,7 +55,21 @@ export const qk = {
   registryRevocations: ["registry", "revocations"] as const,
   registryTrustedKeys: ["registry", "trusted-keys"] as const,
   promotionCandidates: ["memory", "promotion-candidates"] as const,
-  cronHistory: ["cron", "history"] as const,
+  cronJobs: ["cron", "jobs"] as const,
+  cronHistory: (job?: string) => ["cron", "history", job ?? "all"] as const,
+  promotionLog: (limit: number) => ["memory", "promotion-log", limit] as const,
+  autopilotDigest: (hours: number) => ["automation", "digest", hours] as const,
+  projects: ["projects"] as const,
+  project: (id: string) => ["projects", id] as const,
+  memoryByScope: (scopeType: string, scopeId: string, limit: number) =>
+    ["memory", "by-scope", scopeType, scopeId, limit] as const,
+  documents: ["documents"] as const,
+  documentSearch: (q: string) => ["documents", "search", q] as const,
+  drift: ["guard", "drift"] as const,
+  graph: ["memory", "graph"] as const,
+  activityAudit: ["activity", "audit"] as const,
+  activityStats: ["activity", "stats"] as const,
+  dashboardMetrics: ["dashboard", "metrics"] as const,
 };
 
 // ---- queries ----------------------------------------------------------------
@@ -78,7 +95,7 @@ export function useStatsQuery() {
   return useQuery({
     queryKey: qk.stats,
     queryFn: () => getJSON<Stats>("/api/stats"),
-    refetchInterval: 10_000,
+    refetchInterval: pollWhenOffline(30_000),
   });
 }
 
@@ -93,7 +110,7 @@ export function useWakeupQuery(limit = 5) {
   return useQuery({
     queryKey: qk.memories(limit),
     queryFn: () => getJSON<Memory[]>(`/api/memory/wakeup?limit=${limit}`),
-    refetchInterval: 30_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
 }
 
@@ -116,7 +133,7 @@ export function useDevicesAuditQuery() {
   return useQuery({
     queryKey: qk.devicesAudit,
     queryFn: () => getJSON<AuditEvent[]>("/api/devices/audit"),
-    refetchInterval: 5_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
 }
 
@@ -164,17 +181,109 @@ export function usePromotionCandidatesQuery() {
   return useQuery({
     queryKey: qk.promotionCandidates,
     queryFn: () => getJSON<Memory[]>("/api/memory/promotion-candidates"),
-    refetchInterval: 30_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
 }
 
 // v0.8.0 Sprint 4/5/8/9: recent background-job runs (session-gc, memory-decay,
-// access-log-prune, llm-intelligence, memory-demote, tune).
-export function useCronHistoryQuery() {
+// access-log-prune, llm-intelligence, memory-demote, tune), optionally filtered to one job.
+export function useCronHistoryQuery(job?: string) {
   return useQuery({
-    queryKey: qk.cronHistory,
-    queryFn: () => getJSON<CronRun[]>("/api/cron/history"),
+    queryKey: qk.cronHistory(job),
+    queryFn: () =>
+      getJSON<CronRun[]>(
+        `/api/cron/history${job ? `?job=${encodeURIComponent(job)}` : ""}`,
+      ),
     refetchInterval: 30_000,
+  });
+}
+
+// v0.8.0 Sprint 4: every background job, its schedule, and its last run.
+export function useCronJobsQuery() {
+  return useQuery({
+    queryKey: qk.cronJobs,
+    queryFn: () => getJSON<CronJobStatus[]>("/api/cron/jobs"),
+    refetchInterval: 30_000,
+  });
+}
+
+// v0.8.0 Sprint 8: "while you were away" autopilot summary.
+export function useAutopilotDigestQuery(hours = 24) {
+  return useQuery({
+    queryKey: qk.autopilotDigest(hours),
+    queryFn: () => getJSON<AutopilotDigest>(`/api/memory/autopilot-digest?hours=${hours}`),
+    refetchInterval: pollWhenOffline(60_000),
+  });
+}
+
+// v0.8.0 Sprint 8: recent promotion/demotion events, auto and manual alike.
+export function usePromotionLogQuery(limit = 50) {
+  return useQuery({
+    queryKey: qk.promotionLog(limit),
+    queryFn: () => getJSON<PromotionLogEntry[]>(`/api/memory/promotion-log?limit=${limit}`),
+    refetchInterval: 30_000,
+  });
+}
+
+// v0.8.0 Sprint 3/10: every known project, enriched with memory_count + last_memory_at.
+export function useProjectsQuery() {
+  return useQuery({
+    queryKey: qk.projects,
+    queryFn: () => getJSON<ProjectWithStats[]>("/api/projects"),
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectQuery(id: string) {
+  return useQuery({
+    queryKey: qk.project(id),
+    queryFn: () => getJSON<ProjectWithStats>(`/api/projects/${encodeURIComponent(id)}`),
+    enabled: id.length > 0,
+  });
+}
+
+// v0.8.0 Sprint 10: every memory in an exact scope, no ranking, no Global blend - the "what
+// does this project know" view on the Projects detail page.
+export function useMemoryByScopeQuery(scopeType: "project" | "session", scopeId: string, limit = 50) {
+  return useQuery({
+    queryKey: qk.memoryByScope(scopeType, scopeId, limit),
+    queryFn: () =>
+      getJSON<Memory[]>(
+        `/api/memory/by-scope?scope_type=${scopeType}&scope_id=${encodeURIComponent(scopeId)}&limit=${limit}`,
+      ),
+    enabled: scopeId.length > 0,
+  });
+}
+
+// v0.8.0 Sprint 6: every ingested document, most-recently-updated first.
+export function useDocumentsQuery() {
+  return useQuery({
+    queryKey: qk.documents,
+    queryFn: () => getJSON<DocumentSummary[]>("/api/documents"),
+    staleTime: 30_000,
+  });
+}
+
+export function useDocumentSearchQuery(q: string, limit = 10) {
+  return useQuery({
+    queryKey: qk.documentSearch(q),
+    queryFn: () =>
+      getJSON<DocumentChunkRecord[]>(
+        `/api/documents/search?limit=${limit}&q=${encodeURIComponent(q)}`,
+      ),
+    enabled: q.length > 0,
+  });
+}
+
+export function useDeleteDocumentMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => delJSON<{ deleted: boolean }>(`/api/documents/${encodeURIComponent(id)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.documents });
+      toast("Document deleted");
+    },
+    onError: (e) => toast.error(errMessage(e)),
   });
 }
 
@@ -201,128 +310,6 @@ export function useRegistryTrustedKeysQuery() {
     queryFn: () => getJSON<RegistryTrustGrant[]>("/api/registry/trusted-keys"),
     staleTime: 30_000,
   });
-}
-
-export function usePublishPackMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { tarball: ArrayBuffer | Uint8Array; trusted?: string }) =>
-      postBinary<unknown>(
-        "/api/registry/packs",
-        input.tarball,
-        "application/octet-stream",
-      ),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryPacks });
-      await qc.invalidateQueries({ queryKey: qk.registryRevocations });
-    },
-  });
-}
-
-export function useRevokePackMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { name: string; version: string }) =>
-      delJSON<unknown>(`/api/registry/packs/${encodeURIComponent(input.name)}/${encodeURIComponent(input.version)}`),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryPacks });
-      await qc.invalidateQueries({ queryKey: qk.registryRevocations });
-    },
-  });
-}
-
-export function useAddTrustedKeyMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { key: string; allows: string; label?: string }) =>
-      postJSON<RegistryTrustGrant>("/api/registry/trusted-keys", input),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryTrustedKeys });
-      toast.success("Trusted key added");
-    },
-    onError: (e: unknown) => toast.error(errMessage(e)),
-  });
-}
-
-export function useRemoveTrustedKeyMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (key: string) =>
-      delJSON<unknown>(`/api/registry/trusted-keys?key=${encodeURIComponent(key)}`),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryTrustedKeys });
-      toast.success("Trusted key removed");
-    },
-    onError: (e: unknown) => toast.error(errMessage(e)),
-  });
-}
-
-// ---- WebSocket status (P2.1) --------------------------------------------------
-
-export type WsStatus = "connecting" | "connected" | "disconnected";
-
-export interface UseWebSocketResult {
-  status: WsStatus;
-  /** Force a reconnect (e.g. after the user changes the API base). */
-  reconnect: () => void;
-}
-
-const WS_EVENT_NAME = "cairn:ws-status";
-
-function emitWsStatus(status: WsStatus) {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent<WsStatus>(WS_EVENT_NAME, { detail: status }));
-}
-
-export function useWebSocket(): UseWebSocketResult {
-  const [status, setStatus] = useState<WsStatus>("connecting");
-  const [nonce, setNonce] = useState(0);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<WsStatus>).detail;
-      setStatus(detail);
-    };
-    window.addEventListener(WS_EVENT_NAME, handler);
-    return () => window.removeEventListener(WS_EVENT_NAME, handler);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const base = (API_BASE || "").replace(/^http/, "ws");
-    if (!base) return;
-    const url = `${base}/api/ws`;
-    let ws: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-    let cancelled = false;
-    const open = () => {
-      if (cancelled) return;
-      emitWsStatus("connecting");
-      try {
-        ws = new WebSocket(url);
-      } catch {
-        emitWsStatus("disconnected");
-        reconnectTimer = window.setTimeout(open, 3000);
-        return;
-      }
-      ws.onopen = () => emitWsStatus("connected");
-      ws.onclose = () => {
-        emitWsStatus("disconnected");
-        reconnectTimer = window.setTimeout(open, 3000);
-      };
-      ws.onerror = () => {
-        emitWsStatus("disconnected");
-      };
-    };
-    open();
-    return () => {
-      cancelled = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      ws?.close();
-    };
-  }, [nonce]);
-
-  return { status, reconnect: () => setNonce((n) => n + 1) };
 }
 
 // ---- mutations ---------------------------------------------------------------
@@ -381,19 +368,6 @@ export function useLogoutMutation() {
   });
 }
 
-export function useSetAnchorMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: AnchorInput) => postJSON("/api/guard/anchor", input),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.anchor });
-      qc.invalidateQueries({ queryKey: qk.stats });
-      toast.success("Anchor set");
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
 // v0.8.0 Sprint 5: approve a promotion candidate (-> Global scope, locked).
 export function usePromoteMemoryMutation() {
   const qc = useQueryClient();
@@ -416,6 +390,41 @@ export function useDismissPromotionMutation() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.promotionCandidates });
       toast("Dismissed");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+// v0.8.0 Sprint 8 (Undo): revert a promotion back to the scope it was promoted from. 404 means
+// the memory either doesn't exist or was never promoted through this pipeline.
+export function useDemoteMemoryMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/demote`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["memory"] });
+      toast.success("Reverted to prior scope");
+    },
+    onError: (e) => {
+      if (e instanceof ApiError && e.status === 404) {
+        toast.error("Nothing to undo - not tracked as promoted");
+      } else {
+        toast.error(errMessage(e));
+      }
+    },
+  });
+}
+
+// v0.8.0 Sprint 4/9: manually trigger a background job now (same code path the scheduler uses).
+export function useRunCronJobMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (job: string) =>
+      postJSON<CronRun>(`/api/cron/run/${encodeURIComponent(job)}`, {}),
+    onSuccess: (run) => {
+      qc.invalidateQueries({ queryKey: qk.cronJobs });
+      qc.invalidateQueries({ queryKey: ["cron", "history"] });
+      toast.success(`Ran ${run.job}`, { description: run.detail });
     },
     onError: (e) => toast.error(errMessage(e)),
   });

@@ -115,7 +115,67 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/memory/heatmap", "Activity heatmap (last 365 days)", ["memory"], {
         "get" => _,
     });
+    path!("/api/memory/by-scope", "Every memory in an exact scope, no ranking", ["memory"], {
+        "get" => _,
+    });
+    path!("/api/memory/promotion-candidates", "Memories in the 0.70-0.90 review band", ["memory"], {
+        "get" => _,
+    });
+    path!("/api/memory/{id}/promote", "Approve a promotion candidate", ["memory"], {
+        "post" => _,
+    });
+    path!("/api/memory/{id}/dismiss-promotion", "Dismiss a promotion candidate", ["memory"], {
+        "post" => _,
+    });
+    path!("/api/memory/{id}/demote", "Undo a promotion", ["memory"], {
+        "post" => _,
+    });
+    path!("/api/memory/promotion-log", "Promotion/demotion event log", ["memory"], {
+        "get" => _,
+    });
+    path!("/api/memory/autopilot-digest", "\"While you were away\" autopilot summary", ["memory"], {
+        "get" => _,
+    });
     path!("/api/search", "Hybrid search (alias)", ["search"], {
+        "get" => _,
+    });
+
+    // ---- Projects -----------------------------------------------------------
+    path!("/api/projects", "List known projects, with memory stats", ["projects"], {
+        "get" => _,
+    });
+    path!("/api/projects/{id}", "A single project's details + memory stats", ["projects"], {
+        "get" => _,
+    });
+    path!("/api/projects/upsert", "Register/touch a project (auto-detected by the client)", ["projects"], {
+        "patch" => _,
+    });
+
+    // ---- Documents (RAG) ------------------------------------------------------
+    path!("/api/documents/ingest", "Chunk and (re)store a document", ["documents"], {
+        "post" => _,
+    });
+    path!("/api/documents", "List ingested documents", ["documents"], {
+        "get" => _,
+    });
+    path!("/api/documents/search", "Search document chunks", ["documents"], {
+        "get" => _,
+    });
+    path!("/api/documents/{id}", "Delete a document", ["documents"], {
+        "delete" => _,
+    });
+
+    // ---- Cron (background jobs) ------------------------------------------------
+    path!("/api/cron/jobs", "Every background job, schedule + last run", ["cron"], {
+        "get" => _,
+    });
+    path!("/api/cron/run/{job}", "Trigger a job immediately", ["cron"], {
+        "post" => _,
+    });
+    path!("/api/cron/history", "Recent job runs, optionally filtered", ["cron"], {
+        "get" => _,
+    });
+    path!("/api/cron/health", "Single-flight + staleness view of every job", ["cron"], {
         "get" => _,
     });
 
@@ -273,11 +333,11 @@ pub fn build_spec(version: &str) -> Value {
     });
 
     // ---- Live -------------------------------------------------------------
+    // Real-time is SSE-only (`/api/events`); there is no `/api/ws` route - dropped from this
+    // spec (v0.8.0 Sprint 10) after it was found still documented here with no matching
+    // handler anywhere in the router.
     path!("/api/events", "Server-sent event stream", ["live"], {
         "get" => _,
-    });
-    path!("/api/ws", "WebSocket event stream", ["live"], {
-        "get" => _, "post" => _, "put" => _, "delete" => _,
     });
 
     // ---- Setup ------------------------------------------------------------
@@ -304,7 +364,8 @@ pub fn build_spec(version: &str) -> Value {
             {"name": "sessions"}, {"name": "auth"}, {"name": "devices"},
             {"name": "sync"}, {"name": "push"}, {"name": "extensions"},
             {"name": "ingest"}, {"name": "tools"}, {"name": "live"}, {"name": "setup"},
-            {"name": "registry"},
+            {"name": "registry"}, {"name": "projects"}, {"name": "documents"},
+            {"name": "cron"},
         ],
         "components": {
             "securitySchemes": {

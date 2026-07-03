@@ -1000,24 +1000,46 @@ impl MemoryEngine {
     /// `rerank_depth` controls how many top hits get re-ranked (MMR is O(n²) per top result;
     /// 20 is a good default - small enough to be cheap, large enough for a real "smallest
     /// high-signal working set").
+    ///
+    /// Global-only scope (mirrors [`Self::recall`]); see [`Self::hybrid_search_for_org`] for
+    /// the scope-aware entry point `/api/search` uses.
     pub fn hybrid_search(
         &self,
         query: &str,
         limit: usize,
         rerank_depth: usize,
     ) -> Result<Vec<ScoredMemory>> {
+        self.hybrid_search_for_org(
+            query,
+            limit,
+            rerank_depth,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware hybrid search (v0.8.0 Sprint 10). Same RRF+MMR pipeline as
+    /// [`Self::hybrid_search`], but candidates come from [`Self::recall_for_org`] instead of
+    /// the Global-only [`Self::recall`] - fixes a Sprint 2 gap where `/api/search` ignored
+    /// project/session scope entirely while plain recall already respected it.
+    pub fn hybrid_search_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
         // Pull a wider candidate set than the user asked for - RRF + MMR both need more
         // than the final limit to work well.
-        let candidates = self.recall(query, (limit + rerank_depth).max(50))?;
+        let candidates =
+            self.recall_for_org(query, (limit + rerank_depth).max(50), org_id, scope)?;
         Ok(mmr_rerank(candidates, limit, 0.7))
     }
 
     /// Hybrid search with cross-encoder reranking. Falls back to `hybrid_search` when no
-    /// reranker is installed (the default).
-    ///
-    /// Pipeline: `recall -> RRF -> truncate -> diversify_by_session -> mmr -> rerank(top_k)
-    /// -> min-max normalize -> alpha-blend with hybrid score`. The rerank cost is paid only
-    /// for the post-MMR top-K candidates, so total inference is bounded.
+    /// reranker is installed (the default). Global-only scope; see
+    /// [`Self::hybrid_search_with_rerank_for_org`] for the scope-aware entry point.
     pub fn hybrid_search_with_rerank(
         &self,
         query: &str,
@@ -1026,8 +1048,35 @@ impl MemoryEngine {
         reranker: &dyn Reranker,
         blend_weight: f32,
     ) -> Result<Vec<ScoredMemory>> {
+        self.hybrid_search_with_rerank_for_org(
+            query,
+            limit,
+            rerank_depth,
+            reranker,
+            blend_weight,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware version of [`Self::hybrid_search_with_rerank`].
+    ///
+    /// Pipeline: `recall -> RRF -> truncate -> diversify_by_session -> mmr -> rerank(top_k)
+    /// -> min-max normalize -> alpha-blend with hybrid score`. The rerank cost is paid only
+    /// for the post-MMR top-K candidates, so total inference is bounded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_search_with_rerank_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
         // 1. Same wide retrieval + MMR as the no-rerank path.
-        let mmr = self.hybrid_search(query, limit, rerank_depth)?;
+        let mmr = self.hybrid_search_for_org(query, limit, rerank_depth, org_id, scope)?;
         if mmr.is_empty() {
             return Ok(mmr);
         }
@@ -1097,6 +1146,8 @@ impl MemoryEngine {
     /// Falls back to a plain `hybrid_search` when:
     /// - the expander is disabled (short-circuit to single-query `ExpandedQuery`)
     /// - the expansion yields only the original query
+    ///
+    /// Global-only scope; see [`Self::expanded_search_for_org`] for the scope-aware entry point.
     pub fn expanded_search(
         &self,
         query: &str,
@@ -1104,10 +1155,31 @@ impl MemoryEngine {
         rerank_depth: usize,
         expander: &QueryExpander,
     ) -> Result<Vec<ScoredMemory>> {
+        self.expanded_search_for_org(
+            query,
+            limit,
+            rerank_depth,
+            expander,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware version of [`Self::expanded_search`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn expanded_search_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        expander: &QueryExpander,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
         let expanded = expander.expand(query)?;
         if !expanded.is_expanded() {
             // Disabled or no reformulations produced - single-query path.
-            return self.hybrid_search(query, limit, rerank_depth);
+            return self.hybrid_search_for_org(query, limit, rerank_depth, org_id, scope);
         }
         // Pull a wider candidate set per reformulation so MMR has headroom across the
         // merged pool.
@@ -1115,7 +1187,7 @@ impl MemoryEngine {
         let mut by_id: std::collections::HashMap<String, ScoredMemory> =
             std::collections::HashMap::new();
         for q in &expanded.queries {
-            for hit in self.recall(q, per_query_k)? {
+            for hit in self.recall_for_org(q, per_query_k, org_id.clone(), scope)? {
                 by_id
                     .entry(hit.memory.id.clone())
                     .and_modify(|existing| {
@@ -2277,6 +2349,56 @@ mod tests {
             .recall_for_org("launch code", 10, OrgId::default(), &same_project)
             .unwrap();
         assert_eq!(hits.len(), 1, "proj-alpha must see its own memory");
+    }
+
+    /// v0.8.0 Sprint 10 regression: `hybrid_search`/`/api/search` used to always recall
+    /// Global-only (a hardcoded `ScopeCtx::default()`), silently ignoring project context
+    /// while plain `recall` already respected it. `hybrid_search_for_org` is the fix -
+    /// same isolation guarantee `project_scope_isolates_recall_by_project_id` proves for
+    /// `recall_for_org` must hold for the hybrid (BM25+vector+graph, RRF+MMR) path too.
+    #[test]
+    fn hybrid_search_for_org_respects_project_scope() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory {
+            scope_type: cairn_core::ScopeType::Project,
+            scope_id: Some("proj-alpha".to_string()),
+            ..NewMemory::new("proj-alpha secret: the launch code is banana")
+        })
+        .unwrap();
+        mem.remember(NewMemory::new("unrelated global memory about rust async runtimes"))
+            .unwrap();
+
+        let other_project = ScopeCtx {
+            project_id: Some("proj-beta".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .hybrid_search_for_org("launch code", 10, 20, OrgId::default(), &other_project)
+            .unwrap();
+        assert!(
+            hits.iter().all(|h| !h.memory.content.contains("banana")),
+            "proj-beta must not see proj-alpha's project-scoped memory via hybrid_search"
+        );
+
+        let same_project = ScopeCtx {
+            project_id: Some("proj-alpha".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .hybrid_search_for_org("launch code", 10, 20, OrgId::default(), &same_project)
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.memory.content.contains("banana")),
+            "proj-alpha must see its own project-scoped memory via hybrid_search"
+        );
+
+        // The plain (unscoped) entry point keeps its pre-existing Global-only behavior -
+        // this is a additive fix, not a breaking change for MCP stdio / existing callers.
+        let hits = mem.hybrid_search("launch code", 10, 20).unwrap();
+        assert!(
+            hits.iter().all(|h| !h.memory.content.contains("banana")),
+            "unscoped hybrid_search must stay Global-only"
+        );
     }
 
     /// Mirrors `project_scope_isolates_recall_by_project_id` for `Session` scope - a second

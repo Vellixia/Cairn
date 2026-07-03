@@ -4,13 +4,16 @@
 //! - Data directory exists and is writable
 //! - Remote server is reachable with a valid token (calls /api/memory/wakeup)
 //! - Supported AI agents are detected
+//! - Cairn-owned config files aren't in a stale/duplicated state
 //!
 //! Exit codes:
 //! - 0  - all green
 //! - 1  - one or more failures (printed above)
 //! - 2  - usage error (invalid flags)
 
+use crate::{agents, paths};
 use anyhow::Result;
+use serde::Serialize;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -22,7 +25,6 @@ pub struct DoctorOptions {
     #[allow(dead_code)]
     pub interactive: bool,
     /// Output machine-readable JSON instead of human-readable text.
-    #[allow(dead_code)]
     pub json: bool,
 }
 
@@ -64,29 +66,64 @@ pub fn run(opts: DoctorOptions) -> Diagnosis {
                 ok: false,
                 detail: format!("failed to resolve: {e}"),
             });
-            return finalize(checks);
+            return finalize(checks, opts.json);
         }
     };
     checks.push(check_data_dir(&cfg, opts.fix));
     checks.push(check_remote_server());
     checks.push(check_agents());
     checks.push(check_project());
-    checks.push(check_config_health());
+    checks.push(check_config_health(opts.fix));
+    checks.push(check_token_expiry());
+    checks.push(check_version_skew());
+    checks.push(check_spool_backlog());
 
-    finalize(checks)
+    finalize(checks, opts.json)
 }
 
-fn finalize(checks: Vec<Check>) -> Diagnosis {
+#[derive(Serialize)]
+struct CheckJson<'a> {
+    name: &'a str,
+    ok: bool,
+    detail: &'a str,
+}
+
+#[derive(Serialize)]
+struct DiagnosisJson<'a> {
+    ok: bool,
+    checks: Vec<CheckJson<'a>>,
+}
+
+fn finalize(checks: Vec<Check>, json: bool) -> Diagnosis {
     let diag = Diagnosis { checks };
-    // Print in a stable order.
-    for c in &diag.checks {
-        let sym = if c.ok { "OK" } else { "FAIL" };
-        eprintln!("  {sym} {:<14} {}", c.name, c.detail);
-    }
-    if diag.ok() {
-        eprintln!("\ncairn doctor: ok");
+    if json {
+        let out = DiagnosisJson {
+            ok: diag.ok(),
+            checks: diag
+                .checks
+                .iter()
+                .map(|c| CheckJson {
+                    name: c.name,
+                    ok: c.ok,
+                    detail: &c.detail,
+                })
+                .collect(),
+        };
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&out).unwrap_or_default()
+        );
     } else {
-        eprintln!("\ncairn doctor: FAIL");
+        // Print in a stable order.
+        for c in &diag.checks {
+            let sym = if c.ok { "OK" } else { "FAIL" };
+            eprintln!("  {sym} {:<14} {}", c.name, c.detail);
+        }
+        if diag.ok() {
+            eprintln!("\ncairn doctor: ok");
+        } else {
+            eprintln!("\ncairn doctor: FAIL");
+        }
     }
     diag
 }
@@ -137,34 +174,37 @@ fn check_data_dir(cfg: &cairn_core::Config, fix: bool) -> Check {
 }
 
 fn check_remote_server() -> Check {
-    let server = std::env::var("CAIRN_SERVER").ok();
-    match server {
-        Some(s) if !s.trim().is_empty() => {
-            let token = std::env::var("CAIRN_TOKEN").ok();
-            let (ok, detail) = match token {
-                Some(t) if !t.is_empty() => {
-                    // Validate the token with a real request.
-                    let url = format!("{}/api/memory/wakeup?limit=1", s.trim_end_matches('/'));
-                    match ureq::get(&url)
-                        .set("Authorization", &format!("Bearer {t}"))
-                        .call()
-                    {
-                        Ok(resp) if resp.status() == 200 => (true, format!("{s} (token valid)")),
+    // Env and `~/.cairn/config.toml` both count - a server configured only via
+    // the config file (the common case post-v0.8.0-redesign) must show as
+    // configured here, not as "unset", or doctor would contradict what
+    // `cairn hook`/`cairn mcp` actually do.
+    let (project_id, _) = crate::project::detect_project();
+    let resolved = crate::config::resolve(project_id.as_deref());
+    match resolved.server {
+        Some((s, src)) => {
+            let src = src.label();
+            let (ok, detail) = match resolved.token {
+                Some((t, _)) => {
+                    // Validate the token with a real, timeout-bounded request.
+                    let client = crate::http::ApiClient::new(&s, Some(&t));
+                    match client.get("/api/memory/wakeup").query("limit", "1").call() {
+                        Ok(resp) if resp.status() == 200 => {
+                            (true, format!("{s} (from {src}, token valid)"))
+                        }
                         Ok(resp) => {
                             let status = resp.status();
                             let body = resp.into_string().unwrap_or_default();
                             (
                                 false,
-                                format!("{s} (token rejected: HTTP {status} -- {body})"),
+                                format!("{s} (from {src}, token rejected: HTTP {status} -- {body})"),
                             )
                         }
-                        Err(e) => (false, format!("{s} (token check failed: {e})")),
+                        Err(e) => (false, format!("{s} (from {src}, token check failed: {e})")),
                     }
                 }
-                Some(_) => (false, format!("{s} (CAIRN_TOKEN is empty)")),
                 None => (
                     false,
-                    format!("{s} (no CAIRN_TOKEN -- every request will 401)"),
+                    format!("{s} (from {src}, no token configured -- every request will 401)"),
                 ),
             };
             Check {
@@ -173,7 +213,7 @@ fn check_remote_server() -> Check {
                 detail,
             }
         }
-        _ => Check {
+        None => Check {
             name: "remote server",
             ok: true,
             detail: "(unset -- local mode)".into(),
@@ -183,13 +223,11 @@ fn check_remote_server() -> Check {
 
 fn check_agents() -> Check {
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let home = home_dir();
-    let mut found = Vec::new();
-    for id in ["claude-code", "codex", "opencode"] {
-        if detect_agent(id, &project, home.as_deref()) {
-            found.push(id);
-        }
-    }
+    let home = paths::home_dir();
+    let found: Vec<&'static str> = agents::detect_all(&project, home.as_deref())
+        .iter()
+        .map(|a| a.id())
+        .collect();
     if found.is_empty() {
         Check {
             name: "agents",
@@ -223,148 +261,190 @@ fn check_project() -> Check {
     }
 }
 
-/// Detect duplicate cairn hook entries across all agent config files and warn
-/// when the OpenCode plugin is on disk but not registered in `opencode.json`.
-/// These are symptoms of stale state that `cairn setup` can repair on re-run.
-fn check_config_health() -> Check {
-    let home = home_dir();
-    let mut issues: Vec<String> = Vec::new();
+/// Surface non-fatal config-health issues from every agent (duplicate hook
+/// entries, double-registered plugins, ...) - symptoms of stale state that
+/// `cairn setup` can repair on re-run. With `fix=true`, self-heals by calling
+/// the SAME `agent.install()` a manual `cairn setup <agent>` re-run would use
+/// (idempotent - it normalizes/de-dupes existing entries rather than treating
+/// this as a fresh install), then re-checks health so the report reflects
+/// what's actually still broken afterward, not what the fix merely attempted.
+fn check_config_health(fix: bool) -> Check {
+    let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home = paths::home_dir();
+    let (project_id, _) = crate::project::detect_project();
+    let resolved = crate::config::resolve(project_id.as_deref());
 
-    // Codex hooks.json duplicate count
-    if let Some(h) = home.as_deref() {
-        let hooks_path = h.join(".codex").join("hooks.json");
-        if hooks_path.exists() {
-            if let Ok(text) = std::fs::read_to_string(&hooks_path) {
-                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                    if let Some(obj) = v.get("hooks").and_then(|o| o.as_object()) {
-                        for (event, arr) in obj {
-                            if let Some(arr) = arr.as_array() {
-                                let cairn = arr
-                                    .iter()
-                                    .filter(|g| {
-                                        g.get("hooks")
-                                            .and_then(|hs| hs.as_array())
-                                            .map(|hs| {
-                                                hs.iter().any(|h| {
-                                                    h.get("command")
-                                                        .and_then(|c| c.as_str())
-                                                        .map(|c| {
-                                                            let lower = c.to_ascii_lowercase();
-                                                            lower.contains("cairn")
-                                                                && lower.contains("hook")
-                                                        })
-                                                        .unwrap_or(false)
-                                                })
-                                            })
-                                            .unwrap_or(false)
-                                    })
-                                    .count();
-                                if cairn > 1 {
-                                    issues.push(format!(
-                                        "{event}: {cairn} cairn hooks (dedup with `cairn setup codex`)"
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
+    let mut remaining: Vec<String> = Vec::new();
+    let mut fixed: Vec<&'static str> = Vec::new();
+
+    for agent in agents::AGENTS.iter() {
+        let before = agent.health(&project, home.as_deref());
+        if before.is_empty() {
+            continue;
+        }
+        if !fix {
+            remaining.extend(before);
+            continue;
+        }
+        let ctx = agents::InstallCtx {
+            project: &project,
+            home: home.as_deref(),
+            scope: agents::Scope::Global,
+            server: resolved.server.as_ref().map(|(s, _)| s.as_str()),
+            token: resolved.token.as_ref().map(|(t, _)| t.as_str()),
+            embed_env: false,
+        };
+        if agent.install(&ctx).is_ok() {
+            let after = agent.health(&project, home.as_deref());
+            if after.is_empty() {
+                fixed.push(agent.label());
+            } else {
+                remaining.extend(after);
             }
+        } else {
+            remaining.extend(before);
         }
     }
 
-    // OpenCode auto-loads local plugin files from its `plugins/` directory. The cairn
-    // plugin must therefore NOT appear in opencode.json's `plugin` array (that array is
-    // for npm packages) — a local path there makes OpenCode load the plugin twice, so
-    // every lifecycle hook fires twice. Older cairn versions wrote such an entry; flag
-    // it so `cairn setup opencode` can strip it.
-    {
-        let cfg = opencode_config_path();
-        let double_registered = cfg
-            .as_path()
-            .exists()
-            .then(|| std::fs::read_to_string(&cfg).ok())
-            .flatten()
-            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-            .and_then(|v| {
-                v.get("plugin").and_then(|p| p.as_array()).map(|arr| {
-                    arr.iter().any(|p| {
-                        p.as_str().is_some_and(|s| {
-                            let n = s.replace('\\', "/").to_ascii_lowercase();
-                            n.ends_with("/plugins/cairn.js") || n == "plugins/cairn.js"
-                        })
-                    })
-                })
-            })
-            .unwrap_or(false);
-        if double_registered {
-            issues.push(
-                "opencode.json lists the cairn plugin in its `plugin` array; it already \
-                 auto-loads from plugins/ and will double-fire (`cairn setup opencode` to fix)"
-                    .to_string(),
-            );
-        }
-    }
-
-    if issues.is_empty() {
+    if remaining.is_empty() && fixed.is_empty() {
         Check {
             name: "config health",
             ok: true,
             detail: "ok".into(),
         }
+    } else if remaining.is_empty() {
+        Check {
+            name: "config health",
+            ok: true,
+            detail: format!("fixed: {}", fixed.join(", ")),
+        }
     } else {
+        let fixed_note = if fixed.is_empty() {
+            String::new()
+        } else {
+            format!("fixed: {}; ", fixed.join(", "))
+        };
+        let hint = if fix { "" } else { " (run with --fix to repair)" };
         Check {
             name: "config health",
             ok: false,
-            detail: issues.join("; "),
+            detail: format!("{fixed_note}{}{hint}", remaining.join("; ")),
         }
     }
 }
 
-fn detect_agent(id: &str, project: &std::path::Path, home: Option<&std::path::Path>) -> bool {
-    let home_has = |rel: &str| home.is_some_and(|h| h.join(rel).exists());
-    match id {
-        "claude-code" => {
-            project.join(".claude").exists()
-                || project.join(".mcp.json").exists()
-                || home_has(".claude")
-                || home_has(".claude.json")
+/// Warn when the configured token expires within 7 days (or has already
+/// expired) so a user notices before every request starts 401ing.
+fn check_token_expiry() -> Check {
+    let (project_id, _) = crate::project::detect_project();
+    let resolved = crate::config::resolve(project_id.as_deref());
+    let Some((token, _)) = resolved.token else {
+        return Check {
+            name: "token expiry",
+            ok: true,
+            detail: "(no token configured)".into(),
+        };
+    };
+    let Some(info) = crate::status::decode_jwt_info(&token) else {
+        return Check {
+            name: "token expiry",
+            ok: true,
+            detail: "opaque token (cannot check expiry)".into(),
+        };
+    };
+    match info.exp {
+        None => Check {
+            name: "token expiry",
+            ok: true,
+            detail: "no expiry claim (long-lived token)".into(),
+        },
+        Some(exp) => {
+            let days_left = (exp - chrono::Utc::now().timestamp()) as f64 / 86400.0;
+            if days_left < 0.0 {
+                Check {
+                    name: "token expiry",
+                    ok: false,
+                    detail: format!(
+                        "EXPIRED {:.1} day(s) ago -- run `cairn pair` for a fresh token",
+                        -days_left
+                    ),
+                }
+            } else if days_left < 7.0 {
+                Check {
+                    name: "token expiry",
+                    ok: false,
+                    detail: format!(
+                        "expires in {days_left:.1} day(s) -- run `cairn pair` soon"
+                    ),
+                }
+            } else {
+                Check {
+                    name: "token expiry",
+                    ok: true,
+                    detail: format!("expires in {days_left:.0} day(s)"),
+                }
+            }
         }
-        "codex" => {
-            codex_config_path(home).exists()
-                || project.join(".codex").join("config.toml").exists()
-                || home_has(".codex/config.toml")
-        }
-        "opencode" => opencode_config_path().exists() || project.join(".opencode").exists(),
-        _ => false,
     }
 }
 
-fn opencode_config_path() -> PathBuf {
-    // XDG_CONFIG_HOME already IS the config root (e.g. ~/.config); don't add .config again.
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg).join("opencode").join("opencode.json");
+/// Informational: how far client and server versions have drifted. Skew alone isn't a
+/// failure (rolling upgrades are normal) - this exists so a confusing bug report can be
+/// ruled in/out by version mismatch at a glance.
+fn check_version_skew() -> Check {
+    let (project_id, _) = crate::project::detect_project();
+    let resolved = crate::config::resolve(project_id.as_deref());
+    let Some((server, _)) = resolved.server else {
+        return Check {
+            name: "version",
+            ok: true,
+            detail: "(no server configured)".into(),
+        };
+    };
+    let client_version = env!("CARGO_PKG_VERSION");
+    let client = crate::http::ApiClient::new(&server, None);
+    match client.server_version() {
+        Some(server_version) if server_version == client_version => Check {
+            name: "version",
+            ok: true,
+            detail: format!("client and server both v{client_version}"),
+        },
+        Some(server_version) => Check {
+            name: "version",
+            ok: true,
+            detail: format!(
+                "client v{client_version}, server v{server_version} (re-run `cairn setup` after a major upgrade if things look off)"
+            ),
+        },
+        None => Check {
+            name: "version",
+            ok: true,
+            detail: "server did not respond to /api/health".into(),
+        },
     }
-    let base = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(".config").join("opencode").join("opencode.json")
 }
 
-fn codex_config_path(home: Option<&std::path::Path>) -> PathBuf {
-    let config_home = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| home.map(PathBuf::from))
-        .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("."));
-    config_home.join(".codex").join("config.toml")
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-        .filter(|p| !p.as_os_str().is_empty())
+/// Informational: entries queued because a hook couldn't reach the server. A genuinely
+/// unreachable server is already caught by the "remote server" check above; this just makes
+/// the backlog itself visible.
+fn check_spool_backlog() -> Check {
+    let depth = crate::spool::depth();
+    if depth == 0 {
+        Check {
+            name: "spool",
+            ok: true,
+            detail: "empty".into(),
+        }
+    } else {
+        Check {
+            name: "spool",
+            ok: true,
+            detail: format!(
+                "{depth} entr{} queued for replay (flushes on next reachable SessionStart)",
+                if depth == 1 { "y" } else { "ies" }
+            ),
+        }
+    }
 }
 
 /// Build a short-lived full diagnosis from a list of checks - used by the `doctor`

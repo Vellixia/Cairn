@@ -268,6 +268,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/memory/autopilot-digest", get(autopilot_digest))
         .route("/api/memory/session-summary", post(session_summary))
         .route("/api/memory/crystallize", post(crystallize))
+        .route("/api/memory/by-scope", get(memory_by_scope))
         .route("/api/memory/graph", get(memory_graph))
         .route("/api/memory/architecture-report", get(architecture_report))
         .route("/api/projects/upsert", patch(upsert_project))
@@ -538,7 +539,14 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
         )
             .into_response();
     } else {
-        "index.html".to_string()
+        // v0.8.0 Sprint 10 bug fix: a hard navigation/reload of a dynamic route id that
+        // `generateStaticParams()` didn't pre-render (e.g. a real `/projects/<id>` or
+        // `/you/sessions/<id>`) used to fall straight through to the site ROOT's index.html -
+        // verified live, this silently rendered the "Now" dashboard at the `/you/sessions/<id>`
+        // URL instead of the session page. `find_route_family_shell` finds that route family's
+        // own pre-rendered placeholder shell instead, which loads the right client component
+        // and reads the real `id` from the URL itself.
+        find_route_family_shell(&path).unwrap_or_else(|| "index.html".to_string())
     };
     // Pull the per-request CSP nonce (set by security_headers middleware) so we can
     // rewrite inline `<script>` tags in the HTML shell.
@@ -571,6 +579,32 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
                 .into_response()
         }
     }
+}
+
+/// Find the pre-rendered shell for `path`'s dynamic-route family among the embedded web assets.
+fn find_route_family_shell(path: &str) -> Option<String> {
+    find_shell_in(path, <WebAssets as RustEmbed>::iter().map(|f| f.to_string()))
+}
+
+/// Walk up `path`'s segments (most specific first) looking for any file in `files` that sits
+/// one level under that prefix and ends in `.html`. Every dynamic route in this dashboard uses
+/// a single-entry `generateStaticParams()` (e.g. `projects/placeholder.html`,
+/// `you/sessions/new.html`), so there's exactly one shell to find per route family. Returns
+/// `None` if no prefix at any depth matches. Split from [`find_route_family_shell`] so the
+/// matching logic is testable without depending on `web/out/` actually being built.
+fn find_shell_in(path: &str, files: impl Iterator<Item = String>) -> Option<String> {
+    let segments: Vec<&str> = path.split('/').collect();
+    let files: Vec<String> = files.collect();
+    for take in (1..segments.len()).rev() {
+        let want_prefix = format!("{}/", segments[..take].join("/"));
+        if let Some(hit) = files
+            .iter()
+            .find(|f| f.starts_with(&want_prefix) && f.ends_with(".html"))
+        {
+            return Some(hit.clone());
+        }
+    }
+    None
 }
 
 /// Insert a CSP nonce into every `<script>` tag that doesn't already have one. We rewrite
@@ -909,7 +943,9 @@ async fn remember(
             cairn_core::ScopeType::Global => None,
         };
     }
-    Ok(Json(s.mem.remember(input)?))
+    let m = s.mem.remember(input)?;
+    crate::events::publish_memory(&s.events, "added", &m.id);
+    Ok(Json(m))
 }
 
 /// P4.3: `POST /api/memory/gotcha` - record a failure event. The gotcha tracker
@@ -1008,6 +1044,41 @@ async fn recall(
     )?))
 }
 
+#[derive(Deserialize)]
+struct ByScopeQuery {
+    scope_type: cairn_core::ScopeType,
+    #[serde(default)]
+    scope_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// GET `/api/memory/by-scope?scope_type=project&scope_id=<id>&limit=50` - v0.8.0 Sprint 10:
+/// every memory in an *exact* scope, most-recently-updated first. Unlike `/api/memory/recall`
+/// this isn't a search (no ranking, no Global fallback) - it's the plain filter the Projects
+/// detail page needs ("what does this project know"), where faking `X-Cairn-Project` on recall
+/// would wrongly blend in Global results and require a text query that doesn't exist yet.
+async fn memory_by_scope(
+    State(s): State<AppState>,
+    Query(q): Query<ByScopeQuery>,
+) -> Result<Json<Vec<Memory>>, ApiError> {
+    if q.scope_type != cairn_core::ScopeType::Global && q.scope_id.is_none() {
+        return Err(ApiError::bad_request(
+            "scope_id is required unless scope_type=global",
+        ));
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let mut mems: Vec<Memory> = s
+        .store
+        .all_memories()?
+        .into_iter()
+        .filter(|m| m.scope_type == q.scope_type && m.scope_id == q.scope_id)
+        .collect();
+    mems.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    mems.truncate(limit);
+    Ok(Json(mems))
+}
+
 /// v0.8.0 Sprint 3: the project registry populated by the `SessionStart` hook's auto-detection
 /// (`cairn-client`'s `project::detect_project`), so the dashboard can show which repos an agent
 /// has actually worked in. Registration is independent of scope isolation itself - Sprint 2's
@@ -1030,25 +1101,78 @@ async fn upsert_project(
         .store
         .get_project(&body.id)?
         .ok_or_else(|| ApiError::not_found("project vanished immediately after upsert"))?;
+    crate::events::publish_project(&s.events, &project.id);
     Ok(Json(project))
+}
+
+/// v0.8.0 Sprint 10: `GET /api/projects`/`GET /api/projects/:id` enriched with memory_count +
+/// last_memory_at, so the dashboard's Projects page doesn't need a second round-trip per row.
+#[derive(Serialize)]
+struct ProjectWithStats {
+    #[serde(flatten)]
+    project: cairn_store::ProjectRecord,
+    memory_count: usize,
+    last_memory_at: Option<DateTime<Utc>>,
+}
+
+/// Group `mems` by `scope_id` for every `Project`-scoped memory, giving `(count, latest
+/// updated_at)` per project id. One full-corpus scan shared by both project endpoints below -
+/// same cost class as `promotion_candidates`/`architecture_report`, no new store trait method.
+fn project_memory_stats(mems: &[Memory]) -> std::collections::HashMap<String, (usize, DateTime<Utc>)> {
+    let mut stats: std::collections::HashMap<String, (usize, DateTime<Utc>)> = std::collections::HashMap::new();
+    for m in mems {
+        if m.scope_type != cairn_core::ScopeType::Project {
+            continue;
+        }
+        let Some(id) = m.scope_id.as_ref() else {
+            continue;
+        };
+        let entry = stats.entry(id.clone()).or_insert((0, m.updated_at));
+        entry.0 += 1;
+        if m.updated_at > entry.1 {
+            entry.1 = m.updated_at;
+        }
+    }
+    stats
+}
+
+fn with_stats(
+    project: cairn_store::ProjectRecord,
+    stats: &std::collections::HashMap<String, (usize, DateTime<Utc>)>,
+) -> ProjectWithStats {
+    let (memory_count, last_memory_at) = stats
+        .get(&project.id)
+        .map(|(c, t)| (*c, Some(*t)))
+        .unwrap_or((0, None));
+    ProjectWithStats {
+        project,
+        memory_count,
+        last_memory_at,
+    }
 }
 
 /// GET `/api/projects` - every known project, most-recently-active first.
 async fn list_projects(
     State(s): State<AppState>,
-) -> Result<Json<Vec<cairn_store::ProjectRecord>>, ApiError> {
-    Ok(Json(s.store.list_projects()?))
+) -> Result<Json<Vec<ProjectWithStats>>, ApiError> {
+    let projects = s.store.list_projects()?;
+    let stats = project_memory_stats(&s.store.all_memories()?);
+    Ok(Json(
+        projects.into_iter().map(|p| with_stats(p, &stats)).collect(),
+    ))
 }
 
 /// GET `/api/projects/:id` - a single project's details.
 async fn get_project(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Json<cairn_store::ProjectRecord>, ApiError> {
-    match s.store.get_project(&id)? {
-        Some(p) => Ok(Json(p)),
-        None => Err(ApiError::not_found("no such project")),
-    }
+) -> Result<Json<ProjectWithStats>, ApiError> {
+    let project = s
+        .store
+        .get_project(&id)?
+        .ok_or_else(|| ApiError::not_found("no such project"))?;
+    let stats = project_memory_stats(&s.store.all_memories()?);
+    Ok(Json(with_stats(project, &stats)))
 }
 
 /// v0.8.0 Sprint 4: one entry in `GET /api/cron/jobs` - the job's static schedule plus whatever
@@ -1163,26 +1287,35 @@ struct SearchQuery {
 /// With `rerank=local` the post-MMR top-K is re-scored by a cross-encoder.
 async fn search_handler(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<ScoredMemory>>, ApiError> {
     let limit = q.limit.unwrap_or(20);
     let rerank_depth = q.rerank_depth.unwrap_or(20);
+    let org_id = OrgId::default();
 
     // P3.3 query expansion: when `expand=true` and the LLM gate is on.
     if q.expand.unwrap_or(false) && s.cfg.llm_consolidation.enabled {
         let expander = cairn_memory::QueryExpander::new(s.cfg.llm_consolidation.clone());
-        let mut hits = s
-            .mem
-            .expanded_search(&q.q, limit, rerank_depth, &expander)?;
+        let mut hits = s.mem.expanded_search_for_org(
+            &q.q,
+            limit,
+            rerank_depth,
+            &expander,
+            org_id.clone(),
+            &scope,
+        )?;
         // P4.2 rerank: post-expansion cross-encoder pass.
         if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
             let reranker = cairn_memory::rerank_from_config(&s.cfg.rerank);
-            hits = s.mem.hybrid_search_with_rerank(
+            hits = s.mem.hybrid_search_with_rerank_for_org(
                 &q.q,
                 limit,
                 rerank_depth,
                 &*reranker,
                 s.cfg.rerank.blend_weight,
+                org_id,
+                &scope,
             )?;
         }
         return Ok(Json(hits));
@@ -1191,17 +1324,22 @@ async fn search_handler(
     // P4.2 rerank only (no expansion).
     if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
         let reranker = cairn_memory::rerank_from_config(&s.cfg.rerank);
-        return Ok(Json(s.mem.hybrid_search_with_rerank(
+        return Ok(Json(s.mem.hybrid_search_with_rerank_for_org(
             &q.q,
             limit,
             rerank_depth,
             &*reranker,
             s.cfg.rerank.blend_weight,
+            org_id,
+            &scope,
         )?));
     }
 
-    // Default path: plain hybrid search.
-    Ok(Json(s.mem.hybrid_search(&q.q, limit, rerank_depth)?))
+    // Default path: plain hybrid search, scope-aware (v0.8.0 Sprint 10 - was Global-only).
+    Ok(Json(
+        s.mem
+            .hybrid_search_for_org(&q.q, limit, rerank_depth, org_id, &scope)?,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2879,6 +3017,121 @@ mod tests {
         assert_eq!(backfilled[1].data["kind"], "login_failed");
     }
 
+    // -- v0.8.0 Sprint 10: every state-mutating handler that's supposed to go live over SSE
+    // actually does. These are the direct proof for A5-C/D and C-3 - the invalidation map on
+    // the web side is only correct if these fire.
+
+    #[tokio::test]
+    async fn remember_publishes_a_memory_added_event() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        let resp = remember(
+            State(state.clone()),
+            Extension(ScopeCtx::default()),
+            Json(cairn_core::NewMemory::new("sprint10 sse test")),
+        )
+        .await
+        .unwrap();
+        let ev = rx.try_recv().expect("remember should publish a memory event");
+        assert_eq!(ev.kind, crate::events::KIND_MEMORY);
+        assert_eq!(ev.data["action"], "added");
+        assert_eq!(ev.data["memory_id"], resp.0.id);
+    }
+
+    #[tokio::test]
+    async fn memory_by_scope_returns_only_the_exact_scope_no_global_blend() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-by-scope-test".to_string()),
+                ..cairn_core::NewMemory::new("proj-by-scope-test: project-scoped fact")
+            })
+            .unwrap();
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new(
+                "by-scope test: an unrelated global memory",
+            ))
+            .unwrap();
+
+        // Unlike recall, by-scope must NOT blend in Global memories for a Project query.
+        let resp = memory_by_scope(
+            State(state.clone()),
+            Query(ByScopeQuery {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-by-scope-test".to_string()),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.len(), 1);
+        assert_eq!(resp.0[0].content, "proj-by-scope-test: project-scoped fact");
+
+        // Project scope without a scope_id is a 400, not a silent empty/Global fallback.
+        let err = memory_by_scope(
+            State(state.clone()),
+            Query(ByScopeQuery {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn upsert_project_publishes_a_project_event() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        upsert_project(
+            State(state.clone()),
+            Json(ProjectUpsertBody {
+                id: "proj-sse-test".into(),
+                name: "sse test project".into(),
+                path: "/tmp/proj".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let ev = rx
+            .try_recv()
+            .expect("upsert_project should publish a project event");
+        assert_eq!(ev.kind, crate::events::KIND_PROJECT);
+        assert_eq!(ev.data["project_id"], "proj-sse-test");
+    }
+
+    #[tokio::test]
+    async fn audit_log_record_publishes_a_live_audit_event() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        state.audit_log.record(
+            &state.store,
+            &state.events,
+            "sse_test_kind",
+            "tester",
+            "detail here".into(),
+        );
+        let ev = rx
+            .try_recv()
+            .expect("audit_log.record should publish a live audit event");
+        assert_eq!(ev.kind, crate::events::KIND_AUDIT);
+        assert_eq!(ev.data["kind"], "sse_test_kind");
+        assert_eq!(ev.data["actor"], "tester");
+    }
+
     // -- v0.5.0 Sprint 2: memory CRUD + confidence + pin -------------------------------
 
     #[tokio::test]
@@ -3301,6 +3554,7 @@ mod tests {
 
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "hybrid search test query".into(),
                 limit: Some(2),
@@ -3338,6 +3592,7 @@ mod tests {
             .unwrap();
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "P3.3 expand fallback".into(),
                 limit: Some(5),
@@ -3368,6 +3623,7 @@ mod tests {
             .unwrap();
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "P3.3 default".into(),
                 limit: Some(5),
@@ -3398,6 +3654,7 @@ mod tests {
             .unwrap();
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "P4.2 rerank fallback".into(),
                 limit: Some(5),
@@ -3413,6 +3670,71 @@ mod tests {
             resp.iter()
                 .any(|h| h.memory.content.contains("P4.2 rerank fallback")),
             "rerank=local with config off should still find the memory"
+        );
+    }
+
+    /// v0.8.0 Sprint 10 regression: `GET /api/search` used to never extract `Extension<ScopeCtx>`
+    /// at all, so it always searched Global-only regardless of the caller's
+    /// `X-Cairn-Project`/`X-Cairn-Session` headers - unlike `/api/memory/recall`, which already
+    /// respected scope. Proves the fix end-to-end through the actual HTTP handler.
+    #[tokio::test]
+    async fn search_endpoint_respects_project_scope() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-alpha".to_string()),
+                ..cairn_core::NewMemory::new("proj-alpha secret: the launch code is banana")
+            })
+            .unwrap();
+
+        let other_project = ScopeCtx {
+            project_id: Some("proj-beta".to_string()),
+            session_id: None,
+        };
+        let resp = search_handler(
+            State(state.clone()),
+            Extension(other_project),
+            axum::extract::Query(SearchQuery {
+                q: "launch code".into(),
+                limit: Some(5),
+                rerank_depth: Some(20),
+                expand: None,
+                rerank: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            resp.iter().all(|h| !h.memory.content.contains("banana")),
+            "proj-beta must not see proj-alpha's project-scoped memory via /api/search"
+        );
+
+        let same_project = ScopeCtx {
+            project_id: Some("proj-alpha".to_string()),
+            session_id: None,
+        };
+        let resp = search_handler(
+            State(state.clone()),
+            Extension(same_project),
+            axum::extract::Query(SearchQuery {
+                q: "launch code".into(),
+                limit: Some(5),
+                rerank_depth: Some(20),
+                expand: None,
+                rerank: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            resp.iter().any(|h| h.memory.content.contains("banana")),
+            "proj-alpha must see its own project-scoped memory via /api/search"
         );
     }
 
@@ -3457,6 +3779,38 @@ mod tests {
         assert!(
             body_str.contains(&format!("nonce=\"{nonce}\"")),
             "HTML should contain the nonce from the CSP header; nonce={nonce}"
+        );
+    }
+
+    /// v0.8.0 Sprint 10 regression: a hard navigation/reload of a real (non-pre-rendered)
+    /// dynamic-route id used to fall straight through to the site ROOT's shell - verified
+    /// live, this silently rendered the "Now" dashboard at a `/you/sessions/<real-id>` URL.
+    /// `find_shell_in` must resolve to that route family's OWN placeholder shell instead.
+    #[test]
+    fn find_shell_in_picks_the_nearest_ancestor_with_a_prerendered_shell() {
+        let files = || {
+            [
+                "index.html".to_string(),
+                "projects/placeholder.html".to_string(),
+                "you/sessions/new.html".to_string(),
+                "you/settings.html".to_string(),
+            ]
+            .into_iter()
+        };
+
+        assert_eq!(
+            find_shell_in("projects/f5d3a2d44a6859a0", files()),
+            Some("projects/placeholder.html".to_string()),
+        );
+        assert_eq!(
+            find_shell_in("you/sessions/5c1b717f-9a1f-41a7-83bd-ab48819e6ddc", files()),
+            Some("you/sessions/new.html".to_string()),
+            "must match the 2-segment `you/sessions` family, not fall through to `you/settings`",
+        );
+        assert_eq!(
+            find_shell_in("totally/unknown/path", files()),
+            None,
+            "no ancestor prefix matches anything embedded - caller falls back to the site root",
         );
     }
 

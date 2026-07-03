@@ -1,13 +1,10 @@
 "use client";
 
-import { useState } from "react";
-import { useAnchorQuery, useSetAnchorMutation } from "@/lib/queries";
+import { useAnchorQuery } from "@/lib/queries";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON, type Stats } from "@/lib/api";
 import { Anchor, ShieldAlert, Target } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
@@ -18,19 +15,10 @@ export function DriftAnchorCard() {
     queryKey: ["drift-anchor", "stats"],
     queryFn: () => getJSON<Stats>("/api/stats"),
   });
-  const setAnchor = useSetAnchorMutation();
-  const [draft, setDraft] = useState("");
 
   const currentAnchor = anchorQ.data?.anchor ?? null;
   const reliability = statsQ.data?.reliability;
   const reliabilityPct = reliability ? Math.round(reliability.score) : null;
-
-  const onSave = () => {
-    const next = draft.trim() || currentAnchor || "";
-    if (!next) return;
-    setAnchor.mutate({ goal: next });
-    setDraft("");
-  };
 
   const reliabilityTone =
     reliabilityPct == null
@@ -64,27 +52,10 @@ export function DriftAnchorCard() {
               <p className="break-words text-sm text-foreground">{currentAnchor}</p>
             ) : (
               <p className="text-sm text-muted-foreground">
-                No anchor set yet --- pick the project goal you want every recall and check to be measured against.
+                No anchor set yet --- the agent sets one via the `anchor` tool, or it&apos;s
+                auto-derived from the first prompt of a session.
               </p>
             )}
-            <div className="flex gap-2">
-              <Input
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                placeholder="Set or refine the anchor..."
-                className="h-8 text-sm"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") onSave();
-                }}
-              />
-              <Button
-                size="sm"
-                onClick={onSave}
-                disabled={setAnchor.isPending || !draft.trim()}
-              >
-                {setAnchor.isPending ? "Saving..." : "Update"}
-              </Button>
-            </div>
           </div>
         </div>
         {reliability ? (

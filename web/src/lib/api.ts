@@ -97,37 +97,6 @@ export function postJSON<T>(path: string, body: unknown): Promise<T> {
   return request<T>(path, { method: "POST", body });
 }
 
-/// Like [`postJSON`] but sends a raw `ArrayBuffer` with a caller-supplied content type.
-/// Used by the pack registry's `POST /registry/packs` endpoint, where the body is the
-/// tarball bytes rather than a JSON document.
-export async function postBinary<T>(
-  path: string,
-  body: ArrayBuffer,
-  contentType: string,
-): Promise<T> {
-  const res = await fetch(`${API_BASE}${path}`, {
-    method: "POST",
-    credentials: "include",
-    headers: { "content-type": contentType },
-    body,
-  });
-  if (!res.ok) {
-    let parsed: unknown = null;
-    try {
-      parsed = await res.json();
-    } catch {
-      /* ignore */
-    }
-    const message =
-      typeof parsed === "object" && parsed && "error" in parsed
-        ? String((parsed as { error: unknown }).error)
-        : `${res.status} ${res.statusText}`;
-    throw new ApiError(res.status, message, parsed);
-  }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
-}
-
 export function delJSON<T>(path: string): Promise<T> {
   return request<T>(path, { method: "DELETE" });
 }
@@ -248,6 +217,62 @@ export interface CronRun {
   duration_ms: number;
   outcome: "ok" | "err";
   detail: string;
+}
+
+/** v0.8.0 Sprint 6: an ingested document, from `GET /api/documents`. */
+export interface DocumentSummary {
+  id: string;
+  source: string;
+  title: string;
+  chunk_count: number;
+  updated_at: string;
+}
+
+/** v0.8.0 Sprint 6: one chunk hit from `GET /api/documents/search`. */
+export interface DocumentChunkRecord {
+  id: string;
+  source: string;
+  title: string;
+  chunk_index: number;
+  content: string;
+  created_at: string;
+}
+
+/** v0.8.0 Sprint 3/10: a registered project, enriched with memory stats. */
+export interface ProjectWithStats {
+  id: string;
+  name: string;
+  path: string;
+  first_seen: string;
+  last_active: string;
+  memory_count: number;
+  last_memory_at: string | null;
+}
+
+/** v0.8.0 Sprint 4: one background job's schedule + last run, from `GET /api/cron/jobs`. */
+export interface CronJobStatus {
+  name: string;
+  schedule: string;
+  last_run: CronRun | null;
+}
+
+/** v0.8.0 Sprint 8: one promotion/demotion event from `GET /api/memory/promotion-log`. */
+export interface PromotionLogEntry {
+  id: string;
+  memory_id: string;
+  action: "promote" | "demote";
+  old_scope_type: string;
+  old_scope_id: string | null;
+  score: number;
+  reason: string;
+  ts: string;
+}
+
+/** v0.8.0 Sprint 8: "while you were away" autopilot summary from `GET /api/memory/autopilot-digest`. */
+export interface AutopilotDigest {
+  promoted: number;
+  demoted: number;
+  drift_auto_approved: number;
 }
 
 export interface ReadResult {

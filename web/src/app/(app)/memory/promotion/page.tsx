@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { HelpButton } from "@/components/HelpButton";
 import { HELP } from "@/components/helpCopy";
 import {
@@ -23,25 +24,25 @@ import {
   usePromotionCandidatesQuery,
   usePromoteMemoryMutation,
   useDismissPromotionMutation,
-  useCronHistoryQuery,
 } from "@/lib/queries";
 
 export default function PromotionPage() {
   const candidates = usePromotionCandidatesQuery();
   const promote = usePromoteMemoryMutation();
   const dismiss = useDismissPromotionMutation();
-  const history = useCronHistoryQuery();
 
   return (
     <div className="space-y-6 max-w-3xl">
       <header className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Promotion &amp; Intelligence
-          </h1>
+          <h1 className="text-2xl font-semibold tracking-tight">Promotion</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            What the nightly <code>llm-intelligence</code> job found worth reviewing, and what
-            every background job did on its last run.
+            What the nightly <code>llm-intelligence</code> job found worth reviewing. Full-auto
+            promotion, demotion, and job history live on{" "}
+            <Link href="/automation" className="underline underline-offset-2">
+              Automation
+            </Link>
+            .
           </p>
         </div>
         <HelpButton content={HELP["/memory/promotion"]} />
@@ -104,49 +105,6 @@ export default function PromotionPage() {
                   </ItemActions>
                 </Item>
               ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle>Intelligence log</CardTitle>
-          <CardDescription>Last 10 runs per job, newest last.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {history.isLoading ? (
-            <div className="space-y-2">
-              <Skeleton className="h-8 w-full" />
-              <Skeleton className="h-8 w-full" />
-            </div>
-          ) : history.data && history.data.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              No jobs have run yet since the server started.
-            </p>
-          ) : (
-            <ul className="space-y-1.5">
-              {history.data
-                ?.slice()
-                .reverse()
-                .map((run, i) => (
-                  <li
-                    key={`${run.job}-${run.started_at}-${i}`}
-                    className="flex items-center gap-2 text-xs"
-                  >
-                    <Badge
-                      variant={run.outcome === "ok" ? "outline" : "destructive"}
-                      className="font-mono text-[10px] uppercase"
-                    >
-                      {run.outcome}
-                    </Badge>
-                    <span className="font-mono">{run.job}</span>
-                    <span className="text-muted-foreground">
-                      {new Date(run.started_at).toLocaleString()} . {run.duration_ms}ms
-                    </span>
-                    <span className="truncate text-muted-foreground">{run.detail}</span>
-                  </li>
-                ))}
             </ul>
           )}
         </CardContent>

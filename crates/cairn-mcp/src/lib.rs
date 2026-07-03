@@ -24,6 +24,7 @@ use std::sync::Arc;
 /// Default protocol version we advertise if the client doesn't specify one.
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
+pub mod guidance;
 pub mod prompts;
 pub mod resources;
 
@@ -128,7 +129,8 @@ impl McpServer {
                     json!({
                         "protocolVersion": ver,
                         "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") }
+                        "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") },
+                        "instructions": guidance::GUIDANCE_COMPACT
                     }),
                 ))
             }
@@ -909,7 +911,8 @@ impl RemoteProxy {
                     json!({
                         "protocolVersion": ver,
                         "capabilities": { "tools": {} },
-                        "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") }
+                        "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") },
+                        "instructions": guidance::GUIDANCE_COMPACT
                     }),
                 ))
             }
@@ -1011,6 +1014,12 @@ mod tests {
             .unwrap();
         assert_eq!(init["result"]["protocolVersion"], "2025-06-18");
         assert_eq!(init["result"]["serverInfo"]["name"], "cairn");
+        assert_eq!(
+            init["result"]["instructions"].as_str(),
+            Some(guidance::GUIDANCE_COMPACT),
+            "initialize must surface the tool playbook via `instructions` (B6) so every \
+             MCP-speaking agent gets it automatically at connect time"
+        );
 
         let list = s
             .handle(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}))
@@ -1018,6 +1027,23 @@ mod tests {
         let tools = list["result"]["tools"].as_array().unwrap();
         assert!(tools.iter().any(|t| t["name"] == "read"));
         assert!(tools.iter().any(|t| t["name"] == "remember"));
+    }
+
+    /// `RemoteProxy` is the path `cairn mcp` actually takes against a configured server (the
+    /// thin-client v0.8.0 design has no in-process engines) - its `initialize` branch builds
+    /// the response locally with no HTTP call, so this needs no live server to verify it also
+    /// carries `instructions`.
+    #[test]
+    fn remote_proxy_initialize_also_carries_instructions() {
+        let proxy = RemoteProxy::new("http://unused.invalid", None);
+        let init = proxy
+            .handle(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}))
+            .unwrap();
+        assert_eq!(init["result"]["serverInfo"]["name"], "cairn");
+        assert_eq!(
+            init["result"]["instructions"].as_str(),
+            Some(guidance::GUIDANCE_COMPACT)
+        );
     }
 
     #[test]

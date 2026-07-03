@@ -87,7 +87,9 @@ export default function AuditPage() {
       <Card>
         <CardHeader>
           <CardTitle>Events</CardTitle>
-          <CardDescription>Polled every 5 seconds.</CardDescription>
+          <CardDescription>
+            Live via SSE --- falls back to polling every 60s if the connection drops.
+          </CardDescription>
         </CardHeader>
         <CardContent>
           {audit.isLoading ? (

@@ -34,21 +34,21 @@ export const HELP: Record<string, HelpCopy> = {
       "Wakeup is the default context Cairn loads for a fresh agent. Trimming here directly shrinks every future session's token bill.",
   },
   "/memory/promotion": {
-    title: "Promotion & Intelligence",
-    what: "v0.8.0: memories the nightly llm-intelligence job thinks are broadly useful enough to promote to Global scope, plus a log of recent background-job runs.",
+    title: "Promotion",
+    what: "Memories in the 0.70-0.90 promo_score review band - scored high enough by the nightly llm-intelligence job to be worth a look, but not high enough to auto-promote.",
     how: [
       "Promote moves a memory to Global scope and locks it against future suggestions.",
       "Dismiss locks it without changing scope (\"don't ask again\").",
-      "The Intelligence Log shows what session-gc/memory-decay/access-log-prune/llm-intelligence did on their last run.",
+      "Memories scoring above the auto-threshold skip this list and promote themselves - see Automation for that log, the schedule, and Undo.",
     ],
     impact:
-      "Nothing here is automatic yet - every promotion still needs a human click. Auto-promotion with an Undo is a future sprint (v0.8.0 Sprint 8).",
+      "This is the human-in-the-loop half of promotion; full-auto promotion/demotion runs on the same nightly job and is visible on the Automation page.",
   },
   "/memory/compression": {
     title: "Compression Lab",
     what: "Side-by-side comparison of all four read modes for a single file.",
     how: [
-      "Type a file path (e.g. crates/cairn-core/src/lib.rs) and press Render.",
+      "Type a file path (e.g. crates/cairn-core/src/lib.rs) and press Render - the dropdown suggests files from recent memories, but any path works.",
       "Each column shows one mode's view, its token count, and the savings vs full.",
       "The cheapest mode is highlighted as 'best' - prefer that for context-bounded reads.",
     ],
@@ -155,6 +155,38 @@ export const HELP: Record<string, HelpCopy> = {
     impact:
       "Settings here are minimal because most config lives server-side. Sign out from a shared browser, not just close the tab.",
   },
+  "/projects": {
+    title: "Projects",
+    what: "Repos an agent with Cairn hooks has worked in, auto-detected on session start, with a memory count per project.",
+    how: [
+      "Click a project to see its Project-scoped memories and promotion activity.",
+      "Registration is independent of scope isolation - it's discovery, not an access boundary.",
+    ],
+    impact:
+      "Projects are read-only observability - there's no manual create/edit here. A project appears the first time an agent's SessionStart hook auto-detects the repo.",
+  },
+  "/documents": {
+    title: "Documents",
+    what: "Reference material ingested for RAG recall - chunked text from files or URLs that blend into search results alongside memories.",
+    how: [
+      "Ingest via `cairn documents ingest <path|url>` (CLI) - this page is observability + a search preview, not an upload form.",
+      "Use the search box to preview what a query would surface across every ingested document.",
+      "Delete removes the chunks from recall; re-ingesting the same source later restores them.",
+    ],
+    impact:
+      "Documents give recall external reference material (docs, READMEs, specs) it wouldn't otherwise have from memories alone.",
+  },
+  "/automation": {
+    title: "Automation",
+    what: "What the background jobs and full-auto promotion/demotion/drift-approval did while you were away, plus the schedule and a manual Run now per job.",
+    how: [
+      "Pick a lookback window for the digest tiles (24h / 48h / 7d).",
+      "Run now triggers a job immediately - same code path the scheduler uses.",
+      "Promotion log rows for an auto- or manually-promoted memory get an Undo button.",
+    ],
+    impact:
+      "Run history is in-memory since server start; the promotion log is durable. Undo reverts a memory to the scope it was promoted from.",
+  },
   "/memory/architecture": {
     title: "Architecture report",
     what: "Structural analysis of the memory graph as code: nodes (files/memories), edges (relationships), communities, bridges, and cycles.",
@@ -179,9 +211,9 @@ export const HELP: Record<string, HelpCopy> = {
   },
   "/registry/packs": {
     title: "Pack registry",
-    what: "Published .cairnpkg packs. Search, publish new ones, click a row to see versions and download.",
+    what: "Published .cairnpkg packs. Search and browse; click a row to see versions and download.",
     how: [
-      "Publish a pack via the Publish button (upload a .cairnpkg tarball).",
+      "Publish via `POST /api/registry/packs` (CLI/API) - this view is observability, not a publish form.",
       "Click a pack name to see all its versions and download counts.",
       "Use the search box to filter by name or description.",
     ],
@@ -190,21 +222,20 @@ export const HELP: Record<string, HelpCopy> = {
   },
   "/registry": {
     title: "Pack registry",
-    what: "Self-hosted .cairnpkg registry. Three sections: Packs (browse/publish), Trusted Keys (signing authorities), Revocations (audit trail).",
+    what: "Self-hosted .cairnpkg registry, read-only here. Three sections: Packs (browse/download), Trusted Keys (signing authorities), Revocations (audit trail).",
     how: [
       "Use the tab bar above to switch between Packs, Trusted Keys, and Revocations.",
-      "Publish on the Packs tab. Manage signing keys on the Trusted Keys tab. Read the audit trail on Revocations.",
+      "Publishing, key management, and revocation are done via the CLI/API - this dashboard only observes the result.",
     ],
     impact:
-      "Trust flows top-down: add a trusted key, then publish packs signed with it. Revocations are append-only.",
+      "Trust flows top-down: a trusted key signs packs. Revocations are append-only.",
   },
   "/registry/trust": {
     title: "Trusted signing keys",
     what: "Ed25519 public keys the registry trusts to sign packs. Packs signed by unlisted keys still upload but are flagged unsigned.",
     how: [
-      "Add a key by pasting its 64-char hex public key.",
-      "Revoke a key to mark its signed packs as untrusted (the packs remain on disk).",
-      "Rotate by adding a new key then revoking the old one.",
+      "Read-only here - add or remove a key via `POST`/`DELETE /api/registry/trusted-keys` (CLI/API).",
+      "Rotate by adding a new key then revoking the old one from the CLI.",
     ],
     impact:
       "Compromised key? Revoke first, then rotate. Revocations are append-only and surface in the revocations tab.",

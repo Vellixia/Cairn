@@ -21,6 +21,8 @@ import {
   ItemDescription,
 } from "@/components/ui/item";
 import { getJSON, postJSON } from "@/lib/api";
+import { qk } from "@/lib/queries";
+import { pollWhenOffline } from "@/lib/stores/events";
 import { toast } from "sonner";
 
 interface DriftEvent {
@@ -36,16 +38,16 @@ interface DriftEvent {
 export default function DriftCenterPage() {
   const qc = useQueryClient();
   const drifts = useQuery({
-    queryKey: ["guard", "drift"],
+    queryKey: qk.drift,
     queryFn: () => getJSON<DriftEvent[]>("/api/guard/drift"),
-    refetchInterval: 5_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
 
   async function approve(id: number) {
     try {
       await postJSON(`/api/guard/drift/${id}/approve`, {});
       toast.success(`Approved #${id}`);
-      qc.invalidateQueries({ queryKey: ["guard", "drift"] });
+      qc.invalidateQueries({ queryKey: qk.drift });
     } catch (e) {
       toast.error(String(e));
     }
@@ -55,7 +57,7 @@ export default function DriftCenterPage() {
     try {
       await postJSON(`/api/guard/drift/${id}/reject`, {});
       toast(`Rejected #${id}`);
-      qc.invalidateQueries({ queryKey: ["guard", "drift"] });
+      qc.invalidateQueries({ queryKey: qk.drift });
     } catch (e) {
       toast.error(String(e));
     }

@@ -13,31 +13,40 @@ use std::path::PathBuf;
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, Subcommand};
 
+mod agents;
+mod config;
+mod debuglog;
 mod doctor;
 mod documents;
+#[cfg(test)]
+mod env_guard;
 mod hook;
+mod http;
+mod jsonedit;
 mod onboard;
+mod pair;
+mod paths;
 mod project;
 mod reset;
 mod rules;
+mod sessionbuf;
 mod setup;
 mod spool;
 mod status;
+mod statusline;
 mod update;
 
-/// Returns the server URL from CAIRN_SERVER env, or an error with guidance.
+/// Returns the effective server URL (env, then `~/.cairn/config.toml`), or an
+/// error with guidance.
 fn require_server() -> Result<String> {
-    std::env::var("CAIRN_SERVER")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "No Cairn server configured.\n\
-                 Set CAIRN_SERVER in your environment, or run:\n\
-                 \n  cairn onboard --server <url> --token <jwt>\n\
-                 \n  Or: cairn setup --all --server <url> --token <jwt>"
-            )
-        })
+    config::resolve(None).server.map(|(s, _)| s).ok_or_else(|| {
+        anyhow!(
+            "No Cairn server configured.\n\
+             Pair with a server (`cairn pair <code>`), or run:\n\
+             \n  cairn onboard --server <url> --token <jwt>\n\
+             \n  Or: cairn setup --all --server <url> --token <jwt>"
+        )
+    })
 }
 
 #[derive(Parser)]
@@ -71,10 +80,22 @@ enum Cmd {
     Onboard {
         #[arg(long)]
         skip_agents: bool,
+        /// Claim a dashboard-minted pairing code instead of passing --token directly.
+        #[arg(long)]
+        code: Option<String>,
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
         token: Option<String>,
+    },
+    /// Claim a device-pairing code minted by the dashboard (You > Pair) and wire up agents.
+    Pair {
+        code: String,
+        #[arg(long)]
+        server: Option<String>,
+        /// Skip agent auto-detection and wiring.
+        #[arg(long)]
+        no_agents: bool,
     },
     /// Configure an agent (or --all detected) to use a Cairn server.
     Setup {
@@ -90,6 +111,13 @@ enum Cmd {
         /// of the global default (`~/.claude.json`).
         #[arg(long)]
         project: bool,
+        /// Embed server/token directly into the agent's own config file
+        /// instead of the default (server/token live only in
+        /// `~/.cairn/config.toml`, agent entries stay bare). Use this for
+        /// multi-server or per-agent-token setups the shared config file
+        /// can't express.
+        #[arg(long)]
+        embed_env: bool,
     },
     /// Show server connection, token info, and agent status.
     Status {
@@ -97,6 +125,8 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// Print one fast ambient status line (for Claude Code's `statusLine` setting).
+    Statusline,
     /// Remove Cairn-managed entries from all agent config files.
     Reset {
         /// Only show what would be removed.
@@ -141,8 +171,7 @@ enum DocumentsCmd {
     Delete { id: String },
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_target(false)
@@ -161,37 +190,65 @@ async fn main() -> Result<()> {
         }
         Cmd::Onboard {
             skip_agents,
+            code,
             server,
             token,
         } => {
             onboard::run(onboard::OnboardOptions {
                 skip_agents,
                 fix: true,
+                code,
                 server,
                 token,
             })?;
         }
+        Cmd::Pair {
+            code,
+            server,
+            no_agents,
+        } => pair::run(&code, server.as_deref(), no_agents)?,
         Cmd::Setup {
             agent,
             all,
             server,
             token,
             project,
-        } => setup::run(
-            agent.as_deref(),
-            all,
-            server.as_deref(),
-            token.as_deref(),
-            project,
-        )?,
+            embed_env,
+        } => {
+            setup::run(
+                agent.as_deref(),
+                all,
+                server.as_deref(),
+                token.as_deref(),
+                project,
+                embed_env,
+            )?;
+        }
         Cmd::Status { json } => {
             status::run(json)?;
+        }
+        Cmd::Statusline => {
+            statusline::run();
         }
         Cmd::Reset { dry_run } => {
             reset::run(dry_run)?;
         }
         Cmd::Mcp => {
             let _server = require_server()?;
+            // `cairn_core::Config::resolve` (a lower-level, cairn-client-agnostic crate)
+            // only ever reads `CAIRN_SERVER`/`CAIRN_TOKEN` from the process env - it has
+            // no notion of `~/.cairn/config.toml`. Inject the client's resolved values
+            // (which already applied env > file precedence) into this process's env
+            // before calling it, so agent MCP entries can omit the env block entirely
+            // and still work. Safe to `set_var` here: this is the very first thing this
+            // (single-threaded, non-tokio) process does after arg parsing.
+            let resolved = config::resolve(None);
+            if let Some((server, _)) = &resolved.server {
+                std::env::set_var("CAIRN_SERVER", server);
+            }
+            if let Some((token, _)) = &resolved.token {
+                std::env::set_var("CAIRN_TOKEN", token);
+            }
             let cfg = cairn_core::Config::resolve(cli.data_dir).context("resolving config")?;
             cairn_mcp::serve_stdio(&cfg)?;
         }

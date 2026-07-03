@@ -45,7 +45,14 @@ impl AuditLog {
     /// replay. We never let a write to one block the other - best-effort durable write that
     /// fails (e.g. backend transiently unreachable) is logged but doesn't lose the in-memory
     /// event the admin is currently looking at.
-    pub fn record(&self, store: &cairn_store::Store, kind: &str, actor: &str, detail: String) {
+    pub fn record(
+        &self,
+        store: &cairn_store::Store,
+        events: &crate::events::EventBroker,
+        kind: &str,
+        actor: &str,
+        detail: String,
+    ) {
         let ts = Utc::now().timestamp();
         {
             let mut q = self.inner.lock().expect("audit log mutex");
@@ -62,6 +69,7 @@ impl AuditLog {
         match store.append_audit(ts, kind, actor, &detail) {
             Ok(id) => {
                 tracing::trace!(event_id = %id, kind, actor, "audit persisted");
+                crate::events::publish_audit(events, &id, ts, kind, actor, &detail);
             }
             Err(e) => {
                 tracing::warn!(error = %e, kind, actor, "audit durable write failed");
@@ -288,6 +296,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         Ok(None) => {
             state.audit_log.record(
                 &state.store,
+                &state.events,
                 "login_failed",
                 &req.username,
                 "no admin configured".to_string(),
@@ -303,6 +312,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     if rec.username != req.username {
         state.audit_log.record(
             &state.store,
+            &state.events,
             "login_failed",
             &req.username,
             "username mismatch".to_string(),
@@ -320,6 +330,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     if !ok {
         state.audit_log.record(
             &state.store,
+            &state.events,
             "login_failed",
             &req.username,
             "bad password".to_string(),
@@ -331,9 +342,13 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
             .into_response();
     }
     // Success.
-    state
-        .audit_log
-        .record(&state.store, "login_ok", &rec.username, String::new());
+    state.audit_log.record(
+        &state.store,
+        &state.events,
+        "login_ok",
+        &rec.username,
+        String::new(),
+    );
     let payload = mint_session(&state, &rec);
     let Some(signer) = state.session_signer.as_ref() else {
         return error_response("CAIRN_SECRET_KEY is required for cookie sessions");
@@ -471,9 +486,13 @@ pub async fn setup(State(state): State<AppState>, Json(req): Json<SetupRequest>)
             );
         }
     }
-    state
-        .audit_log
-        .record(&state.store, "setup", &rec.username, String::new());
+    state.audit_log.record(
+        &state.store,
+        &state.events,
+        "setup",
+        &rec.username,
+        String::new(),
+    );
     let payload = mint_session(&state, &rec);
     let Some(signer) = state.session_signer.as_ref() else {
         return error_response("CAIRN_SECRET_KEY is required for cookie sessions");

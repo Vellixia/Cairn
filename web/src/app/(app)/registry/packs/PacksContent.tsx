@@ -10,17 +10,15 @@ import {
   useReactTable,
   type SortingState,
 } from "@tanstack/react-table";
-import { Search, Upload, ShieldCheck, Globe, Users } from "lucide-react";
+import { Search, ShieldCheck, Globe, Users } from "lucide-react";
 import Link from "next/link";
-import { qk, usePublishPackMutation } from "@/lib/queries";
+import { qk } from "@/lib/queries";
 import { getJSON } from "@/lib/api";
 import type { RegistryPackMeta } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import {
   Table,
   TableBody,
@@ -115,61 +113,6 @@ const columns: ColumnDef<RegistryPackMeta>[] = [
   },
 ];
 
-function PublishDialog() {
-  const [open, setOpen] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
-  const [trusted, setTrusted] = useState("");
-  const publish = usePublishPackMutation();
-
-  async function handlePublish() {
-    if (!file) return;
-    const buf = await file.arrayBuffer();
-    publish.mutate(
-      { tarball: buf, trusted: trusted || undefined },
-      { onSuccess: () => setOpen(false) },
-    );
-  }
-
-  return (
-    <Dialog open={open} onOpenChange={setOpen}>
-      <DialogTrigger asChild>
-        <Button variant="default" size="sm">
-          <Upload className="mr-1.5 h-4 w-4" />
-          Publish
-        </Button>
-      </DialogTrigger>
-      <DialogContent>
-        <DialogHeader>
-          <DialogTitle>Publish a pack</DialogTitle>
-        </DialogHeader>
-        <div className="space-y-4">
-          <div>
-            <label className="mb-1 block text-sm font-medium">.cairnpkg file</label>
-            <Input
-              type="file"
-              accept=".cairnpkg"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">
-              Trusted key (optional hex)
-            </label>
-            <Input
-              placeholder="64-char hex public key"
-              value={trusted}
-              onChange={(e) => setTrusted(e.target.value)}
-            />
-          </div>
-          <Button onClick={handlePublish} disabled={!file || publish.isPending} className="w-full">
-            {publish.isPending ? "Publishing…" : "Publish"}
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
-  );
-}
-
 export default function PacksContent() {
   const [search, setSearch] = useState("");
   const [sorting, setSorting] = useState<SortingState>([{ id: "stored_at", desc: true }]);
@@ -204,10 +147,7 @@ export default function PacksContent() {
         <CardHeader>
           <div className="flex items-center justify-between">
             <CardTitle>Packs</CardTitle>
-            <div className="flex items-center gap-2">
-              <HelpButton content={HELP["/registry"]} />
-              <PublishDialog />
-            </div>
+            <HelpButton content={HELP["/registry"]} />
           </div>
           <div className="relative mt-2">
             <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
@@ -226,7 +166,7 @@ export default function PacksContent() {
             <p className="py-8 text-center text-sm text-muted-foreground">
               {search.length > 0
                 ? "No packs match your search."
-                : "No packs published yet. Use the Publish button to upload a .cairnpkg file."}
+                : "No packs published yet. Publish via POST /api/registry/packs."}
             </p>
           ) : (
             <div className="overflow-x-auto rounded-md border border-line">

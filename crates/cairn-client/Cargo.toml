@@ -19,7 +19,6 @@ cairn-core.workspace = true
 cairn-mcp.workspace = true
 cairn-document.workspace = true
 clap.workspace = true
-tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 serde.workspace = true

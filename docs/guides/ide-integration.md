@@ -1,116 +1,176 @@
 ---
-title: "Live IDE Verification Prompts"
+title: Connect an AI Agent to Cairn
 type: guide
 status: living
-updated: 2026-07-01
+updated: 2026-07-04
 ---
 
-# Live IDE Verification Prompts
+# Connect an AI Agent to Cairn
 
-Run these inside OpenCode and Claude Code in `D:\code\Cairn` to validate the live integration. Each prompt + expected result.
+## What this covers
 
----
+How to connect Claude Code, Codex CLI, or OpenCode to a Cairn server: the zero-flag `cairn
+pair`/`cairn onboard` flow, the manual `cairn setup <agent>` fallback, exactly what each
+install writes to disk, how to verify the connection, and the optional real-time edit/command
+guard.
 
-## OpenCode (in `D:\code\Cairn`)
+## Prerequisites
 
-### Prompt 1 - list MCP tools
-> Use the cairn tool to list every MCP tool you have access to. Return the count.
+- A reachable Cairn server (self-hosted or hosted) and its URL.
+- The `cairn` client binary on `PATH` (`cairn --version`).
+- Claude Code, Codex CLI, and/or OpenCode already installed — `cairn` detects whichever is
+  present.
 
-**Expected:** Model returns `30` (matches our `tools/list` enumeration). The OpenCode tool palette shows `cairn` as a provider.
+## Steps
 
-**What it proves:** MCP stdio handshake works inside the IDE; the 30 tools advertised match the 30 we exercised in Phase 2.
+### 1. Connect (primary path)
 
-### Prompt 2 - round-trip
-> Use the cairn MCP tools to: (1) remember the fact 'OpenCode is wired to cairn 0.6.2', (2) recall it back, (3) print the id and the recall score.
+**Pairing** is the easiest route if you have dashboard access. Open **You > Pair** to mint a
+single-use code, then run:
 
-**Expected:**
-- Step 1 returns a UUID (e.g. `a3fa25a8-...`).
-- Step 2 returns that same memory with score ~1.0.
-- The dashboard at `https://cairn.andresholivin.dev/` shows the new memory in the graph within a few seconds (poll `/api/memory/timeline` or refresh the UI).
-
-**What it proves:** `cairn_remember` and `cairn_recall` work end-to-end through OpenCode's MCP transport.
-
-### Prompt 3 - hook injection (session bootstrap)
-> What is my current task anchor and what preferences does cairn know about me?
-
-**Expected:** Without any prior prompt in this session, the model answers from `additionalContext` that `cairn hook SessionStart` injected at session open. Anchor = whatever was last set (empty after `phase2` anchor was overwritten by next session); preferences include `always use lean-ctx for reads` from `cairn profile`.
-
-**What it proves:** Hook fires automatically when OpenCode opens the session; `cairn_session_start` content reaches the model's context.
-
-### Prompt 4 - hook on every turn
-> List the most relevant memories for the question: "should we use lean-ctx or cairn MCP for reading files?"
-
-**Expected:** `cairn hook UserPromptSubmit` injects ranked memories; the model can name them by content and kind. Score 0.05+ on at least one item.
-
-**What it proves:** `UserPromptSubmit` hook fires on every prompt; ranking works.
-
----
-
-## Claude Code (in `D:\code\Cairn`)
-
-### Prompt 1 - list MCP tools
-> Same as OpenCode #1.
-
-**Expected:** 30 tools. `cairn` appears under Claude's MCP tools in the session info.
-
-### Prompt 2 - round-trip
-> Same as OpenCode #2.
-
-**Expected:** Identical behavior. UUID returned; dashboard updates within seconds.
-
-### Prompt 3 - hook trace
-> List the Cairn hook events that ran since this session started. Quote any `additionalContext` blocks you received.
-
-**Expected:** Model can quote the `additionalContext` from `SessionStart` (preferences + wakeup) and from the first `UserPromptSubmit` for this prompt. If model cannot, Claude Code hook logs are at `~/.claude/logs/` - check there for raw stdout from `cairn hook`.
-
-**What it proves:** All 4 hook events are firing (`SessionStart`, `UserPromptSubmit`, `PostToolUse`, `SessionEnd`); `SessionEnd` is silent by design.
-
-### Prompt 4 - edit + verify
-> Edit `README.md` to add the line "## Cairn verified" at the end. Then ask cairn to verify the edit.
-
-**Expected:** `cairn hook PostToolUse` ran silently in background (no visible output); `cairn_verify` MCP tool returns a report showing the diff applied (or silent if no baseline to compare against in remote mode).
-
-**What it proves:** PostToolUse fires on Edit/Write/MultiEdit; verify works.
-
----
-
-## What "success" looks like across all 8 prompts
-
-| # | Agent | Outcome |
-|---|-------|---------|
-| O1 | OpenCode | `30` tools |
-| O2 | OpenCode | UUID + score |
-| O3 | OpenCode | Anchor/preferences from injected context |
-| O4 | OpenCode | Ranked memories from UserPromptSubmit hook |
-| C1 | Claude Code | `30` tools |
-| C2 | Claude Code | UUID + score |
-| C3 | Claude Code | 2+ quoted `additionalContext` blocks |
-| C4 | Claude Code | Edit applied + verify report |
-
-If any of O2/O3/C2/C3 fail, the most likely cause is the v0.6.2 setup regression we found: **`cairn setup opencode` without `--token` strips `CAIRN_TOKEN` from `opencode.json`**. Workaround: pass `--token <jwt>` on every setup, OR ensure `CAIRN_TOKEN` is in the User env so `cairn mcp` inherits it.
-
----
-
-## Manual checks if prompts fail
-
-```powershell
-# Verify env vars are visible to a fresh shell
-$env:CAIRN_SERVER; $env:CAIRN_TOKEN.Substring(0,30)
-
-# Verify the MCP config has the token (after a fresh setup)
-Get-Content C:\Users\andre\.config\opencode\opencode.json |
-  Select-String -Pattern 'CAIRN_TOKEN'
-
-# Re-run setup with explicit token to force the field back in
-& "$env:USERPROFILE\.local\bin\cairn.exe" setup opencode `
-  --server https://cairn.andresholivin.dev `
-  --token "<your-token-here>"
-
-# Sanity-test the MCP stdio path yourself
-$env:CAIRN_SERVER = "https://cairn.andresholivin.dev"
-$env:CAIRN_TOKEN = "<your-token-here>"
-& "$env:USERPROFILE\.local\bin\cairn.exe" mcp
-# then on stdin: {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"manual","version":"0"}}}
-# then: {"jsonrpc":"2.0","method":"notifications/initialized"}
-# then: {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"profile","arguments":{}}}
+```sh
+cairn pair <CODE>
 ```
+
+This claims the code, saves `server`/`token` to `~/.cairn/config.toml`, turns on context
+injection by default (~1k tokens/prompt on `UserPromptSubmit`; disable with
+`CAIRN_INJECT_CONTEXT=false`), and auto-detects and wires every supported agent found in the
+current project or your home directory. Add `--server <url>` if the server can't be
+auto-discovered, or `--no-agents` to claim the token without touching any agent config.
+
+If you already have a raw token (minted directly via the API rather than through the
+dashboard's pairing flow), skip pairing:
+
+```sh
+cairn onboard --server <url> --token <jwt>
+```
+
+`cairn onboard` runs the same sequence as `pair` — resolve credentials, validate the token, run
+`cairn doctor`, wire every detected agent — just starting from a token instead of a pairing
+code. It also accepts `--code <CODE>` (equivalent to `cairn pair`) and `--skip-agents`. Both
+commands are idempotent: re-running either just updates existing wiring (printed as
+"re-onboarding").
+
+### 2. Fallback: manual per-agent setup
+
+Reach for `cairn setup` when you want explicit control — one specific agent, a non-default
+scope, or a CI environment where auto-detection isn't appropriate:
+
+```sh
+cairn setup claude-code --server <url> --token <jwt>
+cairn setup codex        --server <url> --token <jwt>
+cairn setup opencode     --server <url> --token <jwt>
+cairn setup --all        --server <url> --token <jwt>   # every agent cairn actually detects
+```
+
+`--server`/`--token` can also come from the `CAIRN_SERVER`/`CAIRN_TOKEN` environment variables
+instead of flags. Useful flags:
+
+- `--project` — Claude Code only: write the MCP entry to `.mcp.json` in the current directory
+  instead of the global `~/.claude.json`.
+- `--embed-env` — embed `CAIRN_SERVER`/`CAIRN_TOKEN` directly into the agent's own config file
+  instead of the default (server/token live only in `~/.cairn/config.toml`, agent entries stay
+  bare). Use this for multi-server or per-agent-token setups the shared config file can't
+  express.
+
+Setup is non-destructive and idempotent: existing config is preserved, Cairn's entries are
+merged in, and running it twice changes nothing.
+
+### 3. What gets installed per agent
+
+Every `cairn setup <agent>` run (and, transitively, `pair`/`onboard`) writes:
+
+| | Claude Code | Codex CLI | OpenCode |
+|---|---|---|---|
+| MCP entry | `~/.claude.json` (global) or `.mcp.json` (`--project`) → `mcpServers.cairn` | `~/.codex/config.toml` → `[mcp_servers.cairn]` | `opencode.json` (`$XDG_CONFIG_HOME/opencode/`, or `%USERPROFILE%\.config\opencode\` on Windows) → `mcp.cairn` |
+| Lifecycle hooks | `.claude/settings.json`: `SessionStart`, `UserPromptSubmit`, `PostToolUse` (Edit\|Write\|MultiEdit\|NotebookEdit), `SessionEnd`, `PreCompact`, `PreToolUse` (Edit\|Write\|MultiEdit\|NotebookEdit\|Bash) | `~/.codex/hooks.json`: `SessionStart`, `UserPromptSubmit`, `PostToolUse` (apply_patch\|Edit\|Write), `Stop` | A generated plugin (`plugins/cairn.js`, auto-loaded — never also listed in the `plugin` array, which would double-fire it) bridging `session.created`/`session.deleted`/`session.idle`/`message.part.updated`/`chat.message` to `cairn hook` |
+| On-demand skill | `.claude/skills/cairn/SKILL.md` (same scope as the MCP entry) | — | — |
+| Managed instructions block | `CLAUDE.md` (slim pointer — the skill carries the real playbook) | `AGENTS.md` (fuller block — no skill system to fall back on) | `AGENTS.md` (same block as Codex) |
+
+Every write above is a merge, not an overwrite — a foreign hook or an unrelated MCP server
+already in the file survives. After setup, run `/mcp` inside Claude Code to approve the
+newly-registered server.
+
+### 4. Verify
+
+```sh
+cairn doctor --json
+```
+
+Runs 8 checks — data directory, remote server reachability + token validity, detected agents,
+current project detection, per-agent config health (stale skill revision, duplicate hooks,
+double-registered OpenCode plugin, ...), token expiry, client/server version skew, and the
+offline-hook spool backlog — and exits non-zero if any failed. `cairn doctor --fix` self-heals
+what it can (creates a missing data dir, re-installs an agent whose config drifted) and
+re-checks before reporting.
+
+```sh
+cairn status
+```
+
+Shows the resolved server and token (and whether each came from an env var,
+`~/.cairn/config.toml`, or a built-in default), whether context injection is on, the config
+file path, the offline spool depth, and which agents were detected. Pass `--json` for
+machine-readable output.
+
+### 5. What the model gets automatically
+
+Two mechanisms teach the model to use Cairn without you maintaining anything by hand:
+
+- **MCP `instructions`** — every MCP-speaking client (Claude Code, Codex, OpenCode) receives a
+  compact tool playbook in the `initialize` response's `instructions` field the moment it
+  connects. This works with zero files written anywhere and zero per-agent configuration.
+- **Claude Code skill** — `.claude/skills/cairn/SKILL.md` carries the fuller playbook (session
+  lifecycle, edit-safety loop, token hygiene, scope model) and loads on-demand, only when Claude
+  Code's own skill matcher judges a task relevant — keeping its always-available cost near
+  zero. Codex and OpenCode have no skill system, so they get the fuller version inlined
+  directly into their `AGENTS.md` managed block instead (see the table above).
+
+Cairn's MCP server currently exposes 28 tools — `read`/`expand`, `remember`/`recall`/`search`,
+`assemble`, `wakeup`, `checkpoint`/`rollback`/`checkpoints`, `anchor`, `prefer`/`profile`,
+`compress`, `consolidate`, `verify`, `sanitize`, `proactive_recall`, the eight-strong
+`memory_*` family (`edit`/`delete`/`pin`/`promote`/`reinforce`/`timeline`/`crystallize`/
+`graph`), `metrics`, and `registry_search` — see `cairn_mcp::tool_defs()` for the authoritative,
+current list.
+
+### 6. Optional: the real-time guard
+
+Every agent gets the `PreToolUse` hook wired unconditionally, but it's a silent no-op until you
+opt in. Turn it on with either:
+
+```sh
+export CAIRN_GUARD=1
+```
+
+or in `~/.cairn/config.toml`:
+
+```toml
+[hooks]
+guard = true
+```
+
+With the guard on, Claude Code's `PreToolUse` hook checks proposed `Edit`/`Write` calls against
+Cairn's edit-verification endpoint (`/api/guard/verify`) before they run, and `Bash` commands
+against Cairn's secret/PII sanitizer (`/api/share/sanitize`). It only ever emits `"ask"` —
+surfacing a risk for you or the agent to weigh in on — never `"deny"`, and it fails open (does
+nothing) whenever the tool isn't supported yet (`MultiEdit`/`NotebookEdit`), the target file
+doesn't exist yet, or the server doesn't answer in time. This is Claude-Code-only for now:
+Codex and OpenCode hooks have no way to return a permission decision.
+
+## Troubleshooting
+
+- **`cairn doctor` reports a config-health issue** (stale skill revision, duplicate hooks,
+  double-registered OpenCode plugin) — re-run `cairn setup <agent>` (or `cairn doctor --fix`);
+  installs are idempotent, so this just refreshes what's stale.
+- **Token expired or expiring soon** — `cairn doctor`/`cairn status` flag this explicitly; run
+  `cairn pair` again for a fresh one.
+- **Hooks seem to do nothing** — confirm `cairn status` shows a server and a valid token. Each
+  hook runs as its own short-lived process and only sees `~/.cairn/config.toml`/env, not
+  whatever env block an agent's own MCP entry carries.
+- **Starting over** — `cairn reset` (add `--dry-run` to preview first) strips every Cairn-owned
+  entry — MCP servers, hooks, the skill file, and the `CLAUDE.md`/`AGENTS.md` managed blocks —
+  while leaving everything else in those files untouched.
+
+## See also
+
+- [docs/reference/architecture.md](../reference/architecture.md)

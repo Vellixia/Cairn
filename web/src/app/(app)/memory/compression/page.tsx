@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { useCompressionDemoQuery } from "@/lib/queries";
+import { useMemo, useState } from "react";
+import { useCompressionDemoQuery, useWakeupQuery } from "@/lib/queries";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -31,6 +31,17 @@ export default function CompressionPage() {
   const [path, setPath] = useState("");
   const [submittedPath, setSubmittedPath] = useState<string | null>(null);
   const demo = useCompressionDemoQuery(submittedPath);
+  const wakeup = useWakeupQuery(50);
+
+  // v0.8.0 Sprint 10 (A2): suggest paths already touched by recent memories instead of a
+  // blank free-text box - free typing still works for anything not in the list.
+  const suggestedPaths = useMemo(() => {
+    const set = new Set<string>();
+    for (const m of wakeup.data ?? []) {
+      for (const f of m.files) set.add(f);
+    }
+    return Array.from(set).sort();
+  }, [wakeup.data]);
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -58,7 +69,13 @@ export default function CompressionPage() {
               onChange={(e) => setPath(e.target.value)}
               placeholder="crates/cairn-core/src/lib.rs"
               className="font-mono"
+              list="compression-path-suggestions"
             />
+            <datalist id="compression-path-suggestions">
+              {suggestedPaths.map((p) => (
+                <option key={p} value={p} />
+              ))}
+            </datalist>
             <Button type="submit" disabled={!path.trim()}>
               Render
             </Button>

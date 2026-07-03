@@ -7,18 +7,27 @@
 //! status which means the server *was* reached). [`replay`] drains the queue at the top of the
 //! next `SessionStart` that can reach the server.
 //!
-//! Deliberately POST-only: every spooled endpoint is a mutation the hook already fires and
-//! forgets. GET calls exist to inject *live* context into the current prompt - replaying a
-//! stale one later has no meaning, so they're never spooled.
+//! Deliberately body-carrying-mutations-only: every spooled endpoint is a mutation the hook
+//! already fires and forgets (POST or PATCH). GET calls exist to inject *live* context into the
+//! current prompt - replaying a stale one later has no meaning, so they're never spooled.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::Write;
 use std::path::PathBuf;
 
+fn default_method() -> String {
+    "POST".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SpoolEntry {
     pub path: String,
+    /// HTTP method to replay with. Defaults to `POST` when deserializing an
+    /// entry queued before this field existed, preserving old behavior for
+    /// anything already on disk.
+    #[serde(default = "default_method")]
+    pub method: String,
     pub body: Value,
     pub project_id: Option<String>,
     pub session_id: Option<String>,
@@ -30,6 +39,18 @@ fn spool_path() -> Option<PathBuf> {
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(PathBuf::from)?;
     Some(home.join(".cairn").join("spool.jsonl"))
+}
+
+/// Number of entries currently queued for replay (0 if the spool file is missing or empty).
+/// Used by `status`/`doctor`/`statusline` to surface offline-hook backlog without draining it.
+pub(crate) fn depth() -> usize {
+    let Some(path) = spool_path() else {
+        return 0;
+    };
+    let Ok(contents) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    contents.lines().filter(|l| !l.trim().is_empty()).count()
 }
 
 /// Append one failed request to the spool. Best-effort: if `~/.cairn` can't be created or
@@ -75,7 +96,7 @@ pub(crate) fn replay(server: &str, token: &str) {
         let Ok(entry) = serde_json::from_str::<SpoolEntry>(line) else {
             continue;
         };
-        let req = ureq::post(&format!("{server}{}", entry.path))
+        let req = ureq::request(&entry.method, &format!("{server}{}", entry.path))
             .set("Authorization", &format!("Bearer {token}"));
         let req = match &entry.project_id {
             Some(pid) => req.set("X-Cairn-Project", pid),
@@ -104,38 +125,37 @@ pub(crate) fn replay(server: &str, token: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
+    use crate::env_guard::with_env;
 
-    /// `spool_path` reads `HOME`/`USERPROFILE`; serialize tests that touch them.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
+    /// `spool_path` reads `HOME`/`USERPROFILE`; go through the crate-wide
+    /// env lock so this can't race against any other test touching them
+    /// (e.g. `paths`/`agents` tests that also resolve a home directory).
     fn with_temp_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        let _guard = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let prev_home = std::env::var_os("HOME");
-        let prev_userprofile = std::env::var_os("USERPROFILE");
-        std::env::set_var("HOME", dir.path());
-        std::env::set_var("USERPROFILE", dir.path());
-        let result = f(dir.path());
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_userprofile {
-            Some(v) => std::env::set_var("USERPROFILE", v),
-            None => std::env::remove_var("USERPROFILE"),
-        }
-        result
+        let dir_str = dir.path().to_string_lossy().into_owned();
+        with_env(
+            &[("HOME", Some(dir_str.as_str())), ("USERPROFILE", Some(dir_str.as_str()))],
+            || f(dir.path()),
+        )
     }
 
     fn entry(path: &str) -> SpoolEntry {
         SpoolEntry {
             path: path.to_string(),
+            method: "POST".to_string(),
             body: serde_json::json!({"content": "test"}),
             project_id: Some("proj-a".to_string()),
             session_id: Some("sess-1".to_string()),
             ts: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn deserializing_an_entry_without_a_method_field_defaults_to_post() {
+        // Simulates an entry queued before `method` existed on disk.
+        let old_shape = r#"{"path":"/api/memory","body":{"content":"x"},"project_id":null,"session_id":null,"ts":"2026-01-01T00:00:00Z"}"#;
+        let parsed: SpoolEntry = serde_json::from_str(old_shape).unwrap();
+        assert_eq!(parsed.method, "POST");
     }
 
     #[test]
@@ -145,6 +165,17 @@ mod tests {
             let contents = std::fs::read_to_string(home.join(".cairn").join("spool.jsonl")).unwrap();
             assert!(contents.contains("/api/memory"));
             assert!(contents.contains("proj-a"));
+        });
+    }
+
+    #[test]
+    fn depth_counts_queued_entries_and_zero_when_absent() {
+        with_temp_home(|_home| {
+            assert_eq!(depth(), 0, "no spool file yet");
+            append(&entry("/api/memory"));
+            assert_eq!(depth(), 1);
+            append(&entry("/api/projects/upsert"));
+            assert_eq!(depth(), 2);
         });
     }
 

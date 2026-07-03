@@ -1,26 +1,15 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Download, Trash2, Globe, ShieldCheck, Users } from "lucide-react";
+import { Download, Globe, ShieldCheck, Users } from "lucide-react";
 import Link from "next/link";
-import { qk, useRevokePackMutation } from "@/lib/queries";
+import { qk } from "@/lib/queries";
 import { getJSON } from "@/lib/api";
 import type { RegistryPackMeta } from "@/lib/api";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-  AlertDialogTrigger,
-} from "@/components/ui/alert-dialog";
 import {
   Table,
   TableBody,
@@ -61,7 +50,6 @@ export default function PackDetail({ name }: { name: string }) {
     enabled: name !== "new",
   });
 
-  const revoke = useRevokePackMutation();
   const latest = versions.data?.[0];
 
   if (name === "new") {
@@ -174,43 +162,13 @@ export default function PackDetail({ name }: { name: string }) {
                       {v.stored_at ? new Date(v.stored_at).toLocaleDateString() : "—"}
                     </TableCell>
                     <TableCell className="text-right">
-                      <div className="flex items-center justify-end gap-1">
-                        <Button variant="ghost" size="icon" asChild>
-                          <Link
-                            href={`/api/registry/packs/${encodeURIComponent(name)}/${encodeURIComponent(v.version)}/download`}
-                          >
-                            <Download className="h-4 w-4" />
-                          </Link>
-                        </Button>
-                        <AlertDialog>
-                          <AlertDialogTrigger asChild>
-                            <Button variant="ghost" size="icon">
-                              <Trash2 className="h-4 w-4 text-destructive" />
-                            </Button>
-                          </AlertDialogTrigger>
-                          <AlertDialogContent>
-                            <AlertDialogHeader>
-                              <AlertDialogTitle>Revoke pack</AlertDialogTitle>
-                              <AlertDialogDescription>
-                                This will permanently remove {name} v{v.version} and
-                                append a revocation event. Federation peers will see
-                                this change on their next sync. This action cannot
-                                be undone.
-                              </AlertDialogDescription>
-                            </AlertDialogHeader>
-                            <AlertDialogFooter>
-                              <AlertDialogCancel>Cancel</AlertDialogCancel>
-                              <AlertDialogAction
-                                onClick={() =>
-                                  revoke.mutate({ name, version: v.version })
-                                }
-                              >
-                                Revoke
-                              </AlertDialogAction>
-                            </AlertDialogFooter>
-                          </AlertDialogContent>
-                        </AlertDialog>
-                      </div>
+                      <Button variant="ghost" size="icon" asChild>
+                        <Link
+                          href={`/api/registry/packs/${encodeURIComponent(name)}/${encodeURIComponent(v.version)}/download`}
+                        >
+                          <Download className="h-4 w-4" />
+                        </Link>
+                      </Button>
                     </TableCell>
                   </TableRow>
                 ))}

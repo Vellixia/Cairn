@@ -33,6 +33,9 @@ import {
   MessagesSquare,
   PiggyBank,
   Smartphone,
+  Bot,
+  FolderGit2,
+  FileText,
 } from "lucide-react";
 import { useUIStore } from "@/lib/stores/ui";
 
@@ -79,6 +82,9 @@ export function CommandPalette() {
     { id: "nav-heat", label: "Memory . Activity heatmap", group: "Navigate", icon: Activity, action: nav("/memory?tab=heatmap") },
     { id: "nav-compress", label: "Memory . Compression lab", group: "Navigate", icon: Layers, action: nav("/memory?tab=compression") },
     { id: "nav-savings", label: "Memory . Savings", group: "Navigate", icon: PiggyBank, action: nav("/memory?tab=savings") },
+    { id: "nav-projects", label: "Projects", group: "Navigate", icon: FolderGit2, action: nav("/projects") },
+    { id: "nav-documents", label: "Documents", group: "Navigate", icon: FileText, action: nav("/documents") },
+    { id: "nav-automation", label: "Automation", group: "Navigate", icon: Bot, action: nav("/automation") },
     { id: "nav-trust", label: "Trust hub", group: "Navigate", icon: ShieldCheck, action: nav("/trust") },
     { id: "nav-score", label: "Trust . Reliability score", group: "Navigate", icon: Target, action: nav("/trust?tab=score") },
     { id: "nav-drift", label: "Trust . Drift center", group: "Navigate", icon: ShieldAlert, action: nav("/trust?tab=drift") },
@@ -97,7 +103,7 @@ export function CommandPalette() {
     { id: "act-remember", label: "Remember something", hint: "jump to Memories", group: "Memory", icon: Brain, action: nav("/memory?tab=wakeup") },
     { id: "act-recall", label: "Recall a memory", hint: "jump to Recall", group: "Memory", icon: Search, action: nav("/memory?tab=recall") },
     { id: "act-issue", label: "Issue a device token", hint: "jump to Tokens", group: "Devices", icon: KeyRound, action: nav("/you?tab=tokens") },
-    { id: "act-prefer", label: "Add a preference", hint: "jump to Profile", group: "Personalization", icon: UserCircle, action: nav("/you?tab=profile") },
+    { id: "act-prefer", label: "View preferences", hint: "jump to Profile", group: "Personalization", icon: UserCircle, action: nav("/you?tab=profile") },
   ];
 
   return (

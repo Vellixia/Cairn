@@ -158,6 +158,7 @@ pub fn run_job_now(state: &AppState, job: &'static str) -> Result<CronRun, Strin
             detail: "already running - single-flight guard".to_string(),
         };
         state.cron_history.record(run.clone());
+        crate::events::publish_cron(&state.events, run.job, run.outcome);
         tracing::warn!(job = job, "cron tick skipped - previous run still in flight");
         return Ok(run);
     }
@@ -308,6 +309,7 @@ pub fn run_job_now(state: &AppState, job: &'static str) -> Result<CronRun, Strin
         detail,
     };
     state.cron_history.record(run.clone());
+    crate::events::publish_cron(&state.events, run.job, run.outcome);
     tracing::info!(
         job = job,
         outcome = outcome,
@@ -459,5 +461,18 @@ mod tests {
         assert_eq!(run.outcome, "skipped");
 
         state.cron_history.finish("session-gc");
+    }
+
+    #[test]
+    fn run_job_now_publishes_a_cron_event() {
+        let Some((state, _dir)) = crate::tests::test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        run_job_now(&state, "session-gc").expect("known job");
+        let ev = rx.try_recv().expect("run_job_now should publish a cron event");
+        assert_eq!(ev.kind, crate::events::KIND_CRON);
+        assert_eq!(ev.data["job"], "session-gc");
+        assert_eq!(ev.data["outcome"], "ok");
     }
 }

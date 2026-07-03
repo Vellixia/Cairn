@@ -6,13 +6,15 @@ import { CairnSidebar } from "@/components/Sidebar";
 import { Topbar } from "@/components/Topbar";
 import { CommandPalette } from "@/components/CommandPalette";
 import { Shortcuts } from "@/components/Shortcuts";
+import { EventStreamProvider } from "@/components/EventStreamProvider";
 import { SidebarProvider } from "@/components/ui/sidebar";
 
 /**
  * Dashboard shell. Wraps everything in <SessionGate>, which probes auth + redirects unauth'd
  * users to /login. <SidebarProvider> establishes the flex row that holds the sidebar and the
- * main content side-by-side (matches shadcn sidebar pattern). The command palette and
- * shortcuts modal are mounted here so they're available on every dashboard page.
+ * main content side-by-side (matches shadcn sidebar pattern). The command palette,
+ * shortcuts modal, and the SSE connection (`EventStreamProvider`) are mounted here so
+ * they're available on every dashboard page without reconnecting on navigation.
  *
  * v0.5.0 Sprint 20: also registers the service worker (PWA) on first paint. The SW is
  * a no-op when the page is opened without HTTPS (browsers require secure context) --- the
@@ -48,6 +50,7 @@ export default function DashboardLayout({
       </SidebarProvider>
       <CommandPalette />
       <Shortcuts />
+      <EventStreamProvider />
     </SessionGate>
   );
 }

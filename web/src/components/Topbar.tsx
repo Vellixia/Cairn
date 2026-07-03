@@ -14,6 +14,7 @@ import { Badge } from "@/components/ui/badge";
 import { Kbd } from "@/components/ui/kbd";
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
+import { LiveStatus } from "@/components/LiveStatus";
 import { useHealthQuery, useLogoutMutation } from "@/lib/queries";
 import { useMeStore } from "@/lib/stores/me";
 import { useUIStore } from "@/lib/stores/ui";
@@ -61,6 +62,7 @@ export function Topbar() {
           </Button>
         </div>
         <div className="flex items-center gap-4">
+          <LiveStatus />
           {healthy ? (
             <Badge variant="secondary" className="font-normal">
               <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500" />

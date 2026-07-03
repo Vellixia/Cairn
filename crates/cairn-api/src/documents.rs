@@ -37,12 +37,14 @@ pub async fn ingest(
     let title = req.title.unwrap_or_else(|| req.source.clone());
     let chunks = chunk_text(&req.content, DEFAULT_CHUNK_CHARS);
     s.store.replace_document(&req.source, &title, &chunks)?;
-    s.store
+    let doc = s
+        .store
         .list_documents()?
         .into_iter()
         .find(|d| d.source == req.source)
-        .map(Json)
-        .ok_or_else(|| ApiError::bad_request("document vanished immediately after ingest"))
+        .ok_or_else(|| ApiError::bad_request("document vanished immediately after ingest"))?;
+    crate::events::publish_document(&s.events, "ingested", &doc.id);
+    Ok(Json(doc))
 }
 
 /// `GET /api/documents` - every ingested document, most-recently-updated first.
@@ -80,5 +82,60 @@ pub async fn delete(
         .find(|d| d.id == id)
         .ok_or_else(|| ApiError::not_found("no such document"))?;
     let deleted = s.store.delete_document(&doc.source)?;
+    if deleted {
+        crate::events::publish_document(&s.events, "deleted", &doc.id);
+    }
     Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ingest_publishes_a_document_ingested_event() {
+        let Some((state, _dir)) = crate::tests::test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        let resp = ingest(
+            State(state.clone()),
+            Json(IngestRequest {
+                source: "sse-test.md".into(),
+                content: "hello world, this is a test document".into(),
+                title: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let ev = rx.try_recv().expect("ingest should publish a document event");
+        assert_eq!(ev.kind, crate::events::KIND_DOCUMENT);
+        assert_eq!(ev.data["action"], "ingested");
+        assert_eq!(ev.data["document_id"], resp.0.id);
+    }
+
+    #[tokio::test]
+    async fn delete_publishes_a_document_deleted_event() {
+        let Some((state, _dir)) = crate::tests::test_state() else {
+            return;
+        };
+        let doc = ingest(
+            State(state.clone()),
+            Json(IngestRequest {
+                source: "sse-test-delete.md".into(),
+                content: "content to be deleted".into(),
+                title: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let mut rx = state.events.subscribe();
+        let _ = delete(State(state.clone()), Path(doc.0.id.clone()))
+            .await
+            .unwrap();
+        let ev = rx.try_recv().expect("delete should publish a document event");
+        assert_eq!(ev.kind, crate::events::KIND_DOCUMENT);
+        assert_eq!(ev.data["action"], "deleted");
+        assert_eq!(ev.data["document_id"], doc.0.id);
+    }
 }

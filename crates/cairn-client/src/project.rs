@@ -67,27 +67,28 @@ pub fn current_dir_str() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::env_guard::with_env;
 
     #[test]
     fn env_override_wins_and_is_stable() {
-        std::env::set_var("CAIRN_PROJECT", "my-explicit-project");
-        let (id1, name1) = detect_project();
-        let (id2, name2) = detect_project();
-        std::env::remove_var("CAIRN_PROJECT");
-        assert_eq!(name1, "my-explicit-project");
-        assert_eq!(name2, "my-explicit-project");
-        assert_eq!(id1, id2, "hashing the same name must be stable");
-        assert_eq!(id1.unwrap().len(), 16);
+        with_env(&[("CAIRN_PROJECT", Some("my-explicit-project"))], || {
+            let (id1, name1) = detect_project();
+            let (id2, name2) = detect_project();
+            assert_eq!(name1, "my-explicit-project");
+            assert_eq!(name2, "my-explicit-project");
+            assert_eq!(id1, id2, "hashing the same name must be stable");
+            assert_eq!(id1.unwrap().len(), 16);
+        });
     }
 
     #[test]
     fn blank_env_override_falls_through() {
-        std::env::set_var("CAIRN_PROJECT", "   ");
-        let (id, name) = detect_project();
-        std::env::remove_var("CAIRN_PROJECT");
-        // Falls through to git/cwd detection - some id, and definitely not the blank string.
-        assert!(id.is_some());
-        assert_ne!(name, "   ");
+        with_env(&[("CAIRN_PROJECT", Some("   "))], || {
+            let (id, name) = detect_project();
+            // Falls through to git/cwd detection - some id, and definitely not the blank string.
+            assert!(id.is_some());
+            assert_ne!(name, "   ");
+        });
     }
 
     #[test]

@@ -31,7 +31,7 @@ Living docs, edited in place as the system evolves.
 | [admin.md](guides/admin.md) | Bootstrap and manage the admin account, dashboard surface |
 | [upgrading.md](guides/upgrading.md) | Version-to-version upgrade notes |
 | [web-auth.md](guides/web-auth.md) | Web dashboard auth model, session vs device tokens |
-| [ide-integration.md](guides/ide-integration.md) | Live IDE / MCP verification prompts |
+| [ide-integration.md](guides/ide-integration.md) | Connect Claude Code, Codex, and OpenCode to a Cairn server |
 
 ## Testing — how Cairn is verified
 

@@ -48,12 +48,12 @@ export default function SavingsPage() {
   const metrics = useQuery({
     queryKey: ["metrics"],
     queryFn: () => getJSON<MetricsResponse>("/api/metrics"),
-    refetchInterval: 5_000,
+    refetchInterval: 15_000,
   });
   const ledger = useQuery({
     queryKey: ["ledger"],
     queryFn: () => getJSON<LedgerEntry[]>("/api/ledger?limit=200"),
-    refetchInterval: 5_000,
+    refetchInterval: 15_000,
   });
 
   const snap = metrics.data?.savings;

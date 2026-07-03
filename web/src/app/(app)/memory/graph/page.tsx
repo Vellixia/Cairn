@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getJSON } from "@/lib/api";
+import { qk } from "@/lib/queries";
+import { pollWhenOffline } from "@/lib/stores/events";
 
 // react-force-graph is a client-only library (uses canvas / d3-force); load with `ssr: false`
 // to avoid "document is not defined" during the static export build.
@@ -38,9 +40,9 @@ interface GraphResponse {
 
 export default function MemoryGraphPage() {
   const graph = useQuery({
-    queryKey: ["memory", "graph"],
+    queryKey: qk.graph,
     queryFn: () => getJSON<GraphResponse>("/api/memory/graph"),
-    refetchInterval: 10_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
   const stats = graph.data
     ? {

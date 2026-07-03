@@ -6,6 +6,9 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   Brain,
+  FolderGit2,
+  FileText,
+  Bot,
   ShieldCheck,
   UserCircle,
   Library,
@@ -26,15 +29,21 @@ import Logo from "@/components/Logo";
 
 type Item = { href: string; label: string; icon: LucideIcon };
 
-const ITEMS: Item[] = [
+// Monitor: observability - what exists, what happened. Admin: security/account
+// surfaces (tokens, pairing, audit, settings) - the only place manual input stays.
+const MONITOR_ITEMS: Item[] = [
   { href: "/", label: "Now", icon: LayoutDashboard },
   { href: "/memory", label: "Memory", icon: Brain },
+  { href: "/projects", label: "Projects", icon: FolderGit2 },
+  { href: "/documents", label: "Documents", icon: FileText },
+  { href: "/automation", label: "Automation", icon: Bot },
   { href: "/trust", label: "Trust", icon: ShieldCheck },
   { href: "/registry/packs", label: "Registry", icon: Library },
-  { href: "/you", label: "You", icon: UserCircle },
 ];
 
-const STORAGE_KEY = "cairn-sidebar-v3";
+const ADMIN_ITEMS: Item[] = [{ href: "/you", label: "You", icon: UserCircle }];
+
+const STORAGE_KEY = "cairn-sidebar-v4";
 
 function isActive(pathname: string | null, href: string): boolean {
   if (!pathname) return false;
@@ -79,8 +88,8 @@ export function CairnSidebar() {
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    // Migration: drop any prior sidebar keys; v3 = flat.
-    for (const k of ["cairn-sidebar-v1", "cairn-sidebar-v2", "cairn-infocard-dismissed-v1"]) {
+    // Migration: drop any prior sidebar keys; v4 = grouped (Monitor/Admin).
+    for (const k of ["cairn-sidebar-v1", "cairn-sidebar-v2", "cairn-sidebar-v3", "cairn-infocard-dismissed-v1"]) {
       try {
         window.localStorage.removeItem(k);
       } catch {
@@ -111,12 +120,28 @@ export function CairnSidebar() {
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel className="px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Workspace
+            Monitor
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {hydrated
-                ? ITEMS.map((it) => (
+                ? MONITOR_ITEMS.map((it) => (
+                    <SidebarMenuItem key={it.href}>
+                      <NavLink item={it} active={isActive(pathname, it.href)} />
+                    </SidebarMenuItem>
+                  ))
+                : null}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <SidebarGroup>
+          <SidebarGroupLabel className="px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Admin
+          </SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {hydrated
+                ? ADMIN_ITEMS.map((it) => (
                     <SidebarMenuItem key={it.href}>
                       <NavLink item={it} active={isActive(pathname, it.href)} />
                     </SidebarMenuItem>

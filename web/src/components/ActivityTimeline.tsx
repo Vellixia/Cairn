@@ -2,6 +2,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { getJSON, type AuditEvent, type Stats } from "@/lib/api";
+import { qk } from "@/lib/queries";
 import { cn } from "@/lib/utils";
 import {
   Activity,
@@ -130,11 +131,11 @@ export interface ActivityTimelineProps {
 
 export function ActivityTimeline({ limit = 8 }: ActivityTimelineProps) {
   const auditQ = useQuery({
-    queryKey: ["activity", "audit"],
+    queryKey: qk.activityAudit,
     queryFn: () => getJSON<AuditEvent[]>("/api/devices/audit"),
   });
   const statsQ = useQuery({
-    queryKey: ["activity", "stats"],
+    queryKey: qk.activityStats,
     queryFn: () => getJSON<Stats>("/api/stats"),
   });
 

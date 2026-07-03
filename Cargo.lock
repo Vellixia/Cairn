@@ -805,7 +805,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "tokio",
  "toml_edit 0.22.27",
  "tracing-subscriber",
  "ureq 2.12.1",

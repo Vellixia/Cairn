@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getJSON } from "@/lib/api";
-import { useLedgerQuery } from "@/lib/queries";
+import { qk, useLedgerQuery } from "@/lib/queries";
 import { ArrowDownRight, ArrowUpRight, Minus } from "lucide-react";
 
 interface SavingsSnapshot {
@@ -41,7 +41,7 @@ function fourteenDayCutoff(): number {
 
 export function TokensSavedHeadline({ className }: { className?: string }) {
   const metrics = useQuery({
-    queryKey: ["dashboard", "metrics"],
+    queryKey: qk.dashboardMetrics,
     queryFn: () => getJSON<MetricsResponse>("/api/metrics"),
     refetchInterval: 30_000,
   });

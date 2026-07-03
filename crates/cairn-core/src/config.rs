@@ -1,21 +1,25 @@
 //! Runtime configuration and on-disk layout.
 //!
+//! This crate reads `std::env::var` directly - there is no in-process `.env`-file loader (no
+//! `dotenvy` or equivalent dependency) in either binary that embeds `cairn-core`
+//! (`cairn-server`, `crates/cairn-api/src/bin/cairn_server.rs`). A real environment variable is
+//! the only input this crate's [`Config::resolve`] ever sees. `.env` files still work in
+//! practice, but the loading happens OUTSIDE this crate: `docker-compose.yml`'s `env_file:`
+//! directive reads `.env` and exports its contents as real environment variables before the
+//! `cairn` container process starts. Running the server bare-metal (no compose) means exporting
+//! the variables yourself (e.g. `set -a; source .env; set +a` before launching `cairn-server`) -
+//! nothing here reads the file for you.
+//!
 //! Settings resolve with precedence (highest -> lowest):
 //!
 //! 1. **CLI flag** - e.g. `--host`, `--port`, `--data-dir`.
-//! 2. **Real environment variable** - whatever the parent shell already exported.
-//! 3. **Project `.env`** - `<repo>/.env` (or the `environment:` block in `docker-compose.yml`).
-//! 4. **Global `.env`** - `~/.config/cairn/.env` on Linux,
-//!    `$XDG_CONFIG_HOME/cairn/.env` elsewhere, `%APPDATA%\\cairn\\.env` on Windows
-//!    (see [`global_env_path`]).
-//! 5. **Built-in default** - the hard-coded fallback inside [`Config::resolve`].
+//! 2. **Environment variable** - however it got set (real shell export, or `docker-compose`'s
+//!    `env_file:` per above).
+//! 3. **Built-in default** - the hard-coded fallback inside [`Config::resolve`].
 //!
-//! The split between CLI / core is intentional: the core crate reads raw `std::env::var`, and the
-//! `cairn` binary loads both `.env` files at startup via `dotenvy` (see
-//! `crates/cairn/src/main.rs`). `dotenvy` only fills variables that are not already set, so
-//! real env always wins over a project `.env`, and a project `.env` always wins over the global
-//! one. A machine-global `.env` lets you configure embeddings/the database connection once for
-//! every project on the device ("global cairn").
+//! `cairn-client` (the `cairn` CLI agents run) is a separate binary with its own, separate
+//! config layer - `~/.cairn/config.toml`, written by `cairn pair`/`onboard`/`setup` - documented
+//! in `crates/cairn-client/src/config.rs`, not here.
 
 use std::path::{Path, PathBuf};
 

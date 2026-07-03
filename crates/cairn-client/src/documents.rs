@@ -8,14 +8,16 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 
 fn server_and_token() -> Result<(String, String)> {
-    let server = std::env::var("CAIRN_SERVER")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .context("CAIRN_SERVER not set - run `cairn onboard` first")?;
-    let token = std::env::var("CAIRN_TOKEN")
-        .ok()
-        .filter(|t| !t.is_empty())
-        .context("CAIRN_TOKEN not set - run `cairn onboard` first")?;
+    let (project_id, _) = crate::project::detect_project();
+    let resolved = crate::config::resolve(project_id.as_deref());
+    let server = resolved
+        .server
+        .map(|(s, _)| s)
+        .context("no server configured - run `cairn onboard` or `cairn pair` first")?;
+    let token = resolved
+        .token
+        .map(|(t, _)| t)
+        .context("no token configured - run `cairn onboard` or `cairn pair` first")?;
     Ok((server.trim_end_matches('/').to_string(), token))
 }
 
