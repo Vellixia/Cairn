@@ -52,11 +52,13 @@ services:
     volumes:
       - cairn-surreal-data:/data
     restart: unless-stopped
-    # Readiness gate: SurrealDB must accept TCP on 8000 before cairn starts. The image is
-    # distroless (no shell utilities beyond `surreal` itself), so healthchecks that need a
-    # shell built-in run through `sh -c` explicitly rather than assuming wget/curl exist.
+    # Readiness gate: SurrealDB must accept connections on 8000 before cairn starts. The image
+    # is genuinely distroless - no `/bin/sh`, no wget/curl - so `CMD-SHELL` (which execs
+    # `/bin/sh -c "..."`) can never run here at all, healthcheck command included. The `surreal`
+    # binary itself ships an `is-ready` subcommand for exactly this: `CMD` (not `CMD-SHELL`)
+    # invokes it directly with no shell involved.
     healthcheck:
-      test: ["CMD-SHELL", "exec 3<>/dev/tcp/127.0.0.1/8000 || exit 1"]
+      test: ["CMD", "/surreal", "is-ready"]
       interval: 5s
       timeout: 3s
       retries: 24
