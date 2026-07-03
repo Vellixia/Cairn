@@ -20,6 +20,7 @@ mod push;
 mod rate_limit;
 mod scope;
 mod security_headers;
+mod selftune;
 mod session;
 mod setup_wizard;
 mod ui;
@@ -275,6 +276,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cron/jobs", get(list_cron_jobs))
         .route("/api/cron/run/:job", post(run_cron_job))
         .route("/api/cron/history", get(cron_history))
+        .route("/api/cron/health", get(cron_health))
         .route("/api/memory/heatmap", get(memory_heatmap))
         .route("/api/guard/verify", post(verify))
         .route("/api/guard/anchor", get(get_anchor).post(post_anchor))
@@ -1101,6 +1103,41 @@ async fn cron_history(
     Query(q): Query<CronHistoryQuery>,
 ) -> Json<Vec<cron::CronRun>> {
     Json(s.cron_history.recent(q.job.as_deref()))
+}
+
+/// v0.8.0 Sprint 9: one entry in `GET /api/cron/health` - unlike [`CronJobStatus`] this exists
+/// for a watchdog/dashboard to answer "is anything wrong?" at a glance, without having to infer
+/// it from `last_run`'s shape.
+#[derive(Serialize)]
+struct CronJobHealth {
+    name: &'static str,
+    schedule: &'static str,
+    running: bool,
+    last_run_at: Option<DateTime<Utc>>,
+    last_status: Option<&'static str>,
+    stale: bool,
+}
+
+/// GET `/api/cron/health` - single-flight + staleness view of every job, for a watchdog or the
+/// dashboard to poll instead of re-deriving health from `GET /api/cron/history` itself.
+async fn cron_health(State(s): State<AppState>) -> Json<Vec<CronJobHealth>> {
+    let now = Utc::now();
+    Json(
+        cron::JOBS
+            .iter()
+            .map(|(name, schedule)| {
+                let last = s.cron_history.last_run(name);
+                CronJobHealth {
+                    name,
+                    schedule,
+                    running: s.cron_history.is_running(name),
+                    last_run_at: last.as_ref().map(|r| r.started_at),
+                    last_status: last.as_ref().map(|r| r.outcome),
+                    stale: s.cron_history.is_stale(name, now),
+                }
+            })
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]

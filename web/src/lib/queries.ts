@@ -168,8 +168,8 @@ export function usePromotionCandidatesQuery() {
   });
 }
 
-// v0.8.0 Sprint 4/5: recent background-job runs (session-gc, memory-decay,
-// access-log-prune, llm-intelligence).
+// v0.8.0 Sprint 4/5/8/9: recent background-job runs (session-gc, memory-decay,
+// access-log-prune, llm-intelligence, memory-demote, tune).
 export function useCronHistoryQuery() {
   return useQuery({
     queryKey: qk.cronHistory,

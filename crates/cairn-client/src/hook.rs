@@ -8,6 +8,7 @@
 //! always 0.
 
 use crate::project::{current_dir_str, detect_project};
+use crate::spool;
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::Read;
@@ -30,6 +31,14 @@ fn run_inner(event: &str) -> Result<()> {
         return Ok(());
     };
 
+    // v0.8.0 Sprint 9: drain anything queued by `post_spooled` while the server was
+    // unreachable. Only on `SessionStart` - it's the one event guaranteed to happen before a
+    // session's other hooks fire, and there's no value in paying a network round-trip for this
+    // on every single prompt.
+    if event == "SessionStart" {
+        crate::spool::replay(&server, &token);
+    }
+
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(input.trim()).unwrap_or(Value::Null);
@@ -51,11 +60,14 @@ fn run_inner(event: &str) -> Result<()> {
 
     if event == "SessionStart" {
         if let Some(pid) = &project_id {
-            let _ = rc.post("/api/projects/upsert").send_json(json!({
-                "id": pid,
-                "name": project_name,
-                "path": current_dir_str(),
-            }));
+            rc.post_spooled(
+                "/api/projects/upsert",
+                json!({
+                    "id": pid,
+                    "name": project_name,
+                    "path": current_dir_str(),
+                }),
+            );
         }
     }
 
@@ -99,6 +111,25 @@ impl RemoteClient {
         match &self.session_id {
             Some(sid) => req.set("X-Cairn-Session", sid),
             None => req,
+        }
+    }
+
+    /// POST `body` to `path`, scoped to this client's current project/session. Identical to
+    /// `self.post(path).send_json(body)` on success or an HTTP error response - either way the
+    /// server was reached, so there's nothing more to do. Only a genuine connectivity failure
+    /// (`ureq::Error::Transport` - no response at all) queues the request to
+    /// `~/.cairn/spool.jsonl` (v0.8.0 Sprint 9) for a future `SessionStart` to replay, instead
+    /// of the content being silently and permanently dropped like every other best-effort hook
+    /// call here.
+    fn post_spooled(&self, path: &str, body: Value) {
+        if let Err(ureq::Error::Transport(_)) = self.post(path).send_json(body.clone()) {
+            spool::append(&spool::SpoolEntry {
+                path: path.to_string(),
+                body,
+                project_id: self.project_id.clone(),
+                session_id: self.session_id.clone(),
+                ts: chrono::Utc::now(),
+            });
         }
     }
 
@@ -176,9 +207,7 @@ impl RemoteClient {
                 // yet. Cheap to call on every prompt - the server no-ops immediately once an
                 // anchor already exists (manual or auto-derived), so this is a live network
                 // call only on the very first prompt of a session.
-                let _ = self
-                    .post("/api/guard/anchor/auto")
-                    .send_json(json!({ "prompt": prompt }));
+                self.post_spooled("/api/guard/anchor/auto", json!({ "prompt": prompt }));
                 // P1.8: default-off context injection. Opt-in via `CAIRN_INJECT_CONTEXT=true`.
                 // Without this gate, every prompt burns ~1000 tokens on a /api/context/assemble
                 // call - silent burn. Recording the prompt to memory still happens below
@@ -204,20 +233,24 @@ impl RemoteClient {
                         }
                     }
                 }
-                let _ = self.post("/api/memory").send_json(json!({
-                    "content": prompt,
-                    "kind": "note",
-                    "tier": "episodic",
-                    "importance": 0.3
-                }));
+                self.post_spooled(
+                    "/api/memory",
+                    json!({
+                        "content": prompt,
+                        "kind": "note",
+                        "tier": "episodic",
+                        "importance": 0.3
+                    }),
+                );
             }
             "SessionEnd" => {
-                let _ = self.post("/api/memory/consolidate").send_json(json!({}));
+                self.post_spooled("/api/memory/consolidate", json!({}));
                 // v0.8.0 Sprint 5: ask the server to synthesize this session's memories into a
                 // project-scoped summary. `X-Cairn-Session`/`X-Cairn-Project` (set above) tell
                 // the server which session/project - no body needed. Best-effort like every
-                // other hook call: a disabled LLM or a network hiccup just skips it.
-                let _ = self.post("/api/memory/session-summary").call();
+                // other hook call: a disabled LLM just skips it; a network hiccup spools it
+                // (v0.8.0 Sprint 9) for the next `SessionStart` to retry.
+                self.post_spooled("/api/memory/session-summary", json!({}));
             }
             _ => {
                 // PostToolUse and other events are not proxied in remote-only mode.

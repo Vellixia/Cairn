@@ -21,6 +21,7 @@ mod project;
 mod reset;
 mod rules;
 mod setup;
+mod spool;
 mod status;
 mod update;
 

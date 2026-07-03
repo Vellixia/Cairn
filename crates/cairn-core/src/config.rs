@@ -248,6 +248,24 @@ pub struct Config {
     /// Whether a session with no manually-set anchor gets one derived automatically from its
     /// first substantive prompt (`CAIRN_AUTO_ANCHOR`, default `true`).
     pub auto_anchor: bool,
+    /// Daily token budget for background LLM calls (v0.8.0 Sprint 9) - concept extraction,
+    /// contradiction detection, and promotion-scoring's borderline-case judgment step all
+    /// check remaining budget first and fall back to their non-LLM heuristic once it's spent,
+    /// rather than overspending or hard-failing. `0` means unlimited.
+    /// (`CAIRN_LLM_DAILY_BUDGET`, default `200_000`).
+    pub llm_daily_budget: u64,
+    /// Whether the weekly `tune` cron job nudges `promote_threshold` from measured retrieval
+    /// quality (the followup-rate signal - see `cairn_memory::FollowupTracker`). Bounded
+    /// (±0.05/week, clamped to `[0.5, 0.95]`) and logged; `false` pins every threshold at its
+    /// configured value exactly as in Sprints 1-8. (`CAIRN_SELFTUNE`, default `true`).
+    pub selftune: bool,
+    /// Cap on Working-tier memories kept per project (v0.8.0 Sprint 9). Beyond this, the
+    /// oldest lowest-confidence rows are deleted by the `memory-decay` cron job - a genuine,
+    /// permanent deletion via the same `delete_memory` path `DELETE /api/memory/:id` already
+    /// uses (Cairn's lossless-retention guarantee covers compressed *file reads*, not the
+    /// memory lifecycle - deleting a memory has always been permanent, autopilot or not).
+    /// (`CAIRN_MAX_WORKING_PER_PROJECT`, default `500`).
+    pub max_working_per_project: usize,
 }
 
 impl Config {
@@ -361,6 +379,16 @@ impl Config {
                 .ok()
                 .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
                 .unwrap_or(true),
+            llm_daily_budget: env_str("CAIRN_LLM_DAILY_BUDGET")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200_000),
+            selftune: std::env::var("CAIRN_SELFTUNE")
+                .ok()
+                .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+                .unwrap_or(true),
+            max_working_per_project: env_str("CAIRN_MAX_WORKING_PER_PROJECT")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500),
             data_dir,
         };
         std::fs::create_dir_all(cfg.blobs_dir())?;
@@ -479,6 +507,9 @@ mod tests {
                 .map(|s| s.to_string())
                 .collect(),
             auto_anchor: true,
+            llm_daily_budget: 200_000,
+            selftune: true,
+            max_working_per_project: 500,
         }
     }
 

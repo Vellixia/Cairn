@@ -58,6 +58,9 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         drift_autopilot: "safe".to_string(),
         drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
         auto_anchor: true,
+        llm_daily_budget: 200_000,
+        selftune: true,
+        max_working_per_project: 500,
     };
     let state = AppState::with_store(&cfg, store).ok()?;
     Some((router(state), dir))
@@ -165,7 +168,7 @@ async fn login_cookie(app: axum::Router) -> String {
 }
 
 #[tokio::test]
-async fn list_jobs_shows_all_five_with_no_prior_run() {
+async fn list_jobs_shows_all_six_with_no_prior_run() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
@@ -174,8 +177,8 @@ async fn list_jobs_shows_all_five_with_no_prior_run() {
     let jobs = body.as_array().expect("array");
     assert_eq!(
         jobs.len(),
-        5,
-        "session-gc, memory-decay, access-log-prune, llm-intelligence, memory-demote"
+        6,
+        "session-gc, memory-decay, access-log-prune, llm-intelligence, memory-demote, tune"
     );
     let names: Vec<&str> = jobs.iter().filter_map(|j| j["name"].as_str()).collect();
     assert!(names.contains(&"session-gc"));
@@ -183,9 +186,63 @@ async fn list_jobs_shows_all_five_with_no_prior_run() {
     assert!(names.contains(&"access-log-prune"));
     assert!(names.contains(&"llm-intelligence"));
     assert!(names.contains(&"memory-demote"));
+    assert!(names.contains(&"tune"));
     for j in jobs {
         assert!(j["last_run"].is_null(), "no job has run yet");
     }
+}
+
+#[tokio::test]
+async fn health_shows_all_six_unstale_and_not_running_with_no_prior_run() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    let (status, body, _) = request_json(app, "GET", "/api/cron/health", Some(&cookie)).await;
+    assert!(status.is_success(), "got {status} body={body}");
+    let jobs = body.as_array().expect("array");
+    assert_eq!(jobs.len(), 6);
+    for j in jobs {
+        assert!(j["last_run_at"].is_null());
+        assert!(j["last_status"].is_null());
+        assert_eq!(j["running"], false);
+        // A job that has never run is never "stale" - there's nothing wrong with a freshly
+        // started server waiting for its first scheduled tick.
+        assert_eq!(j["stale"], false);
+    }
+}
+
+#[tokio::test]
+async fn health_reflects_last_run_after_a_manual_trigger() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    let (status, _, _) = request_json(
+        app.clone(),
+        "POST",
+        "/api/cron/run/session-gc",
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success());
+
+    let (status, body, _) = request_json(app, "GET", "/api/cron/health", Some(&cookie)).await;
+    assert!(status.is_success());
+    let session_gc = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|j| j["name"] == "session-gc")
+        .expect("session-gc listed");
+    assert_eq!(session_gc["last_status"], "ok");
+    assert!(!session_gc["last_run_at"].is_null());
+    assert_eq!(session_gc["running"], false, "run_job_now returns synchronously");
+}
+
+#[tokio::test]
+async fn cron_health_requires_authentication() {
+    let Some((app, _dir)) = state() else { return };
+    let (status, _, _) = request_json(app, "GET", "/api/cron/health", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -203,6 +260,44 @@ async fn memory_demote_job_runs_and_reports_zero_on_an_empty_store() {
     assert!(status.is_success(), "got {status} body={body}");
     assert_eq!(body["job"], "memory-demote");
     assert_eq!(body["outcome"], "ok");
+}
+
+#[tokio::test]
+async fn memory_decay_job_reports_hygiene_counts_alongside_decay() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    // v0.8.0 Sprint 9: the dedup sweep and working-tier cap ride along on this same job -
+    // an empty store exercises all three passes and should report zero for each.
+    let (status, body, _) = request_json(
+        app,
+        "POST",
+        "/api/cron/run/memory-decay",
+        Some(&cookie),
+    )
+    .await;
+    assert!(status.is_success(), "got {status} body={body}");
+    assert_eq!(body["job"], "memory-decay");
+    assert_eq!(body["outcome"], "ok");
+    let detail = body["detail"].as_str().unwrap();
+    assert!(detail.contains("decayed confidence on 0 memories"), "{detail}");
+    assert!(detail.contains("deduped 0"), "{detail}");
+    assert!(detail.contains("capped 0"), "{detail}");
+}
+
+#[tokio::test]
+async fn tune_job_skips_when_too_few_queries_observed() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    // A fresh engine has recorded zero queries - `followup_rate()` would report `0.0` for
+    // that, indistinguishable from "genuinely excellent recall" if read at face value. The
+    // minimum-sample gate must catch this and skip rather than act on it.
+    let (status, body, _) = request_json(app, "POST", "/api/cron/run/tune", Some(&cookie)).await;
+    assert!(status.is_success(), "got {status} body={body}");
+    assert_eq!(body["job"], "tune");
+    assert_eq!(body["outcome"], "ok");
+    assert!(body["detail"].as_str().unwrap().contains("skipped"));
 }
 
 #[tokio::test]

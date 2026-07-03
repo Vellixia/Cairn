@@ -63,6 +63,9 @@ fn state() -> Option<(axum::Router, Arc<Store>, tempfile::TempDir)> {
         drift_autopilot: "safe".to_string(),
         drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
         auto_anchor: true,
+        llm_daily_budget: 200_000,
+        selftune: true,
+        max_working_per_project: 500,
     };
     let state = AppState::with_store(&cfg, store.clone()).ok()?;
     Some((router(state), store, dir))

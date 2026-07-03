@@ -67,6 +67,9 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         drift_autopilot: "safe".to_string(),
         drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
         auto_anchor: true,
+        llm_daily_budget: 200_000,
+        selftune: true,
+        max_working_per_project: 500,
     };
     // with_store auto-opens the registry from cfg.data_dir/registry/, so
     // build_router_with_registry gets a real registry mounted at /api/registry.

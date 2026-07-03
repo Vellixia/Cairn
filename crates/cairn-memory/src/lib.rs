@@ -16,7 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod llm_consolidator;
-pub use llm_consolidator::{apply_decay, Insight, LlmConsolidator, ProceduralStep, SemanticFact};
+pub use llm_consolidator::{
+    apply_decay, llm_tokens_used_today, Insight, LlmConsolidator, ProceduralStep, SemanticFact,
+};
 mod llm_intelligence;
 pub mod analysis;
 pub use analysis::{generate_architecture_report, ArchitectureReport, BridgeEntry, GodNodeEntry};
@@ -469,15 +471,103 @@ impl MemoryEngine {
         Ok(decayed)
     }
 
+    /// v0.8.0 Sprint 9 memory-hygiene pass, folded into the `memory-decay` cron job: find
+    /// `Working`-tier memories whose *current* content collides via SHA-256. `remember`'s
+    /// insert-time dedup (see [`ContentHash`]) only rejects a duplicate at creation time and
+    /// never re-checks afterward - the realistic way a collision appears later is a
+    /// `POST /api/memory/:id` edit changing one memory's `content` to match another's exactly.
+    ///
+    /// Keeps the newest (`updated_at`) of each colliding group and hard-deletes the rest via
+    /// the same `delete_memory` `DELETE /api/memory/:id` already uses - permanent, no
+    /// blob-store retention tier to fall back into. A pinned memory is never deleted (same
+    /// protection `run_decay` already gives it); if every member of a colliding group is
+    /// pinned, the whole group is left alone rather than picking one to keep. Returns the
+    /// number of memories deleted.
+    pub fn run_dedup_sweep(&self) -> Result<usize> {
+        let mut by_hash: HashMap<String, Vec<Memory>> = HashMap::new();
+        for m in self.store.all_memories()? {
+            if m.tier != MemoryTier::Working {
+                continue;
+            }
+            let hash = ContentHash::of_str(&m.content).as_str().to_string();
+            by_hash.entry(hash).or_default().push(m);
+        }
+        let mut deleted = 0;
+        for mut group in by_hash.into_values() {
+            if group.len() < 2 || group.iter().all(|m| m.pinned) {
+                continue;
+            }
+            group.retain(|m| !m.pinned);
+            if group.len() < 2 {
+                continue;
+            }
+            group.sort_by_key(|m| m.updated_at);
+            for m in &group[..group.len() - 1] {
+                if self.store.delete_memory(&m.id)? {
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// v0.8.0 Sprint 9 memory-hygiene pass, folded into the `memory-decay` cron job: cap how
+    /// many `Working`-tier memories a single `Project`-scoped project can accumulate.
+    /// `Working` is the landing tier for every new observation and nothing promotes it onward
+    /// on its own, so a long-lived, chatty project's working set otherwise grows forever.
+    ///
+    /// Once a project exceeds `max_per_project`, the oldest (`updated_at`) non-pinned excess is
+    /// hard-deleted, permanently - honestly the same one-way `delete_memory` every other
+    /// cleanup here uses, not a lossless tier demotion. Pinned memories are excluded from both
+    /// the count and deletion entirely, same protection [`Self::run_dedup_sweep`] gives them -
+    /// this cap only ever limits the *non-pinned* working set. `max_per_project == 0` means
+    /// unlimited, matching every other `0 = unlimited` convention in `Config`. Returns the
+    /// number of memories deleted.
+    pub fn run_working_tier_cap(&self, max_per_project: usize) -> Result<usize> {
+        if max_per_project == 0 {
+            return Ok(0);
+        }
+        let mut by_project: HashMap<String, Vec<Memory>> = HashMap::new();
+        for m in self.store.all_memories()? {
+            if m.tier != MemoryTier::Working || m.scope_type != ScopeType::Project || m.pinned {
+                continue;
+            }
+            if let Some(pid) = m.scope_id.clone() {
+                by_project.entry(pid).or_default().push(m);
+            }
+        }
+        let mut deleted = 0;
+        for mut memories in by_project.into_values() {
+            if memories.len() <= max_per_project {
+                continue;
+            }
+            memories.sort_by_key(|m| m.updated_at);
+            let excess = memories.len() - max_per_project;
+            for m in &memories[..excess] {
+                if self.store.delete_memory(&m.id)? {
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
     /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 1: fill in `concepts` for any memory
     /// that doesn't have any yet. A no-op when the LLM is disabled - `concepts` simply stays
     /// empty, exactly like a pre-Sprint-5 install. Returns the number of memories updated.
-    pub fn run_concept_extraction(&self, llm_cfg: &LlmConsolidationConfig) -> Result<usize> {
+    ///
+    /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) is checked
+    /// before every LLM call so a runaway memory set can't blow through a day's token quota in
+    /// one cron tick - remaining memories are simply picked up on tomorrow's run.
+    pub fn run_concept_extraction(&self, llm_cfg: &LlmConsolidationConfig, daily_budget: u64) -> Result<usize> {
         if !llm_cfg.enabled {
             return Ok(0);
         }
         let mut updated = 0;
         for m in self.store.all_memories()? {
+            if llm_consolidator::is_budget_exhausted(daily_budget) {
+                break;
+            }
             if !m.concepts.is_empty() {
                 continue;
             }
@@ -511,12 +601,19 @@ impl MemoryEngine {
     /// Either way, one confirmed contradiction is enough to act on; there's no need to keep
     /// spending LLM calls looking for more on the same memory. Returns the number of
     /// contradiction pairs acted on (resolved or flagged).
-    pub fn run_contradiction_detection(&self, llm_cfg: &LlmConsolidationConfig) -> Result<usize> {
+    ///
+    /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) is checked
+    /// before every LLM call - once exhausted, remaining memories are left un-checked for
+    /// today and revisited on tomorrow's run.
+    pub fn run_contradiction_detection(&self, llm_cfg: &LlmConsolidationConfig, daily_budget: u64) -> Result<usize> {
         if !llm_cfg.enabled {
             return Ok(0);
         }
         let mut handled = 0;
         for m in self.store.all_memories()? {
+            if llm_consolidator::is_budget_exhausted(daily_budget) {
+                break;
+            }
             if m.suspicious {
                 continue;
             }
@@ -564,7 +661,11 @@ impl MemoryEngine {
     /// `promo_score`; a human reviews the `[0.70, 0.90]` band via
     /// `GET /api/memory/promotion-candidates` and calls `/promote` or `/dismiss-promotion`.
     /// Returns the number of memories scored.
-    pub fn run_promotion_scoring(&self, llm_cfg: &LlmConsolidationConfig) -> Result<usize> {
+    ///
+    /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) only guards the
+    /// borderline-case LLM refinement call below, never the pass itself - once exhausted, every
+    /// remaining memory still gets its cheap `fast_score`, just without the LLM tie-break.
+    pub fn run_promotion_scoring(&self, llm_cfg: &LlmConsolidationConfig, daily_budget: u64) -> Result<usize> {
         let sanitizer = cairn_share::Sanitizer::new();
         let mut scored = 0;
         for m in self.store.all_memories()? {
@@ -593,7 +694,10 @@ impl MemoryEngine {
             // LLM judgment only for genuinely borderline cases - cheap fast_score handles the
             // clear-cut ones (a `Task` never gets there; a heavily cross-project `Fact` is
             // already obviously promotable) without spending a call on every candidate.
-            if (0.40..=0.85).contains(&score) && llm_cfg.enabled {
+            if (0.40..=0.85).contains(&score)
+                && llm_cfg.enabled
+                && !llm_consolidator::is_budget_exhausted(daily_budget)
+            {
                 if let Ok(text) = llm_consolidator::chat_with_config(
                     llm_cfg,
                     &format!(
@@ -2309,6 +2413,132 @@ mod tests {
         assert_eq!(mem.run_decay(30).unwrap(), 0);
     }
 
+    // --- v0.8.0 Sprint 9: memory hygiene tests ---
+
+    #[test]
+    fn dedup_sweep_keeps_newest_and_deletes_older_collisions() {
+        let Some(mem) = engine() else { return };
+        let mut older = synth("duplicate content after an edit");
+        older.updated_at = Utc::now() - Duration::days(1);
+        let newer = synth("duplicate content after an edit");
+        mem.store.insert_memory(&older).unwrap();
+        mem.store.insert_memory(&newer).unwrap();
+
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 1);
+        assert!(mem.store.get_memory(&older.id).unwrap().is_none());
+        assert!(mem.store.get_memory(&newer.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn dedup_sweep_ignores_non_working_tier_and_distinct_content() {
+        let Some(mem) = engine() else { return };
+        let mut semantic_dup = synth("same content, wrong tier");
+        semantic_dup.tier = cairn_core::MemoryTier::Semantic;
+        let mut working_dup = synth("same content, wrong tier");
+        working_dup.tier = cairn_core::MemoryTier::Semantic;
+        mem.store.insert_memory(&semantic_dup).unwrap();
+        mem.store.insert_memory(&working_dup).unwrap();
+        mem.store.insert_memory(&synth("unique working note")).unwrap();
+
+        assert_eq!(
+            mem.run_dedup_sweep().unwrap(),
+            0,
+            "Semantic-tier collisions are out of scope; a lone Working note has nothing to dedup against"
+        );
+    }
+
+    #[test]
+    fn dedup_sweep_never_deletes_a_pinned_memory() {
+        let Some(mem) = engine() else { return };
+        let mut pinned = synth("pinned duplicate");
+        pinned.pinned = true;
+        pinned.updated_at = Utc::now() - Duration::days(1);
+        let unpinned = synth("pinned duplicate");
+        mem.store.insert_memory(&pinned).unwrap();
+        mem.store.insert_memory(&unpinned).unwrap();
+
+        // The unpinned copy is the "duplicate" here even though it's newer - the pinned one is
+        // never a deletion candidate regardless of age.
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 1);
+        assert!(mem.store.get_memory(&pinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&unpinned.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn dedup_sweep_skips_a_group_that_is_entirely_pinned() {
+        let Some(mem) = engine() else { return };
+        let mut a = synth("both pinned");
+        a.pinned = true;
+        let mut b = synth("both pinned");
+        b.pinned = true;
+        mem.store.insert_memory(&a).unwrap();
+        mem.store.insert_memory(&b).unwrap();
+
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 0);
+        assert!(mem.store.get_memory(&a.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&b.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn working_tier_cap_deletes_oldest_excess_for_the_over_quota_project() {
+        let Some(mem) = engine() else { return };
+        for i in 0..3 {
+            let mut m = synth(&format!("note {i}"));
+            m.scope_type = ScopeType::Project;
+            m.scope_id = Some("proj-a".to_string());
+            m.updated_at = Utc::now() - Duration::days(3 - i);
+            mem.store.insert_memory(&m).unwrap();
+        }
+
+        assert_eq!(mem.run_working_tier_cap(2).unwrap(), 1, "3 over a cap of 2 deletes 1");
+        let remaining = mem
+            .store
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.scope_id.as_deref() == Some("proj-a"))
+            .count();
+        assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn working_tier_cap_zero_means_unlimited() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("solo note");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_working_tier_cap(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn working_tier_cap_ignores_global_scope_and_pinned_memories() {
+        let Some(mem) = engine() else { return };
+        let global = synth("global working note");
+        mem.store.insert_memory(&global).unwrap();
+
+        let mut pinned = synth("pinned project note");
+        pinned.scope_type = ScopeType::Project;
+        pinned.scope_id = Some("proj-a".to_string());
+        pinned.pinned = true;
+        // Oldest by far - the obvious deletion pick if pinned memories were wrongly eligible.
+        pinned.updated_at = Utc::now() - Duration::days(10);
+        mem.store.insert_memory(&pinned).unwrap();
+
+        let mut unpinned = synth("unpinned project note");
+        unpinned.scope_type = ScopeType::Project;
+        unpinned.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&unpinned).unwrap();
+
+        // Cap of 1: the lone non-pinned proj-a memory is already exactly at quota. If the
+        // pinned or Global memory were wrongly counted, this would see an excess and delete one.
+        assert_eq!(mem.run_working_tier_cap(1).unwrap(), 0);
+        assert!(mem.store.get_memory(&pinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&unpinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&global.id).unwrap().is_some());
+    }
+
     // --- v0.8.0 Sprint 5: LLM intelligence tests ---
 
     fn disabled_llm_cfg() -> cairn_core::LlmConsolidationConfig {
@@ -2326,7 +2556,7 @@ mod tests {
         let m = synth("some fact with no concepts yet");
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_concept_extraction(&disabled_llm_cfg()).unwrap(), 0);
+        assert_eq!(mem.run_concept_extraction(&disabled_llm_cfg(), 0).unwrap(), 0);
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         assert!(after.concepts.is_empty());
     }
@@ -2338,7 +2568,7 @@ mod tests {
         mem.store.insert_memory(&m).unwrap();
 
         assert_eq!(
-            mem.run_contradiction_detection(&disabled_llm_cfg())
+            mem.run_contradiction_detection(&disabled_llm_cfg(), 0)
                 .unwrap(),
             0
         );
@@ -2356,7 +2586,7 @@ mod tests {
         m.scope_id = Some("proj-a".to_string());
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 1);
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 1);
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         let expected = llm_intelligence::fast_promotion_score(cairn_core::MemoryKind::Fact, 0);
         assert_eq!(after.promo_score, expected);
@@ -2377,7 +2607,7 @@ mod tests {
         working_tier.scope_id = Some("proj-a".to_string());
         mem.store.insert_memory(&working_tier).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 0);
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 0);
     }
 
     #[test]
@@ -2391,7 +2621,7 @@ mod tests {
         m.promo_locked = true;
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 0);
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 0);
     }
 
     #[test]
@@ -2404,7 +2634,7 @@ mod tests {
         m.scope_id = Some("proj-a".to_string());
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg()).unwrap(), 0);
+        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 0);
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         assert_eq!(after.promo_score, 0.0);
     }
