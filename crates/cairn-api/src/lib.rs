@@ -1017,7 +1017,7 @@ async fn memory_by_scope(
         .into_iter()
         .filter(|m| m.scope_type == q.scope_type && m.scope_id == q.scope_id)
         .collect();
-    mems.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    mems.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
     mems.truncate(limit);
     Ok(Json(mems))
 }
@@ -1097,11 +1097,11 @@ async fn list_memories(
     // Unknown sort values fall back to updated_at rather than erroring - consistent with the
     // leniency of `heatmap`/`by-scope`. All sorts are descending (newest/highest first).
     match q.sort.as_deref() {
-        Some("created_at") => mems.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        Some("created_at") => mems.sort_by_key(|m| std::cmp::Reverse(m.created_at)),
         Some("importance") => mems.sort_by(|a, b| b.importance.total_cmp(&a.importance)),
         Some("promo_score") => mems.sort_by(|a, b| b.promo_score.total_cmp(&a.promo_score)),
-        Some("access_count") => mems.sort_by(|a, b| b.access_count.cmp(&a.access_count)),
-        _ => mems.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+        Some("access_count") => mems.sort_by_key(|m| std::cmp::Reverse(m.access_count)),
+        _ => mems.sort_by_key(|m| std::cmp::Reverse(m.updated_at)),
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
     let offset = q.offset.unwrap_or(0);

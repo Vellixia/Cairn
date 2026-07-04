@@ -177,7 +177,7 @@ impl RemoteClient {
         path: &str,
         query: &[(&str, &str)],
         log: &mut DebugLog,
-    ) -> Result<ureq::Response, ureq::Error> {
+    ) -> Result<ureq::Response, Box<ureq::Error>> {
         let start = Instant::now();
         let mut req = self.get(path);
         for (k, v) in query {
@@ -192,7 +192,7 @@ impl RemoteClient {
             };
             log.record(line);
         }
-        result
+        result.map_err(Box::new)
     }
 
     /// POST `body` to `path` - see `send_spooled` for the shared behavior.
@@ -399,15 +399,13 @@ impl RemoteClient {
         log: &mut DebugLog,
     ) -> Result<()> {
         match event {
-            "PreToolUse" => {
-                // v0.8.0 Sprint 10 (C-2): opt-in real-time guard, default off. Silence (no
-                // stdout) is an implicit "allow" per the hook contract, so every early-return
-                // path below - gate off, unsupported tool, network failure - fails open without
-                // needing to say so explicitly.
-                if guard {
-                    if let Some((decision, reason)) = self.guard_check(payload, log) {
-                        emit_permission_decision(event, decision, &reason);
-                    }
+            // v0.8.0 Sprint 10 (C-2): opt-in real-time guard, default off. Silence (no
+            // stdout) is an implicit "allow" per the hook contract, so every early-return
+            // path below - gate off, unsupported tool, network failure - fails open without
+            // needing to say so explicitly.
+            "PreToolUse" if guard => {
+                if let Some((decision, reason)) = self.guard_check(payload, log) {
+                    emit_permission_decision(event, decision, &reason);
                 }
             }
             "SessionStart" => {
