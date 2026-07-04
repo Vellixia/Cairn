@@ -19,11 +19,6 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct DoctorOptions {
     pub fix: bool,
-    /// Reserved for the future `--interactive` flag; currently always read
-    /// from `std::io::stdout().is_terminal()` at the call site, so the field
-    /// here is dead. Kept for API stability with future toggles.
-    #[allow(dead_code)]
-    pub interactive: bool,
     /// Output machine-readable JSON instead of human-readable text.
     pub json: bool,
 }

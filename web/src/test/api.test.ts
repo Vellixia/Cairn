@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest"
-import { resolveApiBase, ApiError, type Health, type Stats, type Memory, type ScoredMemory } from "@/lib/api"
+import { resolveApiBase, ApiError, type Health, type Stats, type Memory } from "@/lib/api"
 
 describe("resolveApiBase", () => {
   it("returns NEXT_PUBLIC_CAIRN_API when set", () => {
@@ -78,11 +78,5 @@ describe("API type shapes", () => {
     expect(m.scope_type).toBe("global")
     expect(m.derived_from).toEqual([])
     expect(m.suspicious).toBe(false)
-  })
-
-  it("ScoredMemory wraps a Memory with score", () => {
-    const sm: ScoredMemory = { memory: fullMemory("m2"), score: 0.85 }
-    expect(sm.memory.content).toBe("hello")
-    expect(sm.score).toBeCloseTo(0.85)
   })
 })

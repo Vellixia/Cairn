@@ -138,53 +138,6 @@ export interface Reliability {
   rollbacks: number;
 }
 
-export interface Checkpoint {
-  id: string;
-  created_at: string;
-  files: number;
-  label: string;
-}
-export interface RollbackReport {
-  checkpoint_id: string;
-  restored: string[];
-  skipped: string[];
-}
-
-export type Sensitivity = "shareable" | "needs_review" | "private";
-export interface Finding {
-  kind: string;
-  start: number;
-  end: number;
-}
-export interface Sanitized {
-  text: string;
-  findings: Finding[];
-  sensitivity: Sensitivity;
-}
-
-export interface ShareExport {
-  schema: string;
-  version: number;
-  total: number;
-  shared: number;
-  needs_review: number;
-  withheld: number;
-  memories: unknown[];
-}
-export interface PoolMemory {
-  kind: string;
-  content: string;
-  concepts: string[];
-  sensitivity: Sensitivity;
-  redactions: number;
-}
-export interface Pool {
-  schema: string;
-  version: number;
-  count: number;
-  memories: PoolMemory[];
-}
-
 export interface Memory {
   id: string;
   kind: string;
@@ -222,11 +175,6 @@ export interface Memory {
   created_at: string;
   updated_at: string;
 }
-export interface ScoredMemory {
-  memory: Memory;
-  score: number;
-}
-
 /** Web redesign v2: filters for the Memory Browser's `GET /api/memory` list endpoint. */
 export interface MemoryListFilters {
   scope_type?: string;
@@ -329,18 +277,6 @@ export interface AutopilotDigest {
   promoted: number;
   demoted: number;
   drift_auto_approved: number;
-}
-
-export interface ReadResult {
-  path: string;
-  hash: string;
-  handle: string;
-  status: "full" | "cached" | "diff" | "outline";
-  lines: number;
-  bytes: number;
-  view: string;
-  note: string;
-  est_tokens: number;
 }
 
 export interface DeviceTokenMeta {

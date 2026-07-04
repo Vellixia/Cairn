@@ -7,7 +7,6 @@
 //! Quick start:
 //!   cairn onboard --server https://cairn.example.com --token <jwt>
 
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
@@ -182,11 +181,7 @@ fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Doctor { fix, json } => {
-            doctor::run_and_exit(doctor::DoctorOptions {
-                fix,
-                interactive: std::io::stdout().is_terminal(),
-                json,
-            })?;
+            doctor::run_and_exit(doctor::DoctorOptions { fix, json })?;
         }
         Cmd::Onboard {
             skip_agents,

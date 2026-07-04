@@ -17,7 +17,6 @@ pub fn home_dir() -> Option<PathBuf> {
 
 /// Cairn's own state directory: `~/.cairn` (config.toml, spool.jsonl, logs/,
 /// per-session file buffers).
-#[allow(dead_code)] // wired up by config.rs (v0.8.0 client redesign, next iteration)
 pub fn cairn_home() -> Option<PathBuf> {
     home_dir().map(|h| h.join(".cairn"))
 }

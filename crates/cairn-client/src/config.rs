@@ -119,7 +119,6 @@ pub struct Resolved {
     pub token: Option<(String, Source)>,
     pub inject_context: (bool, Source),
     pub timeout_ms: u64,
-    #[allow(dead_code)] // wired up by hook.rs's CAIRN_DEBUG file logging (next iteration)
     pub debug: bool,
     /// v0.8.0 Sprint 10 (C-2): whether `PreToolUse` should verify/sanitize proposed edits and
     /// commands before they run. Defaults to `false` - opt-in only.

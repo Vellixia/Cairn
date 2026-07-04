@@ -20,7 +20,7 @@ use crate::db::{
 use crate::Store;
 use cairn_core::{ContentHash, DeviceToken, Error, Memory, Result, TokenScope};
 use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub struct MemoryBackend {
@@ -599,10 +599,4 @@ pub fn build(blobs_dir: std::path::PathBuf) -> Result<Store> {
         backend,
         blobs: BlobStore::new(blobs_dir),
     })
-}
-
-// Suppress the unused-import lint for BTreeMap when no features pull it in.
-#[allow(dead_code)]
-fn _btreemap_keep() -> BTreeMap<(), ()> {
-    BTreeMap::new()
 }

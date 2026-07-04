@@ -47,15 +47,8 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
-        // Cairn brand aliases --- keep inline references working alongside shadcn.
-        // "basalt & ember": neutral graphite surfaces, amber cap-stone accent.
-        ink: "#08090C",
-        surface: "#0F1115",
-        surface2: "#15181E",
-        slate: "#8A94A6",
-        offwhite: "#F1EFEA",
-        ember: "#F97E1C",
-        teal: "#2DD4BF",
+        // `line` is the one Cairn brand alias actually referenced (`border-line`) across
+        // the app; theme colors live in the CSS variables above instead of hardcoded hexes.
         line: "#20242C",
         sidebar: {
           DEFAULT: "hsl(var(--sidebar-background))",

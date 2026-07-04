@@ -154,15 +154,6 @@ pub fn load_admin(state: &AppState) -> cairn_core::Result<Option<AdminRecord>> {
     Ok(Some(rec))
 }
 
-/// Persist (or rotate) the admin record. Kept for the password-rotation
-/// follow-up; until then it's dead code.
-#[allow(dead_code)] // planned for password-rotation follow-up
-pub fn save_admin(state: &AppState, rec: &AdminRecord) -> cairn_core::Result<()> {
-    let json = serde_json::to_string(rec)?;
-    state.store.set_meta(ADMIN_META_KEY, &json)?;
-    Ok(())
-}
-
 /// Env-only admin bootstrap. Called once at server startup after the store is open and before
 /// the HTTP listener binds.
 ///

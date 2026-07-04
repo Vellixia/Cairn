@@ -14,7 +14,6 @@
 //! commands can never disagree about whether Cairn was previously set up.
 
 use anyhow::Result;
-use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use super::doctor;
@@ -56,10 +55,8 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         }
     }
 
-    let interactive = std::io::stdout().is_terminal();
     let mut diag = doctor::run(doctor::DoctorOptions {
         fix: opts.fix,
-        interactive,
         json: false,
     });
 
@@ -67,7 +64,6 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     if opts.fix && !diag.ok() {
         diag = doctor::run(doctor::DoctorOptions {
             fix: false,
-            interactive,
             json: false,
         });
     }

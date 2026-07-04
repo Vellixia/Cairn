@@ -1,7 +1,6 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { Smartphone } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -11,18 +10,15 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Badge } from "@/components/ui/badge";
-import { Kbd } from "@/components/ui/kbd";
 import { Button } from "@/components/ui/button";
 import { SidebarTrigger } from "@/components/ui/sidebar";
 import { LiveStatus } from "@/components/LiveStatus";
 import { useHealthQuery, useLogoutMutation } from "@/lib/queries";
 import { useMeStore } from "@/lib/stores/me";
-import { useUIStore } from "@/lib/stores/ui";
 
 export function Topbar() {
   const router = useRouter();
   const me = useMeStore((s) => s.me);
-  const toggleCommand = useUIStore((s) => s.toggleCommand);
   const logout = useLogoutMutation();
   const health = useHealthQuery();
 
@@ -40,26 +36,6 @@ export function Topbar() {
       <div className="flex items-center justify-between gap-4 px-5 py-2.5">
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <SidebarTrigger className="md:hidden" />
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 px-2 font-mono text-[11px]"
-            onClick={toggleCommand}
-            aria-label="Open command palette"
-          >
-            <Kbd>⌘K</Kbd>
-            <span className="ml-1.5 hidden sm:inline">jump to anything</span>
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 px-2"
-            onClick={() => router.push("/mobile")}
-            aria-label="Open mobile companion"
-            title="Mobile companion"
-          >
-            <Smartphone className="h-3.5 w-3.5" />
-          </Button>
         </div>
         <div className="flex items-center gap-4">
           <LiveStatus />
