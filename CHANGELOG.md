@@ -2,6 +2,174 @@
 
 All notable changes to Cairn are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-07-05 - Intelligent memory + observability-first dashboard
+
+Two threads landed together: nine backend sprints deepening the memory
+engine's autonomy, and a ground-up rebuild of the web dashboard around
+"humans watch, agents do."
+
+### Engine (Sprints 1-9)
+
+- **Storage: HelixDB -> SurrealDB** (Sprint 1) - full `StoreBackend` rewrite
+  against `surrealdb/surrealdb:v3`; SDK and server major versions must
+  match. Drops HelixDB, MinIO, and the `quinn-proto` RUSTSEC patch HelixDB
+  required - the Docker Compose stack is now just `cairn` + `surreal`.
+- **Scope model** (Sprint 2) - Global/Project/Session recall isolation;
+  memories (and, from Sprint 6 onward, documents) are scoped and blended
+  rather than siloed.
+- **Auto project detection + registry** (Sprint 3) - `cairn-client` detects
+  the current project and threads `X-Cairn-Project` automatically.
+- **In-process cron scheduler** (Sprint 4) - session TTL expiry and memory
+  decay run on a schedule instead of on-demand.
+- **LLM-driven concept extraction** (Sprint 5) - contradiction detection,
+  promotion scoring.
+- **RAG document ingest + search** (Sprint 6) - merged into `cairn-assemble`.
+- **MMR in base recall + promotion/intelligence dashboard** (Sprint 7).
+- **Full-auto promotion, drift & anchor autopilot** (Sprint 8) - the manual
+  approve/reject workflow is gone; autopilot decides at verify time, and
+  danger-tier findings never auto-approve.
+- **Resilience & self-tuning** (Sprint 9, final).
+
+### Web: observability-first redesign
+
+- **New IA**: Now / Memory (browser) / Projects / Documents / Automation +
+  You. The `?tab=` hub pattern is gone from monitor pages.
+- **Memory Browser** (`/memory`) - every memory, filterable (scope/tier/
+  kind/pinned/suspicious/query) + sortable + paginated, with a full-detail
+  drawer showing all 22 fields and clickable provenance edges.
+- **"basalt & ember" visual identity** - full theme rewrite: near-black
+  graphite base, ember accent, Inter + JetBrains Mono (self-hosted,
+  offline-safe), dot-grid background.
+- **Registry and Trust removed from the web UI** (still fully supported
+  server/CLI/MCP-side - `.cairnpkg` packs via `cairn pack`, the
+  `registry_search` MCP tool); Automation absorbs what Trust used to show.
+- **Memories gained structure**: optional `title` + `reasoning` fields,
+  threaded through `remember`/`memory_edit` end to end; the browser falls
+  back to the first line of content for older memories that predate this.
+- **Documents are now project-scoped**: `project_id` on ingest/list/search,
+  same "project's own + global blend" policy as memory recall.
+- **Preferences page rewritten** - explanation, add form, per-row delete.
+  Previously a dead end: "No preferences yet, use `cairn prefer`" with no
+  way to act on it from the web.
+- **Dead code removed**: 2 unused UI components, 8 unused API types, 6
+  unused Tailwind aliases, `DoctorOptions::interactive`, and assorted dead
+  Rust helpers.
+
+### Fixed
+
+- `/api/setup/health`'s Database pill was permanently stuck on "warn" with
+  a literal "undefined" in its tooltip - the web client had the response
+  shape typed wrong.
+- `projects/[id]` and `you/sessions/[id]` never worked for a real id, on
+  hard reload or client-side navigation - Next's static export bakes one
+  placeholder shell, and `useParams()`/`params.id` return that placeholder
+  forever with no real Next.js server to reconcile against. Fixed with a
+  `useUrlId()` hook that reads `window.location.pathname` directly; the
+  same pattern applies to any future `[id]` route in this codebase.
+- rustfmt/clippy drift accumulated from CI's floating `stable` toolchain
+  picking up newer lint/format rules (191 formatting diffs, 6 clippy
+  lints) across pre-existing code, unrelated to this release's own changes.
+- Two quick-xml advisories (RUSTSEC-2026-0194, RUSTSEC-2026-0195) via
+  `self_update`; verified neither vulnerable API path is reachable through
+  Cairn's usage and documented as ignores in `deny.toml`/`.cargo/audit.toml`.
+
+### Breaking
+
+- Registry and Trust web pages are gone (backend/CLI/MCP unaffected).
+- Manual drift approve/reject API routes are removed in favor of autopilot.
+- `edit_memory` (store trait, engine, API, MCP) gained two new trailing
+  parameters (`title`, `reasoning`) - a source-level break for any direct
+  caller; existing callers passing `None` see no behavior change.
+
+Stats: `cargo test --workspace` passes clean; clippy and rustfmt clean; all
+CI advisory scans pass with documented, verified-unreachable ignores.
+
+## [0.7.1] - 2026-07-02 - Live-e2e coverage + dashboard fixes + docs reorg
+
+A verification-driven patch release: walked every documented surface (30
+docs covering auth, memory, compression, tiers, profile, guard, share,
+ingest, registry, and MCP transport) against a real Docker stack, fixed
+what broke, and reorganized the docs around reader intent.
+
+### Found and fixed by the live walk
+
+- 3 dashboard crashes surfaced only by real navigation, not unit tests.
+- `static_handler` returned the wrong response for missing assets instead
+  of a 404, and didn't percent-decode paths.
+- `parse_vtt` accepted files missing the `WEBVTT` header instead of
+  rejecting them.
+- The OpenAPI spec was missing registry routes.
+- The memory tracker could panic on a fresh boot - the cutoff wasn't
+  clamped.
+- Setup wiring bugs across agents: OpenCode double-loading its config, the
+  Codex TOML shape, the Claude Code matcher.
+
+### Dashboard
+
+- Registry surfaced in the sidebar nav; hidden dashboard pages surfaced via
+  the command palette, HubTabs, and topbar.
+- `/api/metrics/savings` added; registry nested under `/api/registry`.
+- `HelpButton` tolerant of missing `helpCopy` entries.
+
+### Docs
+
+- Reorganized `docs/` by reader intent, with authoring conventions and
+  templates.
+- New 30-document live-e2e test suite under `docs/testing/`, each doc
+  walked and marked PASS/SKIP against a live stack.
+
+Also fixed while greening CI: a stale VTT test fixture and an `anyhow`
+advisory.
+
+## [0.7.0] - 2026-06-29 - Engine intelligence + dashboard UX + new crates
+
+20 plan items shipped end to end, grouped in four tracks.
+
+### Engine intelligence
+
+- Anti-inflation cap: structural/diff context views fall back to Full when
+  they wouldn't actually be cheaper.
+- 60% diff threshold: auto-delta falls back to Full once the delta exceeds
+  60% of the original.
+- Triple-stream search: BM25 + HNSW vector + graph proximity, fused with
+  RRF (dynamic renormalization, session diversification) - completes the
+  "graph leg" of hybrid search.
+- LLM consolidation: `LlmConsolidator` (`consolidate_semantic`,
+  `extract_procedures`, `synthesize_insights`) + `apply_decay`.
+- Contradiction detection via Jaccard similarity + `auto_forget`.
+- Follow-up tracker (rolling-window recall-quality metric) and bounce
+  tracker (rolling-window compressed-read -> full-read detection).
+- Context injection now defaults **off**, gated by `CAIRN_INJECT_CONTEXT`
+  on `UserPromptSubmit` and the proactive hook.
+
+### Dashboard UX
+
+- Live updates over WebSocket; USD savings surfaced on the overview.
+- Compression Lab: side-by-side 4-mode comparison.
+- Architecture report, context pressure gauge with eviction candidates,
+  activity heatmap, knowledge graph enhancements, memory browser with
+  search + filters.
+
+### Developer experience
+
+- Structured REST error envelope (`error` + `error_code`).
+- `/api/openapi.json` + `/api/capabilities`.
+- LLM-driven query expansion, reformulations merged by max score.
+
+### Engine depth
+
+- Gotcha tracker: in-memory failure clusterer, auto-promotes to a Gotcha
+  memory past a threshold.
+- Shell compression refactored to a 9-category registry, 12 new patterns
+  (npm, pnpm, pip, eslint, tsc, docker, kubectl, curl, rg, etc).
+
+### New crate
+
+- `cairn-rerank`: cross-encoder reranking via fastembed, gated by the
+  `local` feature - completes the "Rerank + MMR diversity" backlog item.
+
+Stats: 555 tests passing, 0 failed. Clippy clean, fmt clean.
+
 ## [0.6.0] - 2026-06-23 - Cleanup sprint
 
 A focused cleanup over the v0.5.0 release. **No new features**, no new
