@@ -29,6 +29,14 @@ jobs:
     name: ${{ matrix.target }}
     needs: create-release
     runs-on: ${{ matrix.os }}
+    # v0.8.0 added SurrealDB, which pulls in aws-lc-sys transitively (via jsonwebtoken's
+    # aws-lc-rs backend). On windows-latest x86_64, aws-lc-sys needs NASM to assemble its
+    # optimized routines and GitHub's windows-latest image does not ship it (checked the
+    # actions/runner-images manifest) - the build fails unless this crate-owned, pre-generated
+    # NASM object fallback is opted into. No-op on the other 4 targets: aws-lc-sys's own
+    # use_prebuilt_nasm() only reads this var on target_os=windows && target_arch=x86_64.
+    env:
+      AWS_LC_SYS_PREBUILT_NASM: "1"
     strategy:
       fail-fast: false
       matrix:
