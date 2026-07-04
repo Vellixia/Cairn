@@ -68,7 +68,11 @@ fn run_inner(event: &str) -> Result<()> {
     let _ = std::io::stdin().read_to_string(&mut input);
     let payload: Value = serde_json::from_str(input.trim()).unwrap_or(Value::Null);
 
-    let mut rc = RemoteClient::new(server, token, std::time::Duration::from_millis(resolved.timeout_ms));
+    let mut rc = RemoteClient::new(
+        server,
+        token,
+        std::time::Duration::from_millis(resolved.timeout_ms),
+    );
     rc.project_id = project_id.clone();
     // v0.8.0 Sprint 5: every hook JSON payload carries the agent's session id - forward it as
     // `X-Cairn-Session` so `SessionEnd`'s session-summary call (and any future session-scoped
@@ -99,7 +103,11 @@ fn run_inner(event: &str) -> Result<()> {
         resolved.guard,
         &mut debug_log,
     );
-    debug_log.flush(event, project_id.as_deref(), overall_start.elapsed().as_millis());
+    debug_log.flush(
+        event,
+        project_id.as_deref(),
+        overall_start.elapsed().as_millis(),
+    );
     result
 }
 
@@ -337,7 +345,12 @@ impl RemoteClient {
         }
     }
 
-    fn verify_content(&self, path: &str, content: &str, log: &mut DebugLog) -> Option<(&'static str, String)> {
+    fn verify_content(
+        &self,
+        path: &str,
+        content: &str,
+        log: &mut DebugLog,
+    ) -> Option<(&'static str, String)> {
         let resp = self.post_json(
             "/api/guard/verify",
             json!({ "path": path, "content": content }),
@@ -356,7 +369,11 @@ impl RemoteClient {
         ))
     }
 
-    fn sanitize_command(&self, command: &str, log: &mut DebugLog) -> Option<(&'static str, String)> {
+    fn sanitize_command(
+        &self,
+        command: &str,
+        log: &mut DebugLog,
+    ) -> Option<(&'static str, String)> {
         let resp = self.post_json("/api/share/sanitize", json!({ "text": command }), log)?;
         if resp.get("sensitivity").and_then(Value::as_str)? == "shareable" {
             return None;
@@ -507,9 +524,10 @@ impl RemoteClient {
                 // v0.8.0 client redesign: previously a documented no-op fired on every single
                 // edit. Zero network cost on this hot path - just append to a local per-session
                 // buffer; `SessionEnd`/`PreCompact` flush the deduped list as one memory.
-                if let (Some(sid), Some(path)) =
-                    (&self.session_id, crate::sessionbuf::extract_touched_path(payload))
-                {
+                if let (Some(sid), Some(path)) = (
+                    &self.session_id,
+                    crate::sessionbuf::extract_touched_path(payload),
+                ) {
                     crate::sessionbuf::record_touch(sid, &path);
                 }
             }
@@ -596,15 +614,15 @@ mod tests {
 
     #[test]
     fn verify_content_asks_on_danger_risk() {
-        let server = canned_json_server(r#"{"risk":"danger","message":"large unreplaced deletion"}"#);
+        let server =
+            canned_json_server(r#"{"risk":"danger","message":"large unreplaced deletion"}"#);
         let rc = client(&server);
         let mut log = DebugLog::new(false);
         assert_eq!(
             rc.verify_content("/tmp/foo.rs", "new content", &mut log),
             Some((
                 "ask",
-                "Cairn guard flagged this edit as high-risk: large unreplaced deletion"
-                    .to_string()
+                "Cairn guard flagged this edit as high-risk: large unreplaced deletion".to_string()
             ))
         );
     }
@@ -689,7 +707,10 @@ mod tests {
         });
         assert_eq!(
             rc.guard_check(&payload, &mut log),
-            Some(("ask", "Cairn guard flagged this edit as high-risk: test".to_string()))
+            Some((
+                "ask",
+                "Cairn guard flagged this edit as high-risk: test".to_string()
+            ))
         );
     }
 
@@ -713,8 +734,9 @@ mod tests {
 
     #[test]
     fn guard_check_bash_routes_to_sanitize() {
-        let server =
-            canned_json_server(r#"{"text":"x","findings":[{"kind":"secret"}],"sensitivity":"private"}"#);
+        let server = canned_json_server(
+            r#"{"text":"x","findings":[{"kind":"secret"}],"sensitivity":"private"}"#,
+        );
         let rc = client(&server);
         let mut log = DebugLog::new(false);
         let payload = json!({

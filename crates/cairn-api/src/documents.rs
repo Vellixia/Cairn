@@ -90,7 +90,11 @@ pub async fn search(
 ) -> Result<Json<Vec<DocumentChunkRecord>>, ApiError> {
     let limit = q.limit.unwrap_or(10).clamp(1, 100);
     let filter = q.project_id.or(scope.project_id);
-    Ok(Json(s.store.search_documents(&q.q, limit, filter.as_deref())?))
+    Ok(Json(s.store.search_documents(
+        &q.q,
+        limit,
+        filter.as_deref(),
+    )?))
 }
 
 /// `DELETE /api/documents/:id` - `:id` is `DocumentSummary.id` (a hash of `source`, not `source`
@@ -133,7 +137,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let ev = rx.try_recv().expect("ingest should publish a document event");
+        let ev = rx
+            .try_recv()
+            .expect("ingest should publish a document event");
         assert_eq!(ev.kind, crate::events::KIND_DOCUMENT);
         assert_eq!(ev.data["action"], "ingested");
         assert_eq!(ev.data["document_id"], resp.0.id);
@@ -159,7 +165,9 @@ mod tests {
         let _ = delete(State(state.clone()), Path(doc.0.id.clone()))
             .await
             .unwrap();
-        let ev = rx.try_recv().expect("delete should publish a document event");
+        let ev = rx
+            .try_recv()
+            .expect("delete should publish a document event");
         assert_eq!(ev.kind, crate::events::KIND_DOCUMENT);
         assert_eq!(ev.data["action"], "deleted");
         assert_eq!(ev.data["document_id"], doc.0.id);

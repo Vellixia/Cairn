@@ -141,7 +141,11 @@ mod tests {
     #[test]
     fn danger_never_auto_approves_regardless_of_mode() {
         let safe_globs = default_safe_globs();
-        for mode in [DriftAutopilot::Off, DriftAutopilot::Safe, DriftAutopilot::All] {
+        for mode in [
+            DriftAutopilot::Off,
+            DriftAutopilot::Safe,
+            DriftAutopilot::All,
+        ] {
             assert_eq!(
                 autopilot_decision(mode, Risk::Danger, "docs/readme.md", &safe_globs),
                 None,
@@ -158,7 +162,12 @@ mod tests {
             None
         );
         assert_eq!(
-            autopilot_decision(DriftAutopilot::Off, Risk::Warn, "docs/readme.md", &safe_globs),
+            autopilot_decision(
+                DriftAutopilot::Off,
+                Risk::Warn,
+                "docs/readme.md",
+                &safe_globs
+            ),
             None
         );
     }
@@ -167,7 +176,12 @@ mod tests {
     fn safe_mode_always_approves_ok() {
         let safe_globs = default_safe_globs();
         assert_eq!(
-            autopilot_decision(DriftAutopilot::Safe, Risk::Ok, "crates/cairn-core/src/lib.rs", &safe_globs),
+            autopilot_decision(
+                DriftAutopilot::Safe,
+                Risk::Ok,
+                "crates/cairn-core/src/lib.rs",
+                &safe_globs
+            ),
             Some("autopilot:ok")
         );
     }
@@ -176,7 +190,12 @@ mod tests {
     fn safe_mode_approves_warn_under_a_safe_glob() {
         let safe_globs = default_safe_globs();
         assert_eq!(
-            autopilot_decision(DriftAutopilot::Safe, Risk::Warn, "docs/architecture.md", &safe_globs),
+            autopilot_decision(
+                DriftAutopilot::Safe,
+                Risk::Warn,
+                "docs/architecture.md",
+                &safe_globs
+            ),
             Some("autopilot:safe-path")
         );
     }
@@ -225,7 +244,10 @@ mod tests {
         let g = globs(&["docs/**"]);
         assert!(glob_match_any("docs/architecture.md", &g));
         assert!(glob_match_any("docs/guides/upgrading.md", &g));
-        assert!(!glob_match_any("crates/docs/x.rs", &g), "must anchor at the start");
+        assert!(
+            !glob_match_any("crates/docs/x.rs", &g),
+            "must anchor at the start"
+        );
         assert!(!glob_match_any("other/docs.md", &g));
     }
 

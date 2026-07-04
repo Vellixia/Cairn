@@ -142,7 +142,10 @@ pub(crate) trait StoreBackend: Send + Sync {
     /// query per memory. Each entry is `(memory_id, project_id, session_id)`. Default no-op:
     /// the in-memory backend (hermetic tests) doesn't need a real access log, and this must
     /// never fail a recall call over a logging write.
-    fn record_access_batch(&self, entries: &[(String, Option<String>, Option<String>)]) -> Result<()> {
+    fn record_access_batch(
+        &self,
+        entries: &[(String, Option<String>, Option<String>)],
+    ) -> Result<()> {
         let _ = entries;
         Ok(())
     }
@@ -347,8 +350,7 @@ impl Store {
     /// (`cfg.db_url`, default `ws://localhost:8000`); the bundled `docker compose` stack starts
     /// one. The content-addressed blob store lives under the data dir.
     pub fn open(cfg: &Config) -> Result<Self> {
-        let backend: Box<dyn StoreBackend> =
-            Box::new(crate::surreal::SurrealStore::connect(cfg)?);
+        let backend: Box<dyn StoreBackend> = Box::new(crate::surreal::SurrealStore::connect(cfg)?);
         Ok(Self {
             backend,
             blobs: BlobStore::new(cfg.blobs_dir()),
@@ -551,7 +553,8 @@ impl Store {
         chunks: &[String],
         project_id: Option<&str>,
     ) -> Result<usize> {
-        self.backend.replace_document(source, title, chunks, project_id)
+        self.backend
+            .replace_document(source, title, chunks, project_id)
     }
     /// Every ingested document, most-recently-updated first (v0.8.0 Sprint 6).
     pub fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
@@ -710,18 +713,23 @@ impl Store {
             rerank: cairn_core::RerankConfig::default(),
             admin: cairn_core::AdminConfig::default(),
             multi_tenant: false,
-        session_ttl_days: 2,
-        decay_period_days: 30,
-        access_log_retention_days: 90,
-        cron_enabled: true,
-        promote_threshold: 0.85,
-        demote_idle_days: 45,
-        drift_autopilot: "safe".to_string(),
-        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
-        auto_anchor: true,
-        llm_daily_budget: 200_000,
-        selftune: true,
-        max_working_per_project: 500,
+            session_ttl_days: 2,
+            decay_period_days: 30,
+            access_log_retention_days: 90,
+            cron_enabled: true,
+            promote_threshold: 0.85,
+            demote_idle_days: 45,
+            drift_autopilot: "safe".to_string(),
+            drift_safe_globs: vec![
+                "docs/**".to_string(),
+                "*.md".to_string(),
+                "**/tests/**".to_string(),
+                "**/*.test.*".to_string(),
+            ],
+            auto_anchor: true,
+            llm_daily_budget: 200_000,
+            selftune: true,
+            max_working_per_project: 500,
         };
         std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
         Some(cfg)

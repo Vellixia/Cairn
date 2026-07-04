@@ -41,7 +41,13 @@ impl Agent for ClaudeCode {
             }
             Scope::Project => paths::claude_project_mcp(ctx.project),
         };
-        merge_mcp_server(&mcp_path, "mcpServers", ctx.server, ctx.token, ctx.embed_env)?;
+        merge_mcp_server(
+            &mcp_path,
+            "mcpServers",
+            ctx.server,
+            ctx.token,
+            ctx.embed_env,
+        )?;
 
         // v0.8.0 Sprint 10 (B6, layer 2): the skill carries the full playbook and loads
         // on-demand, at the same scope as the MCP entry above - a project-scoped MCP
@@ -114,7 +120,8 @@ impl Agent for ClaudeCode {
                 },
                 InstalledFile {
                     path: settings_path,
-                    note: "hooks: SessionStart, UserPromptSubmit, PostToolUse, SessionEnd, PreCompact",
+                    note:
+                        "hooks: SessionStart, UserPromptSubmit, PostToolUse, SessionEnd, PreCompact",
                 },
             ],
             hint: Some("Run /mcp in Claude Code to approve the cairn server"),
@@ -183,9 +190,7 @@ impl Agent for ClaudeCode {
 
         // Only flag a MISSING skill when Claude Code is actually in use - otherwise every
         // `cairn doctor` run would complain about a skill nobody asked for.
-        if issues.is_empty()
-            && self.detect(project, home)
-            && !candidates.iter().any(|f| f.exists())
+        if issues.is_empty() && self.detect(project, home) && !candidates.iter().any(|f| f.exists())
         {
             issues.push(
                 "no Cairn skill installed (run `cairn setup claude-code` to add the playbook)"
@@ -413,8 +418,7 @@ mod tests {
             embed_env: false,
         };
         ClaudeCode.install(&bare_ctx).unwrap();
-        let after: Value =
-            serde_json::from_str(&read_text(&dir.path().join(".mcp.json"))).unwrap();
+        let after: Value = serde_json::from_str(&read_text(&dir.path().join(".mcp.json"))).unwrap();
         assert!(
             after["mcpServers"]["cairn"].get("env").is_none(),
             "non-embed-env install must not write (or keep) an env block"
@@ -514,7 +518,11 @@ mod tests {
         )
         .unwrap();
         let issues = ClaudeCode.health(dir.path(), None);
-        assert_eq!(issues.len(), 1, "rev 0 must never match the real current rev");
+        assert_eq!(
+            issues.len(),
+            1,
+            "rev 0 must never match the real current rev"
+        );
         assert!(issues[0].contains("stale"));
 
         // install() writes the current rev - health should go clean afterward.
@@ -543,11 +551,17 @@ mod tests {
             embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
-        assert!(project.path().join(".claude/skills/cairn/SKILL.md").exists());
+        assert!(project
+            .path()
+            .join(".claude/skills/cairn/SKILL.md")
+            .exists());
 
         for action in ClaudeCode.removal_plan(project.path(), Some(home.path())) {
             action.apply().unwrap();
         }
-        assert!(!project.path().join(".claude/skills/cairn/SKILL.md").exists());
+        assert!(!project
+            .path()
+            .join(".claude/skills/cairn/SKILL.md")
+            .exists());
     }
 }

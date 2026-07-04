@@ -600,8 +600,7 @@ impl StoreBackend for MemoryBackend {
         action: &str,
     ) -> Result<Option<PromotionLogEntry>> {
         let g = self.inner.lock().map_err(poisoned)?;
-        Ok(g
-            .promotion_log
+        Ok(g.promotion_log
             .iter()
             .rev()
             .find(|e| e.memory_id == memory_id && e.action == action)

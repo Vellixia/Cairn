@@ -55,8 +55,14 @@ fn build_line() -> String {
         .and_then(|r| r.into_json::<serde_json::Value>().ok())
         .and_then(|m| {
             let savings = m.get("savings")?;
-            let wakeup = savings.get("wakeup_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-            let recall = savings.get("recall_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+            let wakeup = savings
+                .get("wakeup_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let recall = savings
+                .get("recall_tokens")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
             Some(wakeup + recall)
         });
 

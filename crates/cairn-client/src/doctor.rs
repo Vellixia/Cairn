@@ -104,10 +104,7 @@ fn finalize(checks: Vec<Check>, json: bool) -> Diagnosis {
                 })
                 .collect(),
         };
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&out).unwrap_or_default()
-        );
+        println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
     } else {
         // Print in a stable order.
         for c in &diag.checks {
@@ -191,7 +188,9 @@ fn check_remote_server() -> Check {
                             let body = resp.into_string().unwrap_or_default();
                             (
                                 false,
-                                format!("{s} (from {src}, token rejected: HTTP {status} -- {body})"),
+                                format!(
+                                    "{s} (from {src}, token rejected: HTTP {status} -- {body})"
+                                ),
                             )
                         }
                         Err(e) => (false, format!("{s} (from {src}, token check failed: {e})")),
@@ -319,7 +318,11 @@ fn check_config_health(fix: bool) -> Check {
         } else {
             format!("fixed: {}; ", fixed.join(", "))
         };
-        let hint = if fix { "" } else { " (run with --fix to repair)" };
+        let hint = if fix {
+            ""
+        } else {
+            " (run with --fix to repair)"
+        };
         Check {
             name: "config health",
             ok: false,
@@ -368,9 +371,7 @@ fn check_token_expiry() -> Check {
                 Check {
                     name: "token expiry",
                     ok: false,
-                    detail: format!(
-                        "expires in {days_left:.1} day(s) -- run `cairn pair` soon"
-                    ),
+                    detail: format!("expires in {days_left:.1} day(s) -- run `cairn pair` soon"),
                 }
             } else {
                 Check {

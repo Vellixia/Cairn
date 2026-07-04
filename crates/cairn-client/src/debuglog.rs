@@ -62,7 +62,11 @@ impl DebugLog {
             block.push('\n');
         }
 
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
             let _ = f.write_all(block.as_bytes());
         }
     }
@@ -98,84 +102,104 @@ mod tests {
     #[test]
     fn disabled_log_writes_nothing() {
         let (home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            let mut log = DebugLog::new(false);
-            log.record("GET /api/x -> 200 (12ms)");
-            log.flush("SessionStart", Some("proj"), 12);
-            assert!(!home.path().join(".cairn/logs/hook.log").exists());
-        });
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                let mut log = DebugLog::new(false);
+                log.record("GET /api/x -> 200 (12ms)");
+                log.flush("SessionStart", Some("proj"), 12);
+                assert!(!home.path().join(".cairn/logs/hook.log").exists());
+            },
+        );
     }
 
     #[test]
     fn enabled_log_writes_a_block_with_event_and_lines() {
         let (home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            let mut log = DebugLog::new(true);
-            assert!(log.is_enabled());
-            log.record("GET /api/guard/anchor -> 200 (10ms)");
-            log.record("GET /api/memory/wakeup -> 200 (15ms)");
-            log.flush("SessionStart", Some("proj-abc"), 25);
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                let mut log = DebugLog::new(true);
+                assert!(log.is_enabled());
+                log.record("GET /api/guard/anchor -> 200 (10ms)");
+                log.record("GET /api/memory/wakeup -> 200 (15ms)");
+                log.flush("SessionStart", Some("proj-abc"), 25);
 
-            let text = std::fs::read_to_string(home.path().join(".cairn/logs/hook.log")).unwrap();
-            assert!(text.contains("event=SessionStart"));
-            assert!(text.contains("project=proj-abc"));
-            assert!(text.contains("total=25ms"));
-            assert!(text.contains("GET /api/guard/anchor -> 200 (10ms)"));
-            assert!(text.contains("GET /api/memory/wakeup -> 200 (15ms)"));
-        });
+                let text =
+                    std::fs::read_to_string(home.path().join(".cairn/logs/hook.log")).unwrap();
+                assert!(text.contains("event=SessionStart"));
+                assert!(text.contains("project=proj-abc"));
+                assert!(text.contains("total=25ms"));
+                assert!(text.contains("GET /api/guard/anchor -> 200 (10ms)"));
+                assert!(text.contains("GET /api/memory/wakeup -> 200 (15ms)"));
+            },
+        );
     }
 
     #[test]
     fn empty_recording_flushes_nothing() {
         let (home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            let log = DebugLog::new(true);
-            log.flush("PostToolUse", None, 0);
-            assert!(!home.path().join(".cairn/logs/hook.log").exists());
-        });
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                let log = DebugLog::new(true);
+                log.flush("PostToolUse", None, 0);
+                assert!(!home.path().join(".cairn/logs/hook.log").exists());
+            },
+        );
     }
 
     #[test]
     fn appends_across_multiple_flushes() {
         let (home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            let mut first = DebugLog::new(true);
-            first.record("a");
-            first.flush("SessionStart", None, 1);
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                let mut first = DebugLog::new(true);
+                first.record("a");
+                first.flush("SessionStart", None, 1);
 
-            let mut second = DebugLog::new(true);
-            second.record("b");
-            second.flush("SessionEnd", None, 2);
+                let mut second = DebugLog::new(true);
+                second.record("b");
+                second.flush("SessionEnd", None, 2);
 
-            let text = std::fs::read_to_string(home.path().join(".cairn/logs/hook.log")).unwrap();
-            assert!(text.contains("event=SessionStart"));
-            assert!(text.contains("event=SessionEnd"));
-        });
+                let text =
+                    std::fs::read_to_string(home.path().join(".cairn/logs/hook.log")).unwrap();
+                assert!(text.contains("event=SessionStart"));
+                assert!(text.contains("event=SessionEnd"));
+            },
+        );
     }
 
     #[test]
     fn rotates_when_past_max_size() {
         let (home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            let log_path = home.path().join(".cairn/logs/hook.log");
-            std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
-            // Pre-fill past the 1 MiB rotation threshold.
-            std::fs::write(&log_path, vec![b'x'; (MAX_LOG_BYTES + 1) as usize]).unwrap();
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                let log_path = home.path().join(".cairn/logs/hook.log");
+                std::fs::create_dir_all(log_path.parent().unwrap()).unwrap();
+                // Pre-fill past the 1 MiB rotation threshold.
+                std::fs::write(&log_path, vec![b'x'; (MAX_LOG_BYTES + 1) as usize]).unwrap();
 
-            let mut log = DebugLog::new(true);
-            log.record("fresh entry");
-            log.flush("SessionStart", None, 1);
+                let mut log = DebugLog::new(true);
+                log.record("fresh entry");
+                log.flush("SessionStart", None, 1);
 
-            assert!(
-                home.path().join(".cairn/logs/hook.log.1").exists(),
-                "the oversized file must be rotated to hook.log.1"
-            );
-            let text = std::fs::read_to_string(&log_path).unwrap();
-            assert!(
-                text.contains("fresh entry"),
-                "the new log file must contain only the fresh block, not the old bulk"
-            );
-            assert!(text.len() < (MAX_LOG_BYTES as usize), "new file must not carry over the old bulk");
-        });
+                assert!(
+                    home.path().join(".cairn/logs/hook.log.1").exists(),
+                    "the oversized file must be rotated to hook.log.1"
+                );
+                let text = std::fs::read_to_string(&log_path).unwrap();
+                assert!(
+                    text.contains("fresh entry"),
+                    "the new log file must contain only the fresh block, not the old bulk"
+                );
+                assert!(
+                    text.len() < (MAX_LOG_BYTES as usize),
+                    "new file must not carry over the old bulk"
+                );
+            },
+        );
     }
 }

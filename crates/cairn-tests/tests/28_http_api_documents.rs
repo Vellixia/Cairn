@@ -59,7 +59,12 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         promote_threshold: 0.85,
         demote_idle_days: 45,
         drift_autopilot: "safe".to_string(),
-        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        drift_safe_globs: vec![
+            "docs/**".to_string(),
+            "*.md".to_string(),
+            "**/tests/**".to_string(),
+            "**/*.test.*".to_string(),
+        ],
         auto_anchor: true,
         llm_daily_budget: 200_000,
         selftune: true,
@@ -157,12 +162,7 @@ async fn login_cookie(app: axum::Router) -> String {
         .to_string()
 }
 
-async fn ingest(
-    app: axum::Router,
-    source: &str,
-    content: &str,
-    cookie: &str,
-) -> serde_json::Value {
+async fn ingest(app: axum::Router, source: &str, content: &str, cookie: &str) -> serde_json::Value {
     let (status, body, _) = post_json(
         app,
         "/api/documents/ingest",
@@ -321,16 +321,20 @@ async fn search_finds_a_chunk_by_keyword() {
     assert!(status.is_success());
     let hits = hits.as_array().unwrap();
     assert!(!hits.is_empty());
-    assert!(hits
-        .iter()
-        .any(|h| h["source"] == "docs/zephyrium.md"));
+    assert!(hits.iter().any(|h| h["source"] == "docs/zephyrium.md"));
 }
 
 #[tokio::test]
 async fn delete_removes_the_document() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
-    let summary = ingest(app.clone(), "docs/to-delete.md", "content to delete", &cookie).await;
+    let summary = ingest(
+        app.clone(),
+        "docs/to-delete.md",
+        "content to delete",
+        &cookie,
+    )
+    .await;
     let id = summary["id"].as_str().unwrap();
 
     let (status, body, _) = request_json(
@@ -381,33 +385,33 @@ async fn project_scoped_documents_are_isolated_but_visible_globally() {
     assert_eq!(body["project_id"], "proj-a");
 
     // Different project: proj-a's doc must not appear.
-    let (_, list_b, _) = request_json_scoped(
-        app.clone(),
-        "GET",
-        "/api/documents",
-        &cookie,
-        "proj-b",
-    )
-    .await;
+    let (_, list_b, _) =
+        request_json_scoped(app.clone(), "GET", "/api/documents", &cookie, "proj-b").await;
     assert!(
-        !list_b.as_array().unwrap().iter().any(|d| d["source"] == "proj-a/notes.md"),
+        !list_b
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|d| d["source"] == "proj-a/notes.md"),
         "proj-b must not see proj-a's document; got {list_b}"
     );
 
     // Same project: visible.
-    let (_, list_a, _) = request_json_scoped(
-        app.clone(),
-        "GET",
-        "/api/documents",
-        &cookie,
-        "proj-a",
-    )
-    .await;
-    assert!(list_a.as_array().unwrap().iter().any(|d| d["source"] == "proj-a/notes.md"));
+    let (_, list_a, _) =
+        request_json_scoped(app.clone(), "GET", "/api/documents", &cookie, "proj-a").await;
+    assert!(list_a
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["source"] == "proj-a/notes.md"));
 
     // No header (global, unfiltered): still visible.
     let (_, list_all, _) = request_json(app, "GET", "/api/documents", Some(&cookie)).await;
-    assert!(list_all.as_array().unwrap().iter().any(|d| d["source"] == "proj-a/notes.md"));
+    assert!(list_all
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|d| d["source"] == "proj-a/notes.md"));
 }
 
 /// Same isolation guarantee, exercised through `/api/documents/search` instead of `list`.

@@ -267,7 +267,14 @@ pub fn publish_drift(broker: &EventBroker, path: &str, risk: &str) {
 /// `Store::append_audit` (not a synthetic one) so a client whose last-seen event was an audit
 /// entry can still resume replay correctly via `Last-Event-ID` - `backfill` reads from the same
 /// durable audit log this id came from.
-pub fn publish_audit(broker: &EventBroker, id: &str, ts: i64, kind: &str, actor: &str, detail: &str) {
+pub fn publish_audit(
+    broker: &EventBroker,
+    id: &str,
+    ts: i64,
+    kind: &str,
+    actor: &str,
+    detail: &str,
+) {
     broker.publish(EventPayload {
         id: id.to_string(),
         kind: KIND_AUDIT,

@@ -65,7 +65,11 @@ pub(crate) fn append(entry: &SpoolEntry) {
     let Ok(line) = serde_json::to_string(entry) else {
         return;
     };
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -134,7 +138,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dir_str = dir.path().to_string_lossy().into_owned();
         with_env(
-            &[("HOME", Some(dir_str.as_str())), ("USERPROFILE", Some(dir_str.as_str()))],
+            &[
+                ("HOME", Some(dir_str.as_str())),
+                ("USERPROFILE", Some(dir_str.as_str())),
+            ],
             || f(dir.path()),
         )
     }
@@ -162,7 +169,8 @@ mod tests {
     fn append_creates_dir_and_file_on_first_write() {
         with_temp_home(|home| {
             append(&entry("/api/memory"));
-            let contents = std::fs::read_to_string(home.join(".cairn").join("spool.jsonl")).unwrap();
+            let contents =
+                std::fs::read_to_string(home.join(".cairn").join("spool.jsonl")).unwrap();
             assert!(contents.contains("/api/memory"));
             assert!(contents.contains("proj-a"));
         });
@@ -184,7 +192,8 @@ mod tests {
         with_temp_home(|home| {
             append(&entry("/api/memory"));
             append(&entry("/api/guard/anchor/auto"));
-            let contents = std::fs::read_to_string(home.join(".cairn").join("spool.jsonl")).unwrap();
+            let contents =
+                std::fs::read_to_string(home.join(".cairn").join("spool.jsonl")).unwrap();
             assert_eq!(contents.lines().count(), 2);
         });
     }
@@ -197,8 +206,13 @@ mod tests {
             // Port 1 is reserved and never accepts connections - a fast, deterministic
             // "unreachable" without depending on any real network state.
             replay("http://127.0.0.1:1", "test-token");
-            let contents = std::fs::read_to_string(home.join(".cairn").join("spool.jsonl")).unwrap();
-            assert_eq!(contents.lines().count(), 2, "still-offline entries must stay queued");
+            let contents =
+                std::fs::read_to_string(home.join(".cairn").join("spool.jsonl")).unwrap();
+            assert_eq!(
+                contents.lines().count(),
+                2,
+                "still-offline entries must stay queued"
+            );
         });
     }
 

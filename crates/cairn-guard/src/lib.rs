@@ -568,17 +568,16 @@ mod tests {
             .auto_anchor_if_unset("Refactor the parser module. It's getting unwieldy.")
             .unwrap();
         assert_eq!(result.unwrap().goal, "Refactor the parser module");
-        assert_eq!(
-            g.anchor().unwrap().unwrap(),
-            "Refactor the parser module"
-        );
+        assert_eq!(g.anchor().unwrap().unwrap(), "Refactor the parser module");
     }
 
     #[test]
     fn auto_anchor_is_a_noop_once_any_anchor_is_set() {
         let Some((g, _dir)) = guard() else { return };
         g.set_anchor("manually set goal").unwrap();
-        let result = g.auto_anchor_if_unset("a completely different prompt").unwrap();
+        let result = g
+            .auto_anchor_if_unset("a completely different prompt")
+            .unwrap();
         assert!(result.is_none(), "must not override an existing anchor");
         assert_eq!(g.anchor().unwrap().unwrap(), "manually set goal");
     }

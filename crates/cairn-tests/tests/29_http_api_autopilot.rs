@@ -172,7 +172,9 @@ async fn login_cookie(app: axum::Router) -> String {
 
 #[tokio::test]
 async fn promotion_log_lists_promote_then_demote() {
-    let Some((app, store, _dir)) = state("safe") else { return };
+    let Some((app, store, _dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let m = seed_project_memory(&store, "promotable fact", 0.90);
 
@@ -185,11 +187,18 @@ async fn promotion_log_lists_promote_then_demote() {
     .await;
     assert!(status.is_success(), "got {status} body={body}");
 
-    let (status, log, _) =
-        request_json(app.clone(), "GET", "/api/memory/promotion-log", Some(&cookie)).await;
+    let (status, log, _) = request_json(
+        app.clone(),
+        "GET",
+        "/api/memory/promotion-log",
+        Some(&cookie),
+    )
+    .await;
     assert!(status.is_success());
     let entries = log.as_array().expect("array");
-    assert!(entries.iter().any(|e| e["memory_id"] == m.id && e["action"] == "promote"));
+    assert!(entries
+        .iter()
+        .any(|e| e["memory_id"] == m.id && e["action"] == "promote"));
 
     let (status, body, _) = request_json(
         app.clone(),
@@ -204,21 +213,32 @@ async fn promotion_log_lists_promote_then_demote() {
 
     let (_, log, _) = request_json(app, "GET", "/api/memory/promotion-log", Some(&cookie)).await;
     let entries = log.as_array().expect("array");
-    assert!(entries.iter().any(|e| e["memory_id"] == m.id && e["action"] == "demote"));
+    assert!(entries
+        .iter()
+        .any(|e| e["memory_id"] == m.id && e["action"] == "demote"));
 }
 
 #[tokio::test]
 async fn demote_unknown_id_returns_404() {
-    let Some((app, _store, _dir)) = state("safe") else { return };
+    let Some((app, _store, _dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
-    let (status, _, _) =
-        request_json(app, "POST", "/api/memory/does-not-exist/demote", Some(&cookie)).await;
+    let (status, _, _) = request_json(
+        app,
+        "POST",
+        "/api/memory/does-not-exist/demote",
+        Some(&cookie),
+    )
+    .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
 async fn demote_never_promoted_returns_404() {
-    let Some((app, store, _dir)) = state("safe") else { return };
+    let Some((app, store, _dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let m = seed_project_memory(&store, "never promoted", 0.5);
     let (status, _, _) = request_json(
@@ -235,7 +255,9 @@ async fn demote_never_promoted_returns_404() {
 
 #[tokio::test]
 async fn auto_anchor_derives_from_first_prompt() {
-    let Some((app, _store, _dir)) = state("safe") else { return };
+    let Some((app, _store, _dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
 
     let (status, body, _) = post_json(
@@ -255,7 +277,9 @@ async fn auto_anchor_derives_from_first_prompt() {
 
 #[tokio::test]
 async fn auto_anchor_never_overrides_an_existing_anchor() {
-    let Some((app, _store, _dir)) = state("safe") else { return };
+    let Some((app, _store, _dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
 
     let (status, _, _) = post_json(
@@ -283,7 +307,9 @@ async fn auto_anchor_never_overrides_an_existing_anchor() {
 
 #[tokio::test]
 async fn autopilot_digest_is_zero_with_no_activity() {
-    let Some((app, _store, _dir)) = state("safe") else { return };
+    let Some((app, _store, _dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let (status, body, _) =
         request_json(app, "GET", "/api/memory/autopilot-digest", Some(&cookie)).await;
@@ -295,7 +321,9 @@ async fn autopilot_digest_is_zero_with_no_activity() {
 
 #[tokio::test]
 async fn autopilot_digest_counts_a_promotion() {
-    let Some((app, store, _dir)) = state("safe") else { return };
+    let Some((app, store, _dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let m = seed_project_memory(&store, "digest candidate", 0.9);
     let (status, _, _) = request_json(
@@ -324,7 +352,9 @@ fn warn_risk_new_content() -> (String, String) {
 
 #[tokio::test]
 async fn safe_mode_auto_approves_warn_under_a_safe_glob() {
-    let Some((app, _store, dir)) = state("safe") else { return };
+    let Some((app, _store, dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let target = dir.path().join("docs").join("guide.md");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -351,7 +381,9 @@ async fn safe_mode_auto_approves_warn_under_a_safe_glob() {
 
 #[tokio::test]
 async fn safe_mode_holds_warn_outside_safe_globs() {
-    let Some((app, _store, dir)) = state("safe") else { return };
+    let Some((app, _store, dir)) = state("safe") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let target = dir.path().join("crates").join("lib.rs");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -378,7 +410,9 @@ async fn safe_mode_holds_warn_outside_safe_globs() {
 
 #[tokio::test]
 async fn danger_always_holds_even_in_all_mode() {
-    let Some((app, _store, dir)) = state("all") else { return };
+    let Some((app, _store, dir)) = state("all") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let target = dir.path().join("docs").join("wipe.md");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -408,7 +442,9 @@ async fn danger_always_holds_even_in_all_mode() {
 
 #[tokio::test]
 async fn off_mode_holds_everything() {
-    let Some((app, _store, dir)) = state("off") else { return };
+    let Some((app, _store, dir)) = state("off") else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let target = dir.path().join("docs").join("guide.md");
     std::fs::create_dir_all(target.parent().unwrap()).unwrap();
@@ -434,8 +470,9 @@ async fn off_mode_holds_everything() {
 
 #[tokio::test]
 async fn autopilot_routes_require_authentication() {
-    let Some((app, _store, _dir)) = state("safe") else { return };
-    let (status, _, _) =
-        request_json(app, "GET", "/api/memory/promotion-log", None).await;
+    let Some((app, _store, _dir)) = state("safe") else {
+        return;
+    };
+    let (status, _, _) = request_json(app, "GET", "/api/memory/promotion-log", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

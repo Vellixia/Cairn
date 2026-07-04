@@ -488,7 +488,11 @@ mod tests {
 
         record_llm_tokens(50);
         let after = llm_tokens_used_today();
-        assert_eq!(after, before + 50, "usage accumulates rather than resetting");
+        assert_eq!(
+            after,
+            before + 50,
+            "usage accumulates rather than resetting"
+        );
 
         assert!(
             !is_budget_exhausted(after + 1),

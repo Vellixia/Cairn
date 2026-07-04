@@ -388,7 +388,12 @@ impl Config {
                 .unwrap_or(200_000),
             selftune: std::env::var("CAIRN_SELFTUNE")
                 .ok()
-                .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no"))
+                .map(|s| {
+                    !matches!(
+                        s.trim().to_ascii_lowercase().as_str(),
+                        "0" | "false" | "off" | "no"
+                    )
+                })
                 .unwrap_or(true),
             max_working_per_project: env_str("CAIRN_MAX_WORKING_PER_PROJECT")
                 .and_then(|s| s.parse().ok())

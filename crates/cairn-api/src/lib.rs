@@ -598,7 +598,10 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
 
 /// Find the pre-rendered shell for `path`'s dynamic-route family among the embedded web assets.
 fn find_route_family_shell(path: &str) -> Option<String> {
-    find_shell_in(path, <WebAssets as RustEmbed>::iter().map(|f| f.to_string()))
+    find_shell_in(
+        path,
+        <WebAssets as RustEmbed>::iter().map(|f| f.to_string()),
+    )
 }
 
 /// Walk up `path`'s segments (most specific first) looking for any file in `files` that sits
@@ -1078,10 +1081,16 @@ async fn list_memories(
     if let Some(suspicious) = q.suspicious {
         mems.retain(|m| m.suspicious == suspicious);
     }
-    if let Some(needle) = q.q.as_deref().map(str::to_lowercase).filter(|n| !n.is_empty()) {
+    if let Some(needle) =
+        q.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|n| !n.is_empty())
+    {
         mems.retain(|m| {
             m.content.to_lowercase().contains(&needle)
-                || m.concepts.iter().any(|c| c.to_lowercase().contains(&needle))
+                || m.concepts
+                    .iter()
+                    .any(|c| c.to_lowercase().contains(&needle))
         });
     }
     let total = mems.len();
@@ -1151,8 +1160,11 @@ struct ProjectWithStats {
 /// Group `mems` by `scope_id` for every `Project`-scoped memory, giving `(count, latest
 /// updated_at)` per project id. One full-corpus scan shared by both project endpoints below -
 /// same cost class as `promotion_candidates`/`architecture_report`, no new store trait method.
-fn project_memory_stats(mems: &[Memory]) -> std::collections::HashMap<String, (usize, DateTime<Utc>)> {
-    let mut stats: std::collections::HashMap<String, (usize, DateTime<Utc>)> = std::collections::HashMap::new();
+fn project_memory_stats(
+    mems: &[Memory],
+) -> std::collections::HashMap<String, (usize, DateTime<Utc>)> {
+    let mut stats: std::collections::HashMap<String, (usize, DateTime<Utc>)> =
+        std::collections::HashMap::new();
     for m in mems {
         if m.scope_type != cairn_core::ScopeType::Project {
             continue;
@@ -1185,13 +1197,14 @@ fn with_stats(
 }
 
 /// GET `/api/projects` - every known project, most-recently-active first.
-async fn list_projects(
-    State(s): State<AppState>,
-) -> Result<Json<Vec<ProjectWithStats>>, ApiError> {
+async fn list_projects(State(s): State<AppState>) -> Result<Json<Vec<ProjectWithStats>>, ApiError> {
     let projects = s.store.list_projects()?;
     let stats = project_memory_stats(&s.store.all_memories()?);
     Ok(Json(
-        projects.into_iter().map(|p| with_stats(p, &stats)).collect(),
+        projects
+            .into_iter()
+            .map(|p| with_stats(p, &stats))
+            .collect(),
     ))
 }
 
@@ -1369,10 +1382,13 @@ async fn search_handler(
     }
 
     // Default path: plain hybrid search, scope-aware (v0.8.0 Sprint 10 - was Global-only).
-    Ok(Json(
-        s.mem
-            .hybrid_search_for_org(&q.q, limit, rerank_depth, org_id, &scope)?,
-    ))
+    Ok(Json(s.mem.hybrid_search_for_org(
+        &q.q,
+        limit,
+        rerank_depth,
+        org_id,
+        &scope,
+    )?))
 }
 
 #[derive(Deserialize)]
@@ -1568,11 +1584,10 @@ async fn session_summary(
     let Some(session_id) = scope.session_id else {
         return Ok(Json(json!({ "summarized": false })));
     };
-    match s.mem.synthesize_session(
-        &s.cfg.llm_consolidation,
-        &session_id,
-        scope.project_id,
-    )? {
+    match s
+        .mem
+        .synthesize_session(&s.cfg.llm_consolidation, &session_id, scope.project_id)?
+    {
         Some(m) => {
             crate::events::publish_memory(&s.events, "created", &m.id);
             Ok(Json(json!({ "summarized": true, "memory": m })))
@@ -1793,13 +1808,17 @@ async fn auto_anchor(
     Json(b): Json<AutoAnchorBody>,
 ) -> Result<Json<Value>, ApiError> {
     if !s.cfg.auto_anchor {
-        return Ok(Json(json!({ "anchor": s.guard.anchor()?, "derived": false })));
+        return Ok(Json(
+            json!({ "anchor": s.guard.anchor()?, "derived": false }),
+        ));
     }
     match s.guard.auto_anchor_if_unset(&b.prompt)? {
         Some(meta) => Ok(Json(
             json!({ "anchor": meta.goal, "derived": true, "suspicious": meta.suspicious }),
         )),
-        None => Ok(Json(json!({ "anchor": s.guard.anchor()?, "derived": false }))),
+        None => Ok(Json(
+            json!({ "anchor": s.guard.anchor()?, "derived": false }),
+        )),
     }
 }
 
@@ -1828,8 +1847,14 @@ async fn autopilot_digest(
 ) -> Result<Json<AutopilotDigest>, ApiError> {
     let since = Utc::now() - chrono::Duration::hours(q.hours.unwrap_or(24));
     let log = s.store.list_promotion_log(500)?;
-    let promoted = log.iter().filter(|e| e.action == "promote" && e.ts > since).count();
-    let demoted = log.iter().filter(|e| e.action == "demote" && e.ts > since).count();
+    let promoted = log
+        .iter()
+        .filter(|e| e.action == "promote" && e.ts > since)
+        .count();
+    let demoted = log
+        .iter()
+        .filter(|e| e.action == "demote" && e.ts > since)
+        .count();
     let drift_auto_approved = s
         .sessions
         .recent_drift(500, None)?
@@ -2980,7 +3005,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let ev = rx.try_recv().expect("remember should publish a memory event");
+        let ev = rx
+            .try_recv()
+            .expect("remember should publish a memory event");
         assert_eq!(ev.kind, crate::events::KIND_MEMORY);
         assert_eq!(ev.data["action"], "added");
         assert_eq!(ev.data["memory_id"], resp.0.id);
@@ -3179,9 +3206,12 @@ mod tests {
         }
         assert_eq!(wire["scope_type"], "project");
 
-        let err = get_memory(State(state.clone()), axum::extract::Path("nope".to_string()))
-            .await
-            .unwrap_err();
+        let err = get_memory(
+            State(state.clone()),
+            axum::extract::Path("nope".to_string()),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 

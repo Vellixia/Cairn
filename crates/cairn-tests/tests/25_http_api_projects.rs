@@ -55,7 +55,12 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         promote_threshold: 0.85,
         demote_idle_days: 45,
         drift_autopilot: "safe".to_string(),
-        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        drift_safe_globs: vec![
+            "docs/**".to_string(),
+            "*.md".to_string(),
+            "**/tests/**".to_string(),
+            "**/*.test.*".to_string(),
+        ],
         auto_anchor: true,
         llm_daily_budget: 200_000,
         selftune: true,
@@ -161,7 +166,10 @@ async fn upsert_then_get_returns_the_project() {
         Some(&cookie),
     )
     .await;
-    assert!(status.is_success(), "upsert should succeed; got {status} body={body}");
+    assert!(
+        status.is_success(),
+        "upsert should succeed; got {status} body={body}"
+    );
     assert_eq!(body["id"], "proj-alpha-hash");
     assert_eq!(body["name"], "proj-alpha");
     assert!(body["first_seen"].is_string());
@@ -175,7 +183,10 @@ async fn upsert_then_get_returns_the_project() {
         Some(&cookie),
     )
     .await;
-    assert!(status.is_success(), "get should succeed; got {status} body={body}");
+    assert!(
+        status.is_success(),
+        "get should succeed; got {status} body={body}"
+    );
     assert_eq!(body["name"], "proj-alpha");
     assert_eq!(body["path"], "/home/dev/proj-alpha");
 }
@@ -225,8 +236,7 @@ async fn list_includes_every_upserted_project() {
         assert!(status.is_success());
     }
 
-    let (status, body, _) =
-        request_json(app, "GET", "/api/projects", None, Some(&cookie)).await;
+    let (status, body, _) = request_json(app, "GET", "/api/projects", None, Some(&cookie)).await;
     assert!(status.is_success());
     let list = body.as_array().expect("list is a JSON array");
     let ids: Vec<&str> = list.iter().filter_map(|p| p["id"].as_str()).collect();

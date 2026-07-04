@@ -97,13 +97,22 @@ impl Assembler {
                 score,
             })
             .collect();
-        candidates.extend(doc_hits.into_iter().zip(doc_scores).map(|(c, score)| Candidate {
-            source: "doc",
-            kind: "doc".to_string(),
-            content: c.content,
-            score,
-        }));
-        candidates.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.extend(
+            doc_hits
+                .into_iter()
+                .zip(doc_scores)
+                .map(|(c, score)| Candidate {
+                    source: "doc",
+                    kind: "doc".to_string(),
+                    content: c.content,
+                    score,
+                }),
+        );
+        candidates.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         // Greedily pack the highest-ranked items until the budget is exhausted.
         let mut packed: Vec<(Candidate, usize)> = Vec::new();
@@ -130,7 +139,12 @@ impl Assembler {
         let mut included = Vec::with_capacity(ordered.len());
         let mut context = format!("# Cairn context for: {query}\n");
         for (position, (c, est)) in ordered.into_iter().enumerate() {
-            context.push_str(&format!("\n[{}] ({}) {}\n", position + 1, c.kind, c.content));
+            context.push_str(&format!(
+                "\n[{}] ({}) {}\n",
+                position + 1,
+                c.kind,
+                c.content
+            ));
             included.push(AssembledItem {
                 position,
                 source: c.source.to_string(),

@@ -85,12 +85,17 @@ pub fn run(json_output: bool) -> Result<()> {
         match (&status.token, status.token_source) {
             (Some(t), Some(src)) => {
                 let valid = if t.valid { "valid" } else { "INVALID" };
-                println!("Token:      {} ({} scope, {valid}, from {src})", t.name, t.scope);
+                println!(
+                    "Token:      {} ({} scope, {valid}, from {src})",
+                    t.name, t.scope
+                );
                 if let Some(exp) = &t.expires {
                     println!("Expires:    {exp}");
                 }
             }
-            (None, Some(src)) => println!("Token:      opaque token - cannot decode claims (from {src})"),
+            (None, Some(src)) => {
+                println!("Token:      opaque token - cannot decode claims (from {src})")
+            }
             _ => println!("Token:      (not configured)"),
         }
         println!(
@@ -187,8 +192,8 @@ mod tests {
         // exercise all three valid remainders (0, 2, 3 - a remainder of 1 is
         // never valid base64) to make sure none of them regress.
         for claims in [
-            r#"{"sub":"a","scope":"read"}"#,       // one length class
-            r#"{"sub":"ab","scope":"read"}"#,      // another
+            r#"{"sub":"a","scope":"read"}"#,        // one length class
+            r#"{"sub":"ab","scope":"read"}"#,       // another
             r#"{"sub":"abc","scope":"readwrite"}"#, // another
         ] {
             let payload = base64::Engine::encode(
@@ -206,7 +211,10 @@ mod tests {
 
     #[test]
     fn decode_jwt_info_returns_none_for_malformed_token() {
-        assert!(decode_jwt_info("only-one-part").is_none(), "no '.' separator at all");
+        assert!(
+            decode_jwt_info("only-one-part").is_none(),
+            "no '.' separator at all"
+        );
         assert!(
             decode_jwt_info("a.not-valid-base64!!!.c").is_none(),
             "payload segment isn't valid base64url"

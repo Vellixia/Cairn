@@ -387,7 +387,10 @@ mod tests {
             }
             let v: Value = serde_json::from_str(&read_text(&cfg_path)).unwrap();
             assert!(v["mcp"].get("cairn").is_none());
-            assert!(!plugin_path.exists(), "plugin file must be deleted by reset");
+            assert!(
+                !plugin_path.exists(),
+                "plugin file must be deleted by reset"
+            );
         });
     }
 

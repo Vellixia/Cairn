@@ -61,7 +61,12 @@ fn state() -> Option<(axum::Router, Arc<Store>, tempfile::TempDir)> {
         promote_threshold: 0.85,
         demote_idle_days: 45,
         drift_autopilot: "safe".to_string(),
-        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        drift_safe_globs: vec![
+            "docs/**".to_string(),
+            "*.md".to_string(),
+            "**/tests/**".to_string(),
+            "**/*.test.*".to_string(),
+        ],
         auto_anchor: true,
         llm_daily_budget: 200_000,
         selftune: true,
@@ -191,7 +196,9 @@ async fn login_cookie(app: axum::Router) -> String {
 
 #[tokio::test]
 async fn candidates_lists_only_the_review_band_and_excludes_locked() {
-    let Some((app, store, _dir)) = state() else { return };
+    let Some((app, store, _dir)) = state() else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
 
     let in_band = seed_candidate(&store, "in the review band", 0.80, false);
@@ -213,7 +220,9 @@ async fn candidates_lists_only_the_review_band_and_excludes_locked() {
 
 #[tokio::test]
 async fn promote_moves_to_global_and_locks() {
-    let Some((app, store, _dir)) = state() else { return };
+    let Some((app, store, _dir)) = state() else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let candidate = seed_candidate(&store, "promotable fact", 0.80, false);
 
@@ -232,7 +241,9 @@ async fn promote_moves_to_global_and_locks() {
 
 #[tokio::test]
 async fn promote_unknown_id_returns_404() {
-    let Some((app, _store, _dir)) = state() else { return };
+    let Some((app, _store, _dir)) = state() else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let (status, _, _) = request_json(
         app,
@@ -246,7 +257,9 @@ async fn promote_unknown_id_returns_404() {
 
 #[tokio::test]
 async fn dismiss_promotion_locks_without_changing_scope() {
-    let Some((app, store, _dir)) = state() else { return };
+    let Some((app, store, _dir)) = state() else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
     let candidate = seed_candidate(&store, "dismissable candidate", 0.80, false);
 
@@ -274,24 +287,22 @@ async fn dismiss_promotion_locks_without_changing_scope() {
 
 #[tokio::test]
 async fn session_summary_is_a_safe_noop_with_llm_disabled() {
-    let Some((app, _store, _dir)) = state() else { return };
+    let Some((app, _store, _dir)) = state() else {
+        return;
+    };
     let cookie = login_cookie(app.clone()).await;
 
-    let (status, body, _) = request_json(
-        app,
-        "POST",
-        "/api/memory/session-summary",
-        Some(&cookie),
-    )
-    .await;
+    let (status, body, _) =
+        request_json(app, "POST", "/api/memory/session-summary", Some(&cookie)).await;
     assert!(status.is_success(), "got {status} body={body}");
     assert_eq!(body["summarized"], false);
 }
 
 #[tokio::test]
 async fn promotion_routes_require_authentication() {
-    let Some((app, _store, _dir)) = state() else { return };
-    let (status, _, _) =
-        request_json(app, "GET", "/api/memory/promotion-candidates", None).await;
+    let Some((app, _store, _dir)) = state() else {
+        return;
+    };
+    let (status, _, _) = request_json(app, "GET", "/api/memory/promotion-candidates", None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

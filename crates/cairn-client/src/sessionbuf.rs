@@ -26,7 +26,11 @@ pub fn record_touch(session_id: &str, file_path: &str) {
     if std::fs::create_dir_all(parent).is_err() {
         return;
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(f, "{file_path}");
     }
 }
@@ -77,7 +81,9 @@ fn sweep_orphans_older_than(max_age: std::time::Duration) {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        let Ok(modified) = meta.modified() else { continue };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
         if modified < cutoff {
             let _ = std::fs::remove_file(&path);
         }
@@ -114,58 +120,78 @@ mod tests {
     #[test]
     fn record_and_drain_dedups_preserving_order() {
         let (_home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            record_touch("sess-1", "a.rs");
-            record_touch("sess-1", "b.rs");
-            record_touch("sess-1", "a.rs");
-            let files = drain("sess-1");
-            assert_eq!(files, vec!["a.rs".to_string(), "b.rs".to_string()]);
-        });
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                record_touch("sess-1", "a.rs");
+                record_touch("sess-1", "b.rs");
+                record_touch("sess-1", "a.rs");
+                let files = drain("sess-1");
+                assert_eq!(files, vec!["a.rs".to_string(), "b.rs".to_string()]);
+            },
+        );
     }
 
     #[test]
     fn drain_deletes_the_buffer() {
         let (_home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            record_touch("sess-2", "a.rs");
-            assert!(!drain("sess-2").is_empty());
-            assert!(drain("sess-2").is_empty(), "second drain must find nothing left");
-        });
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                record_touch("sess-2", "a.rs");
+                assert!(!drain("sess-2").is_empty());
+                assert!(
+                    drain("sess-2").is_empty(),
+                    "second drain must find nothing left"
+                );
+            },
+        );
     }
 
     #[test]
     fn drain_with_no_prior_touches_is_empty() {
         let (_home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            assert!(drain("never-touched").is_empty());
-        });
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                assert!(drain("never-touched").is_empty());
+            },
+        );
     }
 
     #[test]
     fn sweep_orphans_older_than_removes_entries_past_max_age() {
         let (home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            record_touch("old-sess", "a.rs");
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            sweep_orphans_older_than(std::time::Duration::from_millis(10));
-            assert!(
-                !home.path().join(".cairn/sessions/old-sess.files").exists(),
-                "an entry older than max_age must be swept"
-            );
-        });
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                record_touch("old-sess", "a.rs");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                sweep_orphans_older_than(std::time::Duration::from_millis(10));
+                assert!(
+                    !home.path().join(".cairn/sessions/old-sess.files").exists(),
+                    "an entry older than max_age must be swept"
+                );
+            },
+        );
     }
 
     #[test]
     fn sweep_orphans_older_than_keeps_entries_within_max_age() {
         let (home, home_str) = temp_home();
-        with_env(&[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))], || {
-            record_touch("fresh-sess", "b.rs");
-            sweep_orphans_older_than(std::time::Duration::from_secs(3600));
-            assert!(
-                home.path().join(".cairn/sessions/fresh-sess.files").exists(),
-                "an entry within max_age must survive the sweep"
-            );
-        });
+        with_env(
+            &[("HOME", Some(&home_str)), ("USERPROFILE", Some(&home_str))],
+            || {
+                record_touch("fresh-sess", "b.rs");
+                sweep_orphans_older_than(std::time::Duration::from_secs(3600));
+                assert!(
+                    home.path()
+                        .join(".cairn/sessions/fresh-sess.files")
+                        .exists(),
+                    "an entry within max_age must survive the sweep"
+                );
+            },
+        );
     }
 
     #[test]

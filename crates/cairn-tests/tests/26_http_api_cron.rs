@@ -56,7 +56,12 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         promote_threshold: 0.85,
         demote_idle_days: 45,
         drift_autopilot: "safe".to_string(),
-        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        drift_safe_globs: vec![
+            "docs/**".to_string(),
+            "*.md".to_string(),
+            "**/tests/**".to_string(),
+            "**/*.test.*".to_string(),
+        ],
         auto_anchor: true,
         llm_daily_budget: 200_000,
         selftune: true,
@@ -235,7 +240,10 @@ async fn health_reflects_last_run_after_a_manual_trigger() {
         .expect("session-gc listed");
     assert_eq!(session_gc["last_status"], "ok");
     assert!(!session_gc["last_run_at"].is_null());
-    assert_eq!(session_gc["running"], false, "run_job_now returns synchronously");
+    assert_eq!(
+        session_gc["running"], false,
+        "run_job_now returns synchronously"
+    );
 }
 
 #[tokio::test]
@@ -250,13 +258,8 @@ async fn memory_demote_job_runs_and_reports_zero_on_an_empty_store() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
-    let (status, body, _) = request_json(
-        app,
-        "POST",
-        "/api/cron/run/memory-demote",
-        Some(&cookie),
-    )
-    .await;
+    let (status, body, _) =
+        request_json(app, "POST", "/api/cron/run/memory-demote", Some(&cookie)).await;
     assert!(status.is_success(), "got {status} body={body}");
     assert_eq!(body["job"], "memory-demote");
     assert_eq!(body["outcome"], "ok");
@@ -269,18 +272,16 @@ async fn memory_decay_job_reports_hygiene_counts_alongside_decay() {
 
     // v0.8.0 Sprint 9: the dedup sweep and working-tier cap ride along on this same job -
     // an empty store exercises all three passes and should report zero for each.
-    let (status, body, _) = request_json(
-        app,
-        "POST",
-        "/api/cron/run/memory-decay",
-        Some(&cookie),
-    )
-    .await;
+    let (status, body, _) =
+        request_json(app, "POST", "/api/cron/run/memory-decay", Some(&cookie)).await;
     assert!(status.is_success(), "got {status} body={body}");
     assert_eq!(body["job"], "memory-decay");
     assert_eq!(body["outcome"], "ok");
     let detail = body["detail"].as_str().unwrap();
-    assert!(detail.contains("decayed confidence on 0 memories"), "{detail}");
+    assert!(
+        detail.contains("decayed confidence on 0 memories"),
+        "{detail}"
+    );
     assert!(detail.contains("deduped 0"), "{detail}");
     assert!(detail.contains("capped 0"), "{detail}");
 }
@@ -305,13 +306,8 @@ async fn llm_intelligence_job_is_a_noop_when_llm_disabled() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
-    let (status, body, _) = request_json(
-        app,
-        "POST",
-        "/api/cron/run/llm-intelligence",
-        Some(&cookie),
-    )
-    .await;
+    let (status, body, _) =
+        request_json(app, "POST", "/api/cron/run/llm-intelligence", Some(&cookie)).await;
     assert!(status.is_success(), "got {status} body={body}");
     assert_eq!(body["job"], "llm-intelligence");
     assert_eq!(body["outcome"], "ok");
@@ -388,13 +384,8 @@ async fn history_filters_by_job() {
 async fn triggering_an_unknown_job_returns_404() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
-    let (status, _, _) = request_json(
-        app,
-        "POST",
-        "/api/cron/run/does-not-exist",
-        Some(&cookie),
-    )
-    .await;
+    let (status, _, _) =
+        request_json(app, "POST", "/api/cron/run/does-not-exist", Some(&cookie)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 

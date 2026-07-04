@@ -48,10 +48,7 @@ pub fn run(dry_run: bool) -> Result<()> {
                 removed += 1;
             }
             Ok(false) => {}
-            Err(e) => eprintln!(
-                "cairn reset: skipping {}: {e}",
-                action.target().display()
-            ),
+            Err(e) => eprintln!("cairn reset: skipping {}: {e}", action.target().display()),
         }
     }
 
@@ -140,7 +137,10 @@ mod tests {
                 reported += 1;
             }
         }
-        assert!(reported >= 2, "should find the CLAUDE.md block and the mcp.json entry");
+        assert!(
+            reported >= 2,
+            "should find the CLAUDE.md block and the mcp.json entry"
+        );
 
         // Nothing on disk moved.
         assert_eq!(read(&p.join("CLAUDE.md")), before_claude);
@@ -171,10 +171,7 @@ mod tests {
             .iter()
             .filter(|a| a.would_change().unwrap())
             .count();
-        let real_count = plan(p, None)
-            .iter()
-            .filter(|a| a.apply().unwrap())
-            .count();
+        let real_count = plan(p, None).iter().filter(|a| a.apply().unwrap()).count();
         assert_eq!(dry_count, real_count);
         assert!(real_count > 0);
 
@@ -219,7 +216,11 @@ mod tests {
 
             let mut mcp: Value = serde_json::from_str(&read(&p.join(".mcp.json"))).unwrap();
             mcp["mcpServers"]["other"] = serde_json::json!({ "command": "foo" });
-            fs::write(p.join(".mcp.json"), serde_json::to_string_pretty(&mcp).unwrap()).unwrap();
+            fs::write(
+                p.join(".mcp.json"),
+                serde_json::to_string_pretty(&mcp).unwrap(),
+            )
+            .unwrap();
         }
 
         // Codex: cairn + a foreign hook + a foreign MCP server. `codex_config_path`
@@ -239,10 +240,9 @@ mod tests {
 
             let hooks_path = h.join(".codex/hooks.json");
             let mut hooks: Value = serde_json::from_str(&read(&hooks_path)).unwrap();
-            hooks["hooks"]["SessionStart"]
-                .as_array_mut()
-                .unwrap()
-                .push(serde_json::json!({ "hooks": [{ "type": "command", "command": "echo foreign" }] }));
+            hooks["hooks"]["SessionStart"].as_array_mut().unwrap().push(
+                serde_json::json!({ "hooks": [{ "type": "command", "command": "echo foreign" }] }),
+            );
             fs::write(&hooks_path, serde_json::to_string_pretty(&hooks).unwrap()).unwrap();
         }
 
@@ -250,7 +250,8 @@ mod tests {
             action.apply().unwrap();
         }
 
-        let settings: Value = serde_json::from_str(&read(&p.join(".claude/settings.json"))).unwrap();
+        let settings: Value =
+            serde_json::from_str(&read(&p.join(".claude/settings.json"))).unwrap();
         let starts = settings["hooks"]["SessionStart"].as_array().unwrap();
         assert_eq!(starts.len(), 1, "foreign Claude Code hook must survive");
         assert_eq!(starts[0]["hooks"][0]["command"], "echo foreign");
@@ -294,7 +295,10 @@ mod tests {
             for action in agents::OpenCode.removal_plan(home.path(), Some(home.path())) {
                 action.apply().unwrap();
             }
-            assert!(!plugin_path.exists(), "reset must delete the XDG-resolved plugin file");
+            assert!(
+                !plugin_path.exists(),
+                "reset must delete the XDG-resolved plugin file"
+            );
         });
     }
 
@@ -327,7 +331,10 @@ mod tests {
             }
         }
 
-        assert!(removed > 0, "the valid settings.json hooks must still be cleaned");
+        assert!(
+            removed > 0,
+            "the valid settings.json hooks must still be cleaned"
+        );
         let settings: Value =
             serde_json::from_str(&read(&p.join(".claude/settings.json"))).unwrap();
         assert!(settings["hooks"].get("SessionStart").is_none());

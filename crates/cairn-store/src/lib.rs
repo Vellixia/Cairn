@@ -5,8 +5,8 @@
 
 mod blob;
 mod db;
-mod surreal;
 pub mod memory_backend;
+mod surreal;
 
 pub use blob::BlobStore;
 pub use db::{

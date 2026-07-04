@@ -153,12 +153,7 @@ fn write_codex_hooks(home: &Path) -> Result<PathBuf> {
         &format!("{exe} hook PostToolUse"),
         Some("apply_patch|Edit|Write"),
     );
-    add_hook(
-        hooks_obj,
-        "Stop",
-        &format!("{exe} hook SessionEnd"),
-        None,
-    );
+    add_hook(hooks_obj, "Stop", &format!("{exe} hook SessionEnd"), None);
 
     write_json(&hooks_path, &Value::Object(hooks_cfg))?;
     Ok(hooks_path)
@@ -333,10 +328,11 @@ WEIRD = \"a=b#c\"
 
     #[test]
     fn non_embed_env_mode_drops_a_previously_embedded_env() {
-        let embedded = upsert_codex_cairn("", Some("http://old:7777"), Some("old-tok"), true).unwrap();
+        let embedded =
+            upsert_codex_cairn("", Some("http://old:7777"), Some("old-tok"), true).unwrap();
         assert!(embedded.contains("CAIRN_TOKEN"));
-        let bare = upsert_codex_cairn(&embedded, Some("http://new:7777"), Some("new-tok"), false)
-            .unwrap();
+        let bare =
+            upsert_codex_cairn(&embedded, Some("http://new:7777"), Some("new-tok"), false).unwrap();
         let doc = bare.parse::<toml_edit::DocumentMut>().unwrap();
         assert!(
             doc["mcp_servers"]["cairn"].get("env").is_none(),

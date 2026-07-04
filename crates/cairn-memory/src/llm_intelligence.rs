@@ -63,14 +63,18 @@ pub(crate) fn check_contradiction_via_llm(
 
 /// `true` only if the response's first word is (case-insensitively) "yes".
 pub(crate) fn parse_yes_no(text: &str) -> bool {
-    text.split_whitespace()
-        .next()
-        .is_some_and(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).eq_ignore_ascii_case("yes"))
+    text.split_whitespace().next().is_some_and(|w| {
+        w.trim_matches(|c: char| !c.is_alphanumeric())
+            .eq_ignore_ascii_case("yes")
+    })
 }
 
 /// Ask the LLM for a 2-3 sentence summary of what a session accomplished, from its memory
 /// contents. Returns `None` on any failure or empty response.
-pub(crate) fn summarize_session_via_llm(cfg: &LlmConsolidationConfig, contents: &[String]) -> Option<String> {
+pub(crate) fn summarize_session_via_llm(
+    cfg: &LlmConsolidationConfig,
+    contents: &[String],
+) -> Option<String> {
     let joined = contents
         .iter()
         .map(|c| format!("- {c}"))
@@ -166,6 +170,9 @@ mod tests {
         let at_three = fast_promotion_score(MemoryKind::Fact, 3);
         let at_ten = fast_promotion_score(MemoryKind::Fact, 10);
         assert_eq!(at_three, at_ten, "cross-project signal saturates at 3 hits");
-        assert!(fast_promotion_score(MemoryKind::Task, 10) < at_three, "task kind never scores high");
+        assert!(
+            fast_promotion_score(MemoryKind::Task, 10) < at_three,
+            "task kind never scores high"
+        );
     }
 }

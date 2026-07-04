@@ -33,7 +33,9 @@ pub fn run(code: &str, server: Option<&str>, no_agents: bool) -> Result<()> {
     );
 
     if no_agents {
-        println!("Skipping agent wiring (--no-agents). Run `cairn setup --all` later to wire agents up.");
+        println!(
+            "Skipping agent wiring (--no-agents). Run `cairn setup --all` later to wire agents up."
+        );
         return Ok(());
     }
 
@@ -109,7 +111,10 @@ mod tests {
     #[test]
     fn explicit_arg_wins_over_everything() {
         with_env(&[("CAIRN_SERVER", Some("http://env:1"))], || {
-            assert_eq!(resolve_server(Some("http://explicit:2")).unwrap(), "http://explicit:2");
+            assert_eq!(
+                resolve_server(Some("http://explicit:2")).unwrap(),
+                "http://explicit:2"
+            );
         });
     }
 

@@ -80,7 +80,14 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         eprintln!("-> Skipping agent wiring (--skip-agents).\n");
     } else {
         eprintln!("-> Detecting & wiring supported agents...");
-        let wired = crate::setup::run(None, true, server.as_deref(), token.as_deref(), false, false)?;
+        let wired = crate::setup::run(
+            None,
+            true,
+            server.as_deref(),
+            token.as_deref(),
+            false,
+            false,
+        )?;
         if wired == 0 {
             eprintln!("  no supported agents detected (run `cairn setup <agent>` to add one)");
         } else {

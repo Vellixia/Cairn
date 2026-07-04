@@ -185,7 +185,10 @@ impl SurrealStore {
         let vals: Vec<Json> = resp
             .take(0)
             .map_err(|e| Error::Storage(format!("surrealdb decode: {e}")))?;
-        Ok(vals.into_iter().filter_map(|v| v.as_object().cloned()).collect())
+        Ok(vals
+            .into_iter()
+            .filter_map(|v| v.as_object().cloned())
+            .collect())
     }
 
     /// `RETURN array::len(SELECT VALUE id FROM <table>)` - a row count that never errors on an
@@ -296,10 +299,7 @@ impl StoreBackend for SurrealStore {
             if m.updated_at < existing.updated_at {
                 return Ok(false); // incoming is older - last-writer-wins keeps the existing copy
             }
-            self.q(
-                "DELETE type::record('memory', $id)",
-                json!({ "id": &m.id }),
-            )?;
+            self.q("DELETE type::record('memory', $id)", json!({ "id": &m.id }))?;
         }
         self.insert_memory(m)?;
         Ok(true)
@@ -1044,7 +1044,10 @@ fn promotion_log_from_row(m: &Map<String, Json>) -> PromotionLogEntry {
 }
 
 fn get_str(m: &Map<String, Json>, k: &str) -> String {
-    m.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+    m.get(k)
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn get_opt_str(m: &Map<String, Json>, k: &str) -> Option<String> {
@@ -1068,7 +1071,11 @@ fn get_bool(m: &Map<String, Json>, k: &str) -> bool {
 fn get_str_vec(m: &Map<String, Json>, k: &str) -> Vec<String> {
     m.get(k)
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -1085,7 +1092,11 @@ fn memory_from_props(m: &Map<String, Json>) -> Memory {
         reasoning: get_opt_str(m, "reasoning"),
         concepts: get_str_vec(m, "concepts"),
         files: get_str_vec(m, "files"),
-        session_id: if session.is_empty() { None } else { Some(session) },
+        session_id: if session.is_empty() {
+            None
+        } else {
+            Some(session)
+        },
         importance: get_f64(m, "importance") as f32,
         access_count: get_i64(m, "access_count"),
         org_id: OrgId::default(),
@@ -1152,18 +1163,23 @@ mod live {
             rerank: cairn_core::RerankConfig::default(),
             admin: cairn_core::AdminConfig::default(),
             multi_tenant: false,
-        session_ttl_days: 2,
-        decay_period_days: 30,
-        access_log_retention_days: 90,
-        cron_enabled: true,
-        promote_threshold: 0.85,
-        demote_idle_days: 45,
-        drift_autopilot: "safe".to_string(),
-        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
-        auto_anchor: true,
-        llm_daily_budget: 200_000,
-        selftune: true,
-        max_working_per_project: 500,
+            session_ttl_days: 2,
+            decay_period_days: 30,
+            access_log_retention_days: 90,
+            cron_enabled: true,
+            promote_threshold: 0.85,
+            demote_idle_days: 45,
+            drift_autopilot: "safe".to_string(),
+            drift_safe_globs: vec![
+                "docs/**".to_string(),
+                "*.md".to_string(),
+                "**/tests/**".to_string(),
+                "**/*.test.*".to_string(),
+            ],
+            auto_anchor: true,
+            llm_daily_budget: 200_000,
+            selftune: true,
+            max_working_per_project: 500,
         };
         Some(SurrealStore::connect(&cfg).expect("connect to live SurrealDB"))
     }
@@ -1205,7 +1221,9 @@ mod live {
             be.revoke_token(&tok.id).expect("revoke"),
             "first revoke reports removed"
         );
-        assert!(!be.validate_token_id(&tok.id).expect("validate after revoke"));
+        assert!(!be
+            .validate_token_id(&tok.id)
+            .expect("validate after revoke"));
         assert!(
             !be.revoke_token(&tok.id).expect("revoke again"),
             "second revoke is a no-op"
@@ -1394,11 +1412,17 @@ mod live {
             reason: "auto-demote".to_string(),
             ts: Utc::now(),
         };
-        store.record_promotion_event(&demote).expect("record demote");
+        store
+            .record_promotion_event(&demote)
+            .expect("record demote");
 
         let log = store.list_promotion_log(10).expect("list");
-        assert!(log.iter().any(|e| e.memory_id == memory_id && e.action == "promote"));
-        assert!(log.iter().any(|e| e.memory_id == memory_id && e.action == "demote"));
+        assert!(log
+            .iter()
+            .any(|e| e.memory_id == memory_id && e.action == "promote"));
+        assert!(log
+            .iter()
+            .any(|e| e.memory_id == memory_id && e.action == "demote"));
     }
 
     #[test]

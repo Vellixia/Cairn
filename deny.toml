@@ -11,11 +11,15 @@ unmaintained = "workspace"
 # Each ignore below is a transitive dependency we can't easily upgrade without breaking the
 # workspace's pinned minor-version policy. The advisory database entry is linked in each line.
 #
-# NOTE: RUSTSEC-2024-0436 (`paste` via rust-embed), RUSTSEC-2025-0119 (`number_prefix` via
-# indicatif/human-panic), and RUSTSEC-2025-0134 (`rustls-pemfile` via axum-server 0.7.x) were
-# removed here in v0.8.0 Sprint 1 - re-resolving Cargo.lock for the SurrealDB addition bumped
-# these transitive deps past the affected versions, so the ignores are now dead (`cargo deny`
-# reports "advisory was not encountered" if they're kept).
+# NOTE: RUSTSEC-2024-0436 (`paste`), RUSTSEC-2025-0119 (`number_prefix`), and RUSTSEC-2025-0134
+# (`rustls-pemfile`) are NOT listed below even though all three crates are still present in
+# Cargo.lock at their flagged versions (verified with `cargo audit` in v0.8.0 CI-green-up) - they
+# are deliberately absent, not dead. All three are `unmaintained` warnings on transitive-only
+# dependencies, and `unmaintained = "workspace"` above means cargo-deny only flags an unmaintained
+# crate when it's a direct workspace dependency, so it never "encounters" these three and adding
+# them here would itself error with "advisory was not encountered". `.cargo/audit.toml` has no such
+# depth exception (`output.deny = ["unmaintained"]` there is depth-agnostic) and DOES need to
+# ignore all three explicitly - see that file. Do not "fix" this by adding them here.
 ignore = [
     # RUSTSEC-2023-0071 - `rsa`: Marvin Attack timing side-channel (no safe upgrade available
     # upstream). Transitive via surrealdb-core -> jsonwebtoken 10.x (used for SurrealDB's own
@@ -24,6 +28,21 @@ ignore = [
     # our deployment; re-evaluate when surrealdb-core migrates off the vulnerable jsonwebtoken
     # version or the `rsa` crate ships a constant-time implementation.
     "RUSTSEC-2023-0071",
+    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 - `quick-xml`: two DoS advisories (quadratic-time
+    # attribute dedup in `BytesStart::attributes()`/`try_get_attribute`, and unbounded heap
+    # allocation in `NamespaceResolver::push`, reachable via `NsReader`). Transitive via
+    # self_update 0.44.0 -> cairn-client. self_update's only quick-xml use is `backends/s3.rs`;
+    # read that file in full (vendored source) and confirmed it does nothing but
+    # `Reader::from_str` + match on `Event::Start`/`Event::Text`/`Event::Eof`, reading `e.name()`
+    # - it never calls `.attributes()`, `.try_get_attribute()`, or anything namespace-related, and
+    # `NsReader` does not appear anywhere in self_update's tree. Neither advisory's affected code
+    # path is reachable through this dependency regardless of which self_update backend
+    # cairn-client uses. No self_update release, including the 1.0.0-rc.1 pre-release, has moved
+    # its quick-xml requirement past `^0.38` (checked the full version history via the crates.io
+    # sparse index), so there is no `cargo update` that resolves this short of vendoring a patched
+    # fork. Re-evaluate once self_update bumps its quick-xml dependency to >=0.41.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
 ]
 
 [bans]

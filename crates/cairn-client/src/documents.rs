@@ -36,7 +36,8 @@ struct DocumentChunkView {
 
 pub fn ingest(source: &str, title: Option<&str>) -> Result<()> {
     let (server, token, project_id) = server_and_token()?;
-    let content = cairn_document::read_source(source).with_context(|| format!("reading {source}"))?;
+    let content =
+        cairn_document::read_source(source).with_context(|| format!("reading {source}"))?;
     let body = serde_json::json!({ "source": source, "content": content, "title": title });
     let mut req = ureq::post(&format!("{server}/api/documents/ingest"))
         .set("Authorization", &format!("Bearer {token}"));

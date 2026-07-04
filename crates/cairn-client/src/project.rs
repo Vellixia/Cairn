@@ -26,8 +26,8 @@ pub fn detect_project() -> (Option<String>, String) {
         if out.status.success() {
             let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
             if !path.is_empty() {
-                let canonical =
-                    std::fs::canonicalize(&path).unwrap_or_else(|_| std::path::PathBuf::from(&path));
+                let canonical = std::fs::canonicalize(&path)
+                    .unwrap_or_else(|_| std::path::PathBuf::from(&path));
                 let name = canonical
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())

@@ -60,7 +60,12 @@ fn state() -> Option<axum::Router> {
         promote_threshold: 0.85,
         demote_idle_days: 45,
         drift_autopilot: "safe".to_string(),
-        drift_safe_globs: vec!["docs/**".to_string(), "*.md".to_string(), "**/tests/**".to_string(), "**/*.test.*".to_string()],
+        drift_safe_globs: vec![
+            "docs/**".to_string(),
+            "*.md".to_string(),
+            "**/tests/**".to_string(),
+            "**/*.test.*".to_string(),
+        ],
         auto_anchor: true,
         llm_daily_budget: 200_000,
         selftune: true,

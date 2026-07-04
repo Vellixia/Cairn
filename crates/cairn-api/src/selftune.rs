@@ -20,7 +20,9 @@ static OVERRIDE: OnceLock<Mutex<Option<f32>>> = OnceLock::new();
 /// [`tune`] has ever set one, otherwise `configured` (`Config.promote_threshold`) unchanged.
 pub fn effective_promote_threshold(configured: f32) -> f32 {
     let cell = OVERRIDE.get_or_init(|| Mutex::new(None));
-    cell.lock().unwrap_or_else(|e| e.into_inner()).unwrap_or(configured)
+    cell.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .unwrap_or(configured)
 }
 
 const MIN_THRESHOLD: f32 = 0.5;

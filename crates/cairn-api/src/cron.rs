@@ -159,7 +159,10 @@ pub fn run_job_now(state: &AppState, job: &'static str) -> Result<CronRun, Strin
         };
         state.cron_history.record(run.clone());
         crate::events::publish_cron(&state.events, run.job, run.outcome);
-        tracing::warn!(job = job, "cron tick skipped - previous run still in flight");
+        tracing::warn!(
+            job = job,
+            "cron tick skipped - previous run still in flight"
+        );
         return Ok(run);
     }
     let _guard = RunningGuard {
@@ -170,7 +173,10 @@ pub fn run_job_now(state: &AppState, job: &'static str) -> Result<CronRun, Strin
     let t0 = std::time::Instant::now();
     let (outcome, detail): (&'static str, String) = match job {
         "session-gc" => match state.mem.run_session_gc(state.cfg.session_ttl_days) {
-            Ok(n) => ("ok", format!("promoted {n} session-scoped memories to global")),
+            Ok(n) => (
+                "ok",
+                format!("promoted {n} session-scoped memories to global"),
+            ),
             Err(e) => ("err", e.to_string()),
         },
         "memory-decay" => {
@@ -390,19 +396,28 @@ mod tests {
     fn single_flight_guard_blocks_a_second_start_until_the_first_finishes() {
         let h = CronHistory::default();
         assert!(h.try_start("session-gc"), "first start succeeds");
-        assert!(!h.try_start("session-gc"), "second concurrent start is blocked");
+        assert!(
+            !h.try_start("session-gc"),
+            "second concurrent start is blocked"
+        );
         assert!(h.is_running("session-gc"));
 
         h.finish("session-gc");
         assert!(!h.is_running("session-gc"));
-        assert!(h.try_start("session-gc"), "start succeeds again once finished");
+        assert!(
+            h.try_start("session-gc"),
+            "start succeeds again once finished"
+        );
     }
 
     #[test]
     fn single_flight_guard_is_independent_per_job() {
         let h = CronHistory::default();
         assert!(h.try_start("session-gc"));
-        assert!(h.try_start("memory-decay"), "a different job is never blocked");
+        assert!(
+            h.try_start("memory-decay"),
+            "a different job is never blocked"
+        );
     }
 
     #[test]
@@ -418,7 +433,10 @@ mod tests {
             };
             assert!(h.is_running("session-gc"));
         }
-        assert!(!h.is_running("session-gc"), "slot released once the guard drops");
+        assert!(
+            !h.is_running("session-gc"),
+            "slot released once the guard drops"
+        );
     }
 
     #[test]
@@ -470,7 +488,9 @@ mod tests {
         };
         let mut rx = state.events.subscribe();
         run_job_now(&state, "session-gc").expect("known job");
-        let ev = rx.try_recv().expect("run_job_now should publish a cron event");
+        let ev = rx
+            .try_recv()
+            .expect("run_job_now should publish a cron event");
         assert_eq!(ev.kind, crate::events::KIND_CRON);
         assert_eq!(ev.data["job"], "session-gc");
         assert_eq!(ev.data["outcome"], "ok");

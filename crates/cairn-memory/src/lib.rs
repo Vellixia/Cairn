@@ -19,8 +19,8 @@ pub mod llm_consolidator;
 pub use llm_consolidator::{
     apply_decay, llm_tokens_used_today, Insight, LlmConsolidator, ProceduralStep, SemanticFact,
 };
-mod llm_intelligence;
 pub mod analysis;
+mod llm_intelligence;
 pub use analysis::{generate_architecture_report, ArchitectureReport, BridgeEntry, GodNodeEntry};
 pub mod followup_tracker;
 pub use followup_tracker::FollowupTracker;
@@ -444,7 +444,9 @@ impl MemoryEngine {
                 match self.store.reassign_scope(&m.id, ScopeType::Global, None) {
                     Ok(true) => promoted += 1,
                     Ok(false) => {}
-                    Err(e) => tracing::warn!(memory_id = %m.id, error = %e, "session-gc: reassign_scope failed"),
+                    Err(e) => {
+                        tracing::warn!(memory_id = %m.id, error = %e, "session-gc: reassign_scope failed")
+                    }
                 }
             }
         }
@@ -559,7 +561,11 @@ impl MemoryEngine {
     /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) is checked
     /// before every LLM call so a runaway memory set can't blow through a day's token quota in
     /// one cron tick - remaining memories are simply picked up on tomorrow's run.
-    pub fn run_concept_extraction(&self, llm_cfg: &LlmConsolidationConfig, daily_budget: u64) -> Result<usize> {
+    pub fn run_concept_extraction(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        daily_budget: u64,
+    ) -> Result<usize> {
         if !llm_cfg.enabled {
             return Ok(0);
         }
@@ -605,7 +611,11 @@ impl MemoryEngine {
     /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) is checked
     /// before every LLM call - once exhausted, remaining memories are left un-checked for
     /// today and revisited on tomorrow's run.
-    pub fn run_contradiction_detection(&self, llm_cfg: &LlmConsolidationConfig, daily_budget: u64) -> Result<usize> {
+    pub fn run_contradiction_detection(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        daily_budget: u64,
+    ) -> Result<usize> {
         if !llm_cfg.enabled {
             return Ok(0);
         }
@@ -665,7 +675,11 @@ impl MemoryEngine {
     /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) only guards the
     /// borderline-case LLM refinement call below, never the pass itself - once exhausted, every
     /// remaining memory still gets its cheap `fast_score`, just without the LLM tie-break.
-    pub fn run_promotion_scoring(&self, llm_cfg: &LlmConsolidationConfig, daily_budget: u64) -> Result<usize> {
+    pub fn run_promotion_scoring(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        daily_budget: u64,
+    ) -> Result<usize> {
         let sanitizer = cairn_share::Sanitizer::new();
         let mut scored = 0;
         for m in self.store.all_memories()? {
@@ -685,8 +699,11 @@ impl MemoryEngine {
                 .scope_id
                 .as_deref()
                 .map(|pid| {
-                    self.store
-                        .count_cross_project_access(&m.id, pid, Utc::now() - Duration::days(30))
+                    self.store.count_cross_project_access(
+                        &m.id,
+                        pid,
+                        Utc::now() - Duration::days(30),
+                    )
                 })
                 .transpose()?
                 .unwrap_or(0);
@@ -912,7 +929,9 @@ impl MemoryEngine {
             .store
             .all_memories()?
             .into_iter()
-            .filter(|m| m.scope_type == ScopeType::Session && m.scope_id.as_deref() == Some(session_id))
+            .filter(|m| {
+                m.scope_type == ScopeType::Session && m.scope_id.as_deref() == Some(session_id)
+            })
             .map(|m| m.content)
             .collect();
         if contents.is_empty() {
@@ -922,10 +941,7 @@ impl MemoryEngine {
             return Ok(None);
         };
         let memory = self.remember(NewMemory {
-            title: Some(format!(
-                "Session summary ({} memories)",
-                contents.len()
-            )),
+            title: Some(format!("Session summary ({} memories)", contents.len())),
             content: summary,
             kind: Some(MemoryKind::Note),
             tier: Some(MemoryTier::Episodic),
@@ -992,9 +1008,9 @@ impl MemoryEngine {
         title: Option<String>,
         reasoning: Option<String>,
     ) -> Result<Option<Memory>> {
-        let updated = self.store.edit_memory(
-            id, content, importance, concepts, files, title, reasoning,
-        )?;
+        let updated = self
+            .store
+            .edit_memory(id, content, importance, concepts, files, title, reasoning)?;
         if !updated {
             return Ok(None);
         }
@@ -1900,7 +1916,15 @@ mod tests {
         let Some(mem) = engine() else { return };
         let m = mem.remember(NewMemory::new("original content")).unwrap();
         let updated = mem
-            .edit(&m.id, Some("new content".into()), None, None, None, None, None)
+            .edit(
+                &m.id,
+                Some("new content".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(updated.content, "new content");
@@ -2296,7 +2320,12 @@ mod tests {
         .unwrap();
 
         let from_acme = mem
-            .recall_for_org("secret", 10, OrgId::new("acme").unwrap(), &ScopeCtx::default())
+            .recall_for_org(
+                "secret",
+                10,
+                OrgId::new("acme").unwrap(),
+                &ScopeCtx::default(),
+            )
             .unwrap();
         assert_eq!(from_acme.len(), 1, "acme should see only acme's memory");
         assert!(from_acme[0].memory.content.contains("unicorns"));
@@ -2311,7 +2340,12 @@ mod tests {
 
         // Acme can never see default's memory, even with a known-keyword query.
         let from_acme_again = mem
-            .recall_for_org("dragons", 10, OrgId::new("acme").unwrap(), &ScopeCtx::default())
+            .recall_for_org(
+                "dragons",
+                10,
+                OrgId::new("acme").unwrap(),
+                &ScopeCtx::default(),
+            )
             .unwrap();
         assert!(
             from_acme_again.is_empty(),
@@ -2339,7 +2373,10 @@ mod tests {
         let hits = mem
             .recall_for_org("launch code", 10, OrgId::default(), &other_project)
             .unwrap();
-        assert!(hits.is_empty(), "proj-beta must not see proj-alpha's memory");
+        assert!(
+            hits.is_empty(),
+            "proj-beta must not see proj-alpha's memory"
+        );
 
         let no_project = ScopeCtx::default();
         let hits = mem
@@ -2374,8 +2411,10 @@ mod tests {
             ..NewMemory::new("proj-alpha secret: the launch code is banana")
         })
         .unwrap();
-        mem.remember(NewMemory::new("unrelated global memory about rust async runtimes"))
-            .unwrap();
+        mem.remember(NewMemory::new(
+            "unrelated global memory about rust async runtimes",
+        ))
+        .unwrap();
 
         let other_project = ScopeCtx {
             project_id: Some("proj-beta".to_string()),
@@ -2569,7 +2608,9 @@ mod tests {
         working_dup.tier = cairn_core::MemoryTier::Semantic;
         mem.store.insert_memory(&semantic_dup).unwrap();
         mem.store.insert_memory(&working_dup).unwrap();
-        mem.store.insert_memory(&synth("unique working note")).unwrap();
+        mem.store
+            .insert_memory(&synth("unique working note"))
+            .unwrap();
 
         assert_eq!(
             mem.run_dedup_sweep().unwrap(),
@@ -2621,7 +2662,11 @@ mod tests {
             mem.store.insert_memory(&m).unwrap();
         }
 
-        assert_eq!(mem.run_working_tier_cap(2).unwrap(), 1, "3 over a cap of 2 deletes 1");
+        assert_eq!(
+            mem.run_working_tier_cap(2).unwrap(),
+            1,
+            "3 over a cap of 2 deletes 1"
+        );
         let remaining = mem
             .store
             .all_memories()
@@ -2687,7 +2732,10 @@ mod tests {
         let m = synth("some fact with no concepts yet");
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_concept_extraction(&disabled_llm_cfg(), 0).unwrap(), 0);
+        assert_eq!(
+            mem.run_concept_extraction(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         assert!(after.concepts.is_empty());
     }
@@ -2717,7 +2765,10 @@ mod tests {
         m.scope_id = Some("proj-a".to_string());
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 1);
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            1
+        );
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         let expected = llm_intelligence::fast_promotion_score(cairn_core::MemoryKind::Fact, 0);
         assert_eq!(after.promo_score, expected);
@@ -2738,7 +2789,10 @@ mod tests {
         working_tier.scope_id = Some("proj-a".to_string());
         mem.store.insert_memory(&working_tier).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 0);
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -2752,7 +2806,10 @@ mod tests {
         m.promo_locked = true;
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 0);
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -2765,7 +2822,10 @@ mod tests {
         m.scope_id = Some("proj-a".to_string());
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(), 0);
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         assert_eq!(after.promo_score, 0.0);
     }
@@ -2913,7 +2973,11 @@ mod tests {
         m.promo_score = 0.85;
         mem.store.insert_memory(&m).unwrap();
 
-        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 0, "score equal to threshold must not promote");
+        assert_eq!(
+            mem.run_auto_promote(0.85).unwrap(),
+            0,
+            "score equal to threshold must not promote"
+        );
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         assert_eq!(after.scope_type, ScopeType::Project);
     }
@@ -2948,7 +3012,10 @@ mod tests {
         let after = mem.store.get_memory(&m.id).unwrap().unwrap();
         assert_eq!(after.scope_type, ScopeType::Project);
         assert_eq!(after.scope_id, Some("proj-a".to_string()));
-        assert!(after.promo_locked, "undo still locks it against re-suggestion");
+        assert!(
+            after.promo_locked,
+            "undo still locks it against re-suggestion"
+        );
 
         let entry = mem
             .store
@@ -3008,7 +3075,11 @@ mod tests {
         pinned.suspicious = true; // would otherwise qualify for demotion
         mem.store.upsert_memory(&pinned).unwrap();
 
-        assert_eq!(mem.run_auto_demote(45).unwrap(), 0, "pinned memories are exempt");
+        assert_eq!(
+            mem.run_auto_demote(45).unwrap(),
+            0,
+            "pinned memories are exempt"
+        );
     }
 
     #[test]

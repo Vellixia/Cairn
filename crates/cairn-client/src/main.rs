@@ -250,9 +250,7 @@ fn main() -> Result<()> {
         Cmd::Hook { event } => hook::run(&event)?,
         Cmd::Upgrade { check } => update::run(check)?,
         Cmd::Documents { cmd } => match cmd {
-            DocumentsCmd::Ingest { source, title } => {
-                documents::ingest(&source, title.as_deref())?
-            }
+            DocumentsCmd::Ingest { source, title } => documents::ingest(&source, title.as_deref())?,
             DocumentsCmd::Search { query, limit } => documents::search(&query, limit)?,
             DocumentsCmd::List => documents::list()?,
             DocumentsCmd::Delete { id } => documents::delete(&id)?,

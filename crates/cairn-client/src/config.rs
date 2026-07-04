@@ -62,10 +62,7 @@ fn parse(text: &str) -> Result<FileConfig> {
     let doc: toml_edit::DocumentMut = text.parse().context("parsing config.toml")?;
     let mut cfg = FileConfig::default();
     if let Some(server) = doc.get("server") {
-        cfg.server_url = server
-            .get("url")
-            .and_then(|v| v.as_str())
-            .map(String::from);
+        cfg.server_url = server.get("url").and_then(|v| v.as_str()).map(String::from);
         cfg.token = server
             .get("token")
             .and_then(|v| v.as_str())
@@ -147,7 +144,10 @@ pub fn resolve(project_id: Option<&str>) -> Resolved {
     };
 
     let inject_context = if let Ok(v) = std::env::var("CAIRN_INJECT_CONTEXT") {
-        (matches!(v.as_str(), "1" | "true" | "yes" | "on"), Source::Env)
+        (
+            matches!(v.as_str(), "1" | "true" | "yes" | "on"),
+            Source::Env,
+        )
     } else {
         let project_override = project_id
             .and_then(|pid| file.projects.get(pid))
@@ -360,7 +360,11 @@ mod tests {
         let home = temp_home();
         for v in ["true", "1", "yes", "on"] {
             with_env(
-                &[home.env_pins()[0], home.env_pins()[1], ("CAIRN_INJECT_CONTEXT", Some(v))],
+                &[
+                    home.env_pins()[0],
+                    home.env_pins()[1],
+                    ("CAIRN_INJECT_CONTEXT", Some(v)),
+                ],
                 || {
                     assert_eq!(
                         resolve(None).inject_context,
@@ -372,7 +376,11 @@ mod tests {
         }
         for v in ["", "false", "0", "no", "off", "TRUE"] {
             with_env(
-                &[home.env_pins()[0], home.env_pins()[1], ("CAIRN_INJECT_CONTEXT", Some(v))],
+                &[
+                    home.env_pins()[0],
+                    home.env_pins()[1],
+                    ("CAIRN_INJECT_CONTEXT", Some(v)),
+                ],
                 || {
                     assert!(
                         !resolve(None).inject_context.0,
@@ -387,11 +395,19 @@ mod tests {
     fn guard_defaults_off_and_is_settable_via_env_or_file() {
         let home = temp_home();
         with_env(
-            &[home.env_pins()[0], home.env_pins()[1], ("CAIRN_GUARD", None)],
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_GUARD", None),
+            ],
             || assert!(!resolve(None).guard, "off by default - opt-in only"),
         );
         with_env(
-            &[home.env_pins()[0], home.env_pins()[1], ("CAIRN_GUARD", Some("true"))],
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_GUARD", Some("true")),
+            ],
             || assert!(resolve(None).guard),
         );
         with_env(&home.env_pins(), || {
@@ -400,7 +416,11 @@ mod tests {
             std::fs::write(&path, "[hooks]\nguard = true\n").unwrap();
         });
         with_env(
-            &[home.env_pins()[0], home.env_pins()[1], ("CAIRN_GUARD", None)],
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_GUARD", None),
+            ],
             || assert!(resolve(None).guard, "file setting should take effect"),
         );
     }
@@ -439,7 +459,12 @@ mod tests {
             std::fs::write(home.path().join(".cairn/config.toml"), "not [ valid toml").unwrap();
         });
         with_env(
-            &[home.env_pins()[0], home.env_pins()[1], ("CAIRN_SERVER", None), ("CAIRN_TOKEN", None)],
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_SERVER", None),
+                ("CAIRN_TOKEN", None),
+            ],
             || {
                 let r = resolve(None);
                 assert!(r.server.is_none());
@@ -464,7 +489,11 @@ mod tests {
         });
 
         with_env(
-            &[home.env_pins()[0], home.env_pins()[1], ("CAIRN_INJECT_CONTEXT", None)],
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_INJECT_CONTEXT", None),
+            ],
             || {
                 let global = resolve(None);
                 assert_eq!(global.inject_context, (true, Source::File));
