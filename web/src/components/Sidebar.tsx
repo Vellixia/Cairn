@@ -109,9 +109,14 @@ export function CairnSidebar() {
   return (
     <Sidebar collapsible="offcanvas" className="border-r border-line">
       <SidebarHeader className="border-b border-line">
-        <div className="flex items-center gap-2 px-2 py-2">
+        <div className="flex items-center gap-2.5 px-2 py-2">
           <Logo size={26} />
-          <span className="font-semibold tracking-tight">Cairn</span>
+          <div className="flex flex-col leading-none">
+            <span className="font-semibold tracking-tight">Cairn</span>
+            <span className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.2em] text-muted-foreground">
+              mission control
+            </span>
+          </div>
         </div>
       </SidebarHeader>
       <SidebarContent>

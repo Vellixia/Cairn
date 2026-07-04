@@ -73,9 +73,14 @@ function LoginForm() {
   return (
     <main className="min-h-screen flex items-center justify-center px-5 py-12">
       <div className="w-full max-w-sm">
-        <div className="flex items-center gap-2.5 mb-6 justify-center">
-          <Logo size={36} />
+        <div className="mb-7 flex flex-col items-center gap-2">
+          <div className="rounded-full bg-primary/10 p-3 ring-1 ring-primary/25 shadow-[0_0_44px_-6px_hsl(var(--primary)/0.45)]">
+            <Logo size={40} />
+          </div>
           <span className="text-xl font-semibold tracking-tight">Cairn</span>
+          <span className="font-mono text-[10px] uppercase tracking-[0.22em] text-muted-foreground">
+            mission control
+          </span>
         </div>
         <Card>
           <CardHeader>

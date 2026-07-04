@@ -2,6 +2,12 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Cairn "basalt & ember" theme (web redesign v2) - a dark, data-dense mission-control
+   identity. Near-black neutral graphite base (basalt), the brand's amber cap-stone as the
+   single accent (ember), a faint dot-grid texture instead of a colored blob, and sharper
+   radii. Dark-only: the light block below is kept wired for completeness but the renderer
+   is pinned dark via <html class="dark"> + color-scheme. */
+
 @layer base {
   :root {
     --background: 0 0% 100%;
@@ -10,20 +16,20 @@
     --card-foreground: 222 47% 11%;
     --popover: 0 0% 100%;
     --popover-foreground: 222 47% 11%;
-    --primary: 24 95% 53%;
-    --primary-foreground: 28 33% 8%;
+    --primary: 28 96% 54%;
+    --primary-foreground: 28 40% 8%;
     --secondary: 220 14% 96%;
     --secondary-foreground: 222 47% 11%;
     --muted: 220 14% 96%;
     --muted-foreground: 220 9% 46%;
-    --accent: 24 95% 53%;
-    --accent-foreground: 28 33% 8%;
+    --accent: 28 96% 54%;
+    --accent-foreground: 28 40% 8%;
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 98%;
     --border: 220 13% 91%;
     --input: 220 13% 91%;
-    --ring: 24 95% 53%;
-    --radius: 0.5rem;
+    --ring: 28 96% 54%;
+    --radius: 0.4rem;
     --sidebar-background: 0 0% 98%;
     --sidebar-foreground: 240 5.3% 26.1%;
     --sidebar-primary: 240 5.9% 10%;
@@ -31,53 +37,53 @@
     --sidebar-accent: 240 4.8% 95.9%;
     --sidebar-accent-foreground: 240 5.9% 10%;
     --sidebar-border: 220 13% 91%;
-    --sidebar-ring: 217.2 91.2% 59.8%;
-    --color-positive: 142 71% 45%;
+    --sidebar-ring: 28 96% 54%;
+    --color-positive: 152 60% 42%;
     --color-positive-foreground: 0 0% 98%;
-    --color-warning: 38 92% 50%;
+    --color-warning: 40 95% 50%;
     --color-warning-foreground: 26 47% 14%;
     --color-danger: 0 84% 60%;
     --color-danger-foreground: 0 0% 98%;
-    --color-info: 199 89% 48%;
+    --color-info: 192 85% 45%;
     --color-info-foreground: 0 0% 98%;
   }
 
   .dark {
-    --background: 213 25% 6%;
-    --foreground: 218 17% 94%;
-    --card: 212 24% 10%;
-    --card-foreground: 218 17% 94%;
-    --popover: 212 24% 10%;
-    --popover-foreground: 218 17% 94%;
-    --primary: 24 95% 53%;
-    --primary-foreground: 28 33% 8%;
-    --secondary: 213 19% 14%;
-    --secondary-foreground: 218 17% 94%;
-    --muted: 213 19% 14%;
-    --muted-foreground: 218 10% 60%;
-    --accent: 24 95% 53%;
-    --accent-foreground: 28 33% 8%;
-    --destructive: 0 79% 63%;
-    --destructive-foreground: 218 17% 94%;
-    --border: 213 17% 21%;
-    --input: 213 17% 21%;
-    --ring: 24 95% 53%;
-    --sidebar-background: 212 24% 10%;
-    --sidebar-foreground: 218 17% 94%;
-    --sidebar-primary: 24 95% 53%;
-    --sidebar-primary-foreground: 28 33% 8%;
-    --sidebar-accent: 213 19% 14%;
-    --sidebar-accent-foreground: 218 17% 94%;
-    --sidebar-border: 213 17% 21%;
-    --sidebar-ring: 24 95% 53%;
-    --color-positive: 142 71% 45%;
-    --color-positive-foreground: 218 17% 94%;
-    --color-warning: 38 92% 50%;
+    --background: 220 12% 4%;
+    --foreground: 40 15% 94%;
+    --card: 220 11% 7%;
+    --card-foreground: 40 15% 94%;
+    --popover: 220 11% 6%;
+    --popover-foreground: 40 15% 94%;
+    --primary: 28 96% 55%;
+    --primary-foreground: 28 40% 8%;
+    --secondary: 220 10% 11%;
+    --secondary-foreground: 40 15% 94%;
+    --muted: 220 10% 11%;
+    --muted-foreground: 220 8% 60%;
+    --accent: 28 96% 55%;
+    --accent-foreground: 28 40% 8%;
+    --destructive: 0 75% 58%;
+    --destructive-foreground: 40 15% 94%;
+    --border: 219 12% 14%;
+    --input: 219 12% 14%;
+    --ring: 28 96% 55%;
+    --sidebar-background: 222 14% 3%;
+    --sidebar-foreground: 220 10% 72%;
+    --sidebar-primary: 28 96% 55%;
+    --sidebar-primary-foreground: 28 40% 8%;
+    --sidebar-accent: 220 10% 9%;
+    --sidebar-accent-foreground: 40 15% 94%;
+    --sidebar-border: 219 12% 12%;
+    --sidebar-ring: 28 96% 55%;
+    --color-positive: 152 60% 44%;
+    --color-positive-foreground: 40 15% 94%;
+    --color-warning: 40 95% 55%;
     --color-warning-foreground: 26 47% 14%;
-    --color-danger: 0 79% 63%;
-    --color-danger-foreground: 218 17% 94%;
-    --color-info: 199 89% 48%;
-    --color-info-foreground: 218 17% 94%;
+    --color-danger: 0 75% 58%;
+    --color-danger-foreground: 40 15% 94%;
+    --color-info: 192 85% 48%;
+    --color-info-foreground: 40 15% 94%;
   }
 }
 
@@ -87,26 +93,58 @@
   }
   body {
     @apply bg-background text-foreground font-sans antialiased;
-    background-image: radial-gradient(
-      1200px 600px at 70% -10%,
-      #16202b 0%,
-      hsl(var(--background)) 55%
-    );
+    /* Ember glow bleeding in from the top + a faint basalt dot-grid. */
+    background-image:
+      radial-gradient(
+        900px 420px at 78% -12%,
+        hsl(28 65% 14% / 0.5) 0%,
+        transparent 62%
+      ),
+      radial-gradient(circle, hsl(220 10% 65% / 0.05) 1px, transparent 1px);
+    background-size:
+      auto,
+      26px 26px;
     background-attachment: fixed;
   }
+  ::selection {
+    background: hsl(var(--primary) / 0.28);
+  }
+}
+
+/* Thin dark scrollbars - the default chrome scrollbar breaks the basalt surface. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(220 10% 18%) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: hsl(220 10% 18%);
+  border-radius: 8px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Active sidebar item: ember left rail + ember text, without forking the shadcn component. */
+[data-sidebar="menu-button"][data-active="true"] {
+  color: hsl(var(--primary));
+  box-shadow: inset 2px 0 0 hsl(var(--primary));
 }
 
 /* Loading skeleton used by SessionGate during the first /api/auth/me probe. */
 .cairn-skeleton {
   background: linear-gradient(
     90deg,
-    #1a2129 0%,
-    #222b35 50%,
-    #1a2129 100%
+    hsl(220 10% 10%) 0%,
+    hsl(220 10% 14%) 50%,
+    hsl(220 10% 10%) 100%
   );
   background-size: 200% 100%;
   animation: cairn-skeleton-pulse 1.4s ease-in-out infinite;
-  border-radius: 9px;
+  border-radius: 8px;
 }
 
 /* Keyboard focus ring --- accessible, brand-tinted. */

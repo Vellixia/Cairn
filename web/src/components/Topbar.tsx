@@ -37,7 +37,7 @@ export function Topbar() {
 
   return (
     <header className="sticky top-0 z-10 border-b border-line bg-background/80 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center justify-between gap-4 px-5 py-3">
+      <div className="flex items-center justify-between gap-4 px-5 py-2.5">
         <div className="flex items-center gap-3 text-sm text-muted-foreground">
           <SidebarTrigger className="md:hidden" />
           <Button
@@ -65,12 +65,17 @@ export function Topbar() {
           <LiveStatus />
           {healthy ? (
             <Badge variant="secondary" className="font-normal">
-              <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-emerald-500" />
+              <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-[hsl(var(--color-positive))]" />
               healthy
+              {health.data?.version && (
+                <span className="ml-1.5 font-mono text-[10px] text-muted-foreground">
+                  v{health.data.version}
+                </span>
+              )}
             </Badge>
           ) : (
             <Badge variant="destructive" className="font-normal">
-              <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-red-500" />
+              <span className="mr-1.5 h-1.5 w-1.5 rounded-full bg-[hsl(var(--color-danger))]" />
               {health.isError ? "offline" : "..."}
             </Badge>
           )}
