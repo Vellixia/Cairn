@@ -7,10 +7,12 @@
 //
 // Also handles Web Push: when the dashboard subscribes to `/api/push/subscribe`,
 // the server can `postMessage` a `CAIRN_PUSH` event into this SW, which
-// displays a `notification` and forwards the click to `/dashboard/reliability/drift`.
+// displays a `notification` and forwards the click to `/automation`.
 
-const CACHE_VERSION = "cairn-v1";
-const STATIC_ASSETS = ["/", "/dashboard", "/manifest.json"];
+// v2: bumped so installed PWAs purge cached shells of routes the redesign deleted
+// (/trust/*, /registry/*, the old /memory tab pages).
+const CACHE_VERSION = "cairn-v2";
+const STATIC_ASSETS = ["/", "/manifest.json"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -103,7 +105,7 @@ self.addEventListener("push", (event) => {
 
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const url = (event.notification.data && event.notification.data.url) || "/dashboard";
+  const url = (event.notification.data && event.notification.data.url) || "/automation";
   event.waitUntil(
     (async () => {
       const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });

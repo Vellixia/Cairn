@@ -29,15 +29,21 @@ import {
   ItemDescription,
 } from "@/components/ui/item";
 import { Sparkles, TrendingDown, ShieldCheck, Play } from "lucide-react";
+import { cn } from "@/lib/utils";
 import {
   useAutopilotDigestQuery,
   useCronJobsQuery,
   useCronHistoryQuery,
-  useRunCronJobMutation,
+  useDismissPromotionMutation,
+  useDriftLogQuery,
+  usePromoteMemoryMutation,
+  usePromotionCandidatesQuery,
   usePromotionLogQuery,
+  useRunCronJobMutation,
   useDemoteMemoryMutation,
+  useStatsQuery,
 } from "@/lib/queries";
-import type { PromotionLogEntry } from "@/lib/api";
+import type { DriftEvent, PromotionLogEntry } from "@/lib/api";
 
 // Friendly labels for cron.rs::JOBS - kept in sync manually since the schedule strings
 // themselves are 6-field (seconds-first) cron expressions, not human-readable.
@@ -61,6 +67,24 @@ function formatReason(reason: string): string {
   return REASON_LABEL[reason] ?? reason;
 }
 
+// The autopilot appends its verdict to the drift detail as "(auto-approved: <reason>)".
+function autopilotReason(detail: string): string | null {
+  const m = detail.match(/\(auto-approved: ([^)]+)\)/);
+  return m ? m[1] : null;
+}
+
+function riskTone(risk: string): string {
+  if (risk === "danger") return "border-red-500/60 text-red-600 dark:text-red-400";
+  if (risk === "warn") return "border-amber-500/60 text-amber-600 dark:text-amber-400";
+  return "border-emerald-500/60 text-emerald-600 dark:text-emerald-400";
+}
+
+function scoreTone(score: number): string {
+  if (score >= 80) return "text-emerald-500";
+  if (score >= 50) return "text-amber-500";
+  return "text-red-500";
+}
+
 export default function AutomationContent() {
   const [hours, setHours] = useState(24);
   const [historyJob, setHistoryJob] = useState<string>("all");
@@ -71,6 +95,12 @@ export default function AutomationContent() {
   const runJob = useRunCronJobMutation();
   const promotionLog = usePromotionLogQuery(50);
   const demote = useDemoteMemoryMutation();
+  const candidates = usePromotionCandidatesQuery();
+  const promote = usePromoteMemoryMutation();
+  const dismiss = useDismissPromotionMutation();
+  const stats = useStatsQuery();
+  const driftLog = useDriftLogQuery();
+  const rel = stats.data?.reliability;
 
   return (
     <div className="space-y-6 max-w-3xl">
@@ -78,8 +108,8 @@ export default function AutomationContent() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Automation</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            What autopilot did while you were away, the background job schedule, and the
-            promotion/demotion trail.
+            Everything the machine does on its own - autopilot, guard decisions, background
+            jobs - plus the one queue that wants a human glance.
           </p>
         </div>
         <HelpButton content={HELP["/automation"]} />
@@ -132,6 +162,150 @@ export default function AutomationContent() {
                 tone="info"
               />
             </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Review queue</CardTitle>
+          <CardDescription>
+            {candidates.data
+              ? `${candidates.data.length} candidate(s) in the 0.70-0.90 promo_score band - `
+              : ""}
+            the only decision the dashboard still asks a human to make. Everything above the
+            threshold promotes itself.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {candidates.isLoading ? (
+            <div className="space-y-2">
+              <Skeleton className="h-12 w-full" />
+              <Skeleton className="h-12 w-full" />
+            </div>
+          ) : candidates.data && candidates.data.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Nothing waiting for review. Candidates appear when the nightly
+              <code className="font-mono"> llm-intelligence</code> job scores a Project-scoped
+              memory between 0.70 and 0.90.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {candidates.data?.map((m) => (
+                <Item key={m.id} variant="outline" size="sm">
+                  <ItemContent>
+                    <ItemTitle className="line-clamp-2">{m.content}</ItemTitle>
+                    <ItemDescription className="flex items-center gap-2 flex-wrap">
+                      <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
+                        {m.promo_score.toFixed(2)}
+                      </Badge>
+                      <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
+                        {m.kind}
+                      </Badge>
+                      {m.tier}
+                    </ItemDescription>
+                  </ItemContent>
+                  <ItemActions>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={promote.isPending}
+                      onClick={() => promote.mutate(m.id)}
+                    >
+                      Promote
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      disabled={dismiss.isPending}
+                      onClick={() => dismiss.mutate(m.id)}
+                    >
+                      Dismiss
+                    </Button>
+                  </ItemActions>
+                </Item>
+              ))}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Guard</CardTitle>
+          <CardDescription>
+            Edit-safety decisions are made by the autopilot at verify time (
+            <code className="font-mono">CAIRN_DRIFT_AUTOPILOT</code>) - this is the read-only
+            audit trail. Danger-risk edits are never auto-approved; the agent&apos;s own
+            PreToolUse guard handles those inline.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {stats.isLoading ? (
+            <Skeleton className="h-20 w-full" />
+          ) : rel ? (
+            <div className="flex items-end gap-6">
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Reliability
+                </p>
+                <p className={cn("font-mono text-4xl font-bold tabular-nums", scoreTone(rel.score))}>
+                  {rel.score}
+                  <span className="ml-1 text-sm font-medium text-muted-foreground">/100</span>
+                </p>
+              </div>
+              <div className="grid flex-1 grid-cols-4 gap-2 text-xs">
+                <GuardStat label="ok" value={rel.ok} tone="text-emerald-500" />
+                <GuardStat label="warn" value={rel.warn} tone="text-amber-500" />
+                <GuardStat label="danger" value={rel.danger} tone="text-red-500" />
+                <GuardStat label="rollbacks" value={rel.rollbacks} />
+              </div>
+            </div>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              No edit history yet - the score seeds itself once an agent verifies edits.
+            </p>
+          )}
+
+          {driftLog.isLoading ? (
+            <Skeleton className="h-16 w-full" />
+          ) : driftLog.data && driftLog.data.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No drift events recorded.</p>
+          ) : (
+            <ul className="space-y-1.5">
+              {driftLog.data?.slice(0, 25).map((d: DriftEvent) => {
+                const reason = autopilotReason(d.detail);
+                return (
+                  <li key={d.id} className="flex items-center gap-2 text-xs">
+                    <Badge
+                      variant="outline"
+                      className={cn("font-mono text-[10px] uppercase", riskTone(d.risk))}
+                    >
+                      {d.risk}
+                    </Badge>
+                    <span className="font-mono truncate max-w-[220px]" title={d.path}>
+                      {d.path}
+                    </span>
+                    {reason ? (
+                      <Badge variant="secondary" className="font-mono text-[10px]">
+                        {reason}
+                      </Badge>
+                    ) : d.status === "rejected" ? (
+                      <Badge variant="outline" className="text-[10px]">
+                        rolled back
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                        flagged
+                      </Badge>
+                    )}
+                    <span className="ml-auto whitespace-nowrap text-muted-foreground">
+                      {new Date(d.ts).toLocaleString()}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </CardContent>
       </Card>
@@ -312,6 +486,27 @@ export default function AutomationContent() {
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function GuardStat({
+  label,
+  value,
+  tone,
+}: {
+  label: string;
+  value: number;
+  tone?: string;
+}) {
+  return (
+    <div className="rounded-lg border border-line bg-card px-3 py-2">
+      <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </div>
+      <div className={cn("mt-0.5 font-mono text-xl tabular-nums", tone ?? "text-foreground")}>
+        {value}
+      </div>
     </div>
   );
 }

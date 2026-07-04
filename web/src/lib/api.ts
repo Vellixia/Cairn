@@ -192,12 +192,29 @@ export interface Memory {
   content: string;
   concepts: string[];
   files: string[];
+  /** Provenance: the agent session that wrote this memory, if any. */
+  session_id: string | null;
+  /** Multi-tenant org tag; the implicit default org on self-hosted installs. */
+  org_id: string;
+  /** Flagged by the content scanner (possible secret/injection); surfaced, never hidden. */
+  suspicious: boolean;
   importance: number;
   access_count: number;
   /** Confidence score [0.0, 1.0], evolves with reinforcement. Defaults to 0.5. */
   confidence: number;
   /** Pinned memories always surface first in wakeup regardless of score. */
   pinned: boolean;
+  /** Edges: ids of memories this one was derived from. */
+  derived_from: string[];
+  /** Edges: ids of memories this one contradicts. */
+  contradicts: string[];
+  /** Edges: ids of memories this one supersedes. */
+  supersedes: string[];
+  /** Edges: file paths / symbols / project ids this memory applies to. */
+  applies_to: string[];
+  /** v0.8.0 Sprint 2: Global / Project / Session isolation scope. */
+  scope_type: "global" | "project" | "session";
+  scope_id: string | null;
   /** v0.8.0 Sprint 5: promotion-worthiness score in [0.0, 1.0]; 0.70-0.90 is the review band. */
   promo_score: number;
   /** v0.8.0 Sprint 5: once true, excluded from promotion scoring/suggestions. */
@@ -208,6 +225,45 @@ export interface Memory {
 export interface ScoredMemory {
   memory: Memory;
   score: number;
+}
+
+/** Web redesign v2: filters for the Memory Browser's `GET /api/memory` list endpoint. */
+export interface MemoryListFilters {
+  scope_type?: string;
+  scope_id?: string;
+  tier?: string;
+  kind?: string;
+  pinned?: boolean;
+  suspicious?: boolean;
+  q?: string;
+  sort?: "updated_at" | "created_at" | "importance" | "promo_score" | "access_count";
+  limit?: number;
+  offset?: number;
+}
+
+export interface MemoryListResponse {
+  items: Memory[];
+  total: number;
+}
+
+/** One guard drift event from `GET /api/guard/drift` (read-only; autopilot decides). */
+export interface DriftEvent {
+  id: number;
+  ts: string;
+  path: string;
+  risk: "ok" | "warn" | "danger" | string;
+  kind: string;
+  detail: string;
+  status: "pending" | "approved" | "rejected" | string;
+}
+
+/** Web redesign v2: one effective-config entry from `GET /api/config` (read-only). */
+export interface ConfigEntry {
+  key: string;
+  value: unknown;
+  env: string;
+  group: string;
+  description: string;
 }
 
 /** v0.8.0 Sprint 4/5: one entry in `GET /api/cron/history`. */
@@ -324,30 +380,6 @@ export interface LedgerEntry {
   signature: string;
 }
 
-// P2.3 Compression Lab - one response carries all 4 read modes for side-by-side.
-export interface CompressionModeView {
-  mode: "auto" | "full" | "signatures" | "map";
-  status: string;
-  view: string;
-  note: string;
-  bytes: number;
-  est_tokens: number;
-  savings_vs_full: number;
-  hash: string;
-}
-
-export interface CompressionDemo {
-  path: string;
-  language: string | null;
-  raw_bytes: number;
-  raw_lines: number;
-  raw_tokens: number;
-  views: CompressionModeView[];
-  best_mode: string;
-  total_savings_tokens: number;
-  savings_ratio: number;
-}
-
 export interface ArchitectureGodNode {
   name: string;
   edge_count: number;
@@ -374,39 +406,3 @@ export interface ArchitectureReport {
   surprising_connections: string[];
 }
 
-export interface RegistryTrustGrant {
-  key: string;
-  allows: "local" | "team" | "public" | string;
-  label: string | null;
-  granted_at: string;
-}
-
-export interface RegistryRevocation {
-  name: string;
-  version: string;
-  revoked_at: string;
-  reason: string | null;
-}
-
-// Alias kept for callers that import by the more verbose name.
-export type RegistryRevocationEvent = RegistryRevocation;
-
-export interface RegistryPackMeta {
-  name: string;
-  version: string;
-  description?: string;
-  scope?: string;
-  published_at?: string;
-  stored_at?: string;
-  size_bytes?: number;
-  memory_count?: number;
-  // Optional manifest fields surfaced by `GET /registry/packs/:name` (the most
-  // recent pack is at index 0 of the response array).
-  author?: string;
-  origin?: string;
-  has_ed25519_signature?: boolean;
-  signer_pubkey?: string;
-  provenance_edge_count?: number;
-  download_count?: number;
-  [k: string]: unknown;
-}

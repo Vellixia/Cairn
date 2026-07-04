@@ -43,8 +43,3 @@ export const issueTokenSchema = z.object({
     .optional(),
 });
 export type IssueTokenInput = z.infer<typeof issueTokenSchema>;
-
-export const recallSchema = z.object({
-  q: z.string().min(1, "Search query is required."),
-});
-export type RecallInput = z.infer<typeof recallSchema>;

@@ -86,10 +86,10 @@ export function DriftAnchorCard() {
               : "Reliability scoring off until a checkpoint exists"}
           </span>
           <Link
-            href="/trust?tab=drift"
+            href="/automation"
             className="text-[hsl(var(--color-info))] hover:underline"
           >
-            Drift center
+            Guard log
           </Link>
         </div>
       </CardContent>

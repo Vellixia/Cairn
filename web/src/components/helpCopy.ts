@@ -4,56 +4,16 @@ export type HelpCopy = HelpContent;
 
 export const HELP: Record<string, HelpCopy> = {
   "/memory": {
-    title: "Memory",
-    what: "Observe the memories Cairn has stored and how they are connected.",
+    title: "Memory browser",
+    what: "Every memory Cairn has - filterable, sortable, searchable - with a full-detail drawer showing provenance, scope, trust signals, and edges to related memories.",
     how: [
-      "Browse Wakeup for the session-start bootstrap. Use Recall to search.",
-      "Graph shows the provenance graph; Savings shows the cost ledger.",
+      "Filter by scope / tier / kind, toggle pinned or suspicious, and search content + concepts.",
+      "Click a row for the full record; edge chips hop the drawer to related memories.",
+      "The Wakeup-order toggle previews the ranked list a fresh agent session loads first.",
+      "Pin and Delete are the only manual actions - agents do the real curation via MCP.",
     ],
     impact:
-      "The agent writes and curates memories via MCP or CLI. This view is observability.",
-  },
-  "/memory/recall": {
-    title: "Recall",
-    what: "Search across every memory Cairn has, ranked by BM25 + semantic similarity.",
-    how: [
-      "Type a question or phrase. Empty query returns your most-recent items.",
-      "Click a result to expand it.",
-    ],
-    impact:
-      "Recall runs against the local SurrealDB index in <50ms for 10k items.",
-  },
-  "/memory/wakeup": {
-    title: "Wakeup",
-    what: "The high-importance memories Cairn would surface at the start of a new session.",
-    how: [
-      "Browse the ranked list. Items at the top are most likely to be relevant right now.",
-      "Click an item to read it in full.",
-    ],
-    impact:
-      "Wakeup is the default context Cairn loads for a fresh agent. Trimming here directly shrinks every future session's token bill.",
-  },
-  "/memory/promotion": {
-    title: "Promotion",
-    what: "Memories in the 0.70-0.90 promo_score review band - scored high enough by the nightly llm-intelligence job to be worth a look, but not high enough to auto-promote.",
-    how: [
-      "Promote moves a memory to Global scope and locks it against future suggestions.",
-      "Dismiss locks it without changing scope (\"don't ask again\").",
-      "Memories scoring above the auto-threshold skip this list and promote themselves - see Automation for that log, the schedule, and Undo.",
-    ],
-    impact:
-      "This is the human-in-the-loop half of promotion; full-auto promotion/demotion runs on the same nightly job and is visible on the Automation page.",
-  },
-  "/memory/compression": {
-    title: "Compression Lab",
-    what: "Side-by-side comparison of all four read modes for a single file.",
-    how: [
-      "Type a file path (e.g. crates/cairn-core/src/lib.rs) and press Render - the dropdown suggests files from recent memories, but any path works.",
-      "Each column shows one mode's view, its token count, and the savings vs full.",
-      "The cheapest mode is highlighted as 'best' - prefer that for context-bounded reads.",
-    ],
-    impact:
-      "Choosing the right mode per file can cut agent token spend 50-90%. Files with strong structure (Rust, Python, Go) compress aggressively; data files and small snippets do not.",
+      "The primary observability surface: if an agent knows it, it is visible here.",
   },
   "/memory/graph": {
     title: "Memory graph",
@@ -74,26 +34,6 @@ export const HELP: Record<string, HelpCopy> = {
     ],
     impact:
       "Bytes saved -> tokens saved -> USD saved. This page is the proof that the read modes are actually doing their job.",
-  },
-  "/trust": {
-    title: "Reliability score",
-    what: "Cairn's edit-guard score: how often your edits round-trip cleanly through memory.",
-    how: [
-      "Watch the score trend. Each sample is one edit + one re-read.",
-      "Drill into the Drift tab to see flagged samples and the AI's reasoning.",
-    ],
-    impact:
-      "Score < 70 means drift is likely. Use the agent's rollback tool to recover.",
-  },
-  "/trust/drift": {
-    title: "Drift center",
-    what: "Every reliability sample flagged as ok, warn, or danger.",
-    how: [
-      "Filter by status. Click any sample to see the diff and the AI's reasoning.",
-      "If a danger sample is wrong, mark it resolved. Cairn adjusts the score.",
-    ],
-    impact:
-      "Drift is the leading indicator of reliability decay. Check this page weekly if you have heavy editing traffic.",
   },
   "/you": {
     title: "Your profile",
@@ -147,13 +87,14 @@ export const HELP: Record<string, HelpCopy> = {
   },
   "/you/settings": {
     title: "Settings",
-    what: "Server info, your admin session, and the sign-out button.",
+    what: "Your admin session, server info, and the full effective server configuration - every knob, its current value, and the env var that changes it.",
     how: [
-      "View the server version and uptime. Sign out to invalidate this browser's session cookie.",
-      "Rotate your admin password from the CLI --- invalidates all sessions.",
+      "Server configuration is read-only here: edit your .env (or environment) and restart the server to apply a change.",
+      "Secrets are redacted to set / not set - values never leave the server.",
+      "Sign out to invalidate this browser's session cookie.",
     ],
     impact:
-      "Settings here are minimal because most config lives server-side. Sign out from a shared browser, not just close the tab.",
+      "One-time customization lives in the environment; this page makes the effective result visible so you never have to guess what the server is running with.",
   },
   "/projects": {
     title: "Projects",
@@ -178,20 +119,22 @@ export const HELP: Record<string, HelpCopy> = {
   },
   "/automation": {
     title: "Automation",
-    what: "What the background jobs and full-auto promotion/demotion/drift-approval did while you were away, plus the schedule and a manual Run now per job.",
+    what: "Everything the machine does on its own: the autopilot digest, guard (edit-safety) decisions, the promotion/demotion trail, background jobs - plus the one review queue that wants a human glance.",
     how: [
       "Pick a lookback window for the digest tiles (24h / 48h / 7d).",
-      "Run now triggers a job immediately - same code path the scheduler uses.",
-      "Promotion log rows for an auto- or manually-promoted memory get an Undo button.",
+      "Review queue: promote or dismiss borderline (0.70-0.90) promotion candidates - the only manual decision left.",
+      "Guard: drift decisions are made by the autopilot at verify time (CAIRN_DRIFT_AUTOPILOT); this log is the read-only audit trail. Danger edits are never auto-approved.",
+      "Run now triggers a background job immediately - same code path the scheduler uses.",
+      "Promotion log rows for a promoted memory get an Undo button.",
     ],
     impact:
-      "Run history is in-memory since server start; the promotion log is durable. Undo reverts a memory to the scope it was promoted from.",
+      "Run history is in-memory since server start; the promotion log and drift log are durable. Undo reverts a memory to the scope it was promoted from.",
   },
   "/memory/architecture": {
     title: "Architecture report",
     what: "Structural analysis of the memory graph as code: nodes (files/memories), edges (relationships), communities, bridges, and cycles.",
     how: [
-      "Open /memory?tab=architecture or click the Architecture tab.",
+      "Open /memory/architecture (linked from the Memory browser header).",
       "Read the four KPIs (Nodes / Edges / Communities / Isolation) for a quick read.",
       "Click .md to download the full report as markdown.",
     ],
@@ -202,53 +145,11 @@ export const HELP: Record<string, HelpCopy> = {
     title: "Activity heatmap",
     what: "Daily memory creation over the last 52 weeks, GitHub-style. Hover a cell to see the date and count.",
     how: [
-      "Open /memory?tab=heatmap.",
+      "Open /memory/heatmap (linked from the Memory browser header).",
       "Hover any cell to read the day + count.",
       "Compare against the recent activity card on / for spot trends.",
     ],
     impact:
       "Lets you see drift in memory-write cadence without scrolling the audit log.",
-  },
-  "/registry/packs": {
-    title: "Pack registry",
-    what: "Published .cairnpkg packs. Search and browse; click a row to see versions and download.",
-    how: [
-      "Publish via `POST /api/registry/packs` (CLI/API) - this view is observability, not a publish form.",
-      "Click a pack name to see all its versions and download counts.",
-      "Use the search box to filter by name or description.",
-    ],
-    impact:
-      "Packs ship context, prompts, and tool configs to cairn-backed agents. Signed packs are trusted; unsigned are visible but flagged.",
-  },
-  "/registry": {
-    title: "Pack registry",
-    what: "Self-hosted .cairnpkg registry, read-only here. Three sections: Packs (browse/download), Trusted Keys (signing authorities), Revocations (audit trail).",
-    how: [
-      "Use the tab bar above to switch between Packs, Trusted Keys, and Revocations.",
-      "Publishing, key management, and revocation are done via the CLI/API - this dashboard only observes the result.",
-    ],
-    impact:
-      "Trust flows top-down: a trusted key signs packs. Revocations are append-only.",
-  },
-  "/registry/trust": {
-    title: "Trusted signing keys",
-    what: "Ed25519 public keys the registry trusts to sign packs. Packs signed by unlisted keys still upload but are flagged unsigned.",
-    how: [
-      "Read-only here - add or remove a key via `POST`/`DELETE /api/registry/trusted-keys` (CLI/API).",
-      "Rotate by adding a new key then revoking the old one from the CLI.",
-    ],
-    impact:
-      "Compromised key? Revoke first, then rotate. Revocations are append-only and surface in the revocations tab.",
-  },
-  "/registry/revocations": {
-    title: "Revocation log",
-    what: "Append-only record of every pack unpublish and key revoke. Audit trail for trust changes.",
-    how: [
-      "Read-only --- new revocations appear here automatically.",
-      "Filter by kind (pack unpublish vs key revoke) or actor.",
-      "Use this page to answer 'who removed X and when'.",
-    ],
-    impact:
-      "Revocations cannot be undone. Operators should record the reason in the audit log before revoking.",
   },
 };

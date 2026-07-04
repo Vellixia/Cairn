@@ -4,7 +4,6 @@ import {
   setupSchema,
   pairCodeSchema,
   issueTokenSchema,
-  recallSchema,
 } from "@/lib/forms/schemas"
 
 describe("loginSchema", () => {
@@ -61,13 +60,6 @@ describe("issueTokenSchema", () => {
 
   it("allows empty expires_in_days", () => {
     const r = issueTokenSchema.safeParse({ name: "key", scope: "write", expires_in_days: "" })
-    expect(r.success).toBe(true)
-  })
-})
-
-describe("recallSchema", () => {
-  it("accepts a query", () => {
-    const r = recallSchema.safeParse({ q: "rust error handling" })
     expect(r.success).toBe(true)
   })
 })

@@ -42,45 +42,47 @@ describe("API type shapes", () => {
     expect(s.memories).toBe(42)
   })
 
-  it("Memory has required fields", () => {
-    const m: Memory = {
-      id: "m1",
+  // The full 22-field record the Memory Browser drawer depends on (scope, provenance,
+  // trust signals, edges) - kept in sync with `GET /api/memory/:id`'s serialization.
+  function fullMemory(id: string): Memory {
+    return {
+      id,
       kind: "note",
       tier: "working",
       content: "hello",
       concepts: [],
       files: [],
+      session_id: null,
+      org_id: "default",
+      suspicious: false,
       importance: 0.5,
       access_count: 0,
       confidence: 0.5,
       pinned: false,
+      derived_from: [],
+      contradicts: [],
+      supersedes: [],
+      applies_to: [],
+      scope_type: "global",
+      scope_id: null,
       promo_score: 0,
       promo_locked: false,
       created_at: "2025-01-01T00:00:00Z",
       updated_at: "2025-01-01T00:00:00Z",
     }
+  }
+
+  it("Memory has required fields including scope, edges, and provenance", () => {
+    const m = fullMemory("m1")
     expect(m.id).toBe("m1")
+    expect(m.scope_type).toBe("global")
+    expect(m.derived_from).toEqual([])
+    expect(m.suspicious).toBe(false)
   })
 
   it("ScoredMemory wraps a Memory with score", () => {
-    const m: Memory = {
-      id: "m2",
-      kind: "note",
-      tier: "working",
-      content: "test",
-      concepts: [],
-      files: [],
-      importance: 0.5,
-      access_count: 0,
-      confidence: 0.5,
-      pinned: false,
-      promo_score: 0,
-      promo_locked: false,
-      created_at: "2025-01-01T00:00:00Z",
-      updated_at: "2025-01-01T00:00:00Z",
-    }
-    const sm: ScoredMemory = { memory: m, score: 0.85 }
-    expect(sm.memory.content).toBe("test")
+    const sm: ScoredMemory = { memory: fullMemory("m2"), score: 0.85 }
+    expect(sm.memory.content).toBe("hello")
     expect(sm.score).toBeCloseTo(0.85)
   })
 })

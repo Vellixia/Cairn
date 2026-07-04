@@ -246,15 +246,18 @@ pub fn router(state: AppState) -> Router {
         .route("/api/context/read", get(read))
         .route("/api/context/expand", get(expand))
         .route("/api/context/assemble", get(assemble))
-        .route("/api/context/compression-demo", get(compression_demo))
         .route("/api/context/pressure", get(context_pressure))
-        .route("/api/memory", post(remember))
+        .route("/api/config", get(config_view))
+        .route("/api/memory", get(list_memories).post(remember))
         .route("/api/memory/gotcha", post(record_gotcha))
         .route("/api/memory/gotcha/wakeup", get(gotcha_wakeup))
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/wakeup", get(wakeup))
         .route("/api/memory/consolidate", post(consolidate_memory))
-        .route("/api/memory/:id", post(edit_memory).delete(delete_memory))
+        .route(
+            "/api/memory/:id",
+            get(get_memory).post(edit_memory).delete(delete_memory),
+        )
         .route("/api/memory/:id/pin", post(pin_memory))
         .route("/api/memory/:id/reinforce", post(reinforce_memory))
         .route("/api/memory/:id/promote", post(promote_memory))
@@ -286,8 +289,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/guard/checkpoints", get(list_checkpoints))
         .route("/api/guard/rollback", post(rollback_checkpoint))
         .route("/api/guard/drift", get(list_drift))
-        .route("/api/guard/drift/:id/approve", post(approve_drift))
-        .route("/api/guard/drift/:id/reject", post(reject_drift))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/latest", get(latest_session))
         .route("/api/sessions/:id", get(get_session).patch(update_session))
@@ -495,6 +496,20 @@ struct WebAssets;
 
 async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
     let raw_path = uri.path().trim_start_matches('/');
+    // An unmatched /api/* path is an API 404, never the SPA shell - serving HTML with a
+    // 200 to an API caller (e.g. an old dashboard build POSTing to a removed route) hides
+    // the failure and looks like success to naive clients.
+    if raw_path == "api" || raw_path.starts_with("api/") {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )],
+            format!("{{\"error\":\"no such API route: /{raw_path}\"}}"),
+        )
+            .into_response();
+    }
     // Bug fix (BUG-2026-06-30-C): browsers URL-encode characters in chunk paths
     // (e.g. `%5Bname%5D` for `[name]`, `%28app%29` for `(app)`). The embedded
     // WebAssets key uses the decoded form, so we percent-decode the request
@@ -795,132 +810,57 @@ async fn expand(
     }
 }
 
-/// P2.3 Compression Lab. Returns all 4 read modes (auto/full/signatures/map) for a single
-/// file in one response so the dashboard can show a side-by-side comparison with token
-/// counts. The cheapest mode is marked `best_mode` for the UI to highlight.
-#[derive(Deserialize)]
-struct CompressionDemoQuery {
-    path: String,
-}
-
+/// Web redesign v2: read-only effective-config viewer for the dashboard's Settings page.
+/// Server config is env-driven and read once at boot - this endpoint SHOWS every knob, its
+/// current effective value, and the env var that changes it (one-time customization is done
+/// by editing the environment and restarting; the dashboard never mutates server config).
+/// Secrets are redacted to a set/not-set marker. Authed like every other /api route.
 #[derive(Serialize)]
-struct ModeView {
-    mode: &'static str,
-    status: String,
-    view: String,
-    note: String,
-    bytes: usize,
-    est_tokens: usize,
-    savings_vs_full: f64,
-    hash: String,
+struct ConfigEntry {
+    key: &'static str,
+    value: Value,
+    env: &'static str,
+    group: &'static str,
+    description: &'static str,
 }
 
-#[derive(Serialize)]
-struct CompressionDemo {
-    path: String,
-    language: Option<String>,
-    raw_bytes: usize,
-    raw_lines: usize,
-    raw_tokens: usize,
-    views: Vec<ModeView>,
-    best_mode: String,
-    total_savings_tokens: usize,
-    savings_ratio: f64,
-}
-
-async fn compression_demo(
-    State(s): State<AppState>,
-    Query(q): Query<CompressionDemoQuery>,
-) -> Result<Json<CompressionDemo>, ApiError> {
-    let path = Path::new(&q.path);
-    // Call the engine once per mode. Errors per-mode are recorded as a fallback view
-    // so the dashboard never sees a partial result.
-    let modes = [
-        ("auto", cairn_context::ReadMode::Auto),
-        ("full", cairn_context::ReadMode::Full),
-        ("signatures", cairn_context::ReadMode::Signatures),
-        ("map", cairn_context::ReadMode::Map),
+async fn config_view(State(s): State<AppState>) -> Json<Vec<ConfigEntry>> {
+    fn secret(present: bool) -> Value {
+        json!(if present { "set" } else { "not set" })
+    }
+    let c = &s.cfg;
+    let entries = vec![
+        ConfigEntry { key: "host", value: json!(c.host), env: "CAIRN_HOST", group: "server", description: "Bind host for the HTTP server." },
+        ConfigEntry { key: "port", value: json!(c.port), env: "CAIRN_PORT", group: "server", description: "Bind port for the HTTP server." },
+        ConfigEntry { key: "data_dir", value: json!(c.data_dir.display().to_string()), env: "CAIRN_DATA_DIR", group: "server", description: "Where Cairn keeps blobs, sessions, and the registry." },
+        ConfigEntry { key: "tls", value: json!(c.tls.is_some()), env: "CAIRN_TLS_CERT / CAIRN_TLS_KEY", group: "server", description: "HTTPS material. Required for non-loopback binds unless insecure is set." },
+        ConfigEntry { key: "insecure", value: json!(c.insecure), env: "CAIRN_INSECURE", group: "server", description: "Allow plain HTTP on a non-loopback bind (reverse-proxy setups only)." },
+        ConfigEntry { key: "cors_origins", value: json!(c.cors_origins), env: "CAIRN_CORS_ORIGINS", group: "server", description: "Allowed CORS origins; empty = same-origin only." },
+        ConfigEntry { key: "secret_key", value: secret(c.secret_key.is_some()), env: "CAIRN_SECRET_KEY", group: "server", description: "HMAC secret signing device-token JWTs and the savings ledger." },
+        ConfigEntry { key: "db_url", value: json!(c.db_url), env: "CAIRN_DB_URL", group: "database", description: "SurrealDB connection URL." },
+        ConfigEntry { key: "db_user", value: json!(c.db_user), env: "CAIRN_DB_USER", group: "database", description: "SurrealDB auth username." },
+        ConfigEntry { key: "db_pass", value: secret(!c.db_pass.is_empty()), env: "CAIRN_DB_PASS", group: "database", description: "SurrealDB auth password." },
+        ConfigEntry { key: "db_ns", value: json!(c.db_ns), env: "CAIRN_DB_NS", group: "database", description: "SurrealDB namespace (isolation boundary between Cairn instances)." },
+        ConfigEntry { key: "db_timeout_secs", value: json!(c.db_timeout_secs), env: "CAIRN_DB_TIMEOUT_SECS", group: "database", description: "Per-query deadline for the SurrealDB client." },
+        ConfigEntry { key: "multi_tenant", value: json!(c.multi_tenant), env: "CAIRN_MULTI_TENANT", group: "database", description: "Org-scoped memories per bearer token; off = single implicit org." },
+        ConfigEntry { key: "embed.provider", value: json!(c.embed.provider), env: "CAIRN_EMBED_PROVIDER", group: "intelligence", description: "Embedding backend (hashing / openai / ollama / ...)." },
+        ConfigEntry { key: "embed.api_key", value: secret(c.embed.api_key.is_some()), env: "CAIRN_EMBED_API_KEY", group: "intelligence", description: "API key for remote embedding providers." },
+        ConfigEntry { key: "llm_consolidation.enabled", value: json!(c.llm_consolidation.enabled), env: "CAIRN_LLM_CONSOLIDATION", group: "intelligence", description: "LLM-driven consolidation, concept extraction, and query expansion." },
+        ConfigEntry { key: "llm_daily_budget", value: json!(c.llm_daily_budget), env: "CAIRN_LLM_DAILY_BUDGET", group: "intelligence", description: "Daily token budget for background LLM calls; 0 = unlimited. Heuristic fallback once spent." },
+        ConfigEntry { key: "rerank.enabled", value: json!(c.rerank.enabled), env: "CAIRN_RERANK", group: "intelligence", description: "Cross-encoder reranking for search." },
+        ConfigEntry { key: "selftune", value: json!(c.selftune), env: "CAIRN_SELFTUNE", group: "automation", description: "Weekly tune job nudges promote_threshold from measured retrieval quality (bounded)." },
+        ConfigEntry { key: "cron_enabled", value: json!(c.cron_enabled), env: "CAIRN_CRON_ENABLED", group: "automation", description: "Master switch for every background job." },
+        ConfigEntry { key: "session_ttl_days", value: json!(c.session_ttl_days), env: "CAIRN_SESSION_TTL_DAYS", group: "automation", description: "Idle days before session-gc promotes Session-scoped memories to Global; 0 disables." },
+        ConfigEntry { key: "decay_period_days", value: json!(c.decay_period_days), env: "CAIRN_DECAY_PERIOD_DAYS", group: "automation", description: "Confidence half-life for the weekly memory-decay job." },
+        ConfigEntry { key: "access_log_retention_days", value: json!(c.access_log_retention_days), env: "CAIRN_ACCESS_LOG_RETENTION_DAYS", group: "automation", description: "How long access-log rows survive the monthly prune." },
+        ConfigEntry { key: "promote_threshold", value: json!(c.promote_threshold), env: "CAIRN_PROMOTE_THRESHOLD", group: "automation", description: "promo_score above this auto-promotes to Global on the nightly llm-intelligence run." },
+        ConfigEntry { key: "demote_idle_days", value: json!(c.demote_idle_days), env: "CAIRN_DEMOTE_IDLE_DAYS", group: "automation", description: "Unused days before an auto-promoted Global memory reverts to Project scope." },
+        ConfigEntry { key: "max_working_per_project", value: json!(c.max_working_per_project), env: "CAIRN_MAX_WORKING_PER_PROJECT", group: "automation", description: "Cap on Working-tier memories per project before decay prunes the weakest." },
+        ConfigEntry { key: "drift_autopilot", value: json!(c.drift_autopilot), env: "CAIRN_DRIFT_AUTOPILOT", group: "guard", description: "Drift auto-approval policy: safe (default), off, or all. Danger never auto-approves." },
+        ConfigEntry { key: "drift_safe_globs", value: json!(c.drift_safe_globs), env: "CAIRN_DRIFT_SAFE_GLOBS", group: "guard", description: "Low-stakes path globs where warn-risk drift auto-approves under the safe policy." },
+        ConfigEntry { key: "auto_anchor", value: json!(c.auto_anchor), env: "CAIRN_AUTO_ANCHOR", group: "guard", description: "Derive a session anchor from the first substantive prompt when none is set." },
     ];
-    let mut views = Vec::with_capacity(modes.len());
-    for (name, mode) in modes {
-        match s.ctx.read(path, mode) {
-            Ok(r) => views.push(ModeView {
-                mode: name,
-                status: format!("{:?}", r.status),
-                view: r.view,
-                note: r.note,
-                bytes: r.bytes,
-                est_tokens: r.est_tokens,
-                savings_vs_full: 0.0, // filled below
-                hash: r.hash,
-            }),
-            Err(e) => views.push(ModeView {
-                mode: name,
-                status: "Error".into(),
-                view: format!("error reading file: {e}"),
-                note: String::new(),
-                bytes: 0,
-                est_tokens: 0,
-                savings_vs_full: 0.0,
-                hash: String::new(),
-            }),
-        }
-    }
-
-    // Identify the full-mode view as the baseline for savings comparison.
-    let full_tokens = views
-        .iter()
-        .find(|v| v.mode == "full")
-        .map(|v| v.est_tokens)
-        .unwrap_or(0);
-    for v in &mut views {
-        if full_tokens > 0 {
-            v.savings_vs_full = 1.0 - (v.est_tokens as f64 / full_tokens as f64);
-        }
-    }
-    let best_mode = views
-        .iter()
-        .min_by_key(|v| v.est_tokens)
-        .map(|v| v.mode.to_string())
-        .unwrap_or_else(|| "auto".to_string());
-    let total_savings_tokens = full_tokens.saturating_sub(
-        views
-            .iter()
-            .find(|v| v.mode == "auto")
-            .map(|v| v.est_tokens)
-            .unwrap_or(full_tokens),
-    );
-    let savings_ratio = if full_tokens > 0 {
-        total_savings_tokens as f64 / full_tokens as f64
-    } else {
-        0.0
-    };
-
-    // Use the full view's lines as the canonical "raw_lines" + tokens.
-    let (raw_lines, raw_bytes) = views
-        .iter()
-        .find(|v| v.mode == "full")
-        .map(|v| (v.view.lines().count(), v.bytes))
-        .unwrap_or((0, 0));
-
-    // Language hint from the file extension (the engine already picks a parser;
-    // we surface a friendlier label).
-    let language = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_string());
-
-    Ok(Json(CompressionDemo {
-        path: q.path,
-        language,
-        raw_bytes,
-        raw_lines,
-        raw_tokens: full_tokens,
-        views,
-        best_mode,
-        total_savings_tokens,
-        savings_ratio,
-    }))
+    Json(entries)
 }
 
 async fn remember(
@@ -1077,6 +1017,99 @@ async fn memory_by_scope(
     mems.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     mems.truncate(limit);
     Ok(Json(mems))
+}
+
+/// Web redesign v2: the Memory Browser's list endpoint. Filterable, sortable, paginated view of
+/// EVERY memory with the full record serialization (all fields, edges included) - the dashboard's
+/// primary observability surface. Same in-handler `all_memories()` scan pattern as `by-scope` and
+/// the project stats; `total` requires the full scan anyway, so pagination only saves
+/// serialization - fine at self-hosted scale.
+#[derive(Deserialize, Default)]
+struct MemoryListQuery {
+    #[serde(default)]
+    scope_type: Option<cairn_core::ScopeType>,
+    #[serde(default)]
+    scope_id: Option<String>,
+    #[serde(default)]
+    tier: Option<cairn_core::MemoryTier>,
+    #[serde(default)]
+    kind: Option<cairn_core::MemoryKind>,
+    #[serde(default)]
+    pinned: Option<bool>,
+    #[serde(default)]
+    suspicious: Option<bool>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    sort: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct MemoryListResponse {
+    items: Vec<Memory>,
+    total: usize,
+}
+
+/// GET `/api/memory?scope_type=&tier=&kind=&pinned=&suspicious=&q=&sort=&limit=&offset=`
+async fn list_memories(
+    State(s): State<AppState>,
+    Query(q): Query<MemoryListQuery>,
+) -> Result<Json<MemoryListResponse>, ApiError> {
+    let mut mems: Vec<Memory> = s.store.all_memories()?;
+    if let Some(st) = q.scope_type {
+        mems.retain(|m| m.scope_type == st);
+    }
+    if let Some(sid) = &q.scope_id {
+        mems.retain(|m| m.scope_id.as_deref() == Some(sid.as_str()));
+    }
+    if let Some(tier) = q.tier {
+        mems.retain(|m| m.tier == tier);
+    }
+    if let Some(kind) = q.kind {
+        mems.retain(|m| m.kind == kind);
+    }
+    if let Some(pinned) = q.pinned {
+        mems.retain(|m| m.pinned == pinned);
+    }
+    if let Some(suspicious) = q.suspicious {
+        mems.retain(|m| m.suspicious == suspicious);
+    }
+    if let Some(needle) = q.q.as_deref().map(str::to_lowercase).filter(|n| !n.is_empty()) {
+        mems.retain(|m| {
+            m.content.to_lowercase().contains(&needle)
+                || m.concepts.iter().any(|c| c.to_lowercase().contains(&needle))
+        });
+    }
+    let total = mems.len();
+    // Unknown sort values fall back to updated_at rather than erroring - consistent with the
+    // leniency of `heatmap`/`by-scope`. All sorts are descending (newest/highest first).
+    match q.sort.as_deref() {
+        Some("created_at") => mems.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
+        Some("importance") => mems.sort_by(|a, b| b.importance.total_cmp(&a.importance)),
+        Some("promo_score") => mems.sort_by(|a, b| b.promo_score.total_cmp(&a.promo_score)),
+        Some("access_count") => mems.sort_by(|a, b| b.access_count.cmp(&a.access_count)),
+        _ => mems.sort_by(|a, b| b.updated_at.cmp(&a.updated_at)),
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let items: Vec<Memory> = mems.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(MemoryListResponse { items, total }))
+}
+
+/// GET `/api/memory/:id` - single memory, full record. Read-only lookup for the Memory Browser's
+/// detail drawer (and edge-hopping between related memories); does NOT bump `access_count`.
+async fn get_memory(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    match s.mem.get(&id)? {
+        Some(m) => Ok(Json(m)),
+        None => Err(ApiError::not_found("no such memory")),
+    }
 }
 
 /// v0.8.0 Sprint 3: the project registry populated by the `SessionStart` hook's auto-detection
@@ -1584,41 +1617,14 @@ struct HeatmapQuery {
 }
 
 // -- drift + sessions handlers (v0.5.0 Sprint 4) -----------------------------------------
+// Web redesign v2: drift decisions are made by the autopilot inline at verify time
+// (cairn-guard/src/autopilot.rs) - the manual approve/reject endpoints were removed because
+// the dashboard is observability-only. This list endpoint is the read-only audit trail.
 
 async fn list_drift(
     State(s): State<AppState>,
 ) -> Result<Json<Vec<cairn_session::DriftEvent>>, ApiError> {
     Ok(Json(s.sessions.recent_drift(200, None)?))
-}
-
-async fn approve_drift(
-    State(s): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-) -> Result<Json<Value>, ApiError> {
-    if s.sessions
-        .set_drift_status(id, cairn_session::DriftStatus::Approved)?
-    {
-        Ok(Json(json!({ "ok": true, "status": "approved" })))
-    } else {
-        Err(ApiError::not_found(
-            "drift event not found or already resolved",
-        ))
-    }
-}
-
-async fn reject_drift(
-    State(s): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-) -> Result<Json<Value>, ApiError> {
-    if s.sessions
-        .set_drift_status(id, cairn_session::DriftStatus::Rejected)?
-    {
-        Ok(Json(json!({ "ok": true, "status": "rejected" })))
-    } else {
-        Err(ApiError::not_found(
-            "drift event not found or already resolved",
-        ))
-    }
 }
 
 async fn list_sessions(
@@ -2492,75 +2498,6 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// P2.3: compression-demo returns all 4 modes + correct savings math.
-    #[tokio::test]
-    async fn compression_demo_returns_all_four_modes() {
-        let Some((state, dir)) = test_state() else {
-            return;
-        };
-        let file = dir.path().join("widget.rs");
-        std::fs::write(
-            &file,
-            "pub fn hi() -> u32 { 1 }\npub fn bye() -> u32 { 2 }\n",
-        )
-        .unwrap();
-
-        let resp = compression_demo(
-            axum::extract::State(state),
-            axum::extract::Query(CompressionDemoQuery {
-                path: file.to_string_lossy().into_owned(),
-            }),
-        )
-        .await
-        .unwrap();
-        let demo = resp.0;
-        assert_eq!(demo.views.len(), 4);
-        let labels: Vec<&str> = demo.views.iter().map(|v| v.mode).collect();
-        assert!(labels.contains(&"auto"));
-        assert!(labels.contains(&"full"));
-        assert!(labels.contains(&"signatures"));
-        assert!(labels.contains(&"map"));
-
-        // full should be the baseline; signatures must be <= full tokens.
-        let full = demo.views.iter().find(|v| v.mode == "full").unwrap();
-        let sigs = demo.views.iter().find(|v| v.mode == "signatures").unwrap();
-        assert!(sigs.est_tokens <= full.est_tokens);
-
-        // best_mode must match the cheapest view.
-        let cheapest_tokens = demo.views.iter().map(|v| v.est_tokens).min().unwrap();
-        let best = demo
-            .views
-            .iter()
-            .find(|v| v.est_tokens == cheapest_tokens)
-            .unwrap();
-        assert_eq!(demo.best_mode, best.mode);
-    }
-
-    /// P2.3: an unsupported language falls back to Full for signatures/map.
-    #[tokio::test]
-    async fn compression_demo_falls_back_for_unsupported_language() {
-        let Some((state, dir)) = test_state() else {
-            return;
-        };
-        let file = dir.path().join("notes.txt");
-        std::fs::write(&file, "plain prose line 1\nplain prose line 2\n").unwrap();
-
-        let resp = compression_demo(
-            axum::extract::State(state),
-            axum::extract::Query(CompressionDemoQuery {
-                path: file.to_string_lossy().into_owned(),
-            }),
-        )
-        .await
-        .unwrap();
-        let demo = resp.0;
-        // For .txt, the engine falls through to Full for signatures + map. They should
-        // be roughly equal in tokens.
-        let full = demo.views.iter().find(|v| v.mode == "full").unwrap();
-        let sigs = demo.views.iter().find(|v| v.mode == "signatures").unwrap();
-        assert_eq!(sigs.est_tokens, full.est_tokens);
-    }
-
     /// `None` when `CAIRN_DB_URL` is unset or SurrealDB is unreachable (tests skip gracefully).
     /// The temp dir is a scratch workspace for the test's files (separate from the store).
     pub(crate) fn test_state() -> Option<(AppState, tempfile::TempDir)> {
@@ -3089,6 +3026,178 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_memories_filters_by_scope_and_reports_total() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-list-test".to_string()),
+                ..cairn_core::NewMemory::new("list test: project-scoped fact")
+            })
+            .unwrap();
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("list test: global memory"))
+            .unwrap();
+
+        let all = list_memories(State(state.clone()), Query(MemoryListQuery::default()))
+            .await
+            .unwrap();
+        assert_eq!(all.0.total, 2);
+        assert_eq!(all.0.items.len(), 2);
+
+        let scoped = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                scope_type: Some(cairn_core::ScopeType::Project),
+                scope_id: Some("proj-list-test".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scoped.0.total, 1);
+        assert_eq!(scoped.0.items[0].content, "list test: project-scoped fact");
+    }
+
+    #[tokio::test]
+    async fn list_memories_clamps_limit_and_offsets_past_end() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        for i in 0..3 {
+            state
+                .mem
+                .remember(cairn_core::NewMemory::new(format!("clamp test mem {i}")))
+                .unwrap();
+        }
+
+        // limit=0 clamps up to 1; total stays post-filter pre-pagination.
+        let one = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                limit: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(one.0.items.len(), 1);
+        assert_eq!(one.0.total, 3);
+
+        // offset past the end yields empty items, same total.
+        let past = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                offset: Some(50),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(past.0.items.is_empty());
+        assert_eq!(past.0.total, 3);
+    }
+
+    #[tokio::test]
+    async fn list_memories_q_matches_content_case_insensitively() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("The Widget Factory uses Tokio"))
+            .unwrap();
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("unrelated note about pandas"))
+            .unwrap();
+
+        let hits = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                q: Some("widget factory".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits.0.total, 1);
+        assert!(hits.0.items[0].content.contains("Widget Factory"));
+    }
+
+    #[tokio::test]
+    async fn get_memory_returns_the_full_record_and_404s_on_unknown() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let created = state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-get-test".to_string()),
+                ..cairn_core::NewMemory::new("get test: full record fact")
+            })
+            .unwrap();
+
+        let got = get_memory(
+            State(state.clone()),
+            axum::extract::Path(created.id.clone()),
+        )
+        .await
+        .unwrap();
+        // Lock the full-serialization contract the Memory Browser drawer depends on: the wire
+        // JSON must expose scope, provenance, edge, and trust fields - not a slimmed view.
+        let wire = serde_json::to_value(&got.0).unwrap();
+        for key in [
+            "scope_type",
+            "scope_id",
+            "session_id",
+            "suspicious",
+            "derived_from",
+            "contradicts",
+            "supersedes",
+            "applies_to",
+            "promo_score",
+            "promo_locked",
+        ] {
+            assert!(wire.get(key).is_some(), "wire JSON must carry `{key}`");
+        }
+        assert_eq!(wire["scope_type"], "project");
+
+        let err = get_memory(State(state.clone()), axum::extract::Path("nope".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn config_view_redacts_secrets_and_names_env_vars() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let entries = config_view(State(state.clone())).await.0;
+        assert!(!entries.is_empty());
+        // Every entry names an env var; secret-bearing keys never leak raw values.
+        for e in &entries {
+            assert!(!e.env.is_empty());
+            if e.key == "db_pass" || e.key == "secret_key" || e.key.ends_with("api_key") {
+                assert!(
+                    e.value == json!("set") || e.value == json!("not set"),
+                    "secret `{}` must be redacted, got {}",
+                    e.key,
+                    e.value
+                );
+            }
+        }
+        let autopilot = entries.iter().find(|e| e.key == "drift_autopilot").unwrap();
+        assert_eq!(autopilot.env, "CAIRN_DRIFT_AUTOPILOT");
+    }
+
+    #[tokio::test]
     async fn upsert_project_publishes_a_project_event() {
         let Some((state, _dir)) = test_state() else {
             return;
@@ -3426,14 +3535,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_persists_drift_events_and_approve_moves_them() {
+    async fn verify_persists_drift_events_with_a_pending_danger_status() {
         let Some((state, dir)) = test_state() else {
             return;
         };
         let f = dir.path().join("drift.txt");
         let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
         std::fs::write(&f, &original).unwrap();
-        // A gutting edit - verify flags danger.
+        // A gutting edit - verify flags danger. Web redesign v2: there is no manual
+        // approve/reject anymore; the autopilot never auto-approves danger, so the event
+        // stays pending in the read-only audit log ("flagged").
         verify(
             State(state.clone()),
             Json(VerifyBody {
@@ -3449,21 +3560,13 @@ mod tests {
             !drifts.is_empty(),
             "verify-d danger should produce a drift event"
         );
-        let id = drifts[0].id;
-
-        // Approve it.
-        let ok = approve_drift(State(state.clone()), axum::extract::Path(id))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(ok["status"], serde_json::json!("approved"));
-
-        // Re-approving a resolved event returns 404.
-        let err = approve_drift(State(state.clone()), axum::extract::Path(id))
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(drifts[0].risk, "danger");
+        assert_eq!(drifts[0].status, cairn_session::DriftStatus::Pending);
+        assert!(
+            !drifts[0].detail.contains("auto-approved"),
+            "danger must never carry an autopilot approval; got {}",
+            drifts[0].detail
+        );
     }
 
     // -- v0.5.0 Sprint 5: ledger ---------------------------------------------------------

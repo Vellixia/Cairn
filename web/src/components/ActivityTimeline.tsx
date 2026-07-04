@@ -197,7 +197,8 @@ export function ActivityTimeline({ limit = 8 }: ActivityTimelineProps) {
                 </p>
               </div>
               <span className="shrink-0 text-xs text-muted-foreground">
-                {relativeTime(it.ev.ts)}
+                {/* AuditEvent.ts is unix SECONDS (admin.rs `Utc::now().timestamp()`) */}
+                {relativeTime(it.ev.ts * 1000)}
               </span>
             </li>
           ))}

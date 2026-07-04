@@ -93,9 +93,9 @@ export default function ProfilePage() {
       </Card>
 
       <p className="text-[11px] text-muted-foreground">
-        See{" "}
-        <Link href="/memory?tab=wakeup" className="underline">
-          Wakeup
+        Use the{" "}
+        <Link href="/memory" className="underline">
+          memory browser&apos;s Wakeup-order toggle
         </Link>{" "}
         to inspect how preferences flow into session bootstrap.
       </p>

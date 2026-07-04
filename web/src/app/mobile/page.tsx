@@ -5,27 +5,28 @@ import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 /**
- * Mobile companion PWA (v0.5.0 Sprint 23).
+ * Mobile companion PWA (v0.5.0 Sprint 23; web redesign v2 made it read-only).
  *
- * Standalone PWA surface for approvals + quick stats. Lives at /mobile and
- * is registered in the web app's install banner + main navigation.
+ * Standalone PWA surface for a quick check-in. Lives at /mobile and is linked
+ * from the dashboard topbar.
  *
  * Features:
- * - Drift approvals: pull the pending drift queue, swipe to approve/reject.
  * - Quick stats: token savings card mirrors the dashboard savings tile.
+ * - Recent guard activity: read-only view of the drift decision log (the
+ *   autopilot decides at verify time; there is nothing to approve by hand).
  * - Biometric lock: when the device exposes `PublicKeyCredential` (WebAuthn),
  *   gate the page behind a fingerprint / face unlock prompt. Falls back to
  *   no lock when the API is absent (dev / desktop).
  *
- * The companion is intentionally narrow --- it's NOT a Cairn dashboard. The
- * full dashboard lives at /dashboard. The companion is for a "phone in
- * pocket" check-in.
+ * The companion is intentionally narrow --- it's NOT a Cairn dashboard.
  */
 
-type PendingDrift = {
-  id: string;
-  summary: string;
-  created_at: string;
+type DriftRow = {
+  id: number;
+  path: string;
+  risk: string;
+  detail: string;
+  ts: string;
 };
 
 type QuickStats = {
@@ -42,7 +43,7 @@ const EMPTY_STATS: QuickStats = {
 
 export default function MobileCompanion() {
   const [stats, setStats] = useState<QuickStats>(EMPTY_STATS);
-  const [drift, setDrift] = useState<PendingDrift[]>([]);
+  const [drift, setDrift] = useState<DriftRow[]>([]);
   const [unlocked, setUnlocked] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,15 +95,13 @@ export default function MobileCompanion() {
 
   const loadDrift = useCallback(async () => {
     try {
-      const res = await fetch("/api/guard/drift?status=pending", {
-        credentials: "include",
-      });
+      const res = await fetch("/api/guard/drift", { credentials: "include" });
       if (res.ok) {
         const j = await res.json();
         // `/api/guard/drift` returns a flat array; accept both shapes so a
         // future `{items: [...]}` shape doesn't break the mobile page.
-        const list: PendingDrift[] = Array.isArray(j) ? j : j.items ?? [];
-        setDrift(list);
+        const list: DriftRow[] = Array.isArray(j) ? j : j.items ?? [];
+        setDrift(list.slice(0, 10));
       }
     } catch (e) {
       setError(String(e));
@@ -162,31 +161,31 @@ export default function MobileCompanion() {
       </section>
 
       <section className="px-5 mt-6">
-        <h2 className="text-sm font-medium mb-2">Drift to review</h2>
+        <h2 className="text-sm font-medium mb-2">Recent guard activity</h2>
         {drift.length === 0 ? (
           <Card className="p-6 text-center text-sm text-muted-foreground">
-            Nothing pending. All clean.
+            No drift events. All clean.
           </Card>
         ) : (
           <div className="flex flex-col gap-2">
             {drift.map((d) => (
               <Card key={d.id} className="p-3">
-                <div className="text-sm">{d.summary}</div>
-                <div className="flex gap-2 mt-3">
-                  <Button
-                    size="sm"
-                    variant="default"
-                    onClick={() => approveDrift(d.id)}
+                <div className="flex items-center gap-2">
+                  <span
+                    className={
+                      d.risk === "danger"
+                        ? "text-[10px] font-semibold uppercase text-red-400"
+                        : d.risk === "warn"
+                          ? "text-[10px] font-semibold uppercase text-amber-400"
+                          : "text-[10px] font-semibold uppercase text-emerald-400"
+                    }
                   >
-                    Approve
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => rejectDrift(d.id)}
-                  >
-                    Reject
-                  </Button>
+                    {d.risk}
+                  </span>
+                  <span className="text-xs font-mono truncate">{d.path}</span>
+                </div>
+                <div className="mt-1 text-xs text-muted-foreground line-clamp-2">
+                  {d.detail}
                 </div>
               </Card>
             ))}
@@ -199,18 +198,4 @@ export default function MobileCompanion() {
       )}
     </main>
   );
-}
-
-async function approveDrift(id: string) {
-  await fetch(`/api/guard/drift/${id}/approve`, {
-    method: "POST",
-    credentials: "include",
-  });
-}
-
-async function rejectDrift(id: string) {
-  await fetch(`/api/guard/drift/${id}/reject`, {
-    method: "POST",
-    credentials: "include",
-  });
 }

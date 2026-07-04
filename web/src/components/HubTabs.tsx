@@ -20,7 +20,8 @@ export function HubTabs({
   tabs,
   defaultTab,
 }: {
-  view: "memory" | "trust" | "you";
+  // Web redesign v2: the monitor pages dropped the tab-hub pattern; /you is the only hub left.
+  view: "you";
   title: string;
   description: string;
   tabs: HubTab[];

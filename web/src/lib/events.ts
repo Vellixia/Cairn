@@ -10,9 +10,8 @@ const DEBOUNCE_MS = 300;
 const RECONNECT_MS = 3000;
 
 // SSE kind -> query-key prefixes to invalidate (react-query matches by prefix, so ["memory"]
-// also invalidates ["memory", "wakeup", 5], ["memory", "graph"], etc). `projects`/`documents`/
-// `automation` have no active queries yet - those pages land in I7-I9 - but invalidating a key
-// with no observers is a no-op, so it's safe to wire the map ahead of the UI that needs it.
+// also invalidates ["memory", "wakeup", 5], ["memory", "list", {...}], ["memory", "detail", id],
+// etc - the Memory Browser's keys get live invalidation for free by starting with "memory").
 const INVALIDATION_MAP: Record<string, readonly QueryKey[]> = {
   memory: [["memory"], qk.stats, ["projects"]],
   drift: [qk.drift, qk.stats, ["automation"]],

@@ -1,6 +1,8 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Card,
@@ -57,7 +59,13 @@ export default function MemoryGraphPage() {
     <div className="space-y-6">
 
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Memory graph</h1>
+        <Link
+          href="/memory"
+          className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+        >
+          <ArrowLeft className="size-3" aria-hidden="true" /> Memory
+        </Link>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight">Memory graph</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           The provenance graph: every memory as a node, every{" "}
           <code>derived_from</code> / <code>contradicts</code> /{" "}

@@ -95,7 +95,7 @@ export function OverviewContent() {
         <KpiCard
           label="Memories"
           value={stats.data ? stats.data.memories : null}
-          href="/memory?tab=recall"
+          href="/memory"
           icon={Brain}
           hint={
             anchor.data?.anchor
@@ -108,7 +108,7 @@ export function OverviewContent() {
           label="Reliability"
           value={rel ? rel.score : null}
           suffix={rel ? "/100" : undefined}
-          href="/trust?tab=score"
+          href="/automation"
           icon={ShieldCheck}
           hint={
             rel
@@ -224,10 +224,10 @@ export function OverviewContent() {
             <p className="text-sm text-muted-foreground">
               No memories yet.{" "}
               <Link
-                href="/memory?tab=recall"
+                href="/memory"
                 className="text-[hsl(var(--color-info))] hover:underline"
               >
-                Browse recent memories
+                Open the memory browser
               </Link>
             </p>
           ) : memories.data ? (

@@ -31,7 +31,7 @@ flowchart LR
 
     CLI["cairn<br/>MCP + hooks + setup"]
     Server["cairn-server<br/>in-container<br/>REST API + web UI"]
-    Store["HelixDB<br/>graph + vectors<br/>+ blob store"]
+    Store["SurrealDB<br/>graph + vectors<br/>+ blob store"]
 
     Agents -->|"MCP stdio"| CLI
     CLI -->|"HTTP"| Server
@@ -118,9 +118,9 @@ irm https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.ps1 | 
 ```
 
 ```sh
-# Docker - the full stack (Cairn + HelixDB + MinIO), the easiest path
-cp .env.example .env          # set MinIO + admin credentials (see .env.example)
-docker compose up -d          # builds Cairn, pulls HelixDB + MinIO, wires them together
+# Docker - the full stack (Cairn + SurrealDB), the easiest path
+cp .env.example .env          # set database + admin credentials (see .env.example)
+docker compose up -d          # builds Cairn, pulls SurrealDB, wires them together
 # -> http://localhost:7777
 # First-boot admin is bootstrapped from CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD.
 # Comment out CAIRN_ADMIN_PASSWORD to fall back to the /setup wizard on first visit.
@@ -133,7 +133,7 @@ cargo install --git https://github.com/Vellixia/Cairn cairn
 
 ### 2. Start the server
 
-`docker compose up -d` brings up Cairn + HelixDB + MinIO. The admin record
+`docker compose up -d` brings up Cairn + SurrealDB. The admin record
 is bootstrapped from `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD` in
 `.env` on first boot. See [docs/guides/admin.md](docs/guides/admin.md) for the full
 admin surface (mint tokens, pair codes, password rotation).
@@ -184,7 +184,7 @@ The fastest path from `git clone` to a Cairn-aware session:
 curl -fsSL https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.sh | sh
 
 # 2. Start the server stack
-docker compose up -d                     # HelixDB + MinIO + Cairn on :7777
+docker compose up -d                     # SurrealDB + Cairn on :7777
 
 # 3. Pair the device (mints + claims a token in one step, no copy-paste):
 #    open http://127.0.0.1:7777/you/pair, click "Generate code", then:

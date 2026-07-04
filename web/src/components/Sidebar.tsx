@@ -9,9 +9,7 @@ import {
   FolderGit2,
   FileText,
   Bot,
-  ShieldCheck,
   UserCircle,
-  Library,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -29,16 +27,15 @@ import Logo from "@/components/Logo";
 
 type Item = { href: string; label: string; icon: LucideIcon };
 
-// Monitor: observability - what exists, what happened. Admin: security/account
-// surfaces (tokens, pairing, audit, settings) - the only place manual input stays.
+// Observe: pure observability - what exists, what happened, what the machine decided.
+// Admin: security/account surfaces (tokens, pairing, audit, settings) - the only place
+// manual input stays. Trust folded into Automation; Registry is agent-facing (CLI/MCP only).
 const MONITOR_ITEMS: Item[] = [
   { href: "/", label: "Now", icon: LayoutDashboard },
   { href: "/memory", label: "Memory", icon: Brain },
   { href: "/projects", label: "Projects", icon: FolderGit2 },
   { href: "/documents", label: "Documents", icon: FileText },
   { href: "/automation", label: "Automation", icon: Bot },
-  { href: "/trust", label: "Trust", icon: ShieldCheck },
-  { href: "/registry/packs", label: "Registry", icon: Library },
 ];
 
 const ADMIN_ITEMS: Item[] = [{ href: "/you", label: "You", icon: UserCircle }];

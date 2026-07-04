@@ -119,7 +119,7 @@ export function HealthRow() {
         ? "ok"
         : "warn";
 
-  const helixStatus: Status = setupQ.isLoading
+  const dbStatus: Status = setupQ.isLoading
     ? "loading"
     : setupQ.isError
       ? "down"
@@ -157,12 +157,12 @@ export function HealthRow() {
         icon={Radio}
       />
       <Pill
-        label="Helix"
-        status={helixStatus}
+        label="Database"
+        status={dbStatus}
         detail={
           setupQ.data
             ? `${setupQ.data.memories} memories indexed`
-            : "graph + vector store"
+            : "SurrealDB - graph + vector store"
         }
         icon={Database}
       />

@@ -68,16 +68,16 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/context/assemble", "Budget-constrained memory pack", ["context"], {
         "get" => _,
     });
-    path!("/api/context/compression-demo", "Side-by-side read-mode comparison", ["context"], {
+    path!("/api/context/pressure", "Context window utilization + eviction candidates", ["context"], {
         "get" => _,
     });
-    path!("/api/context/pressure", "Context window utilization + eviction candidates", ["context"], {
+    path!("/api/config", "Effective server config (read-only, secrets redacted)", ["admin"], {
         "get" => _,
     });
 
     // ---- Memory -----------------------------------------------------------
-    path!("/api/memory", "Store a memory", ["memory"], {
-        "post" => _,
+    path!("/api/memory", "Browse (filter/sort/paginate) or store memories", ["memory"], {
+        "get" => _, "post" => _,
     });
     path!("/api/memory/recall", "Hybrid search (BM25 + vector + graph)", ["memory"], {
         "get" => _,
@@ -88,8 +88,8 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/memory/consolidate", "Promote memories across tiers", ["memory"], {
         "post" => _,
     });
-    path!("/api/memory/{id}", "Edit or delete a memory", ["memory"], {
-        "post" => _, "delete" => _,
+    path!("/api/memory/{id}", "Fetch, edit, or delete a memory", ["memory"], {
+        "get" => _, "post" => _, "delete" => _,
     });
     path!("/api/memory/{id}/pin", "Pin/unpin a memory", ["memory"], {
         "post" => _,
@@ -195,14 +195,8 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/guard/rollback", "Roll back to a checkpoint", ["guard"], {
         "post" => _,
     });
-    path!("/api/guard/drift", "List drift entries", ["guard"], {
+    path!("/api/guard/drift", "Drift decision log (autopilot-decided, read-only)", ["guard"], {
         "get" => _,
-    });
-    path!("/api/guard/drift/{id}/approve", "Approve drift", ["guard"], {
-        "post" => _,
-    });
-    path!("/api/guard/drift/{id}/reject", "Reject drift", ["guard"], {
-        "post" => _,
     });
 
     // ---- Profile ----------------------------------------------------------
@@ -365,7 +359,7 @@ pub fn build_spec(version: &str) -> Value {
             {"name": "sync"}, {"name": "push"}, {"name": "extensions"},
             {"name": "ingest"}, {"name": "tools"}, {"name": "live"}, {"name": "setup"},
             {"name": "registry"}, {"name": "projects"}, {"name": "documents"},
-            {"name": "cron"},
+            {"name": "cron"}, {"name": "admin"},
         ],
         "components": {
             "securitySchemes": {
@@ -408,9 +402,9 @@ mod tests {
             "/api/openapi.json",
             "/api/context/read",
             "/api/context/assemble",
-            "/api/context/compression-demo",
             "/api/context/pressure",
             "/api/memory",
+            "/api/memory/{id}",
             "/api/memory/recall",
             "/api/memory/wakeup",
             "/api/memory/consolidate",

@@ -78,8 +78,7 @@ export default function AuditPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Audit log</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            The last 50 admin events. In-memory only --- restart loses it. A
-          HelixDB-backed log is a later iteration.
+            The last 50 admin events. In-memory only --- a server restart clears it.
           </p>
         </div>
         <HelpButton content={HELP["/you/audit"]} />

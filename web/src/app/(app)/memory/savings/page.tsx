@@ -13,6 +13,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { getJSON } from "@/lib/api";
+import { ArrowLeft } from "lucide-react";
+import Link from "next/link";
 
 interface LedgerEntry {
   id: number;
@@ -65,7 +67,13 @@ export default function SavingsPage() {
     <div className="space-y-6">
 
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Savings &amp; recover</h1>
+        <Link
+          href="/memory"
+          className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+        >
+          <ArrowLeft className="size-3" aria-hidden="true" /> Memory
+        </Link>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight">Savings &amp; recover</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Every compact read + assemble pass appends a signed entry. The ledger HMACs each row
           against <code>CAIRN_SECRET_KEY</code> --- <code>/api/ledger/verify</code> re-checks any

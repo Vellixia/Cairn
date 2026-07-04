@@ -45,7 +45,8 @@ export function LastAdminActionCard({ className }: { className?: string }) {
           <p className="truncate text-xs text-muted-foreground">{latest.detail}</p>
         </div>
         <Badge variant="outline" className="shrink-0 font-mono text-[10px]">
-          {relativeTime(latest.ts, Date.now())}
+          {/* AuditEvent.ts is unix SECONDS (admin.rs `Utc::now().timestamp()`) */}
+          {relativeTime(latest.ts * 1000, Date.now())}
         </Badge>
       </div>
     </div>

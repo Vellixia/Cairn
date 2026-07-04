@@ -4,7 +4,7 @@
 //   1. Admin credentials (username + password)
 //   2. Embed provider (default: local hashing; opt into local ONNX or OpenAI-compatible)
 //   3. (optional) device pair --- generate a QR code to onboard a phone/tablet
-//   4. Green-health check (Helix reachable, embedder loaded, admin exists)
+//   4. Green-health check (database reachable, embedder loaded, admin exists)
 //   5. Done --- drop the user at /dashboard
 //
 // The existing `/setup` route stays as a v1 fallback (deprecation banner). Both POST to
