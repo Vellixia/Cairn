@@ -1402,6 +1402,10 @@ struct MemoryEditBody {
     concepts: Option<Vec<String>>,
     #[serde(default)]
     files: Option<Vec<String>>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 /// POST `/api/memory/:id` - edit a memory's mutable fields. Any field omitted from the body is
@@ -1414,10 +1418,15 @@ async fn edit_memory(
     let content = body
         .content
         .map(|c| cairn_profile::strip_preference_blocks(&c));
-    match s
-        .mem
-        .edit(&id, content, body.importance, body.concepts, body.files)?
-    {
+    match s.mem.edit(
+        &id,
+        content,
+        body.importance,
+        body.concepts,
+        body.files,
+        body.title,
+        body.reasoning,
+    )? {
         Some(m) => {
             crate::events::publish_memory(&s.events, "edited", &m.id);
             Ok(Json(m))
@@ -3163,6 +3172,8 @@ mod tests {
             "applies_to",
             "promo_score",
             "promo_locked",
+            "title",
+            "reasoning",
         ] {
             assert!(wire.get(key).is_some(), "wire JSON must carry `{key}`");
         }
@@ -3259,6 +3270,8 @@ mod tests {
             importance: Some(0.9),
             concepts: None,
             files: None,
+            title: None,
+            reasoning: None,
         };
         let edited = edit_memory(
             State(state.clone()),

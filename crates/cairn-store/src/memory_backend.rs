@@ -197,6 +197,8 @@ impl StoreBackend for MemoryBackend {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<bool> {
         let mut g = self.inner.lock().map_err(poisoned)?;
         let Some(existing) = g.memories.get(id).cloned() else {
@@ -218,6 +220,12 @@ impl StoreBackend for MemoryBackend {
         }
         if let Some(f) = files {
             updated.files = f;
+        }
+        if let Some(t) = title {
+            updated.title = Some(t);
+        }
+        if let Some(r) = reasoning {
+            updated.reasoning = Some(r);
         }
         updated.updated_at = Utc::now();
         let hash = ContentHash::of_str(&updated.content);
@@ -473,7 +481,13 @@ impl StoreBackend for MemoryBackend {
         Ok(g.projects.get(id).cloned())
     }
 
-    fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
+    fn replace_document(
+        &self,
+        source: &str,
+        title: &str,
+        chunks: &[String],
+        project_id: Option<&str>,
+    ) -> Result<usize> {
         let mut g = self.inner.lock().map_err(poisoned)?;
         g.document_chunks.retain(|_, c| c.source != source);
         let base_id = ContentHash::of_str(source).short().to_string();
@@ -488,6 +502,7 @@ impl StoreBackend for MemoryBackend {
                     title: title.to_string(),
                     chunk_index: i,
                     content: content.clone(),
+                    project_id: project_id.map(str::to_string),
                     created_at: now,
                 },
             );
@@ -495,10 +510,15 @@ impl StoreBackend for MemoryBackend {
         Ok(chunks.len())
     }
 
-    fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
+    fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
         let g = self.inner.lock().map_err(poisoned)?;
         let mut by_source: HashMap<String, DocumentSummary> = HashMap::new();
         for c in g.document_chunks.values() {
+            if let Some(want) = project_filter {
+                if c.project_id.as_deref() != Some(want) && c.project_id.is_some() {
+                    continue;
+                }
+            }
             by_source
                 .entry(c.source.clone())
                 .and_modify(|d| {
@@ -512,6 +532,7 @@ impl StoreBackend for MemoryBackend {
                     source: c.source.clone(),
                     title: c.title.clone(),
                     chunk_count: 1,
+                    project_id: c.project_id.clone(),
                     updated_at: c.created_at,
                 });
         }
@@ -523,7 +544,12 @@ impl StoreBackend for MemoryBackend {
     /// No vector index in the hermetic backend - falls back to a naive lexical match count
     /// (case-insensitive substring hits per query word), same "good enough offline" spirit as
     /// `semantic_recall` returning `None` for lexical-only fallback elsewhere.
-    fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
+    fn search_documents(
+        &self,
+        query: &str,
+        k: usize,
+        project_filter: Option<&str>,
+    ) -> Result<Vec<DocumentChunkRecord>> {
         let g = self.inner.lock().map_err(poisoned)?;
         let terms: Vec<String> = query
             .to_lowercase()
@@ -536,6 +562,10 @@ impl StoreBackend for MemoryBackend {
         let mut scored: Vec<(usize, &DocumentChunkRecord)> = g
             .document_chunks
             .values()
+            .filter(|c| match project_filter {
+                Some(want) => c.project_id.as_deref() == Some(want) || c.project_id.is_none(),
+                None => true,
+            })
             .filter_map(|c| {
                 let lower = c.content.to_lowercase();
                 let hits = terms.iter().filter(|t| lower.contains(t.as_str())).count();

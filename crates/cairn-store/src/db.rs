@@ -53,6 +53,7 @@ pub(crate) trait StoreBackend: Send + Sync {
     }
     /// Edit a memory's mutable fields. Returns `Ok(true)` if the row was updated, `Ok(false)`
     /// if no row exists. Only the fields that are `Some` are applied - the rest are kept.
+    #[allow(clippy::too_many_arguments)]
     fn edit_memory(
         &self,
         id: &str,
@@ -60,8 +61,10 @@ pub(crate) trait StoreBackend: Send + Sync {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<bool> {
-        let _ = (id, content, importance, concepts, files);
+        let _ = (id, content, importance, concepts, files, title, reasoning);
         Ok(false)
     }
     /// Delete a memory by id. Returns `Ok(true)` if a row was removed, `Ok(false)` otherwise.
@@ -191,17 +194,32 @@ pub(crate) trait StoreBackend: Send + Sync {
     /// inserted. Unlike `record_access_batch`/`prune_access_log_before`, this is a real,
     /// user-visible, testable feature - both backends implement it for real (no no-op default),
     /// same precedent as `ProjectRecord` above.
-    fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
-        let _ = (source, title, chunks);
+    fn replace_document(
+        &self,
+        source: &str,
+        title: &str,
+        chunks: &[String],
+        project_id: Option<&str>,
+    ) -> Result<usize> {
+        let _ = (source, title, chunks, project_id);
         Ok(0)
     }
-    /// Every ingested document, most-recently-updated first.
-    fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
+    /// Every ingested document, most-recently-updated first. `project_filter`: `None` returns
+    /// everything; `Some(id)` returns that project's documents plus global (`project_id: None`)
+    /// ones - same blend policy as memory scoping.
+    fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
+        let _ = project_filter;
         Ok(Vec::new())
     }
-    /// The top `k` chunks most relevant to `query`, across every ingested document.
-    fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
-        let _ = (query, k);
+    /// The top `k` chunks most relevant to `query`. `project_filter` follows the same blend
+    /// policy as [`list_documents`](Self::list_documents).
+    fn search_documents(
+        &self,
+        query: &str,
+        k: usize,
+        project_filter: Option<&str>,
+    ) -> Result<Vec<DocumentChunkRecord>> {
+        let _ = (query, k, project_filter);
         Ok(Vec::new())
     }
     /// Delete every chunk belonging to `source`. Returns `Ok(true)` if any chunk was removed.
@@ -266,6 +284,11 @@ pub struct DocumentChunkRecord {
     pub title: String,
     pub chunk_index: usize,
     pub content: String,
+    /// Web redesign v2 follow-up: `None` = global (visible everywhere); `Some(id)` = attached
+    /// to that project, visible in the project's own view and blended into project-scoped
+    /// searches - the same visibility policy memory scoping already uses.
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -298,6 +321,8 @@ pub struct DocumentSummary {
     pub source: String,
     pub title: String,
     pub chunk_count: usize,
+    #[serde(default)]
+    pub project_id: Option<String>,
     pub updated_at: DateTime<Utc>,
 }
 
@@ -387,6 +412,7 @@ impl Store {
         self.backend.reassign_scope(id, scope_type, scope_id)
     }
     /// Edit a memory's mutable fields. Only the `Some` values are applied.
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_memory(
         &self,
         id: &str,
@@ -394,9 +420,11 @@ impl Store {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<bool> {
         self.backend
-            .edit_memory(id, content, importance, concepts, files)
+            .edit_memory(id, content, importance, concepts, files, title, reasoning)
     }
     /// Delete a memory by id.
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
@@ -516,16 +544,27 @@ impl Store {
     }
 
     /// Replace every chunk belonging to `source` (v0.8.0 Sprint 6).
-    pub fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
-        self.backend.replace_document(source, title, chunks)
+    pub fn replace_document(
+        &self,
+        source: &str,
+        title: &str,
+        chunks: &[String],
+        project_id: Option<&str>,
+    ) -> Result<usize> {
+        self.backend.replace_document(source, title, chunks, project_id)
     }
     /// Every ingested document, most-recently-updated first (v0.8.0 Sprint 6).
-    pub fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
-        self.backend.list_documents()
+    pub fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
+        self.backend.list_documents(project_filter)
     }
     /// The top `k` document chunks most relevant to `query` (v0.8.0 Sprint 6).
-    pub fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
-        self.backend.search_documents(query, k)
+    pub fn search_documents(
+        &self,
+        query: &str,
+        k: usize,
+        project_filter: Option<&str>,
+    ) -> Result<Vec<DocumentChunkRecord>> {
+        self.backend.search_documents(query, k, project_filter)
     }
     /// Delete every chunk belonging to `source` (v0.8.0 Sprint 6).
     pub fn delete_document(&self, source: &str) -> Result<bool> {
@@ -706,7 +745,9 @@ mod tests {
             id: id.into(),
             kind: MemoryKind::Note,
             tier: MemoryTier::Working,
+            title: None,
             content: content.into(),
+            reasoning: None,
             concepts: vec![],
             files: vec![],
             session_id: None,

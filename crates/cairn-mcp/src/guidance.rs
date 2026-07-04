@@ -58,8 +58,10 @@ tools over your built-in equivalents wherever one exists.
    `proactive_recall` at the start of a turn to get automatically-surfaced related context.
 3. **As you go:** `remember` decisions, gotchas, and rationale the moment you make them, not at \
    the end of the session - a memory written in the moment is more accurate than one \
-   reconstructed from a summary. Use `prefer` for standing user preferences (coding style, \
-   communication tone, tool choices) that should apply beyond this one session.
+   reconstructed from a summary. Pass a short title and the reasoning behind non-obvious \
+   memories - both show up in the dashboard's Memory Browser and make the difference between a \
+   scannable record and an opaque blob of content. Use `prefer` for standing user preferences \
+   (coding style, communication tone, tool choices) that should apply beyond this one session.
 4. **End:** call `memory_crystallize` to fold working-tier notes from this session into a single \
    durable summary, then `consolidate` to promote memories across tiers based on how much \
    they've been reinforced.

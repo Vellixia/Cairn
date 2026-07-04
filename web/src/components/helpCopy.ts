@@ -37,13 +37,13 @@ export const HELP: Record<string, HelpCopy> = {
   },
   "/you": {
     title: "Your profile",
-    what: "Standing preferences Cairn-backed agents honor, plus device tokens and settings.",
+    what: "Standing preferences every Cairn-backed agent honors, plus device tokens and settings.",
     how: [
-      "Profile is read-only here --- use `cairn prefer` or the prefer MCP tool to add rules.",
+      "Add or delete preferences directly here, or let an agent record one with the prefer tool.",
       "Issue and revoke device tokens under Tokens.",
     ],
     impact:
-      "Preferences cascade into every session. Manage them from the agent, not this form.",
+      "Preferences are injected at every session start, before wakeup memories - this is one of the few pages where manual input is the point (a preference is a deliberate, rare decision).",
   },
   "/you/tokens": {
     title: "Device tokens",
@@ -108,14 +108,15 @@ export const HELP: Record<string, HelpCopy> = {
   },
   "/documents": {
     title: "Documents",
-    what: "Reference material ingested for RAG recall - chunked text from files or URLs that blend into search results alongside memories.",
+    what: "Reference material ingested via `cairn documents ingest` - chunked text from files or URLs, searchable through this page's own search box.",
     how: [
-      "Ingest via `cairn documents ingest <path|url>` (CLI) - this page is observability + a search preview, not an upload form.",
-      "Use the search box to preview what a query would surface across every ingested document.",
-      "Delete removes the chunks from recall; re-ingesting the same source later restores them.",
+      "Ingest via `cairn documents ingest <path|url>` (CLI) from inside a project to scope a document to it - this page is observability + a search preview, not an upload form.",
+      "Documents ingested inside a project show up here AND on that project's own page; documents ingested outside any project are global and visible to every project.",
+      "Use the search box to preview what a query would surface across every visible document.",
+      "Delete removes the chunks; re-ingesting the same source later restores them.",
     ],
     impact:
-      "Documents give recall external reference material (docs, READMEs, specs) it wouldn't otherwise have from memories alone.",
+      "Documents give agents external reference material (docs, READMEs, specs) alongside their own memories - project-scoped by default so a project's docs don't clutter every other project's context.",
   },
   "/automation": {
     title: "Automation",

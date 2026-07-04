@@ -242,6 +242,8 @@ impl McpServer {
             "remember" => {
                 let content = str_arg(args.get("content")).ok_or("missing 'content'")?;
                 let mut nm = NewMemory::new(content);
+                nm.title = str_arg(args.get("title")).map(String::from);
+                nm.reasoning = str_arg(args.get("reasoning")).map(String::from);
                 nm.kind = str_arg(args.get("kind")).and_then(|k| k.parse().ok());
                 nm.tier = str_arg(args.get("tier")).and_then(|t| t.parse().ok());
                 nm.importance = args
@@ -393,9 +395,11 @@ impl McpServer {
                         .map(|s| s.to_string())
                         .collect::<Vec<_>>()
                 });
+                let title = str_arg(args.get("title")).map(String::from);
+                let reasoning = str_arg(args.get("reasoning")).map(String::from);
                 match self
                     .mem
-                    .edit(id, content, importance, concepts, files)
+                    .edit(id, content, importance, concepts, files, title, reasoning)
                     .map_err(|e| e.to_string())?
                 {
                     Some(m) => Ok(format!("edited {} (kind={})", m.id, m.kind.as_str())),
@@ -526,11 +530,13 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "remember",
-            "description": "Save a durable memory so future sessions on any device recall it.",
+            "description": "Save a durable memory so future sessions on any device recall it. Include title and reasoning when the memory isn't self-explanatory from content alone - they show up as the scannable headline and the \"why\" in the dashboard's Memory Browser.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "content": { "type": "string" },
+                    "title": { "type": "string", "description": "Short scannable label, e.g. 'Use ripgrep over grep'. Falls back to the first line of content if omitted." },
+                    "reasoning": { "type": "string", "description": "Why this matters or why this decision was made, kept separate from content - e.g. 'grep missed matches in binary-adjacent files last time'." },
                     "kind": { "type": "string", "enum": ["fact", "decision", "task", "preference", "gotcha", "note"] },
                     "tier": { "type": "string", "enum": ["working", "episodic", "semantic", "procedural"] },
                     "importance": { "type": "number", "minimum": 0, "maximum": 1 }
@@ -667,12 +673,14 @@ pub fn tool_defs() -> Value {
         // -- v0.5.0 Sprint 10: memory CRUD + graph + search + metrics --
         {
             "name": "memory_edit",
-            "description": "Edit an existing memory's mutable fields (content, importance, concepts, files). Fields omitted from the input are left unchanged.",
+            "description": "Edit an existing memory's mutable fields (content, title, reasoning, importance, concepts, files). Fields omitted from the input are left unchanged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "id": { "type": "string", "description": "Memory id to edit." },
                     "content": { "type": "string", "description": "New content (optional)." },
+                    "title": { "type": "string", "description": "New scannable label (optional)." },
+                    "reasoning": { "type": "string", "description": "New rationale/why (optional)." },
                     "importance": { "type": "number", "description": "0.0--1.0, clamped." },
                     "concepts": { "type": "array", "items": { "type": "string" } },
                     "files": { "type": "array", "items": { "type": "string" } }

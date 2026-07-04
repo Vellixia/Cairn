@@ -71,7 +71,10 @@ impl Assembler {
         let mem_hits = self.mem.recall(query, 50)?;
         // Document search is supplementary - a hiccup there (e.g. an embedder error) degrades
         // to memory-only results instead of failing the whole assembly.
-        let doc_hits = self.store.search_documents(query, 20).unwrap_or_default();
+        let doc_hits = self
+            .store
+            .search_documents(query, 20, None)
+            .unwrap_or_default();
 
         // Memory scores are a tiny RRF-fused value (bounded well under 1.0 in practice) while
         // document scores are reciprocal-rank over an unrelated HNSW cosine ranking - mixing
@@ -421,6 +424,7 @@ mod tests {
                 "docs/zephyrium.md",
                 "Zephyrium docs",
                 &["zephyrium's architecture is a rust workspace with several crates.".to_string()],
+                None,
             )
             .unwrap();
 

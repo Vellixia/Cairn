@@ -6,8 +6,9 @@
 //! locally via `cairn_document::read_source` and POSTs the already-fetched text here; this
 //! handler only chunks (`cairn_document::chunk_text`) and stores.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Extension, Path, Query, State};
 use axum::Json;
+use cairn_core::ScopeCtx;
 use cairn_document::{chunk_text, DEFAULT_CHUNK_CHARS};
 use cairn_store::{DocumentChunkRecord, DocumentSummary};
 use serde::Deserialize;
@@ -26,9 +27,12 @@ pub struct IngestRequest {
     pub title: Option<String>,
 }
 
-/// `POST /api/documents/ingest` - chunk `content` and (re)store it under `source`.
+/// `POST /api/documents/ingest` - chunk `content` and (re)store it under `source`. Scoped to
+/// the caller's project (`X-Cairn-Project`) when set - same visibility policy as `remember`;
+/// `None` (no header, e.g. a manual `cairn documents ingest` outside a project) stays global.
 pub async fn ingest(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Json(req): Json<IngestRequest>,
 ) -> Result<Json<DocumentSummary>, ApiError> {
     if req.content.trim().is_empty() {
@@ -36,10 +40,11 @@ pub async fn ingest(
     }
     let title = req.title.unwrap_or_else(|| req.source.clone());
     let chunks = chunk_text(&req.content, DEFAULT_CHUNK_CHARS);
-    s.store.replace_document(&req.source, &title, &chunks)?;
+    s.store
+        .replace_document(&req.source, &title, &chunks, scope.project_id.as_deref())?;
     let doc = s
         .store
-        .list_documents()?
+        .list_documents(None)?
         .into_iter()
         .find(|d| d.source == req.source)
         .ok_or_else(|| ApiError::bad_request("document vanished immediately after ingest"))?;
@@ -47,9 +52,24 @@ pub async fn ingest(
     Ok(Json(doc))
 }
 
-/// `GET /api/documents` - every ingested document, most-recently-updated first.
-pub async fn list(State(s): State<AppState>) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
-    Ok(Json(s.store.list_documents()?))
+#[derive(Debug, Deserialize)]
+pub struct ListQuery {
+    /// Explicit override for the dashboard (which has no `X-Cairn-Project` header context of
+    /// its own); falls back to the request's scope header when omitted so CLI/MCP callers get
+    /// project-aware results for free.
+    #[serde(default)]
+    project_id: Option<String>,
+}
+
+/// `GET /api/documents?project_id=...` - every ingested document, most-recently-updated first.
+/// `None` (no param, no scope header) returns everything, unfiltered.
+pub async fn list(
+    State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
+    Query(q): Query<ListQuery>,
+) -> Result<Json<Vec<DocumentSummary>>, ApiError> {
+    let filter = q.project_id.or(scope.project_id);
+    Ok(Json(s.store.list_documents(filter.as_deref())?))
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,16 +77,20 @@ pub struct SearchQuery {
     q: String,
     #[serde(default)]
     limit: Option<usize>,
+    #[serde(default)]
+    project_id: Option<String>,
 }
 
-/// `GET /api/documents/search?q=...&limit=...` - the most relevant chunks across every
-/// ingested document.
+/// `GET /api/documents/search?q=...&limit=...&project_id=...` - the most relevant chunks,
+/// blended the same way `list` is (project-scoped + global).
 pub async fn search(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<DocumentChunkRecord>>, ApiError> {
     let limit = q.limit.unwrap_or(10).clamp(1, 100);
-    Ok(Json(s.store.search_documents(&q.q, limit)?))
+    let filter = q.project_id.or(scope.project_id);
+    Ok(Json(s.store.search_documents(&q.q, limit, filter.as_deref())?))
 }
 
 /// `DELETE /api/documents/:id` - `:id` is `DocumentSummary.id` (a hash of `source`, not `source`
@@ -77,7 +101,7 @@ pub async fn delete(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let doc = s
         .store
-        .list_documents()?
+        .list_documents(None)?
         .into_iter()
         .find(|d| d.id == id)
         .ok_or_else(|| ApiError::not_found("no such document"))?;
@@ -100,6 +124,7 @@ mod tests {
         let mut rx = state.events.subscribe();
         let resp = ingest(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             Json(IngestRequest {
                 source: "sse-test.md".into(),
                 content: "hello world, this is a test document".into(),
@@ -121,6 +146,7 @@ mod tests {
         };
         let doc = ingest(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             Json(IngestRequest {
                 source: "sse-test-delete.md".into(),
                 content: "content to be deleted".into(),

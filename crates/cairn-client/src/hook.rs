@@ -257,6 +257,7 @@ impl RemoteClient {
                 self.post_spooled(
                     "/api/memory",
                     json!({
+                        "title": format!("Files touched this session ({})", files.len()),
                         "content": content,
                         "kind": "note",
                         "tier": "episodic",

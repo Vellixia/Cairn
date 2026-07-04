@@ -50,6 +50,8 @@ DEFINE TABLE IF NOT EXISTS document_chunk SCHEMALESS;
 DEFINE INDEX IF NOT EXISTS document_chunk_source ON document_chunk FIELDS source;
 DEFINE INDEX IF NOT EXISTS document_chunk_embedding_hnsw ON document_chunk FIELDS embedding
     HNSW DIMENSION {dim} DIST COSINE TYPE F32;
+-- web redesign v2 follow-up: project scoping for ingested documents.
+DEFINE INDEX IF NOT EXISTS document_chunk_project_id ON document_chunk FIELDS project_id;
 
 -- v0.8.0 Sprint 8: promotion/demotion audit trail (auto and manual). `/demote` (Undo) looks up
 -- the most recent `action = 'promote'` row for a memory to find `old_scope_id` - once promoted,

@@ -142,7 +142,12 @@ export interface Memory {
   id: string;
   kind: string;
   tier: string;
+  /** Short scannable label. `null` for memories written before this field existed or by
+   * callers that don't set one - the browser falls back to the first line of content. */
+  title: string | null;
   content: string;
+  /** Why this memory matters, kept separate from content. `null` when not provided. */
+  reasoning: string | null;
   concepts: string[];
   files: string[];
   /** Provenance: the agent session that wrote this memory, if any. */
@@ -229,6 +234,9 @@ export interface DocumentSummary {
   source: string;
   title: string;
   chunk_count: number;
+  /** Web redesign v2 follow-up: `null` = global (visible everywhere); a project id = attached
+   * to that project's own Documents section, plus the unfiltered global list. */
+  project_id: string | null;
   updated_at: string;
 }
 
@@ -239,6 +247,7 @@ export interface DocumentChunkRecord {
   title: string;
   chunk_index: number;
   content: string;
+  project_id: string | null;
   created_at: string;
 }
 

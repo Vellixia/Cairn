@@ -228,7 +228,9 @@ impl StoreBackend for SurrealStore {
             "data": {
                 "kind": m.kind.as_str(),
                 "tier": m.tier.as_str(),
+                "title": m.title,
                 "content": m.content,
+                "reasoning": m.reasoning,
                 "content_hash": hash.as_str(),
                 "concepts": m.concepts,
                 "files": m.files,
@@ -339,6 +341,8 @@ impl StoreBackend for SurrealStore {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<bool> {
         let Some(existing) = self.get_memory(id)? else {
             return Ok(false);
@@ -355,6 +359,12 @@ impl StoreBackend for SurrealStore {
         }
         if let Some(f) = files {
             updated.files = f;
+        }
+        if let Some(t) = title {
+            updated.title = Some(t);
+        }
+        if let Some(r) = reasoning {
+            updated.reasoning = Some(r);
         }
         updated.updated_at = Utc::now();
         // Drop + reinsert so all properties land together (and the vector index re-embeds the
@@ -787,7 +797,13 @@ impl StoreBackend for SurrealStore {
         Ok(rows.first().map(project_from_row))
     }
 
-    fn replace_document(&self, source: &str, title: &str, chunks: &[String]) -> Result<usize> {
+    fn replace_document(
+        &self,
+        source: &str,
+        title: &str,
+        chunks: &[String],
+        project_id: Option<&str>,
+    ) -> Result<usize> {
         // Idempotent re-ingest: wipe whatever's there first, so an edited/shrunk source never
         // leaves stale trailing chunks behind.
         self.q(
@@ -807,6 +823,7 @@ impl StoreBackend for SurrealStore {
                         "title": title,
                         "chunk_index": i,
                         "content": content,
+                        "project_id": project_id,
                         "created_at": now,
                         "embedding": embedding,
                     },
@@ -816,11 +833,11 @@ impl StoreBackend for SurrealStore {
         Ok(chunks.len())
     }
 
-    fn list_documents(&self) -> Result<Vec<DocumentSummary>> {
+    fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
         // Grouped/aggregated in Rust rather than SurrealQL - same "pull it all, fold in Rust"
         // convention used everywhere else in this file for anything beyond a flat SELECT.
         let rows = self.read_rows(
-            "SELECT source, title, created_at FROM document_chunk",
+            "SELECT source, title, project_id, created_at FROM document_chunk",
             json!({}),
         )?;
         let mut by_source: std::collections::HashMap<String, DocumentSummary> =
@@ -828,6 +845,14 @@ impl StoreBackend for SurrealStore {
         for r in &rows {
             let source = get_str(r, "source");
             let created_at = parse_ts(&get_str(r, "created_at"));
+            let project_id = get_opt_str(r, "project_id");
+            // Blend policy: an unfiltered call sees everything; a project-filtered call sees
+            // that project's documents plus global ones - same rule memory recall follows.
+            if let Some(want) = project_filter {
+                if project_id.as_deref() != Some(want) && project_id.is_some() {
+                    continue;
+                }
+            }
             by_source
                 .entry(source.clone())
                 .and_modify(|d| {
@@ -841,6 +866,7 @@ impl StoreBackend for SurrealStore {
                     source,
                     title: get_str(r, "title"),
                     chunk_count: 1,
+                    project_id,
                     updated_at: created_at,
                 });
         }
@@ -849,14 +875,31 @@ impl StoreBackend for SurrealStore {
         Ok(out)
     }
 
-    fn search_documents(&self, query: &str, k: usize) -> Result<Vec<DocumentChunkRecord>> {
+    fn search_documents(
+        &self,
+        query: &str,
+        k: usize,
+        project_filter: Option<&str>,
+    ) -> Result<Vec<DocumentChunkRecord>> {
         let qvec = self.embed.embed_one(query)?;
-        let ef = (k as u32).saturating_mul(4).max(40);
+        // Over-fetch when scope-filtering post-hoc in Rust (consistent with the "pull, then
+        // filter in Rust" convention above) so a project filter doesn't starve results.
+        let fetch_k = if project_filter.is_some() { k * 4 } else { k };
+        let ef = (fetch_k as u32).saturating_mul(4).max(40);
         let sql = format!(
-            "SELECT *, record::id(id) AS rid FROM document_chunk WHERE embedding <|{k},{ef}|> $qvec"
+            "SELECT *, record::id(id) AS rid FROM document_chunk WHERE embedding <|{fetch_k},{ef}|> $qvec"
         );
         let rows = self.read_rows(sql, json!({ "qvec": qvec }))?;
-        Ok(rows.iter().map(document_chunk_from_row).collect())
+        let mut out: Vec<DocumentChunkRecord> = rows
+            .iter()
+            .map(document_chunk_from_row)
+            .filter(|d| match project_filter {
+                Some(want) => d.project_id.as_deref() == Some(want) || d.project_id.is_none(),
+                None => true,
+            })
+            .collect();
+        out.truncate(k);
+        Ok(out)
     }
 
     fn delete_document(&self, source: &str) -> Result<bool> {
@@ -976,6 +1019,7 @@ fn document_chunk_from_row(m: &Map<String, Json>) -> DocumentChunkRecord {
         title: get_str(m, "title"),
         chunk_index: get_i64(m, "chunk_index") as usize,
         content: get_str(m, "content"),
+        project_id: get_opt_str(m, "project_id"),
         created_at: parse_ts(&get_str(m, "created_at")),
     }
 }
@@ -1001,6 +1045,10 @@ fn promotion_log_from_row(m: &Map<String, Json>) -> PromotionLogEntry {
 
 fn get_str(m: &Map<String, Json>, k: &str) -> String {
     m.get(k).and_then(|v| v.as_str()).unwrap_or_default().to_string()
+}
+
+fn get_opt_str(m: &Map<String, Json>, k: &str) -> Option<String> {
+    m.get(k).and_then(|v| v.as_str()).map(str::to_string)
 }
 
 fn get_i64(m: &Map<String, Json>, k: &str) -> i64 {
@@ -1032,7 +1080,9 @@ fn memory_from_props(m: &Map<String, Json>) -> Memory {
         id: get_str(m, "rid"),
         kind: MemoryKind::from_str(&get_str(m, "kind")).unwrap_or(MemoryKind::Note),
         tier: MemoryTier::from_str(&get_str(m, "tier")).unwrap_or(MemoryTier::Working),
+        title: get_opt_str(m, "title"),
         content: get_str(m, "content"),
+        reasoning: get_opt_str(m, "reasoning"),
         concepts: get_str_vec(m, "concepts"),
         files: get_str_vec(m, "files"),
         session_id: if session.is_empty() { None } else { Some(session) },
@@ -1201,7 +1251,9 @@ mod live {
             id: uuid_simple(),
             kind: MemoryKind::Decision,
             tier: MemoryTier::Working,
+            title: None,
             content: "use surrealdb for the cairn vector store".into(),
+            reasoning: None,
             concepts: vec!["surrealdb".into(), "store".into()],
             files: vec![],
             session_id: None,
@@ -1265,11 +1317,11 @@ mod live {
             "the surrealdb backend uses an HNSW index for semantic search.".to_string(),
         ];
         let inserted = store
-            .replace_document(source, "Cairn RAG test doc", &chunks)
+            .replace_document(source, "Cairn RAG test doc", &chunks, None)
             .expect("replace_document");
         assert_eq!(inserted, 2);
 
-        let docs = store.list_documents().expect("list_documents");
+        let docs = store.list_documents(None).expect("list_documents");
         let doc = docs
             .iter()
             .find(|d| d.source == source)
@@ -1278,7 +1330,7 @@ mod live {
         assert_eq!(doc.chunk_count, 2);
 
         let hits = store
-            .search_documents("HNSW semantic search index", 5)
+            .search_documents("HNSW semantic search index", 5, None)
             .expect("search_documents");
         assert!(
             hits.iter().any(|c| c.source == source),
@@ -1288,14 +1340,14 @@ mod live {
         // Re-ingesting the same source replaces its chunks rather than accumulating.
         let single = vec!["just one chunk now.".to_string()];
         store
-            .replace_document(source, "Cairn RAG test doc", &single)
+            .replace_document(source, "Cairn RAG test doc", &single, None)
             .expect("re-ingest");
-        let docs = store.list_documents().expect("list_documents2");
+        let docs = store.list_documents(None).expect("list_documents2");
         let doc = docs.iter().find(|d| d.source == source).expect("present");
         assert_eq!(doc.chunk_count, 1, "re-ingest must replace, not append");
 
         assert!(store.delete_document(source).expect("delete_document"));
-        let docs = store.list_documents().expect("list_documents3");
+        let docs = store.list_documents(None).expect("list_documents3");
         assert!(!docs.iter().any(|d| d.source == source));
     }
 

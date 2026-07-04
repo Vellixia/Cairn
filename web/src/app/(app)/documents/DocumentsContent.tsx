@@ -39,19 +39,36 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
 import { Trash2, Search } from "lucide-react";
+import Link from "next/link";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   useDocumentsQuery,
   useDocumentSearchQuery,
   useDeleteDocumentMutation,
+  useProjectsQuery,
 } from "@/lib/queries";
 import type { DocumentSummary } from "@/lib/api";
 
+const ALL_PROJECTS = "__all__";
+
 export default function DocumentsContent() {
-  const documents = useDocumentsQuery();
+  const projects = useProjectsQuery();
+  const [projectFilter, setProjectFilter] = useState(ALL_PROJECTS);
+  const activeProject = projectFilter === ALL_PROJECTS ? undefined : projectFilter;
+  const documents = useDocumentsQuery(activeProject);
   const del = useDeleteDocumentMutation();
   const [query, setQuery] = useState("");
-  const search = useDocumentSearchQuery(query);
+  const search = useDocumentSearchQuery(query, 10, activeProject);
   const [deleteTarget, setDeleteTarget] = useState<DocumentSummary | null>(null);
+
+  const projectName = (id: string | null) =>
+    id ? (projects.data?.find((p) => p.id === id)?.name ?? id) : null;
 
   const columns: ColumnDef<DocumentSummary>[] = [
     {
@@ -63,10 +80,25 @@ export default function DocumentsContent() {
       accessorKey: "source",
       header: "Source",
       cell: ({ row }) => (
-        <span className="font-mono text-xs text-muted-foreground truncate block max-w-[240px]">
+        <span className="font-mono text-xs text-muted-foreground truncate block max-w-[200px]">
           {row.original.source}
         </span>
       ),
+    },
+    {
+      accessorKey: "project_id",
+      header: "Project",
+      cell: ({ row }) =>
+        row.original.project_id ? (
+          <Link
+            href={`/projects/${encodeURIComponent(row.original.project_id)}`}
+            className="text-xs underline decoration-dotted underline-offset-2 hover:text-foreground"
+          >
+            {projectName(row.original.project_id)}
+          </Link>
+        ) : (
+          <span className="text-xs text-muted-foreground">global</span>
+        ),
     },
     {
       accessorKey: "chunk_count",
@@ -114,8 +146,9 @@ export default function DocumentsContent() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Documents</h1>
           <p className="mt-1 text-sm text-muted-foreground">
-            Reference material ingested for RAG recall - search results blend into{" "}
-            <code className="font-mono">/api/search</code> alongside memories.
+            Reference material ingested via <code className="font-mono">cairn documents
+            ingest</code> - scoped to a project when ingested from inside one, global
+            otherwise.
           </p>
         </div>
         <HelpButton content={HELP["/documents"]} />
@@ -125,18 +158,33 @@ export default function DocumentsContent() {
         <CardHeader>
           <CardTitle>Search chunks</CardTitle>
           <CardDescription>
-            Preview what a search query would surface across every ingested document.
+            Preview what a search query would surface across every visible document.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="relative">
-            <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
-            <Input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search document chunks..."
-              className="pl-8"
-            />
+          <div className="flex gap-2">
+            <div className="relative flex-1">
+              <Search className="absolute left-2.5 top-2.5 size-4 text-muted-foreground" />
+              <Input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search document chunks..."
+                className="pl-8"
+              />
+            </div>
+            <Select value={projectFilter} onValueChange={setProjectFilter}>
+              <SelectTrigger className="w-[160px]">
+                <SelectValue placeholder="Project" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={ALL_PROJECTS}>All projects</SelectItem>
+                {projects.data?.map((p) => (
+                  <SelectItem key={p.id} value={p.id}>
+                    {p.name}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
           {query.length > 0 && (
             <div className="space-y-2">
@@ -169,7 +217,9 @@ export default function DocumentsContent() {
         <CardHeader>
           <CardTitle>Ingested documents</CardTitle>
           <CardDescription>
-            {documents.data ? `${documents.data.length} document(s)` : "Loading..."}
+            {documents.data
+              ? `${documents.data.length} document(s)${activeProject ? " . scoped to this project + global" : ""}`
+              : "Loading..."}
           </CardDescription>
         </CardHeader>
         <CardContent>

@@ -60,6 +60,7 @@ import {
   useWakeupQuery,
 } from "@/lib/queries";
 import type { Memory, MemoryListFilters } from "@/lib/api";
+import { displayTitle } from "@/lib/memoryTitle";
 import {
   Activity,
   AlertTriangle,
@@ -183,20 +184,32 @@ export default function MemoryBrowser() {
       {
         accessorKey: "content",
         header: "Memory",
-        cell: ({ row }) => (
-          <div className="flex items-center gap-1.5 max-w-[420px]">
-            {row.original.pinned && (
-              <Pin className="size-3 shrink-0 text-amber-500" aria-label="pinned" />
-            )}
-            {row.original.suspicious && (
-              <AlertTriangle
-                className="size-3 shrink-0 text-destructive"
-                aria-label="suspicious"
-              />
-            )}
-            <span className="truncate text-sm font-medium">{row.original.content}</span>
-          </div>
-        ),
+        cell: ({ row }) => {
+          const m = row.original;
+          const title = displayTitle(m.title, m.content);
+          // Only show a second, muted content line when the title is a REAL title (distinct
+          // from content) - falling back to content-as-title would otherwise duplicate it.
+          const showPreview = m.title && m.content.trim() !== title.trim();
+          return (
+            <div className="max-w-[420px]">
+              <div className="flex items-center gap-1.5">
+                {m.pinned && (
+                  <Pin className="size-3 shrink-0 text-amber-500" aria-label="pinned" />
+                )}
+                {m.suspicious && (
+                  <AlertTriangle
+                    className="size-3 shrink-0 text-destructive"
+                    aria-label="suspicious"
+                  />
+                )}
+                <span className="truncate text-sm font-medium">{title}</span>
+              </div>
+              {showPreview && (
+                <p className="truncate text-xs text-muted-foreground">{m.content}</p>
+              )}
+            </div>
+          );
+        },
       },
       {
         accessorKey: "kind",
@@ -560,7 +573,7 @@ function MemoryDetailDrawer({
               <SheetHeader>
                 <SheetTitle className="flex items-center gap-2 text-left">
                   {m.pinned && <Pin className="size-4 text-amber-500" aria-label="pinned" />}
-                  Memory detail
+                  {displayTitle(m.title, m.content)}
                 </SheetTitle>
                 <SheetDescription className="font-mono text-[11px] break-all text-left">
                   {m.id}
@@ -577,10 +590,24 @@ function MemoryDetailDrawer({
                 )}
 
                 <section>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">
+                    Content
+                  </p>
                   <p className="whitespace-pre-wrap rounded-md border border-line bg-muted/30 p-3 text-sm">
                     {m.content}
                   </p>
                 </section>
+
+                {m.reasoning && (
+                  <section>
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground mb-1.5">
+                      Reasoning
+                    </p>
+                    <p className="whitespace-pre-wrap rounded-md border border-line bg-muted/20 p-3 text-sm text-muted-foreground">
+                      {m.reasoning}
+                    </p>
+                  </section>
+                )}
 
                 <section className="flex flex-wrap gap-1.5">
                   <Badge variant="outline" className="text-[10px]">

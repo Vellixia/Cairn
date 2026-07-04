@@ -143,7 +143,16 @@ pub struct Memory {
     pub id: String,
     pub kind: MemoryKind,
     pub tier: MemoryTier,
+    /// Short scannable label (web redesign v2 follow-up). `None` for memories written before
+    /// this field existed or by callers that don't set one - the dashboard falls back to the
+    /// first line of `content` as a display title in that case.
+    #[serde(default)]
+    pub title: Option<String>,
     pub content: String,
+    /// Why this memory matters / the reasoning behind it, separate from the memory's own
+    /// content - e.g. "chose X because Y broke last time". `None` when not provided.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     pub concepts: Vec<String>,
     pub files: Vec<String>,
     pub session_id: Option<String>,
@@ -232,6 +241,10 @@ fn default_confidence() -> f32 {
 pub struct NewMemory {
     pub content: String,
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
     pub kind: Option<MemoryKind>,
     #[serde(default)]
     pub tier: Option<MemoryTier>,
@@ -288,7 +301,9 @@ impl NewMemory {
             id: Uuid::new_v4().to_string(),
             kind: self.kind.unwrap_or(MemoryKind::Note),
             tier: self.tier.unwrap_or(MemoryTier::Working),
+            title: self.title,
             content: self.content,
+            reasoning: self.reasoning,
             concepts: self.concepts,
             files: self.files,
             session_id: self.session_id,

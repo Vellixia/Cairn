@@ -174,6 +174,46 @@ async fn ingest(
     body
 }
 
+/// Like `post_json` but sets `X-Cairn-Project` so the scope middleware picks it up - used to
+/// exercise document project-scoping (web redesign v2 follow-up).
+async fn post_json_scoped(
+    app: axum::Router,
+    path: &str,
+    body: serde_json::Value,
+    cookie: &str,
+    project_id: &str,
+) -> (StatusCode, serde_json::Value, Vec<axum::http::HeaderValue>) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("cookie", format!("cairn_session={cookie}"))
+        .header("X-Cairn-Project", project_id)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+    read_body(resp).await
+}
+
+/// Like `request_json` but sets `X-Cairn-Project`.
+async fn request_json_scoped(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    cookie: &str,
+    project_id: &str,
+) -> (StatusCode, serde_json::Value, Vec<axum::http::HeaderValue>) {
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("cookie", format!("cairn_session={cookie}"))
+        .header("X-Cairn-Project", project_id)
+        .body(Body::empty())
+        .expect("build request");
+    let resp = app.oneshot(req).await.expect("oneshot");
+    read_body(resp).await
+}
+
 #[tokio::test]
 async fn ingest_then_list_shows_the_document() {
     let Some((app, _dir)) = state() else { return };
@@ -319,6 +359,95 @@ async fn delete_unknown_id_returns_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Web redesign v2 follow-up: a document ingested under one project's `X-Cairn-Project` header
+/// is invisible when listing a DIFFERENT project, but still shows up in the unfiltered
+/// (no-header) global list - same blend policy memory scoping already uses.
+#[tokio::test]
+async fn project_scoped_documents_are_isolated_but_visible_globally() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    let (status, body, _) = post_json_scoped(
+        app.clone(),
+        "/api/documents/ingest",
+        serde_json::json!({ "source": "proj-a/notes.md", "content": "alpha project notes" }),
+        &cookie,
+        "proj-a",
+    )
+    .await;
+    assert!(status.is_success(), "ingest failed: {status} body={body}");
+    assert_eq!(body["project_id"], "proj-a");
+
+    // Different project: proj-a's doc must not appear.
+    let (_, list_b, _) = request_json_scoped(
+        app.clone(),
+        "GET",
+        "/api/documents",
+        &cookie,
+        "proj-b",
+    )
+    .await;
+    assert!(
+        !list_b.as_array().unwrap().iter().any(|d| d["source"] == "proj-a/notes.md"),
+        "proj-b must not see proj-a's document; got {list_b}"
+    );
+
+    // Same project: visible.
+    let (_, list_a, _) = request_json_scoped(
+        app.clone(),
+        "GET",
+        "/api/documents",
+        &cookie,
+        "proj-a",
+    )
+    .await;
+    assert!(list_a.as_array().unwrap().iter().any(|d| d["source"] == "proj-a/notes.md"));
+
+    // No header (global, unfiltered): still visible.
+    let (_, list_all, _) = request_json(app, "GET", "/api/documents", Some(&cookie)).await;
+    assert!(list_all.as_array().unwrap().iter().any(|d| d["source"] == "proj-a/notes.md"));
+}
+
+/// Same isolation guarantee, exercised through `/api/documents/search` instead of `list`.
+#[tokio::test]
+async fn project_scoped_search_excludes_other_projects_documents() {
+    let Some((app, _dir)) = state() else { return };
+    let cookie = login_cookie(app.clone()).await;
+
+    post_json_scoped(
+        app.clone(),
+        "/api/documents/ingest",
+        serde_json::json!({ "source": "proj-a/guide.md", "content": "zephyrium alpha guide content" }),
+        &cookie,
+        "proj-a",
+    )
+    .await;
+    post_json_scoped(
+        app.clone(),
+        "/api/documents/ingest",
+        serde_json::json!({ "source": "proj-b/guide.md", "content": "zephyrium beta guide content" }),
+        &cookie,
+        "proj-b",
+    )
+    .await;
+
+    let (status, hits, _) = request_json_scoped(
+        app,
+        "GET",
+        "/api/documents/search?q=zephyrium%20guide",
+        &cookie,
+        "proj-a",
+    )
+    .await;
+    assert!(status.is_success());
+    let hits = hits.as_array().unwrap();
+    assert!(hits.iter().any(|h| h["source"] == "proj-a/guide.md"));
+    assert!(
+        !hits.iter().any(|h| h["source"] == "proj-b/guide.md"),
+        "proj-a search must not surface proj-b's document; got {hits:?}"
+    );
 }
 
 #[tokio::test]

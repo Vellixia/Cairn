@@ -56,8 +56,10 @@ export const qk = {
   project: (id: string) => ["projects", id] as const,
   memoryByScope: (scopeType: string, scopeId: string, limit: number) =>
     ["memory", "by-scope", scopeType, scopeId, limit] as const,
-  documents: ["documents"] as const,
-  documentSearch: (q: string) => ["documents", "search", q] as const,
+  documents: (projectId?: string) => ["documents", projectId ?? "all"] as const,
+  documentSearch: (q: string, projectId?: string) =>
+    ["documents", "search", q, projectId ?? "all"] as const,
+  preferences: ["profile", "list"] as const,
   drift: ["guard", "drift"] as const,
   graph: ["memory", "graph"] as const,
   activityAudit: ["activity", "audit"] as const,
@@ -225,6 +227,42 @@ export function useCronJobsQuery() {
   });
 }
 
+// Web redesign v2 follow-up: standing preferences (memories with kind=preference), injected
+// as "Standing preferences:" at every agent SessionStart, before wakeup memories.
+export function usePreferencesQuery() {
+  return useQuery({
+    queryKey: qk.preferences,
+    queryFn: () => getJSON<Memory[]>("/api/profile"),
+  });
+}
+
+export function useAddPreferenceMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (rule: string) => postJSON<Memory>("/api/profile", { rule }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.preferences });
+      toast.success("Preference added");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+// Preferences are memories under the hood - deleting one goes through the generic memory
+// delete path, but invalidates the preferences list too so the profile page updates.
+export function useDeletePreferenceMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => delJSON<{ deleted: boolean }>(`/api/memory/${encodeURIComponent(id)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.preferences });
+      qc.invalidateQueries({ queryKey: ["memory"] });
+      toast("Preference deleted");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
 // v0.8.0 Sprint 8: "while you were away" autopilot summary.
 export function useAutopilotDigestQuery(hours = 24) {
   return useQuery({
@@ -273,21 +311,27 @@ export function useMemoryByScopeQuery(scopeType: "project" | "session", scopeId:
   });
 }
 
-// v0.8.0 Sprint 6: every ingested document, most-recently-updated first.
-export function useDocumentsQuery() {
+// v0.8.0 Sprint 6 (web redesign v2: project-scoped): every ingested document,
+// most-recently-updated first. `projectId` filters to that project's docs + global ones -
+// omit for the unfiltered global list.
+export function useDocumentsQuery(projectId?: string) {
   return useQuery({
-    queryKey: qk.documents,
-    queryFn: () => getJSON<DocumentSummary[]>("/api/documents"),
+    queryKey: qk.documents(projectId),
+    queryFn: () =>
+      getJSON<DocumentSummary[]>(
+        `/api/documents${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`,
+      ),
     staleTime: 30_000,
   });
 }
 
-export function useDocumentSearchQuery(q: string, limit = 10) {
+export function useDocumentSearchQuery(q: string, limit = 10, projectId?: string) {
   return useQuery({
-    queryKey: qk.documentSearch(q),
+    queryKey: qk.documentSearch(q, projectId),
     queryFn: () =>
       getJSON<DocumentChunkRecord[]>(
-        `/api/documents/search?limit=${limit}&q=${encodeURIComponent(q)}`,
+        `/api/documents/search?limit=${limit}&q=${encodeURIComponent(q)}` +
+          (projectId ? `&project_id=${encodeURIComponent(projectId)}` : ""),
       ),
     enabled: q.length > 0,
   });
@@ -298,7 +342,7 @@ export function useDeleteDocumentMutation() {
   return useMutation({
     mutationFn: (id: string) => delJSON<{ deleted: boolean }>(`/api/documents/${encodeURIComponent(id)}`),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.documents });
+      qc.invalidateQueries({ queryKey: ["documents"] });
       toast("Document deleted");
     },
     onError: (e) => toast.error(errMessage(e)),

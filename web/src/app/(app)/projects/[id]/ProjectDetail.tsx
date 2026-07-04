@@ -16,12 +16,21 @@ import {
   ItemTitle,
   ItemDescription,
 } from "@/components/ui/item";
-import { useProjectQuery, useMemoryByScopeQuery, usePromotionLogQuery } from "@/lib/queries";
+import {
+  useProjectQuery,
+  useMemoryByScopeQuery,
+  usePromotionLogQuery,
+  useDocumentsQuery,
+} from "@/lib/queries";
+import { displayTitle } from "@/lib/memoryTitle";
+import { useUrlId } from "@/lib/useUrlId";
 
-export default function ProjectDetail({ id }: { id: string }) {
+export default function ProjectDetail() {
+  const id = useUrlId() ?? "";
   const project = useProjectQuery(id);
   const memories = useMemoryByScopeQuery("project", id, 50);
   const promotionLog = usePromotionLogQuery(200);
+  const documents = useDocumentsQuery(id);
 
   const promotionActivity = (promotionLog.data ?? []).filter((e) => e.old_scope_id === id);
 
@@ -95,25 +104,76 @@ export default function ProjectDetail({ id }: { id: string }) {
             </p>
           ) : (
             <ul className="space-y-1.5">
-              {memories.data?.map((m) => (
-                <Item key={m.id} variant="outline" size="sm">
-                  <ItemContent>
-                    <ItemTitle className="line-clamp-2">{m.content}</ItemTitle>
-                    <ItemDescription className="flex items-center gap-2 flex-wrap">
-                      <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
-                        {m.kind}
-                      </Badge>
-                      {m.promo_score > 0 && (
-                        <Badge variant="secondary" className="mr-1.5 font-mono text-[10px]">
-                          promo {m.promo_score.toFixed(2)}
-                        </Badge>
+              {memories.data?.map((m) => {
+                const title = displayTitle(m.title, m.content);
+                const showPreview = m.title && m.content.trim() !== title.trim();
+                return (
+                  <Item key={m.id} variant="outline" size="sm">
+                    <ItemContent>
+                      <ItemTitle className="line-clamp-1">{title}</ItemTitle>
+                      {showPreview && (
+                        <p className="line-clamp-1 text-xs text-muted-foreground">{m.content}</p>
                       )}
-                      <span className="text-[11px] text-muted-foreground">
-                        {m.tier} . {new Date(m.updated_at).toLocaleString()}
-                      </span>
-                    </ItemDescription>
-                  </ItemContent>
-                </Item>
+                      <ItemDescription className="flex items-center gap-2 flex-wrap">
+                        <Badge variant="outline" className="mr-1.5 font-mono text-[10px]">
+                          {m.kind}
+                        </Badge>
+                        {m.promo_score > 0 && (
+                          <Badge variant="secondary" className="mr-1.5 font-mono text-[10px]">
+                            promo {m.promo_score.toFixed(2)}
+                          </Badge>
+                        )}
+                        <span className="text-[11px] text-muted-foreground">
+                          {m.tier} . {new Date(m.updated_at).toLocaleString()}
+                        </span>
+                      </ItemDescription>
+                    </ItemContent>
+                  </Item>
+                );
+              })}
+            </ul>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Documents</CardTitle>
+          <CardDescription>
+            Reference material ingested from inside this project, plus anything global.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          {documents.isLoading ? (
+            <Skeleton className="h-10 w-full" />
+          ) : documents.data && documents.data.length === 0 ? (
+            <p className="text-sm text-muted-foreground">
+              Ingest from inside this repo:{" "}
+              <code className="font-mono">cairn documents ingest &lt;path|url&gt;</code>.
+            </p>
+          ) : (
+            <ul className="space-y-1.5">
+              {documents.data?.map((d) => (
+                <li
+                  key={d.id}
+                  className="flex items-center gap-2 text-xs rounded-md border border-line/40 bg-muted/30 px-3 py-2"
+                >
+                  <span className="font-medium">{d.title}</span>
+                  <span className="font-mono text-muted-foreground truncate max-w-[200px]">
+                    {d.source}
+                  </span>
+                  <Badge variant="outline" className="font-mono text-[10px]">
+                    {d.chunk_count} chunks
+                  </Badge>
+                  {!d.project_id && (
+                    <Badge variant="secondary" className="text-[10px]">
+                      global
+                    </Badge>
+                  )}
+                  <span className="ml-auto text-muted-foreground">
+                    {new Date(d.updated_at).toLocaleString()}
+                  </span>
+                </li>
               ))}
             </ul>
           )}

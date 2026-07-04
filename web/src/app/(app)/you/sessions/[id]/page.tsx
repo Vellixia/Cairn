@@ -1,21 +1,19 @@
 import SessionDetail from "./SessionDetail";
 
 /**
- * Server wrapper. The actual interactive UI lives in `./SessionDetail` as a
- * client component; this page just receives the dynamic route param at build
- * time and forwards it as a prop.
+ * Server wrapper. `generateStaticParams` returns a single placeholder so Next.js's
+ * `output: "export"` pre-renders one shell page; the cairn-server static-fallback serves that
+ * shell for any id the export didn't pre-render.
  *
- * `generateStaticParams` returns a single placeholder so Next.js's
- * `output: "export"` pre-renders one shell page. Real session ids are loaded
- * client-side via `react-query`, so the dashboard's
- * `/dashboard/sessions/<id>` URL works whether or not a static shell exists
- * for that exact id --- the cairn-server static-fallback serves the page if
- * Next's export hasn't pre-rendered it.
+ * BUG FIX (found alongside the same defect in `projects/[id]` - see that file's fuller note):
+ * `params.id` (and even `useParams()`) always returns the literal placeholder string in this
+ * foreign-server static-export setup, on both a hard reload and a client-side transition.
+ * `SessionDetail` reads the real id from `window.location.pathname` instead (`useUrlId`).
  */
 export function generateStaticParams() {
   return [{ id: "new" }];
 }
 
-export default function SessionDetailPage({ params }: { params: { id: string } }) {
-  return <SessionDetail id={params.id} />;
+export default function SessionDetailPage() {
+  return <SessionDetail />;
 }

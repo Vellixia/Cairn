@@ -577,7 +577,7 @@ impl MemoryEngine {
             }
             if self
                 .store
-                .edit_memory(&m.id, None, None, Some(concepts), None)?
+                .edit_memory(&m.id, None, None, Some(concepts), None, None, None)?
             {
                 updated += 1;
             }
@@ -922,6 +922,10 @@ impl MemoryEngine {
             return Ok(None);
         };
         let memory = self.remember(NewMemory {
+            title: Some(format!(
+                "Session summary ({} memories)",
+                contents.len()
+            )),
             content: summary,
             kind: Some(MemoryKind::Note),
             tier: Some(MemoryTier::Episodic),
@@ -974,9 +978,10 @@ impl MemoryEngine {
         Ok(promoted)
     }
 
-    /// Edit a memory's content/importance/concepts/files. Pass `None` to leave a field alone.
-    /// `confidence` and `pinned` are deliberately NOT editable here - they have their own
-    /// helpers (`reinforce` happens on recall, `pin` is a single toggle).
+    /// Edit a memory's content/importance/concepts/files/title/reasoning. Pass `None` to leave
+    /// a field alone. `confidence` and `pinned` are deliberately NOT editable here - they have
+    /// their own helpers (`reinforce` happens on recall, `pin` is a single toggle).
+    #[allow(clippy::too_many_arguments)]
     pub fn edit(
         &self,
         id: &str,
@@ -984,10 +989,12 @@ impl MemoryEngine {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<Option<Memory>> {
-        let updated = self
-            .store
-            .edit_memory(id, content, importance, concepts, files)?;
+        let updated = self.store.edit_memory(
+            id, content, importance, concepts, files, title, reasoning,
+        )?;
         if !updated {
             return Ok(None);
         }
@@ -1893,7 +1900,7 @@ mod tests {
         let Some(mem) = engine() else { return };
         let m = mem.remember(NewMemory::new("original content")).unwrap();
         let updated = mem
-            .edit(&m.id, Some("new content".into()), None, None, None)
+            .edit(&m.id, Some("new content".into()), None, None, None, None, None)
             .unwrap()
             .unwrap();
         assert_eq!(updated.content, "new content");
@@ -1902,7 +1909,7 @@ mod tests {
 
         // Unknown id returns Ok(None).
         assert!(mem
-            .edit("no-such-id", None, None, None, None)
+            .edit("no-such-id", None, None, None, None, None, None)
             .unwrap()
             .is_none());
     }
@@ -2244,7 +2251,9 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             kind: MemoryKind::Note,
             tier: MemoryTier::Working,
+            title: None,
             content: content.to_string(),
+            reasoning: None,
             concepts: vec![],
             files: vec![],
             session_id: None,

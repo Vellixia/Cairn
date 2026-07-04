@@ -42,14 +42,16 @@ describe("API type shapes", () => {
     expect(s.memories).toBe(42)
   })
 
-  // The full 22-field record the Memory Browser drawer depends on (scope, provenance,
-  // trust signals, edges) - kept in sync with `GET /api/memory/:id`'s serialization.
+  // The full record the Memory Browser drawer depends on (scope, provenance, trust signals,
+  // edges, title/reasoning) - kept in sync with `GET /api/memory/:id`'s serialization.
   function fullMemory(id: string): Memory {
     return {
       id,
       kind: "note",
       tier: "working",
+      title: null,
       content: "hello",
+      reasoning: null,
       concepts: [],
       files: [],
       session_id: null,
