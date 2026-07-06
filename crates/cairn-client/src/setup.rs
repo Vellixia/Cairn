@@ -114,7 +114,12 @@ pub fn run(
     Ok(1)
 }
 
-fn install_one(a: &dyn agents::Agent, project: &Path, home: Option<&Path>, scope: Scope) -> Result<()> {
+fn install_one(
+    a: &dyn agents::Agent,
+    project: &Path,
+    home: Option<&Path>,
+    scope: Scope,
+) -> Result<()> {
     let ctx = InstallCtx {
         project,
         home,
