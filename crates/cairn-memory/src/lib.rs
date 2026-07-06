@@ -1100,8 +1100,72 @@ impl MemoryEngine {
     ) -> Result<Vec<ScoredMemory>> {
         // 1. Same wide retrieval + MMR as the no-rerank path.
         let mmr = self.hybrid_search_for_org(query, limit, rerank_depth, org_id, scope)?;
+        Ok(self.rerank_hits(query, mmr, limit, reranker, blend_weight))
+    }
+
+    /// Query expansion with cross-encoder reranking. Global-only scope; see
+    /// [`Self::expanded_search_with_rerank_for_org`] for the scope-aware entry point and for why
+    /// this composition exists as its own method rather than chaining
+    /// [`Self::expanded_search`] and [`Self::hybrid_search_with_rerank`].
+    pub fn expanded_search_with_rerank(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        expander: &QueryExpander,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+    ) -> Result<Vec<ScoredMemory>> {
+        self.expanded_search_with_rerank_for_org(
+            query,
+            limit,
+            rerank_depth,
+            expander,
+            reranker,
+            blend_weight,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware search with LLM query expansion *and* cross-encoder reranking.
+    /// Composes [`Self::expanded_search_for_org`] (wider retrieval via reformulations) with the
+    /// same rerank pass [`Self::hybrid_search_with_rerank_for_org`] uses, instead of the two
+    /// being mutually exclusive - `search_handler` used to silently drop the expansion whenever
+    /// both `expand=true` and `rerank=local` were requested together, because it reran a plain
+    /// (unexpanded) search-with-rerank on top of the expanded hits instead of reranking them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn expanded_search_with_rerank_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        expander: &QueryExpander,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
+        let hits =
+            self.expanded_search_for_org(query, limit, rerank_depth, expander, org_id, scope)?;
+        Ok(self.rerank_hits(query, hits, limit, reranker, blend_weight))
+    }
+
+    /// Cross-encoder rerank of an already-retrieved hit list against `query` - the shared tail
+    /// end of both [`Self::hybrid_search_with_rerank_for_org`] and
+    /// [`Self::expanded_search_with_rerank_for_org`]. `query` is always the caller's original,
+    /// unexpanded text: expansion widens *retrieval*, but relevance for the final ranking is
+    /// still judged against what the user actually asked.
+    fn rerank_hits(
+        &self,
+        query: &str,
+        mmr: Vec<ScoredMemory>,
+        limit: usize,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+    ) -> Vec<ScoredMemory> {
         if mmr.is_empty() {
-            return Ok(mmr);
+            return mmr;
         }
 
         // 2. Rerank the post-MMR top-K (capped at `reranker` budget).
@@ -1113,7 +1177,7 @@ impl MemoryEngine {
             Err(e) => {
                 // Fail-soft: keep the MMR ordering if the reranker errors.
                 tracing::warn!(error = %e, "reranker failed; returning MMR-only result");
-                return Ok(mmr);
+                return mmr;
             }
         };
 
@@ -1159,7 +1223,7 @@ impl MemoryEngine {
         }
         // Trim to the requested limit.
         result.truncate(limit);
-        Ok(result)
+        result
     }
 
     /// Search the engine with LLM-driven query expansion. For each reformulation we run

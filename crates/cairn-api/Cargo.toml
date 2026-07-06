@@ -49,6 +49,7 @@ hmac.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+url.workspace = true
 async-stream = "0.3"
 futures-core = "0.3"
 

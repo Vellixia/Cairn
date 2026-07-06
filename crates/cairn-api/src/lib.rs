@@ -827,6 +827,22 @@ struct ConfigEntry {
     description: &'static str,
 }
 
+/// Masks embedded userinfo credentials in a URL (`scheme://user:pass@host/...` becomes
+/// `scheme://***@host/...`). `db_url` is documented as credential-free - auth goes through the
+/// separate `db_user`/`db_pass` fields - but nothing enforces that, so a `CAIRN_DB_URL` set with
+/// embedded credentials would otherwise leak a password verbatim to the config viewer. Returns
+/// the input unchanged if it doesn't parse as a URL or carries no username/password.
+fn mask_url_credentials(raw: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return raw.to_string();
+    };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        let _ = parsed.set_password(None);
+        let _ = parsed.set_username("***");
+    }
+    parsed.to_string()
+}
+
 async fn config_view(State(s): State<AppState>) -> Json<Vec<ConfigEntry>> {
     fn secret(present: bool) -> Value {
         json!(if present { "set" } else { "not set" })
@@ -840,7 +856,7 @@ async fn config_view(State(s): State<AppState>) -> Json<Vec<ConfigEntry>> {
         ConfigEntry { key: "insecure", value: json!(c.insecure), env: "CAIRN_INSECURE", group: "server", description: "Allow plain HTTP on a non-loopback bind (reverse-proxy setups only)." },
         ConfigEntry { key: "cors_origins", value: json!(c.cors_origins), env: "CAIRN_CORS_ORIGINS", group: "server", description: "Allowed CORS origins; empty = same-origin only." },
         ConfigEntry { key: "secret_key", value: secret(c.secret_key.is_some()), env: "CAIRN_SECRET_KEY", group: "server", description: "HMAC secret signing device-token JWTs and the savings ledger." },
-        ConfigEntry { key: "db_url", value: json!(c.db_url), env: "CAIRN_DB_URL", group: "database", description: "SurrealDB connection URL." },
+        ConfigEntry { key: "db_url", value: json!(mask_url_credentials(&c.db_url)), env: "CAIRN_DB_URL", group: "database", description: "SurrealDB connection URL. Embedded userinfo credentials, if any, are masked." },
         ConfigEntry { key: "db_user", value: json!(c.db_user), env: "CAIRN_DB_USER", group: "database", description: "SurrealDB auth username." },
         ConfigEntry { key: "db_pass", value: secret(!c.db_pass.is_empty()), env: "CAIRN_DB_PASS", group: "database", description: "SurrealDB auth password." },
         ConfigEntry { key: "db_ns", value: json!(c.db_ns), env: "CAIRN_DB_NS", group: "database", description: "SurrealDB namespace (isolation boundary between Cairn instances)." },
@@ -1343,27 +1359,25 @@ async fn search_handler(
     // P3.3 query expansion: when `expand=true` and the LLM gate is on.
     if q.expand.unwrap_or(false) && s.cfg.llm_consolidation.enabled {
         let expander = cairn_memory::QueryExpander::new(s.cfg.llm_consolidation.clone());
-        let mut hits = s.mem.expanded_search_for_org(
-            &q.q,
-            limit,
-            rerank_depth,
-            &expander,
-            org_id.clone(),
-            &scope,
-        )?;
-        // P4.2 rerank: post-expansion cross-encoder pass.
-        if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
+        // P4.2 rerank: reranks the *expanded* hits, rather than discarding them and rerunning
+        // a plain (unexpanded) search-with-rerank - see expanded_search_with_rerank_for_org's
+        // doc comment for why these two used to be mutually exclusive.
+        let hits = if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
             let reranker = cairn_memory::rerank_from_config(&s.cfg.rerank);
-            hits = s.mem.hybrid_search_with_rerank_for_org(
+            s.mem.expanded_search_with_rerank_for_org(
                 &q.q,
                 limit,
                 rerank_depth,
+                &expander,
                 &*reranker,
                 s.cfg.rerank.blend_weight,
                 org_id,
                 &scope,
-            )?;
-        }
+            )?
+        } else {
+            s.mem
+                .expanded_search_for_org(&q.q, limit, rerank_depth, &expander, org_id, &scope)?
+        };
         return Ok(Json(hits));
     }
 
@@ -2492,6 +2506,27 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(v["error"], "no such memory");
         assert_eq!(v["error_code"], "not_found");
+    }
+
+    #[test]
+    fn mask_url_credentials_strips_embedded_userinfo() {
+        assert_eq!(
+            mask_url_credentials("wss://myuser:hunter2@db.example.com:8000/rpc"),
+            "wss://***@db.example.com:8000/rpc"
+        );
+    }
+
+    #[test]
+    fn mask_url_credentials_leaves_credential_free_urls_untouched() {
+        assert_eq!(
+            mask_url_credentials("ws://localhost:8000/rpc"),
+            "ws://localhost:8000/rpc"
+        );
+    }
+
+    #[test]
+    fn mask_url_credentials_passes_through_unparseable_input() {
+        assert_eq!(mask_url_credentials("not a url"), "not a url");
     }
 
     #[tokio::test]
