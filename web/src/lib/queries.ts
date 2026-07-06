@@ -20,7 +20,6 @@ import {
   type Memory,
   type MemoryListFilters,
   type MemoryListResponse,
-  type PairCode,
   type DocumentSummary,
   type DocumentChunkRecord,
   type PromotionLogEntry,
@@ -29,7 +28,7 @@ import {
 } from "@/lib/api";
 import { useMeStore } from "@/lib/stores/me";
 import { pollWhenOffline } from "@/lib/stores/events";
-import type { IssueTokenInput, PairCodeInput } from "@/lib/forms/schemas";
+import type { IssueTokenInput } from "@/lib/forms/schemas";
 
 // ---- query keys (single source of truth) ------------------------------------
 
@@ -521,17 +520,6 @@ export function useDeleteMemoryMutation() {
       qc.invalidateQueries({ queryKey: ["memory"] });
       qc.invalidateQueries({ queryKey: qk.stats });
       toast("Memory deleted");
-    },
-    onError: (e) => toast.error(errMessage(e)),
-  });
-}
-
-export function useGeneratePairCodeMutation() {
-  return useMutation({
-    mutationFn: (input: PairCodeInput) =>
-      postJSON<PairCode>("/api/devices/pair-codes", input),
-    onSuccess: (p) => {
-      toast.success(`Pair code for "${p.name}" valid ${p.code.length} chars`);
     },
     onError: (e) => toast.error(errMessage(e)),
   });

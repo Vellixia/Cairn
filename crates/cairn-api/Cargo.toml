@@ -26,7 +26,7 @@ cairn-share.workspace = true
 cairn-session.workspace = true
 cairn-registry.workspace = true
 cairn-embed.workspace = true
-cairn-mcp.workspace = true
+cairn-mcp = { workspace = true, features = ["engine"] }
 cairn-ingest.workspace = true
 cairn-document.workspace = true
 serde.workspace = true

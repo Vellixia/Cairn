@@ -26,7 +26,6 @@ const AUTH_PATHS = new Set([
   "/api/auth/status",
   "/api/auth/me",
   "/api/health",
-  "/api/pair/claim",
 ]);
 
 function isAuthPath(path: string): boolean {
@@ -299,12 +298,6 @@ export interface DeviceTokenMeta {
 
 export interface IssuedToken extends DeviceTokenMeta {
   token: string;
-}
-
-export interface PairCode {
-  code: string;
-  name: string;
-  expires_at: string;
 }
 
 export interface AuditEvent {

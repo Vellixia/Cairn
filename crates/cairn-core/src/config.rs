@@ -18,7 +18,7 @@
 //! 3. **Built-in default** - the hard-coded fallback inside [`Config::resolve`].
 //!
 //! `cairn-client` (the `cairn` CLI agents run) is a separate binary with its own, separate
-//! config layer - `~/.cairn/config.toml`, written by `cairn pair`/`onboard`/`setup` - documented
+//! config layer - `~/.cairn/config.toml`, written by `cairn onboard`/`setup` - documented
 //! in `crates/cairn-client/src/config.rs`, not here.
 
 use std::path::{Path, PathBuf};

@@ -23,7 +23,6 @@ mod hook;
 mod http;
 mod jsonedit;
 mod onboard;
-mod pair;
 mod paths;
 mod project;
 mod reset;
@@ -40,8 +39,8 @@ mod update;
 fn require_server() -> Result<String> {
     config::resolve(None).server.map(|(s, _)| s).ok_or_else(|| {
         anyhow!(
-            "No Cairn server configured.\n\
-             Pair with a server (`cairn pair <code>`), or run:\n\
+            "No Cairn server configured. Mint a token from the dashboard's You > Tokens \
+             page, then run:\n\
              \n  cairn onboard --server <url> --token <jwt>\n\
              \n  Or: cairn setup --all --server <url> --token <jwt>"
         )
@@ -79,22 +78,10 @@ enum Cmd {
     Onboard {
         #[arg(long)]
         skip_agents: bool,
-        /// Claim a dashboard-minted pairing code instead of passing --token directly.
-        #[arg(long)]
-        code: Option<String>,
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
         token: Option<String>,
-    },
-    /// Claim a device-pairing code minted by the dashboard (You > Pair) and wire up agents.
-    Pair {
-        code: String,
-        #[arg(long)]
-        server: Option<String>,
-        /// Skip agent auto-detection and wiring.
-        #[arg(long)]
-        no_agents: bool,
     },
     /// Configure an agent (or --all detected) to use a Cairn server.
     Setup {
@@ -110,13 +97,6 @@ enum Cmd {
         /// of the global default (`~/.claude.json`).
         #[arg(long)]
         project: bool,
-        /// Embed server/token directly into the agent's own config file
-        /// instead of the default (server/token live only in
-        /// `~/.cairn/config.toml`, agent entries stay bare). Use this for
-        /// multi-server or per-agent-token setups the shared config file
-        /// can't express.
-        #[arg(long)]
-        embed_env: bool,
     },
     /// Show server connection, token info, and agent status.
     Status {
@@ -185,30 +165,22 @@ fn main() -> Result<()> {
         }
         Cmd::Onboard {
             skip_agents,
-            code,
             server,
             token,
         } => {
             onboard::run(onboard::OnboardOptions {
                 skip_agents,
                 fix: true,
-                code,
                 server,
                 token,
             })?;
         }
-        Cmd::Pair {
-            code,
-            server,
-            no_agents,
-        } => pair::run(&code, server.as_deref(), no_agents)?,
         Cmd::Setup {
             agent,
             all,
             server,
             token,
             project,
-            embed_env,
         } => {
             setup::run(
                 agent.as_deref(),
@@ -216,7 +188,6 @@ fn main() -> Result<()> {
                 server.as_deref(),
                 token.as_deref(),
                 project,
-                embed_env,
             )?;
         }
         Cmd::Status { json } => {

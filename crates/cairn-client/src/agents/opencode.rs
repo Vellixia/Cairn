@@ -6,7 +6,7 @@ use super::{Agent, InstallCtx, InstallReport, InstalledFile, RemovalAction};
 use crate::jsonedit::{read_object, strip_cairn_plugin_entries, write_json};
 use crate::paths;
 use anyhow::{Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -47,7 +47,7 @@ impl Agent for OpenCode {
         paths::opencode_config_path().exists() || project.join(".opencode").exists()
     }
 
-    fn install(&self, ctx: &InstallCtx) -> Result<InstallReport> {
+    fn install(&self, _ctx: &InstallCtx) -> Result<InstallReport> {
         let path = paths::opencode_config_path();
         let mut cfg = read_object(&path)?;
         let mcp = cfg.entry("mcp").or_insert_with(|| json!({}));
@@ -55,42 +55,15 @@ impl Agent for OpenCode {
             .as_object_mut()
             .with_context(|| format!("{}: 'mcp' is not an object", path.display()))?;
 
-        // Preserve any existing environment variables from a previous setup run -
-        // but only in `--embed-env` mode. Outside it, any env a pre-config-file
-        // `setup` run embedded is dropped (de-tokenized) rather than carried
-        // forward: server/token live in `~/.cairn/config.toml` instead.
-        let mut env = Map::new();
-        if ctx.embed_env {
-            if let Some(existing) = mcp_obj.get("cairn") {
-                if let Some(existing_env) = existing.get("environment").and_then(Value::as_object) {
-                    for (k, v) in existing_env {
-                        env.insert(k.clone(), v.clone());
-                    }
-                }
-            }
-            if let Some(s) = ctx.server {
-                env.insert("CAIRN_SERVER".into(), json!(s));
-            }
-            if let Some(t) = ctx.token {
-                env.insert("CAIRN_TOKEN".into(), json!(t));
-            }
-        }
-
+        // v0.8.0 client redesign: server/token live only in `~/.cairn/config.toml` - any
+        // `environment` block a pre-config-file `setup` run embedded here is dropped
+        // (de-tokenized) rather than carried forward.
         let cli_exe = paths::cairn_exe();
-        let entry = if env.is_empty() {
-            json!({
-                "type": "local",
-                "command": [cli_exe, "mcp"],
-                "enabled": true
-            })
-        } else {
-            json!({
-                "type": "local",
-                "command": [cli_exe, "mcp"],
-                "environment": Value::Object(env),
-                "enabled": true
-            })
-        };
+        let entry = json!({
+            "type": "local",
+            "command": [cli_exe, "mcp"],
+            "enabled": true
+        });
         mcp_obj.insert("cairn".into(), entry);
 
         // Write the plugin file. OpenCode auto-loads every .js/.ts file in its
@@ -269,96 +242,70 @@ mod tests {
         fs::read_to_string(path).unwrap()
     }
 
-    /// Test-only entry point that takes an explicit config path, bypassing
-    /// `opencode_config_path()`'s `XDG_CONFIG_HOME` lookup so tests don't race
-    /// on the env var when run in parallel.
-    fn install_with_path(server: Option<&str>, token: Option<&str>, path: &Path) -> Result<()> {
-        let mut cfg = read_object(path)?;
-        let mcp = cfg.entry("mcp").or_insert_with(|| json!({}));
-        let mcp_obj = mcp
-            .as_object_mut()
-            .with_context(|| format!("{}: 'mcp' is not an object", path.display()))?;
-        let mut env = Map::new();
-        if let Some(s) = server {
-            env.insert("CAIRN_SERVER".into(), json!(s));
-        }
-        if let Some(t) = token {
-            env.insert("CAIRN_TOKEN".into(), json!(t));
-        }
-        let exe = paths::cairn_exe();
-        let entry = if env.is_empty() {
-            json!({ "type": "local", "command": [exe, "mcp"], "enabled": true })
-        } else {
-            json!({
-                "type": "local",
-                "command": [exe, "mcp"],
-                "environment": Value::Object(env),
-                "enabled": true
-            })
-        };
-        mcp_obj.insert("cairn".into(), entry);
-        strip_cairn_plugin_entries(&mut cfg);
-        write_json(path, &Value::Object(cfg))
-    }
-
     #[test]
-    fn writes_into_the_home_config_and_includes_remote_env() {
+    fn install_writes_bare_command_with_no_environment() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
         let exe = paths::cairn_exe();
-        let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
-        fs::create_dir_all(cfg.parent().unwrap()).unwrap();
 
-        install_with_path(Some("http://example.com:7777"), Some("tok-123"), &cfg).unwrap();
+        crate::env_guard::with_env(&[("XDG_CONFIG_HOME", Some(&home_str))], || {
+            let ctx = InstallCtx {
+                project: home.path(),
+                home: Some(home.path()),
+                scope: Scope::Global,
+            };
+            OpenCode.install(&ctx).unwrap();
 
-        let v: Value = serde_json::from_str(&read_text(&cfg)).unwrap();
-        assert_eq!(v["mcp"]["cairn"]["command"][0], exe);
-        assert_eq!(v["mcp"]["cairn"]["command"][1], "mcp");
-        assert_eq!(v["mcp"]["cairn"]["type"], "local");
-        assert_eq!(v["mcp"]["cairn"]["enabled"], true);
-        assert_eq!(
-            v["mcp"]["cairn"]["environment"]["CAIRN_SERVER"],
-            "http://example.com:7777"
-        );
-        assert_eq!(v["mcp"]["cairn"]["environment"]["CAIRN_TOKEN"], "tok-123");
-    }
-
-    #[test]
-    fn local_mode_omits_environment() {
-        let exe = paths::cairn_exe();
-        let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
-        fs::create_dir_all(cfg.parent().unwrap()).unwrap();
-
-        install_with_path(None, None, &cfg).unwrap();
-
-        let v: Value = serde_json::from_str(&read_text(&cfg)).unwrap();
-        assert_eq!(v["mcp"]["cairn"]["command"][0], exe);
-        assert!(v["mcp"]["cairn"]["environment"].is_null());
+            let v: Value =
+                serde_json::from_str(&read_text(&paths::opencode_config_path())).unwrap();
+            assert_eq!(v["mcp"]["cairn"]["command"][0], exe);
+            assert_eq!(v["mcp"]["cairn"]["command"][1], "mcp");
+            assert_eq!(v["mcp"]["cairn"]["type"], "local");
+            assert_eq!(v["mcp"]["cairn"]["enabled"], true);
+            assert!(
+                v["mcp"]["cairn"]["environment"].is_null(),
+                "server/token live only in ~/.cairn/config.toml, never embedded here"
+            );
+        });
     }
 
     #[test]
     fn strips_stale_plugin_entry_and_never_adds_one() {
-        let cfg = tempfile::tempdir().unwrap().path().join("opencode.json");
-        fs::create_dir_all(cfg.parent().unwrap()).unwrap();
-        fs::write(
-            &cfg,
-            r#"{"plugin":["plugins/cairn.js","./plugins/agentmemory-capture.ts"]}"#,
-        )
-        .unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
 
-        install_with_path(Some("http://example.com:7777"), Some("tok-123"), &cfg).unwrap();
+        crate::env_guard::with_env(&[("XDG_CONFIG_HOME", Some(&home_str))], || {
+            let cfg_path = paths::opencode_config_path();
+            if let Some(parent) = cfg_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            fs::write(
+                &cfg_path,
+                r#"{"plugin":["plugins/cairn.js","./plugins/agentmemory-capture.ts"]}"#,
+            )
+            .unwrap();
 
-        let v: Value = serde_json::from_str(&read_text(&cfg)).unwrap();
-        assert_eq!(v["mcp"]["cairn"]["command"][0], paths::cairn_exe());
-        let plugins = v["plugin"].as_array().unwrap();
-        assert!(
-            !plugins.iter().any(|p| p
-                .as_str()
-                .map(|s| s.to_ascii_lowercase().contains("cairn.js"))
-                .unwrap_or(false)),
-            "setup must strip the local cairn plugin from the `plugin` array"
-        );
-        assert!(plugins
-            .iter()
-            .any(|p| p.as_str() == Some("./plugins/agentmemory-capture.ts")));
+            let ctx = InstallCtx {
+                project: home.path(),
+                home: Some(home.path()),
+                scope: Scope::Global,
+            };
+            OpenCode.install(&ctx).unwrap();
+
+            let v: Value = serde_json::from_str(&read_text(&cfg_path)).unwrap();
+            assert_eq!(v["mcp"]["cairn"]["command"][0], paths::cairn_exe());
+            let plugins = v["plugin"].as_array().unwrap();
+            assert!(
+                !plugins.iter().any(|p| p
+                    .as_str()
+                    .map(|s| s.to_ascii_lowercase().contains("cairn.js"))
+                    .unwrap_or(false)),
+                "setup must strip the local cairn plugin from the `plugin` array"
+            );
+            assert!(plugins
+                .iter()
+                .any(|p| p.as_str() == Some("./plugins/agentmemory-capture.ts")));
+        });
     }
 
     #[test]
@@ -371,9 +318,6 @@ mod tests {
                 project: home.path(),
                 home: Some(home.path()),
                 scope: Scope::Global,
-                server: Some("http://h:7777"),
-                token: Some("tok"),
-                embed_env: true,
             };
             OpenCode.install(&ctx).unwrap();
 
@@ -416,9 +360,6 @@ mod tests {
                 project: home.path(),
                 home: Some(home.path()),
                 scope: Scope::Global,
-                server: None,
-                token: None,
-                embed_env: false,
             };
             OpenCode.install(&ctx).unwrap();
             assert!(OpenCode.health(home.path(), Some(home.path())).is_empty());
@@ -426,40 +367,43 @@ mod tests {
     }
 
     #[test]
-    fn embed_env_false_is_the_default_and_de_tokenizes_a_previous_embed() {
+    fn install_de_tokenizes_an_environment_block_left_by_an_older_binary() {
         let home = tempfile::tempdir().unwrap();
         let home_str = home.path().to_string_lossy().into_owned();
 
         crate::env_guard::with_env(&[("XDG_CONFIG_HOME", Some(&home_str))], || {
-            let embed_ctx = InstallCtx {
-                project: home.path(),
-                home: Some(home.path()),
-                scope: Scope::Global,
-                server: Some("http://old:7777"),
-                token: Some("old-token"),
-                embed_env: true,
-            };
-            OpenCode.install(&embed_ctx).unwrap();
             let cfg_path = paths::opencode_config_path();
-            let before: Value = serde_json::from_str(&read_text(&cfg_path)).unwrap();
-            assert_eq!(
-                before["mcp"]["cairn"]["environment"]["CAIRN_TOKEN"],
-                "old-token"
-            );
+            if let Some(parent) = cfg_path.parent() {
+                fs::create_dir_all(parent).unwrap();
+            }
+            // Simulate a pre-v0.8.0 binary's opencode.json, which used to embed
+            // server/token directly into `mcp.cairn.environment`.
+            fs::write(
+                &cfg_path,
+                json!({
+                    "mcp": {
+                        "cairn": {
+                            "type": "local",
+                            "command": ["cairn", "mcp"],
+                            "environment": { "CAIRN_TOKEN": "old-token" },
+                            "enabled": true
+                        }
+                    }
+                })
+                .to_string(),
+            )
+            .unwrap();
 
-            let bare_ctx = InstallCtx {
+            let ctx = InstallCtx {
                 project: home.path(),
                 home: Some(home.path()),
                 scope: Scope::Global,
-                server: Some("http://new:7777"),
-                token: Some("new-token"),
-                embed_env: false,
             };
-            OpenCode.install(&bare_ctx).unwrap();
+            OpenCode.install(&ctx).unwrap();
             let after: Value = serde_json::from_str(&read_text(&cfg_path)).unwrap();
             assert!(
                 after["mcp"]["cairn"]["environment"].is_null(),
-                "non-embed-env install must not write (or keep) an environment block"
+                "install must not write (or keep) an environment block"
             );
         });
     }

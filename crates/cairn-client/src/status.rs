@@ -10,8 +10,14 @@ struct Status {
     version: String,
     server: Option<String>,
     server_source: Option<&'static str>,
+    /// The file's server URL, when `CAIRN_SERVER` env is active and differs from it - a real
+    /// edit to `~/.cairn/config.toml` that's silently being ignored. Safe to show in full.
+    server_shadowed_file_value: Option<String>,
     token: Option<TokenInfo>,
     token_source: Option<&'static str>,
+    /// Presence-only (unlike `server_shadowed_file_value`): the file has a different token
+    /// than the active `CAIRN_TOKEN` env value, but the raw value is never surfaced here.
+    token_shadowed: bool,
     inject_context: bool,
     inject_context_source: &'static str,
     config_path: Option<String>,
@@ -62,8 +68,10 @@ pub fn run(json_output: bool) -> Result<()> {
         version: env!("CARGO_PKG_VERSION").to_string(),
         server,
         server_source,
+        server_shadowed_file_value: resolved.server_shadowed_file_value,
         token: token_info,
         token_source,
+        token_shadowed: resolved.token_shadowed_file_value.is_some(),
         inject_context: resolved.inject_context.0,
         inject_context_source: resolved.inject_context.1.label(),
         config_path: crate::config::config_path().map(|p| p.display().to_string()),
@@ -82,6 +90,12 @@ pub fn run(json_output: bool) -> Result<()> {
             (Some(s), Some(src)) => println!("Server:     {s}  (from {src})"),
             _ => println!("Server:     (not configured)"),
         }
+        if let Some(shadowed) = &status.server_shadowed_file_value {
+            println!(
+                "            note: {} (file value: {shadowed})",
+                crate::config::shadow_note("server", "CAIRN_SERVER")
+            );
+        }
         match (&status.token, status.token_source) {
             (Some(t), Some(src)) => {
                 let valid = if t.valid { "valid" } else { "INVALID" };
@@ -97,6 +111,12 @@ pub fn run(json_output: bool) -> Result<()> {
                 println!("Token:      opaque token - cannot decode claims (from {src})")
             }
             _ => println!("Token:      (not configured)"),
+        }
+        if status.token_shadowed {
+            println!(
+                "            note: {}",
+                crate::config::shadow_note("token", "CAIRN_TOKEN")
+            );
         }
         println!(
             "Inject:     {} (from {})",
@@ -175,8 +195,8 @@ mod tests {
     #[test]
     fn decode_jwt_info_reads_sub_and_scope() {
         // A real device token minted by the server during manual E2E
-        // verification of `cairn pair` (harmless, already-expired-by-then
-        // test credential) - decoding it used to return `None` (displaying
+        // verification (harmless, already-expired-by-then test credential) -
+        // decoding it used to return `None` (displaying
         // as "opaque token" in status output) because the old code manually
         // padded the payload with `=` and then fed that into a
         // `URL_SAFE_NO_PAD` decoder, which rejects padding characters.

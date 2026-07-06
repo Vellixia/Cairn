@@ -264,15 +264,6 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/devices/audit", "Device audit log", ["devices"], {
         "get" => _,
     });
-    path!("/api/devices/pair-codes", "Issue a pairing code", ["devices"], {
-        "post" => _,
-    });
-    path!("/api/pair/new", "New pairing (server side)", ["devices"], {
-        "post" => _,
-    });
-    path!("/api/pair/claim", "Claim a pairing code", ["devices"], {
-        "post" => _,
-    });
     path!("/api/sync/pull", "Pull from another cairn server", ["sync"], {
         "get" => _, "post" => _,
     });
@@ -366,7 +357,7 @@ pub fn build_spec(version: &str) -> Value {
                 "bearer": {
                     "type": "http",
                     "scheme": "bearer",
-                    "description": "Bearer token from /api/pair or /api/auth/login",
+                    "description": "Bearer token minted from the dashboard's You > Tokens page",
                 }
             }
         },

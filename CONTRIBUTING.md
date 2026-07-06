@@ -71,7 +71,7 @@ cargo test --workspace
 | `cairn-embed` | embedding providers (hashing default, ONNX opt-in) |
 | `cairn-api` | axum REST API - embedded web UI - PWA service worker - push subscriptions |
 | `cairn-mcp` | MCP server (stdio) . 29 tools + 10 graph actions = 39 total . 6 resources . 5 prompts |
-| `cairn-client` | the host `cairn` binary (mcp, setup, hook, sync, pair, bench, pack, doctor, ...) |
+| `cairn-client` | the host `cairn` binary (mcp, setup, hook, sync, bench, pack, doctor, ...) |
 
 The two binaries shipped are `cairn-server` (in-container, from `cairn-api`) and `cairn` (host, from `cairn-client`).
 

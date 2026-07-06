@@ -17,7 +17,7 @@ and Docker topology.
 ```mermaid
 graph TD
     Agent["AI Agent<br/>Claude Code Codex CLI OpenCode"]
-    CLI["cairn (host binary)<br/>McpServer / RemoteProxy<br/>setup run hook sync pair pack"]
+    CLI["cairn (host binary)<br/>McpServer / RemoteProxy<br/>setup run hook sync pack"]
     Server["cairn-server (in-container bin)<br/>cairn-api axum REST + web UI<br/>auth cookie + JWT + CORS + CSP nonce"]
     Store["cairn-store<br/>SurrealStore + BlobStore"]
     Surreal["SurrealDB<br/>graph + HNSW vectors, RocksDB-backed"]
@@ -34,7 +34,7 @@ graph TD
 
 | Binary | Lives in | Role |
 |---|---|---|
-| `cairn` (host) | release tarball + install script | Client: `mcp`, `setup`, `rules`, `run`, `hook`, `remember`, `recall`, `wakeup`, `prefer`, `anchor`, `checkpoint`, `rollback`, `sync`, `pair`, `export`, `import`, `contribute`, `pull`, `bench`, `doctor`, `onboard`, `pack`, `graph`, `memory`, `search`, `sessions`, `session`, `metrics`, `stats` |
+| `cairn` (host) | release tarball + install script | Client: `mcp`, `setup`, `rules`, `run`, `hook`, `remember`, `recall`, `wakeup`, `prefer`, `anchor`, `checkpoint`, `rollback`, `sync`, `export`, `import`, `contribute`, `pull`, `bench`, `doctor`, `onboard`, `pack`, `graph`, `memory`, `search`, `sessions`, `session`, `metrics`, `stats` |
 | `cairn-server` (in-container) | Docker image only | Long-lived server: binds :7777, serves the API + web UI, runs env-only admin bootstrap |
 
 v0.5.0 shipped both as the same name (`cairn`); v0.6.0 split them so the
@@ -128,7 +128,7 @@ graph BT
 | `cairn-mcp` | MCP server over stdio. Local mode (opens the SurrealDB store) or remote proxy mode (forwards to `cairn-api`). 29 tools + 10 graph actions = 39, 6 resources, 5 prompts. |
 | `cairn-api` | Axum REST API + embedded web UI (rust-embed). Auth middleware (cookie session + JWT device tokens), CORS, per-request CSP nonce. Registry + extensions + push + ingest routes. |
 | `cairn-api` (bin `cairn-server`) | In-container entrypoint. Resolves config, opens the store, runs `bootstrap_admin_from_env`, binds :7777, serves the API + web UI. Built into the Docker image; never ships in host tarballs. |
-| `cairn-client` | Host binary `cairn`: `mcp`, `setup`, `run`, `hook`, `sync`, `pair`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
+| `cairn-client` | Host binary `cairn`: `mcp`, `setup`, `run`, `hook`, `sync`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
 
 ---
 
@@ -207,7 +207,6 @@ All tools are exposed via `cairn mcp` (stdio) and mirrored at `/api/tools/list` 
 | GET | `/api/devices/tokens` | List device tokens |
 | POST | `/api/devices/tokens` | Create a device token |
 | POST | `/api/devices/tokens/:id/revoke` | Revoke a device token |
-| POST | `/api/devices/pair-codes` | Create a pairing code |
 | GET | `/api/devices/audit` | Audit log |
 | POST | `/api/push/subscribe` | Subscribe to push notifications |
 | POST | `/api/push/unsubscribe` | Unsubscribe |

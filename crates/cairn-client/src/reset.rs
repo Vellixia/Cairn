@@ -161,9 +161,6 @@ mod tests {
             project: p,
             home: None,
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
 
@@ -196,9 +193,6 @@ mod tests {
             project: p,
             home: Some(h),
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
         {
@@ -280,9 +274,6 @@ mod tests {
                 project: home.path(),
                 home: Some(home.path()),
                 scope: Scope::Global,
-                server: None,
-                token: None,
-                embed_env: false,
             };
             agents::OpenCode.install(&ctx).unwrap();
             let plugin_path = paths::opencode_plugin_path();
@@ -311,9 +302,6 @@ mod tests {
             project: p,
             home: None,
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         // Install validly first (so settings.json has a real cairn hook to
         // clean up), THEN corrupt .mcp.json (hand-edited, truncated write) -

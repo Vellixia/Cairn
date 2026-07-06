@@ -9,16 +9,25 @@
 //! prefer/profile, anchor, verify/checkpoint/rollback, compress, sanitize,
 //! search, memory_*, metrics, registry_search, proactive_recall.
 
+#[cfg(feature = "engine")]
 use cairn_assemble::Assembler;
+#[cfg(feature = "engine")]
 use cairn_context::{ContextEngine, ReadMode};
+#[cfg(feature = "engine")]
 use cairn_core::{Config, NewMemory, Result};
+#[cfg(feature = "engine")]
 use cairn_guard::Guard;
+#[cfg(feature = "engine")]
 use cairn_memory::MemoryEngine;
+#[cfg(feature = "engine")]
 use cairn_profile::Profile;
+#[cfg(feature = "engine")]
 use cairn_shell::ShellCompressor;
+#[cfg(feature = "engine")]
 use cairn_store::Store;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
+#[cfg(feature = "engine")]
 use std::sync::Arc;
 
 /// Default protocol version we advertise if the client doesn't specify one.
@@ -28,6 +37,7 @@ pub mod guidance;
 pub mod prompts;
 pub mod resources;
 
+#[cfg(feature = "engine")]
 pub struct McpServer {
     pub ctx: Arc<ContextEngine>,
     pub guard: Arc<Guard>,
@@ -41,6 +51,7 @@ pub struct McpServer {
     pub config: Config,
 }
 
+#[cfg(feature = "engine")]
 impl McpServer {
     /// P3.3: is the LLM consolidation flag on? Cached to avoid repeated config reads.
     fn llm_consolidation_enabled(&self) -> bool {
@@ -780,6 +791,7 @@ pub fn tool_defs() -> Value {
 }
 
 /// Extract a string argument, if present.
+#[cfg(feature = "engine")]
 fn str_arg(v: Option<&Value>) -> Option<&str> {
     v.and_then(Value::as_str)
 }
@@ -789,6 +801,7 @@ fn str_arg(v: Option<&Value>) -> Option<&str> {
 /// Run the proactive recall hook for `prompt`. Returns the list of memories to
 /// prepend to the agent's context, or an empty list if the hook decides no
 /// recall is warranted (intent didn't match, project opted out, or no matches).
+#[cfg(feature = "engine")]
 pub fn proactive_recall(
     server: &McpServer,
     prompt: &str,
@@ -834,6 +847,12 @@ fn err(id: Option<Value>, code: i64, message: &str) -> Value {
 
 /// Start the right MCP backend for the current environment. If `CAIRN_SERVER` is set, the MCP
 /// server forwards tool calls to that remote Cairn HTTP API; otherwise it opens the local store.
+///
+/// The local-store branch requires the `engine` feature (see `Cargo.toml`) - `cairn-client`
+/// builds without it, since its own `Cmd::Mcp` handler already requires a server to be
+/// configured before this function is ever reached (see `require_server()` in `main.rs`), so
+/// that branch is provably unreachable there. `cairn-api`, which genuinely runs a local
+/// `McpServer` per `/api/tools/call` request, builds with `engine` enabled.
 pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
     if let Some(server) = cfg.default_server.as_deref() {
         let token = std::env::var("CAIRN_TOKEN").ok();
@@ -844,9 +863,19 @@ pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
         }
         proxy.serve_stdio()
     } else {
-        McpServer::new(cfg)
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .serve_stdio()
+        #[cfg(feature = "engine")]
+        {
+            McpServer::new(cfg)
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .serve_stdio()
+        }
+        #[cfg(not(feature = "engine"))]
+        {
+            Err(std::io::Error::other(
+                "no server configured, and this build has no local engine support -- \
+                 set CAIRN_SERVER or run `cairn onboard --server <url> --token <jwt>`",
+            ))
+        }
     }
 }
 
@@ -1004,7 +1033,11 @@ impl RemoteProxy {
     }
 }
 
-#[cfg(test)]
+// Requires `--features engine`: every test here except one constructs a real `McpServer`.
+// `RemoteProxy` (the path `cairn-client` actually takes) has no engine dependency at all, but
+// splitting it out of this shared module isn't worth the churn - it's exercised indirectly by
+// `cairn-client`'s own test suite regardless.
+#[cfg(all(test, feature = "engine"))]
 mod tests {
     use super::*;
 

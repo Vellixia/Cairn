@@ -66,6 +66,7 @@ pub fn run(opts: DoctorOptions) -> Diagnosis {
     };
     checks.push(check_data_dir(&cfg, opts.fix));
     checks.push(check_remote_server());
+    checks.push(check_env_shadows_file());
     checks.push(check_agents());
     checks.push(check_project());
     checks.push(check_config_health(opts.fix));
@@ -189,16 +190,27 @@ fn check_remote_server() -> Check {
                             (
                                 false,
                                 format!(
-                                    "{s} (from {src}, token rejected: HTTP {status} -- {body})"
+                                    "{s} (from {src}, token rejected: HTTP {status} -- {} -- \
+                                     mint a fresh one from the dashboard's You > Tokens page \
+                                     -- {body})",
+                                    crate::http::token_rejection_causes()
                                 ),
                             )
                         }
-                        Err(e) => (false, format!("{s} (from {src}, token check failed: {e})")),
+                        Err(e) => (
+                            false,
+                            format!(
+                                "{s} (from {src}, token check failed: {e} -- is the server reachable?)"
+                            ),
+                        ),
                     }
                 }
                 None => (
                     false,
-                    format!("{s} (from {src}, no token configured -- every request will 401)"),
+                    format!(
+                        "{s} (from {src}, no token configured -- every request will 401 -- \
+                         mint one from the dashboard's You > Tokens page)"
+                    ),
                 ),
             };
             Check {
@@ -212,6 +224,38 @@ fn check_remote_server() -> Check {
             ok: true,
             detail: "(unset -- local mode)".into(),
         },
+    }
+}
+
+/// Surface `CAIRN_SERVER`/`CAIRN_TOKEN` env values that are silently shadowing a *different*
+/// value saved in `~/.cairn/config.toml` - the direct cause of "I edited the file/ran `cairn
+/// setup` again but nothing changed" confusion, since the active (env) value keeps winning per
+/// `env > file > default` precedence and nothing before this check said so explicitly. Always
+/// `ok` (informational): the active value may be perfectly correct, this just flags that the
+/// file has a different one sitting unused - not a functional break, so it must not block
+/// `onboard`'s doctor-gate.
+fn check_env_shadows_file() -> Check {
+    let (project_id, _) = crate::project::detect_project();
+    let resolved = crate::config::resolve(project_id.as_deref());
+    let mut notes = Vec::new();
+    if resolved.server_shadowed_file_value.is_some() {
+        notes.push(crate::config::shadow_note("server", "CAIRN_SERVER"));
+    }
+    if resolved.token_shadowed_file_value.is_some() {
+        notes.push(crate::config::shadow_note("token", "CAIRN_TOKEN"));
+    }
+    if notes.is_empty() {
+        Check {
+            name: "shadowing",
+            ok: true,
+            detail: "no shadowed values".into(),
+        }
+    } else {
+        Check {
+            name: "shadowing",
+            ok: true,
+            detail: notes.join("; "),
+        }
     }
 }
 
@@ -265,8 +309,6 @@ fn check_project() -> Check {
 fn check_config_health(fix: bool) -> Check {
     let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let home = paths::home_dir();
-    let (project_id, _) = crate::project::detect_project();
-    let resolved = crate::config::resolve(project_id.as_deref());
 
     let mut remaining: Vec<String> = Vec::new();
     let mut fixed: Vec<&'static str> = Vec::new();
@@ -284,9 +326,6 @@ fn check_config_health(fix: bool) -> Check {
             project: &project,
             home: home.as_deref(),
             scope: agents::Scope::Global,
-            server: resolved.server.as_ref().map(|(s, _)| s.as_str()),
-            token: resolved.token.as_ref().map(|(t, _)| t.as_str()),
-            embed_env: false,
         };
         if agent.install(&ctx).is_ok() {
             let after = agent.health(&project, home.as_deref());
@@ -363,7 +402,8 @@ fn check_token_expiry() -> Check {
                     name: "token expiry",
                     ok: false,
                     detail: format!(
-                        "EXPIRED {:.1} day(s) ago -- run `cairn pair` for a fresh token",
+                        "EXPIRED {:.1} day(s) ago -- mint a fresh token from the dashboard's \
+                         You > Tokens page and run `cairn onboard --token <jwt>`",
                         -days_left
                     ),
                 }
@@ -371,7 +411,10 @@ fn check_token_expiry() -> Check {
                 Check {
                     name: "token expiry",
                     ok: false,
-                    detail: format!("expires in {days_left:.1} day(s) -- run `cairn pair` soon"),
+                    detail: format!(
+                        "expires in {days_left:.1} day(s) -- mint a fresh token from the \
+                         dashboard's You > Tokens page and run `cairn onboard --token <jwt>` soon"
+                    ),
                 }
             } else {
                 Check {

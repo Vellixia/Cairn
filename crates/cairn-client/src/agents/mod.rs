@@ -32,20 +32,15 @@ pub enum Scope {
 
 /// Everything an `install()` call needs. Borrowing rather than owning keeps
 /// this cheap to build per-agent in a loop (`setup --all`).
+///
+/// No `server`/`token` fields: since the v0.8.0 client redesign, agent config files never
+/// embed credentials - they get a bare MCP entry referencing `cairn mcp`/`cairn hook`, which
+/// read `~/.cairn/config.toml` themselves. The caller (`setup::run`) persists server/token to
+/// that shared file directly; per-agent `install()` never needs to see them.
 pub struct InstallCtx<'a> {
     pub project: &'a Path,
     pub home: Option<&'a Path>,
     pub scope: Scope,
-    pub server: Option<&'a str>,
-    pub token: Option<&'a str>,
-    /// Default `false` (v0.8.0 client redesign): `server`/`token` are still
-    /// saved to `~/.cairn/config.toml` by the caller, but agent config files
-    /// get a bare MCP entry with no `env` block, and any env block a previous
-    /// (pre-config-file) `setup` run embedded is actively removed. Pass `true`
-    /// (`cairn setup --embed-env`) to keep embedding server/token directly
-    /// into the agent's own config file instead - useful for multi-server or
-    /// per-agent-token setups the shared config file can't express.
-    pub embed_env: bool,
 }
 
 /// One file an `install()` call touched, for the human-readable summary

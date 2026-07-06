@@ -7,15 +7,19 @@ updated: 2026-07-01
 
 # Administering Cairn
 
-Cairn runs **inside a Docker container**; the host has only one binary
-(`cairn`, the client). All admin operations happen either:
+The Cairn **server** runs **inside a Docker container**; there is no
+`cairn-server` binary on the host. The **client** binary (`cairn`,
+`crates/cairn-client/`) is a real, separate binary that does run on the
+host - it's what you use to talk to the containerized server (`onboard`,
+`setup`, `doctor`, MCP, hooks, etc.). All admin operations happen either:
 
 1. **At first boot, from environment variables** - `CAIRN_ADMIN_USERNAME` +
    `CAIRN_ADMIN_PASSWORD` in `.env` (or compose `environment:`).
 2. **At any time, from the web dashboard** at <http://127.0.0.1:7777>
    once you're logged in.
 
-There is no `cairn` host binary and no `docker exec` workflow. If your
+There is no `docker exec` workflow for admin tasks - everything above is
+either an env var read at container startup or a dashboard action. If your
 admin session is lost, wipe the data volume and start over with a new
 password in `.env`.
 
@@ -52,28 +56,22 @@ Log in at <http://127.0.0.1:7777/login> with the admin credentials.
 
 ### Mint a device token
 
-`/settings/tokens` -> "Mint token" -> fill the form -> submit. The bearer
+`/you/tokens` -> "Mint token" -> fill the form -> submit. The bearer
 token appears **once** in the success toast; copy it immediately. Use
 it as `Authorization: Bearer <token>` on subsequent API calls, or pass
-it to `cairn setup <agent> --token <token>` to wire an AI agent.
-
-### Generate a pair code
-
-`/settings/pair` -> click "Generate pair code" or create a token directly.
-Copy the JWT and run on the new device:
+it to `cairn setup <agent> --token <token>` to wire an AI agent, or run
+on the new device:
 
 ```sh
 cairn onboard --server http://your-host:7777 --token <jwt>
 ```
 
-The token is single-issue; regenerate as needed.
-
 ### Rotate the admin password
 
-`/settings/admin` (if present in v0.6.0+) -> "Rotate password" -> enter
-old + new -> submit. The rotation bumps the admin generation counter,
-invalidating every existing session cookie. Anyone still logged in
-gets bounced to `/login` on next request.
+`/you/settings` -> "Rotate password" -> enter old + new -> submit. The
+rotation bumps the admin generation counter, invalidating every existing
+session cookie. Anyone still logged in gets bounced to `/login` on next
+request.
 
 If the dashboard password-rotation form isn't available in your build,
 the fallback is `docker compose down -v` (wipes the admin record) ->
@@ -110,27 +108,30 @@ curl http://127.0.0.1:7777/api/devices/tokens \
 # Revoke a token
 curl -X POST http://127.0.0.1:7777/api/devices/tokens/<id>/revoke \
   -H 'Cookie: cairn_session=...'
-
-# Generate a pair code
-curl -X POST http://127.0.0.1:7777/api/devices/pair-codes \
-  -H 'Cookie: cairn_session=...' \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"laptop"}'
 ```
 
-All four require an admin session cookie (the dashboard handles login).
-`/api/devices/tokens` returns the bearer token **once** in the response
-body; subsequent reads only return metadata.
+All three require an admin session cookie (the dashboard handles login) -
+`/api/devices/*` is cookie-only by design, so a bearer token cannot call
+these endpoints even if it's scoped `admin`. `/api/devices/tokens` returns
+the bearer token **once** in the response body; subsequent reads only
+return metadata.
 
-## Why no `cairn` host binary?
+## Why is there no `cairn` *server* binary on the host?
 
-See `docs/reference/decisions.md` ADR-029. Short version: Docker is the only
-install path; the user never SSHes into the container; the dashboard
-+ env vars cover everything.
+This is specifically about the **server** (`cairn-server`, the in-container
+axum process) - not the client. The `cairn` client binary
+(`crates/cairn-client/`) is real and is exactly what you run on the host
+for everything in this guide (`cairn onboard`, `cairn setup`, `cairn
+doctor`, ...). What doesn't exist on the host is a `cairn-server` binary
+or a `docker exec`-into-the-container admin workflow: Docker is the only
+install path for the server (see `docs/reference/decisions.md` ADR-029),
+the user never SSHes into the container, and the dashboard + env vars
+cover every admin operation.
 
 ## See also
 
 - `docs/guides/upgrading.md` - version-to-version upgrade notes
 - `docs/reference/architecture.md` - the full crate graph + HTTP route map
-- `docs/reference/decisions.md` - ADR-029 (env-only admin bootstrap) and
-  ADR-030 (no host binary)
+- `docs/reference/decisions.md` - ADR-029 (delete the `cairn-server` crate;
+  server is Docker-only) and ADR-030 (rename `cairn-cli` -> `cairn` client
+  binary)

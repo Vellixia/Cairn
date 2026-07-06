@@ -44,7 +44,7 @@ export default function SessionDetail() {
       </header>
       {id === "new" ? (
         <Card className="p-6 text-sm text-muted-foreground">
-          Select a session from <a href="/dashboard/sessions" className="underline">the listing</a> to see details.
+          Select a session from <a href="/you/sessions" className="underline">the listing</a> to see details.
         </Card>
       ) : session.isLoading ? (
         <Skeleton className="h-72 w-full" />

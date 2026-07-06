@@ -28,7 +28,7 @@ import Logo from "@/components/Logo";
 type Item = { href: string; label: string; icon: LucideIcon };
 
 // Observe: pure observability - what exists, what happened, what the machine decided.
-// Admin: security/account surfaces (tokens, pairing, audit, settings) - the only place
+// Admin: security/account surfaces (tokens, audit, settings) - the only place
 // manual input stays. Trust folded into Automation; Registry is agent-facing (CLI/MCP only).
 const MONITOR_ITEMS: Item[] = [
   { href: "/", label: "Now", icon: LayoutDashboard },

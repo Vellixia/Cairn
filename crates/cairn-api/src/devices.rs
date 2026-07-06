@@ -1,10 +1,10 @@
-//! Admin-facing device management: issue device tokens + pair codes from the dashboard.
+//! Admin-facing device management: issue device tokens from the dashboard.
 //!
-//! The web UI (You -> Tokens, You -> Pair) drives these endpoints so the admin can issue
-//! tokens / pair codes from the browser without leaving the dashboard. The JWT is
-//! returned ONCE in the `POST /api/devices/tokens` response; subsequent reads only return the
-//! token metadata (id, name, scope, created_at, revoked). The server never persists the JWT
-//! itself beyond what `create_token` does in the store (token id + metadata).
+//! The web UI (You -> Tokens) drives these endpoints so the admin can issue tokens from the
+//! browser without leaving the dashboard. The JWT is returned ONCE in the
+//! `POST /api/devices/tokens` response; subsequent reads only return the token metadata (id,
+//! name, scope, created_at, revoked). The server never persists the JWT itself beyond what
+//! `create_token` does in the store (token id + metadata).
 
 use crate::admin::require_admin;
 use crate::AppState;
@@ -17,7 +17,6 @@ use axum::{
 use cairn_core::{DeviceToken, TokenScope};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTokenRequest {
@@ -60,20 +59,6 @@ impl TokenMetaView {
             last_used_at: t.last_used_at,
         }
     }
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CreatePairCodeRequest {
-    pub name: String,
-    #[serde(default)]
-    pub ttl_minutes: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct IssuedPairCode {
-    pub code: String,
-    pub name: String,
-    pub expires_at: DateTime<Utc>,
 }
 
 pub async fn list_tokens(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -168,69 +153,6 @@ pub async fn revoke_token(
         )
             .into_response(),
         Err(e) => admin_error(&format!("revoke: {e}")),
-    }
-}
-
-pub async fn create_pair_code(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(req): Json<CreatePairCodeRequest>,
-) -> Response {
-    let rec = match require_admin(&state, &headers).await {
-        Ok(r) => r,
-        Err(resp) => return resp,
-    };
-    if req.name.trim().is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "name is required"})),
-        )
-            .into_response();
-    }
-    let ttl = req.ttl_minutes.unwrap_or(10).clamp(1, 60);
-    let (code, expires_at) =
-        match pair_code::generate_for(&state, &req.name, Duration::from_secs((ttl as u64) * 60)) {
-            Ok(v) => v,
-            Err(e) => return admin_error(&format!("generate: {e}")),
-        };
-    state.audit_log.record(
-        &state.store,
-        &state.events,
-        "pair_code_issued",
-        &rec.username,
-        format!("{} (ttl {}m)", req.name, ttl),
-    );
-    let issued = IssuedPairCode {
-        code,
-        name: req.name,
-        expires_at,
-    };
-    (StatusCode::CREATED, Json(issued)).into_response()
-}
-
-mod pair_code {
-    use super::*;
-    use rand::seq::SliceRandom;
-
-    const CHARSET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L
-
-    pub(super) fn generate_for(
-        state: &AppState,
-        name: &str,
-        ttl: Duration,
-    ) -> cairn_core::Result<(String, DateTime<Utc>)> {
-        let mut rng = rand::thread_rng();
-        let code: String = (0..8)
-            .map(|_| *CHARSET.choose(&mut rng).unwrap() as char)
-            .collect();
-        let token = state.store.create_token(name, TokenScope::Write, None)?;
-        let expires_at = Utc::now() + chrono::Duration::seconds(ttl.as_secs() as i64);
-        // Store the token id (not the bearer) - `pair_claim` signs a fresh JWT at claim time, same
-        // pattern as the existing `/api/pair/new` flow.
-        state
-            .store
-            .create_pairing(&code, &token.id, name, &expires_at.to_rfc3339())?;
-        Ok((code, expires_at))
     }
 }
 

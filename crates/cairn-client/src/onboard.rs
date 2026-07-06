@@ -1,12 +1,18 @@
 //! `cairn onboard` - zero-prompt setup for first-run installs.
 //!
-//! 1. **Resolve credentials** - `--code` (claim a dashboard pairing code),
-//!    `--server`/`--token` flags, env vars, `~/.cairn/config.toml`, or a
-//!    one-shot `localhost:7777` probe, in that order.
+//! 1. **Resolve credentials** - `--server`/`--token` flags, env vars,
+//!    `~/.cairn/config.toml`, or a one-shot `localhost:7777` probe, in that order.
 //! 2. **Verify** - `cairn doctor` (connectivity + diagnostics).
 //! 3. **Wire agents** - `setup::run` in-process for every detected agent (no
 //!    subprocess, no stdout-scraping for a wired-agent count).
 //! 4. **Print a summary.**
+//!
+//! Deliberately zero-prompt end to end, INCLUDING when no credentials are found
+//! anywhere (see `resolve_credentials`'s final branch): this command must be safe
+//! to run unattended in CI, so a missing server/token is reported via stderr
+//! guidance and the run proceeds in local-only mode rather than blocking on
+//! interactive input. If a user finds the guidance insufficient, improve the
+//! printed message - do not add a prompt here.
 //!
 //! Re-running is safe and shows "Re-onboarding" to signal the incremental
 //! update - `is_reonboarding` below reuses the exact same "would `cairn
@@ -24,11 +30,9 @@ pub struct OnboardOptions {
     pub skip_agents: bool,
     /// Run `doctor --fix` on failures before reporting green.
     pub fix: bool,
-    /// Claim this dashboard-minted pairing code instead of a raw token.
-    pub code: Option<String>,
     /// Remote server URL.
     pub server: Option<String>,
-    /// Remote server token (ignored if `code` is set).
+    /// Remote server token.
     pub token: Option<String>,
 }
 
@@ -80,14 +84,7 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         eprintln!("-> Skipping agent wiring (--skip-agents).\n");
     } else {
         eprintln!("-> Detecting & wiring supported agents...");
-        let wired = crate::setup::run(
-            None,
-            true,
-            server.as_deref(),
-            token.as_deref(),
-            false,
-            false,
-        )?;
+        let wired = crate::setup::run(None, true, server.as_deref(), token.as_deref(), false)?;
         if wired == 0 {
             eprintln!("  no supported agents detected (run `cairn setup <agent>` to add one)");
         } else {
@@ -99,6 +96,12 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     eprintln!("Done. Next steps:");
     if let Some(s) = &server {
         eprintln!("  - server: {s}");
+    } else {
+        eprintln!("  - no server configured yet -- Cairn is running in local-only mode");
+        eprintln!(
+            "  - to connect to a server: mint a token from the dashboard's You > Tokens page, \
+             then run `cairn onboard --server <url> --token <jwt>`"
+        );
     }
     eprintln!("  - open a session in your AI agent (Claude Code, OpenCode, Codex)");
     eprintln!("  - check status with `cairn status`");
@@ -106,18 +109,12 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Resolve server+token from, in priority order: `--code` (claim a pairing
-/// code via `pair::claim`), `--server`/`--token` flags, `CAIRN_SERVER`/
-/// `CAIRN_TOKEN` env, `~/.cairn/config.toml` - or, only when NOTHING else
-/// supplied credentials, a one-shot probe of `http://localhost:7777` that
-/// prints the dashboard pairing URL if a server answers but isn't yet
-/// authenticated against.
+/// Resolve server+token from, in priority order: `--server`/`--token` flags,
+/// `CAIRN_SERVER`/`CAIRN_TOKEN` env, `~/.cairn/config.toml` - or, only when
+/// NOTHING else supplied credentials, a one-shot probe of
+/// `http://localhost:7777` that prints guidance on how to get a token if a
+/// server answers but isn't yet authenticated against.
 fn resolve_credentials(opts: &OnboardOptions) -> Result<(Option<String>, Option<String>)> {
-    if let Some(code) = &opts.code {
-        let server = crate::pair::resolve_server(opts.server.as_deref())?;
-        let token = crate::pair::claim(&server, code)?;
-        return Ok((Some(server), Some(token)));
-    }
     if opts.server.is_some() || opts.token.is_some() {
         return Ok((opts.server.clone(), opts.token.clone()));
     }
@@ -140,9 +137,18 @@ fn resolve_credentials(opts: &OnboardOptions) -> Result<(Option<String>, Option<
     if client.server_version().is_some() {
         eprintln!(
             "cairn: found a Cairn server at {localhost} but no token configured.\n\
-             Open {localhost}/you/pair in your browser to generate a pairing code, then run:\n\
-             \n  cairn onboard --code <CODE>\n\
+             Open {localhost}/you/tokens in your browser to mint a token, then run:\n\
+             \n  cairn onboard --server {localhost} --token <jwt>\n\
              \nContinuing onboard without a server for now (local-only checks)."
+        );
+    } else {
+        eprintln!(
+            "cairn: no Cairn server configured (checked --server/--token flags, \
+             CAIRN_SERVER/CAIRN_TOKEN env vars, ~/.cairn/config.toml, and {localhost}) \
+             -- continuing in local-only mode.\n\
+             To connect to a server: mint a token from the dashboard's You > Tokens page, \
+             then run `cairn onboard --server <url> --token <jwt>`.\n\
+             If local-only mode is what you want, no action needed."
         );
     }
     Ok((None, None))

@@ -9,8 +9,8 @@ updated: 2026-07-04
 
 ## What this covers
 
-How to connect Claude Code, Codex CLI, or OpenCode to a Cairn server: the zero-flag `cairn
-pair`/`cairn onboard` flow, the manual `cairn setup <agent>` fallback, exactly what each
+How to connect Claude Code, Codex CLI, or OpenCode to a Cairn server: minting a token and
+running `cairn onboard`, the manual `cairn setup <agent>` fallback, exactly what each
 install writes to disk, how to verify the connection, and the optional real-time edit/command
 guard.
 
@@ -25,31 +25,19 @@ guard.
 
 ### 1. Connect (primary path)
 
-**Pairing** is the easiest route if you have dashboard access. Open **You > Pair** to mint a
-single-use code, then run:
-
-```sh
-cairn pair <CODE>
-```
-
-This claims the code, saves `server`/`token` to `~/.cairn/config.toml`, turns on context
-injection by default (~1k tokens/prompt on `UserPromptSubmit`; disable with
-`CAIRN_INJECT_CONTEXT=false`), and auto-detects and wires every supported agent found in the
-current project or your home directory. Add `--server <url>` if the server can't be
-auto-discovered, or `--no-agents` to claim the token without touching any agent config.
-
-If you already have a raw token (minted directly via the API rather than through the
-dashboard's pairing flow), skip pairing:
+Mint a token from the dashboard (**You > Tokens** → "Mint token"), then run:
 
 ```sh
 cairn onboard --server <url> --token <jwt>
 ```
 
-`cairn onboard` runs the same sequence as `pair` — resolve credentials, validate the token, run
-`cairn doctor`, wire every detected agent — just starting from a token instead of a pairing
-code. It also accepts `--code <CODE>` (equivalent to `cairn pair`) and `--skip-agents`. Both
-commands are idempotent: re-running either just updates existing wiring (printed as
-"re-onboarding").
+This resolves credentials, validates the token, runs `cairn doctor`, saves `server`/`token` to
+`~/.cairn/config.toml`, turns on context injection by default (~1k tokens/prompt on
+`UserPromptSubmit`; disable with `CAIRN_INJECT_CONTEXT=false`), and auto-detects and wires every
+supported agent found in the current project or your home directory. `--server` can be omitted
+against a local dev server (it probes `localhost:7777` automatically); add `--skip-agents` to
+save the token without touching any agent config. `cairn onboard` is idempotent: re-running it
+just updates existing wiring (printed as "re-onboarding").
 
 ### 2. Fallback: manual per-agent setup
 
@@ -68,17 +56,13 @@ instead of flags. Useful flags:
 
 - `--project` — Claude Code only: write the MCP entry to `.mcp.json` in the current directory
   instead of the global `~/.claude.json`.
-- `--embed-env` — embed `CAIRN_SERVER`/`CAIRN_TOKEN` directly into the agent's own config file
-  instead of the default (server/token live only in `~/.cairn/config.toml`, agent entries stay
-  bare). Use this for multi-server or per-agent-token setups the shared config file can't
-  express.
 
 Setup is non-destructive and idempotent: existing config is preserved, Cairn's entries are
 merged in, and running it twice changes nothing.
 
 ### 3. What gets installed per agent
 
-Every `cairn setup <agent>` run (and, transitively, `pair`/`onboard`) writes:
+Every `cairn setup <agent>` run (and, transitively, `cairn onboard`) writes:
 
 | | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
@@ -162,8 +146,9 @@ Codex and OpenCode hooks have no way to return a permission decision.
 - **`cairn doctor` reports a config-health issue** (stale skill revision, duplicate hooks,
   double-registered OpenCode plugin) — re-run `cairn setup <agent>` (or `cairn doctor --fix`);
   installs are idempotent, so this just refreshes what's stale.
-- **Token expired or expiring soon** — `cairn doctor`/`cairn status` flag this explicitly; run
-  `cairn pair` again for a fresh one.
+- **Token expired or expiring soon** — `cairn doctor`/`cairn status` flag this explicitly; mint
+  a fresh token from the dashboard (**You > Tokens**) and re-run `cairn onboard --server <url>
+  --token <jwt>`.
 - **Hooks seem to do nothing** — confirm `cairn status` shows a server and a valid token. Each
   hook runs as its own short-lived process and only sees `~/.cairn/config.toml`/env, not
   whatever env block an agent's own MCP entry carries.

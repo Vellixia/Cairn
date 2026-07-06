@@ -136,22 +136,22 @@ cargo install --git https://github.com/Vellixia/Cairn cairn
 `docker compose up -d` brings up Cairn + SurrealDB. The admin record
 is bootstrapped from `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD` in
 `.env` on first boot. See [docs/guides/admin.md](docs/guides/admin.md) for the full
-admin surface (mint tokens, pair codes, password rotation).
+admin surface (mint tokens, password rotation).
 
 ### 3. Connect an agent
 
-Fastest path: mint a pairing code from the dashboard (**You -> Pair -> Generate code**) and
-claim it from the CLI - no manual token copy-paste, and it wires every agent it detects in one
-shot:
+Fastest path: log in to the dashboard, open **You -> Tokens**, and click "Mint token" to get a
+JWT. Then run:
 
 ```sh
-cairn pair <CODE>          # claims the code, writes ~/.cairn/config.toml, wires detected agents
+cairn onboard --server <url> --token <jwt>   # writes ~/.cairn/config.toml, wires detected agents
 ```
 
-Zero-flag onboarding works the same way against a local dev server (probes `localhost:7777`):
+Against a local dev server, `--server` can be omitted (`cairn onboard` probes
+`localhost:7777` automatically) - you still need `--token`:
 
 ```sh
-cairn onboard               # or: cairn onboard --code <CODE> for a remote server
+cairn onboard --token <jwt>
 ```
 
 Or wire agents by hand:
@@ -186,12 +186,12 @@ curl -fsSL https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install
 # 2. Start the server stack
 docker compose up -d                     # SurrealDB + Cairn on :7777
 
-# 3. Pair the device (mints + claims a token in one step, no copy-paste):
-#    open http://127.0.0.1:7777/you/pair, click "Generate code", then:
-cairn pair <CODE>                        # wires every detected agent, including OpenCode
+# 3. Mint a token and onboard (wires every detected agent, including OpenCode):
+#    open http://127.0.0.1:7777/you/tokens, click "Mint token", copy the JWT, then:
+cairn onboard --server http://localhost:7777 --token <jwt>
 
-# Or wire OpenCode by hand with a token minted from You -> Tokens:
-cairn setup opencode --server http://localhost:7777 --token <token>
+# Or wire OpenCode by hand with the same token:
+cairn setup opencode --server http://localhost:7777 --token <jwt>
 
 # 4. Restart OpenCode so the MCP entry picks up. You'll see `cairn` in the tool list.
 ```

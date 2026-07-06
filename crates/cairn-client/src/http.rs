@@ -54,10 +54,6 @@ impl ApiClient {
         self.authed(self.agent.get(&format!("{}{path}", self.server)))
     }
 
-    pub fn post(&self, path: &str) -> ureq::Request {
-        self.authed(self.agent.post(&format!("{}{path}", self.server)))
-    }
-
     fn authed(&self, req: ureq::Request) -> ureq::Request {
         match &self.token {
             Some(t) => req.set("Authorization", &format!("Bearer {t}")),
@@ -83,6 +79,13 @@ impl ApiClient {
     }
 }
 
+/// The plausible causes of a token rejection, shared between `validate_token`'s standalone
+/// error and `doctor`'s terser inline report so the two never describe the same HTTP-level
+/// failure in contradictory ways.
+pub fn token_rejection_causes() -> &'static str {
+    "the token may be expired, revoked, or belong to a server with a different secret key"
+}
+
 /// Verify that a device token is valid before writing it to agent config files
 /// (or reporting it as healthy). Makes an authenticated
 /// `GET /api/memory/wakeup?limit=1` request and returns `Ok(())` when the
@@ -95,10 +98,10 @@ pub fn validate_token(server: &str, token: &str) -> Result<()> {
             let status = resp.status();
             let body = resp.into_string().unwrap_or_default();
             anyhow::bail!(
-                "token rejected by server (HTTP {status}) -- the token may be expired, \
-                 revoked, or belong to a server with a different secret key.\n\
+                "token rejected by server (HTTP {status}) -- {}.\n\
                  Server response: {body}\n\
-                 Obtain a fresh token by pairing (`cairn pair`) or from the dashboard."
+                 Obtain a fresh token from the dashboard's You > Tokens page.",
+                token_rejection_causes()
             )
         }
         Err(e) => {

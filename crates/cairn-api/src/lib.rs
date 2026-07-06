@@ -33,7 +33,7 @@ pub use events::{EventBroker, EventPayload};
 
 use crate::admin::{self as admin_mod, auth_status, list_audit, login, logout, me, setup};
 use crate::auth::{extract_bearer, TokenInfo, TokenSigner};
-use crate::devices::{create_pair_code, create_token, list_tokens, revoke_token};
+use crate::devices::{create_token, list_tokens, revoke_token};
 use crate::events::events as sse_events;
 use crate::ledger::{get_ledger, verify_ledger, LedgerState};
 use crate::metrics::{
@@ -301,8 +301,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/pool", get(pool_list))
         .route("/api/tools/list", get(tools_list))
         .route("/api/tools/call", post(tools_call))
-        .route("/api/pair/new", post(pair_new))
-        .route("/api/pair/claim", post(pair_claim))
         .route("/api/sync/pull", get(sync_pull))
         .route("/api/sync/push", post(sync_push))
         .route("/api/auth/status", get(auth_status))
@@ -313,7 +311,6 @@ pub fn router(state: AppState) -> Router {
         .route("/api/devices/audit", get(list_audit))
         .route("/api/devices/tokens", get(list_tokens).post(create_token))
         .route("/api/devices/tokens/:id/revoke", post(revoke_token))
-        .route("/api/devices/pair-codes", post(create_pair_code))
         .route("/api/push/subscribe", post(push::subscribe))
         .route("/api/push/unsubscribe", post(push::unsubscribe))
         .route("/api/push/list", get(push::list_subscriptions))
@@ -2083,75 +2080,6 @@ async fn pool_list(State(s): State<AppState>) -> Result<Json<Value>, ApiError> {
     })))
 }
 
-/// Generate a short, unambiguous pairing code (~40 bits of entropy): 8 chars, no 0/O/1/I/L.
-pub fn pairing_code() -> String {
-    const ALPHA: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let bytes = uuid::Uuid::new_v4().into_bytes();
-    let mut acc = 0u64;
-    for &b in &bytes[..5] {
-        acc = (acc << 8) | b as u64;
-    }
-    (0..8)
-        .map(|i| ALPHA[((acc >> (35 - i * 5)) & 0x1f) as usize] as char)
-        .collect()
-}
-
-#[derive(Deserialize)]
-struct PairNewBody {
-    #[serde(default)]
-    name: Option<String>,
-}
-
-/// Mint a device token and a short-lived pairing code for it (authed). A new device claims the code
-/// to receive the token, so long secrets never have to be copied around.
-async fn pair_new(
-    State(s): State<AppState>,
-    Json(b): Json<PairNewBody>,
-) -> Result<Json<Value>, ApiError> {
-    let name = b
-        .name
-        .filter(|n| !n.trim().is_empty())
-        .unwrap_or_else(|| "device".to_string());
-    let token = s
-        .store
-        .create_token(&name, cairn_core::TokenScope::Write, None)?;
-    let code = pairing_code();
-    let expires = (Utc::now() + chrono::Duration::minutes(10))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    s.store.create_pairing(&code, &token.id, &name, &expires)?;
-    let bearer = s.sign_token(&token.id, &name, cairn_core::TokenScope::Write, None);
-    Ok(Json(
-        json!({ "code": code, "name": name, "expires_at": expires, "token": bearer }),
-    ))
-}
-
-#[derive(Deserialize)]
-struct PairClaimBody {
-    code: String,
-}
-
-/// Claim a pairing code (open endpoint): returns the device token if the code is valid, unexpired,
-/// and unclaimed. Single-use.
-async fn pair_claim(
-    State(s): State<AppState>,
-    Json(b): Json<PairClaimBody>,
-) -> Result<Json<Value>, ApiError> {
-    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    match s
-        .store
-        .claim_pairing(b.code.trim().to_uppercase().as_str(), &now)?
-    {
-        Some((token_id, name)) => {
-            let bearer = s.sign_token(&token_id, &name, cairn_core::TokenScope::Write, None);
-            Ok(Json(json!({ "token": bearer, "name": name })))
-        }
-        None => {
-            tracing::warn!(code = %b.code, "failed pairing claim attempt (invalid or expired code)");
-            Err(ApiError::not_found("invalid or expired pairing code"))
-        }
-    }
-}
-
 // -- sync + auth -----------------------------------------------------------------------------
 
 #[derive(Deserialize)]
@@ -2226,17 +2154,19 @@ async fn tools_call(
 /// Authentication middleware.
 ///
 /// Composition:
-///   1. Public endpoints (`/api/health`, `/api/pair/claim`, the admin auth surface) - pass
-///      through unchanged.
+///   1. Public endpoints (`/api/health`, the admin auth surface) - pass through unchanged.
 ///   2. Admin cookie - if `cairn_session` is present, signed, and the embedded generation
 ///      matches the live admin record, the request is treated as the admin (all scopes).
 ///   3. Device-token bearer - the existing JWT path; respected when no admin cookie is
-///      available so CLI / MCP clients keep working.
-///   4. Loopback fallback - when there are no device tokens AND no admin (first-run before
-///      `/setup`), only loopback calls pass. The admin cookie path overrides this once
+///      available so CLI / MCP clients keep working. A token whose scope doesn't cover the
+///      requested method/path is rejected with `InsufficientScope` (403), distinct from a
+///      missing/invalid token (401).
+///   4. Loopback fallback - only when there are zero device tokens, no admin exists yet
+///      (first-run before `/setup`), AND the caller's address is loopback. Any one of those
+///      three conditions failing closes this path; the admin cookie path supersedes it once
 ///      `/setup` has been visited.
 ///
-/// All errors are 401 with a uniform JSON body.
+/// All errors are 401/403 with a uniform JSON body.
 async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
     let path = req.uri().path();
     let method = req.method().as_str();
@@ -2248,7 +2178,6 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
             "/api/health"
                 | "/api/capabilities"
                 | "/api/openapi.json"
-                | "/api/pair/claim"
                 | "/api/auth/login"
                 | "/api/auth/logout"
                 | "/api/auth/me"
@@ -2784,49 +2713,6 @@ mod tests {
         let serialized = serde_json::to_string(&pool).unwrap();
         assert!(serialized.contains("BM25"));
         assert!(!serialized.contains("abcdefghijklmnop12345678"));
-    }
-
-    #[tokio::test]
-    async fn pair_new_then_claim_yields_a_valid_token_once() {
-        let Some((state, _dir)) = test_state() else {
-            return;
-        };
-
-        // The host mints a pairing code.
-        let created = pair_new(
-            State(state.clone()),
-            Json(PairNewBody {
-                name: Some("laptop".into()),
-            }),
-        )
-        .await
-        .unwrap()
-        .0;
-        let code = created["code"].as_str().unwrap().to_string();
-        assert_eq!(created["name"], "laptop");
-        assert_eq!(code.len(), 8);
-
-        // The new device claims it -> a real, valid device token.
-        let claimed = pair_claim(
-            State(state.clone()),
-            Json(PairClaimBody { code: code.clone() }),
-        )
-        .await
-        .unwrap()
-        .0;
-        assert_eq!(claimed["name"], "laptop");
-        let token = claimed["token"].as_str().unwrap();
-        let info = state
-            .verify_bearer(token)
-            .expect("claimed token is a valid JWT");
-        assert!(state.store.validate_token_id(&info.id).unwrap());
-
-        // Single-use: a second claim is a 404.
-        let err = pair_claim(State(state.clone()), Json(PairClaimBody { code }))
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(err.status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

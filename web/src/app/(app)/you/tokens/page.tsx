@@ -171,7 +171,6 @@ export default function DevicesTokensPage() {
                         <SelectValue placeholder="scope" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="admin">admin</SelectItem>
                         <SelectItem value="write">write</SelectItem>
                         <SelectItem value="read">read</SelectItem>
                       </SelectContent>
