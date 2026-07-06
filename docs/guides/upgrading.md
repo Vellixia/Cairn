@@ -35,8 +35,8 @@ crates). The single-admin/cookie-session model from 0.4.0 is unchanged - this re
   v0.8.0 the datastore is SurrealDB, not HelixDB - see "Upgrading to 0.8.0" below if
   you're coming from a HelixDB-backed 0.5.0-0.7.x install.
 - `deploy/` templates and the Chrome extension under `extensions/chrome/` were removed.
-  Use `cairn onboard` (or the new `cairn install --docker` subcommand) to bootstrap
-  a fresh stack.
+  Bootstrap a fresh stack with `docker compose up -d` (the root `docker-compose.yml`),
+  then run `cairn onboard --server <url> --token <jwt>` on each client device.
 - `cairn-bench` now produces a single CSV row per fixture (`LongMemEval`, `horizon`,
   `retention`) and prints token savings alongside MRR.
 - The Cairn repository does not commit `web/out/`. The directory is created at
@@ -89,7 +89,8 @@ proactive, and the mobile companion.
 ## Removed
 
 - `deploy/` (Compose templates, k8s manifests, Helm chart) - replaced by
-  `cairn install --docker` and the root `docker-compose.yml`.
+  `docker compose up -d` against the root `docker-compose.yml`, followed by
+  `cairn onboard --server <url> --token <jwt>` on each client device.
 - `extensions/chrome/` - moved to `POST /api/extensions/capture`.
 - `web/out/_next/` build artifacts - gitignored; rebuild with `cd web && npm run build`.
 
@@ -120,7 +121,7 @@ Cairn's `docker-compose.yml` uses **two** Docker volumes:
 | Volume | Persists | Notes |
 |---|---|---|
 | `cairn-data` | Admin record, audit log, sessions, ledger, push subscriptions | Mounted at `/data` inside the cairn container |
-| `cairn-surreal-data` | **All SurrealDB data** - memories, device tokens, sync state, pairing codes, checkpoint metadata | RocksDB-backed, mounted at `/data` inside the surreal container |
+| `cairn-surreal-data` | **All SurrealDB data** - memories, device tokens, sync state, checkpoint metadata | RocksDB-backed, mounted at `/data` inside the surreal container |
 
 **Critical:** `docker compose down` preserves both volumes. `docker compose down -v`
 **wipes both**. Losing `cairn-surreal-data` silently invalidates every device token (the

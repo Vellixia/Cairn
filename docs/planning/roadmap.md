@@ -106,7 +106,6 @@ gantt
 | `cairn-profile`: preference learning | Done | `prefer`/`profile` tools, injected at session start |
 | `cairn-share`: sanitization | Done | Secret/PII redaction, classification, diff preview |
 | Multi-device sync (pull/push) | Done | Last-write-wins on `updated_at` |
-| Pairing codes (device-code flow) | Done | Short, single-use |
 | Binary split (`cairn` server + `cairn` client) | Done | Two binaries, clear separation |
 | `cairn setup <agent>` | Done | Claude Code, Codex CLI, OpenCode |
 | `cairn setup --all` (auto-detect) | Done | Detects from project/home markers |
@@ -140,7 +139,7 @@ gantt
 | Single admin account + cookie session (0.4.0) | Done | Argon2id hash, httpOnly HMAC-SHA256 cookie, sliding TTL, generation counter for instant invalidation |
 | Admin recovery: `cairn-server admin password` + `reset` | Done | Loopback-only, mirrors the TLS gate; resets write a `__deleted__` tombstone sentinel rather than a physical delete, by design - kept identical across the HelixDB and SurrealDB backends |
 | Web: sidebar dashboard + login + setup wizard | Done | SessionGate probes `/api/auth/status` + `/me`; `aria-current` sidebar, K palette, toast system |
-| Admin token issuance from the dashboard | Done | `/api/devices/{tokens, pair-codes, audit}` admin endpoints; CLI flow unchanged |
+| Admin token issuance from the dashboard | Done | `/api/devices/{tokens, audit}` admin endpoints; CLI flow unchanged |
 | Security headers middleware | Done | `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy: clipboard-write=(self)` |
 | Hybrid search (BM25 + vector + graph, RRF) | Done | BM25 + HNSW vectors + graph proximity, RRF fusion with dynamic renormalization and session diversification. Graph leg completed v0.7.0 |
 | Rerank + MMR diversity | Done | Cross-encoder reranking (`cairn-rerank`, fastembed, `local` feature) v0.7.0; MMR in base recall v0.8.0 Sprint 7 |

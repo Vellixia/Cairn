@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest"
 import {
   loginSchema,
   setupSchema,
-  pairCodeSchema,
   issueTokenSchema,
 } from "@/lib/forms/schemas"
 
@@ -32,18 +31,6 @@ describe("setupSchema", () => {
   it("rejects short password", () => {
     const r = setupSchema.safeParse({ username: "admin", password: "123", confirm: "123" })
     expect(r.success).toBe(false)
-  })
-})
-
-describe("pairCodeSchema", () => {
-  it("accepts valid device name and ttl", () => {
-    const r = pairCodeSchema.safeParse({ name: "my-laptop", ttl_minutes: 30 })
-    expect(r.success).toBe(true)
-  })
-
-  it("coerces string ttl to number", () => {
-    const r = pairCodeSchema.safeParse({ name: "phone", ttl_minutes: "15" })
-    expect(r.success).toBe(true)
   })
 })
 

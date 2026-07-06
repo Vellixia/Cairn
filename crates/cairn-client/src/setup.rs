@@ -18,16 +18,15 @@ use crate::paths;
 use anyhow::{anyhow, Result};
 use std::path::Path;
 
-/// Returns the number of agents actually installed, so callers (`cairn
-/// onboard`, `cairn pair`) can report a wired-agent count without spawning a
-/// subprocess and scraping its stdout for it.
+/// Returns the number of agents actually installed, so `cairn onboard` can
+/// report a wired-agent count without spawning a subprocess and scraping its
+/// stdout for it.
 pub fn run(
     agent: Option<&str>,
     all: bool,
     server: Option<&str>,
     token: Option<&str>,
     project_flag: bool,
-    embed_env: bool,
 ) -> Result<usize> {
     // Fall back to CAIRN_SERVER/CAIRN_TOKEN env vars when the flags are not passed explicitly.
     let env_server = server
@@ -53,11 +52,10 @@ pub fn run(
 
     // v0.8.0 client redesign: persist server/token to `~/.cairn/config.toml` so `cairn hook`
     // and `cairn mcp` work without every agent config file embedding them (see `config.rs`,
-    // `hook.rs`). This is what makes `embed_env: false` (the default just below) safe - the
-    // values aren't lost, they just live in one shared file instead of N agent-specific ones.
-    // A brand-new config.toml also means a brand-new user: turn the flagship context-injection
-    // feature on for them (existing installs that never touch this again keep the in-binary
-    // default of off - see `hook.rs`).
+    // `hook.rs`) - the values aren't lost, they just live in one shared file instead of N
+    // agent-specific ones. A brand-new config.toml also means a brand-new user: turn the
+    // flagship context-injection feature on for them (existing installs that never touch
+    // this again keep the in-binary default of off - see `hook.rs`).
     if effective_server.is_some() || effective_token.is_some() {
         let is_fresh_config = crate::config::config_path().is_some_and(|p| !p.exists());
         crate::config::save_server(effective_server, effective_token)?;
@@ -86,15 +84,7 @@ pub fn run(
     if all {
         let detected = agents::detect_all(&project, home.as_deref());
         for a in &detected {
-            install_one(
-                *a,
-                &project,
-                home.as_deref(),
-                scope,
-                effective_server,
-                effective_token,
-                embed_env,
-            )?;
+            install_one(*a, &project, home.as_deref(), scope)?;
         }
         if detected.is_empty() {
             println!("cairn: no supported agents detected here or in your home directory.");
@@ -115,15 +105,7 @@ pub fn run(
             agents::ids().join(", ")
         )
     })?;
-    install_one(
-        a,
-        &project,
-        home.as_deref(),
-        scope,
-        effective_server,
-        effective_token,
-        embed_env,
-    )?;
+    install_one(a, &project, home.as_deref(), scope)?;
     if let Some(srv) = effective_server {
         println!("\nCairn server: {srv}. Open a session in your agent.");
     } else {
@@ -132,23 +114,11 @@ pub fn run(
     Ok(1)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn install_one(
-    a: &dyn agents::Agent,
-    project: &Path,
-    home: Option<&Path>,
-    scope: Scope,
-    server: Option<&str>,
-    token: Option<&str>,
-    embed_env: bool,
-) -> Result<()> {
+fn install_one(a: &dyn agents::Agent, project: &Path, home: Option<&Path>, scope: Scope) -> Result<()> {
     let ctx = InstallCtx {
         project,
         home,
         scope,
-        server,
-        token,
-        embed_env,
     };
     let report = a.install(&ctx)?;
     report.print(a.label());
@@ -165,7 +135,7 @@ mod tests {
         // Pin CAIRN_SERVER/CAIRN_TOKEN unset so this can never attempt a real
         // network validation call if the ambient shell happens to export them.
         crate::env_guard::with_env(&[("CAIRN_SERVER", None), ("CAIRN_TOKEN", None)], || {
-            let err = run(Some("emacs"), false, None, None, false, false).unwrap_err();
+            let err = run(Some("emacs"), false, None, None, false).unwrap_err();
             let msg = err.to_string();
             assert!(msg.contains("emacs"));
             assert!(msg.contains("claude-code"));

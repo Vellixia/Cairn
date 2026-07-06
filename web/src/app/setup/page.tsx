@@ -1,7 +1,16 @@
 "use client";
 
-import Link from "next/link";
-import { useEffect } from "react";
+// Setup wizard --- two steps the new user walks through on first launch:
+//   1. Admin credentials (username + password)
+//   2. Health check (database reachable, embedder loaded, admin exists) + finish
+//
+// Embedding provider is environment-driven only (CAIRN_EMBED_PROVIDER / CAIRN_EMBED_MODEL /
+// CAIRN_EMBED_URL / CAIRN_EMBED_API_KEY) --- there is no in-wizard picker. The health step
+// surfaces the live, actually-configured provider so the user isn't left guessing. Device
+// pairing has been removed entirely; new devices authenticate with a device token instead
+// (see the Tokens page under You).
+
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -15,15 +24,6 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import {
   Field,
   FieldDescription,
   FieldError,
@@ -31,180 +31,271 @@ import {
   FieldLabel,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import Logo from "@/components/Logo";
-import { ApiError, getJSON, type AuthStatus } from "@/lib/api";
-import { useSetupMutation } from "@/lib/queries";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import { setupSchema, type SetupInput } from "@/lib/forms/schemas";
+import { getJSON, postJSON, type AuthStatus } from "@/lib/api";
+import { toast } from "sonner";
+
+interface SetupHealth {
+  health: {
+    db_reachable: boolean;
+    admin_exists: boolean;
+    embedder_loaded: boolean;
+    secret_key_configured: boolean;
+  };
+  embed_provider: string;
+}
 
 export default function SetupPage() {
   const router = useRouter();
-  const setup = useSetupMutation();
+  const [step, setStep] = useState<1 | 2>(1);
+  const [health, setHealth] = useState<SetupHealth | null>(null);
+
+  // If an admin already exists, this page has nothing left to do - send the visitor to
+  // log in instead of showing a "create admin" form the backend would just 409 on submit.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const status = await getJSON<AuthStatus>("/api/auth/status");
+        if (!cancelled && !status.setup_required) {
+          router.replace("/login");
+        }
+      } catch {
+        // Can't reach the server to check - stay on this page and let submission fail loudly.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [router]);
 
   const form = useForm<SetupInput>({
     resolver: zodResolver(setupSchema),
-    defaultValues: { username: "admin", password: "", confirm: "" },
+    defaultValues: {
+      username: "",
+      password: "",
+      confirm: "",
+    },
   });
-
-  useEffect(() => {
-    getJSON<AuthStatus>("/api/auth/status")
-      .then((s) => {
-        if (!s.setup_required) router.replace("/login");
-      })
-      .catch(() => {});
-  }, [router]);
 
   async function onSubmit(values: SetupInput) {
     try {
-      await setup.mutateAsync({ username: values.username, password: values.password });
-      router.replace("/dashboard");
+      const res = await postJSON<{ username: string }>("/api/auth/setup", {
+        username: values.username,
+        password: values.password,
+      });
+      toast.success(`Welcome, ${res.username}`);
+      // Refresh health.
+      const h = await getJSON<SetupHealth>("/api/setup/health");
+      setHealth(h);
+      setStep(2);
     } catch (e) {
-      if (e instanceof ApiError && e.status === 409) {
-        form.setError("root", {
-          message: "An admin already exists. Use the Sign in page instead.",
-        });
-      } else if (e instanceof ApiError && e.status === 429) {
-        form.setError("root", { message: "Too many attempts. Try again in a minute." });
-      } else {
-        form.setError("root", {
-          message: e instanceof Error ? e.message : "Setup failed.",
-        });
-      }
+      toast.error(e instanceof Error ? e.message : "Setup failed");
     }
   }
 
-return (
-    <main className="min-h-screen flex items-center justify-center px-5 py-12">
-      <div className="w-full max-w-sm">
-        <div className="flex items-center gap-2.5 mb-6 justify-center">
-          <Logo size={36} />
-          <span className="text-xl font-semibold tracking-tight">Cairn</span>
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <header className="space-y-2">
+        <h1 className="text-2xl font-semibold tracking-tight">
+          Set up Cairn
+        </h1>
+        <p className="text-sm text-muted-foreground">
+          2 short steps. The dashboard unlocks once setup completes.
+        </p>
+        <div className="flex gap-1 text-[11px] text-muted-foreground">
+          {(["1", "2"] as const).map((label, i) => {
+            const n = (i + 1) as 1 | 2;
+            const active = step === n;
+            const done = step > n;
+            return (
+              <Badge
+                key={label}
+                variant={active ? "default" : done ? "secondary" : "outline"}
+                className="font-mono"
+              >
+                {label}
+              </Badge>
+            );
+          })}
         </div>
+      </header>
 
-        <AlertDialog defaultOpen>
-          <AlertDialogContent>
-            <AlertDialogHeader>
-              <AlertDialogTitle>v1 setup --- deprecated in v0.5.0</AlertDialogTitle>
-              <AlertDialogDescription>
-                The new wizard (admin, embed, pair, health) lives at{" "}
-                <Link href="/setup/wizard" className="underline font-mono">
-                  /setup/wizard
-                </Link>
-                . This form still works but skips the embed provider picker.
-              </AlertDialogDescription>
-            </AlertDialogHeader>
-            <AlertDialogFooter>
-              <Button asChild variant="outline">
-                <Link href="/setup/wizard">Open wizard</Link>
-              </Button>
-              <AlertDialogAction>Continue with v1</AlertDialogAction>
-            </AlertDialogFooter>
-          </AlertDialogContent>
-        </AlertDialog>
+      {step === 1 && (
+        <Step1Credentials form={form} onSubmit={form.handleSubmit(onSubmit)} />
+      )}
+      {step === 2 && (
+        <Step2Health
+          health={health}
+          onContinue={() => router.push("/dashboard")}
+        />
+      )}
+    </div>
+  );
+}
 
-        <Card>
-          <CardHeader>
-            <CardTitle>Create admin</CardTitle>
-            <CardDescription>
-              First-run setup. Choose the username and password that will own this
-              dashboard.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form
-              id="form-setup"
-              onSubmit={form.handleSubmit(onSubmit)}
-              className="space-y-3"
-            >
-              <FieldGroup>
-                <Controller
-                  name="username"
-                  control={form.control}
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="form-setup-username">Username</FieldLabel>
-                      <Input
-                        {...field}
-                        id="form-setup-username"
-                        aria-invalid={fieldState.invalid}
-                        autoComplete="username"
-                        required
-                      />
-                      {fieldState.invalid && (
-                        <FieldError errors={[fieldState.error]} />
-                      )}
-                    </Field>
+function Step1Credentials({
+  form,
+  onSubmit,
+}: {
+  form: ReturnType<typeof useForm<SetupInput>>;
+  onSubmit: () => void;
+}) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>1. Admin account</CardTitle>
+        <CardDescription>
+          The single admin who can issue device tokens and review drift events.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form
+          id="form-setup-step1"
+          onSubmit={onSubmit}
+          className="space-y-3"
+        >
+          <FieldGroup>
+            <Controller
+              name="username"
+              control={form.control}
+              render={({ field, fieldState }) => (
+                <Field data-invalid={fieldState.invalid}>
+                  <FieldLabel htmlFor="form-setup-step1-username">
+                    Username
+                  </FieldLabel>
+                  <Input
+                    {...field}
+                    id="form-setup-step1-username"
+                    aria-invalid={fieldState.invalid}
+                    autoFocus
+                    autoComplete="username"
+                  />
+                  {fieldState.invalid && (
+                    <FieldError errors={[fieldState.error]} />
                   )}
-                />
-                <Controller
-                  name="password"
-                  control={form.control}
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="form-setup-password">New password</FieldLabel>
-                      <Input
-                        {...field}
-                        id="form-setup-password"
-                        aria-invalid={fieldState.invalid}
-                        type="password"
-                        autoComplete="new-password"
-                        required
-                      />
-                      <FieldDescription>
-                        8+ characters. Hashed with Argon2id.
-                      </FieldDescription>
-                      {fieldState.invalid && (
-                        <FieldError errors={[fieldState.error]} />
-                      )}
-                    </Field>
-                  )}
-                />
-                <Controller
-                  name="confirm"
-                  control={form.control}
-                  render={({ field, fieldState }) => (
-                    <Field data-invalid={fieldState.invalid}>
-                      <FieldLabel htmlFor="form-setup-confirm">Confirm</FieldLabel>
-                      <Input
-                        {...field}
-                        id="form-setup-confirm"
-                        aria-invalid={fieldState.invalid}
-                        type="password"
-                        autoComplete="new-password"
-                        required
-                      />
-                      {fieldState.invalid && (
-                        <FieldError errors={[fieldState.error]} />
-                      )}
-                    </Field>
-                  )}
-                />
-                {form.formState.errors.root && (
-                  <Field>
-                    <p role="alert" className="text-sm text-destructive">
-                      {form.formState.errors.root.message}
-                    </p>
-                  </Field>
-                )}
-                <Field>
-                  <Button
-                    type="submit"
-                    form="form-setup"
-                    className="w-full"
-                    disabled={setup.isPending}
-                  >
-                    {setup.isPending ? "Creating..." : "Create admin"}
-                  </Button>
                 </Field>
-              </FieldGroup>
-            </form>
-            <p className="mt-5 text-xs text-muted-foreground">
-              Or set <code>CAIRN_ADMIN_USERNAME</code>,{" "}
-              <code>CAIRN_ADMIN_PASSWORD_HASH</code> (Argon2id PHC) in{" "}
-              <code>.env</code> and restart.
-            </p>
-          </CardContent>
-        </Card>
-      </div>
-    </main>
+              )}
+            />
+            <Controller
+              name="password"
+              control={form.control}
+              render={({ field, fieldState }) => (
+                <Field data-invalid={fieldState.invalid}>
+                  <FieldLabel htmlFor="form-setup-step1-password">
+                    Password
+                  </FieldLabel>
+                  <Input
+                    {...field}
+                    id="form-setup-step1-password"
+                    aria-invalid={fieldState.invalid}
+                    type="password"
+                    autoComplete="new-password"
+                  />
+                  <FieldDescription>8 characters minimum.</FieldDescription>
+                  {fieldState.invalid && (
+                    <FieldError errors={[fieldState.error]} />
+                  )}
+                </Field>
+              )}
+            />
+            <Controller
+              name="confirm"
+              control={form.control}
+              render={({ field, fieldState }) => (
+                <Field data-invalid={fieldState.invalid}>
+                  <FieldLabel htmlFor="form-setup-step1-confirm">
+                    Confirm password
+                  </FieldLabel>
+                  <Input
+                    {...field}
+                    id="form-setup-step1-confirm"
+                    aria-invalid={fieldState.invalid}
+                    type="password"
+                    autoComplete="new-password"
+                  />
+                  {fieldState.invalid && (
+                    <FieldError errors={[fieldState.error]} />
+                  )}
+                </Field>
+              )}
+            />
+            <Field>
+              <Button type="submit" form="form-setup-step1">
+                Create admin
+              </Button>
+            </Field>
+          </FieldGroup>
+        </form>
+        <p className="mt-3 text-[11px] text-muted-foreground">
+          Or set <code>CAIRN_ADMIN_USERNAME</code>,{" "}
+          <code>CAIRN_ADMIN_PASSWORD_HASH</code> (Argon2id PHC) in{" "}
+          <code>.env</code> and restart.
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Step2Health({
+  health,
+  onContinue,
+}: {
+  health: SetupHealth | null;
+  onContinue: () => void;
+}) {
+  if (!health) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>2. Health check</CardTitle>
+          <CardDescription>Verifying everything is wired up...</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <Skeleton className="h-32 w-full" />
+        </CardContent>
+      </Card>
+    );
+  }
+  const allGreen = Object.values(health.health).every(Boolean);
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{allGreen ? "All green" : "Almost there"}</CardTitle>
+        <CardDescription>2. Health check</CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <ul className="space-y-2">
+          <Health label="Database reachable" ok={health.health.db_reachable} />
+          <Health label="Admin account" ok={health.health.admin_exists} />
+          <Health label="Embedder loaded" ok={health.health.embedder_loaded} />
+          <Health
+            label="Secret key configured"
+            ok={health.health.secret_key_configured}
+          />
+        </ul>
+        <p className="text-[11px] text-muted-foreground">
+          Embedding provider: <code>{health.embed_provider}</code> (configured via{" "}
+          <code>CAIRN_EMBED_PROVIDER</code> --- see docs to change).
+        </p>
+        <Button onClick={onContinue}>Open dashboard</Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function Health({ label, ok }: { label: string; ok: boolean }) {
+  return (
+    <li className="flex items-center gap-2 text-sm">
+      <span
+        className={`inline-block h-2 w-2 rounded-full ${ok ? "bg-emerald-500" : "bg-amber-500"}`}
+      />
+      <span className={ok ? "" : "text-amber-600"}>{label}</span>
+      <Badge variant={ok ? "secondary" : "outline"} className="ml-auto font-mono text-[10px]">
+        {ok ? "ok" : "check"}
+      </Badge>
+    </li>
   );
 }

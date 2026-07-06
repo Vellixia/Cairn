@@ -54,19 +54,28 @@ store; the bearer itself is never persisted in cleartext.
 
 Every request goes through `auth()` (in `crates/cairn-api/src/lib.rs`):
 
-1. Public endpoints (`/api/health`, `/api/pair/claim`, the admin auth surface) - pass.
-2. Admin cookie - if `cairn_session` is signed and the embedded generation
-   matches the live admin record, the request is treated as the admin.
+1. Public endpoints (`/api/health`, the admin auth surface) - pass through
+   unchanged.
+2. Admin cookie - if `cairn_session` is present, signed, and the embedded
+   generation matches the live admin record, the request is treated as the
+   admin (all scopes).
 3. Device-token bearer - the existing JWT path; respected when no admin
-   cookie is present.
-4. Loopback fallback - only when there are zero device tokens AND no admin
-   (first-run before `/setup`). Lets the operator visit `/setup` on localhost.
+   cookie is present, so CLI / MCP clients keep working. A token whose
+   scope doesn't cover the requested method/path gets a distinct
+   `InsufficientScope` outcome (403 `forbidden`), separate from a
+   missing/invalid token (401 `unauthenticated`).
+4. Loopback fallback - only when **all three** of the following hold at
+   once: zero device tokens exist, no admin record exists yet (first-run,
+   before `/setup`), and the request's source address is loopback. Any one
+   of those three conditions failing closes the fallback - for example, an
+   admin visiting from a non-loopback address after tokens exist gets a
+   401, not silent access. The admin-cookie path supersedes this fallback
+   once `/setup` has been completed.
 
-### Pairing-code limits
-
-Pairing codes are short-lived (1--60 min, default 10) and single-use; v0.5.0
-does not enforce per-IP rate limits on the auth surface. See `docs/SECURITY.md`
-for the threat model; rate limiting is a documented v0.6 item.
+`/api/devices/*` (token issuance, revocation, and the audit log) is
+**cookie-only by design** - it checks the `cairn_session` cookie and
+nothing else. A bearer token, even one scoped `admin`, cannot authenticate
+against these endpoints; only an active dashboard browser session can.
 
 ## Dashboard surface
 
@@ -162,9 +171,8 @@ Signal-dense landing page composed of:
 | `/trust/checkpoints` | Snapshot + rollback |
 | `/trust/drift` | Drift center |
 | `/trust/sanitize` | Redact secrets + classify |
-| `/you` | You hub: profile / tokens / pair / audit / sessions / settings |
+| `/you` | You hub: profile / tokens / audit / sessions / settings |
 | `/you/tokens` | **Admin: issue / list / revoke device tokens** |
-| `/you/pair` | **Admin: generate pairing code** |
 | `/you/audit` | **Admin: last 50 audit events** |
 | `/you/sessions` | Per-session detail list |
 | `/you/settings` | Session info, sign out |
@@ -177,9 +185,6 @@ The admin can do everything the CLI could, from the dashboard:
   expiry. Server signs the JWT, returns it once in the response, and stores
   only the metadata.
 - **Revoke a device token**: marks the id revoked; future bearer calls 401.
-- **Generate a pairing code**: short 8-char code, TTL 1--60 min (default 10).
-  Same-store pattern: the dashboard **You -> Pair** page mints codes; the claim endpoint signs a fresh
-  JWT at claim time.
 
 ## Static export
 

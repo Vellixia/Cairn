@@ -6,7 +6,6 @@
 //!
 //! - last-write-wins on `upsert_memory` (older `updated_at` is dropped).
 //! - monotonic `AuditRecord` ids so SSE replay works the same.
-//! - single-use pairing codes (claimed codes are removed).
 //! - `set_meta_if_absent` honors the `__deleted__` tombstone.
 //!
 //! No vector index: `semantic_recall` returns `Ok(None)` so `MemoryEngine`
@@ -34,8 +33,6 @@ struct Inner {
     by_hash: HashMap<String, String>,
     /// id -> DeviceToken
     tokens: HashMap<String, DeviceToken>,
-    /// code -> (token, name, expires_at)
-    pairings: HashMap<String, (String, String, String)>,
     /// server -> last_sync ts
     last_sync: HashMap<String, DateTime<Utc>>,
     /// path -> (content_hash, lines)
@@ -65,7 +62,6 @@ impl MemoryBackend {
                 memories: HashMap::new(),
                 by_hash: HashMap::new(),
                 tokens: HashMap::new(),
-                pairings: HashMap::new(),
                 last_sync: HashMap::new(),
                 file_versions: HashMap::new(),
                 meta: HashMap::new(),
@@ -391,28 +387,6 @@ impl StoreBackend for MemoryBackend {
         v.reverse();
         v.truncate(limit);
         Ok(v)
-    }
-
-    fn create_pairing(&self, code: &str, token: &str, name: &str, expires_at: &str) -> Result<()> {
-        let mut g = self.inner.lock().map_err(poisoned)?;
-        g.pairings.insert(
-            code.to_string(),
-            (token.to_string(), name.to_string(), expires_at.to_string()),
-        );
-        Ok(())
-    }
-
-    fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>> {
-        let mut g = self.inner.lock().map_err(poisoned)?;
-        let Some((token, name, expires_at)) = g.pairings.get(code).cloned() else {
-            return Ok(None);
-        };
-        // RFC3339 strings compare lexicographically. An expired code never claims.
-        if expires_at.as_str() <= now {
-            return Ok(None);
-        }
-        g.pairings.remove(code);
-        Ok(Some((token, name)))
     }
 
     fn append_audit(&self, ts: i64, kind: &str, actor: &str, detail: &str) -> Result<String> {

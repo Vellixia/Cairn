@@ -42,8 +42,8 @@ impl Agent for Codex {
         } else {
             String::new()
         };
-        let merged = upsert_codex_cairn(&original, ctx.server, ctx.token, ctx.embed_env)
-            .with_context(|| format!("editing {}", path.display()))?;
+        let merged =
+            upsert_codex_cairn(&original).with_context(|| format!("editing {}", path.display()))?;
         fs::write(&path, merged).with_context(|| format!("writing {}", path.display()))?;
 
         let mut files = vec![InstalledFile {
@@ -161,15 +161,8 @@ fn write_codex_hooks(home: &Path) -> Result<PathBuf> {
 
 /// Upsert the `[mcp_servers.cairn]` table into a Codex `config.toml`,
 /// preserving every other table, comment, and whitespace via `toml_edit`.
-/// Existing vars in `[mcp_servers.cairn.env]` are kept unless `server`/`token`
-/// override them. Idempotent: running twice on the same inputs yields
-/// byte-identical output.
-fn upsert_codex_cairn(
-    original: &str,
-    server: Option<&str>,
-    token: Option<&str>,
-    embed_env: bool,
-) -> Result<String> {
+/// Idempotent: running twice yields byte-identical output.
+fn upsert_codex_cairn(original: &str) -> Result<String> {
     use toml_edit::{value, Array, DocumentMut, Item, Table};
 
     let mut doc = original
@@ -197,27 +190,10 @@ fn upsert_codex_cairn(
     args.push("mcp");
     cairn["args"] = value(args);
 
-    if embed_env {
-        let has_existing_env = cairn.get("env").and_then(Item::as_table).is_some();
-        if server.is_some() || token.is_some() || has_existing_env {
-            let env = cairn
-                .entry("env")
-                .or_insert(Item::Table(Table::new()))
-                .as_table_mut()
-                .context("config.toml: `mcp_servers.cairn.env` is not a table")?;
-            if let Some(s) = server {
-                env["CAIRN_SERVER"] = value(s);
-            }
-            if let Some(t) = token {
-                env["CAIRN_TOKEN"] = value(t);
-            }
-        }
-    } else {
-        // v0.8.0 client redesign: outside `--embed-env`, server/token live only in
-        // `~/.cairn/config.toml` - actively drop any env block a previous
-        // (pre-config-file) `setup` run embedded here, rather than preserving it.
-        cairn.remove("env");
-    }
+    // v0.8.0 client redesign: server/token live only in `~/.cairn/config.toml` - actively
+    // drop any env block a previous (pre-config-file) `setup` run embedded here, rather
+    // than preserving it.
+    cairn.remove("env");
 
     Ok(doc.to_string())
 }
@@ -231,33 +207,18 @@ mod tests {
     }
 
     #[test]
-    fn upsert_writes_cairn_table_and_env() {
+    fn upsert_writes_cairn_table() {
         let exe = paths::cairn_exe();
-        let out =
-            upsert_codex_cairn("", Some("http://example.com:7777"), Some("tok-123"), true).unwrap();
+        let out = upsert_codex_cairn("").unwrap();
         let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
         assert_eq!(
             doc["mcp_servers"]["cairn"]["command"].as_str(),
             Some(exe.as_str())
         );
         assert_eq!(doc["mcp_servers"]["cairn"]["args"][0].as_str(), Some("mcp"));
-        assert_eq!(
-            doc["mcp_servers"]["cairn"]["env"]["CAIRN_SERVER"].as_str(),
-            Some("http://example.com:7777")
-        );
-        assert_eq!(
-            doc["mcp_servers"]["cairn"]["env"]["CAIRN_TOKEN"].as_str(),
-            Some("tok-123")
-        );
-    }
-
-    #[test]
-    fn upsert_omits_env_when_no_server_or_token() {
-        let out = upsert_codex_cairn("", None, None, true).unwrap();
-        let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
         assert!(
             doc["mcp_servers"]["cairn"].get("env").is_none(),
-            "no env sub-table when there is nothing to put in it"
+            "server/token live only in ~/.cairn/config.toml, never embedded here"
         );
     }
 
@@ -265,7 +226,7 @@ mod tests {
     fn upsert_replaces_stale_cairn_but_keeps_other_servers() {
         let exe = paths::cairn_exe();
         let original = "# head\n[mcp_servers.cairn]\ncommand = \"stale\"\nargs = [\"old\"]\n\n[mcp_servers.other]\ncommand = \"foo\"\n";
-        let out = upsert_codex_cairn(original, None, None, true).unwrap();
+        let out = upsert_codex_cairn(original).unwrap();
         let doc = out.parse::<toml_edit::DocumentMut>().unwrap();
         assert_eq!(
             doc["mcp_servers"]["cairn"]["command"].as_str(),
@@ -293,7 +254,7 @@ command = \"foo\"
 [mcp_servers.other.env]
 WEIRD = \"a=b#c\"
 ";
-        let out = upsert_codex_cairn(original, Some("http://h:7777"), None, true).unwrap();
+        let out = upsert_codex_cairn(original).unwrap();
         assert!(out.contains("# user preferences — keep me!"));
         assert!(out.contains("model = \"opus\"  # inline comment"));
         assert!(out.contains("[tui]"));
@@ -302,48 +263,32 @@ WEIRD = \"a=b#c\"
             doc["mcp_servers"]["other"]["env"]["WEIRD"].as_str(),
             Some("a=b#c")
         );
-        assert_eq!(
-            doc["mcp_servers"]["cairn"]["env"]["CAIRN_SERVER"].as_str(),
-            Some("http://h:7777")
-        );
     }
 
     #[test]
     fn upsert_is_idempotent() {
-        let first = upsert_codex_cairn("", Some("http://h:7777"), Some("t-1"), true).unwrap();
-        let second = upsert_codex_cairn(&first, Some("http://h:7777"), Some("t-1"), true).unwrap();
+        let first = upsert_codex_cairn("").unwrap();
+        let second = upsert_codex_cairn(&first).unwrap();
         assert_eq!(first, second, "re-running upsert must be byte-identical");
     }
 
     #[test]
-    fn upsert_preserves_existing_token_when_omitted_in_embed_env_mode() {
-        let first = upsert_codex_cairn("", Some("http://h:7777"), Some("keep-me"), true).unwrap();
-        let second = upsert_codex_cairn(&first, Some("http://h:7777"), None, true).unwrap();
-        let doc = second.parse::<toml_edit::DocumentMut>().unwrap();
-        assert_eq!(
-            doc["mcp_servers"]["cairn"]["env"]["CAIRN_TOKEN"].as_str(),
-            Some("keep-me")
-        );
-    }
-
-    #[test]
-    fn non_embed_env_mode_drops_a_previously_embedded_env() {
-        let embedded =
-            upsert_codex_cairn("", Some("http://old:7777"), Some("old-tok"), true).unwrap();
-        assert!(embedded.contains("CAIRN_TOKEN"));
-        let bare =
-            upsert_codex_cairn(&embedded, Some("http://new:7777"), Some("new-tok"), false).unwrap();
+    fn upsert_de_tokenizes_an_env_block_left_by_an_older_binary() {
+        // Simulate a pre-v0.8.0 binary's config.toml, which used to embed
+        // server/token directly into `[mcp_servers.cairn.env]`.
+        let embedded = "[mcp_servers.cairn]\ncommand = \"cairn\"\nargs = [\"mcp\"]\n\n[mcp_servers.cairn.env]\nCAIRN_TOKEN = \"old-tok\"\n";
+        let bare = upsert_codex_cairn(embedded).unwrap();
         let doc = bare.parse::<toml_edit::DocumentMut>().unwrap();
         assert!(
             doc["mcp_servers"]["cairn"].get("env").is_none(),
-            "non-embed-env re-run must drop the old env block, not merge into it"
+            "upsert must drop a previously-embedded env block, not merge into it"
         );
     }
 
     /// Test-only entry point that takes an explicit config path, skipping
     /// `codex_config_path`'s `XDG_CONFIG_HOME` lookup so tests don't race on
     /// the env var when run in parallel.
-    fn install_at(path: &Path, server: Option<&str>, token: Option<&str>) -> Result<()> {
+    fn install_at(path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
@@ -352,7 +297,7 @@ WEIRD = \"a=b#c\"
         } else {
             String::new()
         };
-        let merged = upsert_codex_cairn(&original, server, token, true)?;
+        let merged = upsert_codex_cairn(&original)?;
         fs::write(path, merged)?;
         Ok(())
     }
@@ -364,7 +309,7 @@ WEIRD = \"a=b#c\"
         let cfg = dir.path().join("config.toml");
         fs::write(&cfg, "# user prefs\ntui = { theme = \"dark\" }\n").unwrap();
 
-        install_at(&cfg, Some("http://example.com:7777"), Some("tok-xyz")).unwrap();
+        install_at(&cfg).unwrap();
 
         let out = read_text(&cfg);
         assert!(out.contains("# user prefs"));
@@ -374,14 +319,7 @@ WEIRD = \"a=b#c\"
             doc["mcp_servers"]["cairn"]["command"].as_str(),
             Some(exe.as_str())
         );
-        assert_eq!(
-            doc["mcp_servers"]["cairn"]["env"]["CAIRN_SERVER"].as_str(),
-            Some("http://example.com:7777")
-        );
-        assert_eq!(
-            doc["mcp_servers"]["cairn"]["env"]["CAIRN_TOKEN"].as_str(),
-            Some("tok-xyz")
-        );
+        assert!(doc["mcp_servers"]["cairn"].get("env").is_none());
     }
 
     #[test]
@@ -389,9 +327,9 @@ WEIRD = \"a=b#c\"
         let dir = tempfile::tempdir().unwrap();
         let cfg = dir.path().join("config.toml");
 
-        install_at(&cfg, Some("http://h:7777"), Some("t-1")).unwrap();
+        install_at(&cfg).unwrap();
         let first = read_text(&cfg);
-        install_at(&cfg, Some("http://h:7777"), Some("t-1")).unwrap();
+        install_at(&cfg).unwrap();
         let second = read_text(&cfg);
         assert_eq!(first, second, "running setup twice must be idempotent");
     }

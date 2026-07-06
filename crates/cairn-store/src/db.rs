@@ -110,9 +110,6 @@ pub(crate) trait StoreBackend: Send + Sync {
     fn record_guard_event(&self, ts: &str, kind: &str, risk: &str, path: &str) -> Result<()>;
     /// `(kind, risk, path, ts)`, newest first.
     fn recent_guard_events(&self, limit: usize) -> Result<Vec<(String, String, String, String)>>;
-    fn create_pairing(&self, code: &str, token: &str, name: &str, expires_at: &str) -> Result<()>;
-    /// Atomically claim a non-expired code (single-use): returns `(token, name)` and removes it.
-    fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>>;
 
     // -- audit log (v0.5.0 - Sprint 1) ----------------------------------------------------
     /// Append an audit event to durable storage. Returns the assigned event id (a monotonically
@@ -635,19 +632,6 @@ impl Store {
     ) -> Result<Vec<(String, String, String, String)>> {
         self.backend.recent_guard_events(limit)
     }
-    pub fn create_pairing(
-        &self,
-        code: &str,
-        token: &str,
-        name: &str,
-        expires_at: &str,
-    ) -> Result<()> {
-        self.backend.create_pairing(code, token, name, expires_at)
-    }
-    pub fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>> {
-        self.backend.claim_pairing(code, now)
-    }
-
     /// Open an **isolated** store for tests against a SurrealDB server.
     ///
     /// Returns `None` when `CAIRN_DB_URL` is unset, so the offline suite simply skips
@@ -664,8 +648,8 @@ impl Store {
     /// Open a fully in-memory `Store` with no network or filesystem dependency beyond the
     /// supplied `blobs_dir` (which the content-addressed blob store uses as its root; pass a
     /// tempdir to keep a test hermetic). All semantic operations match the Surreal backend
-    /// (last-write-wins on `upsert_memory`, monotonic audit ids, single-use pairing codes,
-    /// `__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)` — same as the
+    /// (last-write-wins on `upsert_memory`, monotonic audit ids, `__deleted__` tombstone
+    /// honoring). `semantic_recall` returns `Ok(None)` — same as the
     /// offline fallback on the production server when no vector index is available.
     ///
     /// Use this in any test bucket that needs a real `Store` without standing up SurrealDB.
@@ -855,31 +839,6 @@ mod tests {
         assert_eq!(lines, 42);
         s.record_file_version("/x.rs", "def456", 10).unwrap();
         assert_eq!(s.latest_file_version("/x.rs").unwrap().unwrap().0, "def456");
-    }
-
-    #[test]
-    fn pairing_code_claims_once_and_respects_expiry() {
-        let Some(s) = store() else { return };
-        // A live code claims exactly once, returning its token + device name.
-        s.create_pairing("ABCD2345", "tok-1", "laptop", "2999-01-01T00:00:00.000Z")
-            .unwrap();
-        let claimed = s
-            .claim_pairing("ABCD2345", "2026-01-01T00:00:00.000Z")
-            .unwrap();
-        assert_eq!(claimed, Some(("tok-1".to_string(), "laptop".to_string())));
-        // Single-use: a second claim finds nothing.
-        assert!(s
-            .claim_pairing("ABCD2345", "2026-01-01T00:00:00.000Z")
-            .unwrap()
-            .is_none());
-
-        // An expired code never claims (RFC3339 strings compare lexicographically).
-        s.create_pairing("EXPIRED1", "tok-2", "phone", "2000-01-01T00:00:00.000Z")
-            .unwrap();
-        assert!(s
-            .claim_pairing("EXPIRED1", "2026-01-01T00:00:00.000Z")
-            .unwrap()
-            .is_none());
     }
 
     #[test]

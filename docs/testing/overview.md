@@ -60,7 +60,7 @@ Coverage (17 of 26 files itemized below; v0.8.0 added 9 more HTTP-API-focused fi
 
 **Hermetic boundary:** the test bucket never talks to a live database. `Store::open_in_memory()`
 constructs a fully in-memory `Store` whose every operation matches the SurrealDB backend's
-semantics (last-write-wins on `upsert_memory`, monotonic audit ids, single-use pairing codes,
+semantics (last-write-wins on `upsert_memory`, monotonic audit ids,
 `__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)`, so `MemoryEngine`
 falls back to lexical ranking - the same fallback the production server takes whenever the
 active embedder has no vector index available.
@@ -364,11 +364,6 @@ Historical category table (v0.4.0, kept for diff context):
   - Method: dashboard **You -> Tokens** page, or `POST /api/devices/tokens` (admin session)
   - Expected: Prints JWT
   - Result: **SKIP** - Already tested in earlier session; token exists and works.
-
-- [ ] **9.2** Pairing
-  - Method: dashboard **You -> Pair** page (`POST /api/devices/pair-codes`), then `cairn pair <code>`
-  - Expected: Device paired, token claimed
-  - Result: **SKIP** - Tested in earlier session; pairing works.
 
 - [x] **9.3** Sync push
   - Method: `cairn sync --server http://localhost:7777`

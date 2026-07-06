@@ -105,7 +105,7 @@ A doc with any P0 finding is treated as failed for the walk summary. A doc with 
 | 13 | `13-registry-packs.md` | Pack publish, list, download, revoke, search | `/api/registry/packs[/:name[/:version]]`, `/api/registry/search`; `registry_search` |
 | 14 | `14-registry-trust.md` | Trusted keys, revocations, federation | `/api/registry/{trusted-keys,revocations}` |
 | 15 | `15-devices-tokens.md` | Device token issue, list, revoke | `/api/devices/tokens[/:id/revoke]` |
-| 16 | `16-pair-mobile.md` | Pair codes, claim, PWA mobile | `/api/devices/pair-codes`, `/api/pair/{new,claim}`, `/mobile` |
+| 16 | `16-mobile-pwa.md` | PWA mobile: biometric gate, savings card, drift approve/reject | `/mobile`, `/api/metrics/savings`, `/api/guard/drift/:id/{approve,reject}` |
 | 17 | `17-push.md` | Push subscribe, unsubscribe, list | `/api/push/{subscribe,unsubscribe,list}` |
 | 18 | `18-ingest.md` | Transcript ingest, browser extension capture | `/api/ingest/transcript`, `/api/extensions/capture` |
 | 19 | `19-audit.md` | Audit log (5 kinds) | `/api/devices/audit` |
@@ -118,7 +118,7 @@ A doc with any P0 finding is treated as failed for the walk summary. A doc with 
 | 26 | `26-dashboard-palette.md` | Command palette (24 items), shortcuts, sidebar | `⌘K`, `?`, `esc`; sidebar 5 hubs |
 | 27 | `27-settings.md` | Settings page (read-only session info) | `/you?tab=settings` |
 | 28 | `28-edge-cases.md` | Rate limit, CORS, env precedence, session expiry, scope denied, TLS refusal, secret-key guard, dashboard 404, content-hash dedup, multi-tenant, opt-in context injection, suspicious preference | invariant assertions |
-| 29 | `29-stubs-and-gaps.md` | Known unimplemented (WebSocket, `cairn pair`, `cairn pack`, `cairn-bench`, Web Push relay) | n/a — gap record |
+| 29 | `29-stubs-and-gaps.md` | Known unimplemented (WebSocket, `cairn pack`, `cairn-bench`, Web Push relay) | n/a — gap record |
 | 30 | `30-mcp-transport.md` | MCP JSON-RPC transport (stdio, the real agent surface) | `cairn mcp` over stdio; `initialize`, `tools/list`, `tools/call`, `ping`, `notifications/initialized` | **Walked** ⭐ |
 | 31 | `31-v0.8.0-surreal-scope-projects.md` | SurrealDB backend, scope model, project auto-detection | `/api/memory` + `X-Cairn-Project`/`X-Cairn-Session`, `/api/projects[/upsert]`; `cairn hook SessionStart` | **Walked** ⭐ |
 | 32 | `32-v0.8.0-session-ttl-cron-jobs.md` | Session TTL promotion, cron job list/history/manual-run | `/api/cron/{jobs,run/:job,history}` | **Walked** ⭐ |

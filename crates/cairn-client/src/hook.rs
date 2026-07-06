@@ -45,7 +45,7 @@ fn run_inner(event: &str) -> Result<()> {
         // ever embedded CAIRN_SERVER/CAIRN_TOKEN into the *agent's* MCP entry env - invisible
         // to this separately-spawned hook process - so hooks were silently broken unless the
         // user also exported the vars in their shell profile. `config::resolve` closes that
-        // gap for anyone who has re-run `setup`/`onboard`/`pair` since; this message is now
+        // gap for anyone who has re-run `setup`/`onboard` since; this message is now
         // the true "nothing is configured at all" case.
         eprintln!(
             "cairn hook: no server/token configured (env, ~/.cairn/config.toml, or agent config). Hook skipped."
@@ -483,7 +483,7 @@ impl RemoteClient {
                 self.post_spooled("/api/guard/anchor/auto", json!({ "prompt": prompt }), log);
                 // P1.8: default-off context injection unless `config::resolve` says otherwise
                 // (env `CAIRN_INJECT_CONTEXT`, a per-project override, or the global
-                // `[hooks] inject_context` a fresh `pair`/`onboard`/`setup` now writes to
+                // `[hooks] inject_context` a fresh `onboard`/`setup` now writes to
                 // `~/.cairn/config.toml`). Without this gate, every prompt burns ~1000 tokens
                 // on a /api/context/assemble call - silent burn. Recording the prompt to memory
                 // still happens below regardless, so the system stays useful either way.

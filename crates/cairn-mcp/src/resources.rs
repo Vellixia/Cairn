@@ -10,6 +10,7 @@
 //! (e.g. memory graph on a fresh install), so a client can subscribe without
 //! crashing.
 
+#[cfg(feature = "engine")]
 use crate::McpServer;
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
@@ -70,6 +71,7 @@ pub fn resource_defs() -> &'static [ResourceDef] {
 
 /// Read a resource by URI. Returns `Ok(Value)` (a JSON payload or text blob)
 /// or `Err(String)` for an unknown URI.
+#[cfg(feature = "engine")]
 pub fn read_resource(server: &McpServer, uri: &str) -> Result<Value, String> {
     match uri {
         "cairn://memory/graph" => Ok(read_memory_graph(server)),
@@ -82,6 +84,7 @@ pub fn read_resource(server: &McpServer, uri: &str) -> Result<Value, String> {
     }
 }
 
+#[cfg(feature = "engine")]
 fn read_memory_graph(server: &McpServer) -> Value {
     match server.mem.graph() {
         Ok(g) => json!({
@@ -93,6 +96,7 @@ fn read_memory_graph(server: &McpServer) -> Value {
     }
 }
 
+#[cfg(feature = "engine")]
 fn read_memory_timeline(server: &McpServer) -> Value {
     // Without a dedicated timeline() method we surface a "by_kind(Decision)"
     // view as a stand-in. Future Sprint 24 follow-up can add a real
@@ -125,6 +129,7 @@ fn read_memory_timeline(server: &McpServer) -> Value {
     }
 }
 
+#[cfg(feature = "engine")]
 fn read_savings_today(_server: &McpServer) -> Value {
     // The savings ledger is owned by cairn-api (HTTP /api/ledger). The MCP
     // server talks to the local store / memory engine directly, so we surface
@@ -136,6 +141,7 @@ fn read_savings_today(_server: &McpServer) -> Value {
     })
 }
 
+#[cfg(feature = "engine")]
 fn read_drift_pending(_server: &McpServer) -> Value {
     // Same as above - drift is owned by cairn-session. The MCP surface
     // exposes the URI; the actual JSON is filled by the host (cairn
@@ -146,6 +152,7 @@ fn read_drift_pending(_server: &McpServer) -> Value {
     })
 }
 
+#[cfg(feature = "engine")]
 fn read_audit_recent(server: &McpServer) -> Value {
     // Audit events are stored in SurrealDB on the in-container server. The standalone
     // MCP stdio binary (without the HTTP surface) returns an
@@ -161,6 +168,7 @@ fn read_audit_recent(server: &McpServer) -> Value {
     })
 }
 
+#[cfg(feature = "engine")]
 fn read_config_toml(server: &McpServer) -> Value {
     let cfg = &server.config;
     let body = format!(
@@ -199,7 +207,10 @@ pub fn resource_metadata(uri: &str) -> Option<Value> {
     }
 }
 
-#[cfg(test)]
+// Requires `--features engine`: most tests here construct a real `McpServer`. The two that
+// don't (`six_canonical_resources_are_listed`, `resource_metadata_is_none_for_unknown_uri`)
+// aren't worth splitting into a separate always-on module for this small a set.
+#[cfg(all(test, feature = "engine"))]
 mod tests {
     use super::*;
 

@@ -5,7 +5,7 @@ use super::{Agent, InstallCtx, InstallReport, InstalledFile, RemovalAction, Scop
 use crate::jsonedit::{add_hook, read_object, write_json};
 use crate::paths;
 use anyhow::{anyhow, Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{json, Value};
 use std::path::Path;
 
 pub struct ClaudeCode;
@@ -41,13 +41,7 @@ impl Agent for ClaudeCode {
             }
             Scope::Project => paths::claude_project_mcp(ctx.project),
         };
-        merge_mcp_server(
-            &mcp_path,
-            "mcpServers",
-            ctx.server,
-            ctx.token,
-            ctx.embed_env,
-        )?;
+        merge_mcp_server(&mcp_path, "mcpServers")?;
 
         // v0.8.0 Sprint 10 (B6, layer 2): the skill carries the full playbook and loads
         // on-demand, at the same scope as the MCP entry above - a project-scoped MCP
@@ -219,13 +213,7 @@ fn skill_path(project: &Path, home: Option<&Path>, scope: Scope) -> Result<std::
     }
 }
 
-fn merge_mcp_server(
-    path: &Path,
-    schema_key: &str,
-    server: Option<&str>,
-    token: Option<&str>,
-    embed_env: bool,
-) -> Result<()> {
+fn merge_mcp_server(path: &Path, schema_key: &str) -> Result<()> {
     let mut obj = read_object(path)?;
     let servers = obj
         .entry(schema_key)
@@ -233,51 +221,17 @@ fn merge_mcp_server(
         .as_object_mut()
         .with_context(|| format!("{}: '{schema_key}' is not an object", path.display()))?;
 
-    // Preserve existing env vars from a previous setup run - but only in `--embed-env`
-    // mode. Outside it, any env a pre-config-file `setup` run left behind is dropped
-    // (de-tokenized) rather than carried forward.
-    let existing_env = embed_env
-        .then(|| {
-            servers
-                .get("cairn")
-                .and_then(|v| v.get("env"))
-                .and_then(Value::as_object)
-        })
-        .flatten();
-
-    servers.insert(
-        "cairn".into(),
-        cairn_server(server, token, existing_env, embed_env),
-    );
+    // v0.8.0 client redesign: server/token live only in `~/.cairn/config.toml` (written by
+    // the caller), never in the agent's own config - so this is always a bare entry. Any
+    // `env` block a pre-config-file `setup` run left behind is dropped (de-tokenized) rather
+    // than carried forward.
+    servers.insert("cairn".into(), cairn_server());
     write_json(path, &Value::Object(obj))
 }
 
-fn cairn_server(
-    server: Option<&str>,
-    token: Option<&str>,
-    existing_env: Option<&Map<String, Value>>,
-    embed_env: bool,
-) -> Value {
-    let mut env = Map::new();
-    if embed_env {
-        if let Some(existing) = existing_env {
-            for (k, v) in existing {
-                env.insert(k.clone(), v.clone());
-            }
-        }
-        if let Some(s) = server {
-            env.insert("CAIRN_SERVER".into(), json!(s));
-        }
-        if let Some(t) = token {
-            env.insert("CAIRN_TOKEN".into(), json!(t));
-        }
-    }
+fn cairn_server() -> Value {
     let exe = paths::cairn_exe();
-    if env.is_empty() {
-        json!({ "command": exe, "args": ["mcp"] })
-    } else {
-        json!({ "command": exe, "args": ["mcp"], "env": Value::Object(env) })
-    }
+    json!({ "command": exe, "args": ["mcp"] })
 }
 
 #[cfg(test)]
@@ -303,9 +257,6 @@ mod tests {
             project: dir.path(),
             home: None,
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
         ClaudeCode.install(&ctx).unwrap();
@@ -354,9 +305,6 @@ mod tests {
             project: project.path(),
             home: Some(home.path()),
             scope: Scope::Global,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
 
@@ -376,9 +324,6 @@ mod tests {
             project: project.path(),
             home: Some(home.path()),
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
 
@@ -388,40 +333,35 @@ mod tests {
     }
 
     #[test]
-    fn embed_env_false_is_the_default_and_de_tokenizes_a_previous_embed() {
+    fn install_de_tokenizes_an_env_block_left_by_an_older_binary() {
         let dir = tempfile::tempdir().unwrap();
-        // Simulate a pre-config-file install that embedded server/token directly.
-        let embed_ctx = InstallCtx {
-            project: dir.path(),
-            home: None,
-            scope: Scope::Project,
-            server: Some("http://old:7777"),
-            token: Some("old-token"),
-            embed_env: true,
-        };
-        ClaudeCode.install(&embed_ctx).unwrap();
-        let before: Value =
-            serde_json::from_str(&read_text(&dir.path().join(".mcp.json"))).unwrap();
-        assert_eq!(
-            before["mcpServers"]["cairn"]["env"]["CAIRN_TOKEN"],
-            "old-token"
-        );
+        // Simulate a pre-v0.8.0 binary's `.mcp.json`, which used to embed
+        // server/token directly into the agent's own config file.
+        std::fs::write(
+            dir.path().join(".mcp.json"),
+            json!({
+                "mcpServers": {
+                    "cairn": {
+                        "command": "cairn",
+                        "args": ["mcp"],
+                        "env": { "CAIRN_TOKEN": "old-token" },
+                    }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
 
-        // Re-running setup WITHOUT --embed-env must produce a bare entry and
-        // drop the previously-embedded env entirely.
-        let bare_ctx = InstallCtx {
+        let ctx = InstallCtx {
             project: dir.path(),
             home: None,
             scope: Scope::Project,
-            server: Some("http://new:7777"),
-            token: Some("new-token"),
-            embed_env: false,
         };
-        ClaudeCode.install(&bare_ctx).unwrap();
+        ClaudeCode.install(&ctx).unwrap();
         let after: Value = serde_json::from_str(&read_text(&dir.path().join(".mcp.json"))).unwrap();
         assert!(
             after["mcpServers"]["cairn"].get("env").is_none(),
-            "non-embed-env install must not write (or keep) an env block"
+            "install must not write (or keep) an env block"
         );
     }
 
@@ -481,9 +421,6 @@ mod tests {
             project: project.path(),
             home: Some(home.path()),
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&project_ctx).unwrap();
         let project_skill = project.path().join(".claude/skills/cairn/SKILL.md");
@@ -530,9 +467,6 @@ mod tests {
             project: dir.path(),
             home: None,
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
         assert!(ClaudeCode.health(dir.path(), None).is_empty());
@@ -546,9 +480,6 @@ mod tests {
             project: project.path(),
             home: Some(home.path()),
             scope: Scope::Project,
-            server: None,
-            token: None,
-            embed_env: false,
         };
         ClaudeCode.install(&ctx).unwrap();
         assert!(project

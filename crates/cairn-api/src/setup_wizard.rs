@@ -1,16 +1,13 @@
-//! Setup wizard v2 (Sprint 6).
+//! Setup wizard (Sprint 6, consolidated to 2 steps).
 //!
-//! v1's `/api/auth/setup` accepted only username + password. v2 layers an embed-provider
-//! picker, optional device-pair via a QR code, and a green-health check that verifies
-//! database reachability, the embed provider, and that the admin record round-tripped.
-//!
-//! The wizard flow is:
-//! 1. `POST /api/auth/setup` with the embed fields + credentials. Returns the session cookie
-//!    and a `health` block the dashboard uses to render the final "all-green" page.
-//! 2. The dashboard renders the wizard steps; the existing `/setup` route is kept as a
-//!    fallback (deprecation banner pointing to `/setup/wizard`).
-//! 3. After the wizard, the embed config is read at server startup - the runtime picks up
-//!    the persisted choice on next launch.
+//! `POST /api/auth/setup` takes username + password and returns the session cookie plus a
+//! `health` block the dashboard uses to render the final "all-green" page. The dashboard's
+//! `/setup` route walks: 1) admin credentials, 2) health check (database reachability, embed
+//! provider, admin record round-tripped) + finish. Embed provider is configured entirely via
+//! `CAIRN_EMBED_PROVIDER`/`CAIRN_EMBED_MODEL`/`CAIRN_EMBED_URL`/`CAIRN_EMBED_API_KEY` env vars
+//! (`cairn_core::Config`) - there is no in-wizard picker; an earlier version had one, but it
+//! persisted to a store key nothing ever read back at startup, so it was removed rather than
+//! wired up for a setting that already has a working env-var path.
 
 use crate::AppState;
 use axum::{extract::State, Json};

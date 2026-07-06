@@ -55,16 +55,6 @@ export const HELP: Record<string, HelpCopy> = {
     impact:
       "Tokens are bearer credentials. Revoke immediately on loss; expired tokens are rejected, not auto-rotated.",
   },
-  "/you/pair": {
-    title: "Pair a device",
-    what: "Generate a short-lived pairing code so a new device can fetch its own token out-of-band.",
-    how: [
-      "Click Generate code. Read the 6-character code to the new device out-of-band.",
-      "The new device hits /api/devices/pair with the code and gets a token.",
-    ],
-    impact:
-      "Pair codes expire in 10 minutes and are single-use. They avoid typing long tokens over an insecure channel.",
-  },
   "/you/audit": {
     title: "Audit log",
     what: "The last 50 administrative events on this server: logins, token issues, rollbacks, exports.",

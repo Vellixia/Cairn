@@ -4,7 +4,6 @@ import { Suspense } from "react";
 import { HubTabs, type HubTab } from "@/components/HubTabs";
 import ProfilePage from "./profile/page";
 import TokensPage from "./tokens/page";
-import PairPage from "./pair/page";
 import AuditPage from "./audit/page";
 import SessionsPage from "./sessions/page";
 import SettingsPage from "./settings/page";
@@ -12,7 +11,6 @@ import SettingsPage from "./settings/page";
 const YOU_TABS: HubTab[] = [
   { id: "profile", label: "Profile", content: <ProfilePage /> },
   { id: "tokens", label: "Tokens", content: <TokensPage /> },
-  { id: "pair", label: "Pair", content: <PairPage /> },
   { id: "audit", label: "Audit", content: <AuditPage /> },
   { id: "sessions", label: "Sessions", content: <SessionsPage /> },
   { id: "settings", label: "Settings", content: <SettingsPage /> },

@@ -111,9 +111,44 @@ impl Source {
     }
 }
 
+/// Human-readable one-liner for a shadowed field, shared by `status` and `doctor` so the two
+/// commands never describe the same situation two different ways. `field_label` is what a
+/// human calls the setting ("server", "token"); `env_var` is the exact variable name to tell
+/// them to unset.
+pub fn shadow_note(field_label: &str, env_var: &str) -> String {
+    format!(
+        "{env_var} overrides ~/.cairn/config.toml's saved {field_label} -- \
+         unset {env_var} to use the file value, or update the file to match."
+    )
+}
+
+/// `active` is `Some((v, Source::Env))` and `file_value` is `Some(f)` with `f != v` ->
+/// shadowing; anything else (active not env-sourced, no file value, or file value identical
+/// to the active env value) -> not shadowing. Identical values are deliberately NOT flagged:
+/// if `CAIRN_TOKEN=foo` and the file also has `token = "foo"`, unsetting the env var changes
+/// nothing observable, so a warning would be pure noise.
+fn shadowed_value(
+    active: &Option<(String, Source)>,
+    file_value: &Option<String>,
+) -> Option<String> {
+    match (active, file_value) {
+        (Some((active_val, Source::Env)), Some(file_val)) if active_val != file_val => {
+            Some(file_val.clone())
+        }
+        _ => None,
+    }
+}
+
 pub struct Resolved {
     pub server: Option<(String, Source)>,
     pub token: Option<(String, Source)>,
+    /// Populated iff `server` came from `Source::Env` AND the file also had a *different,
+    /// non-empty* `server_url` - i.e. a real shadowing situation, not merely "both happen to
+    /// be set". Safe to display in full (it's a URL).
+    pub server_shadowed_file_value: Option<String>,
+    /// Same semantics as `server_shadowed_file_value`, for `token`. Callers must not print
+    /// this raw - it's a live credential; only note that a different value exists in the file.
+    pub token_shadowed_file_value: Option<String>,
     pub inject_context: (bool, Source),
     pub timeout_ms: u64,
     pub debug: bool,
@@ -138,10 +173,13 @@ pub fn resolve(project_id: Option<&str>) -> Resolved {
         Some(s) => Some((s, Source::Env)),
         None => file.server_url.clone().map(|s| (s, Source::File)),
     };
+    let server_shadowed_file_value = shadowed_value(&server, &file.server_url);
+
     let token = match std::env::var("CAIRN_TOKEN").ok().filter(|t| !t.is_empty()) {
         Some(t) => Some((t, Source::Env)),
         None => file.token.clone().map(|t| (t, Source::File)),
     };
+    let token_shadowed_file_value = shadowed_value(&token, &file.token);
 
     let inject_context = if let Ok(v) = std::env::var("CAIRN_INJECT_CONTEXT") {
         (
@@ -177,6 +215,8 @@ pub fn resolve(project_id: Option<&str>) -> Resolved {
     Resolved {
         server,
         token,
+        server_shadowed_file_value,
+        token_shadowed_file_value,
         inject_context,
         timeout_ms,
         debug,
@@ -224,9 +264,9 @@ pub fn save_server(server_url: Option<&str>, token: Option<&str>) -> Result<()> 
     write_config_file(&path, &doc.to_string())
 }
 
-/// Set `[hooks] inject_context = <value>` - called on new `pair`/`onboard`/
-/// `setup` runs so freshly-onboarded users get the flagship feature on by
-/// default (existing installs, which never touch this function unless they
+/// Set `[hooks] inject_context = <value>` - called on new `onboard`/`setup`
+/// runs so freshly-onboarded users get the flagship feature on by default
+/// (existing installs, which never touch this function unless they
 /// re-onboard, keep the in-binary default of off - see `hook.rs`).
 pub fn save_inject_context_default(enabled: bool) -> Result<()> {
     let Some(path) = config_path() else {
@@ -351,7 +391,106 @@ mod tests {
                     ("http://env-server:7777".to_string(), Source::Env)
                 );
                 assert_eq!(r.token.unwrap(), ("env-token".to_string(), Source::Env));
+                // The file's differing values are shadowed - precedence-adjacent but
+                // distinct from resolution itself, see the dedicated shadow tests below.
+                assert_eq!(
+                    r.server_shadowed_file_value.as_deref(),
+                    Some("http://file-server:7777")
+                );
+                assert_eq!(r.token_shadowed_file_value.as_deref(), Some("file-token"));
             },
+        );
+    }
+
+    #[test]
+    fn shadow_detected_when_env_and_file_disagree() {
+        let home = temp_home();
+        with_env(&home.env_pins(), || {
+            save_server(Some("http://file:7777"), Some("file-tok")).unwrap();
+        });
+        with_env(
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_SERVER", Some("http://env:7777")),
+                ("CAIRN_TOKEN", Some("env-tok")),
+            ],
+            || {
+                let r = resolve(None);
+                assert_eq!(
+                    r.server_shadowed_file_value.as_deref(),
+                    Some("http://file:7777")
+                );
+                assert_eq!(r.token_shadowed_file_value.as_deref(), Some("file-tok"));
+            },
+        );
+    }
+
+    #[test]
+    fn no_shadow_when_env_and_file_values_are_identical() {
+        let home = temp_home();
+        with_env(&home.env_pins(), || {
+            save_server(Some("http://same:7777"), Some("same-tok")).unwrap();
+        });
+        with_env(
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_SERVER", Some("http://same:7777")),
+                ("CAIRN_TOKEN", Some("same-tok")),
+            ],
+            || {
+                let r = resolve(None);
+                assert!(
+                    r.server_shadowed_file_value.is_none(),
+                    "identical env/file values must not be flagged as shadowing - noise, not signal"
+                );
+                assert!(r.token_shadowed_file_value.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn no_shadow_when_file_has_no_value() {
+        let home = temp_home();
+        with_env(
+            &[
+                home.env_pins()[0],
+                home.env_pins()[1],
+                ("CAIRN_SERVER", Some("http://env-only:7777")),
+                ("CAIRN_TOKEN", Some("env-only-tok")),
+            ],
+            || {
+                let r = resolve(None);
+                assert!(r.server_shadowed_file_value.is_none());
+                assert!(r.token_shadowed_file_value.is_none());
+            },
+        );
+    }
+
+    #[test]
+    fn shadowed_value_matches_each_case_directly() {
+        let env = Some(("env-val".to_string(), Source::Env));
+        let file_sourced = Some(("file-val".to_string(), Source::File));
+        assert_eq!(
+            shadowed_value(&env, &Some("file-val".to_string())),
+            Some("file-val".to_string()),
+            "env-sourced + differing file value -> shadowed"
+        );
+        assert_eq!(
+            shadowed_value(&env, &Some("env-val".to_string())),
+            None,
+            "env-sourced + identical file value -> not shadowed (noise)"
+        );
+        assert_eq!(
+            shadowed_value(&file_sourced, &Some("file-val".to_string())),
+            None,
+            "file-sourced (env unset) -> nothing is overriding anything"
+        );
+        assert_eq!(
+            shadowed_value(&env, &None),
+            None,
+            "no file value at all -> nothing to shadow"
         );
     }
 

@@ -18,7 +18,7 @@
 //! ## Data model
 //! Every table is `SCHEMALESS` - Cairn owns validation in Rust, the same trust boundary as the old
 //! HelixDB property bags. Tables with a natural unique key (`memory`, `token`, `meta`,
-//! `sync_state`, `checkpoint`, `pairing`, the `audit_counter` singleton) use that key directly as
+//! `sync_state`, `checkpoint`, the `audit_counter` singleton) use that key directly as
 //! the SurrealDB record id via `type::record(table, $key)`, so single-record reads/writes/deletes
 //! are O(1) with no secondary index. Append-only logs with no natural key (`file_version`,
 //! `guard_event`, `audit_event`) use an auto-generated record id and are queried by `ORDER BY`.
@@ -654,29 +654,6 @@ impl StoreBackend for SurrealStore {
             .collect())
     }
 
-    fn create_pairing(&self, code: &str, token: &str, name: &str, expires_at: &str) -> Result<()> {
-        self.q(
-            "CREATE type::record('pairing', $code) CONTENT $data",
-            json!({
-                "code": code,
-                "data": { "token": token, "name": name, "expires_at": expires_at },
-            }),
-        )?;
-        Ok(())
-    }
-
-    fn claim_pairing(&self, code: &str, now: &str) -> Result<Option<(String, String)>> {
-        // Atomic single-statement claim: the WHERE guard means the delete (and thus the
-        // RETURN BEFORE payload) only fires when the code is still live.
-        let rows = self.read_rows(
-            "DELETE type::record('pairing', $code) WHERE expires_at > $now RETURN BEFORE",
-            json!({ "code": code, "now": now }),
-        )?;
-        Ok(rows
-            .first()
-            .map(|r| (get_str(r, "token"), get_str(r, "name"))))
-    }
-
     // -- audit log (v0.5.0 - Sprint 1) ----------------------------------------------------
 
     fn append_audit(&self, ts: i64, kind: &str, actor: &str, detail: &str) -> Result<String> {
@@ -1232,34 +1209,6 @@ mod live {
             !be.revoke_token(&tok.id).expect("revoke again"),
             "second revoke is a no-op"
         );
-    }
-
-    #[test]
-    #[ignore = "requires a live SurrealDB server (set CAIRN_DB_URL)"]
-    fn pairing_is_single_use() {
-        let Some(be) = backend() else { return };
-        let code = format!("pc-{}", uuid_simple());
-        let future = ts(Utc::now() + chrono::Duration::minutes(10));
-        be.create_pairing(&code, "tok-xyz", "new-device", &future)
-            .expect("create_pairing");
-        let now = ts(Utc::now());
-        assert_eq!(
-            be.claim_pairing(&code, &now).expect("claim"),
-            Some(("tok-xyz".to_string(), "new-device".to_string()))
-        );
-        assert_eq!(be.claim_pairing(&code, &now).expect("claim again"), None);
-    }
-
-    #[test]
-    #[ignore = "requires a live SurrealDB server (set CAIRN_DB_URL)"]
-    fn expired_pairing_is_rejected() {
-        let Some(be) = backend() else { return };
-        let code = format!("pc-{}", uuid_simple());
-        let past = ts(Utc::now() - chrono::Duration::minutes(1));
-        be.create_pairing(&code, "tok-old", "old-device", &past)
-            .expect("create_pairing");
-        let now = ts(Utc::now());
-        assert_eq!(be.claim_pairing(&code, &now).expect("claim expired"), None);
     }
 
     /// The full memory path through the public `Store` facade + `open_for_test` harness.

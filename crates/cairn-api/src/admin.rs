@@ -135,14 +135,6 @@ pub struct LoginRequest {
 pub struct SetupRequest {
     pub username: String,
     pub password: String,
-    #[serde(default)]
-    pub embed_provider: Option<String>,
-    #[serde(default)]
-    pub embed_model: Option<String>,
-    #[serde(default)]
-    pub embed_url: Option<String>,
-    #[serde(default)]
-    pub embed_api_key: Option<String>,
 }
 
 /// Read the admin record out of the meta store. Returns `None` if absent (or tombstoned).
@@ -460,23 +452,6 @@ pub async fn setup(State(state): State<AppState>, Json(req): Json<SetupRequest>)
         }
         Err(e) => return error_response(&format!("persist: {e}")),
     }
-    // Sprint 6: persist the chosen embed provider so the rest of the runtime reads the
-    // user's preference on next start. We do this *after* the admin record is written so
-    // a failure here doesn't roll back the admin creation.
-    if let Some(provider) = req.embed_provider.as_deref() {
-        if !provider.trim().is_empty() {
-            let embed = serde_json::json!({
-                "provider": provider,
-                "model": req.embed_model,
-                "url": req.embed_url,
-                "api_key": req.embed_api_key,
-            });
-            let _ = state.store.set_meta(
-                "embed_config",
-                &serde_json::to_string(&embed).unwrap_or_default(),
-            );
-        }
-    }
     state.audit_log.record(
         &state.store,
         &state.events,
@@ -497,7 +472,6 @@ pub async fn setup(State(state): State<AppState>, Json(req): Json<SetupRequest>)
     let body = serde_json::json!({
         "username": rec.username,
         "expires_at": payload.exp,
-        "embed": req.embed_provider,
     });
     with_cookie((StatusCode::OK, Json(body)).into_response(), set_cookie)
 }
@@ -596,10 +570,6 @@ mod tests {
         let r = SetupRequest {
             username: "".into(),
             password: "short".into(),
-            embed_provider: None,
-            embed_model: None,
-            embed_url: None,
-            embed_api_key: None,
         };
         assert!(r.username.trim().is_empty());
         assert!(r.password.len() < 8);
