@@ -151,6 +151,7 @@ gantt
 |---|---|---|
 | Full 4-tier consolidation/decay | Partial | Consolidation implemented, decay tuning ongoing |
 | Federation (signed packs, trust/scopes) | Partial | Share/pool exists, full federation protocol TBD |
+| Multi-tenant `OrgId` end-to-end | Partial | The `OrgId` type + storage/query scoping have existed since v0.5.0 Sprint 19, but the JWT `Claims` struct (`crates/cairn-api/src/auth.rs`) has no `org_id` field - no bearer token can carry an org identity yet, so every call site (`recall`, `/api/search`, and any future `_for_org` handler) can only ever pass `OrgId::default()`. `Config::multi_tenant` toggles scoping logic that has nothing to scope by. Found during v0.8.0's PR review (2026-07-06); needs a real design decision (token-embedded claim vs. header vs. admin-assigned mapping) before `CAIRN_MULTI_TENANT=true` means anything in a deployment with more than one org |
 
 ### Backlog
 
