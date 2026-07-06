@@ -1158,7 +1158,7 @@ async fn upsert_project(
     let project = s
         .store
         .get_project(&body.id)?
-        .ok_or_else(|| ApiError::not_found("project vanished immediately after upsert"))?;
+        .ok_or_else(|| ApiError::internal("project vanished immediately after upsert"))?;
     crate::events::publish_project(&s.events, &project.id);
     Ok(Json(project))
 }

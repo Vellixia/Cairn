@@ -499,8 +499,19 @@ impl MemoryEngine {
             if group.len() < 2 || group.iter().all(|m| m.pinned) {
                 continue;
             }
+            let had_pinned = group.iter().any(|m| m.pinned);
             group.retain(|m| !m.pinned);
-            if group.len() < 2 {
+            if had_pinned {
+                // A pinned member is this group's permanent keeper - every remaining (unpinned)
+                // duplicate is redundant, not just the ones beyond the newest. Without this
+                // branch, a group of exactly one pinned + one unpinned memory fell through to
+                // the `group.len() < 2` no-op below and the unpinned duplicate was never
+                // cleaned up.
+                for m in &group {
+                    if self.store.delete_memory(&m.id)? {
+                        deleted += 1;
+                    }
+                }
                 continue;
             }
             group.sort_by_key(|m| m.updated_at);
@@ -633,6 +644,14 @@ impl MemoryEngine {
             for candidate in similar {
                 if candidate.id == m.id {
                     continue;
+                }
+                // Re-checked here (not just at the top of the outer loop) so a memory with a
+                // full 10-candidate `similar` list can't run up to 9 more LLM calls after the
+                // budget is already exhausted - matches the doc comment's "before every LLM
+                // call" contract. The outer-loop check above stays: it's what skips the
+                // (non-LLM) `semantic_recall` lookup entirely once the budget is gone.
+                if llm_consolidator::is_budget_exhausted(daily_budget) {
+                    break;
                 }
                 if llm_intelligence::check_contradiction_via_llm(
                     llm_cfg,
@@ -2698,6 +2717,27 @@ mod tests {
         assert_eq!(mem.run_dedup_sweep().unwrap(), 1);
         assert!(mem.store.get_memory(&pinned.id).unwrap().is_some());
         assert!(mem.store.get_memory(&unpinned.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn dedup_sweep_deletes_every_unpinned_duplicate_when_one_is_pinned() {
+        // Same shape as `dedup_sweep_never_deletes_a_pinned_memory` but with two unpinned
+        // duplicates instead of one, so the fix can't pass by coincidentally handling only the
+        // smallest group size (retain-then-"keep the newest of what's left" would wrongly leave
+        // one unpinned copy behind here too).
+        let Some(mem) = engine() else { return };
+        let mut pinned = synth("triple duplicate");
+        pinned.pinned = true;
+        let unpinned_a = synth("triple duplicate");
+        let unpinned_b = synth("triple duplicate");
+        mem.store.insert_memory(&pinned).unwrap();
+        mem.store.insert_memory(&unpinned_a).unwrap();
+        mem.store.insert_memory(&unpinned_b).unwrap();
+
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 2);
+        assert!(mem.store.get_memory(&pinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&unpinned_a.id).unwrap().is_none());
+        assert!(mem.store.get_memory(&unpinned_b.id).unwrap().is_none());
     }
 
     #[test]
