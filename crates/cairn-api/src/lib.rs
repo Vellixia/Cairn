@@ -506,7 +506,7 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
                 axum::http::header::CONTENT_TYPE,
                 "application/json; charset=utf-8",
             )],
-            format!("{{\"error\":\"no such API route: /{raw_path}\"}}"),
+            serde_json::json!({ "error": format!("no such API route: /{raw_path}") }).to_string(),
         )
             .into_response();
     }
@@ -1481,7 +1481,11 @@ async fn pin_memory(
             if body.pinned { "pinned" } else { "unpinned" },
             &id,
         );
-        Ok(Json(s.mem.get(&id)?.unwrap()))
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after pin/unpin"))?;
+        Ok(Json(m))
     } else {
         Err(ApiError::not_found("no such memory"))
     }
@@ -1520,7 +1524,11 @@ async fn promote_memory(
 ) -> Result<Json<Memory>, ApiError> {
     if s.mem.promote_memory(&id)? {
         crate::events::publish_memory(&s.events, "promoted", &id);
-        Ok(Json(s.mem.get(&id)?.unwrap()))
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after promotion"))?;
+        Ok(Json(m))
     } else {
         Err(ApiError::not_found("no such memory"))
     }
@@ -1533,7 +1541,11 @@ async fn dismiss_promotion(
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<Memory>, ApiError> {
     if s.mem.dismiss_promotion(&id)? {
-        Ok(Json(s.mem.get(&id)?.unwrap()))
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after dismissal"))?;
+        Ok(Json(m))
     } else {
         Err(ApiError::not_found("no such memory"))
     }
@@ -1564,7 +1576,11 @@ async fn demote_memory(
 ) -> Result<Json<Memory>, ApiError> {
     if s.mem.demote_memory(&id)? {
         crate::events::publish_memory(&s.events, "demoted", &id);
-        Ok(Json(s.mem.get(&id)?.unwrap()))
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after demotion"))?;
+        Ok(Json(m))
     } else {
         Err(ApiError::not_found(
             "no such memory, or it was never promoted",
