@@ -241,11 +241,21 @@ impl MemoryEngine {
         let bm25_rank = ranks_desc(&bm25_scores);
 
         // Semantic ranking (vector kNN) as id -> rank, when the backend supports it.
+        // `semantic_recall` queries the store's whole vector index with no org/scope awareness
+        // of its own, so its raw results can include other tenants'/scopes' memories - filter to
+        // `mems` (already org+scope-filtered above) before ranking, otherwise a memory outside
+        // this caller's tenant can still shift RRF scores for memories that *are* in `mems`, even
+        // though its own content never appears in the returned `ScoredMemory` list. Filtering
+        // before `.enumerate()` (rather than after) also re-derives ranks relative to just this
+        // caller's own candidates instead of leaking their position in the global ranking.
+        let mems_ids: std::collections::HashSet<&str> =
+            mems.iter().map(|m| m.id.as_str()).collect();
         let sem_rank: HashMap<String, usize> = self
             .store
             .semantic_recall(query, limit.max(SEMANTIC_K))?
             .into_iter()
             .flatten()
+            .filter(|m| mems_ids.contains(m.id.as_str()))
             .enumerate()
             .map(|(rank, m)| (m.id, rank))
             .collect();
@@ -279,6 +289,11 @@ impl MemoryEngine {
                     }
                 }
             }
+            // Same tenant-isolation concern as `sem_rank` above: `self.graph()` walks every
+            // memory in the store with no org/scope filter, so an edge to another tenant's node
+            // could otherwise boost an in-`mems` memory's score based on proximity to content
+            // this caller can't see.
+            gmap.retain(|id, _| mems_ids.contains(id.as_str()));
             gmap
         };
 

@@ -235,6 +235,7 @@ impl StoreBackend for SurrealStore {
                 "content": m.content,
                 "reasoning": m.reasoning,
                 "content_hash": hash.as_str(),
+                "org_id": m.org_id.as_str(),
                 "concepts": m.concepts,
                 "files": m.files,
                 "session_id": m.session_id.clone().unwrap_or_default(),
@@ -1099,7 +1100,10 @@ fn memory_from_props(m: &Map<String, Json>) -> Memory {
         },
         importance: get_f64(m, "importance") as f32,
         access_count: get_i64(m, "access_count"),
-        org_id: OrgId::default(),
+        // `.unwrap_or_default()` covers rows written before org_id was persisted (empty/missing
+        // -> OrgId::new errors -> falls back to the same implicit single-tenant default those
+        // rows were always implicitly scoped to).
+        org_id: OrgId::new(get_str(m, "org_id")).unwrap_or_default(),
         suspicious: get_bool(m, "suspicious"),
         confidence: get_f64(m, "confidence") as f32,
         pinned: get_bool(m, "pinned"),
