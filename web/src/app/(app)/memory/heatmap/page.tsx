@@ -11,6 +11,8 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useHeatmapQuery } from "@/lib/queries";
+import { ArrowLeft } from "lucide-react";
+import Link from "next/link";
 import { useMemo, useState } from "react";
 
 const LEVEL_COLORS = [
@@ -100,7 +102,13 @@ export default function HeatmapPage() {
     <div className="space-y-6 max-w-4xl">
       <header className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Activity</h1>
+          <Link
+            href="/memory"
+            className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+          >
+            <ArrowLeft className="size-3" aria-hidden="true" /> Memory
+          </Link>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">Activity</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Daily memory creation over the last 52 weeks.
           </p>
@@ -132,7 +140,7 @@ export default function HeatmapPage() {
                     <span
                       key={i}
                       className="absolute"
-                      style={{ left: `${ml.week * 14}px` }}
+                      style={{ left: `${ml.week * 12}px` }}
                     >
                       {ml.label}
                     </span>
@@ -152,8 +160,9 @@ export default function HeatmapPage() {
                     ))}
                   </div>
 
-                  {/* Grid */}
-                  <div className="flex flex-col flex-wrap gap-0.5" style={{ height: "7 * 12px + 6 * 2px" }}>
+                  {/* Grid: column-major (grid-rows-7 + grid-flow-col) = one column per week,
+                      Mon..Sun top to bottom - deterministic, no height math. */}
+                  <div className="grid grid-flow-col grid-rows-7 gap-0.5">
                     {grid.cells.map((cell, i) => (
                       <div
                         key={i}
@@ -171,7 +180,7 @@ export default function HeatmapPage() {
                 {tooltip && (
                   <p className="mt-2 text-xs text-muted-foreground">
                     <span className="font-medium">{tooltip.date}</span> —{" "}
-                    {tooltip.count} memory{tooltip.count === 1 ? "" : "ies"}
+                    {tooltip.count} {tooltip.count === 1 ? "memory" : "memories"}
                   </p>
                 )}
 

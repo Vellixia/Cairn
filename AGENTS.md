@@ -16,7 +16,7 @@ cargo build --workspace
 - Run a single crate's tests: `cargo test -p cairn-core` (substitute any crate name).
 - `cargo build --workspace` does **not** require the web UI; `crates/cairn-api/build.rs` creates `web/out/` at compile time when missing so the binary falls back to its built-in page.
 
-**Server (requires HelixDB):**
+**Server (requires SurrealDB):**
 ```sh
 docker compose up -d
 ```
@@ -35,16 +35,16 @@ CI does not run them.
 
 A single workspace member (`cairn-tests`) that hosts `tests/<NN>_<topic>.rs` files - one
 integration test binary per file. Every test calls a real Cairn crate function against a
-real `Store::open_in_memory()` instance (no network, no HelixDB). The hermetic boundary is
+real `Store::open_in_memory()` instance (no network, no live database). The hermetic boundary is
 maintained by a per-test in-memory `cairn_store::Store`, exercising every engine without a
 running backend.
 
 ```sh
-cargo test -p cairn-tests                 # 17 files, 134 tests
+cargo test -p cairn-tests                 # 26 files, 204 tests (as of v0.8.0)
 cargo test -p cairn-tests --test 18_context_engine  # just one
 ```
 
-Coverage (17 files): memory tiers, followup + gotcha trackers, activity heatmap, architecture
+Coverage: memory tiers, followup + gotcha trackers, activity heatmap, architecture
 report, **real `MemoryEngine` end-to-end (remember / recall / hybrid_search / consolidate /
 crystallize / gotcha promotion)**, **real `ContextEngine` (Full / Cached / Diff / Outline +
 anti-inflation + auto-delta fallbacks)**, **real `Assembler` (budget + dropped items)**,
@@ -86,14 +86,14 @@ resolved finding is `docs/testing/findings/README.md`.
 
 ## Architecture
 
-21-crate Rust workspace (MSRV 1.85) + Next.js static-export web UI. Two binaries:
+23-crate Rust workspace (MSRV 1.89) + Next.js static-export web UI. Two binaries:
 
 | Binary | Lives in | Purpose |
 |--------|----------|---------|
 | `cairn-server` (in-container) | Docker image (`cairn-api` bin) | Long-lived server: binds :7777, serves the API + web UI, runs env-only admin bootstrap |
 | `cairn` (host) | release tarball (`cairn-client` crate) | Client: `mcp`, `setup`, `onboard`, `doctor`, `hook`, `status`, `reset`, `upgrade` |
 
-**Dep graph:** `cairn-core` -> `cairn-store` -> domain crates (`context`, `memory`, `guard`, `shell`, `profile`, `embed`, `share`, `assemble`) -> `cairn-mcp` -> `cairn-api`. `cairn-client` is a thin remote-only HTTP wrapper (no local engines).
+**Dep graph:** `cairn-core` -> `cairn-store` -> domain crates (`context`, `memory`, `guard`, `shell`, `profile`, `embed`, `share`, `assemble`, `document`) -> `cairn-mcp` -> `cairn-api`. `cairn-client` is a thin remote-only HTTP wrapper (no local engines).
 
 **Config precedence:** CLI flag > env var > project `.env` > `~/.config/cairn/.env` > built-in default.
 
@@ -134,9 +134,9 @@ resolved finding is `docs/testing/findings/README.md`.
 
 ## Runtime prerequisites
 
-- **HelixDB required.** Set `CAIRN_HELIX_URL` or use `docker compose up -d helix`.
+- **SurrealDB required.** Set `CAIRN_DB_URL` (default `ws://localhost:8000`) or use `docker compose up -d surreal`.
 - **Production:** set `CAIRN_SECRET_KEY` (32+ bytes), `CAIRN_TLS_CERT` + `CAIRN_TLS_KEY`.
-- **Docker compose:** requires `.env` with non-default `MINIO_ROOT_USER` + `MINIO_ROOT_PASSWORD` (startup guard refuses `minioadmin`).
+- **Docker compose:** requires `.env` with a non-default `SURREAL_PASS` (startup guard refuses `root`/`secret`/`changeme`/`password`).
 
 ## Key files
 

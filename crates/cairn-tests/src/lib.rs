@@ -8,7 +8,7 @@
 //! ## Hard boundary
 //!
 //! - No network calls.
-//! - No live HelixDB / docker / external services.
+//! - No live database / docker / external services.
 //! - Every test calls a real Cairn crate function against a real
 //!   `cairn_store::Store::open_in_memory()` instance. Hand-coded JSON
 //!   literals and re-implementations of functions already in the crate

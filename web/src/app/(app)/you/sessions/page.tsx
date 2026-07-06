@@ -49,7 +49,7 @@ export default function SessionsPage() {
               <CardHeader>
                 <CardTitle className="text-base">
                   <a
-                    href={`/dashboard/sessions/${encodeURIComponent(s.id)}`}
+                    href={`/you/sessions/${encodeURIComponent(s.id)}`}
                     className="underline"
                   >
                     {s.id}

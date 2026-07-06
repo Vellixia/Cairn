@@ -46,6 +46,12 @@ use cairn_store::AuditRecord;
 pub const KIND_AUDIT: &str = "audit";
 pub const KIND_MEMORY: &str = "memory";
 pub const KIND_DRIFT: &str = "drift";
+/// v0.8.0 Sprint 10: Projects/Documents/Automation pages went live via polling because nothing
+/// published these three kinds - added so the whole dashboard is SSE-driven, not just
+/// memory/drift/audit.
+pub const KIND_PROJECT: &str = "project";
+pub const KIND_DOCUMENT: &str = "document";
+pub const KIND_CRON: &str = "cron";
 
 /// Payload of an event published to subscribers. `id` is a unique, monotonic string suitable for
 /// `id:` in SSE and `Last-Event-ID` on reconnect.
@@ -254,6 +260,62 @@ pub fn publish_drift(broker: &EventBroker, path: &str, risk: &str) {
         kind: KIND_DRIFT,
         ts: Utc::now().timestamp(),
         data: serde_json::json!({"path": path, "risk": risk}),
+    });
+}
+
+/// Publish a durable audit-log entry as a live event. `id` is the id already minted by
+/// `Store::append_audit` (not a synthetic one) so a client whose last-seen event was an audit
+/// entry can still resume replay correctly via `Last-Event-ID` - `backfill` reads from the same
+/// durable audit log this id came from.
+pub fn publish_audit(
+    broker: &EventBroker,
+    id: &str,
+    ts: i64,
+    kind: &str,
+    actor: &str,
+    detail: &str,
+) {
+    broker.publish(EventPayload {
+        id: id.to_string(),
+        kind: KIND_AUDIT,
+        ts,
+        data: serde_json::json!({
+            "kind": kind,
+            "actor": actor,
+            "detail": detail,
+        }),
+    });
+}
+
+/// Publish a project-registry event (create or `last_active` touch via `/api/projects/upsert`).
+pub fn publish_project(broker: &EventBroker, project_id: &str) {
+    broker.publish(EventPayload {
+        id: format!("project-{}-{}", project_id, broker.next_synth_id()),
+        kind: KIND_PROJECT,
+        ts: Utc::now().timestamp(),
+        data: serde_json::json!({"project_id": project_id}),
+    });
+}
+
+/// Publish a document event. `action` is "ingested" | "deleted".
+pub fn publish_document(broker: &EventBroker, action: &str, document_id: &str) {
+    broker.publish(EventPayload {
+        id: format!("doc-{}-{}-{}", action, document_id, broker.next_synth_id()),
+        kind: KIND_DOCUMENT,
+        ts: Utc::now().timestamp(),
+        data: serde_json::json!({"action": action, "document_id": document_id}),
+    });
+}
+
+/// Publish a cron-run-completed event. Fired from [`crate::cron::run_job_now`] so a manual
+/// `POST /api/cron/run/:job` and a scheduled tick both show up live, matching how they already
+/// share one history.
+pub fn publish_cron(broker: &EventBroker, job: &str, outcome: &str) {
+    broker.publish(EventPayload {
+        id: format!("cron-{}-{}", job, broker.next_synth_id()),
+        kind: KIND_CRON,
+        ts: Utc::now().timestamp(),
+        data: serde_json::json!({"job": job, "outcome": outcome}),
     });
 }
 

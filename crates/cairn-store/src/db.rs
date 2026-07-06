@@ -1,20 +1,22 @@
 //! The structured store.
 //!
-//! `Store` is a thin facade over a [`StoreBackend`] - Cairn's [`HelixBackend`](crate::helix) - plus
-//! the content-addressed [`BlobStore`] that holds full-fidelity originals. Keeping the public
-//! `Store` API stable means the backend never churns the engines, API, MCP, or CLI.
+//! `Store` is a thin facade over a [`StoreBackend`] - Cairn's [`SurrealStore`](crate::surreal) -
+//! plus the content-addressed [`BlobStore`] that holds full-fidelity originals. Keeping the
+//! public `Store` API stable means the backend never churns the engines, API, MCP, or CLI.
 
 use crate::blob::BlobStore;
-use cairn_core::{Config, DeviceToken, Error, Memory, Result};
+use cairn_core::{Config, DeviceToken, Memory, Result};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Tombstone value written by [`Store::reset_meta`]. HelixDB's append-only schema can't
-/// physically remove rows, so this sentinel signals "logically absent" to readers.
+/// Tombstone value written by [`Store::reset_meta`]. SurrealDB rows are mutable, but Cairn keeps
+/// this sentinel so tombstone semantics stay identical across backends: this sentinel signals
+/// "logically absent" to readers.
 pub(crate) const META_TOMBSTONE: &str = "__deleted__";
 
 /// The structured-storage operations Cairn needs from a backend, implemented by
-/// [`HelixBackend`](crate::helix::HelixBackend).
+/// [`SurrealStore`](crate::surreal::SurrealStore).
 pub(crate) trait StoreBackend: Send + Sync {
     fn insert_memory(&self, m: &Memory) -> Result<()>;
     fn get_memory(&self, id: &str) -> Result<Option<Memory>>;
@@ -35,8 +37,23 @@ pub(crate) trait StoreBackend: Send + Sync {
         let _ = (id, pinned);
         Ok(())
     }
+    /// Change a memory's scope in place (v0.8.0 Sprint 4 - used by the `session-gc` cron job
+    /// to promote expired `Session`-scoped memories to `Global`). Deliberately separate from
+    /// [`edit_memory`](Self::edit_memory), which only touches content/importance/concepts/
+    /// files - scope is an access-control boundary, not a content edit. Idempotent; missing
+    /// rows are no-ops (`Ok(false)`).
+    fn reassign_scope(
+        &self,
+        id: &str,
+        scope_type: cairn_core::ScopeType,
+        scope_id: Option<String>,
+    ) -> Result<bool> {
+        let _ = (id, scope_type, scope_id);
+        Ok(false)
+    }
     /// Edit a memory's mutable fields. Returns `Ok(true)` if the row was updated, `Ok(false)`
     /// if no row exists. Only the fields that are `Some` are applied - the rest are kept.
+    #[allow(clippy::too_many_arguments)]
     fn edit_memory(
         &self,
         id: &str,
@@ -44,8 +61,10 @@ pub(crate) trait StoreBackend: Send + Sync {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<bool> {
-        let _ = (id, content, importance, concepts, files);
+        let _ = (id, content, importance, concepts, files, title, reasoning);
         Ok(false)
     }
     /// Delete a memory by id. Returns `Ok(true)` if a row was removed, `Ok(false)` otherwise.
@@ -117,6 +136,197 @@ pub(crate) trait StoreBackend: Send + Sync {
     fn max_audit_event_id(&self) -> Result<i64> {
         Ok(0)
     }
+
+    // -- access log (v0.8.0 - Sprint 2) ---------------------------------------------------
+    /// Record that `recall` returned each of these memories, in one batched write - not one
+    /// query per memory. Each entry is `(memory_id, project_id, session_id)`. Default no-op:
+    /// the in-memory backend (hermetic tests) doesn't need a real access log, and this must
+    /// never fail a recall call over a logging write.
+    fn record_access_batch(
+        &self,
+        entries: &[(String, Option<String>, Option<String>)],
+    ) -> Result<()> {
+        let _ = entries;
+        Ok(())
+    }
+    /// Delete `access_log` rows older than `before` (v0.8.0 Sprint 4 - the monthly
+    /// `access-log-prune` cron job). Returns the number of rows removed where the backend can
+    /// report it (`0` from the default no-op, matching `record_access_batch`'s hermetic-backend
+    /// boundary - the in-memory backend never stores access-log rows in the first place).
+    fn prune_access_log_before(&self, before: DateTime<Utc>) -> Result<u64> {
+        let _ = before;
+        Ok(0)
+    }
+    /// Count `access_log` rows for `memory_id` from any project other than `exclude_project_id`
+    /// since `since` (v0.8.0 Sprint 5 - the promotion-scoring "cross-project popularity"
+    /// signal: a `Project`-scoped memory that keeps getting hit from *other* projects is a
+    /// candidate for `Global` promotion). Same hermetic-backend boundary as
+    /// `record_access_batch`/`prune_access_log_before` - the in-memory backend never stores
+    /// access-log rows, so this is `0` there by design, not an oversight.
+    fn count_cross_project_access(
+        &self,
+        memory_id: &str,
+        exclude_project_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64> {
+        let _ = (memory_id, exclude_project_id, since);
+        Ok(0)
+    }
+
+    // -- projects (v0.8.0 - Sprint 3) -----------------------------------------------------
+    /// Create or update a project's `last_active` timestamp (and `name`/`path`, in case they
+    /// changed - e.g. a repo renamed or moved). `first_seen` is preserved across upserts.
+    fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
+        let _ = (id, name, path);
+        Ok(())
+    }
+    /// All known projects, most-recently-active first.
+    fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        Ok(Vec::new())
+    }
+    /// A single project by id.
+    fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        let _ = id;
+        Ok(None)
+    }
+
+    // -- RAG documents (v0.8.0 - Sprint 6) ------------------------------------------------
+    /// Replace every chunk belonging to `source` (delete + reinsert) - `cairn documents ingest`
+    /// is idempotent, so re-ingesting an updated file/URL always reflects its latest content
+    /// rather than accumulating stale chunks alongside fresh ones. Returns the number of chunks
+    /// inserted. Unlike `record_access_batch`/`prune_access_log_before`, this is a real,
+    /// user-visible, testable feature - both backends implement it for real (no no-op default),
+    /// same precedent as `ProjectRecord` above.
+    fn replace_document(
+        &self,
+        source: &str,
+        title: &str,
+        chunks: &[String],
+        project_id: Option<&str>,
+    ) -> Result<usize> {
+        let _ = (source, title, chunks, project_id);
+        Ok(0)
+    }
+    /// Every ingested document, most-recently-updated first. `project_filter`: `None` returns
+    /// everything; `Some(id)` returns that project's documents plus global (`project_id: None`)
+    /// ones - same blend policy as memory scoping.
+    fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
+        let _ = project_filter;
+        Ok(Vec::new())
+    }
+    /// The top `k` chunks most relevant to `query`. `project_filter` follows the same blend
+    /// policy as [`list_documents`](Self::list_documents).
+    fn search_documents(
+        &self,
+        query: &str,
+        k: usize,
+        project_filter: Option<&str>,
+    ) -> Result<Vec<DocumentChunkRecord>> {
+        let _ = (query, k, project_filter);
+        Ok(Vec::new())
+    }
+    /// Delete every chunk belonging to `source`. Returns `Ok(true)` if any chunk was removed.
+    fn delete_document(&self, source: &str) -> Result<bool> {
+        let _ = source;
+        Ok(false)
+    }
+
+    // -- promotion log (v0.8.0 - Sprint 8) -------------------------------------------------
+    /// Append a promotion-related event (auto-promote, manual promote, auto-demote, manual
+    /// demote/undo) - a real, user-visible, testable feature like `ProjectRecord`/
+    /// `DocumentChunkRecord` above, not a no-op-default telemetry sink like `access_log`.
+    fn record_promotion_event(&self, entry: &PromotionLogEntry) -> Result<()> {
+        let _ = entry;
+        Ok(())
+    }
+    /// Recent promotion-log entries, newest first.
+    fn list_promotion_log(&self, limit: usize) -> Result<Vec<PromotionLogEntry>> {
+        let _ = limit;
+        Ok(Vec::new())
+    }
+    /// The most recent log entry for `memory_id` whose `action` matches, if any - used by
+    /// `/demote` (Undo) to find where a promoted memory should go back to.
+    fn last_promotion_event(
+        &self,
+        memory_id: &str,
+        action: &str,
+    ) -> Result<Option<PromotionLogEntry>> {
+        let _ = (memory_id, action);
+        Ok(None)
+    }
+    /// Count `access_log` rows for `memory_id` from any project, since `since` (v0.8.0
+    /// Sprint 8 - the auto-demote "has this Global memory been used lately" check). Unlike
+    /// `count_cross_project_access`, there's no project to exclude - a `Global` memory has no
+    /// single "home" project once promoted, so any access at all counts.
+    fn count_any_access(&self, memory_id: &str, since: DateTime<Utc>) -> Result<i64> {
+        let _ = (memory_id, since);
+        Ok(0)
+    }
+}
+
+/// A registered project (v0.8.0 Sprint 3): the repos/directories an agent has run in,
+/// auto-detected by the `SessionStart` hook (see `cairn-client`'s `project::detect_project`)
+/// and used to power a "which projects has this agent touched" dashboard view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectRecord {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+    pub first_seen: DateTime<Utc>,
+    pub last_active: DateTime<Utc>,
+}
+
+/// One chunk of an ingested document (v0.8.0 Sprint 6) - see `cairn-document::chunk_text` for
+/// how the source text is split. `source` is the literal path/URL the caller ingested; `id` is
+/// `{source_hash}-{chunk_index}` so re-ingesting the same source deterministically overwrites
+/// the same chunk ids rather than growing the table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentChunkRecord {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub chunk_index: usize,
+    pub content: String,
+    /// Web redesign v2 follow-up: `None` = global (visible everywhere); `Some(id)` = attached
+    /// to that project, visible in the project's own view and blended into project-scoped
+    /// searches - the same visibility policy memory scoping already uses.
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One promotion-related event (v0.8.0 Sprint 8): powers `GET /api/memory/promotion-log` (the
+/// dashboard's audit trail) and `/demote`'s Undo (`old_scope_id` is where the most recent
+/// `"promote"` entry for a memory sends it back to - once promoted to `Global`,
+/// `Memory.scope_id` itself is wiped, so this is the only record of where it came from).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromotionLogEntry {
+    pub id: String,
+    pub memory_id: String,
+    /// `"promote"` | `"demote"`.
+    pub action: String,
+    pub old_scope_type: cairn_core::ScopeType,
+    pub old_scope_id: Option<String>,
+    pub score: f32,
+    /// `"auto-threshold"` | `"manual"` | `"auto-demote"` | `"manual-undo"`.
+    pub reason: String,
+    pub ts: DateTime<Utc>,
+}
+
+/// One ingested document's summary (v0.8.0 Sprint 6) - what `GET /api/documents` and
+/// `cairn documents list` show, without pulling every chunk's full content over the wire.
+/// `id` is a short content-hash of `source` (same "hash it for a URL-safe id" idea as Sprint
+/// 3's project ids) - `source` itself is a path/URL and may contain characters unsafe for a
+/// REST path segment, so `DELETE /api/documents/:id` routes on this instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentSummary {
+    pub id: String,
+    pub source: String,
+    pub title: String,
+    pub chunk_count: usize,
+    #[serde(default)]
+    pub project_id: Option<String>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// A single audit event read from durable storage.
@@ -136,19 +346,11 @@ pub struct Store {
 }
 
 impl Store {
-    /// Open the store described by `cfg`. Cairn uses **HelixDB** as its datastore, so
-    /// `CAIRN_HELIX_URL` (`cfg.helix_url`) must be set; the bundled `docker compose` stack provides
+    /// Open the store described by `cfg`. Cairn uses **SurrealDB** as its datastore
+    /// (`cfg.db_url`, default `ws://localhost:8000`); the bundled `docker compose` stack starts
     /// one. The content-addressed blob store lives under the data dir.
     pub fn open(cfg: &Config) -> Result<Self> {
-        let url = cfg.helix_url.as_deref().ok_or_else(|| {
-            Error::Invalid(
-                "CAIRN_HELIX_URL is required - Cairn stores data in HelixDB. Run the docker compose \
-                 stack (which starts one) or point CAIRN_HELIX_URL at a HelixDB server."
-                    .into(),
-            )
-        })?;
-        let backend: Box<dyn StoreBackend> =
-            Box::new(crate::helix::HelixBackend::connect(url, cfg)?);
+        let backend: Box<dyn StoreBackend> = Box::new(crate::surreal::SurrealStore::connect(cfg)?);
         Ok(Self {
             backend,
             blobs: BlobStore::new(cfg.blobs_dir()),
@@ -202,7 +404,17 @@ impl Store {
     pub fn set_pinned(&self, id: &str, pinned: bool) -> Result<()> {
         self.backend.set_pinned(id, pinned)
     }
+    /// Change a memory's scope in place (v0.8.0 Sprint 4).
+    pub fn reassign_scope(
+        &self,
+        id: &str,
+        scope_type: cairn_core::ScopeType,
+        scope_id: Option<String>,
+    ) -> Result<bool> {
+        self.backend.reassign_scope(id, scope_type, scope_id)
+    }
     /// Edit a memory's mutable fields. Only the `Some` values are applied.
+    #[allow(clippy::too_many_arguments)]
     pub fn edit_memory(
         &self,
         id: &str,
@@ -210,9 +422,11 @@ impl Store {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<bool> {
         self.backend
-            .edit_memory(id, content, importance, concepts, files)
+            .edit_memory(id, content, importance, concepts, files, title, reasoning)
     }
     /// Delete a memory by id.
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
@@ -295,9 +509,95 @@ impl Store {
         self.backend.max_audit_event_id()
     }
 
-    /// Mark `key` as deleted by appending the tombstone sentinel. The append-only HelixDB
-    /// schema can't physically remove rows, so future reads will see this as absent via
-    /// [`get_meta`] and [`set_meta_if_absent`]. Returns `Ok(true)` if a record existed.
+    /// Record a batch of recall hits to the access log (v0.8.0 Sprint 2). Best-effort - see
+    /// [`StoreBackend::record_access_batch`].
+    pub fn record_access_batch(
+        &self,
+        entries: &[(String, Option<String>, Option<String>)],
+    ) -> Result<()> {
+        self.backend.record_access_batch(entries)
+    }
+    /// Delete `access_log` rows older than `before` (v0.8.0 Sprint 4).
+    pub fn prune_access_log_before(&self, before: DateTime<Utc>) -> Result<u64> {
+        self.backend.prune_access_log_before(before)
+    }
+    /// Count cross-project `access_log` hits for a memory (v0.8.0 Sprint 5).
+    pub fn count_cross_project_access(
+        &self,
+        memory_id: &str,
+        exclude_project_id: &str,
+        since: DateTime<Utc>,
+    ) -> Result<i64> {
+        self.backend
+            .count_cross_project_access(memory_id, exclude_project_id, since)
+    }
+
+    /// Create or update a project's `last_active` timestamp (v0.8.0 Sprint 3).
+    pub fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
+        self.backend.upsert_project(id, name, path)
+    }
+    /// All known projects, most-recently-active first.
+    pub fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        self.backend.list_projects()
+    }
+    /// A single project by id.
+    pub fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        self.backend.get_project(id)
+    }
+
+    /// Replace every chunk belonging to `source` (v0.8.0 Sprint 6).
+    pub fn replace_document(
+        &self,
+        source: &str,
+        title: &str,
+        chunks: &[String],
+        project_id: Option<&str>,
+    ) -> Result<usize> {
+        self.backend
+            .replace_document(source, title, chunks, project_id)
+    }
+    /// Every ingested document, most-recently-updated first (v0.8.0 Sprint 6).
+    pub fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
+        self.backend.list_documents(project_filter)
+    }
+    /// The top `k` document chunks most relevant to `query` (v0.8.0 Sprint 6).
+    pub fn search_documents(
+        &self,
+        query: &str,
+        k: usize,
+        project_filter: Option<&str>,
+    ) -> Result<Vec<DocumentChunkRecord>> {
+        self.backend.search_documents(query, k, project_filter)
+    }
+    /// Delete every chunk belonging to `source` (v0.8.0 Sprint 6).
+    pub fn delete_document(&self, source: &str) -> Result<bool> {
+        self.backend.delete_document(source)
+    }
+
+    /// Append a promotion-log entry (v0.8.0 Sprint 8).
+    pub fn record_promotion_event(&self, entry: &PromotionLogEntry) -> Result<()> {
+        self.backend.record_promotion_event(entry)
+    }
+    /// Recent promotion-log entries, newest first (v0.8.0 Sprint 8).
+    pub fn list_promotion_log(&self, limit: usize) -> Result<Vec<PromotionLogEntry>> {
+        self.backend.list_promotion_log(limit)
+    }
+    /// The most recent `action` log entry for a memory (v0.8.0 Sprint 8).
+    pub fn last_promotion_event(
+        &self,
+        memory_id: &str,
+        action: &str,
+    ) -> Result<Option<PromotionLogEntry>> {
+        self.backend.last_promotion_event(memory_id, action)
+    }
+    /// Count any `access_log` hits for a memory since `since` (v0.8.0 Sprint 8).
+    pub fn count_any_access(&self, memory_id: &str, since: DateTime<Utc>) -> Result<i64> {
+        self.backend.count_any_access(memory_id, since)
+    }
+
+    /// Mark `key` as deleted by writing the tombstone sentinel (rather than physically removing
+    /// the row), so future reads see this as absent via [`get_meta`] and [`set_meta_if_absent`]
+    /// while the row itself still carries an audit trail. Returns `Ok(true)` if a record existed.
     pub fn reset_meta(&self, key: &str) -> Result<bool> {
         let existed = self.backend.get_meta(key)?.is_some();
         self.backend.set_meta(key, META_TOMBSTONE)?;
@@ -348,11 +648,11 @@ impl Store {
         self.backend.claim_pairing(code, now)
     }
 
-    /// Open an **isolated** store for tests against a HelixDB server.
+    /// Open an **isolated** store for tests against a SurrealDB server.
     ///
-    /// Returns `None` when `CAIRN_HELIX_URL` is unset, so the offline suite simply skips
-    /// Helix-backed tests; when it *is* set but the server can't be reached, this panics so CI
-    /// surfaces the failure rather than skipping silently. Each call gets a fresh label namespace
+    /// Returns `None` when `CAIRN_DB_URL` is unset, so the offline suite simply skips
+    /// Surreal-backed tests; when it *is* set but the server can't be reached, this panics so CI
+    /// surfaces the failure rather than skipping silently. Each call gets a fresh namespace
     /// (so concurrent tests never collide on the shared server) and the dependency-free `hashing`
     /// embedder (no model download, no network).
     #[doc(hidden)]
@@ -363,23 +663,23 @@ impl Store {
 
     /// Open a fully in-memory `Store` with no network or filesystem dependency beyond the
     /// supplied `blobs_dir` (which the content-addressed blob store uses as its root; pass a
-    /// tempdir to keep a test hermetic). All semantic operations match the Helix backend
+    /// tempdir to keep a test hermetic). All semantic operations match the Surreal backend
     /// (last-write-wins on `upsert_memory`, monotonic audit ids, single-use pairing codes,
     /// `__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)` — same as the
     /// offline fallback on the production server when no vector index is available.
     ///
-    /// Use this in any test bucket that needs a real `Store` without standing up HelixDB.
+    /// Use this in any test bucket that needs a real `Store` without standing up SurrealDB.
     pub fn open_in_memory(blobs_dir: std::path::PathBuf) -> Result<Self> {
         crate::memory_backend::build(blobs_dir)
     }
 
-    /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) - a fresh label
-    /// namespace + the `hashing` embedder, pointed at `CAIRN_HELIX_URL`. `None` when that is unset.
+    /// The isolated [`Config`] backing [`open_for_test`](Self::open_for_test) - a fresh
+    /// namespace + the `hashing` embedder, pointed at `CAIRN_DB_URL`. `None` when that is unset.
     /// Components built from a `Config` (the API/MCP servers) use this directly in their tests.
     /// Data/blob dirs are created so the store opens cleanly.
     #[doc(hidden)]
     pub fn test_config() -> Option<Config> {
-        let url = std::env::var("CAIRN_HELIX_URL")
+        let url = std::env::var("CAIRN_DB_URL")
             .ok()
             .filter(|s| !s.trim().is_empty())?;
         let id = Uuid::new_v4().simple().to_string();
@@ -387,9 +687,11 @@ impl Store {
             data_dir: std::env::temp_dir().join(format!("cairn-test-{id}")),
             host: "127.0.0.1".into(),
             port: 7777,
-            helix_url: Some(url),
-            helix_token: None,
-            helix_ns: Some(format!("t{id}_")),
+            db_url: url,
+            db_user: std::env::var("CAIRN_DB_USER").unwrap_or_else(|_| "root".into()),
+            db_pass: std::env::var("CAIRN_DB_PASS").unwrap_or_default(),
+            db_ns: format!("t{id}"),
+            db_timeout_secs: 10,
             default_server: None,
             secret_key: Some(b"test-secret-key-must-be-32-bytes!!".to_vec()),
             tls: None,
@@ -411,6 +713,23 @@ impl Store {
             rerank: cairn_core::RerankConfig::default(),
             admin: cairn_core::AdminConfig::default(),
             multi_tenant: false,
+            session_ttl_days: 2,
+            decay_period_days: 30,
+            access_log_retention_days: 90,
+            cron_enabled: true,
+            promote_threshold: 0.85,
+            demote_idle_days: 45,
+            drift_autopilot: "safe".to_string(),
+            drift_safe_globs: vec![
+                "docs/**".to_string(),
+                "*.md".to_string(),
+                "**/tests/**".to_string(),
+                "**/*.test.*".to_string(),
+            ],
+            auto_anchor: true,
+            llm_daily_budget: 200_000,
+            selftune: true,
+            max_working_per_project: 500,
         };
         std::fs::create_dir_all(cfg.blobs_dir()).expect("create test blob dir");
         Some(cfg)
@@ -423,8 +742,8 @@ mod tests {
     use cairn_core::{MemoryKind, MemoryTier};
     use chrono::Duration;
 
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these); otherwise an isolated
-    /// Helix-backed store.
+    /// `None` when `CAIRN_DB_URL` is unset (offline runs skip these); otherwise an isolated
+    /// Surreal-backed store.
     fn store() -> Option<Store> {
         Store::open_for_test()
     }
@@ -434,7 +753,9 @@ mod tests {
             id: id.into(),
             kind: MemoryKind::Note,
             tier: MemoryTier::Working,
+            title: None,
             content: content.into(),
+            reasoning: None,
             concepts: vec![],
             files: vec![],
             session_id: None,
@@ -448,6 +769,10 @@ mod tests {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            scope_type: cairn_core::ScopeType::Global,
+            scope_id: None,
+            promo_score: 0.0,
+            promo_locked: false,
             created_at: updated,
             updated_at: updated,
         }
@@ -651,16 +976,20 @@ mod tests {
 
     #[test]
     fn audit_survives_round_trip_after_a_store_drop_and_reopen() {
-        // Append a few events to one store, then close it and open a fresh one. The events
-        // should still be readable - that's the whole point of the Sprint 1 migration away
-        // from the in-memory ring buffer.
-        let Some(s1) = store() else { return };
+        // Append a few events to one store, then close it and open a fresh one *against the
+        // same config* (same namespace) - that's the whole point of the Sprint 1 migration away
+        // from the in-memory ring buffer. `store()` can't be reused here: it calls
+        // `open_for_test`, which mints a brand new isolated namespace on every call.
+        let Some(cfg) = Store::test_config() else {
+            return;
+        };
+        let s1 = Store::open(&cfg).expect("open s1");
         s1.append_audit(100, "login_ok", "alice", "").unwrap();
         s1.append_audit(200, "token_issued", "alice", "laptop")
             .unwrap();
         drop(s1);
 
-        let Some(s2) = store() else { return };
+        let s2 = Store::open(&cfg).expect("open s2");
         let recent = s2.recent_audit(10, None).unwrap();
         let kinds: Vec<&str> = recent.iter().map(|r| r.kind.as_str()).collect();
         assert!(

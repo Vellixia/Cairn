@@ -12,13 +12,13 @@ path = "src/main.rs"
 
 [features]
 default = []
-# The client is a thin remote-only HTTP wrapper. No local engines, no HelixDB.
+# The client is a thin remote-only HTTP wrapper. No local engines, no local database.
 
 [dependencies]
 cairn-core.workspace = true
 cairn-mcp.workspace = true
+cairn-document.workspace = true
 clap.workspace = true
-tokio.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 serde.workspace = true

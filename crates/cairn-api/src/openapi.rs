@@ -68,16 +68,16 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/context/assemble", "Budget-constrained memory pack", ["context"], {
         "get" => _,
     });
-    path!("/api/context/compression-demo", "Side-by-side read-mode comparison", ["context"], {
+    path!("/api/context/pressure", "Context window utilization + eviction candidates", ["context"], {
         "get" => _,
     });
-    path!("/api/context/pressure", "Context window utilization + eviction candidates", ["context"], {
+    path!("/api/config", "Effective server config (read-only, secrets redacted)", ["admin"], {
         "get" => _,
     });
 
     // ---- Memory -----------------------------------------------------------
-    path!("/api/memory", "Store a memory", ["memory"], {
-        "post" => _,
+    path!("/api/memory", "Browse (filter/sort/paginate) or store memories", ["memory"], {
+        "get" => _, "post" => _,
     });
     path!("/api/memory/recall", "Hybrid search (BM25 + vector + graph)", ["memory"], {
         "get" => _,
@@ -88,8 +88,8 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/memory/consolidate", "Promote memories across tiers", ["memory"], {
         "post" => _,
     });
-    path!("/api/memory/{id}", "Edit or delete a memory", ["memory"], {
-        "post" => _, "delete" => _,
+    path!("/api/memory/{id}", "Fetch, edit, or delete a memory", ["memory"], {
+        "get" => _, "post" => _, "delete" => _,
     });
     path!("/api/memory/{id}/pin", "Pin/unpin a memory", ["memory"], {
         "post" => _,
@@ -115,7 +115,67 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/memory/heatmap", "Activity heatmap (last 365 days)", ["memory"], {
         "get" => _,
     });
+    path!("/api/memory/by-scope", "Every memory in an exact scope, no ranking", ["memory"], {
+        "get" => _,
+    });
+    path!("/api/memory/promotion-candidates", "Memories in the 0.70-0.90 review band", ["memory"], {
+        "get" => _,
+    });
+    path!("/api/memory/{id}/promote", "Approve a promotion candidate", ["memory"], {
+        "post" => _,
+    });
+    path!("/api/memory/{id}/dismiss-promotion", "Dismiss a promotion candidate", ["memory"], {
+        "post" => _,
+    });
+    path!("/api/memory/{id}/demote", "Undo a promotion", ["memory"], {
+        "post" => _,
+    });
+    path!("/api/memory/promotion-log", "Promotion/demotion event log", ["memory"], {
+        "get" => _,
+    });
+    path!("/api/memory/autopilot-digest", "\"While you were away\" autopilot summary", ["memory"], {
+        "get" => _,
+    });
     path!("/api/search", "Hybrid search (alias)", ["search"], {
+        "get" => _,
+    });
+
+    // ---- Projects -----------------------------------------------------------
+    path!("/api/projects", "List known projects, with memory stats", ["projects"], {
+        "get" => _,
+    });
+    path!("/api/projects/{id}", "A single project's details + memory stats", ["projects"], {
+        "get" => _,
+    });
+    path!("/api/projects/upsert", "Register/touch a project (auto-detected by the client)", ["projects"], {
+        "patch" => _,
+    });
+
+    // ---- Documents (RAG) ------------------------------------------------------
+    path!("/api/documents/ingest", "Chunk and (re)store a document", ["documents"], {
+        "post" => _,
+    });
+    path!("/api/documents", "List ingested documents", ["documents"], {
+        "get" => _,
+    });
+    path!("/api/documents/search", "Search document chunks", ["documents"], {
+        "get" => _,
+    });
+    path!("/api/documents/{id}", "Delete a document", ["documents"], {
+        "delete" => _,
+    });
+
+    // ---- Cron (background jobs) ------------------------------------------------
+    path!("/api/cron/jobs", "Every background job, schedule + last run", ["cron"], {
+        "get" => _,
+    });
+    path!("/api/cron/run/{job}", "Trigger a job immediately", ["cron"], {
+        "post" => _,
+    });
+    path!("/api/cron/history", "Recent job runs, optionally filtered", ["cron"], {
+        "get" => _,
+    });
+    path!("/api/cron/health", "Single-flight + staleness view of every job", ["cron"], {
         "get" => _,
     });
 
@@ -135,14 +195,8 @@ pub fn build_spec(version: &str) -> Value {
     path!("/api/guard/rollback", "Roll back to a checkpoint", ["guard"], {
         "post" => _,
     });
-    path!("/api/guard/drift", "List drift entries", ["guard"], {
+    path!("/api/guard/drift", "Drift decision log (autopilot-decided, read-only)", ["guard"], {
         "get" => _,
-    });
-    path!("/api/guard/drift/{id}/approve", "Approve drift", ["guard"], {
-        "post" => _,
-    });
-    path!("/api/guard/drift/{id}/reject", "Reject drift", ["guard"], {
-        "post" => _,
     });
 
     // ---- Profile ----------------------------------------------------------
@@ -273,11 +327,11 @@ pub fn build_spec(version: &str) -> Value {
     });
 
     // ---- Live -------------------------------------------------------------
+    // Real-time is SSE-only (`/api/events`); there is no `/api/ws` route - dropped from this
+    // spec (v0.8.0 Sprint 10) after it was found still documented here with no matching
+    // handler anywhere in the router.
     path!("/api/events", "Server-sent event stream", ["live"], {
         "get" => _,
-    });
-    path!("/api/ws", "WebSocket event stream", ["live"], {
-        "get" => _, "post" => _, "put" => _, "delete" => _,
     });
 
     // ---- Setup ------------------------------------------------------------
@@ -304,7 +358,8 @@ pub fn build_spec(version: &str) -> Value {
             {"name": "sessions"}, {"name": "auth"}, {"name": "devices"},
             {"name": "sync"}, {"name": "push"}, {"name": "extensions"},
             {"name": "ingest"}, {"name": "tools"}, {"name": "live"}, {"name": "setup"},
-            {"name": "registry"},
+            {"name": "registry"}, {"name": "projects"}, {"name": "documents"},
+            {"name": "cron"}, {"name": "admin"},
         ],
         "components": {
             "securitySchemes": {
@@ -347,9 +402,9 @@ mod tests {
             "/api/openapi.json",
             "/api/context/read",
             "/api/context/assemble",
-            "/api/context/compression-demo",
             "/api/context/pressure",
             "/api/memory",
+            "/api/memory/{id}",
             "/api/memory/recall",
             "/api/memory/wakeup",
             "/api/memory/consolidate",

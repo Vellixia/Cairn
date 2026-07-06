@@ -6,6 +6,7 @@
 //! due to LLM call cost.
 
 use cairn_core::{Error, LlmConsolidationConfig, Result};
+use chrono::Datelike;
 use serde::Deserialize;
 
 /// One extracted semantic fact (LLM call output).
@@ -35,6 +36,11 @@ pub struct Insight {
 #[derive(Debug, Deserialize)]
 struct ChatCompletionResponse {
     choices: Vec<ChatChoice>,
+    /// Not every OpenAI-compatible server returns `usage` (some local Ollama configurations
+    /// omit it) - `#[serde(default)]` so a missing field degrades to "unknown cost" rather
+    /// than a parse failure.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +51,14 @@ struct ChatChoice {
 #[derive(Debug, Deserialize)]
 struct ChatMessage {
     content: String,
+}
+
+/// v0.8.0 Sprint 9: token accounting from the response, fed into [`record_llm_tokens`] so the
+/// daily budget guard (`Config::llm_daily_budget`) has real usage to check against.
+#[derive(Debug, Deserialize)]
+struct Usage {
+    #[serde(default)]
+    total_tokens: u64,
 }
 
 /// LLM-driven consolidator. Talks to any OpenAI-compatible `/v1/chat/completions` endpoint
@@ -141,11 +155,69 @@ pub(crate) fn chat_with_config(config: &LlmConsolidationConfig, prompt: &str) ->
         .map_err(|e| Error::Invalid(format!("LLM request failed: {e}")))?
         .into_json()
         .map_err(|e| Error::Invalid(format!("LLM response parse: {e}")))?;
+    // v0.8.0 Sprint 9: every call self-reports into the process-wide daily budget tracker, so
+    // every existing caller (this module's own consolidator, query_expander, llm_intelligence)
+    // gets budget accounting for free - no signature change needed anywhere else. Checking
+    // *against* the budget is still each background job's own responsibility (see
+    // `is_budget_exhausted`), since only the caller knows whether skipping this particular call
+    // is safe (a live user-facing query-expansion call and an unattended nightly batch have very
+    // different "is it OK to just skip this" answers).
+    if let Some(usage) = resp.usage.as_ref() {
+        record_llm_tokens(usage.total_tokens);
+    }
     Ok(resp
         .choices
         .first()
         .map(|c| c.message.content.clone())
         .unwrap_or_default())
+}
+
+/// v0.8.0 Sprint 9: process-wide daily LLM token budget. `(day_number, tokens_used_today)` -
+/// `day_number` is days-since-epoch, so a new day naturally resets the counter to `0` the next
+/// time anything touches it (no timer, no background task needed for the reset itself).
+static LLM_BUDGET: std::sync::OnceLock<std::sync::Mutex<(i64, u64)>> = std::sync::OnceLock::new();
+
+fn today() -> i64 {
+    chrono::Utc::now().date_naive().num_days_from_ce() as i64
+}
+
+/// Record tokens spent against today's budget. Best-effort: a poisoned mutex (only possible if
+/// an earlier accessor panicked while holding the lock) is recovered rather than propagated -
+/// losing a little budget-tracking precision is preferable to a background job crashing over it.
+pub(crate) fn record_llm_tokens(tokens: u64) {
+    let cell = LLM_BUDGET.get_or_init(|| std::sync::Mutex::new((today(), 0)));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    let day = today();
+    if guard.0 != day {
+        *guard = (day, 0);
+    }
+    guard.1 += tokens;
+}
+
+/// `true` once today's usage has reached `daily_limit`. `daily_limit == 0` means unlimited
+/// (`CAIRN_LLM_DAILY_BUDGET=0`), matching every other `0 = unlimited` convention in `Config`.
+pub(crate) fn is_budget_exhausted(daily_limit: u64) -> bool {
+    if daily_limit == 0 {
+        return false;
+    }
+    let cell = LLM_BUDGET.get_or_init(|| std::sync::Mutex::new((today(), 0)));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    let day = today();
+    if guard.0 != day {
+        *guard = (day, 0);
+    }
+    guard.1 >= daily_limit
+}
+
+/// Tokens used so far today - exposed for `GET /api/metrics`/the autopilot digest.
+pub fn llm_tokens_used_today() -> u64 {
+    let cell = LLM_BUDGET.get_or_init(|| std::sync::Mutex::new((today(), 0)));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    let day = today();
+    if guard.0 != day {
+        *guard = (day, 0);
+    }
+    guard.1
 }
 
 impl LlmConsolidator {
@@ -399,5 +471,36 @@ mod tests {
         apply_decay(&mut m, 30.0, now);
         // delta_days is 0, so no decay
         assert!((m.confidence - 0.8).abs() < 0.001);
+    }
+
+    // v0.8.0 Sprint 9: LLM_BUDGET is a single process-wide static, so every assertion here uses
+    // deltas off a `before` snapshot rather than absolute numbers - keeps this test correct
+    // regardless of execution order relative to any other test in this binary that happens to
+    // record usage (there are none today, but this way nobody has to remember that constraint
+    // later). Everything lives in one #[test] fn since interleaving across threads is what would
+    // actually be unsafe, not order.
+    #[test]
+    fn budget_guard_tracks_usage_and_reports_exhaustion() {
+        let before = llm_tokens_used_today();
+
+        // 0 = unlimited, never exhausted no matter how much has already been spent today.
+        assert!(!is_budget_exhausted(0));
+
+        record_llm_tokens(50);
+        let after = llm_tokens_used_today();
+        assert_eq!(
+            after,
+            before + 50,
+            "usage accumulates rather than resetting"
+        );
+
+        assert!(
+            !is_budget_exhausted(after + 1),
+            "a limit above today's usage is not yet exhausted"
+        );
+        assert!(
+            is_budget_exhausted(after),
+            "a limit at today's usage is exhausted"
+        );
     }
 }

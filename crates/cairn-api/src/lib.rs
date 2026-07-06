@@ -7,7 +7,9 @@
 pub mod admin;
 mod auth;
 mod capabilities;
+pub mod cron;
 mod devices;
+mod documents;
 mod events;
 mod extensions;
 mod ingest;
@@ -16,7 +18,9 @@ mod metrics;
 mod openapi;
 mod push;
 mod rate_limit;
+mod scope;
 mod security_headers;
+mod selftune;
 mod session;
 mod setup_wizard;
 mod ui;
@@ -38,16 +42,16 @@ use crate::metrics::{
 use crate::session::{extract_cookie as extract_session_cookie, SessionSigner};
 use crate::setup_wizard::setup_health;
 use axum::{
-    extract::{Query, Request, State},
+    extract::{Extension, Query, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use cairn_assemble::{Assembler, AssemblyReport};
 use cairn_context::{ContextEngine, ReadMode, ReadResult};
-use cairn_core::{Config, Memory, NewMemory, TlsConfig};
+use cairn_core::{Config, Memory, NewMemory, OrgId, ScopeCtx, TlsConfig};
 use cairn_guard::{Checkpoint, Guard, RollbackReport, VerifyReport};
 use cairn_memory::{MemoryEngine, ScoredMemory};
 use cairn_profile::Profile;
@@ -103,6 +107,9 @@ pub struct AppState {
     /// file per subscription under `<data_dir>/push/`. Optional so the API can
     /// run without a writable data dir (some embedded test harnesses).
     pub push: Option<Arc<push::PushStore>>,
+    /// Recent cron job runs (v0.8.0 Sprint 4) - see `cron.rs`. Populated by both the
+    /// scheduler's own ticks and the manual `POST /api/cron/run/:job` trigger.
+    pub cron_history: Arc<cron::CronHistory>,
     signer: Option<Arc<TokenSigner>>,
 }
 
@@ -128,7 +135,7 @@ impl AppState {
             }
             Arc::new(g)
         };
-        let asm = Arc::new(Assembler::new(mem.clone()));
+        let asm = Arc::new(Assembler::new(mem.clone(), store.clone()));
         let shell = Arc::new(ShellCompressor::new(store.clone()));
         let profile = Arc::new(Profile::new(mem.clone()));
         let san = Arc::new(cairn_share::Sanitizer::new());
@@ -173,6 +180,7 @@ impl AppState {
                 .ok()
                 .map(Arc::new),
             push: push::PushStore::open(&cfg.data_dir).ok().map(Arc::new),
+            cron_history: Arc::new(cron::CronHistory::default()),
             signer,
             version: env!("CARGO_PKG_VERSION").to_string(),
         })
@@ -238,29 +246,49 @@ pub fn router(state: AppState) -> Router {
         .route("/api/context/read", get(read))
         .route("/api/context/expand", get(expand))
         .route("/api/context/assemble", get(assemble))
-        .route("/api/context/compression-demo", get(compression_demo))
         .route("/api/context/pressure", get(context_pressure))
-        .route("/api/memory", post(remember))
+        .route("/api/config", get(config_view))
+        .route("/api/memory", get(list_memories).post(remember))
         .route("/api/memory/gotcha", post(record_gotcha))
         .route("/api/memory/gotcha/wakeup", get(gotcha_wakeup))
         .route("/api/memory/recall", get(recall))
         .route("/api/memory/wakeup", get(wakeup))
         .route("/api/memory/consolidate", post(consolidate_memory))
-        .route("/api/memory/:id", post(edit_memory).delete(delete_memory))
+        .route(
+            "/api/memory/:id",
+            get(get_memory).post(edit_memory).delete(delete_memory),
+        )
         .route("/api/memory/:id/pin", post(pin_memory))
         .route("/api/memory/:id/reinforce", post(reinforce_memory))
+        .route("/api/memory/:id/promote", post(promote_memory))
+        .route("/api/memory/:id/dismiss-promotion", post(dismiss_promotion))
+        .route("/api/memory/:id/demote", post(demote_memory))
+        .route(
+            "/api/memory/promotion-candidates",
+            get(promotion_candidates),
+        )
+        .route("/api/memory/promotion-log", get(promotion_log))
+        .route("/api/memory/autopilot-digest", get(autopilot_digest))
+        .route("/api/memory/session-summary", post(session_summary))
         .route("/api/memory/crystallize", post(crystallize))
+        .route("/api/memory/by-scope", get(memory_by_scope))
         .route("/api/memory/graph", get(memory_graph))
         .route("/api/memory/architecture-report", get(architecture_report))
+        .route("/api/projects/upsert", patch(upsert_project))
+        .route("/api/projects", get(list_projects))
+        .route("/api/projects/:id", get(get_project))
+        .route("/api/cron/jobs", get(list_cron_jobs))
+        .route("/api/cron/run/:job", post(run_cron_job))
+        .route("/api/cron/history", get(cron_history))
+        .route("/api/cron/health", get(cron_health))
         .route("/api/memory/heatmap", get(memory_heatmap))
         .route("/api/guard/verify", post(verify))
         .route("/api/guard/anchor", get(get_anchor).post(post_anchor))
+        .route("/api/guard/anchor/auto", post(auto_anchor))
         .route("/api/guard/checkpoint", post(create_checkpoint))
         .route("/api/guard/checkpoints", get(list_checkpoints))
         .route("/api/guard/rollback", post(rollback_checkpoint))
         .route("/api/guard/drift", get(list_drift))
-        .route("/api/guard/drift/:id/approve", post(approve_drift))
-        .route("/api/guard/drift/:id/reject", post(reject_drift))
         .route("/api/sessions", get(list_sessions).post(create_session))
         .route("/api/sessions/latest", get(latest_session))
         .route("/api/sessions/:id", get(get_session).patch(update_session))
@@ -291,11 +319,16 @@ pub fn router(state: AppState) -> Router {
         .route("/api/push/list", get(push::list_subscriptions))
         .route("/api/extensions/capture", post(extensions::capture))
         .route("/api/ingest/transcript", post(ingest::transcript))
+        .route("/api/documents/ingest", post(documents::ingest))
+        .route("/api/documents", get(documents::list))
+        .route("/api/documents/search", get(documents::search))
+        .route("/api/documents/:id", delete(documents::delete))
         .fallback(static_handler)
         .merge(auth_routes)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(middleware::from_fn_with_state(state.clone(), auth))
         .layer(middleware::from_fn(security_headers::security_headers))
+        .layer(middleware::from_fn(scope::scope_middleware))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
@@ -463,6 +496,20 @@ struct WebAssets;
 
 async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
     let raw_path = uri.path().trim_start_matches('/');
+    // An unmatched /api/* path is an API 404, never the SPA shell - serving HTML with a
+    // 200 to an API caller (e.g. an old dashboard build POSTing to a removed route) hides
+    // the failure and looks like success to naive clients.
+    if raw_path == "api" || raw_path.starts_with("api/") {
+        return (
+            axum::http::StatusCode::NOT_FOUND,
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "application/json; charset=utf-8",
+            )],
+            serde_json::json!({ "error": format!("no such API route: /{raw_path}") }).to_string(),
+        )
+            .into_response();
+    }
     // Bug fix (BUG-2026-06-30-C): browsers URL-encode characters in chunk paths
     // (e.g. `%5Bname%5D` for `[name]`, `%28app%29` for `(app)`). The embedded
     // WebAssets key uses the decoded form, so we percent-decode the request
@@ -507,7 +554,14 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
         )
             .into_response();
     } else {
-        "index.html".to_string()
+        // v0.8.0 Sprint 10 bug fix: a hard navigation/reload of a dynamic route id that
+        // `generateStaticParams()` didn't pre-render (e.g. a real `/projects/<id>` or
+        // `/you/sessions/<id>`) used to fall straight through to the site ROOT's index.html -
+        // verified live, this silently rendered the "Now" dashboard at the `/you/sessions/<id>`
+        // URL instead of the session page. `find_route_family_shell` finds that route family's
+        // own pre-rendered placeholder shell instead, which loads the right client component
+        // and reads the real `id` from the URL itself.
+        find_route_family_shell(&path).unwrap_or_else(|| "index.html".to_string())
     };
     // Pull the per-request CSP nonce (set by security_headers middleware) so we can
     // rewrite inline `<script>` tags in the HTML shell.
@@ -540,6 +594,35 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
                 .into_response()
         }
     }
+}
+
+/// Find the pre-rendered shell for `path`'s dynamic-route family among the embedded web assets.
+fn find_route_family_shell(path: &str) -> Option<String> {
+    find_shell_in(
+        path,
+        <WebAssets as RustEmbed>::iter().map(|f| f.to_string()),
+    )
+}
+
+/// Walk up `path`'s segments (most specific first) looking for any file in `files` that sits
+/// one level under that prefix and ends in `.html`. Every dynamic route in this dashboard uses
+/// a single-entry `generateStaticParams()` (e.g. `projects/placeholder.html`,
+/// `you/sessions/new.html`), so there's exactly one shell to find per route family. Returns
+/// `None` if no prefix at any depth matches. Split from [`find_route_family_shell`] so the
+/// matching logic is testable without depending on `web/out/` actually being built.
+fn find_shell_in(path: &str, files: impl Iterator<Item = String>) -> Option<String> {
+    let segments: Vec<&str> = path.split('/').collect();
+    let files: Vec<String> = files.collect();
+    for take in (1..segments.len()).rev() {
+        let want_prefix = format!("{}/", segments[..take].join("/"));
+        if let Some(hit) = files
+            .iter()
+            .find(|f| f.starts_with(&want_prefix) && f.ends_with(".html"))
+        {
+            return Some(hit.clone());
+        }
+    }
+    None
 }
 
 /// Insert a CSP nonce into every `<script>` tag that doesn't already have one. We rewrite
@@ -639,12 +722,12 @@ async fn health() -> Json<Value> {
 /// `GET /api/health/deep` - real dependency probe. Returns 200 when all components are
 /// reachable, 503 when any are degraded. Safe to use as a load-balancer readiness check.
 async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json<Value>) {
-    let helix_ok = s.store.count_memories().is_ok();
+    let db_ok = s.store.count_memories().is_ok();
     let embedder_ok = cairn_embed::from_config(&s.cfg.embed).is_ok();
     let admin_ok = admin_mod::load_admin(&s)
         .map(|r| r.is_some())
         .unwrap_or(false);
-    let all_ok = helix_ok && embedder_ok;
+    let all_ok = db_ok && embedder_ok;
     let code = if all_ok {
         axum::http::StatusCode::OK
     } else {
@@ -657,7 +740,7 @@ async fn health_deep(State(s): State<AppState>) -> (axum::http::StatusCode, Json
             "name": "cairn",
             "version": env!("CARGO_PKG_VERSION"),
             "components": {
-                "helix": if helix_ok { "ok" } else { "unreachable" },
+                "db": if db_ok { "ok" } else { "unreachable" },
                 "embedder": if embedder_ok { "ok" } else { "unavailable" },
                 "admin": if admin_ok { "configured" } else { "not_configured" },
             }
@@ -730,136 +813,78 @@ async fn expand(
     }
 }
 
-/// P2.3 Compression Lab. Returns all 4 read modes (auto/full/signatures/map) for a single
-/// file in one response so the dashboard can show a side-by-side comparison with token
-/// counts. The cheapest mode is marked `best_mode` for the UI to highlight.
-#[derive(Deserialize)]
-struct CompressionDemoQuery {
-    path: String,
-}
-
+/// Web redesign v2: read-only effective-config viewer for the dashboard's Settings page.
+/// Server config is env-driven and read once at boot - this endpoint SHOWS every knob, its
+/// current effective value, and the env var that changes it (one-time customization is done
+/// by editing the environment and restarting; the dashboard never mutates server config).
+/// Secrets are redacted to a set/not-set marker. Authed like every other /api route.
 #[derive(Serialize)]
-struct ModeView {
-    mode: &'static str,
-    status: String,
-    view: String,
-    note: String,
-    bytes: usize,
-    est_tokens: usize,
-    savings_vs_full: f64,
-    hash: String,
+struct ConfigEntry {
+    key: &'static str,
+    value: Value,
+    env: &'static str,
+    group: &'static str,
+    description: &'static str,
 }
 
-#[derive(Serialize)]
-struct CompressionDemo {
-    path: String,
-    language: Option<String>,
-    raw_bytes: usize,
-    raw_lines: usize,
-    raw_tokens: usize,
-    views: Vec<ModeView>,
-    best_mode: String,
-    total_savings_tokens: usize,
-    savings_ratio: f64,
-}
-
-async fn compression_demo(
-    State(s): State<AppState>,
-    Query(q): Query<CompressionDemoQuery>,
-) -> Result<Json<CompressionDemo>, ApiError> {
-    let path = Path::new(&q.path);
-    // Call the engine once per mode. Errors per-mode are recorded as a fallback view
-    // so the dashboard never sees a partial result.
-    let modes = [
-        ("auto", cairn_context::ReadMode::Auto),
-        ("full", cairn_context::ReadMode::Full),
-        ("signatures", cairn_context::ReadMode::Signatures),
-        ("map", cairn_context::ReadMode::Map),
-    ];
-    let mut views = Vec::with_capacity(modes.len());
-    for (name, mode) in modes {
-        match s.ctx.read(path, mode) {
-            Ok(r) => views.push(ModeView {
-                mode: name,
-                status: format!("{:?}", r.status),
-                view: r.view,
-                note: r.note,
-                bytes: r.bytes,
-                est_tokens: r.est_tokens,
-                savings_vs_full: 0.0, // filled below
-                hash: r.hash,
-            }),
-            Err(e) => views.push(ModeView {
-                mode: name,
-                status: "Error".into(),
-                view: format!("error reading file: {e}"),
-                note: String::new(),
-                bytes: 0,
-                est_tokens: 0,
-                savings_vs_full: 0.0,
-                hash: String::new(),
-            }),
-        }
-    }
-
-    // Identify the full-mode view as the baseline for savings comparison.
-    let full_tokens = views
-        .iter()
-        .find(|v| v.mode == "full")
-        .map(|v| v.est_tokens)
-        .unwrap_or(0);
-    for v in &mut views {
-        if full_tokens > 0 {
-            v.savings_vs_full = 1.0 - (v.est_tokens as f64 / full_tokens as f64);
-        }
-    }
-    let best_mode = views
-        .iter()
-        .min_by_key(|v| v.est_tokens)
-        .map(|v| v.mode.to_string())
-        .unwrap_or_else(|| "auto".to_string());
-    let total_savings_tokens = full_tokens.saturating_sub(
-        views
-            .iter()
-            .find(|v| v.mode == "auto")
-            .map(|v| v.est_tokens)
-            .unwrap_or(full_tokens),
-    );
-    let savings_ratio = if full_tokens > 0 {
-        total_savings_tokens as f64 / full_tokens as f64
-    } else {
-        0.0
+/// Masks embedded userinfo credentials in a URL (`scheme://user:pass@host/...` becomes
+/// `scheme://***@host/...`). `db_url` is documented as credential-free - auth goes through the
+/// separate `db_user`/`db_pass` fields - but nothing enforces that, so a `CAIRN_DB_URL` set with
+/// embedded credentials would otherwise leak a password verbatim to the config viewer. Returns
+/// the input unchanged if it doesn't parse as a URL or carries no username/password.
+fn mask_url_credentials(raw: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return raw.to_string();
     };
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        let _ = parsed.set_password(None);
+        let _ = parsed.set_username("***");
+    }
+    parsed.to_string()
+}
 
-    // Use the full view's lines as the canonical "raw_lines" + tokens.
-    let (raw_lines, raw_bytes) = views
-        .iter()
-        .find(|v| v.mode == "full")
-        .map(|v| (v.view.lines().count(), v.bytes))
-        .unwrap_or((0, 0));
-
-    // Language hint from the file extension (the engine already picks a parser;
-    // we surface a friendlier label).
-    let language = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| e.to_string());
-
-    Ok(Json(CompressionDemo {
-        path: q.path,
-        language,
-        raw_bytes,
-        raw_lines,
-        raw_tokens: full_tokens,
-        views,
-        best_mode,
-        total_savings_tokens,
-        savings_ratio,
-    }))
+async fn config_view(State(s): State<AppState>) -> Json<Vec<ConfigEntry>> {
+    fn secret(present: bool) -> Value {
+        json!(if present { "set" } else { "not set" })
+    }
+    let c = &s.cfg;
+    let entries = vec![
+        ConfigEntry { key: "host", value: json!(c.host), env: "CAIRN_HOST", group: "server", description: "Bind host for the HTTP server." },
+        ConfigEntry { key: "port", value: json!(c.port), env: "CAIRN_PORT", group: "server", description: "Bind port for the HTTP server." },
+        ConfigEntry { key: "data_dir", value: json!(c.data_dir.display().to_string()), env: "CAIRN_DATA_DIR", group: "server", description: "Where Cairn keeps blobs, sessions, and the registry." },
+        ConfigEntry { key: "tls", value: json!(c.tls.is_some()), env: "CAIRN_TLS_CERT / CAIRN_TLS_KEY", group: "server", description: "HTTPS material. Required for non-loopback binds unless insecure is set." },
+        ConfigEntry { key: "insecure", value: json!(c.insecure), env: "CAIRN_INSECURE", group: "server", description: "Allow plain HTTP on a non-loopback bind (reverse-proxy setups only)." },
+        ConfigEntry { key: "cors_origins", value: json!(c.cors_origins), env: "CAIRN_CORS_ORIGINS", group: "server", description: "Allowed CORS origins; empty = same-origin only." },
+        ConfigEntry { key: "secret_key", value: secret(c.secret_key.is_some()), env: "CAIRN_SECRET_KEY", group: "server", description: "HMAC secret signing device-token JWTs and the savings ledger." },
+        ConfigEntry { key: "db_url", value: json!(mask_url_credentials(&c.db_url)), env: "CAIRN_DB_URL", group: "database", description: "SurrealDB connection URL. Embedded userinfo credentials, if any, are masked." },
+        ConfigEntry { key: "db_user", value: json!(c.db_user), env: "CAIRN_DB_USER", group: "database", description: "SurrealDB auth username." },
+        ConfigEntry { key: "db_pass", value: secret(!c.db_pass.is_empty()), env: "CAIRN_DB_PASS", group: "database", description: "SurrealDB auth password." },
+        ConfigEntry { key: "db_ns", value: json!(c.db_ns), env: "CAIRN_DB_NS", group: "database", description: "SurrealDB namespace (isolation boundary between Cairn instances)." },
+        ConfigEntry { key: "db_timeout_secs", value: json!(c.db_timeout_secs), env: "CAIRN_DB_TIMEOUT_SECS", group: "database", description: "Per-query deadline for the SurrealDB client." },
+        ConfigEntry { key: "multi_tenant", value: json!(c.multi_tenant), env: "CAIRN_MULTI_TENANT", group: "database", description: "Org-scoped memories per bearer token; off = single implicit org." },
+        ConfigEntry { key: "embed.provider", value: json!(c.embed.provider), env: "CAIRN_EMBED_PROVIDER", group: "intelligence", description: "Embedding backend (hashing / openai / ollama / ...)." },
+        ConfigEntry { key: "embed.api_key", value: secret(c.embed.api_key.is_some()), env: "CAIRN_EMBED_API_KEY", group: "intelligence", description: "API key for remote embedding providers." },
+        ConfigEntry { key: "llm_consolidation.enabled", value: json!(c.llm_consolidation.enabled), env: "CAIRN_LLM_CONSOLIDATION", group: "intelligence", description: "LLM-driven consolidation, concept extraction, and query expansion." },
+        ConfigEntry { key: "llm_daily_budget", value: json!(c.llm_daily_budget), env: "CAIRN_LLM_DAILY_BUDGET", group: "intelligence", description: "Daily token budget for background LLM calls; 0 = unlimited. Heuristic fallback once spent." },
+        ConfigEntry { key: "rerank.enabled", value: json!(c.rerank.enabled), env: "CAIRN_RERANK", group: "intelligence", description: "Cross-encoder reranking for search." },
+        ConfigEntry { key: "selftune", value: json!(c.selftune), env: "CAIRN_SELFTUNE", group: "automation", description: "Weekly tune job nudges promote_threshold from measured retrieval quality (bounded)." },
+        ConfigEntry { key: "cron_enabled", value: json!(c.cron_enabled), env: "CAIRN_CRON_ENABLED", group: "automation", description: "Master switch for every background job." },
+        ConfigEntry { key: "session_ttl_days", value: json!(c.session_ttl_days), env: "CAIRN_SESSION_TTL_DAYS", group: "automation", description: "Idle days before session-gc promotes Session-scoped memories to Global; 0 disables." },
+        ConfigEntry { key: "decay_period_days", value: json!(c.decay_period_days), env: "CAIRN_DECAY_PERIOD_DAYS", group: "automation", description: "Confidence half-life for the weekly memory-decay job." },
+        ConfigEntry { key: "access_log_retention_days", value: json!(c.access_log_retention_days), env: "CAIRN_ACCESS_LOG_RETENTION_DAYS", group: "automation", description: "How long access-log rows survive the monthly prune." },
+        ConfigEntry { key: "promote_threshold", value: json!(c.promote_threshold), env: "CAIRN_PROMOTE_THRESHOLD", group: "automation", description: "promo_score above this auto-promotes to Global on the nightly llm-intelligence run." },
+        ConfigEntry { key: "demote_idle_days", value: json!(c.demote_idle_days), env: "CAIRN_DEMOTE_IDLE_DAYS", group: "automation", description: "Unused days before an auto-promoted Global memory reverts to Project scope." },
+        ConfigEntry { key: "max_working_per_project", value: json!(c.max_working_per_project), env: "CAIRN_MAX_WORKING_PER_PROJECT", group: "automation", description: "Cap on Working-tier memories per project before decay prunes the weakest." },
+        ConfigEntry { key: "drift_autopilot", value: json!(c.drift_autopilot), env: "CAIRN_DRIFT_AUTOPILOT", group: "guard", description: "Drift auto-approval policy: safe (default), off, or all. Danger never auto-approves." },
+        ConfigEntry { key: "drift_safe_globs", value: json!(c.drift_safe_globs), env: "CAIRN_DRIFT_SAFE_GLOBS", group: "guard", description: "Low-stakes path globs where warn-risk drift auto-approves under the safe policy." },
+        ConfigEntry { key: "auto_anchor", value: json!(c.auto_anchor), env: "CAIRN_AUTO_ANCHOR", group: "guard", description: "Derive a session anchor from the first substantive prompt when none is set." },
+    ];
+    Json(entries)
 }
 
 async fn remember(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Json(mut input): Json<NewMemory>,
 ) -> Result<Json<Memory>, ApiError> {
     // Strip injected preference delimiter blocks so memory content cannot smuggle itself back
@@ -867,7 +892,19 @@ async fn remember(
     input.content = cairn_profile::strip_preference_blocks(&input.content);
     input.suspicious =
         Some(input.suspicious.unwrap_or(false) || cairn_profile::is_suspicious(&input.content));
-    Ok(Json(s.mem.remember(input)?))
+    // v0.8.0 Sprint 2: a caller that sets `scope_type` without an explicit `scope_id` gets the
+    // current request's project/session (from `X-Cairn-Project`/`X-Cairn-Session`) - so the
+    // client doesn't have to repeat the id it already sent as a header.
+    if input.scope_id.is_none() {
+        input.scope_id = match input.scope_type {
+            cairn_core::ScopeType::Project => scope.project_id.clone(),
+            cairn_core::ScopeType::Session => scope.session_id.clone(),
+            cairn_core::ScopeType::Global => None,
+        };
+    }
+    let m = s.mem.remember(input)?;
+    crate::events::publish_memory(&s.events, "added", &m.id);
+    Ok(Json(m))
 }
 
 /// P4.3: `POST /api/memory/gotcha` - record a failure event. The gotcha tracker
@@ -915,7 +952,18 @@ async fn gotcha_wakeup(
     Query(q): Query<GotchaWakeupQuery>,
 ) -> Result<Json<Value>, ApiError> {
     let limit = q.limit.unwrap_or(5).clamp(1, 50);
-    let clusters = s.mem.top_gotcha_clusters(limit)?;
+    let clusters: Vec<Value> = s
+        .mem
+        .top_gotcha_clusters(limit)?
+        .iter()
+        .map(|c| {
+            let mut v = serde_json::to_value(c).unwrap_or(Value::Null);
+            if let Value::Object(ref mut m) = v {
+                m.insert("size".into(), json!(c.size()));
+            }
+            v
+        })
+        .collect();
     let total = s
         .mem
         .gotcha_tracker()
@@ -944,9 +992,338 @@ struct RecallQuery {
 
 async fn recall(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Query(q): Query<RecallQuery>,
 ) -> Result<Json<Vec<ScoredMemory>>, ApiError> {
-    Ok(Json(s.mem.recall(&q.q, q.limit.unwrap_or(10))?))
+    Ok(Json(s.mem.recall_for_org(
+        &q.q,
+        q.limit.unwrap_or(10),
+        OrgId::default(),
+        &scope,
+    )?))
+}
+
+#[derive(Deserialize)]
+struct ByScopeQuery {
+    scope_type: cairn_core::ScopeType,
+    #[serde(default)]
+    scope_id: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// GET `/api/memory/by-scope?scope_type=project&scope_id=<id>&limit=50` - v0.8.0 Sprint 10:
+/// every memory in an *exact* scope, most-recently-updated first. Unlike `/api/memory/recall`
+/// this isn't a search (no ranking, no Global fallback) - it's the plain filter the Projects
+/// detail page needs ("what does this project know"), where faking `X-Cairn-Project` on recall
+/// would wrongly blend in Global results and require a text query that doesn't exist yet.
+async fn memory_by_scope(
+    State(s): State<AppState>,
+    Query(q): Query<ByScopeQuery>,
+) -> Result<Json<Vec<Memory>>, ApiError> {
+    if q.scope_type != cairn_core::ScopeType::Global && q.scope_id.is_none() {
+        return Err(ApiError::bad_request(
+            "scope_id is required unless scope_type=global",
+        ));
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let mut mems: Vec<Memory> = s
+        .store
+        .all_memories()?
+        .into_iter()
+        .filter(|m| m.scope_type == q.scope_type && m.scope_id == q.scope_id)
+        .collect();
+    mems.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
+    mems.truncate(limit);
+    Ok(Json(mems))
+}
+
+/// Web redesign v2: the Memory Browser's list endpoint. Filterable, sortable, paginated view of
+/// EVERY memory with the full record serialization (all fields, edges included) - the dashboard's
+/// primary observability surface. Same in-handler `all_memories()` scan pattern as `by-scope` and
+/// the project stats; `total` requires the full scan anyway, so pagination only saves
+/// serialization - fine at self-hosted scale.
+#[derive(Deserialize, Default)]
+struct MemoryListQuery {
+    #[serde(default)]
+    scope_type: Option<cairn_core::ScopeType>,
+    #[serde(default)]
+    scope_id: Option<String>,
+    #[serde(default)]
+    tier: Option<cairn_core::MemoryTier>,
+    #[serde(default)]
+    kind: Option<cairn_core::MemoryKind>,
+    #[serde(default)]
+    pinned: Option<bool>,
+    #[serde(default)]
+    suspicious: Option<bool>,
+    #[serde(default)]
+    q: Option<String>,
+    #[serde(default)]
+    sort: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+#[derive(Serialize)]
+struct MemoryListResponse {
+    items: Vec<Memory>,
+    total: usize,
+}
+
+/// GET `/api/memory?scope_type=&tier=&kind=&pinned=&suspicious=&q=&sort=&limit=&offset=`
+async fn list_memories(
+    State(s): State<AppState>,
+    Query(q): Query<MemoryListQuery>,
+) -> Result<Json<MemoryListResponse>, ApiError> {
+    let mut mems: Vec<Memory> = s.store.all_memories()?;
+    if let Some(st) = q.scope_type {
+        mems.retain(|m| m.scope_type == st);
+    }
+    if let Some(sid) = &q.scope_id {
+        mems.retain(|m| m.scope_id.as_deref() == Some(sid.as_str()));
+    }
+    if let Some(tier) = q.tier {
+        mems.retain(|m| m.tier == tier);
+    }
+    if let Some(kind) = q.kind {
+        mems.retain(|m| m.kind == kind);
+    }
+    if let Some(pinned) = q.pinned {
+        mems.retain(|m| m.pinned == pinned);
+    }
+    if let Some(suspicious) = q.suspicious {
+        mems.retain(|m| m.suspicious == suspicious);
+    }
+    if let Some(needle) =
+        q.q.as_deref()
+            .map(str::to_lowercase)
+            .filter(|n| !n.is_empty())
+    {
+        mems.retain(|m| {
+            m.content.to_lowercase().contains(&needle)
+                || m.concepts
+                    .iter()
+                    .any(|c| c.to_lowercase().contains(&needle))
+        });
+    }
+    let total = mems.len();
+    // Unknown sort values fall back to updated_at rather than erroring - consistent with the
+    // leniency of `heatmap`/`by-scope`. All sorts are descending (newest/highest first).
+    match q.sort.as_deref() {
+        Some("created_at") => mems.sort_by_key(|m| std::cmp::Reverse(m.created_at)),
+        Some("importance") => mems.sort_by(|a, b| b.importance.total_cmp(&a.importance)),
+        Some("promo_score") => mems.sort_by(|a, b| b.promo_score.total_cmp(&a.promo_score)),
+        Some("access_count") => mems.sort_by_key(|m| std::cmp::Reverse(m.access_count)),
+        _ => mems.sort_by_key(|m| std::cmp::Reverse(m.updated_at)),
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let offset = q.offset.unwrap_or(0);
+    let items: Vec<Memory> = mems.into_iter().skip(offset).take(limit).collect();
+    Ok(Json(MemoryListResponse { items, total }))
+}
+
+/// GET `/api/memory/:id` - single memory, full record. Read-only lookup for the Memory Browser's
+/// detail drawer (and edge-hopping between related memories); does NOT bump `access_count`.
+async fn get_memory(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    match s.mem.get(&id)? {
+        Some(m) => Ok(Json(m)),
+        None => Err(ApiError::not_found("no such memory")),
+    }
+}
+
+/// v0.8.0 Sprint 3: the project registry populated by the `SessionStart` hook's auto-detection
+/// (`cairn-client`'s `project::detect_project`), so the dashboard can show which repos an agent
+/// has actually worked in. Registration is independent of scope isolation itself - Sprint 2's
+/// recall filtering only needs the `X-Cairn-Project` header, not a matching registry row.
+#[derive(Deserialize)]
+struct ProjectUpsertBody {
+    id: String,
+    name: String,
+    #[serde(default)]
+    path: String,
+}
+
+/// PATCH `/api/projects/upsert` - create or update a project's `last_active` timestamp.
+async fn upsert_project(
+    State(s): State<AppState>,
+    Json(body): Json<ProjectUpsertBody>,
+) -> Result<Json<cairn_store::ProjectRecord>, ApiError> {
+    s.store.upsert_project(&body.id, &body.name, &body.path)?;
+    let project = s
+        .store
+        .get_project(&body.id)?
+        .ok_or_else(|| ApiError::internal("project vanished immediately after upsert"))?;
+    crate::events::publish_project(&s.events, &project.id);
+    Ok(Json(project))
+}
+
+/// v0.8.0 Sprint 10: `GET /api/projects`/`GET /api/projects/:id` enriched with memory_count +
+/// last_memory_at, so the dashboard's Projects page doesn't need a second round-trip per row.
+#[derive(Serialize)]
+struct ProjectWithStats {
+    #[serde(flatten)]
+    project: cairn_store::ProjectRecord,
+    memory_count: usize,
+    last_memory_at: Option<DateTime<Utc>>,
+}
+
+/// Group `mems` by `scope_id` for every `Project`-scoped memory, giving `(count, latest
+/// updated_at)` per project id. One full-corpus scan shared by both project endpoints below -
+/// same cost class as `promotion_candidates`/`architecture_report`, no new store trait method.
+fn project_memory_stats(
+    mems: &[Memory],
+) -> std::collections::HashMap<String, (usize, DateTime<Utc>)> {
+    let mut stats: std::collections::HashMap<String, (usize, DateTime<Utc>)> =
+        std::collections::HashMap::new();
+    for m in mems {
+        if m.scope_type != cairn_core::ScopeType::Project {
+            continue;
+        }
+        let Some(id) = m.scope_id.as_ref() else {
+            continue;
+        };
+        let entry = stats.entry(id.clone()).or_insert((0, m.updated_at));
+        entry.0 += 1;
+        if m.updated_at > entry.1 {
+            entry.1 = m.updated_at;
+        }
+    }
+    stats
+}
+
+fn with_stats(
+    project: cairn_store::ProjectRecord,
+    stats: &std::collections::HashMap<String, (usize, DateTime<Utc>)>,
+) -> ProjectWithStats {
+    let (memory_count, last_memory_at) = stats
+        .get(&project.id)
+        .map(|(c, t)| (*c, Some(*t)))
+        .unwrap_or((0, None));
+    ProjectWithStats {
+        project,
+        memory_count,
+        last_memory_at,
+    }
+}
+
+/// GET `/api/projects` - every known project, most-recently-active first.
+async fn list_projects(State(s): State<AppState>) -> Result<Json<Vec<ProjectWithStats>>, ApiError> {
+    let projects = s.store.list_projects()?;
+    let stats = project_memory_stats(&s.store.all_memories()?);
+    Ok(Json(
+        projects
+            .into_iter()
+            .map(|p| with_stats(p, &stats))
+            .collect(),
+    ))
+}
+
+/// GET `/api/projects/:id` - a single project's details.
+async fn get_project(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<ProjectWithStats>, ApiError> {
+    let project = s
+        .store
+        .get_project(&id)?
+        .ok_or_else(|| ApiError::not_found("no such project"))?;
+    let stats = project_memory_stats(&s.store.all_memories()?);
+    Ok(Json(with_stats(project, &stats)))
+}
+
+/// v0.8.0 Sprint 4: one entry in `GET /api/cron/jobs` - the job's static schedule plus whatever
+/// its last recorded run looked like (`None` if it has never run since server start).
+#[derive(Serialize)]
+struct CronJobStatus {
+    name: &'static str,
+    schedule: &'static str,
+    last_run: Option<cron::CronRun>,
+}
+
+/// GET `/api/cron/jobs` - every background job, its cron schedule, and its last run.
+async fn list_cron_jobs(State(s): State<AppState>) -> Json<Vec<CronJobStatus>> {
+    Json(
+        cron::JOBS
+            .iter()
+            .map(|(name, schedule)| CronJobStatus {
+                name,
+                schedule,
+                last_run: s.cron_history.last_run(name),
+            })
+            .collect(),
+    )
+}
+
+/// POST `/api/cron/run/:job` - trigger a job immediately, same auth as every other `/api/*`
+/// route. Goes through the same [`cron::run_job_now`] the scheduler itself calls, so a manual
+/// run and a scheduled run are indistinguishable in `GET /api/cron/history`.
+async fn run_cron_job(
+    State(s): State<AppState>,
+    axum::extract::Path(job): axum::extract::Path<String>,
+) -> Result<Json<cron::CronRun>, ApiError> {
+    let name = cron::JOBS
+        .iter()
+        .find(|(n, _)| *n == job)
+        .map(|(n, _)| *n)
+        .ok_or_else(|| ApiError::not_found(format!("no such cron job: {job}")))?;
+    cron::run_job_now(&s, name)
+        .map(Json)
+        .map_err(ApiError::bad_request)
+}
+
+#[derive(Deserialize)]
+struct CronHistoryQuery {
+    #[serde(default)]
+    job: Option<String>,
+}
+
+/// GET `/api/cron/history` - recent runs, optionally filtered to one job (`?job=session-gc`).
+async fn cron_history(
+    State(s): State<AppState>,
+    Query(q): Query<CronHistoryQuery>,
+) -> Json<Vec<cron::CronRun>> {
+    Json(s.cron_history.recent(q.job.as_deref()))
+}
+
+/// v0.8.0 Sprint 9: one entry in `GET /api/cron/health` - unlike [`CronJobStatus`] this exists
+/// for a watchdog/dashboard to answer "is anything wrong?" at a glance, without having to infer
+/// it from `last_run`'s shape.
+#[derive(Serialize)]
+struct CronJobHealth {
+    name: &'static str,
+    schedule: &'static str,
+    running: bool,
+    last_run_at: Option<DateTime<Utc>>,
+    last_status: Option<&'static str>,
+    stale: bool,
+}
+
+/// GET `/api/cron/health` - single-flight + staleness view of every job, for a watchdog or the
+/// dashboard to poll instead of re-deriving health from `GET /api/cron/history` itself.
+async fn cron_health(State(s): State<AppState>) -> Json<Vec<CronJobHealth>> {
+    let now = Utc::now();
+    Json(
+        cron::JOBS
+            .iter()
+            .map(|(name, schedule)| {
+                let last = s.cron_history.last_run(name);
+                CronJobHealth {
+                    name,
+                    schedule,
+                    running: s.cron_history.is_running(name),
+                    last_run_at: last.as_ref().map(|r| r.started_at),
+                    last_status: last.as_ref().map(|r| r.outcome),
+                    stale: s.cron_history.is_stale(name, now),
+                }
+            })
+            .collect(),
+    )
 }
 
 #[derive(Deserialize)]
@@ -972,45 +1349,60 @@ struct SearchQuery {
 /// With `rerank=local` the post-MMR top-K is re-scored by a cross-encoder.
 async fn search_handler(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Query(q): Query<SearchQuery>,
 ) -> Result<Json<Vec<ScoredMemory>>, ApiError> {
     let limit = q.limit.unwrap_or(20);
     let rerank_depth = q.rerank_depth.unwrap_or(20);
+    let org_id = OrgId::default();
 
     // P3.3 query expansion: when `expand=true` and the LLM gate is on.
     if q.expand.unwrap_or(false) && s.cfg.llm_consolidation.enabled {
         let expander = cairn_memory::QueryExpander::new(s.cfg.llm_consolidation.clone());
-        let mut hits = s
-            .mem
-            .expanded_search(&q.q, limit, rerank_depth, &expander)?;
-        // P4.2 rerank: post-expansion cross-encoder pass.
-        if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
+        // P4.2 rerank: reranks the *expanded* hits, rather than discarding them and rerunning
+        // a plain (unexpanded) search-with-rerank - see expanded_search_with_rerank_for_org's
+        // doc comment for why these two used to be mutually exclusive.
+        let hits = if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
             let reranker = cairn_memory::rerank_from_config(&s.cfg.rerank);
-            hits = s.mem.hybrid_search_with_rerank(
+            s.mem.expanded_search_with_rerank_for_org(
                 &q.q,
                 limit,
                 rerank_depth,
+                &expander,
                 &*reranker,
                 s.cfg.rerank.blend_weight,
-            )?;
-        }
+                org_id,
+                &scope,
+            )?
+        } else {
+            s.mem
+                .expanded_search_for_org(&q.q, limit, rerank_depth, &expander, org_id, &scope)?
+        };
         return Ok(Json(hits));
     }
 
     // P4.2 rerank only (no expansion).
     if q.rerank.as_deref() == Some("local") && s.cfg.rerank.enabled {
         let reranker = cairn_memory::rerank_from_config(&s.cfg.rerank);
-        return Ok(Json(s.mem.hybrid_search_with_rerank(
+        return Ok(Json(s.mem.hybrid_search_with_rerank_for_org(
             &q.q,
             limit,
             rerank_depth,
             &*reranker,
             s.cfg.rerank.blend_weight,
+            org_id,
+            &scope,
         )?));
     }
 
-    // Default path: plain hybrid search.
-    Ok(Json(s.mem.hybrid_search(&q.q, limit, rerank_depth)?))
+    // Default path: plain hybrid search, scope-aware (v0.8.0 Sprint 10 - was Global-only).
+    Ok(Json(s.mem.hybrid_search_for_org(
+        &q.q,
+        limit,
+        rerank_depth,
+        org_id,
+        &scope,
+    )?))
 }
 
 #[derive(Deserialize)]
@@ -1040,6 +1432,10 @@ struct MemoryEditBody {
     concepts: Option<Vec<String>>,
     #[serde(default)]
     files: Option<Vec<String>>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    reasoning: Option<String>,
 }
 
 /// POST `/api/memory/:id` - edit a memory's mutable fields. Any field omitted from the body is
@@ -1052,10 +1448,15 @@ async fn edit_memory(
     let content = body
         .content
         .map(|c| cairn_profile::strip_preference_blocks(&c));
-    match s
-        .mem
-        .edit(&id, content, body.importance, body.concepts, body.files)?
-    {
+    match s.mem.edit(
+        &id,
+        content,
+        body.importance,
+        body.concepts,
+        body.files,
+        body.title,
+        body.reasoning,
+    )? {
         Some(m) => {
             crate::events::publish_memory(&s.events, "edited", &m.id);
             Ok(Json(m))
@@ -1094,7 +1495,11 @@ async fn pin_memory(
             if body.pinned { "pinned" } else { "unpinned" },
             &id,
         );
-        Ok(Json(s.mem.get(&id)?.unwrap()))
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after pin/unpin"))?;
+        Ok(Json(m))
     } else {
         Err(ApiError::not_found("no such memory"))
     }
@@ -1117,6 +1522,108 @@ async fn reinforce_memory(
 struct CrystallizeBody {
     #[serde(default)]
     session_id: Option<String>,
+}
+
+/// GET `/api/memory/promotion-candidates` - v0.8.0 Sprint 5: `Project`-scoped memories whose
+/// `promo_score` (written by the `llm-intelligence` cron job) falls in the human-review band.
+async fn promotion_candidates(State(s): State<AppState>) -> Result<Json<Vec<Memory>>, ApiError> {
+    Ok(Json(s.mem.promotion_candidates()?))
+}
+
+/// POST `/api/memory/:id/promote` - v0.8.0 Sprint 5: approve a promotion candidate. Moves the
+/// memory to `Global` scope and locks it against further promotion scoring.
+async fn promote_memory(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    if s.mem.promote_memory(&id)? {
+        crate::events::publish_memory(&s.events, "promoted", &id);
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after promotion"))?;
+        Ok(Json(m))
+    } else {
+        Err(ApiError::not_found("no such memory"))
+    }
+}
+
+/// POST `/api/memory/:id/dismiss-promotion` - v0.8.0 Sprint 5: "don't ask again". Locks the
+/// memory against further promotion scoring/suggestions without changing its scope.
+async fn dismiss_promotion(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    if s.mem.dismiss_promotion(&id)? {
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after dismissal"))?;
+        Ok(Json(m))
+    } else {
+        Err(ApiError::not_found("no such memory"))
+    }
+}
+
+/// GET `/api/memory/promotion-log` - v0.8.0 Sprint 8: recent promotion/demotion events, auto
+/// and manual alike, newest first. The dashboard's audit trail for full-auto promotion.
+#[derive(Deserialize)]
+struct PromotionLogQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+async fn promotion_log(
+    State(s): State<AppState>,
+    Query(q): Query<PromotionLogQuery>,
+) -> Result<Json<Vec<cairn_store::PromotionLogEntry>>, ApiError> {
+    let limit = q.limit.unwrap_or(50).clamp(1, 500);
+    Ok(Json(s.store.list_promotion_log(limit)?))
+}
+
+/// POST `/api/memory/:id/demote` - v0.8.0 Sprint 8 (Undo): revert a promotion back to the
+/// scope it was promoted from, using the promotion log. Works for both auto-promotions and
+/// human `/promote` calls. 404 if the memory doesn't exist or was never promoted through this
+/// pipeline (nothing recorded to revert to).
+async fn demote_memory(
+    State(s): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<Memory>, ApiError> {
+    if s.mem.demote_memory(&id)? {
+        crate::events::publish_memory(&s.events, "demoted", &id);
+        let m = s
+            .mem
+            .get(&id)?
+            .ok_or_else(|| ApiError::internal("memory vanished immediately after demotion"))?;
+        Ok(Json(m))
+    } else {
+        Err(ApiError::not_found(
+            "no such memory, or it was never promoted",
+        ))
+    }
+}
+
+/// POST `/api/memory/session-summary` - v0.8.0 Sprint 5: called by the `SessionEnd` hook.
+/// Summarizes the current session's memories (from `X-Cairn-Session`) into one `Project`-scoped
+/// `Episodic` note via the LLM. A safe no-op (`{"summarized": false}`) when the LLM is disabled,
+/// there's no session id, or the session has no memories yet - the hook never treats this as an
+/// error either way.
+async fn session_summary(
+    State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
+) -> Result<Json<Value>, ApiError> {
+    let Some(session_id) = scope.session_id else {
+        return Ok(Json(json!({ "summarized": false })));
+    };
+    match s
+        .mem
+        .synthesize_session(&s.cfg.llm_consolidation, &session_id, scope.project_id)?
+    {
+        Some(m) => {
+            crate::events::publish_memory(&s.events, "created", &m.id);
+            Ok(Json(json!({ "summarized": true, "memory": m })))
+        }
+        None => Ok(Json(json!({ "summarized": false }))),
+    }
 }
 
 /// POST `/api/memory/crystallize` - promote working-tier memories into a semantic crystal.
@@ -1164,41 +1671,14 @@ struct HeatmapQuery {
 }
 
 // -- drift + sessions handlers (v0.5.0 Sprint 4) -----------------------------------------
+// Web redesign v2: drift decisions are made by the autopilot inline at verify time
+// (cairn-guard/src/autopilot.rs) - the manual approve/reject endpoints were removed because
+// the dashboard is observability-only. This list endpoint is the read-only audit trail.
 
 async fn list_drift(
     State(s): State<AppState>,
 ) -> Result<Json<Vec<cairn_session::DriftEvent>>, ApiError> {
     Ok(Json(s.sessions.recent_drift(200, None)?))
-}
-
-async fn approve_drift(
-    State(s): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-) -> Result<Json<Value>, ApiError> {
-    if s.sessions
-        .set_drift_status(id, cairn_session::DriftStatus::Approved)?
-    {
-        Ok(Json(json!({ "ok": true, "status": "approved" })))
-    } else {
-        Err(ApiError::not_found(
-            "drift event not found or already resolved",
-        ))
-    }
-}
-
-async fn reject_drift(
-    State(s): State<AppState>,
-    axum::extract::Path(id): axum::extract::Path<i64>,
-) -> Result<Json<Value>, ApiError> {
-    if s.sessions
-        .set_drift_status(id, cairn_session::DriftStatus::Rejected)?
-    {
-        Ok(Json(json!({ "ok": true, "status": "rejected" })))
-    } else {
-        Err(ApiError::not_found(
-            "drift event not found or already resolved",
-        ))
-    }
 }
 
 async fn list_sessions(
@@ -1296,14 +1776,28 @@ async fn verify(
         report.risk,
         cairn_guard::Risk::Warn | cairn_guard::Risk::Danger
     ) {
+        // v0.8.0 Sprint 8: drift autopilot. A `risk=ok` edit never even reaches this branch (no
+        // event is created for it at all - it was already a zero-interaction case before this
+        // sprint); this only decides whether a `warn` under `CAIRN_DRIFT_AUTOPILOT` gets
+        // auto-approved instead of sitting `Pending`. `danger` never auto-approves.
+        let mode = cairn_guard::DriftAutopilot::parse(&s.cfg.drift_autopilot);
+        let decision =
+            cairn_guard::autopilot_decision(mode, report.risk, &b.path, &s.cfg.drift_safe_globs);
+        let (status, detail) = match decision {
+            Some(reason) => (
+                cairn_session::DriftStatus::Approved,
+                format!("{} (auto-approved: {reason})", report.message),
+            ),
+            None => (cairn_session::DriftStatus::Pending, report.message.clone()),
+        };
         let ev = cairn_session::DriftEvent {
             id: s.sessions.next_drift_id(),
             ts: Utc::now(),
             path: b.path.clone(),
             risk: report.risk.as_str().to_string(),
             kind: "verify".into(),
-            detail: report.message.clone(),
-            status: cairn_session::DriftStatus::Pending,
+            detail,
+            status,
         };
         let _ = s.sessions.append_drift(&ev);
         crate::events::publish_drift(&s.events, &b.path, report.risk.as_str());
@@ -1328,6 +1822,80 @@ async fn post_anchor(
     Ok(Json(
         json!({ "anchor": meta.goal, "suspicious": meta.suspicious }),
     ))
+}
+
+#[derive(Deserialize)]
+struct AutoAnchorBody {
+    prompt: String,
+}
+
+/// POST `/api/guard/anchor/auto` - v0.8.0 Sprint 8: called by the `UserPromptSubmit` hook on
+/// every prompt. A no-op (`"derived": false`) once an anchor already exists (whether set
+/// manually or auto-derived earlier this session) or when `CAIRN_AUTO_ANCHOR` is off - cheap
+/// to call unconditionally since the common case after the first prompt is an immediate no-op.
+async fn auto_anchor(
+    State(s): State<AppState>,
+    Json(b): Json<AutoAnchorBody>,
+) -> Result<Json<Value>, ApiError> {
+    if !s.cfg.auto_anchor {
+        return Ok(Json(
+            json!({ "anchor": s.guard.anchor()?, "derived": false }),
+        ));
+    }
+    match s.guard.auto_anchor_if_unset(&b.prompt)? {
+        Some(meta) => Ok(Json(
+            json!({ "anchor": meta.goal, "derived": true, "suspicious": meta.suspicious }),
+        )),
+        None => Ok(Json(
+            json!({ "anchor": s.guard.anchor()?, "derived": false }),
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+struct DigestQuery {
+    #[serde(default)]
+    hours: Option<i64>,
+}
+
+#[derive(Serialize)]
+struct AutopilotDigest {
+    promoted: usize,
+    demoted: usize,
+    drift_auto_approved: usize,
+}
+
+/// GET `/api/memory/autopilot-digest?hours=24` - v0.8.0 Sprint 8: what autopilot did while the
+/// human was away, for the `SessionStart` hook's "since you were away" summary line. Looks
+/// back a fixed window (default 24h) rather than tracking a precise "since last session ended"
+/// timestamp - each hook invocation is a stateless process (v0.8.0 Sprint 3), so there's no
+/// cheap place to persist that client-side, and "in the last day" is close enough for a
+/// human-facing digest.
+async fn autopilot_digest(
+    State(s): State<AppState>,
+    Query(q): Query<DigestQuery>,
+) -> Result<Json<AutopilotDigest>, ApiError> {
+    let since = Utc::now() - chrono::Duration::hours(q.hours.unwrap_or(24));
+    let log = s.store.list_promotion_log(500)?;
+    let promoted = log
+        .iter()
+        .filter(|e| e.action == "promote" && e.ts > since)
+        .count();
+    let demoted = log
+        .iter()
+        .filter(|e| e.action == "demote" && e.ts > since)
+        .count();
+    let drift_auto_approved = s
+        .sessions
+        .recent_drift(500, None)?
+        .into_iter()
+        .filter(|d| d.ts > since && d.detail.contains("(auto-approved:"))
+        .count();
+    Ok(Json(AutopilotDigest {
+        promoted,
+        demoted,
+        drift_auto_approved,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1727,7 +2295,7 @@ async fn auth(State(s): State<AppState>, req: Request, next: Next) -> Response {
                     "error": "invalid bearer token",
                     "error_code": "unauthenticated",
                     "reason": "unknown_token",
-                    "detail": "token is cryptographically valid but was not found in the store (it may have been revoked, or HelixDB data may have been lost)"
+                    "detail": "token is cryptographically valid but was not found in the store (it may have been revoked, or the database data may have been lost)"
                 })),
             )
                 .into_response();
@@ -1940,6 +2508,27 @@ mod tests {
         assert_eq!(v["error_code"], "not_found");
     }
 
+    #[test]
+    fn mask_url_credentials_strips_embedded_userinfo() {
+        assert_eq!(
+            mask_url_credentials("wss://myuser:hunter2@db.example.com:8000/rpc"),
+            "wss://***@db.example.com:8000/rpc"
+        );
+    }
+
+    #[test]
+    fn mask_url_credentials_leaves_credential_free_urls_untouched() {
+        assert_eq!(
+            mask_url_credentials("ws://localhost:8000/rpc"),
+            "ws://localhost:8000/rpc"
+        );
+    }
+
+    #[test]
+    fn mask_url_credentials_passes_through_unparseable_input() {
+        assert_eq!(mask_url_credentials("not a url"), "not a url");
+    }
+
     #[tokio::test]
     async fn api_error_envelope_codes_per_constructor() {
         let cases: [(ApiError, StatusCode, &str); 5] = [
@@ -1994,76 +2583,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
-    /// P2.3: compression-demo returns all 4 modes + correct savings math.
-    #[tokio::test]
-    async fn compression_demo_returns_all_four_modes() {
-        let Some((state, dir)) = test_state() else {
-            return;
-        };
-        let file = dir.path().join("widget.rs");
-        std::fs::write(
-            &file,
-            "pub fn hi() -> u32 { 1 }\npub fn bye() -> u32 { 2 }\n",
-        )
-        .unwrap();
-
-        let resp = compression_demo(
-            axum::extract::State(state),
-            axum::extract::Query(CompressionDemoQuery {
-                path: file.to_string_lossy().into_owned(),
-            }),
-        )
-        .await
-        .unwrap();
-        let demo = resp.0;
-        assert_eq!(demo.views.len(), 4);
-        let labels: Vec<&str> = demo.views.iter().map(|v| v.mode).collect();
-        assert!(labels.contains(&"auto"));
-        assert!(labels.contains(&"full"));
-        assert!(labels.contains(&"signatures"));
-        assert!(labels.contains(&"map"));
-
-        // full should be the baseline; signatures must be <= full tokens.
-        let full = demo.views.iter().find(|v| v.mode == "full").unwrap();
-        let sigs = demo.views.iter().find(|v| v.mode == "signatures").unwrap();
-        assert!(sigs.est_tokens <= full.est_tokens);
-
-        // best_mode must match the cheapest view.
-        let cheapest_tokens = demo.views.iter().map(|v| v.est_tokens).min().unwrap();
-        let best = demo
-            .views
-            .iter()
-            .find(|v| v.est_tokens == cheapest_tokens)
-            .unwrap();
-        assert_eq!(demo.best_mode, best.mode);
-    }
-
-    /// P2.3: an unsupported language falls back to Full for signatures/map.
-    #[tokio::test]
-    async fn compression_demo_falls_back_for_unsupported_language() {
-        let Some((state, dir)) = test_state() else {
-            return;
-        };
-        let file = dir.path().join("notes.txt");
-        std::fs::write(&file, "plain prose line 1\nplain prose line 2\n").unwrap();
-
-        let resp = compression_demo(
-            axum::extract::State(state),
-            axum::extract::Query(CompressionDemoQuery {
-                path: file.to_string_lossy().into_owned(),
-            }),
-        )
-        .await
-        .unwrap();
-        let demo = resp.0;
-        // For .txt, the engine falls through to Full for signatures + map. They should
-        // be roughly equal in tokens.
-        let full = demo.views.iter().find(|v| v.mode == "full").unwrap();
-        let sigs = demo.views.iter().find(|v| v.mode == "signatures").unwrap();
-        assert_eq!(sigs.est_tokens, full.est_tokens);
-    }
-
-    /// `None` when `CAIRN_HELIX_URL` is unset or HelixDB is unreachable (tests skip gracefully).
+    /// `None` when `CAIRN_DB_URL` is unset or SurrealDB is unreachable (tests skip gracefully).
     /// The temp dir is a scratch workspace for the test's files (separate from the store).
     pub(crate) fn test_state() -> Option<(AppState, tempfile::TempDir)> {
         let cfg = cairn_store::Store::test_config()?;
@@ -2519,6 +3039,300 @@ mod tests {
         assert_eq!(backfilled[1].data["kind"], "login_failed");
     }
 
+    // -- v0.8.0 Sprint 10: every state-mutating handler that's supposed to go live over SSE
+    // actually does. These are the direct proof for A5-C/D and C-3 - the invalidation map on
+    // the web side is only correct if these fire.
+
+    #[tokio::test]
+    async fn remember_publishes_a_memory_added_event() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        let resp = remember(
+            State(state.clone()),
+            Extension(ScopeCtx::default()),
+            Json(cairn_core::NewMemory::new("sprint10 sse test")),
+        )
+        .await
+        .unwrap();
+        let ev = rx
+            .try_recv()
+            .expect("remember should publish a memory event");
+        assert_eq!(ev.kind, crate::events::KIND_MEMORY);
+        assert_eq!(ev.data["action"], "added");
+        assert_eq!(ev.data["memory_id"], resp.0.id);
+    }
+
+    #[tokio::test]
+    async fn memory_by_scope_returns_only_the_exact_scope_no_global_blend() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-by-scope-test".to_string()),
+                ..cairn_core::NewMemory::new("proj-by-scope-test: project-scoped fact")
+            })
+            .unwrap();
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new(
+                "by-scope test: an unrelated global memory",
+            ))
+            .unwrap();
+
+        // Unlike recall, by-scope must NOT blend in Global memories for a Project query.
+        let resp = memory_by_scope(
+            State(state.clone()),
+            Query(ByScopeQuery {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-by-scope-test".to_string()),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(resp.0.len(), 1);
+        assert_eq!(resp.0[0].content, "proj-by-scope-test: project-scoped fact");
+
+        // Project scope without a scope_id is a 400, not a silent empty/Global fallback.
+        let err = memory_by_scope(
+            State(state.clone()),
+            Query(ByScopeQuery {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_memories_filters_by_scope_and_reports_total() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-list-test".to_string()),
+                ..cairn_core::NewMemory::new("list test: project-scoped fact")
+            })
+            .unwrap();
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("list test: global memory"))
+            .unwrap();
+
+        let all = list_memories(State(state.clone()), Query(MemoryListQuery::default()))
+            .await
+            .unwrap();
+        assert_eq!(all.0.total, 2);
+        assert_eq!(all.0.items.len(), 2);
+
+        let scoped = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                scope_type: Some(cairn_core::ScopeType::Project),
+                scope_id: Some("proj-list-test".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(scoped.0.total, 1);
+        assert_eq!(scoped.0.items[0].content, "list test: project-scoped fact");
+    }
+
+    #[tokio::test]
+    async fn list_memories_clamps_limit_and_offsets_past_end() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        for i in 0..3 {
+            state
+                .mem
+                .remember(cairn_core::NewMemory::new(format!("clamp test mem {i}")))
+                .unwrap();
+        }
+
+        // limit=0 clamps up to 1; total stays post-filter pre-pagination.
+        let one = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                limit: Some(0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(one.0.items.len(), 1);
+        assert_eq!(one.0.total, 3);
+
+        // offset past the end yields empty items, same total.
+        let past = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                offset: Some(50),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(past.0.items.is_empty());
+        assert_eq!(past.0.total, 3);
+    }
+
+    #[tokio::test]
+    async fn list_memories_q_matches_content_case_insensitively() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("The Widget Factory uses Tokio"))
+            .unwrap();
+        state
+            .mem
+            .remember(cairn_core::NewMemory::new("unrelated note about pandas"))
+            .unwrap();
+
+        let hits = list_memories(
+            State(state.clone()),
+            Query(MemoryListQuery {
+                q: Some("widget factory".to_string()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(hits.0.total, 1);
+        assert!(hits.0.items[0].content.contains("Widget Factory"));
+    }
+
+    #[tokio::test]
+    async fn get_memory_returns_the_full_record_and_404s_on_unknown() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let created = state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-get-test".to_string()),
+                ..cairn_core::NewMemory::new("get test: full record fact")
+            })
+            .unwrap();
+
+        let got = get_memory(
+            State(state.clone()),
+            axum::extract::Path(created.id.clone()),
+        )
+        .await
+        .unwrap();
+        // Lock the full-serialization contract the Memory Browser drawer depends on: the wire
+        // JSON must expose scope, provenance, edge, and trust fields - not a slimmed view.
+        let wire = serde_json::to_value(&got.0).unwrap();
+        for key in [
+            "scope_type",
+            "scope_id",
+            "session_id",
+            "suspicious",
+            "derived_from",
+            "contradicts",
+            "supersedes",
+            "applies_to",
+            "promo_score",
+            "promo_locked",
+            "title",
+            "reasoning",
+        ] {
+            assert!(wire.get(key).is_some(), "wire JSON must carry `{key}`");
+        }
+        assert_eq!(wire["scope_type"], "project");
+
+        let err = get_memory(
+            State(state.clone()),
+            axum::extract::Path("nope".to_string()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn config_view_redacts_secrets_and_names_env_vars() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let entries = config_view(State(state.clone())).await.0;
+        assert!(!entries.is_empty());
+        // Every entry names an env var; secret-bearing keys never leak raw values.
+        for e in &entries {
+            assert!(!e.env.is_empty());
+            if e.key == "db_pass" || e.key == "secret_key" || e.key.ends_with("api_key") {
+                assert!(
+                    e.value == json!("set") || e.value == json!("not set"),
+                    "secret `{}` must be redacted, got {}",
+                    e.key,
+                    e.value
+                );
+            }
+        }
+        let autopilot = entries.iter().find(|e| e.key == "drift_autopilot").unwrap();
+        assert_eq!(autopilot.env, "CAIRN_DRIFT_AUTOPILOT");
+    }
+
+    #[tokio::test]
+    async fn upsert_project_publishes_a_project_event() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        upsert_project(
+            State(state.clone()),
+            Json(ProjectUpsertBody {
+                id: "proj-sse-test".into(),
+                name: "sse test project".into(),
+                path: "/tmp/proj".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        let ev = rx
+            .try_recv()
+            .expect("upsert_project should publish a project event");
+        assert_eq!(ev.kind, crate::events::KIND_PROJECT);
+        assert_eq!(ev.data["project_id"], "proj-sse-test");
+    }
+
+    #[tokio::test]
+    async fn audit_log_record_publishes_a_live_audit_event() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        let mut rx = state.events.subscribe();
+        state.audit_log.record(
+            &state.store,
+            &state.events,
+            "sse_test_kind",
+            "tester",
+            "detail here".into(),
+        );
+        let ev = rx
+            .try_recv()
+            .expect("audit_log.record should publish a live audit event");
+        assert_eq!(ev.kind, crate::events::KIND_AUDIT);
+        assert_eq!(ev.data["kind"], "sse_test_kind");
+        assert_eq!(ev.data["actor"], "tester");
+    }
+
     // -- v0.5.0 Sprint 2: memory CRUD + confidence + pin -------------------------------
 
     #[tokio::test]
@@ -2537,6 +3351,8 @@ mod tests {
             importance: Some(0.9),
             concepts: None,
             files: None,
+            title: None,
+            reasoning: None,
         };
         let edited = edit_memory(
             State(state.clone()),
@@ -2813,14 +3629,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_persists_drift_events_and_approve_moves_them() {
+    async fn verify_persists_drift_events_with_a_pending_danger_status() {
         let Some((state, dir)) = test_state() else {
             return;
         };
         let f = dir.path().join("drift.txt");
         let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
         std::fs::write(&f, &original).unwrap();
-        // A gutting edit - verify flags danger.
+        // A gutting edit - verify flags danger. Web redesign v2: there is no manual
+        // approve/reject anymore; the autopilot never auto-approves danger, so the event
+        // stays pending in the read-only audit log ("flagged").
         verify(
             State(state.clone()),
             Json(VerifyBody {
@@ -2836,21 +3654,13 @@ mod tests {
             !drifts.is_empty(),
             "verify-d danger should produce a drift event"
         );
-        let id = drifts[0].id;
-
-        // Approve it.
-        let ok = approve_drift(State(state.clone()), axum::extract::Path(id))
-            .await
-            .unwrap()
-            .0;
-        assert_eq!(ok["status"], serde_json::json!("approved"));
-
-        // Re-approving a resolved event returns 404.
-        let err = approve_drift(State(state.clone()), axum::extract::Path(id))
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(err.status, StatusCode::NOT_FOUND);
+        assert_eq!(drifts[0].risk, "danger");
+        assert_eq!(drifts[0].status, cairn_session::DriftStatus::Pending);
+        assert!(
+            !drifts[0].detail.contains("auto-approved"),
+            "danger must never carry an autopilot approval; got {}",
+            drifts[0].detail
+        );
     }
 
     // -- v0.5.0 Sprint 5: ledger ---------------------------------------------------------
@@ -2910,7 +3720,7 @@ mod tests {
         };
         let h = setup_health(State(state.clone())).await.0;
         let v = serde_json::to_value(&h.health).unwrap();
-        assert!(v.get("helix_reachable").is_some());
+        assert!(v.get("db_reachable").is_some());
         assert!(v.get("admin_exists").is_some());
         assert!(v.get("embedder_loaded").is_some());
         assert!(v.get("secret_key_configured").is_some());
@@ -2941,6 +3751,7 @@ mod tests {
 
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "hybrid search test query".into(),
                 limit: Some(2),
@@ -2978,6 +3789,7 @@ mod tests {
             .unwrap();
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "P3.3 expand fallback".into(),
                 limit: Some(5),
@@ -3008,6 +3820,7 @@ mod tests {
             .unwrap();
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "P3.3 default".into(),
                 limit: Some(5),
@@ -3038,6 +3851,7 @@ mod tests {
             .unwrap();
         let resp = search_handler(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             axum::extract::Query(SearchQuery {
                 q: "P4.2 rerank fallback".into(),
                 limit: Some(5),
@@ -3053,6 +3867,71 @@ mod tests {
             resp.iter()
                 .any(|h| h.memory.content.contains("P4.2 rerank fallback")),
             "rerank=local with config off should still find the memory"
+        );
+    }
+
+    /// v0.8.0 Sprint 10 regression: `GET /api/search` used to never extract `Extension<ScopeCtx>`
+    /// at all, so it always searched Global-only regardless of the caller's
+    /// `X-Cairn-Project`/`X-Cairn-Session` headers - unlike `/api/memory/recall`, which already
+    /// respected scope. Proves the fix end-to-end through the actual HTTP handler.
+    #[tokio::test]
+    async fn search_endpoint_respects_project_scope() {
+        let Some((state, _dir)) = test_state() else {
+            return;
+        };
+        state
+            .mem
+            .remember(cairn_core::NewMemory {
+                scope_type: cairn_core::ScopeType::Project,
+                scope_id: Some("proj-alpha".to_string()),
+                ..cairn_core::NewMemory::new("proj-alpha secret: the launch code is banana")
+            })
+            .unwrap();
+
+        let other_project = ScopeCtx {
+            project_id: Some("proj-beta".to_string()),
+            session_id: None,
+        };
+        let resp = search_handler(
+            State(state.clone()),
+            Extension(other_project),
+            axum::extract::Query(SearchQuery {
+                q: "launch code".into(),
+                limit: Some(5),
+                rerank_depth: Some(20),
+                expand: None,
+                rerank: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            resp.iter().all(|h| !h.memory.content.contains("banana")),
+            "proj-beta must not see proj-alpha's project-scoped memory via /api/search"
+        );
+
+        let same_project = ScopeCtx {
+            project_id: Some("proj-alpha".to_string()),
+            session_id: None,
+        };
+        let resp = search_handler(
+            State(state.clone()),
+            Extension(same_project),
+            axum::extract::Query(SearchQuery {
+                q: "launch code".into(),
+                limit: Some(5),
+                rerank_depth: Some(20),
+                expand: None,
+                rerank: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert!(
+            resp.iter().any(|h| h.memory.content.contains("banana")),
+            "proj-alpha must see its own project-scoped memory via /api/search"
         );
     }
 
@@ -3100,9 +3979,41 @@ mod tests {
         );
     }
 
+    /// v0.8.0 Sprint 10 regression: a hard navigation/reload of a real (non-pre-rendered)
+    /// dynamic-route id used to fall straight through to the site ROOT's shell - verified
+    /// live, this silently rendered the "Now" dashboard at a `/you/sessions/<real-id>` URL.
+    /// `find_shell_in` must resolve to that route family's OWN placeholder shell instead.
+    #[test]
+    fn find_shell_in_picks_the_nearest_ancestor_with_a_prerendered_shell() {
+        let files = || {
+            [
+                "index.html".to_string(),
+                "projects/placeholder.html".to_string(),
+                "you/sessions/new.html".to_string(),
+                "you/settings.html".to_string(),
+            ]
+            .into_iter()
+        };
+
+        assert_eq!(
+            find_shell_in("projects/f5d3a2d44a6859a0", files()),
+            Some("projects/placeholder.html".to_string()),
+        );
+        assert_eq!(
+            find_shell_in("you/sessions/5c1b717f-9a1f-41a7-83bd-ab48819e6ddc", files()),
+            Some("you/sessions/new.html".to_string()),
+            "must match the 2-segment `you/sessions` family, not fall through to `you/settings`",
+        );
+        assert_eq!(
+            find_shell_in("totally/unknown/path", files()),
+            None,
+            "no ancestor prefix matches anything embedded - caller falls back to the site root",
+        );
+    }
+
     /// Registry HTTP integration: publish a signed pack, list it, download the tarball
     /// back, then revoke and confirm the revocations log records it. Skips when
-    /// `CAIRN_HELIX_URL` is unset.
+    /// `CAIRN_DB_URL` is unset.
     #[tokio::test]
     async fn registry_publish_list_download_revoke_end_to_end() {
         use axum::body::{to_bytes, Body};
@@ -3138,7 +4049,7 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .method("POST")
-                    .uri("/registry/packs")
+                    .uri("/api/registry/packs")
                     .header("content-type", cairn_pack::MIME)
                     .body(Body::from(tar_bytes.clone()))
                     .unwrap(),
@@ -3156,7 +4067,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs")
+                    .uri("/api/registry/packs")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3173,7 +4084,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs/alpha/1.0.0/download")
+                    .uri("/api/registry/packs/alpha/1.0.0/download")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3191,7 +4102,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/search?q=alp")
+                    .uri("/api/registry/search?q=alp")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3207,7 +4118,7 @@ mod tests {
             .oneshot(
                 HttpRequest::builder()
                     .method("DELETE")
-                    .uri("/registry/packs/alpha/1.0.0")
+                    .uri("/api/registry/packs/alpha/1.0.0")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3223,7 +4134,7 @@ mod tests {
         let resp = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/revocations")
+                    .uri("/api/registry/revocations")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3304,7 +4215,7 @@ mod tests {
             .clone()
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs")
+                    .uri("/api/registry/packs")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -3324,7 +4235,7 @@ mod tests {
         let resp = app
             .oneshot(
                 HttpRequest::builder()
-                    .uri("/registry/packs/local-notes/1.0.0/manifest.json")
+                    .uri("/api/registry/packs/local-notes/1.0.0/manifest.json")
                     .body(Body::empty())
                     .unwrap(),
             )

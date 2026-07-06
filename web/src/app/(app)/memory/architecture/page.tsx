@@ -12,7 +12,8 @@ import {
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
-import { Download } from "lucide-react";
+import { ArrowLeft, Download } from "lucide-react";
+import Link from "next/link";
 import { useArchitectureReportQuery } from "@/lib/queries";
 import type { ArchitectureReport } from "@/lib/api";
 
@@ -35,7 +36,13 @@ export default function ArchitecturePage() {
     <div className="space-y-6 max-w-4xl">
       <header className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Architecture</h1>
+          <Link
+            href="/memory"
+            className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+          >
+            <ArrowLeft className="size-3" aria-hidden="true" /> Memory
+          </Link>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight">Architecture</h1>
           <p className="mt-1 text-sm text-muted-foreground">
             Structural analysis of the memory graph: communities, hub nodes, bridges, and cycles.
           </p>

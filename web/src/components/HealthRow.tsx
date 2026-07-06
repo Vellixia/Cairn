@@ -98,7 +98,16 @@ export function HealthRow() {
   });
   const setupQ = useQuery({
     queryKey: ["health", "setup"],
-    queryFn: () => getJSON<{ ok: boolean; memories: number; detail?: string }>("/api/setup/health"),
+    queryFn: () =>
+      getJSON<{
+        health: {
+          db_reachable: boolean;
+          admin_exists: boolean;
+          embedder_loaded: boolean;
+          secret_key_configured: boolean;
+        };
+        embed_provider: string;
+      }>("/api/setup/health"),
     refetchInterval: HEALTH_TTL,
     staleTime: HEALTH_TTL,
   });
@@ -119,11 +128,11 @@ export function HealthRow() {
         ? "ok"
         : "warn";
 
-  const helixStatus: Status = setupQ.isLoading
+  const dbStatus: Status = setupQ.isLoading
     ? "loading"
     : setupQ.isError
       ? "down"
-      : setupQ.data?.ok
+      : setupQ.data?.health.db_reachable
         ? "ok"
         : "warn";
 
@@ -157,19 +166,19 @@ export function HealthRow() {
         icon={Radio}
       />
       <Pill
-        label="Helix"
-        status={helixStatus}
+        label="Database"
+        status={dbStatus}
         detail={
-          setupQ.data
-            ? `${setupQ.data.memories} memories indexed`
-            : "graph + vector store"
+          typeof statsQ.data?.memories === "number"
+            ? `${statsQ.data.memories} memories indexed`
+            : "SurrealDB - graph + vector store"
         }
         icon={Database}
       />
       <Pill
         label="Embedder"
-        status="ok"
-        detail="local hashing (default)"
+        status={setupQ.data?.health.embedder_loaded ? "ok" : setupQ.isLoading ? "loading" : "warn"}
+        detail={setupQ.data ? `${setupQ.data.embed_provider} provider` : "loading..."}
         icon={Cpu}
       />
       <Pill

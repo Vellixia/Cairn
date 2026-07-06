@@ -2,7 +2,7 @@
 //!
 //! Every constructor here is pure (no I/O, no clock dependency other than
 //! `Utc::now()` for stable timestamps). Tests should never reach for a real
-//! filesystem, network, or HelixDB — that boundary is enforced by *what* this
+//! filesystem, network, or a live database — that boundary is enforced by *what* this
 //! module exports, not by discipline.
 //!
 //! Conventions:
@@ -65,7 +65,9 @@ pub fn mock_memory_at(
         id,
         kind,
         tier,
+        title: None,
         content: content.to_string(),
+        reasoning: None,
         concepts: default_concepts(content),
         files: vec![],
         session_id: Some(mock_session("alpha")),
@@ -79,6 +81,10 @@ pub fn mock_memory_at(
         contradicts: vec![],
         supersedes: vec![],
         applies_to: vec![],
+        scope_type: cairn_core::ScopeType::Global,
+        scope_id: None,
+        promo_score: 0.0,
+        promo_locked: false,
         created_at: when,
         updated_at: when,
     }

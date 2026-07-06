@@ -88,8 +88,8 @@ fn build_capabilities(s: &AppState) -> Capabilities {
         "/api/openapi.json".into(),
         "/api/context/read".into(),
         "/api/context/assemble".into(),
-        "/api/context/compression-demo".into(),
         "/api/context/pressure".into(),
+        "/api/config".into(),
         "/api/memory".into(),
         "/api/memory/recall".into(),
         "/api/memory/wakeup".into(),
@@ -113,7 +113,10 @@ fn build_capabilities(s: &AppState) -> Capabilities {
         "/api/tools/call".into(),
         "/api/ledger".into(),
         "/api/events".into(),
-        "/api/ws".into(),
+        "/api/projects".into(),
+        "/api/documents".into(),
+        "/api/cron/jobs".into(),
+        "/api/memory/by-scope".into(),
     ];
 
     Capabilities {

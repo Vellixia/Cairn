@@ -79,7 +79,14 @@ If the page returns a Next.js error envelope (look for "Application error" or st
 
 A doc with any P0 finding is treated as failed for the walk summary. A doc with only P1+P2 findings passes.
 
-## Index (30 docs; doc 30 walked ⭐)
+## Index (37 docs; docs 30-37 walked ⭐)
+
+> Docs 31-37 (added 2026-07-03) cover the v0.8.0 feature set (SurrealDB backend, scope model,
+> project auto-detection, session/cron, LLM intelligence, RAG documents, dashboard promotion
+> panel, autopilot, resilience/self-tuning) against a freshly rebuilt live stack running current
+> source - not the older `cairn + helix + minio` infrastructure docs 01-30 were walked against.
+> SurrealDB has no host port by design; where these docs need direct datastore access they go
+> through a cairn read endpoint instead of a direct database query.
 
 | # | Doc | Surface | Key endpoints / tools |
 |---|---|---|---|
@@ -113,6 +120,13 @@ A doc with any P0 finding is treated as failed for the walk summary. A doc with 
 | 28 | `28-edge-cases.md` | Rate limit, CORS, env precedence, session expiry, scope denied, TLS refusal, secret-key guard, dashboard 404, content-hash dedup, multi-tenant, opt-in context injection, suspicious preference | invariant assertions |
 | 29 | `29-stubs-and-gaps.md` | Known unimplemented (WebSocket, `cairn pair`, `cairn pack`, `cairn-bench`, Web Push relay) | n/a — gap record |
 | 30 | `30-mcp-transport.md` | MCP JSON-RPC transport (stdio, the real agent surface) | `cairn mcp` over stdio; `initialize`, `tools/list`, `tools/call`, `ping`, `notifications/initialized` | **Walked** ⭐ |
+| 31 | `31-v0.8.0-surreal-scope-projects.md` | SurrealDB backend, scope model, project auto-detection | `/api/memory` + `X-Cairn-Project`/`X-Cairn-Session`, `/api/projects[/upsert]`; `cairn hook SessionStart` | **Walked** ⭐ |
+| 32 | `32-v0.8.0-session-ttl-cron-jobs.md` | Session TTL promotion, cron job list/history/manual-run | `/api/cron/{jobs,run/:job,history}` | **Walked** ⭐ |
+| 33 | `33-v0.8.0-llm-intelligence.md` | Concept extraction, contradiction detection, promotion LLM tie-break | `/api/cron/run/llm-intelligence`; fake LLM stub | **Walked** ⭐ |
+| 34 | `34-v0.8.0-rag-documents.md` | Document ingest/search/list/delete, assemble surfacing `[doc]` chunks | `cairn documents {ingest,search,list,delete}`, `/api/context/assemble` | **Walked** ⭐ |
+| 35 | `35-v0.8.0-dashboard-promotion-panel.md` | Promotion candidates + intelligence log dashboard panel | `/memory/promotion`; `preview_*` tools against the real production build | **Walked** ⭐ |
+| 36 | `36-v0.8.0-autopilot.md` | Auto-promotion + undo, drift autopilot matrix, auto-anchor, digest | `/api/memory/{:id/promote,:id/demote,autopilot-digest}`, `/api/guard/{verify,anchor/auto}` | **Walked** ⭐ |
+| 37 | `37-v0.8.0-resilience-selftuning.md` | Offline hook spool, cron health/single-flight, LLM budget, self-tuning, memory hygiene | `/api/cron/health`, `/api/cron/run/tune`; `~/.cairn/spool.jsonl` | **Walked** ⭐ |
 
 ## How to run a walk
 

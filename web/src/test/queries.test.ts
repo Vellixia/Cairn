@@ -11,8 +11,12 @@ describe("query keys", () => {
     expect(qk.memories(5)).toEqual(["memory", "wakeup", 5])
   })
 
-  it("recall key includes query string", () => {
-    expect(qk.recall("error handling")).toEqual(["memory", "recall", "error handling"])
+  it("memory list key carries the filter object under the memory prefix", () => {
+    expect(qk.memoryList({ tier: "semantic" })).toEqual(["memory", "list", { tier: "semantic" }])
+  })
+
+  it("memory detail key includes the id under the memory prefix", () => {
+    expect(qk.memoryDetail("m1")).toEqual(["memory", "detail", "m1"])
   })
 
   it("devices tokens key is stable", () => {

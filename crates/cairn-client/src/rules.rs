@@ -1,9 +1,14 @@
 //! `cairn rules` --- write per-agent instruction files that tell the model to actually USE Cairn.
 //!
 //! Registering an MCP server is not enough: the agent has to be *told* to prefer Cairn's tools
-//! (`read`/`recall`/`remember`/`sanitize`/...) over its defaults --- exactly like a hand-written rules
-//! file. This writes that guidance into each agent's native instructions file, idempotently:
-//! shared files (CLAUDE.md, AGENTS.md) get a replaceable **managed block**.
+//! over its defaults. This writes that guidance into each agent's native instructions file,
+//! idempotently: shared files (CLAUDE.md, AGENTS.md) get a replaceable **managed block**.
+//!
+//! v0.8.0 Sprint 10 (B6, layer 3): the block content itself now renders from
+//! [`cairn_mcp::guidance`], the single source of truth shared with the MCP `instructions` field
+//! and the Claude Code skill - Claude Code gets [`cairn_mcp::guidance::claude_md_block`] (slim;
+//! the skill carries the real playbook), Codex/OpenCode (no skill system) get the fuller
+//! [`cairn_mcp::guidance::agents_md_block`].
 
 use anyhow::{bail, Result};
 use std::fs;
@@ -15,63 +20,31 @@ const KNOWN: &[&str] = &["claude-code", "codex", "opencode", "agents"];
 const BEGIN: &str = "<!-- BEGIN CAIRN (managed by `cairn rules`) -->";
 const END: &str = "<!-- END CAIRN -->";
 
-/// The instruction body --- what every agent is told about using Cairn. Kept tool-name-accurate.
-const BODY: &str = "\
-## Cairn --- prefer these tools
-
-You have **Cairn** (MCP server `cairn`): persistent memory, lean context, and edit safety. Use it.
-
-- **Reading code/files:** use `read` instead of your default file read - unchanged re-reads are
-  nearly free, and `mode:\"signatures\"` returns a large file as just its structure (huge token
-  saving). Recover any full original with `expand`.
-- **Verbose tool output:** run `compress` to shrink cargo/build/log output into a compact view,
-  retaining the exact original (recover with `expand`).
-- **Memory:** at the start of a task, `wakeup` auto-injects your highest-priority memories so
-  you never start cold. Use `recall` (quick) or `search` (hybrid BM25+semantic) to find relevant
-  past decisions and context; `remember` decisions, gotchas, and rationale as you make them.
-  Record standing user preferences with `prefer`. Call `proactive_recall` at the start of each
-  turn to get context automatically injected. Use `assemble` to build a context block under a
-  token budget.
-- **Before sharing, logging, or committing text:** run `sanitize` to redact secrets/PII.
-- **Risky edits:** `checkpoint` before large changes; `verify` a proposed file against its retained
-  original to catch silent corruption; `rollback` to undo damage.
-- **Stay on task:** keep the current goal in `anchor`.
-- **End of session:** run `memory_crystallize` then `consolidate` to promote working notes into
-  durable knowledge. Curate with `memory_pin` (keep), `memory_reinforce` (bump confidence),
-  `memory_delete` (remove stale). On self-hosted servers use `registry_search` to browse
-  the local pack registry.
-- **Dashboard is observability-only:** the web UI shows what exists and progress --- you are the one
-  who writes, curates, and maintains; humans watch.
-
-Everything Cairn shows is lossless --- the full original is always one `expand` away.";
-
 /// Write the Cairn rules into `id`'s native instruction file under `project`.
 pub fn write_for(id: &str, project: &Path) -> Result<()> {
-    let path = match id {
-        "claude-code" => {
-            managed(&project.join("CLAUDE.md"))?;
-            project.join("CLAUDE.md")
-        }
-        "codex" => {
-            // Codex CLI reads AGENTS.md from the project root (or `$CODEX_HOME/AGENTS.md`
-            // for user-scope rules). We use the project root to stay scoped.
-            managed(&project.join("AGENTS.md"))?;
-            project.join("AGENTS.md")
-        }
-        "agents" | "opencode" => {
-            managed(&project.join("AGENTS.md"))?;
-            project.join("AGENTS.md")
-        }
+    let (path, block) = match id {
+        "claude-code" => (
+            project.join("CLAUDE.md"),
+            cairn_mcp::guidance::claude_md_block(),
+        ),
+        // Codex CLI reads AGENTS.md from the project root (or `$CODEX_HOME/AGENTS.md` for
+        // user-scope rules); OpenCode has no rules-file convention of its own and shares the
+        // same generic AGENTS.md target. We use the project root to stay scoped.
+        "codex" | "agents" | "opencode" => (
+            project.join("AGENTS.md"),
+            cairn_mcp::guidance::agents_md_block(),
+        ),
         other => bail!("unknown agent '{other}'. Supported: {}.", KNOWN.join(", ")),
     };
+    managed(&path, &block)?;
     println!("\u{2713} wrote Cairn rules: {}", path.display());
     Ok(())
 }
 
 /// Insert or replace the Cairn managed block in a (possibly shared) file, preserving the rest.
-fn managed(path: &Path) -> Result<()> {
+fn managed(path: &Path, body: &str) -> Result<()> {
     let existing = fs::read_to_string(path).unwrap_or_default();
-    let block = format!("{BEGIN}\n{BODY}\n{END}");
+    let block = format!("{BEGIN}\n{body}\n{END}");
     let updated = match (existing.find(BEGIN), existing.find(END)) {
         (Some(s), Some(e)) if e > s => {
             let mut out = String::with_capacity(existing.len());
@@ -113,17 +86,31 @@ mod tests {
         assert_eq!(after_first.matches(BEGIN).count(), 1);
         assert_eq!(after_first.matches(END).count(), 1);
         assert!(after_first.contains("Always write tests."));
-        assert!(after_first.contains("prefer these tools"));
-        assert!(after_first.contains("`recall`"));
+        // Claude Code gets the SLIM pointer (layer 3 fallback) - the real playbook lives in
+        // the installed skill (layer 2), not permanently in CLAUDE.md.
+        assert!(after_first.contains("Cairn MCP is connected"));
+        assert!(after_first.contains("cairn skill"));
     }
 
     #[test]
-    fn codex_targets_agents_md_at_project_root() {
+    fn codex_targets_agents_md_at_project_root_with_the_fuller_block() {
         let dir = tempfile::tempdir().unwrap();
         write_for("codex", dir.path()).unwrap();
         let p = dir.path().join("AGENTS.md");
         assert!(p.exists());
-        assert!(fs::read_to_string(&p).unwrap().contains("Cairn"));
-        assert!(fs::read_to_string(&p).unwrap().contains(BEGIN));
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains(BEGIN));
+        // Codex has no skill system to fall back on, so AGENTS.md carries the fuller block
+        // (same content class as the pre-Sprint-10 CLAUDE.md block) rather than a slim pointer.
+        assert!(content.contains("prefer these tools"));
+        assert!(content.contains("`recall`"));
+    }
+
+    #[test]
+    fn opencode_shares_the_same_agents_md_target_and_block_as_codex() {
+        let dir = tempfile::tempdir().unwrap();
+        write_for("opencode", dir.path()).unwrap();
+        let content = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        assert!(content.contains("prefer these tools"));
     }
 }

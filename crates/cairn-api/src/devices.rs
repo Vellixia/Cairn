@@ -126,6 +126,7 @@ pub async fn create_token(
     t.token = Some(bearer.clone());
     state.audit_log.record(
         &state.store,
+        &state.events,
         "token_issued",
         &rec.username,
         format!("{} ({})", req.name, scope.as_str()),
@@ -152,9 +153,13 @@ pub async fn revoke_token(
     };
     match state.store.revoke_token(&id) {
         Ok(true) => {
-            state
-                .audit_log
-                .record(&state.store, "token_revoked", &rec.username, id.clone());
+            state.audit_log.record(
+                &state.store,
+                &state.events,
+                "token_revoked",
+                &rec.username,
+                id.clone(),
+            );
             (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
         }
         Ok(false) => (
@@ -190,6 +195,7 @@ pub async fn create_pair_code(
         };
     state.audit_log.record(
         &state.store,
+        &state.events,
         "pair_code_issued",
         &rec.username,
         format!("{} (ttl {}m)", req.name, ttl),

@@ -2,7 +2,7 @@
 title: "Cairn End-to-End Testing"
 type: testing
 status: living
-updated: 2026-07-01
+updated: 2026-07-02
 ---
 
 # Cairn End-to-End Testing
@@ -22,18 +22,21 @@ the CI does not run either. Every Rust test exercises a real Cairn crate against
 
 ### 1. Rust integration tests - `crates/cairn-tests/`
 
-A workspace member hosting 17 hermetic integration test files under
+A workspace member hosting hermetic integration test files under
 `crates/cairn-tests/tests/<NN>_<topic>.rs`. Each file is a separate `cargo test` binary,
 all run by `cargo test -p cairn-tests` (or `cargo test --workspace`). Tests use **no
-network and no live HelixDB** - they construct a real `cairn_store::Store` backed by a
+network and no live database** - they construct a real `cairn_store::Store` backed by a
 new in-memory `MemoryBackend` (added in 0.7.1) and exercise every engine.
 
 ```sh
-cargo test -p cairn-tests                       # all 17 files, 134 tests
+cargo test -p cairn-tests                       # 26 files, 204 tests (as of v0.8.0)
 cargo test -p cairn-tests --test 19_memory_engine     # one
 ```
 
-Coverage (17 files, 134 tests):
+Coverage (17 of 26 files itemized below; v0.8.0 added 9 more HTTP-API-focused files -
+`02, 14, 21, 24-29` - not yet itemized here in detail, see
+`crates/cairn-tests/tests/<NN>_*.rs` directly or `docs/planning/plans/v0.8.0.md`'s per-sprint
+"What shipped" sections for what each one covers):
 
 | # | File | Real crate surface |
 |---|------|-------------------|
@@ -55,12 +58,12 @@ Coverage (17 files, 134 tests):
 | 22 | `22_mcp_dispatch.rs` | real `cairn_mcp::McpServer::dispatch` - tool list, remember/recall round-trip, assemble, sanitize, unknown-tool error |
 | 23 | `23_api_envelope.rs` | real `cairn_api::router` mounted via `tower::ServiceExt::oneshot` - /api/health, /api/capabilities, /api/openapi.json, /api/stats (auth-gated), 404 envelope |
 
-**Hermetic boundary:** the test bucket never talks to HelixDB. `Store::open_in_memory()`
-constructs a fully in-memory `Store` whose every operation matches the Helix backend's
+**Hermetic boundary:** the test bucket never talks to a live database. `Store::open_in_memory()`
+constructs a fully in-memory `Store` whose every operation matches the SurrealDB backend's
 semantics (last-write-wins on `upsert_memory`, monotonic audit ids, single-use pairing codes,
-`__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)` so
-`MemoryEngine` falls back to lexical ranking, identical to the offline behaviour of the
-production server when `CAIRN_HELIX_URL` is unset.
+`__deleted__` tombstone honoring). `semantic_recall` returns `Ok(None)`, so `MemoryEngine`
+falls back to lexical ranking - the same fallback the production server takes whenever the
+active embedder has no vector index available.
 
 **Bugs surfaced by this bucket in 0.7.1:**
 - `crates/cairn-memory/src/gotcha_tracker.rs:122` and `followup_tracker.rs:56` panic on

@@ -87,7 +87,15 @@ fn edit_updates_only_specified_fields() {
     let Some((mem, _dir)) = engine() else { return };
     let m = mem.remember(NewMemory::new("original content")).unwrap();
     let updated = mem
-        .edit(&m.id, Some("new content".into()), None, None, None)
+        .edit(
+            &m.id,
+            Some("new content".into()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .expect("edit")
         .expect("found");
     assert_eq!(updated.content, "new content");
@@ -95,7 +103,7 @@ fn edit_updates_only_specified_fields() {
     assert!((updated.importance - 0.5).abs() < 1e-6);
     // Unknown id returns Ok(None).
     assert!(mem
-        .edit("no-such-id", None, None, None, None)
+        .edit("no-such-id", None, None, None, None, None, None)
         .unwrap()
         .is_none());
 }

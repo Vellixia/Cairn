@@ -2,7 +2,7 @@
 //!
 //! v1's `/api/auth/setup` accepted only username + password. v2 layers an embed-provider
 //! picker, optional device-pair via a QR code, and a green-health check that verifies
-//! HelixDB reachability, the embed provider, and that the admin record round-tripped.
+//! database reachability, the embed provider, and that the admin record round-tripped.
 //!
 //! The wizard flow is:
 //! 1. `POST /api/auth/setup` with the embed fields + credentials. Returns the session cookie
@@ -18,7 +18,7 @@ use serde::Serialize;
 
 #[derive(Debug, Serialize)]
 pub struct HealthCheck {
-    pub helix_reachable: bool,
+    pub db_reachable: bool,
     pub admin_exists: bool,
     pub embedder_loaded: bool,
     pub secret_key_configured: bool,
@@ -35,12 +35,12 @@ pub async fn setup_health(State(s): State<AppState>) -> Json<SetupHealth> {
     let admin_exists = crate::admin::load_admin(&s)
         .map(|r| r.is_some())
         .unwrap_or(false);
-    let helix_reachable = s.store.count_memories().is_ok();
+    let db_reachable = s.store.count_memories().is_ok();
     let embedder_loaded = cairn_embed::from_config(&s.cfg.embed).is_ok();
     let secret_key_configured = s.cfg.secret_key.is_some();
     Json(SetupHealth {
         health: HealthCheck {
-            helix_reachable,
+            db_reachable,
             admin_exists,
             embedder_loaded,
             secret_key_configured,

@@ -6,9 +6,10 @@ import { useEffect, useState } from "react";
 import {
   LayoutDashboard,
   Brain,
-  ShieldCheck,
+  FolderGit2,
+  FileText,
+  Bot,
   UserCircle,
-  Library,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -26,15 +27,20 @@ import Logo from "@/components/Logo";
 
 type Item = { href: string; label: string; icon: LucideIcon };
 
-const ITEMS: Item[] = [
+// Observe: pure observability - what exists, what happened, what the machine decided.
+// Admin: security/account surfaces (tokens, pairing, audit, settings) - the only place
+// manual input stays. Trust folded into Automation; Registry is agent-facing (CLI/MCP only).
+const MONITOR_ITEMS: Item[] = [
   { href: "/", label: "Now", icon: LayoutDashboard },
   { href: "/memory", label: "Memory", icon: Brain },
-  { href: "/trust", label: "Trust", icon: ShieldCheck },
-  { href: "/registry/packs", label: "Registry", icon: Library },
-  { href: "/you", label: "You", icon: UserCircle },
+  { href: "/projects", label: "Projects", icon: FolderGit2 },
+  { href: "/documents", label: "Documents", icon: FileText },
+  { href: "/automation", label: "Automation", icon: Bot },
 ];
 
-const STORAGE_KEY = "cairn-sidebar-v3";
+const ADMIN_ITEMS: Item[] = [{ href: "/you", label: "You", icon: UserCircle }];
+
+const STORAGE_KEY = "cairn-sidebar-v4";
 
 function isActive(pathname: string | null, href: string): boolean {
   if (!pathname) return false;
@@ -79,8 +85,8 @@ export function CairnSidebar() {
   const [hydrated, setHydrated] = useState(false);
 
   useEffect(() => {
-    // Migration: drop any prior sidebar keys; v3 = flat.
-    for (const k of ["cairn-sidebar-v1", "cairn-sidebar-v2", "cairn-infocard-dismissed-v1"]) {
+    // Migration: drop any prior sidebar keys; v4 = grouped (Monitor/Admin).
+    for (const k of ["cairn-sidebar-v1", "cairn-sidebar-v2", "cairn-sidebar-v3", "cairn-infocard-dismissed-v1"]) {
       try {
         window.localStorage.removeItem(k);
       } catch {
@@ -103,20 +109,41 @@ export function CairnSidebar() {
   return (
     <Sidebar collapsible="offcanvas" className="border-r border-line">
       <SidebarHeader className="border-b border-line">
-        <div className="flex items-center gap-2 px-2 py-2">
+        <div className="flex items-center gap-2.5 px-2 py-2">
           <Logo size={26} />
-          <span className="font-semibold tracking-tight">Cairn</span>
+          <div className="flex flex-col leading-none">
+            <span className="font-semibold tracking-tight">Cairn</span>
+            <span className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.2em] text-muted-foreground">
+              mission control
+            </span>
+          </div>
         </div>
       </SidebarHeader>
       <SidebarContent>
         <SidebarGroup>
           <SidebarGroupLabel className="px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-            Workspace
+            Monitor
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
               {hydrated
-                ? ITEMS.map((it) => (
+                ? MONITOR_ITEMS.map((it) => (
+                    <SidebarMenuItem key={it.href}>
+                      <NavLink item={it} active={isActive(pathname, it.href)} />
+                    </SidebarMenuItem>
+                  ))
+                : null}
+            </SidebarMenu>
+          </SidebarGroupContent>
+        </SidebarGroup>
+        <SidebarGroup>
+          <SidebarGroupLabel className="px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+            Admin
+          </SidebarGroupLabel>
+          <SidebarGroupContent>
+            <SidebarMenu>
+              {hydrated
+                ? ADMIN_ITEMS.map((it) => (
                     <SidebarMenuItem key={it.href}>
                       <NavLink item={it} active={isActive(pathname, it.href)} />
                     </SidebarMenuItem>

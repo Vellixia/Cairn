@@ -1,8 +1,8 @@
 //! In-memory [`StoreBackend`](crate::db::StoreBackend) implementation.
 //!
 //! Used by the hermetic test bucket (`crates/cairn-tests/`) and any other
-//! caller that wants a `Store` without standing up HelixDB. The semantics
-//! match the Helix backend wherever it matters for engine correctness:
+//! caller that wants a `Store` without standing up a database. The semantics
+//! match the SurrealDB backend wherever it matters for engine correctness:
 //!
 //! - last-write-wins on `upsert_memory` (older `updated_at` is dropped).
 //! - monotonic `AuditRecord` ids so SSE replay works the same.
@@ -11,13 +11,16 @@
 //!
 //! No vector index: `semantic_recall` returns `Ok(None)` so `MemoryEngine`
 //! falls back to lexical ranking, identical to the offline behaviour of
-//! the production server when `CAIRN_HELIX_URL` is unset.
+//! the production server when `CAIRN_DB_URL` is unset.
 
-use crate::db::{AuditRecord, StoreBackend};
+use crate::db::{
+    AuditRecord, DocumentChunkRecord, DocumentSummary, ProjectRecord, PromotionLogEntry,
+    StoreBackend,
+};
 use crate::Store;
 use cairn_core::{ContentHash, DeviceToken, Error, Memory, Result, TokenScope};
 use chrono::{DateTime, Utc};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Mutex;
 
 pub struct MemoryBackend {
@@ -47,6 +50,12 @@ struct Inner {
     next_audit_id: i64,
     /// (ts, kind, risk, path) append-only, newest first when read
     guard_events: Vec<(String, String, String, String)>,
+    /// id -> ProjectRecord (v0.8.0 Sprint 3)
+    projects: HashMap<String, ProjectRecord>,
+    /// chunk id -> DocumentChunkRecord (v0.8.0 Sprint 6)
+    document_chunks: HashMap<String, DocumentChunkRecord>,
+    /// append-only promotion log, oldest first (v0.8.0 Sprint 8)
+    promotion_log: Vec<PromotionLogEntry>,
 }
 
 impl MemoryBackend {
@@ -64,6 +73,9 @@ impl MemoryBackend {
                 audit: Vec::new(),
                 next_audit_id: 1,
                 guard_events: Vec::new(),
+                projects: HashMap::new(),
+                document_chunks: HashMap::new(),
+                promotion_log: Vec::new(),
             }),
         }
     }
@@ -162,6 +174,22 @@ impl StoreBackend for MemoryBackend {
         Ok(())
     }
 
+    fn reassign_scope(
+        &self,
+        id: &str,
+        scope_type: cairn_core::ScopeType,
+        scope_id: Option<String>,
+    ) -> Result<bool> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        let Some(m) = g.memories.get_mut(id) else {
+            return Ok(false);
+        };
+        m.scope_type = scope_type;
+        m.scope_id = scope_id;
+        m.updated_at = Utc::now();
+        Ok(true)
+    }
+
     fn edit_memory(
         &self,
         id: &str,
@@ -169,6 +197,8 @@ impl StoreBackend for MemoryBackend {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<bool> {
         let mut g = self.inner.lock().map_err(poisoned)?;
         let Some(existing) = g.memories.get(id).cloned() else {
@@ -190,6 +220,12 @@ impl StoreBackend for MemoryBackend {
         }
         if let Some(f) = files {
             updated.files = f;
+        }
+        if let Some(t) = title {
+            updated.title = Some(t);
+        }
+        if let Some(r) = reasoning {
+            updated.reasoning = Some(r);
         }
         updated.updated_at = Utc::now();
         let hash = ContentHash::of_str(&updated.content);
@@ -327,7 +363,7 @@ impl StoreBackend for MemoryBackend {
 
     fn list_checkpoints(&self) -> Result<Vec<(String, String, String)>> {
         let g = self.inner.lock().map_err(poisoned)?;
-        // Helix returns newest first; match that ordering.
+        // The real backend returns newest first; match that ordering.
         let mut v: Vec<_> = g
             .checkpoints
             .iter()
@@ -412,6 +448,168 @@ impl StoreBackend for MemoryBackend {
         let g = self.inner.lock().map_err(poisoned)?;
         Ok(g.next_audit_id - 1)
     }
+
+    fn upsert_project(&self, id: &str, name: &str, path: &str) -> Result<()> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        let now = Utc::now();
+        g.projects
+            .entry(id.to_string())
+            .and_modify(|p| {
+                p.name = name.to_string();
+                p.path = path.to_string();
+                p.last_active = now;
+            })
+            .or_insert_with(|| ProjectRecord {
+                id: id.to_string(),
+                name: name.to_string(),
+                path: path.to_string(),
+                first_seen: now,
+                last_active: now,
+            });
+        Ok(())
+    }
+
+    fn list_projects(&self) -> Result<Vec<ProjectRecord>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        let mut v: Vec<ProjectRecord> = g.projects.values().cloned().collect();
+        v.sort_by_key(|p| std::cmp::Reverse(p.last_active));
+        Ok(v)
+    }
+
+    fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        Ok(g.projects.get(id).cloned())
+    }
+
+    fn replace_document(
+        &self,
+        source: &str,
+        title: &str,
+        chunks: &[String],
+        project_id: Option<&str>,
+    ) -> Result<usize> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        g.document_chunks.retain(|_, c| c.source != source);
+        let base_id = ContentHash::of_str(source).short().to_string();
+        let now = Utc::now();
+        for (i, content) in chunks.iter().enumerate() {
+            let id = format!("{base_id}-{i}");
+            g.document_chunks.insert(
+                id.clone(),
+                DocumentChunkRecord {
+                    id,
+                    source: source.to_string(),
+                    title: title.to_string(),
+                    chunk_index: i,
+                    content: content.clone(),
+                    project_id: project_id.map(str::to_string),
+                    created_at: now,
+                },
+            );
+        }
+        Ok(chunks.len())
+    }
+
+    fn list_documents(&self, project_filter: Option<&str>) -> Result<Vec<DocumentSummary>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        let mut by_source: HashMap<String, DocumentSummary> = HashMap::new();
+        for c in g.document_chunks.values() {
+            if let Some(want) = project_filter {
+                if c.project_id.as_deref() != Some(want) && c.project_id.is_some() {
+                    continue;
+                }
+            }
+            by_source
+                .entry(c.source.clone())
+                .and_modify(|d| {
+                    d.chunk_count += 1;
+                    if c.created_at > d.updated_at {
+                        d.updated_at = c.created_at;
+                    }
+                })
+                .or_insert_with(|| DocumentSummary {
+                    id: ContentHash::of_str(&c.source).short().to_string(),
+                    source: c.source.clone(),
+                    title: c.title.clone(),
+                    chunk_count: 1,
+                    project_id: c.project_id.clone(),
+                    updated_at: c.created_at,
+                });
+        }
+        let mut out: Vec<DocumentSummary> = by_source.into_values().collect();
+        out.sort_by_key(|d| std::cmp::Reverse(d.updated_at));
+        Ok(out)
+    }
+
+    /// No vector index in the hermetic backend - falls back to a naive lexical match count
+    /// (case-insensitive substring hits per query word), same "good enough offline" spirit as
+    /// `semantic_recall` returning `None` for lexical-only fallback elsewhere.
+    fn search_documents(
+        &self,
+        query: &str,
+        k: usize,
+        project_filter: Option<&str>,
+    ) -> Result<Vec<DocumentChunkRecord>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        let terms: Vec<String> = query
+            .to_lowercase()
+            .split_whitespace()
+            .map(str::to_string)
+            .collect();
+        if terms.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut scored: Vec<(usize, &DocumentChunkRecord)> = g
+            .document_chunks
+            .values()
+            .filter(|c| match project_filter {
+                Some(want) => c.project_id.as_deref() == Some(want) || c.project_id.is_none(),
+                None => true,
+            })
+            .filter_map(|c| {
+                let lower = c.content.to_lowercase();
+                let hits = terms.iter().filter(|t| lower.contains(t.as_str())).count();
+                (hits > 0).then_some((hits, c))
+            })
+            .collect();
+        scored.sort_by_key(|(hits, _)| std::cmp::Reverse(*hits));
+        Ok(scored.into_iter().take(k).map(|(_, c)| c.clone()).collect())
+    }
+
+    fn delete_document(&self, source: &str) -> Result<bool> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        let before = g.document_chunks.len();
+        g.document_chunks.retain(|_, c| c.source != source);
+        Ok(g.document_chunks.len() < before)
+    }
+
+    fn record_promotion_event(&self, entry: &PromotionLogEntry) -> Result<()> {
+        let mut g = self.inner.lock().map_err(poisoned)?;
+        g.promotion_log.push(entry.clone());
+        Ok(())
+    }
+
+    fn list_promotion_log(&self, limit: usize) -> Result<Vec<PromotionLogEntry>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        Ok(g.promotion_log.iter().rev().take(limit).cloned().collect())
+    }
+
+    fn last_promotion_event(
+        &self,
+        memory_id: &str,
+        action: &str,
+    ) -> Result<Option<PromotionLogEntry>> {
+        let g = self.inner.lock().map_err(poisoned)?;
+        Ok(g.promotion_log
+            .iter()
+            .rev()
+            .find(|e| e.memory_id == memory_id && e.action == action)
+            .cloned())
+    }
+
+    // `count_any_access` keeps the trait's no-op default (`Ok(0)`) - same hermetic-backend
+    // boundary as `count_cross_project_access`: the in-memory backend never stores access_log
+    // rows in the first place.
 }
 
 fn poisoned(e: std::sync::PoisonError<std::sync::MutexGuard<'_, Inner>>) -> Error {
@@ -430,10 +628,4 @@ pub fn build(blobs_dir: std::path::PathBuf) -> Result<Store> {
         backend,
         blobs: BlobStore::new(blobs_dir),
     })
-}
-
-// Suppress the unused-import lint for BTreeMap when no features pull it in.
-#[allow(dead_code)]
-fn _btreemap_keep() -> BTreeMap<(), ()> {
-    BTreeMap::new()
 }

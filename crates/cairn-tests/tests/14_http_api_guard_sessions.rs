@@ -1,8 +1,10 @@
 //! 14 — cairn-api `/api/guard/*` + `/api/sessions/*` HTTP routes, in-process.
 //!
 //! Exercises the guard verify/anchor/checkpoint/drift + sessions lifecycle
-//! end-to-end through the real `cairn_api::router`. Includes a BUG 09-1
-//! coverage test: `list_drift` (lib.rs:1099) hardcodes `None` for the
+//! end-to-end through the real `cairn_api::router`. Drift decisions are made
+//! by the autopilot inline at verify time (web redesign v2 removed the manual
+//! approve/reject routes); `GET /api/guard/drift` is the read-only audit log.
+//! Includes a BUG 09-1 coverage test: `list_drift` hardcodes `None` for the
 //! status filter, so the `?status=pending` query parameter is ignored.
 //! The test asserts the endpoint returns non-empty events when drift is
 //! appended - the spec call - and logs a comment when the filter appears
@@ -25,9 +27,11 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         data_dir: dir.path().to_path_buf(),
         host: "127.0.0.1".into(),
         port: 7777,
-        helix_url: None,
-        helix_token: None,
-        helix_ns: None,
+        db_url: "ws://localhost:8000".into(),
+        db_user: "root".into(),
+        db_pass: String::new(),
+        db_ns: "cairn".into(),
+        db_timeout_secs: 10,
         default_server: None,
         secret_key: Some(b"cairn-api-tests-secret-key-32!!!".to_vec()),
         tls: None,
@@ -49,6 +53,23 @@ fn state() -> Option<(axum::Router, tempfile::TempDir)> {
         rerank: cairn_core::RerankConfig::default(),
         admin: cairn_core::AdminConfig::default(),
         multi_tenant: false,
+        session_ttl_days: 2,
+        decay_period_days: 30,
+        access_log_retention_days: 90,
+        cron_enabled: true,
+        promote_threshold: 0.85,
+        demote_idle_days: 45,
+        drift_autopilot: "safe".to_string(),
+        drift_safe_globs: vec![
+            "docs/**".to_string(),
+            "*.md".to_string(),
+            "**/tests/**".to_string(),
+            "**/*.test.*".to_string(),
+        ],
+        auto_anchor: true,
+        llm_daily_budget: 200_000,
+        selftune: true,
+        max_working_per_project: 500,
     };
     let state = AppState::with_store(&cfg, store).ok()?;
     Some((router(state), dir))
@@ -229,67 +250,25 @@ async fn verify_on_dangerous_path_appends_pending_drift_event() {
     );
 }
 
+/// Web redesign v2: drift decisions belong to the autopilot at verify time - the manual
+/// approve/reject routes were removed. The route table must actually 404 them so nothing
+/// (an old dashboard build, a stale script) can silently mutate drift statuses.
 #[tokio::test]
-async fn approve_drift_transitions_status_and_404s_on_repeat() {
+async fn manual_drift_approve_route_is_gone() {
     let Some((app, _dir)) = state() else { return };
     let cookie = login_cookie(app.clone()).await;
 
-    // Force a pending drift entry by writing a 10-line baseline and proposing
-    // a 1-line replacement. Diff-size risk classifier rates this Danger.
-    let target = _dir.path().join("scripts").join("risky.sh");
-    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-    let baseline = (1..=10)
-        .map(|i| format!("line {i}: preserved\n"))
-        .collect::<String>();
-    std::fs::write(&target, &baseline).unwrap();
-    let (vs, vj, _h) = post_json(
-        app.clone(),
-        "/api/guard/verify",
-        serde_json::json!({
-            "path": target.to_string_lossy(),
-            "content": "survivor\n".to_string(),
-        }),
-        Some(&cookie),
-    )
-    .await;
-    assert!(vs.is_success(), "verify must succeed; got {vs} body={vj}");
-    assert_eq!(vj["risk"].as_str(), Some("danger"), "must be danger: {vj}");
-
-    let (ls, lj, _h) = get_json(app.clone(), "/api/guard/drift?limit=10", Some(&cookie)).await;
-    assert!(
-        ls.is_success(),
-        "list drift must succeed; got {ls} body={lj}"
-    );
-    let events = lj.as_array().expect("array");
-    assert!(!events.is_empty(), "expected >=1 drift event; body={lj}");
-    let id = events[0]["id"].as_i64().expect("drift id is i64");
-
-    // Approve it.
-    let (as_, aj, _h) = post_json(
-        app.clone(),
-        &format!("/api/guard/drift/{id}/approve"),
-        serde_json::json!({}),
-        Some(&cookie),
-    )
-    .await;
-    assert!(
-        as_.is_success(),
-        "approve must succeed; got {as_} body={aj}"
-    );
-    assert_eq!(aj["status"], "approved");
-
-    // Repeat approve must 404 - the row is no longer pending.
-    let (as2, aj2, _h) = post_json(
+    let (status, _body, _h) = post_json(
         app,
-        &format!("/api/guard/drift/{id}/approve"),
+        "/api/guard/drift/1/approve",
         serde_json::json!({}),
         Some(&cookie),
     )
     .await;
     assert_eq!(
-        as2,
+        status,
         StatusCode::NOT_FOUND,
-        "re-approving a resolved drift must 404; got {as2} body={aj2}"
+        "manual drift approval must no longer be routable; got {status}"
     );
 }
 

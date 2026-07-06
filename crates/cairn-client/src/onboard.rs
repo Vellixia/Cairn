@@ -1,16 +1,20 @@
 //! `cairn onboard` - zero-prompt setup for first-run installs.
 //!
-//! 1. **Verify the binary** - `cairn doctor` (connectivity + diagnostics).
-//! 2. **Detect agents** - `cairn setup --all` for every supported agent.
-//! 3. **Print a summary** - what was detected, what was wired, what the next step is.
+//! 1. **Resolve credentials** - `--code` (claim a dashboard pairing code),
+//!    `--server`/`--token` flags, env vars, `~/.cairn/config.toml`, or a
+//!    one-shot `localhost:7777` probe, in that order.
+//! 2. **Verify** - `cairn doctor` (connectivity + diagnostics).
+//! 3. **Wire agents** - `setup::run` in-process for every detected agent (no
+//!    subprocess, no stdout-scraping for a wired-agent count).
+//! 4. **Print a summary.**
 //!
-//! Pass `--server <url>` and `--token <jwt>` to configure remote access.
-//! Re-running is safe and shows "Re-onboarding" to signal the incremental update.
+//! Re-running is safe and shows "Re-onboarding" to signal the incremental
+//! update - `is_reonboarding` below reuses the exact same "would `cairn
+//! reset` find anything to remove" check `reset.rs` runs, so the two
+//! commands can never disagree about whether Cairn was previously set up.
 
-use anyhow::{Context, Result};
-use std::io::IsTerminal;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use anyhow::Result;
+use std::path::PathBuf;
 
 use super::doctor;
 
@@ -20,9 +24,11 @@ pub struct OnboardOptions {
     pub skip_agents: bool,
     /// Run `doctor --fix` on failures before reporting green.
     pub fix: bool,
-    /// Remote server URL - sets `CAIRN_SERVER` for the spawned `setup` subprocess.
+    /// Claim this dashboard-minted pairing code instead of a raw token.
+    pub code: Option<String>,
+    /// Remote server URL.
     pub server: Option<String>,
-    /// Remote server token - sets `CAIRN_TOKEN` for the spawned `setup` subprocess.
+    /// Remote server token (ignored if `code` is set).
     pub token: Option<String>,
 }
 
@@ -35,10 +41,22 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         eprintln!("[cairn]  Cairn onboard - zero-prompt setup\n");
     }
 
-    let interactive = atty_stdout();
+    let (server, token) = resolve_credentials(&opts)?;
+
+    // Validate once, up front, and persist immediately - mirrors `setup::run`'s own
+    // validate-then-save sequencing so `onboard` can't wire agents against a token
+    // it never actually checked.
+    if let (Some(srv), Some(tok)) = (&server, &token) {
+        crate::http::validate_token(srv, tok)?;
+        let is_fresh_config = crate::config::config_path().is_some_and(|p| !p.exists());
+        crate::config::save_server(Some(srv), Some(tok))?;
+        if is_fresh_config {
+            crate::config::save_inject_context_default(true)?;
+        }
+    }
+
     let mut diag = doctor::run(doctor::DoctorOptions {
         fix: opts.fix,
-        interactive,
         json: false,
     });
 
@@ -46,7 +64,6 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     if opts.fix && !diag.ok() {
         diag = doctor::run(doctor::DoctorOptions {
             fix: false,
-            interactive,
             json: false,
         });
     }
@@ -63,7 +80,14 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         eprintln!("-> Skipping agent wiring (--skip-agents).\n");
     } else {
         eprintln!("-> Detecting & wiring supported agents...");
-        let wired = wire_agents(&opts)?;
+        let wired = crate::setup::run(
+            None,
+            true,
+            server.as_deref(),
+            token.as_deref(),
+            false,
+            false,
+        )?;
         if wired == 0 {
             eprintln!("  no supported agents detected (run `cairn setup <agent>` to add one)");
         } else {
@@ -73,7 +97,7 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
 
     // 3. Summary.
     eprintln!("Done. Next steps:");
-    if let Some(s) = &opts.server {
+    if let Some(s) = &server {
         eprintln!("  - server: {s}");
     }
     eprintln!("  - open a session in your AI agent (Claude Code, OpenCode, Codex)");
@@ -82,99 +106,59 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Detect whether any supported agent already has a cairn config.
-fn is_reonboarding() -> bool {
-    let home = std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from);
-    let home = match home.as_ref() {
-        Some(h) => h.as_path(),
-        None => return false,
-    };
-
-    // Claude Code project-scoped .mcp.json (commonest location).
-    if has_cairn_entry(home.join(".mcp.json")) {
-        return true;
+/// Resolve server+token from, in priority order: `--code` (claim a pairing
+/// code via `pair::claim`), `--server`/`--token` flags, `CAIRN_SERVER`/
+/// `CAIRN_TOKEN` env, `~/.cairn/config.toml` - or, only when NOTHING else
+/// supplied credentials, a one-shot probe of `http://localhost:7777` that
+/// prints the dashboard pairing URL if a server answers but isn't yet
+/// authenticated against.
+fn resolve_credentials(opts: &OnboardOptions) -> Result<(Option<String>, Option<String>)> {
+    if let Some(code) = &opts.code {
+        let server = crate::pair::resolve_server(opts.server.as_deref())?;
+        let token = crate::pair::claim(&server, code)?;
+        return Ok((Some(server), Some(token)));
     }
-    if has_cairn_entry(home.join(".claude").join(".mcp.json")) {
-        return true;
+    if opts.server.is_some() || opts.token.is_some() {
+        return Ok((opts.server.clone(), opts.token.clone()));
     }
-    // Codex hooks — written alongside the config.
-    if home.join(".codex").join("hooks.json").exists() {
-        return true;
-    }
-    // OpenCode.
-    let opencode_cfg = home.join("opencode").join("opencode.json");
-    if opencode_cfg.exists() {
-        // Could parse and check, but existence under the known path is sufficient.
-        return true;
-    }
-    false
-}
-
-fn has_cairn_entry(path: impl AsRef<Path>) -> bool {
-    let p = path.as_ref();
-    if !p.exists() {
-        return false;
-    }
-    // Quick check: read first few KB looking for "cairn".
-    let Ok(content) = std::fs::read_to_string(p) else {
-        return false;
-    };
-    content.contains("\"cairn\"")
-}
-
-fn wire_agents(opts: &OnboardOptions) -> Result<usize> {
-    // Spawn `cairn setup --all --server <url> --token <tok>` as a subprocess so it picks up
-    // the same arg parsing + env that an interactive user would have. We never want to
-    // duplicate the wiring logic in two places.
-    let current = std::env::current_exe().context("locating current cairn binary")?;
-    let mut cmd = Command::new(&current);
-    cmd.arg("setup").arg("--all");
-    if let Some(s) = &opts.server {
-        cmd.arg("--server").arg(s);
-    }
-    if let Some(t) = &opts.token {
-        cmd.arg("--token").arg(t);
-    }
-    // If the caller did not pass --server/--token but the env vars are set, pass them
-    // explicitly to guarantee the subprocess sees them even if the shell strips them.
-    if opts.server.is_none() {
-        if let Ok(s) = std::env::var("CAIRN_SERVER") {
-            cmd.env("CAIRN_SERVER", s);
+    if let Ok(s) = std::env::var("CAIRN_SERVER") {
+        if !s.trim().is_empty() {
+            let token = std::env::var("CAIRN_TOKEN").ok().filter(|t| !t.is_empty());
+            return Ok((Some(s), token));
         }
     }
-    if opts.token.is_none() {
-        if let Ok(t) = std::env::var("CAIRN_TOKEN") {
-            cmd.env("CAIRN_TOKEN", t);
-        }
+    let resolved = crate::config::resolve(None);
+    if resolved.server.is_some() {
+        return Ok((
+            resolved.server.map(|(s, _)| s),
+            resolved.token.map(|(t, _)| t),
+        ));
     }
-    let out = cmd.output().context("spawning cairn setup --all")?;
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    // Count "[x] Configured" markers - that's how many agents we wired.
-    let wired = stdout.matches("Configured").count();
-    if !out.status.success() && wired == 0 {
-        anyhow::bail!(
-            "setup --all exited with status {}: {}{}",
-            out.status,
-            stderr,
-            if stderr.is_empty() {
-                stdout.as_ref()
-            } else {
-                ""
-            }
+    // Nothing configured anywhere - try localhost, the docker-compose default port.
+    let localhost = "http://localhost:7777";
+    let client = crate::http::ApiClient::new(localhost, None);
+    if client.server_version().is_some() {
+        eprintln!(
+            "cairn: found a Cairn server at {localhost} but no token configured.\n\
+             Open {localhost}/you/pair in your browser to generate a pairing code, then run:\n\
+             \n  cairn onboard --code <CODE>\n\
+             \nContinuing onboard without a server for now (local-only checks)."
         );
     }
-    print!("{}", stdout);
-    if !stderr.is_empty() {
-        eprint!("{}", stderr);
-    }
-    Ok(wired)
+    Ok((None, None))
 }
 
-fn atty_stdout() -> bool {
-    // We can't import the `atty` crate without a new dep; std::io::IsTerminal does the same
-    // thing on stable Rust 1.70+.
-    std::io::stdout().is_terminal()
+/// True when any agent already has a cairn-owned entry in its config - the
+/// exact same "is there something here to remove" check `cairn reset` uses
+/// (`Agent::removal_plan` + `RemovalAction::would_change`), rather than
+/// hand-checking a fixed list of paths that can drift from what `setup`
+/// actually writes.
+fn is_reonboarding() -> bool {
+    let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home = crate::paths::home_dir();
+    crate::agents::AGENTS.iter().any(|a| {
+        a.removal_plan(&project, home.as_deref())
+            .iter()
+            .any(|action| action.would_change().unwrap_or(false))
+    })
 }

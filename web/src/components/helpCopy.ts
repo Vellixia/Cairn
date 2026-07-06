@@ -4,45 +4,16 @@ export type HelpCopy = HelpContent;
 
 export const HELP: Record<string, HelpCopy> = {
   "/memory": {
-    title: "Memory",
-    what: "Observe the memories Cairn has stored and how they are connected.",
+    title: "Memory browser",
+    what: "Every memory Cairn has - filterable, sortable, searchable - with a full-detail drawer showing provenance, scope, trust signals, and edges to related memories.",
     how: [
-      "Browse Wakeup for the session-start bootstrap. Use Recall to search.",
-      "Graph shows the provenance graph; Savings shows the cost ledger.",
+      "Filter by scope / tier / kind, toggle pinned or suspicious, and search content + concepts.",
+      "Click a row for the full record; edge chips hop the drawer to related memories.",
+      "The Wakeup-order toggle previews the ranked list a fresh agent session loads first.",
+      "Pin and Delete are the only manual actions - agents do the real curation via MCP.",
     ],
     impact:
-      "The agent writes and curates memories via MCP or CLI. This view is observability.",
-  },
-  "/memory/recall": {
-    title: "Recall",
-    what: "Search across every memory Cairn has, ranked by BM25 + semantic similarity.",
-    how: [
-      "Type a question or phrase. Empty query returns your most-recent items.",
-      "Click a result to expand it.",
-    ],
-    impact:
-      "Recall runs against the local Helix index in <50ms for 10k items.",
-  },
-  "/memory/wakeup": {
-    title: "Wakeup",
-    what: "The high-importance memories Cairn would surface at the start of a new session.",
-    how: [
-      "Browse the ranked list. Items at the top are most likely to be relevant right now.",
-      "Click an item to read it in full.",
-    ],
-    impact:
-      "Wakeup is the default context Cairn loads for a fresh agent. Trimming here directly shrinks every future session's token bill.",
-  },
-  "/memory/compression": {
-    title: "Compression Lab",
-    what: "Side-by-side comparison of all four read modes for a single file.",
-    how: [
-      "Type a file path (e.g. crates/cairn-core/src/lib.rs) and press Render.",
-      "Each column shows one mode's view, its token count, and the savings vs full.",
-      "The cheapest mode is highlighted as 'best' - prefer that for context-bounded reads.",
-    ],
-    impact:
-      "Choosing the right mode per file can cut agent token spend 50-90%. Files with strong structure (Rust, Python, Go) compress aggressively; data files and small snippets do not.",
+      "The primary observability surface: if an agent knows it, it is visible here.",
   },
   "/memory/graph": {
     title: "Memory graph",
@@ -64,35 +35,15 @@ export const HELP: Record<string, HelpCopy> = {
     impact:
       "Bytes saved -> tokens saved -> USD saved. This page is the proof that the read modes are actually doing their job.",
   },
-  "/trust": {
-    title: "Reliability score",
-    what: "Cairn's edit-guard score: how often your edits round-trip cleanly through memory.",
-    how: [
-      "Watch the score trend. Each sample is one edit + one re-read.",
-      "Drill into the Drift tab to see flagged samples and the AI's reasoning.",
-    ],
-    impact:
-      "Score < 70 means drift is likely. Use the agent's rollback tool to recover.",
-  },
-  "/trust/drift": {
-    title: "Drift center",
-    what: "Every reliability sample flagged as ok, warn, or danger.",
-    how: [
-      "Filter by status. Click any sample to see the diff and the AI's reasoning.",
-      "If a danger sample is wrong, mark it resolved. Cairn adjusts the score.",
-    ],
-    impact:
-      "Drift is the leading indicator of reliability decay. Check this page weekly if you have heavy editing traffic.",
-  },
   "/you": {
     title: "Your profile",
-    what: "Standing preferences Cairn-backed agents honor, plus device tokens and settings.",
+    what: "Standing preferences every Cairn-backed agent honors, plus device tokens and settings.",
     how: [
-      "Profile is read-only here --- use `cairn prefer` or the prefer MCP tool to add rules.",
+      "Add or delete preferences directly here, or let an agent record one with the prefer tool.",
       "Issue and revoke device tokens under Tokens.",
     ],
     impact:
-      "Preferences cascade into every session. Manage them from the agent, not this form.",
+      "Preferences are injected at every session start, before wakeup memories - this is one of the few pages where manual input is the point (a preference is a deliberate, rare decision).",
   },
   "/you/tokens": {
     title: "Device tokens",
@@ -136,19 +87,55 @@ export const HELP: Record<string, HelpCopy> = {
   },
   "/you/settings": {
     title: "Settings",
-    what: "Server info, your admin session, and the sign-out button.",
+    what: "Your admin session, server info, and the full effective server configuration - every knob, its current value, and the env var that changes it.",
     how: [
-      "View the server version and uptime. Sign out to invalidate this browser's session cookie.",
-      "Rotate your admin password from the CLI --- invalidates all sessions.",
+      "Server configuration is read-only here: edit your .env (or environment) and restart the server to apply a change.",
+      "Secrets are redacted to set / not set - values never leave the server.",
+      "Sign out to invalidate this browser's session cookie.",
     ],
     impact:
-      "Settings here are minimal because most config lives server-side. Sign out from a shared browser, not just close the tab.",
+      "One-time customization lives in the environment; this page makes the effective result visible so you never have to guess what the server is running with.",
+  },
+  "/projects": {
+    title: "Projects",
+    what: "Repos an agent with Cairn hooks has worked in, auto-detected on session start, with a memory count per project.",
+    how: [
+      "Click a project to see its Project-scoped memories and promotion activity.",
+      "Registration is independent of scope isolation - it's discovery, not an access boundary.",
+    ],
+    impact:
+      "Projects are read-only observability - there's no manual create/edit here. A project appears the first time an agent's SessionStart hook auto-detects the repo.",
+  },
+  "/documents": {
+    title: "Documents",
+    what: "Reference material ingested via `cairn documents ingest` - chunked text from files or URLs, searchable through this page's own search box.",
+    how: [
+      "Ingest via `cairn documents ingest <path|url>` (CLI) from inside a project to scope a document to it - this page is observability + a search preview, not an upload form.",
+      "Documents ingested inside a project show up here AND on that project's own page; documents ingested outside any project are global and visible to every project.",
+      "Use the search box to preview what a query would surface across every visible document.",
+      "Delete removes the chunks; re-ingesting the same source later restores them.",
+    ],
+    impact:
+      "Documents give agents external reference material (docs, READMEs, specs) alongside their own memories - project-scoped by default so a project's docs don't clutter every other project's context.",
+  },
+  "/automation": {
+    title: "Automation",
+    what: "Everything the machine does on its own: the autopilot digest, guard (edit-safety) decisions, the promotion/demotion trail, background jobs - plus the one review queue that wants a human glance.",
+    how: [
+      "Pick a lookback window for the digest tiles (24h / 48h / 7d).",
+      "Review queue: promote or dismiss borderline (0.70-0.90) promotion candidates - the only manual decision left.",
+      "Guard: drift decisions are made by the autopilot at verify time (CAIRN_DRIFT_AUTOPILOT); this log is the read-only audit trail. Danger edits are never auto-approved.",
+      "Run now triggers a background job immediately - same code path the scheduler uses.",
+      "Promotion log rows for a promoted memory get an Undo button.",
+    ],
+    impact:
+      "Run history is in-memory since server start; the promotion log and drift log are durable. Undo reverts a memory to the scope it was promoted from.",
   },
   "/memory/architecture": {
     title: "Architecture report",
     what: "Structural analysis of the memory graph as code: nodes (files/memories), edges (relationships), communities, bridges, and cycles.",
     how: [
-      "Open /memory?tab=architecture or click the Architecture tab.",
+      "Open /memory/architecture (linked from the Memory browser header).",
       "Read the four KPIs (Nodes / Edges / Communities / Isolation) for a quick read.",
       "Click .md to download the full report as markdown.",
     ],
@@ -159,54 +146,11 @@ export const HELP: Record<string, HelpCopy> = {
     title: "Activity heatmap",
     what: "Daily memory creation over the last 52 weeks, GitHub-style. Hover a cell to see the date and count.",
     how: [
-      "Open /memory?tab=heatmap.",
+      "Open /memory/heatmap (linked from the Memory browser header).",
       "Hover any cell to read the day + count.",
       "Compare against the recent activity card on / for spot trends.",
     ],
     impact:
       "Lets you see drift in memory-write cadence without scrolling the audit log.",
-  },
-  "/registry/packs": {
-    title: "Pack registry",
-    what: "Published .cairnpkg packs. Search, publish new ones, click a row to see versions and download.",
-    how: [
-      "Publish a pack via the Publish button (upload a .cairnpkg tarball).",
-      "Click a pack name to see all its versions and download counts.",
-      "Use the search box to filter by name or description.",
-    ],
-    impact:
-      "Packs ship context, prompts, and tool configs to cairn-backed agents. Signed packs are trusted; unsigned are visible but flagged.",
-  },
-  "/registry": {
-    title: "Pack registry",
-    what: "Self-hosted .cairnpkg registry. Three sections: Packs (browse/publish), Trusted Keys (signing authorities), Revocations (audit trail).",
-    how: [
-      "Use the tab bar above to switch between Packs, Trusted Keys, and Revocations.",
-      "Publish on the Packs tab. Manage signing keys on the Trusted Keys tab. Read the audit trail on Revocations.",
-    ],
-    impact:
-      "Trust flows top-down: add a trusted key, then publish packs signed with it. Revocations are append-only.",
-  },
-  "/registry/trust": {
-    title: "Trusted signing keys",
-    what: "Ed25519 public keys the registry trusts to sign packs. Packs signed by unlisted keys still upload but are flagged unsigned.",
-    how: [
-      "Add a key by pasting its 64-char hex public key.",
-      "Revoke a key to mark its signed packs as untrusted (the packs remain on disk).",
-      "Rotate by adding a new key then revoking the old one.",
-    ],
-    impact:
-      "Compromised key? Revoke first, then rotate. Revocations are append-only and surface in the revocations tab.",
-  },
-  "/registry/revocations": {
-    title: "Revocation log",
-    what: "Append-only record of every pack unpublish and key revoke. Audit trail for trust changes.",
-    how: [
-      "Read-only --- new revocations appear here automatically.",
-      "Filter by kind (pack unpublish vs key revoke) or actor.",
-      "Use this page to answer 'who removed X and when'.",
-    ],
-    impact:
-      "Revocations cannot be undone. Operators should record the reason in the audit log before revoking.",
   },
 };

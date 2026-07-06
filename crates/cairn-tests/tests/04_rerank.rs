@@ -154,3 +154,56 @@ fn hybrid_search_with_rerank_runs_end_to_end_on_in_memory_store() {
         hits[0].memory.content
     );
 }
+
+#[test]
+fn expanded_search_with_rerank_runs_end_to_end_on_in_memory_store() {
+    // Regression coverage for search_handler's expand=true + rerank=local composition: it used
+    // to silently discard the expanded hits and rerun a plain, unexpanded search-with-rerank
+    // instead of reranking the results expansion already found. Query expansion itself needs a
+    // live LLM (config disabled here, same as the rest of this file's "contract, not model
+    // output" philosophy) - what this proves is that the composed engine method runs the full
+    // pipeline end to end without error and returns validly-bounded, sensibly-ordered scores.
+    let Some((mem, _dir)) = engine() else { return };
+    mem.remember(NewMemory {
+        content: "rust uses ownership for memory safety".into(),
+        kind: Some(MemoryKind::Fact),
+        ..Default::default()
+    })
+    .expect("remember");
+    mem.remember(NewMemory {
+        content: "the weather today is sunny and warm".into(),
+        kind: Some(MemoryKind::Note),
+        ..Default::default()
+    })
+    .expect("remember");
+
+    let expander = cairn_memory::QueryExpander::new(cairn_core::LlmConsolidationConfig {
+        enabled: false,
+        url: String::new(),
+        model: String::new(),
+        api_key: None,
+    });
+    let hits = mem
+        .expanded_search_with_rerank(
+            "rust ownership memory",
+            5,
+            10,
+            &expander,
+            &NullReranker,
+            0.6,
+        )
+        .expect("expanded search with rerank");
+    assert!(!hits.is_empty(), "the rust memory must surface");
+    for h in &hits {
+        assert!(
+            (0.0..=1.0).contains(&h.score),
+            "blended score must be in [0, 1]: {}",
+            h.score
+        );
+    }
+    assert!(
+        hits[0].memory.content.contains("rust"),
+        "rust memory should be first; got {:?}",
+        hits[0].memory.content
+    );
+}

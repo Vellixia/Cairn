@@ -5,16 +5,22 @@
 //! across the four tiers (working -> episodic -> semantic -> procedural). Vector/graph hybrid
 //! retrieval builds on this foundation.
 
-use cairn_core::{ContentHash, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result};
+use cairn_core::{
+    ContentHash, LlmConsolidationConfig, Memory, MemoryKind, MemoryTier, NewMemory, OrgId, Result,
+    ScopeCtx, ScopeType,
+};
 use cairn_store::Store;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub mod llm_consolidator;
-pub use llm_consolidator::{apply_decay, Insight, LlmConsolidator, ProceduralStep, SemanticFact};
+pub use llm_consolidator::{
+    apply_decay, llm_tokens_used_today, Insight, LlmConsolidator, ProceduralStep, SemanticFact,
+};
 pub mod analysis;
+mod llm_intelligence;
 pub use analysis::{generate_architecture_report, ArchitectureReport, BridgeEntry, GodNodeEntry};
 pub mod followup_tracker;
 pub use followup_tracker::FollowupTracker;
@@ -183,25 +189,40 @@ impl MemoryEngine {
     /// scale-free combination of the two rankings. Importance and Ebbinghaus recency break ties.
     /// On a lexical-only backend (`semantic_recall` -> `None`) this degrades to pure BM25.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<ScoredMemory>> {
-        // Single-tenant: scope everything to the implicit default org.
-        self.recall_for_org(query, limit, OrgId::default())
+        // Single-tenant, Global-only scope: today's behavior for every caller that doesn't
+        // have a project/session context (MCP stdio mode, existing tests). `cairn-api`'s HTTP
+        // recall handler is the first caller to pass a real `ScopeCtx`.
+        self.recall_for_org(query, limit, OrgId::default(), &ScopeCtx::default())
     }
 
-    /// Tenant-scoped recall (v0.5.0 Sprint 19). Only memories with matching
-    /// `org_id` (or the implicit default for self-hosted installs) are
-    /// considered.
+    /// Tenant- and scope-aware recall (v0.5.0 Sprint 19 org isolation + v0.8.0 Sprint 2 scope
+    /// model). Only memories with matching `org_id` (or the implicit default for self-hosted
+    /// installs) **and** matching scope are considered: every `Global` memory, plus `Project`/
+    /// `Session` memories whose `scope_id` matches `scope.project_id`/`scope.session_id`.
     pub fn recall_for_org(
         &self,
         query: &str,
         limit: usize,
         org_id: OrgId,
+        scope: &ScopeCtx,
     ) -> Result<Vec<ScoredMemory>> {
         let all = self.store.all_memories()?;
         // Tenant isolation: filter by org_id before any ranking work.
         let mems: Vec<Memory> = all
             .into_iter()
             .filter(|m| {
-                m.org_id == org_id || m.org_id == OrgId::default() && org_id == OrgId::default()
+                let org_ok = m.org_id == org_id
+                    || (m.org_id == OrgId::default() && org_id == OrgId::default());
+                let scope_ok = match m.scope_type {
+                    ScopeType::Global => true,
+                    ScopeType::Project => {
+                        scope.project_id.is_some() && m.scope_id == scope.project_id
+                    }
+                    ScopeType::Session => {
+                        scope.session_id.is_some() && m.scope_id == scope.session_id
+                    }
+                };
+                org_ok && scope_ok
             })
             .collect();
         if mems.is_empty() {
@@ -220,11 +241,21 @@ impl MemoryEngine {
         let bm25_rank = ranks_desc(&bm25_scores);
 
         // Semantic ranking (vector kNN) as id -> rank, when the backend supports it.
+        // `semantic_recall` queries the store's whole vector index with no org/scope awareness
+        // of its own, so its raw results can include other tenants'/scopes' memories - filter to
+        // `mems` (already org+scope-filtered above) before ranking, otherwise a memory outside
+        // this caller's tenant can still shift RRF scores for memories that *are* in `mems`, even
+        // though its own content never appears in the returned `ScoredMemory` list. Filtering
+        // before `.enumerate()` (rather than after) also re-derives ranks relative to just this
+        // caller's own candidates instead of leaking their position in the global ranking.
+        let mems_ids: std::collections::HashSet<&str> =
+            mems.iter().map(|m| m.id.as_str()).collect();
         let sem_rank: HashMap<String, usize> = self
             .store
             .semantic_recall(query, limit.max(SEMANTIC_K))?
             .into_iter()
             .flatten()
+            .filter(|m| mems_ids.contains(m.id.as_str()))
             .enumerate()
             .map(|(rank, m)| (m.id, rank))
             .collect();
@@ -258,6 +289,11 @@ impl MemoryEngine {
                     }
                 }
             }
+            // Same tenant-isolation concern as `sem_rank` above: `self.graph()` walks every
+            // memory in the store with no org/scope filter, so an edge to another tenant's node
+            // could otherwise boost an in-`mems` memory's score based on proximity to content
+            // this caller can't see.
+            gmap.retain(|id, _| mems_ids.contains(id.as_str()));
             gmap
         };
 
@@ -320,9 +356,10 @@ impl MemoryEngine {
             .into_iter()
             .enumerate()
             .map(|(i, m)| {
-                let score = (norm_bm25 as f32) * bm25_rrf_scores[i]
+                let score = ((norm_bm25 as f32) * bm25_rrf_scores[i]
                     + (norm_vec as f32) * vec_rrf_scores[i]
-                    + (norm_graph as f32) * graph_rrf_scores[i];
+                    + (norm_graph as f32) * graph_rrf_scores[i])
+                    * scope_weight(m.scope_type);
                 ScoredMemory { memory: m, score }
             })
             .collect();
@@ -337,10 +374,16 @@ impl MemoryEngine {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
         });
-        scored.truncate(limit);
+
+        // v0.8.0 Sprint 7: MMR diversification, on the full (tiebreak-sorted) candidate pool
+        // rather than an already-truncated top-`limit` slice - `hybrid_search`/
+        // `hybrid_search_with_rerank` already apply `mmr_rerank` this way; `recall_for_org` was
+        // the one remaining path doing a plain score-sort-and-cut. For a corpus smaller than
+        // `limit`, `mmr_rerank` degrades to the same score-sorted order this used to produce.
+        let mmr_selected = mmr_rerank(scored, limit, 0.7);
 
         // Session diversification: cap at 3 per session, fill from remaining.
-        let diversified = diversify_by_session(scored, limit, 3);
+        let diversified = diversify_by_session(mmr_selected, limit, 3);
 
         for s in &diversified {
             let _ = self.store.touch_memory(&s.memory.id);
@@ -364,6 +407,24 @@ impl MemoryEngine {
             }
         }
 
+        // v0.8.0 Sprint 2: batched access-log write (one round-trip for the whole recall
+        // call, not one per memory). Best-effort - a logging failure must not break recall.
+        if !diversified.is_empty() {
+            let entries: Vec<(String, Option<String>, Option<String>)> = diversified
+                .iter()
+                .map(|s| {
+                    (
+                        s.memory.id.clone(),
+                        scope.project_id.clone(),
+                        scope.session_id.clone(),
+                    )
+                })
+                .collect();
+            if let Err(e) = self.store.record_access_batch(&entries) {
+                tracing::warn!(error = %e, "access log write failed");
+            }
+        }
+
         Ok(diversified)
     }
 
@@ -380,6 +441,554 @@ impl MemoryEngine {
         });
         all.truncate(limit);
         Ok(all)
+    }
+
+    /// v0.8.0 Sprint 4 `session-gc` cron job: promote every `Session`-scoped memory that
+    /// hasn't been touched in `ttl_days` days to `Global` scope, so it doesn't stay silently
+    /// walled off once its session is long gone (Sprint 2's isolation rules mean a
+    /// `Session`-scoped memory is otherwise invisible to every future session, forever).
+    /// `ttl_days == 0` disables the sweep. Returns the number of memories promoted.
+    pub fn run_session_gc(&self, ttl_days: u32) -> Result<usize> {
+        if ttl_days == 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - Duration::days(ttl_days as i64);
+        let mut promoted = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type == ScopeType::Session && m.updated_at < cutoff {
+                match self.store.reassign_scope(&m.id, ScopeType::Global, None) {
+                    Ok(true) => promoted += 1,
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(memory_id = %m.id, error = %e, "session-gc: reassign_scope failed")
+                    }
+                }
+            }
+        }
+        Ok(promoted)
+    }
+
+    /// v0.8.0 Sprint 4 `memory-decay` cron job: apply the agentmemory confidence-decay curve
+    /// (see [`apply_decay`]) to every memory, persisting only the ones whose confidence
+    /// actually moved this run. `updated_at` is preserved on write (not bumped to "now") -
+    /// `apply_decay` measures elapsed time *from* `updated_at`, so touching it here would
+    /// silently reset the decay clock on every run and nothing would ever decay past the
+    /// first period. Returns the number of memories whose confidence changed.
+    pub fn run_decay(&self, decay_period_days: u32) -> Result<usize> {
+        let now = Utc::now();
+        let mut decayed = 0;
+        for mut m in self.store.all_memories()? {
+            let before = m.confidence;
+            apply_decay(&mut m, decay_period_days as f64, now);
+            if m.confidence != before {
+                self.store.upsert_memory(&m)?;
+                decayed += 1;
+            }
+        }
+        Ok(decayed)
+    }
+
+    /// v0.8.0 Sprint 9 memory-hygiene pass, folded into the `memory-decay` cron job: find
+    /// `Working`-tier memories whose *current* content collides via SHA-256. `remember`'s
+    /// insert-time dedup (see [`ContentHash`]) only rejects a duplicate at creation time and
+    /// never re-checks afterward - the realistic way a collision appears later is a
+    /// `POST /api/memory/:id` edit changing one memory's `content` to match another's exactly.
+    ///
+    /// Keeps the newest (`updated_at`) of each colliding group and hard-deletes the rest via
+    /// the same `delete_memory` `DELETE /api/memory/:id` already uses - permanent, no
+    /// blob-store retention tier to fall back into. A pinned memory is never deleted (same
+    /// protection `run_decay` already gives it); if every member of a colliding group is
+    /// pinned, the whole group is left alone rather than picking one to keep. Returns the
+    /// number of memories deleted.
+    pub fn run_dedup_sweep(&self) -> Result<usize> {
+        let mut by_hash: HashMap<String, Vec<Memory>> = HashMap::new();
+        for m in self.store.all_memories()? {
+            if m.tier != MemoryTier::Working {
+                continue;
+            }
+            let hash = ContentHash::of_str(&m.content).as_str().to_string();
+            by_hash.entry(hash).or_default().push(m);
+        }
+        let mut deleted = 0;
+        for mut group in by_hash.into_values() {
+            if group.len() < 2 || group.iter().all(|m| m.pinned) {
+                continue;
+            }
+            let had_pinned = group.iter().any(|m| m.pinned);
+            group.retain(|m| !m.pinned);
+            if had_pinned {
+                // A pinned member is this group's permanent keeper - every remaining (unpinned)
+                // duplicate is redundant, not just the ones beyond the newest. Without this
+                // branch, a group of exactly one pinned + one unpinned memory fell through to
+                // the `group.len() < 2` no-op below and the unpinned duplicate was never
+                // cleaned up.
+                for m in &group {
+                    if self.store.delete_memory(&m.id)? {
+                        deleted += 1;
+                    }
+                }
+                continue;
+            }
+            group.sort_by_key(|m| m.updated_at);
+            for m in &group[..group.len() - 1] {
+                if self.store.delete_memory(&m.id)? {
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// v0.8.0 Sprint 9 memory-hygiene pass, folded into the `memory-decay` cron job: cap how
+    /// many `Working`-tier memories a single `Project`-scoped project can accumulate.
+    /// `Working` is the landing tier for every new observation and nothing promotes it onward
+    /// on its own, so a long-lived, chatty project's working set otherwise grows forever.
+    ///
+    /// Once a project exceeds `max_per_project`, the oldest (`updated_at`) non-pinned excess is
+    /// hard-deleted, permanently - honestly the same one-way `delete_memory` every other
+    /// cleanup here uses, not a lossless tier demotion. Pinned memories are excluded from both
+    /// the count and deletion entirely, same protection [`Self::run_dedup_sweep`] gives them -
+    /// this cap only ever limits the *non-pinned* working set. `max_per_project == 0` means
+    /// unlimited, matching every other `0 = unlimited` convention in `Config`. Returns the
+    /// number of memories deleted.
+    pub fn run_working_tier_cap(&self, max_per_project: usize) -> Result<usize> {
+        if max_per_project == 0 {
+            return Ok(0);
+        }
+        let mut by_project: HashMap<String, Vec<Memory>> = HashMap::new();
+        for m in self.store.all_memories()? {
+            if m.tier != MemoryTier::Working || m.scope_type != ScopeType::Project || m.pinned {
+                continue;
+            }
+            if let Some(pid) = m.scope_id.clone() {
+                by_project.entry(pid).or_default().push(m);
+            }
+        }
+        let mut deleted = 0;
+        for mut memories in by_project.into_values() {
+            if memories.len() <= max_per_project {
+                continue;
+            }
+            memories.sort_by_key(|m| m.updated_at);
+            let excess = memories.len() - max_per_project;
+            for m in &memories[..excess] {
+                if self.store.delete_memory(&m.id)? {
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 1: fill in `concepts` for any memory
+    /// that doesn't have any yet. A no-op when the LLM is disabled - `concepts` simply stays
+    /// empty, exactly like a pre-Sprint-5 install. Returns the number of memories updated.
+    ///
+    /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) is checked
+    /// before every LLM call so a runaway memory set can't blow through a day's token quota in
+    /// one cron tick - remaining memories are simply picked up on tomorrow's run.
+    pub fn run_concept_extraction(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        daily_budget: u64,
+    ) -> Result<usize> {
+        if !llm_cfg.enabled {
+            return Ok(0);
+        }
+        let mut updated = 0;
+        for m in self.store.all_memories()? {
+            if llm_consolidator::is_budget_exhausted(daily_budget) {
+                break;
+            }
+            if !m.concepts.is_empty() {
+                continue;
+            }
+            let concepts = llm_intelligence::extract_concepts_via_llm(llm_cfg, &m.content);
+            if concepts.is_empty() {
+                continue;
+            }
+            if self
+                .store
+                .edit_memory(&m.id, None, None, Some(concepts), None, None, None)?
+            {
+                updated += 1;
+            }
+        }
+        Ok(updated)
+    }
+
+    /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 2: for every not-yet-`suspicious`
+    /// memory, pull its top-10 semantically similar neighbors (`Store::semantic_recall` - a
+    /// no-op when the backend has no vector index, e.g. the hermetic in-memory backend used by
+    /// tests) and ask the LLM whether any of them directly contradicts it. On the first
+    /// contradiction found:
+    ///
+    /// - v0.8.0 Sprint 8 **auto-resolve**: if one side is unambiguously better on *both* axes
+    ///   (newer by `updated_at` *and* higher `confidence`), the newer memory's `supersedes`
+    ///   gains an edge to the older one and neither is flagged `suspicious` - there's nothing
+    ///   left for a human to adjudicate.
+    /// - Otherwise (a genuine tie on either axis), both stay ambiguous: the current memory
+    ///   records the `contradicts` edge and is flagged `suspicious`, same as before Sprint 8.
+    ///
+    /// Either way, one confirmed contradiction is enough to act on; there's no need to keep
+    /// spending LLM calls looking for more on the same memory. Returns the number of
+    /// contradiction pairs acted on (resolved or flagged).
+    ///
+    /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) is checked
+    /// before every LLM call - once exhausted, remaining memories are left un-checked for
+    /// today and revisited on tomorrow's run.
+    pub fn run_contradiction_detection(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        daily_budget: u64,
+    ) -> Result<usize> {
+        if !llm_cfg.enabled {
+            return Ok(0);
+        }
+        let mut handled = 0;
+        for m in self.store.all_memories()? {
+            if llm_consolidator::is_budget_exhausted(daily_budget) {
+                break;
+            }
+            if m.suspicious {
+                continue;
+            }
+            let Some(similar) = self.store.semantic_recall(&m.content, 10)? else {
+                continue;
+            };
+            for candidate in similar {
+                if candidate.id == m.id {
+                    continue;
+                }
+                // Re-checked here (not just at the top of the outer loop) so a memory with a
+                // full 10-candidate `similar` list can't run up to 9 more LLM calls after the
+                // budget is already exhausted - matches the doc comment's "before every LLM
+                // call" contract. The outer-loop check above stays: it's what skips the
+                // (non-LLM) `semantic_recall` lookup entirely once the budget is gone.
+                if llm_consolidator::is_budget_exhausted(daily_budget) {
+                    break;
+                }
+                if llm_intelligence::check_contradiction_via_llm(
+                    llm_cfg,
+                    &m.content,
+                    &candidate.content,
+                ) {
+                    let (newer, older) = if m.updated_at >= candidate.updated_at {
+                        (&m, &candidate)
+                    } else {
+                        (&candidate, &m)
+                    };
+                    if newer.confidence > older.confidence {
+                        let mut updated_newer = newer.clone();
+                        updated_newer.supersedes.push(older.id.clone());
+                        updated_newer.updated_at = Utc::now();
+                        self.store.upsert_memory(&updated_newer)?;
+                    } else {
+                        let mut updated = m.clone();
+                        updated.contradicts.push(candidate.id);
+                        updated.suspicious = true;
+                        updated.updated_at = Utc::now();
+                        self.store.upsert_memory(&updated)?;
+                    }
+                    handled += 1;
+                    break;
+                }
+            }
+        }
+        Ok(handled)
+    }
+
+    /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 3: score every `Project`-scoped,
+    /// not-yet-`promo_locked` `Semantic`/`Procedural` memory for how promotion-worthy it is.
+    /// Deliberately does **not** auto-promote anything, even at a very high score - that's
+    /// Sprint 8's "autopilot" job (`CAIRN_PROMOTE_THRESHOLD`). Sprint 5 only ever writes
+    /// `promo_score`; a human reviews the `[0.70, 0.90]` band via
+    /// `GET /api/memory/promotion-candidates` and calls `/promote` or `/dismiss-promotion`.
+    /// Returns the number of memories scored.
+    ///
+    /// v0.8.0 Sprint 9: `daily_budget` (`Config.llm_daily_budget`, 0 = unlimited) only guards the
+    /// borderline-case LLM refinement call below, never the pass itself - once exhausted, every
+    /// remaining memory still gets its cheap `fast_score`, just without the LLM tie-break.
+    pub fn run_promotion_scoring(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        daily_budget: u64,
+    ) -> Result<usize> {
+        let sanitizer = cairn_share::Sanitizer::new();
+        let mut scored = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type != ScopeType::Project || m.promo_locked {
+                continue;
+            }
+            if !matches!(m.tier, MemoryTier::Semantic | MemoryTier::Procedural) {
+                continue;
+            }
+            // Hard blocklist: never promote anything that looks like it carries a secret,
+            // an email, an IP, or a home path - reuses cairn-share's battle-tested sanitizer
+            // instead of a second, weaker regex.
+            if !sanitizer.sanitize(&m.content).sensitivity.is_shareable() {
+                continue;
+            }
+            let cross_hits = m
+                .scope_id
+                .as_deref()
+                .map(|pid| {
+                    self.store.count_cross_project_access(
+                        &m.id,
+                        pid,
+                        Utc::now() - Duration::days(30),
+                    )
+                })
+                .transpose()?
+                .unwrap_or(0);
+            let mut score = llm_intelligence::fast_promotion_score(m.kind, cross_hits);
+            // LLM judgment only for genuinely borderline cases - cheap fast_score handles the
+            // clear-cut ones (a `Task` never gets there; a heavily cross-project `Fact` is
+            // already obviously promotable) without spending a call on every candidate.
+            if (0.40..=0.85).contains(&score)
+                && llm_cfg.enabled
+                && !llm_consolidator::is_budget_exhausted(daily_budget)
+            {
+                if let Ok(text) = llm_consolidator::chat_with_config(
+                    llm_cfg,
+                    &format!(
+                        "Is this knowledge specific to one project, or universally applicable \
+                         to any software project? Answer with exactly one word, PROJECT or \
+                         UNIVERSAL.\n\n{}",
+                        m.content
+                    ),
+                ) {
+                    let llm_score = if text.trim().eq_ignore_ascii_case("universal") {
+                        1.0
+                    } else {
+                        0.0
+                    };
+                    score = score * 0.5 + llm_score * 0.5;
+                }
+            }
+            let mut updated = m.clone();
+            updated.promo_score = score.clamp(0.0, 1.0);
+            updated.updated_at = Utc::now();
+            self.store.upsert_memory(&updated)?;
+            scored += 1;
+        }
+        Ok(scored)
+    }
+
+    /// Memories currently suggested for promotion (v0.8.0 Sprint 5): `Project`-scoped, not
+    /// locked, with `promo_score` in the human-review band `[0.70, 0.90]`. Above `0.90` a
+    /// human should almost certainly just approve it; below `0.70` it isn't a strong enough
+    /// signal to bother asking about.
+    pub fn promotion_candidates(&self) -> Result<Vec<Memory>> {
+        Ok(self
+            .store
+            .all_memories()?
+            .into_iter()
+            .filter(|m| {
+                m.scope_type == ScopeType::Project
+                    && !m.promo_locked
+                    && (0.70..=0.90).contains(&m.promo_score)
+            })
+            .collect())
+    }
+
+    /// Promote a memory to `Global` scope and lock it against further promotion scoring -
+    /// once promoted there's nothing left to suggest. Returns `Ok(false)` if the id doesn't
+    /// exist.
+    pub fn promote_memory(&self, id: &str) -> Result<bool> {
+        let Some(mut m) = self.store.get_memory(id)? else {
+            return Ok(false);
+        };
+        let (old_scope_type, old_scope_id) = (m.scope_type, m.scope_id.clone());
+        let score = m.promo_score;
+        m.scope_type = ScopeType::Global;
+        m.scope_id = None;
+        m.promo_locked = true;
+        m.updated_at = Utc::now();
+        let ok = self.store.upsert_memory(&m)?;
+        if ok {
+            self.log_promotion(id, "promote", old_scope_type, old_scope_id, score, "manual");
+        }
+        Ok(ok)
+    }
+
+    /// v0.8.0 Sprint 8: best-effort append to the promotion log (see [`cairn_store::
+    /// PromotionLogEntry`]) - a logging failure must never fail the promotion/demotion itself,
+    /// same "warn and move on" precedent as `recall_for_org`'s reinforcement bump.
+    fn log_promotion(
+        &self,
+        memory_id: &str,
+        action: &'static str,
+        old_scope_type: ScopeType,
+        old_scope_id: Option<String>,
+        score: f32,
+        reason: &'static str,
+    ) {
+        let entry = cairn_store::PromotionLogEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            memory_id: memory_id.to_string(),
+            action: action.to_string(),
+            old_scope_type,
+            old_scope_id,
+            score,
+            reason: reason.to_string(),
+            ts: Utc::now(),
+        };
+        if let Err(e) = self.store.record_promotion_event(&entry) {
+            tracing::warn!(memory_id = %memory_id, action, error = %e, "failed to record promotion log entry");
+        }
+    }
+
+    /// v0.8.0 Sprint 8 `llm-intelligence` cron job, phase 4: promote every `Project`-scoped,
+    /// unlocked memory whose `promo_score` exceeds `threshold` straight to `Global`, logging
+    /// where it came from so `/demote` can undo it later. Runs after `run_promotion_scoring`
+    /// in the same cron tick, so a memory that clears the threshold never lingers in the
+    /// human-review `promotion_candidates()` band - the scope-type change this makes removes
+    /// it from that filter immediately. Returns the number of memories auto-promoted.
+    pub fn run_auto_promote(&self, threshold: f32) -> Result<usize> {
+        let mut promoted = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type != ScopeType::Project || m.promo_locked {
+                continue;
+            }
+            if m.promo_score <= threshold {
+                continue;
+            }
+            let (old_scope_type, old_scope_id) = (m.scope_type, m.scope_id.clone());
+            let mut updated = m.clone();
+            updated.scope_type = ScopeType::Global;
+            updated.scope_id = None;
+            updated.promo_locked = true;
+            updated.updated_at = Utc::now();
+            if self.store.upsert_memory(&updated)? {
+                self.log_promotion(
+                    &m.id,
+                    "promote",
+                    old_scope_type,
+                    old_scope_id,
+                    m.promo_score,
+                    "auto-threshold",
+                );
+                promoted += 1;
+            }
+        }
+        Ok(promoted)
+    }
+
+    /// v0.8.0 Sprint 8 `memory-demote` cron job: reverse an auto-promotion that isn't earning
+    /// its keep - the safety net that makes full-auto promotion (`run_auto_promote`) safe to
+    /// leave unattended. A `Global` memory is only ever a candidate if its most recent
+    /// `"promote"` log entry has `reason = "auto-threshold"` - a human's explicit
+    /// `promote_memory`/`pinned` call is never second-guessed by this job. Among those,
+    /// demotes anything `suspicious` (flagged by contradiction detection) OR unused by any
+    /// project for `idle_days`, reverting to the scope recorded at promotion time. Returns the
+    /// number of memories demoted.
+    pub fn run_auto_demote(&self, idle_days: u32) -> Result<usize> {
+        let cutoff = Utc::now() - Duration::days(idle_days as i64);
+        let mut demoted = 0;
+        for m in self.store.all_memories()? {
+            if m.scope_type != ScopeType::Global || m.pinned {
+                continue;
+            }
+            let Some(promo) = self.store.last_promotion_event(&m.id, "promote")? else {
+                continue; // never promoted through this pipeline - nothing recorded to revert to
+            };
+            if promo.reason != "auto-threshold" {
+                continue; // a human explicitly promoted this - never auto-reverted
+            }
+            let idle = self.store.count_any_access(&m.id, cutoff).unwrap_or(0) == 0;
+            if !m.suspicious && !idle {
+                continue;
+            }
+            let mut updated = m.clone();
+            updated.scope_type = promo.old_scope_type;
+            updated.scope_id = promo.old_scope_id.clone();
+            updated.promo_locked = true;
+            updated.updated_at = Utc::now();
+            if self.store.upsert_memory(&updated)? {
+                self.log_promotion(&m.id, "demote", ScopeType::Global, None, 0.0, "auto-demote");
+                demoted += 1;
+            }
+        }
+        Ok(demoted)
+    }
+
+    /// v0.8.0 Sprint 8 `/api/memory/:id/demote` (Undo): revert a promotion back to where it
+    /// came from, using the most recent `"promote"` log entry for this memory - works for both
+    /// auto-promotions and human-driven `promote_memory` calls, since both now log. Returns
+    /// `Ok(false)` if the memory doesn't exist, or was never promoted through this pipeline
+    /// (e.g. promoted before Sprint 8 shipped, so there's no log entry to revert to).
+    pub fn demote_memory(&self, id: &str) -> Result<bool> {
+        let Some(mut m) = self.store.get_memory(id)? else {
+            return Ok(false);
+        };
+        let Some(promo) = self.store.last_promotion_event(id, "promote")? else {
+            return Ok(false);
+        };
+        m.scope_type = promo.old_scope_type;
+        m.scope_id = promo.old_scope_id.clone();
+        m.promo_locked = true;
+        m.updated_at = Utc::now();
+        let ok = self.store.upsert_memory(&m)?;
+        if ok {
+            self.log_promotion(id, "demote", ScopeType::Global, None, 0.0, "manual-undo");
+        }
+        Ok(ok)
+    }
+
+    /// Dismiss a promotion suggestion ("don't ask again") without changing scope. Returns
+    /// `Ok(false)` if the id doesn't exist.
+    pub fn dismiss_promotion(&self, id: &str) -> Result<bool> {
+        let Some(mut m) = self.store.get_memory(id)? else {
+            return Ok(false);
+        };
+        m.promo_locked = true;
+        m.updated_at = Utc::now();
+        self.store.upsert_memory(&m)
+    }
+
+    /// v0.8.0 Sprint 5 `SessionEnd` hook: summarize a session's memories into a single
+    /// `Project`-scoped `Episodic` note. `Ok(None)` (a safe no-op, not an error) when the LLM
+    /// is disabled, the session has no memories, or the LLM call fails/returns nothing usable.
+    pub fn synthesize_session(
+        &self,
+        llm_cfg: &LlmConsolidationConfig,
+        session_id: &str,
+        project_id: Option<String>,
+    ) -> Result<Option<Memory>> {
+        if !llm_cfg.enabled {
+            return Ok(None);
+        }
+        let contents: Vec<String> = self
+            .store
+            .all_memories()?
+            .into_iter()
+            .filter(|m| {
+                m.scope_type == ScopeType::Session && m.scope_id.as_deref() == Some(session_id)
+            })
+            .map(|m| m.content)
+            .collect();
+        if contents.is_empty() {
+            return Ok(None);
+        }
+        let Some(summary) = llm_intelligence::summarize_session_via_llm(llm_cfg, &contents) else {
+            return Ok(None);
+        };
+        let memory = self.remember(NewMemory {
+            title: Some(format!("Session summary ({} memories)", contents.len())),
+            content: summary,
+            kind: Some(MemoryKind::Note),
+            tier: Some(MemoryTier::Episodic),
+            importance: Some(0.6),
+            scope_type: if project_id.is_some() {
+                ScopeType::Project
+            } else {
+                ScopeType::Global
+            },
+            scope_id: project_id,
+            ..Default::default()
+        })?;
+        Ok(Some(memory))
     }
 
     /// Fetch a memory by id.
@@ -419,9 +1028,10 @@ impl MemoryEngine {
         Ok(promoted)
     }
 
-    /// Edit a memory's content/importance/concepts/files. Pass `None` to leave a field alone.
-    /// `confidence` and `pinned` are deliberately NOT editable here - they have their own
-    /// helpers (`reinforce` happens on recall, `pin` is a single toggle).
+    /// Edit a memory's content/importance/concepts/files/title/reasoning. Pass `None` to leave
+    /// a field alone. `confidence` and `pinned` are deliberately NOT editable here - they have
+    /// their own helpers (`reinforce` happens on recall, `pin` is a single toggle).
+    #[allow(clippy::too_many_arguments)]
     pub fn edit(
         &self,
         id: &str,
@@ -429,10 +1039,12 @@ impl MemoryEngine {
         importance: Option<f32>,
         concepts: Option<Vec<String>>,
         files: Option<Vec<String>>,
+        title: Option<String>,
+        reasoning: Option<String>,
     ) -> Result<Option<Memory>> {
         let updated = self
             .store
-            .edit_memory(id, content, importance, concepts, files)?;
+            .edit_memory(id, content, importance, concepts, files, title, reasoning)?;
         if !updated {
             return Ok(None);
         }
@@ -445,24 +1057,46 @@ impl MemoryEngine {
     /// `rerank_depth` controls how many top hits get re-ranked (MMR is O(n²) per top result;
     /// 20 is a good default - small enough to be cheap, large enough for a real "smallest
     /// high-signal working set").
+    ///
+    /// Global-only scope (mirrors [`Self::recall`]); see [`Self::hybrid_search_for_org`] for
+    /// the scope-aware entry point `/api/search` uses.
     pub fn hybrid_search(
         &self,
         query: &str,
         limit: usize,
         rerank_depth: usize,
     ) -> Result<Vec<ScoredMemory>> {
+        self.hybrid_search_for_org(
+            query,
+            limit,
+            rerank_depth,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware hybrid search (v0.8.0 Sprint 10). Same RRF+MMR pipeline as
+    /// [`Self::hybrid_search`], but candidates come from [`Self::recall_for_org`] instead of
+    /// the Global-only [`Self::recall`] - fixes a Sprint 2 gap where `/api/search` ignored
+    /// project/session scope entirely while plain recall already respected it.
+    pub fn hybrid_search_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
         // Pull a wider candidate set than the user asked for - RRF + MMR both need more
         // than the final limit to work well.
-        let candidates = self.recall(query, (limit + rerank_depth).max(50))?;
+        let candidates =
+            self.recall_for_org(query, (limit + rerank_depth).max(50), org_id, scope)?;
         Ok(mmr_rerank(candidates, limit, 0.7))
     }
 
     /// Hybrid search with cross-encoder reranking. Falls back to `hybrid_search` when no
-    /// reranker is installed (the default).
-    ///
-    /// Pipeline: `recall -> RRF -> truncate -> diversify_by_session -> mmr -> rerank(top_k)
-    /// -> min-max normalize -> alpha-blend with hybrid score`. The rerank cost is paid only
-    /// for the post-MMR top-K candidates, so total inference is bounded.
+    /// reranker is installed (the default). Global-only scope; see
+    /// [`Self::hybrid_search_with_rerank_for_org`] for the scope-aware entry point.
     pub fn hybrid_search_with_rerank(
         &self,
         query: &str,
@@ -471,10 +1105,101 @@ impl MemoryEngine {
         reranker: &dyn Reranker,
         blend_weight: f32,
     ) -> Result<Vec<ScoredMemory>> {
+        self.hybrid_search_with_rerank_for_org(
+            query,
+            limit,
+            rerank_depth,
+            reranker,
+            blend_weight,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware version of [`Self::hybrid_search_with_rerank`].
+    ///
+    /// Pipeline: `recall -> RRF -> truncate -> diversify_by_session -> mmr -> rerank(top_k)
+    /// -> min-max normalize -> alpha-blend with hybrid score`. The rerank cost is paid only
+    /// for the post-MMR top-K candidates, so total inference is bounded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hybrid_search_with_rerank_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
         // 1. Same wide retrieval + MMR as the no-rerank path.
-        let mmr = self.hybrid_search(query, limit, rerank_depth)?;
+        let mmr = self.hybrid_search_for_org(query, limit, rerank_depth, org_id, scope)?;
+        Ok(self.rerank_hits(query, mmr, limit, reranker, blend_weight))
+    }
+
+    /// Query expansion with cross-encoder reranking. Global-only scope; see
+    /// [`Self::expanded_search_with_rerank_for_org`] for the scope-aware entry point and for why
+    /// this composition exists as its own method rather than chaining
+    /// [`Self::expanded_search`] and [`Self::hybrid_search_with_rerank`].
+    pub fn expanded_search_with_rerank(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        expander: &QueryExpander,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+    ) -> Result<Vec<ScoredMemory>> {
+        self.expanded_search_with_rerank_for_org(
+            query,
+            limit,
+            rerank_depth,
+            expander,
+            reranker,
+            blend_weight,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware search with LLM query expansion *and* cross-encoder reranking.
+    /// Composes [`Self::expanded_search_for_org`] (wider retrieval via reformulations) with the
+    /// same rerank pass [`Self::hybrid_search_with_rerank_for_org`] uses, instead of the two
+    /// being mutually exclusive - `search_handler` used to silently drop the expansion whenever
+    /// both `expand=true` and `rerank=local` were requested together, because it reran a plain
+    /// (unexpanded) search-with-rerank on top of the expanded hits instead of reranking them.
+    #[allow(clippy::too_many_arguments)]
+    pub fn expanded_search_with_rerank_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        expander: &QueryExpander,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
+        let hits =
+            self.expanded_search_for_org(query, limit, rerank_depth, expander, org_id, scope)?;
+        Ok(self.rerank_hits(query, hits, limit, reranker, blend_weight))
+    }
+
+    /// Cross-encoder rerank of an already-retrieved hit list against `query` - the shared tail
+    /// end of both [`Self::hybrid_search_with_rerank_for_org`] and
+    /// [`Self::expanded_search_with_rerank_for_org`]. `query` is always the caller's original,
+    /// unexpanded text: expansion widens *retrieval*, but relevance for the final ranking is
+    /// still judged against what the user actually asked.
+    fn rerank_hits(
+        &self,
+        query: &str,
+        mmr: Vec<ScoredMemory>,
+        limit: usize,
+        reranker: &dyn Reranker,
+        blend_weight: f32,
+    ) -> Vec<ScoredMemory> {
         if mmr.is_empty() {
-            return Ok(mmr);
+            return mmr;
         }
 
         // 2. Rerank the post-MMR top-K (capped at `reranker` budget).
@@ -486,7 +1211,7 @@ impl MemoryEngine {
             Err(e) => {
                 // Fail-soft: keep the MMR ordering if the reranker errors.
                 tracing::warn!(error = %e, "reranker failed; returning MMR-only result");
-                return Ok(mmr);
+                return mmr;
             }
         };
 
@@ -532,7 +1257,7 @@ impl MemoryEngine {
         }
         // Trim to the requested limit.
         result.truncate(limit);
-        Ok(result)
+        result
     }
 
     /// Search the engine with LLM-driven query expansion. For each reformulation we run
@@ -542,6 +1267,8 @@ impl MemoryEngine {
     /// Falls back to a plain `hybrid_search` when:
     /// - the expander is disabled (short-circuit to single-query `ExpandedQuery`)
     /// - the expansion yields only the original query
+    ///
+    /// Global-only scope; see [`Self::expanded_search_for_org`] for the scope-aware entry point.
     pub fn expanded_search(
         &self,
         query: &str,
@@ -549,10 +1276,31 @@ impl MemoryEngine {
         rerank_depth: usize,
         expander: &QueryExpander,
     ) -> Result<Vec<ScoredMemory>> {
+        self.expanded_search_for_org(
+            query,
+            limit,
+            rerank_depth,
+            expander,
+            OrgId::default(),
+            &ScopeCtx::default(),
+        )
+    }
+
+    /// Tenant- and scope-aware version of [`Self::expanded_search`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn expanded_search_for_org(
+        &self,
+        query: &str,
+        limit: usize,
+        rerank_depth: usize,
+        expander: &QueryExpander,
+        org_id: OrgId,
+        scope: &ScopeCtx,
+    ) -> Result<Vec<ScoredMemory>> {
         let expanded = expander.expand(query)?;
         if !expanded.is_expanded() {
             // Disabled or no reformulations produced - single-query path.
-            return self.hybrid_search(query, limit, rerank_depth);
+            return self.hybrid_search_for_org(query, limit, rerank_depth, org_id, scope);
         }
         // Pull a wider candidate set per reformulation so MMR has headroom across the
         // merged pool.
@@ -560,7 +1308,7 @@ impl MemoryEngine {
         let mut by_id: std::collections::HashMap<String, ScoredMemory> =
             std::collections::HashMap::new();
         for q in &expanded.queries {
-            for hit in self.recall(q, per_query_k)? {
+            for hit in self.recall_for_org(q, per_query_k, org_id.clone(), scope)? {
                 by_id
                     .entry(hit.memory.id.clone())
                     .and_modify(|existing| {
@@ -984,6 +1732,16 @@ fn rrf(rank: usize) -> f32 {
     1.0 / (60.0 + rank as f32)
 }
 
+/// Scope multiplier applied to a memory's fused score (v0.8.0 Sprint 2): the narrower the
+/// scope, the more likely it's exactly what the current project/session needs right now.
+fn scope_weight(scope_type: ScopeType) -> f32 {
+    match scope_type {
+        ScopeType::Session => 1.5,
+        ScopeType::Project => 1.2,
+        ScopeType::Global => 1.0,
+    }
+}
+
 /// Dense 0-based ranks (highest score = rank 0) for a score vector, by index.
 fn ranks_desc(scores: &[f32]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..scores.len()).collect();
@@ -1105,7 +1863,7 @@ mod tests {
     use cairn_core::{MemoryKind, MemoryTier};
     use cairn_store::Store;
 
-    /// An engine backed by an isolated Helix store, or `None` when `CAIRN_HELIX_URL` is unset
+    /// An engine backed by an isolated database, or `None` when `CAIRN_DB_URL` is unset
     /// (offline runs skip these integration tests; CI sets the URL and runs them for real).
     fn engine() -> Option<MemoryEngine> {
         Some(MemoryEngine::new(Arc::new(Store::open_for_test()?)))
@@ -1256,7 +2014,15 @@ mod tests {
         let Some(mem) = engine() else { return };
         let m = mem.remember(NewMemory::new("original content")).unwrap();
         let updated = mem
-            .edit(&m.id, Some("new content".into()), None, None, None)
+            .edit(
+                &m.id,
+                Some("new content".into()),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(updated.content, "new content");
@@ -1265,7 +2031,7 @@ mod tests {
 
         // Unknown id returns Ok(None).
         assert!(mem
-            .edit("no-such-id", None, None, None, None)
+            .edit("no-such-id", None, None, None, None, None, None)
             .unwrap()
             .is_none());
     }
@@ -1607,7 +2373,9 @@ mod tests {
             id: uuid::Uuid::new_v4().to_string(),
             kind: MemoryKind::Note,
             tier: MemoryTier::Working,
+            title: None,
             content: content.to_string(),
+            reasoning: None,
             concepts: vec![],
             files: vec![],
             session_id: None,
@@ -1621,6 +2389,10 @@ mod tests {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            scope_type: cairn_core::ScopeType::Global,
+            scope_id: None,
+            promo_score: 0.0,
+            promo_locked: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -1646,7 +2418,12 @@ mod tests {
         .unwrap();
 
         let from_acme = mem
-            .recall_for_org("secret", 10, OrgId::new("acme").unwrap())
+            .recall_for_org(
+                "secret",
+                10,
+                OrgId::new("acme").unwrap(),
+                &ScopeCtx::default(),
+            )
             .unwrap();
         assert_eq!(from_acme.len(), 1, "acme should see only acme's memory");
         assert!(from_acme[0].memory.content.contains("unicorns"));
@@ -1661,13 +2438,795 @@ mod tests {
 
         // Acme can never see default's memory, even with a known-keyword query.
         let from_acme_again = mem
-            .recall_for_org("dragons", 10, OrgId::new("acme").unwrap())
+            .recall_for_org(
+                "dragons",
+                10,
+                OrgId::new("acme").unwrap(),
+                &ScopeCtx::default(),
+            )
             .unwrap();
         assert!(
             from_acme_again.is_empty(),
             "acme must not leak across tenants"
         );
     }
+
+    /// v0.8.0 Sprint 2: a `Project`-scoped memory is invisible to a caller whose `ScopeCtx`
+    /// names a different project, and invisible with no project context at all - it is not
+    /// `Global`, so absence of a project header must not fall back to showing it.
+    #[test]
+    fn project_scope_isolates_recall_by_project_id() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory {
+            scope_type: cairn_core::ScopeType::Project,
+            scope_id: Some("proj-alpha".to_string()),
+            ..NewMemory::new("proj-alpha secret: the launch code is banana")
+        })
+        .unwrap();
+
+        let other_project = ScopeCtx {
+            project_id: Some("proj-beta".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .recall_for_org("launch code", 10, OrgId::default(), &other_project)
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "proj-beta must not see proj-alpha's memory"
+        );
+
+        let no_project = ScopeCtx::default();
+        let hits = mem
+            .recall_for_org("launch code", 10, OrgId::default(), &no_project)
+            .unwrap();
+        assert!(
+            hits.is_empty(),
+            "no project context must not fall back to showing project-scoped memories"
+        );
+
+        let same_project = ScopeCtx {
+            project_id: Some("proj-alpha".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .recall_for_org("launch code", 10, OrgId::default(), &same_project)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "proj-alpha must see its own memory");
+    }
+
+    /// v0.8.0 Sprint 10 regression: `hybrid_search`/`/api/search` used to always recall
+    /// Global-only (a hardcoded `ScopeCtx::default()`), silently ignoring project context
+    /// while plain `recall` already respected it. `hybrid_search_for_org` is the fix -
+    /// same isolation guarantee `project_scope_isolates_recall_by_project_id` proves for
+    /// `recall_for_org` must hold for the hybrid (BM25+vector+graph, RRF+MMR) path too.
+    #[test]
+    fn hybrid_search_for_org_respects_project_scope() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory {
+            scope_type: cairn_core::ScopeType::Project,
+            scope_id: Some("proj-alpha".to_string()),
+            ..NewMemory::new("proj-alpha secret: the launch code is banana")
+        })
+        .unwrap();
+        mem.remember(NewMemory::new(
+            "unrelated global memory about rust async runtimes",
+        ))
+        .unwrap();
+
+        let other_project = ScopeCtx {
+            project_id: Some("proj-beta".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .hybrid_search_for_org("launch code", 10, 20, OrgId::default(), &other_project)
+            .unwrap();
+        assert!(
+            hits.iter().all(|h| !h.memory.content.contains("banana")),
+            "proj-beta must not see proj-alpha's project-scoped memory via hybrid_search"
+        );
+
+        let same_project = ScopeCtx {
+            project_id: Some("proj-alpha".to_string()),
+            session_id: None,
+        };
+        let hits = mem
+            .hybrid_search_for_org("launch code", 10, 20, OrgId::default(), &same_project)
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| h.memory.content.contains("banana")),
+            "proj-alpha must see its own project-scoped memory via hybrid_search"
+        );
+
+        // The plain (unscoped) entry point keeps its pre-existing Global-only behavior -
+        // this is a additive fix, not a breaking change for MCP stdio / existing callers.
+        let hits = mem.hybrid_search("launch code", 10, 20).unwrap();
+        assert!(
+            hits.iter().all(|h| !h.memory.content.contains("banana")),
+            "unscoped hybrid_search must stay Global-only"
+        );
+    }
+
+    /// Mirrors `project_scope_isolates_recall_by_project_id` for `Session` scope - a second
+    /// session must not see the first session's Session-scoped rows, the same way Project
+    /// scope isolates by project id.
+    #[test]
+    fn session_scope_isolates_recall_by_session_id() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory {
+            scope_type: cairn_core::ScopeType::Session,
+            scope_id: Some("session-a".to_string()),
+            ..NewMemory::new("session-a scratch note: temp password is hunter2")
+        })
+        .unwrap();
+
+        let session_b = ScopeCtx {
+            project_id: None,
+            session_id: Some("session-b".to_string()),
+        };
+        let hits = mem
+            .recall_for_org("temp password", 10, OrgId::default(), &session_b)
+            .unwrap();
+        assert!(hits.is_empty(), "session-b must not see session-a's memory");
+
+        let session_a = ScopeCtx {
+            project_id: None,
+            session_id: Some("session-a".to_string()),
+        };
+        let hits = mem
+            .recall_for_org("temp password", 10, OrgId::default(), &session_a)
+            .unwrap();
+        assert_eq!(hits.len(), 1, "session-a must see its own memory");
+    }
+
+    /// A `Global` memory is visible from every scope context - the default for memories that
+    /// don't set `scope_type` at all.
+    #[test]
+    fn global_scope_is_visible_from_every_context() {
+        let Some(mem) = engine() else { return };
+        mem.remember(NewMemory::new("global fact: rust compiles to native code"))
+            .unwrap();
+
+        for ctx in [
+            ScopeCtx::default(),
+            ScopeCtx {
+                project_id: Some("any-project".to_string()),
+                session_id: None,
+            },
+            ScopeCtx {
+                project_id: None,
+                session_id: Some("any-session".to_string()),
+            },
+        ] {
+            let hits = mem
+                .recall_for_org("rust compiles", 10, OrgId::default(), &ctx)
+                .unwrap();
+            assert_eq!(hits.len(), 1, "global memory must be visible from {ctx:?}");
+        }
+    }
+
+    // --- v0.8.0 Sprint 4: session-gc + decay cron drivers ---
+
+    #[test]
+    fn session_gc_promotes_stale_session_memories_to_global() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("session scratch note for gc");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("session-old".to_string());
+        m.updated_at = Utc::now() - Duration::days(10);
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_session_gc(2).unwrap(), 1);
+
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Global);
+        assert!(after.scope_id.is_none());
+    }
+
+    #[test]
+    fn session_gc_leaves_fresh_session_memories_alone() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("fresh session note");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("session-fresh".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_session_gc(2).unwrap(), 0);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Session);
+    }
+
+    #[test]
+    fn session_gc_disabled_when_ttl_is_zero() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("ancient session note");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("session-ancient".to_string());
+        m.updated_at = Utc::now() - Duration::days(365);
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_session_gc(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn decay_reduces_confidence_of_stale_memories_and_preserves_updated_at() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("old fact that should decay");
+        m.confidence = 0.9;
+        let backdated = Utc::now() - Duration::days(90);
+        m.updated_at = backdated;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_decay(30).unwrap(), 1);
+
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert!(
+            after.confidence < 0.9,
+            "confidence should have decayed, got {}",
+            after.confidence
+        );
+        assert_eq!(
+            after.updated_at.timestamp_millis(),
+            backdated.timestamp_millis(),
+            "updated_at must not be bumped by decay - it's the clock apply_decay measures from"
+        );
+    }
+
+    #[test]
+    fn decay_leaves_fresh_memories_untouched() {
+        let Some(mem) = engine() else { return };
+        let m = synth("brand new fact");
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_decay(30).unwrap(), 0);
+    }
+
+    // --- v0.8.0 Sprint 9: memory hygiene tests ---
+
+    #[test]
+    fn dedup_sweep_keeps_newest_and_deletes_older_collisions() {
+        let Some(mem) = engine() else { return };
+        let mut older = synth("duplicate content after an edit");
+        older.updated_at = Utc::now() - Duration::days(1);
+        let newer = synth("duplicate content after an edit");
+        mem.store.insert_memory(&older).unwrap();
+        mem.store.insert_memory(&newer).unwrap();
+
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 1);
+        assert!(mem.store.get_memory(&older.id).unwrap().is_none());
+        assert!(mem.store.get_memory(&newer.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn dedup_sweep_ignores_non_working_tier_and_distinct_content() {
+        let Some(mem) = engine() else { return };
+        let mut semantic_dup = synth("same content, wrong tier");
+        semantic_dup.tier = cairn_core::MemoryTier::Semantic;
+        let mut working_dup = synth("same content, wrong tier");
+        working_dup.tier = cairn_core::MemoryTier::Semantic;
+        mem.store.insert_memory(&semantic_dup).unwrap();
+        mem.store.insert_memory(&working_dup).unwrap();
+        mem.store
+            .insert_memory(&synth("unique working note"))
+            .unwrap();
+
+        assert_eq!(
+            mem.run_dedup_sweep().unwrap(),
+            0,
+            "Semantic-tier collisions are out of scope; a lone Working note has nothing to dedup against"
+        );
+    }
+
+    #[test]
+    fn dedup_sweep_never_deletes_a_pinned_memory() {
+        let Some(mem) = engine() else { return };
+        let mut pinned = synth("pinned duplicate");
+        pinned.pinned = true;
+        pinned.updated_at = Utc::now() - Duration::days(1);
+        let unpinned = synth("pinned duplicate");
+        mem.store.insert_memory(&pinned).unwrap();
+        mem.store.insert_memory(&unpinned).unwrap();
+
+        // The unpinned copy is the "duplicate" here even though it's newer - the pinned one is
+        // never a deletion candidate regardless of age.
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 1);
+        assert!(mem.store.get_memory(&pinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&unpinned.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn dedup_sweep_deletes_every_unpinned_duplicate_when_one_is_pinned() {
+        // Same shape as `dedup_sweep_never_deletes_a_pinned_memory` but with two unpinned
+        // duplicates instead of one, so the fix can't pass by coincidentally handling only the
+        // smallest group size (retain-then-"keep the newest of what's left" would wrongly leave
+        // one unpinned copy behind here too).
+        let Some(mem) = engine() else { return };
+        let mut pinned = synth("triple duplicate");
+        pinned.pinned = true;
+        let unpinned_a = synth("triple duplicate");
+        let unpinned_b = synth("triple duplicate");
+        mem.store.insert_memory(&pinned).unwrap();
+        mem.store.insert_memory(&unpinned_a).unwrap();
+        mem.store.insert_memory(&unpinned_b).unwrap();
+
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 2);
+        assert!(mem.store.get_memory(&pinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&unpinned_a.id).unwrap().is_none());
+        assert!(mem.store.get_memory(&unpinned_b.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn dedup_sweep_skips_a_group_that_is_entirely_pinned() {
+        let Some(mem) = engine() else { return };
+        let mut a = synth("both pinned");
+        a.pinned = true;
+        let mut b = synth("both pinned");
+        b.pinned = true;
+        mem.store.insert_memory(&a).unwrap();
+        mem.store.insert_memory(&b).unwrap();
+
+        assert_eq!(mem.run_dedup_sweep().unwrap(), 0);
+        assert!(mem.store.get_memory(&a.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&b.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn working_tier_cap_deletes_oldest_excess_for_the_over_quota_project() {
+        let Some(mem) = engine() else { return };
+        for i in 0..3 {
+            let mut m = synth(&format!("note {i}"));
+            m.scope_type = ScopeType::Project;
+            m.scope_id = Some("proj-a".to_string());
+            m.updated_at = Utc::now() - Duration::days(3 - i);
+            mem.store.insert_memory(&m).unwrap();
+        }
+
+        assert_eq!(
+            mem.run_working_tier_cap(2).unwrap(),
+            1,
+            "3 over a cap of 2 deletes 1"
+        );
+        let remaining = mem
+            .store
+            .all_memories()
+            .unwrap()
+            .into_iter()
+            .filter(|m| m.scope_id.as_deref() == Some("proj-a"))
+            .count();
+        assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn working_tier_cap_zero_means_unlimited() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("solo note");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_working_tier_cap(0).unwrap(), 0);
+    }
+
+    #[test]
+    fn working_tier_cap_ignores_global_scope_and_pinned_memories() {
+        let Some(mem) = engine() else { return };
+        let global = synth("global working note");
+        mem.store.insert_memory(&global).unwrap();
+
+        let mut pinned = synth("pinned project note");
+        pinned.scope_type = ScopeType::Project;
+        pinned.scope_id = Some("proj-a".to_string());
+        pinned.pinned = true;
+        // Oldest by far - the obvious deletion pick if pinned memories were wrongly eligible.
+        pinned.updated_at = Utc::now() - Duration::days(10);
+        mem.store.insert_memory(&pinned).unwrap();
+
+        let mut unpinned = synth("unpinned project note");
+        unpinned.scope_type = ScopeType::Project;
+        unpinned.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&unpinned).unwrap();
+
+        // Cap of 1: the lone non-pinned proj-a memory is already exactly at quota. If the
+        // pinned or Global memory were wrongly counted, this would see an excess and delete one.
+        assert_eq!(mem.run_working_tier_cap(1).unwrap(), 0);
+        assert!(mem.store.get_memory(&pinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&unpinned.id).unwrap().is_some());
+        assert!(mem.store.get_memory(&global.id).unwrap().is_some());
+    }
+
+    // --- v0.8.0 Sprint 5: LLM intelligence tests ---
+
+    fn disabled_llm_cfg() -> cairn_core::LlmConsolidationConfig {
+        cairn_core::LlmConsolidationConfig {
+            enabled: false,
+            url: "http://localhost:11434/v1/chat/completions".to_string(),
+            model: "llama3.2".to_string(),
+            api_key: None,
+        }
+    }
+
+    #[test]
+    fn concept_extraction_is_a_noop_when_llm_disabled() {
+        let Some(mem) = engine() else { return };
+        let m = synth("some fact with no concepts yet");
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(
+            mem.run_concept_extraction(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert!(after.concepts.is_empty());
+    }
+
+    #[test]
+    fn contradiction_detection_is_a_noop_when_llm_disabled() {
+        let Some(mem) = engine() else { return };
+        let m = synth("the sky is blue");
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(
+            mem.run_contradiction_detection(&disabled_llm_cfg(), 0)
+                .unwrap(),
+            0
+        );
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert!(!after.suspicious);
+    }
+
+    #[test]
+    fn promotion_scoring_scores_eligible_project_memories() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("rust ownership prevents use-after-free bugs");
+        m.kind = cairn_core::MemoryKind::Fact;
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            1
+        );
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        let expected = llm_intelligence::fast_promotion_score(cairn_core::MemoryKind::Fact, 0);
+        assert_eq!(after.promo_score, expected);
+        assert!(after.promo_score > 0.0);
+    }
+
+    #[test]
+    fn promotion_scoring_skips_non_project_scope_and_wrong_tier() {
+        let Some(mem) = engine() else { return };
+        let mut global_fact = synth("a global fact");
+        global_fact.kind = cairn_core::MemoryKind::Fact;
+        global_fact.tier = cairn_core::MemoryTier::Semantic;
+        mem.store.insert_memory(&global_fact).unwrap();
+
+        let mut working_tier = synth("a working-tier project note");
+        working_tier.kind = cairn_core::MemoryKind::Fact;
+        working_tier.scope_type = ScopeType::Project;
+        working_tier.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&working_tier).unwrap();
+
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn promotion_scoring_skips_locked_memories() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("a locked candidate");
+        m.kind = cairn_core::MemoryKind::Fact;
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_locked = true;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn promotion_scoring_skips_content_with_secrets() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("contact admin@example.com for the api key sk_live_1234567890abcdef");
+        m.kind = cairn_core::MemoryKind::Fact;
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(
+            mem.run_promotion_scoring(&disabled_llm_cfg(), 0).unwrap(),
+            0
+        );
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.promo_score, 0.0);
+    }
+
+    #[test]
+    fn promotion_candidates_filters_to_review_band_and_excludes_locked() {
+        let Some(mem) = engine() else { return };
+        let mut in_band = synth("in the review band");
+        in_band.scope_type = ScopeType::Project;
+        in_band.scope_id = Some("proj-a".to_string());
+        in_band.promo_score = 0.80;
+        mem.store.insert_memory(&in_band).unwrap();
+
+        let mut too_low = synth("below the band");
+        too_low.scope_type = ScopeType::Project;
+        too_low.scope_id = Some("proj-a".to_string());
+        too_low.promo_score = 0.50;
+        mem.store.insert_memory(&too_low).unwrap();
+
+        let mut locked = synth("in band but locked");
+        locked.scope_type = ScopeType::Project;
+        locked.scope_id = Some("proj-a".to_string());
+        locked.promo_score = 0.85;
+        locked.promo_locked = true;
+        mem.store.insert_memory(&locked).unwrap();
+
+        let candidates = mem.promotion_candidates().unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, in_band.id);
+    }
+
+    #[test]
+    fn promote_memory_moves_to_global_and_locks() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("promotable fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert!(mem.promote_memory(&m.id).unwrap());
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Global);
+        assert!(after.scope_id.is_none());
+        assert!(after.promo_locked);
+    }
+
+    #[test]
+    fn promote_memory_missing_id_returns_false() {
+        let Some(mem) = engine() else { return };
+        assert!(!mem.promote_memory("does-not-exist").unwrap());
+    }
+
+    #[test]
+    fn dismiss_promotion_locks_without_changing_scope() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("dismissable candidate");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        assert!(mem.dismiss_promotion(&m.id).unwrap());
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+        assert_eq!(after.scope_id, Some("proj-a".to_string()));
+        assert!(after.promo_locked);
+    }
+
+    #[test]
+    fn synthesize_session_is_a_noop_when_llm_disabled() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("something that happened this session");
+        m.scope_type = ScopeType::Session;
+        m.scope_id = Some("sess-1".to_string());
+        mem.store.insert_memory(&m).unwrap();
+
+        let result = mem
+            .synthesize_session(&disabled_llm_cfg(), "sess-1", Some("proj-a".to_string()))
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn synthesize_session_is_a_noop_when_session_has_no_memories() {
+        let Some(mem) = engine() else { return };
+        let mut enabled_cfg = disabled_llm_cfg();
+        enabled_cfg.enabled = true;
+        let result = mem
+            .synthesize_session(&enabled_cfg, "empty-session", None)
+            .unwrap();
+        assert!(result.is_none());
+    }
+
+    // --- v0.8.0 Sprint 8: autopilot tests ---
+
+    #[test]
+    fn promote_memory_records_a_promotion_log_entry() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("manually promotable fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.95;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert!(mem.promote_memory(&m.id).unwrap());
+        let entry = mem
+            .store
+            .last_promotion_event(&m.id, "promote")
+            .unwrap()
+            .expect("logged");
+        assert_eq!(entry.action, "promote");
+        assert_eq!(entry.reason, "manual");
+        assert_eq!(entry.old_scope_type, ScopeType::Project);
+        assert_eq!(entry.old_scope_id, Some("proj-a".to_string()));
+    }
+
+    #[test]
+    fn run_auto_promote_promotes_above_threshold_and_logs() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("clearly universal fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.tier = cairn_core::MemoryTier::Semantic;
+        m.promo_score = 0.90;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 1);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Global);
+        assert!(after.promo_locked);
+        let entry = mem
+            .store
+            .last_promotion_event(&m.id, "promote")
+            .unwrap()
+            .expect("logged");
+        assert_eq!(entry.reason, "auto-threshold");
+        assert_eq!(entry.old_scope_id, Some("proj-a".to_string()));
+    }
+
+    #[test]
+    fn run_auto_promote_skips_at_or_below_threshold() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("borderline fact");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.85;
+        mem.store.insert_memory(&m).unwrap();
+
+        assert_eq!(
+            mem.run_auto_promote(0.85).unwrap(),
+            0,
+            "score equal to threshold must not promote"
+        );
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+    }
+
+    #[test]
+    fn run_auto_promote_skips_locked_and_non_project_memories() {
+        let Some(mem) = engine() else { return };
+        let mut locked = synth("locked candidate");
+        locked.scope_type = ScopeType::Project;
+        locked.scope_id = Some("proj-a".to_string());
+        locked.promo_score = 0.99;
+        locked.promo_locked = true;
+        mem.store.insert_memory(&locked).unwrap();
+
+        let mut global = synth("already global");
+        global.promo_score = 0.99;
+        mem.store.insert_memory(&global).unwrap();
+
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 0);
+    }
+
+    #[test]
+    fn demote_memory_reverts_to_the_logged_scope() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("promoted then undone");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+        assert!(mem.promote_memory(&m.id).unwrap());
+
+        assert!(mem.demote_memory(&m.id).unwrap());
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+        assert_eq!(after.scope_id, Some("proj-a".to_string()));
+        assert!(
+            after.promo_locked,
+            "undo still locks it against re-suggestion"
+        );
+
+        let entry = mem
+            .store
+            .last_promotion_event(&m.id, "demote")
+            .unwrap()
+            .expect("logged");
+        assert_eq!(entry.reason, "manual-undo");
+    }
+
+    #[test]
+    fn demote_memory_false_when_never_promoted() {
+        let Some(mem) = engine() else { return };
+        let m = synth("never promoted");
+        mem.store.insert_memory(&m).unwrap();
+        assert!(!mem.demote_memory(&m.id).unwrap());
+    }
+
+    #[test]
+    fn demote_memory_false_for_unknown_id() {
+        let Some(mem) = engine() else { return };
+        assert!(!mem.demote_memory("does-not-exist").unwrap());
+    }
+
+    #[test]
+    fn run_auto_demote_reverts_a_suspicious_auto_promoted_memory() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("auto-promoted but now suspicious");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.95;
+        mem.store.insert_memory(&m).unwrap();
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 1);
+
+        // Flag it suspicious after the fact (as contradiction detection would).
+        let mut flagged = mem.store.get_memory(&m.id).unwrap().unwrap();
+        flagged.suspicious = true;
+        mem.store.upsert_memory(&flagged).unwrap();
+
+        assert_eq!(mem.run_auto_demote(45).unwrap(), 1);
+        let after = mem.store.get_memory(&m.id).unwrap().unwrap();
+        assert_eq!(after.scope_type, ScopeType::Project);
+        assert_eq!(after.scope_id, Some("proj-a".to_string()));
+    }
+
+    #[test]
+    fn run_auto_demote_never_touches_a_pinned_memory() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("auto-promoted then pinned by a human");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        m.promo_score = 0.95;
+        mem.store.insert_memory(&m).unwrap();
+        assert_eq!(mem.run_auto_promote(0.85).unwrap(), 1);
+
+        let mut pinned = mem.store.get_memory(&m.id).unwrap().unwrap();
+        pinned.pinned = true;
+        pinned.suspicious = true; // would otherwise qualify for demotion
+        mem.store.upsert_memory(&pinned).unwrap();
+
+        assert_eq!(
+            mem.run_auto_demote(45).unwrap(),
+            0,
+            "pinned memories are exempt"
+        );
+    }
+
+    #[test]
+    fn run_auto_demote_never_touches_a_manually_promoted_memory() {
+        let Some(mem) = engine() else { return };
+        let mut m = synth("manually promoted, never auto");
+        m.scope_type = ScopeType::Project;
+        m.scope_id = Some("proj-a".to_string());
+        mem.store.insert_memory(&m).unwrap();
+        assert!(mem.promote_memory(&m.id).unwrap()); // reason = "manual", not "auto-threshold"
+
+        let mut suspicious = mem.store.get_memory(&m.id).unwrap().unwrap();
+        suspicious.suspicious = true;
+        mem.store.upsert_memory(&suspicious).unwrap();
+
+        assert_eq!(
+            mem.run_auto_demote(45).unwrap(),
+            0,
+            "a human's explicit promotion is never second-guessed by the safety net"
+        );
+    }
+
+    // Note: the hermetic in-memory backend's `count_any_access` always reports `0` (same
+    // no-op boundary as `count_cross_project_access` - it never stores `access_log` rows), so
+    // every auto-promoted memory looks "idle" here regardless of `idle_days`. That's enough to
+    // test the `suspicious`/`pinned`/`manual` gates above, but a "not suspicious AND actively
+    // used, so left alone" case needs a real `access_log` - see `crates/cairn-store/src/
+    // surreal.rs`'s `live::` tests for that against a real SurrealDB.
 
     // --- P1.3 Triple-Stream tests ---
 

@@ -2,10 +2,12 @@
 
 import Link from "next/link";
 import {
+  qk,
   useStatsQuery,
   useWakeupQuery,
   useAnchorQuery,
   useDevicesTokensQuery,
+  useAutopilotDigestQuery,
 } from "@/lib/queries";
 import { getJSON } from "@/lib/api";
 import { useQuery } from "@tanstack/react-query";
@@ -24,7 +26,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { Item, ItemContent, ItemTitle, ItemDescription } from "@/components/ui/item";
-import { Brain, Plug, ShieldCheck, Network } from "lucide-react";
+import { Brain, Plug, ShieldCheck, Network, Bot } from "lucide-react";
 
 interface SavingsSnapshot {
   compact_bytes?: number;
@@ -49,8 +51,9 @@ export function OverviewContent() {
   const memories = useWakeupQuery(5);
   const anchor = useAnchorQuery();
   const devices = useDevicesTokensQuery();
+  const digest = useAutopilotDigestQuery(24);
   const metrics = useQuery({
-    queryKey: ["dashboard", "metrics"],
+    queryKey: qk.dashboardMetrics,
     queryFn: () => getJSON<MetricsResponse>("/api/metrics"),
     refetchInterval: 30_000,
   });
@@ -62,6 +65,29 @@ export function OverviewContent() {
 
   return (
     <div className="space-y-6">
+      <Link
+        href="/automation"
+        className="flex items-center gap-2 rounded-lg border border-line bg-muted/30 px-4 py-2.5 text-xs text-muted-foreground transition-colors hover:border-[hsl(var(--color-info))] hover:text-foreground"
+      >
+        <Bot className="size-3.5 shrink-0" aria-hidden="true" />
+        {digest.data ? (
+          <span>
+            While you were away:{" "}
+            <span className="font-medium text-foreground">{digest.data.promoted}</span> promoted
+            {" . "}
+            <span className="font-medium text-foreground">{digest.data.demoted}</span> demoted
+            {" . "}
+            <span className="font-medium text-foreground">
+              {digest.data.drift_auto_approved}
+            </span>{" "}
+            drift auto-approved
+          </span>
+        ) : (
+          <span>Loading autopilot digest...</span>
+        )}
+        <span className="ml-auto shrink-0">View Automation →</span>
+      </Link>
+
       <section
         aria-label="Key performance indicators"
         className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4"
@@ -69,7 +95,7 @@ export function OverviewContent() {
         <KpiCard
           label="Memories"
           value={stats.data ? stats.data.memories : null}
-          href="/memory?tab=recall"
+          href="/memory"
           icon={Brain}
           hint={
             anchor.data?.anchor
@@ -82,7 +108,7 @@ export function OverviewContent() {
           label="Reliability"
           value={rel ? rel.score : null}
           suffix={rel ? "/100" : undefined}
-          href="/trust?tab=score"
+          href="/automation"
           icon={ShieldCheck}
           hint={
             rel
@@ -198,10 +224,10 @@ export function OverviewContent() {
             <p className="text-sm text-muted-foreground">
               No memories yet.{" "}
               <Link
-                href="/memory?tab=recall"
+                href="/memory"
                 className="text-[hsl(var(--color-info))] hover:underline"
               >
-                Browse recent memories
+                Open the memory browser
               </Link>
             </p>
           ) : memories.data ? (

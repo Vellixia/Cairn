@@ -107,7 +107,7 @@ mod tests {
     use super::*;
     use cairn_store::Store;
 
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these integration tests).
+    /// `None` when `CAIRN_DB_URL` is unset (offline runs skip these integration tests).
     fn profile() -> Option<Profile> {
         let mem = Arc::new(MemoryEngine::new(Arc::new(Store::open_for_test()?)));
         Some(Profile::new(mem))

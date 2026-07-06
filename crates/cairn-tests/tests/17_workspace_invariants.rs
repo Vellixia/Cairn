@@ -19,9 +19,9 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 fn workspace_manifest_lists_all_members() {
-    // The workspace has 23 crates: 21 domain crates + cairn-tests +
-    // cairn-client (the host CLI binary). The 23-crate target is
-    // the v0.7.0 audit count.
+    // The workspace has 24 crates: 22 domain crates + cairn-tests +
+    // cairn-client (the host CLI binary). Bumped from 23 to 24 in
+    // v0.8.0 Sprint 6 for the new `cairn-document` crate (RAG ingestion).
     let manifest =
         std::fs::read_to_string(workspace_root().join("Cargo.toml")).expect("workspace Cargo.toml");
     // The workspace member list is the only place "crates/X" appears
@@ -32,7 +32,7 @@ fn workspace_manifest_lists_all_members() {
         .lines()
         .filter(|l| l.starts_with("    \"crates/") && l.ends_with("\","))
         .count();
-    assert_eq!(count, 23, "expected 23 workspace members, got {count}");
+    assert_eq!(count, 24, "expected 24 workspace members, got {count}");
 }
 
 #[test]
@@ -88,11 +88,13 @@ fn cairn_tests_crate_declares_path_deps_for_what_it_uses() {
 #[test]
 fn cairn_tests_crate_does_not_pull_in_heavy_runtime_engines() {
     // The hermetic test bucket must not enable the runtime features
-    // that need HelixDB / ONNX / a live embedder. cairn-embed and
+    // that need ONNX / a live embedder / a live database. cairn-embed and
     // cairn-store are present as type-only deps — fine — but the
-    // `local` feature on cairn-embed (fastembed/ONNX) must stay off
-    // and cairn-store must not pull helix-db into the test compile
-    // graph.
+    // `local` feature on cairn-embed (fastembed/ONNX) must stay off,
+    // and cairn-store must never gain a direct helix-db dependency again
+    // (removed entirely in v0.8.0 Sprint 1 - SurrealDB doesn't need
+    // hermetic tests to talk to a live server; `Store::open_in_memory`
+    // covers that).
     let manifest = std::fs::read_to_string(
         workspace_root()
             .join("crates")

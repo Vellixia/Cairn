@@ -1,6 +1,8 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
+import { ArrowLeft } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import {
   Card,
@@ -11,6 +13,8 @@ import {
 } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getJSON } from "@/lib/api";
+import { qk } from "@/lib/queries";
+import { pollWhenOffline } from "@/lib/stores/events";
 
 // react-force-graph is a client-only library (uses canvas / d3-force); load with `ssr: false`
 // to avoid "document is not defined" during the static export build.
@@ -38,9 +42,9 @@ interface GraphResponse {
 
 export default function MemoryGraphPage() {
   const graph = useQuery({
-    queryKey: ["memory", "graph"],
+    queryKey: qk.graph,
     queryFn: () => getJSON<GraphResponse>("/api/memory/graph"),
-    refetchInterval: 10_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
   const stats = graph.data
     ? {
@@ -55,7 +59,13 @@ export default function MemoryGraphPage() {
     <div className="space-y-6">
 
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Memory graph</h1>
+        <Link
+          href="/memory"
+          className="text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1"
+        >
+          <ArrowLeft className="size-3" aria-hidden="true" /> Memory
+        </Link>
+        <h1 className="mt-1 text-2xl font-semibold tracking-tight">Memory graph</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           The provenance graph: every memory as a node, every{" "}
           <code>derived_from</code> / <code>contradicts</code> /{" "}

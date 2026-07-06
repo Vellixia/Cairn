@@ -4,7 +4,7 @@
 //! remember, edit, delete, pin, reinforce, recall, graph. Auth flow:
 //! POST `/api/auth/setup` -> POST `/api/auth/login` -> `cairn_session=<value>` cookie.
 //!
-//! Hermetic: no network, no HelixDB, no docker. In-memory `cairn_store::Store` +
+//! Hermetic: no network, no live database, no docker. In-memory `cairn_store::Store` +
 //! `cairn_api::router` (state from `AppState::with_store`).
 
 use axum::body::Body;
@@ -26,9 +26,11 @@ fn state() -> Option<(axum::Router, Arc<Store>, tempfile::TempDir)> {
         data_dir: dir.path().to_path_buf(),
         host: "127.0.0.1".into(),
         port: 7777,
-        helix_url: None,
-        helix_token: None,
-        helix_ns: None,
+        db_url: "ws://localhost:8000".into(),
+        db_user: "root".into(),
+        db_pass: String::new(),
+        db_ns: "cairn".into(),
+        db_timeout_secs: 10,
         default_server: None,
         secret_key: Some(b"cairn-api-tests-secret-key-32!!!".to_vec()),
         tls: None,
@@ -50,6 +52,23 @@ fn state() -> Option<(axum::Router, Arc<Store>, tempfile::TempDir)> {
         rerank: cairn_core::RerankConfig::default(),
         admin: cairn_core::AdminConfig::default(),
         multi_tenant: false,
+        session_ttl_days: 2,
+        decay_period_days: 30,
+        access_log_retention_days: 90,
+        cron_enabled: true,
+        promote_threshold: 0.85,
+        demote_idle_days: 45,
+        drift_autopilot: "safe".to_string(),
+        drift_safe_globs: vec![
+            "docs/**".to_string(),
+            "*.md".to_string(),
+            "**/tests/**".to_string(),
+            "**/*.test.*".to_string(),
+        ],
+        auto_anchor: true,
+        llm_daily_budget: 200_000,
+        selftune: true,
+        max_working_per_project: 500,
     };
     let state = AppState::with_store(&cfg, store.clone()).ok()?;
     Some((router(state), store, dir))

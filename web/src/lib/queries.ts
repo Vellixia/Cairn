@@ -1,35 +1,35 @@
-import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
   ApiError,
-  API_BASE,
   delJSON,
   getJSON,
-  postBinary,
   postJSON,
   type ArchitectureReport,
   type AuditEvent,
-  type CompressionDemo,
+  type AutopilotDigest,
+  type ConfigEntry,
+  type CronJobStatus,
+  type CronRun,
   type DeviceTokenMeta,
+  type DriftEvent,
   type Health,
   type IssuedToken,
   type LedgerEntry,
   type Me,
   type Memory,
+  type MemoryListFilters,
+  type MemoryListResponse,
   type PairCode,
-  type RegistryRevocation,
-  type RegistryTrustGrant,
-  type ScoredMemory,
+  type DocumentSummary,
+  type DocumentChunkRecord,
+  type PromotionLogEntry,
+  type ProjectWithStats,
   type Stats,
 } from "@/lib/api";
 import { useMeStore } from "@/lib/stores/me";
-import type {
-  AnchorInput,
-  IssueTokenInput,
-  PairCodeInput,
-  RecallInput,
-} from "@/lib/forms/schemas";
+import { pollWhenOffline } from "@/lib/stores/events";
+import type { IssueTokenInput, PairCodeInput } from "@/lib/forms/schemas";
 
 // ---- query keys (single source of truth) ------------------------------------
 
@@ -39,17 +39,32 @@ export const qk = {
   stats: ["stats"] as const,
   anchor: ["guard", "anchor"] as const,
   memories: (limit: number) => ["memory", "wakeup", limit] as const,
-  recall: (q: string) => ["memory", "recall", q] as const,
+  memoryList: (filters: MemoryListFilters) => ["memory", "list", filters] as const,
+  memoryDetail: (id: string) => ["memory", "detail", id] as const,
   devicesTokens: ["devices", "tokens"] as const,
   devicesAudit: ["devices", "audit"] as const,
   ledger: (limit: number) => ["ledger", limit] as const,
   heatmap: (days: number) => ["memory", "heatmap", days] as const,
   architectureReport: ["memory", "architecture-report"] as const,
-  registryPacks: ["registry", "packs"] as const,
-  registryPack: (name: string) => ["registry", "packs", name] as const,
-  registrySearch: (q: string) => ["registry", "search", q] as const,
-  registryRevocations: ["registry", "revocations"] as const,
-  registryTrustedKeys: ["registry", "trusted-keys"] as const,
+  promotionCandidates: ["memory", "promotion-candidates"] as const,
+  config: ["config"] as const,
+  cronJobs: ["cron", "jobs"] as const,
+  cronHistory: (job?: string) => ["cron", "history", job ?? "all"] as const,
+  promotionLog: (limit: number) => ["memory", "promotion-log", limit] as const,
+  autopilotDigest: (hours: number) => ["automation", "digest", hours] as const,
+  projects: ["projects"] as const,
+  project: (id: string) => ["projects", id] as const,
+  memoryByScope: (scopeType: string, scopeId: string, limit: number) =>
+    ["memory", "by-scope", scopeType, scopeId, limit] as const,
+  documents: (projectId?: string) => ["documents", projectId ?? "all"] as const,
+  documentSearch: (q: string, projectId?: string) =>
+    ["documents", "search", q, projectId ?? "all"] as const,
+  preferences: ["profile", "list"] as const,
+  drift: ["guard", "drift"] as const,
+  graph: ["memory", "graph"] as const,
+  activityAudit: ["activity", "audit"] as const,
+  activityStats: ["activity", "stats"] as const,
+  dashboardMetrics: ["dashboard", "metrics"] as const,
 };
 
 // ---- queries ----------------------------------------------------------------
@@ -75,7 +90,7 @@ export function useStatsQuery() {
   return useQuery({
     queryKey: qk.stats,
     queryFn: () => getJSON<Stats>("/api/stats"),
-    refetchInterval: 10_000,
+    refetchInterval: pollWhenOffline(30_000),
   });
 }
 
@@ -90,15 +105,52 @@ export function useWakeupQuery(limit = 5) {
   return useQuery({
     queryKey: qk.memories(limit),
     queryFn: () => getJSON<Memory[]>(`/api/memory/wakeup?limit=${limit}`),
-    refetchInterval: 30_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
 }
 
-export function useRecallQuery(q: string) {
+// Web redesign v2: the Memory Browser's list query. Filter object must keep a consistent
+// shape (undefined for absent keys) so react-query's key hashing doesn't churn.
+export function useMemoryListQuery(filters: MemoryListFilters) {
   return useQuery({
-    queryKey: qk.recall(q),
-    queryFn: () => getJSON<ScoredMemory[]>(`/api/memory/recall?limit=20&q=${encodeURIComponent(q)}`),
-    enabled: q.length > 0,
+    queryKey: qk.memoryList(filters),
+    queryFn: () => {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(filters)) {
+        if (v !== undefined && v !== null && `${v}`.length > 0) params.set(k, `${v}`);
+      }
+      const qs = params.toString();
+      return getJSON<MemoryListResponse>(`/api/memory${qs ? `?${qs}` : ""}`);
+    },
+    placeholderData: keepPreviousData,
+    refetchInterval: pollWhenOffline(60_000),
+  });
+}
+
+// Full single-memory record for the detail drawer (and edge-hopping).
+export function useMemoryQuery(id: string | null) {
+  return useQuery({
+    queryKey: qk.memoryDetail(id ?? ""),
+    queryFn: () => getJSON<Memory>(`/api/memory/${encodeURIComponent(id ?? "")}`),
+    enabled: !!id,
+  });
+}
+
+// Read-only drift decision log - autopilot decides at verify time; this is the audit trail.
+export function useDriftLogQuery() {
+  return useQuery({
+    queryKey: qk.drift,
+    queryFn: () => getJSON<DriftEvent[]>("/api/guard/drift"),
+    refetchInterval: pollWhenOffline(60_000),
+  });
+}
+
+// Web redesign v2: effective server config for the Settings page (read-only; change via env).
+export function useConfigQuery() {
+  return useQuery({
+    queryKey: qk.config,
+    queryFn: () => getJSON<ConfigEntry[]>("/api/config"),
+    staleTime: 300_000,
   });
 }
 
@@ -113,7 +165,7 @@ export function useDevicesAuditQuery() {
   return useQuery({
     queryKey: qk.devicesAudit,
     queryFn: () => getJSON<AuditEvent[]>("/api/devices/audit"),
-    refetchInterval: 5_000,
+    refetchInterval: pollWhenOffline(60_000),
   });
 }
 
@@ -122,18 +174,6 @@ export function useLedgerQuery(limit = 200) {
     queryKey: qk.ledger(limit),
     queryFn: () => getJSON<LedgerEntry[]>(`/api/ledger?limit=${limit}`),
     refetchInterval: 30_000,
-  });
-}
-
-// P2.3: side-by-side compression demo (all 4 read modes for one file).
-export function useCompressionDemoQuery(path: string | null) {
-  return useQuery({
-    queryKey: ["context", "compression-demo", path ?? ""],
-    queryFn: () =>
-      getJSON<CompressionDemo>(
-        `/api/context/compression-demo?path=${encodeURIComponent(path ?? "")}`,
-      ),
-    enabled: !!path && path.length > 0,
   });
 }
 
@@ -156,151 +196,157 @@ export function useHeatmapQuery(days = 365) {
   });
 }
 
-// P2.8: registry dashboard.
-export function useRegistryPacksQuery() {
+// v0.8.0 Sprint 5: memories in the [0.70, 0.90] promotion review band.
+export function usePromotionCandidatesQuery() {
   return useQuery({
-    queryKey: qk.registryPacks,
-    queryFn: () => getJSON<unknown[]>("/api/registry/packs"),
-    staleTime: 30_000,
+    queryKey: qk.promotionCandidates,
+    queryFn: () => getJSON<Memory[]>("/api/memory/promotion-candidates"),
+    refetchInterval: pollWhenOffline(60_000),
   });
 }
 
-export function useRegistryRevocationsQuery() {
+// v0.8.0 Sprint 4/5/8/9: recent background-job runs (session-gc, memory-decay,
+// access-log-prune, llm-intelligence, memory-demote, tune), optionally filtered to one job.
+export function useCronHistoryQuery(job?: string) {
   return useQuery({
-    queryKey: qk.registryRevocations,
-    queryFn: () => getJSON<RegistryRevocation[]>("/api/registry/revocations"),
-    staleTime: 30_000,
-  });
-}
-
-export function useRegistryTrustedKeysQuery() {
-  return useQuery({
-    queryKey: qk.registryTrustedKeys,
-    queryFn: () => getJSON<RegistryTrustGrant[]>("/api/registry/trusted-keys"),
-    staleTime: 30_000,
-  });
-}
-
-export function usePublishPackMutation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (input: { tarball: ArrayBuffer | Uint8Array; trusted?: string }) =>
-      postBinary<unknown>(
-        "/api/registry/packs",
-        input.tarball,
-        "application/octet-stream",
+    queryKey: qk.cronHistory(job),
+    queryFn: () =>
+      getJSON<CronRun[]>(
+        `/api/cron/history${job ? `?job=${encodeURIComponent(job)}` : ""}`,
       ),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryPacks });
-      await qc.invalidateQueries({ queryKey: qk.registryRevocations });
-    },
+    refetchInterval: 30_000,
   });
 }
 
-export function useRevokePackMutation() {
+// v0.8.0 Sprint 4: every background job, its schedule, and its last run.
+export function useCronJobsQuery() {
+  return useQuery({
+    queryKey: qk.cronJobs,
+    queryFn: () => getJSON<CronJobStatus[]>("/api/cron/jobs"),
+    refetchInterval: 30_000,
+  });
+}
+
+// Web redesign v2 follow-up: standing preferences (memories with kind=preference), injected
+// as "Standing preferences:" at every agent SessionStart, before wakeup memories.
+export function usePreferencesQuery() {
+  return useQuery({
+    queryKey: qk.preferences,
+    queryFn: () => getJSON<Memory[]>("/api/profile"),
+  });
+}
+
+export function useAddPreferenceMutation() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { name: string; version: string }) =>
-      delJSON<unknown>(`/api/registry/packs/${encodeURIComponent(input.name)}/${encodeURIComponent(input.version)}`),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryPacks });
-      await qc.invalidateQueries({ queryKey: qk.registryRevocations });
+    mutationFn: (rule: string) => postJSON<Memory>("/api/profile", { rule }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.preferences });
+      toast.success("Preference added");
     },
+    onError: (e) => toast.error(errMessage(e)),
   });
 }
 
-export function useAddTrustedKeyMutation() {
+// Preferences are memories under the hood - deleting one goes through the generic memory
+// delete path, but invalidates the preferences list too so the profile page updates.
+export function useDeletePreferenceMutation() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: { key: string; allows: string; label?: string }) =>
-      postJSON<RegistryTrustGrant>("/api/registry/trusted-keys", input),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryTrustedKeys });
-      toast.success("Trusted key added");
+    mutationFn: (id: string) => delJSON<{ deleted: boolean }>(`/api/memory/${encodeURIComponent(id)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.preferences });
+      qc.invalidateQueries({ queryKey: ["memory"] });
+      toast("Preference deleted");
     },
-    onError: (e: unknown) => toast.error(errMessage(e)),
+    onError: (e) => toast.error(errMessage(e)),
   });
 }
 
-export function useRemoveTrustedKeyMutation() {
+// v0.8.0 Sprint 8: "while you were away" autopilot summary.
+export function useAutopilotDigestQuery(hours = 24) {
+  return useQuery({
+    queryKey: qk.autopilotDigest(hours),
+    queryFn: () => getJSON<AutopilotDigest>(`/api/memory/autopilot-digest?hours=${hours}`),
+    refetchInterval: pollWhenOffline(60_000),
+  });
+}
+
+// v0.8.0 Sprint 8: recent promotion/demotion events, auto and manual alike.
+export function usePromotionLogQuery(limit = 50) {
+  return useQuery({
+    queryKey: qk.promotionLog(limit),
+    queryFn: () => getJSON<PromotionLogEntry[]>(`/api/memory/promotion-log?limit=${limit}`),
+    refetchInterval: 30_000,
+  });
+}
+
+// v0.8.0 Sprint 3/10: every known project, enriched with memory_count + last_memory_at.
+export function useProjectsQuery() {
+  return useQuery({
+    queryKey: qk.projects,
+    queryFn: () => getJSON<ProjectWithStats[]>("/api/projects"),
+    staleTime: 30_000,
+  });
+}
+
+export function useProjectQuery(id: string) {
+  return useQuery({
+    queryKey: qk.project(id),
+    queryFn: () => getJSON<ProjectWithStats>(`/api/projects/${encodeURIComponent(id)}`),
+    enabled: id.length > 0,
+  });
+}
+
+// v0.8.0 Sprint 10: every memory in an exact scope, no ranking, no Global blend - the "what
+// does this project know" view on the Projects detail page.
+export function useMemoryByScopeQuery(scopeType: "project" | "session", scopeId: string, limit = 50) {
+  return useQuery({
+    queryKey: qk.memoryByScope(scopeType, scopeId, limit),
+    queryFn: () =>
+      getJSON<Memory[]>(
+        `/api/memory/by-scope?scope_type=${scopeType}&scope_id=${encodeURIComponent(scopeId)}&limit=${limit}`,
+      ),
+    enabled: scopeId.length > 0,
+  });
+}
+
+// v0.8.0 Sprint 6 (web redesign v2: project-scoped): every ingested document,
+// most-recently-updated first. `projectId` filters to that project's docs + global ones -
+// omit for the unfiltered global list.
+export function useDocumentsQuery(projectId?: string) {
+  return useQuery({
+    queryKey: qk.documents(projectId),
+    queryFn: () =>
+      getJSON<DocumentSummary[]>(
+        `/api/documents${projectId ? `?project_id=${encodeURIComponent(projectId)}` : ""}`,
+      ),
+    staleTime: 30_000,
+  });
+}
+
+export function useDocumentSearchQuery(q: string, limit = 10, projectId?: string) {
+  return useQuery({
+    queryKey: qk.documentSearch(q, projectId),
+    queryFn: () =>
+      getJSON<DocumentChunkRecord[]>(
+        `/api/documents/search?limit=${limit}&q=${encodeURIComponent(q)}` +
+          (projectId ? `&project_id=${encodeURIComponent(projectId)}` : ""),
+      ),
+    enabled: q.length > 0,
+  });
+}
+
+export function useDeleteDocumentMutation() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (key: string) =>
-      delJSON<unknown>(`/api/registry/trusted-keys?key=${encodeURIComponent(key)}`),
-    onSuccess: async () => {
-      await qc.invalidateQueries({ queryKey: qk.registryTrustedKeys });
-      toast.success("Trusted key removed");
+    mutationFn: (id: string) => delJSON<{ deleted: boolean }>(`/api/documents/${encodeURIComponent(id)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["documents"] });
+      toast("Document deleted");
     },
-    onError: (e: unknown) => toast.error(errMessage(e)),
+    onError: (e) => toast.error(errMessage(e)),
   });
-}
-
-// ---- WebSocket status (P2.1) --------------------------------------------------
-
-export type WsStatus = "connecting" | "connected" | "disconnected";
-
-export interface UseWebSocketResult {
-  status: WsStatus;
-  /** Force a reconnect (e.g. after the user changes the API base). */
-  reconnect: () => void;
-}
-
-const WS_EVENT_NAME = "cairn:ws-status";
-
-function emitWsStatus(status: WsStatus) {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent<WsStatus>(WS_EVENT_NAME, { detail: status }));
-}
-
-export function useWebSocket(): UseWebSocketResult {
-  const [status, setStatus] = useState<WsStatus>("connecting");
-  const [nonce, setNonce] = useState(0);
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const handler = (e: Event) => {
-      const detail = (e as CustomEvent<WsStatus>).detail;
-      setStatus(detail);
-    };
-    window.addEventListener(WS_EVENT_NAME, handler);
-    return () => window.removeEventListener(WS_EVENT_NAME, handler);
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const base = (API_BASE || "").replace(/^http/, "ws");
-    if (!base) return;
-    const url = `${base}/api/ws`;
-    let ws: WebSocket | null = null;
-    let reconnectTimer: number | null = null;
-    let cancelled = false;
-    const open = () => {
-      if (cancelled) return;
-      emitWsStatus("connecting");
-      try {
-        ws = new WebSocket(url);
-      } catch {
-        emitWsStatus("disconnected");
-        reconnectTimer = window.setTimeout(open, 3000);
-        return;
-      }
-      ws.onopen = () => emitWsStatus("connected");
-      ws.onclose = () => {
-        emitWsStatus("disconnected");
-        reconnectTimer = window.setTimeout(open, 3000);
-      };
-      ws.onerror = () => {
-        emitWsStatus("disconnected");
-      };
-    };
-    open();
-    return () => {
-      cancelled = true;
-      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
-      ws?.close();
-    };
-  }, [nonce]);
-
-  return { status, reconnect: () => setNonce((n) => n + 1) };
 }
 
 // ---- mutations ---------------------------------------------------------------
@@ -359,14 +405,63 @@ export function useLogoutMutation() {
   });
 }
 
-export function useSetAnchorMutation() {
+// v0.8.0 Sprint 5: approve a promotion candidate (-> Global scope, locked).
+export function usePromoteMemoryMutation() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (input: AnchorInput) => postJSON("/api/guard/anchor", input),
+    mutationFn: (id: string) => postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/promote`, {}),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.anchor });
-      qc.invalidateQueries({ queryKey: qk.stats });
-      toast.success("Anchor set");
+      qc.invalidateQueries({ queryKey: qk.promotionCandidates });
+      toast.success("Promoted to Global");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+// v0.8.0 Sprint 5: dismiss a promotion candidate ("don't ask again").
+export function useDismissPromotionMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/dismiss-promotion`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: qk.promotionCandidates });
+      toast("Dismissed");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+// v0.8.0 Sprint 8 (Undo): revert a promotion back to the scope it was promoted from. 404 means
+// the memory either doesn't exist or was never promoted through this pipeline.
+export function useDemoteMemoryMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/demote`, {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["memory"] });
+      toast.success("Reverted to prior scope");
+    },
+    onError: (e) => {
+      if (e instanceof ApiError && e.status === 404) {
+        toast.error("Nothing to undo - not tracked as promoted");
+      } else {
+        toast.error(errMessage(e));
+      }
+    },
+  });
+}
+
+// v0.8.0 Sprint 4/9: manually trigger a background job now (same code path the scheduler uses).
+export function useRunCronJobMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (job: string) =>
+      postJSON<CronRun>(`/api/cron/run/${encodeURIComponent(job)}`, {}),
+    onSuccess: (run) => {
+      qc.invalidateQueries({ queryKey: qk.cronJobs });
+      qc.invalidateQueries({ queryKey: ["cron", "history"] });
+      toast.success(`Ran ${run.job}`, { description: run.detail });
     },
     onError: (e) => toast.error(errMessage(e)),
   });
@@ -398,6 +493,34 @@ export function useRevokeTokenMutation() {
       qc.invalidateQueries({ queryKey: qk.devicesTokens });
       qc.invalidateQueries({ queryKey: qk.devicesAudit });
       toast("Token revoked");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+// Web redesign v2: minimal housekeeping curation on the Memory Browser. Agents do the real
+// curation via MCP; pin + delete survive as admin housekeeping (like document delete).
+export function usePinMemoryMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, pinned }: { id: string; pinned: boolean }) =>
+      postJSON<Memory>(`/api/memory/${encodeURIComponent(id)}/pin`, { pinned }),
+    onSuccess: (m) => {
+      qc.invalidateQueries({ queryKey: ["memory"] });
+      toast(m.pinned ? "Pinned" : "Unpinned");
+    },
+    onError: (e) => toast.error(errMessage(e)),
+  });
+}
+
+export function useDeleteMemoryMutation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => delJSON<{ deleted: boolean }>(`/api/memory/${encodeURIComponent(id)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["memory"] });
+      qc.invalidateQueries({ queryKey: qk.stats });
+      toast("Memory deleted");
     },
     onError: (e) => toast.error(errMessage(e)),
   });

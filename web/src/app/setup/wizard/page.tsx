@@ -4,7 +4,7 @@
 //   1. Admin credentials (username + password)
 //   2. Embed provider (default: local hashing; opt into local ONNX or OpenAI-compatible)
 //   3. (optional) device pair --- generate a QR code to onboard a phone/tablet
-//   4. Green-health check (Helix reachable, embedder loaded, admin exists)
+//   4. Green-health check (database reachable, embedder loaded, admin exists)
 //   5. Done --- drop the user at /dashboard
 //
 // The existing `/setup` route stays as a v1 fallback (deprecation banner). Both POST to
@@ -40,7 +40,7 @@ import { toast } from "sonner";
 
 interface SetupHealth {
   health: {
-    helix_reachable: boolean;
+    db_reachable: boolean;
     admin_exists: boolean;
     embedder_loaded: boolean;
     secret_key_configured: boolean;
@@ -474,7 +474,7 @@ function Step4Health({
       </CardHeader>
       <CardContent className="space-y-3">
         <ul className="space-y-2">
-          <Health label="HelixDB reachable" ok={health.health.helix_reachable} />
+          <Health label="Database reachable" ok={health.health.db_reachable} />
           <Health label="Admin account" ok={health.health.admin_exists} />
           <Health label="Embedder loaded" ok={health.health.embedder_loaded} />
           <Health

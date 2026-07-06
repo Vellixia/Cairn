@@ -1,21 +1,25 @@
 //! Runtime configuration and on-disk layout.
 //!
+//! This crate reads `std::env::var` directly - there is no in-process `.env`-file loader (no
+//! `dotenvy` or equivalent dependency) in either binary that embeds `cairn-core`
+//! (`cairn-server`, `crates/cairn-api/src/bin/cairn_server.rs`). A real environment variable is
+//! the only input this crate's [`Config::resolve`] ever sees. `.env` files still work in
+//! practice, but the loading happens OUTSIDE this crate: `docker-compose.yml`'s `env_file:`
+//! directive reads `.env` and exports its contents as real environment variables before the
+//! `cairn` container process starts. Running the server bare-metal (no compose) means exporting
+//! the variables yourself (e.g. `set -a; source .env; set +a` before launching `cairn-server`) -
+//! nothing here reads the file for you.
+//!
 //! Settings resolve with precedence (highest -> lowest):
 //!
 //! 1. **CLI flag** - e.g. `--host`, `--port`, `--data-dir`.
-//! 2. **Real environment variable** - whatever the parent shell already exported.
-//! 3. **Project `.env`** - `<repo>/.env` (or the `environment:` block in `docker-compose.yml`).
-//! 4. **Global `.env`** - `~/.config/cairn/.env` on Linux,
-//!    `$XDG_CONFIG_HOME/cairn/.env` elsewhere, `%APPDATA%\\cairn\\.env` on Windows
-//!    (see [`global_env_path`]).
-//! 5. **Built-in default** - the hard-coded fallback inside [`Config::resolve`].
+//! 2. **Environment variable** - however it got set (real shell export, or `docker-compose`'s
+//!    `env_file:` per above).
+//! 3. **Built-in default** - the hard-coded fallback inside [`Config::resolve`].
 //!
-//! The split between CLI / core is intentional: the core crate reads raw `std::env::var`, and the
-//! `cairn` binary loads both `.env` files at startup via `dotenvy` (see
-//! `crates/cairn/src/main.rs`). `dotenvy` only fills variables that are not already set, so
-//! real env always wins over a project `.env`, and a project `.env` always wins over the global
-//! one. A machine-global `.env` lets you configure embeddings/Helix once for every project on the
-//! device ("global cairn").
+//! `cairn-client` (the `cairn` CLI agents run) is a separate binary with its own, separate
+//! config layer - `~/.cairn/config.toml`, written by `cairn pair`/`onboard`/`setup` - documented
+//! in `crates/cairn-client/src/config.rs`, not here.
 
 use std::path::{Path, PathBuf};
 
@@ -49,7 +53,7 @@ impl Default for AdminConfig {
     }
 }
 
-/// Embedding-model settings (used to vectorize memories for Helix's vector search).
+/// Embedding-model settings (used to vectorize memories for the store's vector search).
 #[derive(Clone)]
 pub struct EmbedConfig {
     /// `local` (default), `openai`, or `ollama`.
@@ -164,14 +168,20 @@ pub struct Config {
     pub host: String,
     /// Serve bind port (`CAIRN_PORT`, default `7777`).
     pub port: u16,
-    /// HelixDB server URL (`CAIRN_HELIX_URL`).
-    pub helix_url: Option<String>,
-    /// HelixDB bearer API key (`CAIRN_HELIX_TOKEN`). Sent as `Authorization: Bearer <token>` on
-    /// every HelixDB request. Optional - HelixDB instances without auth don't need it.
-    pub helix_token: Option<String>,
-    /// Label-namespace prefix for the HelixDB backend (`CAIRN_HELIX_NS`). Lets multiple Cairn
-    /// instances - or isolated tests - share one Helix server without colliding. Default `cairn_`.
-    pub helix_ns: Option<String>,
+    /// SurrealDB connection URL (`CAIRN_DB_URL`, default `ws://localhost:8000`). In the bundled
+    /// docker-compose stack this is `ws://surreal:8000` (Docker-internal network name; SurrealDB
+    /// is never exposed to the host).
+    pub db_url: String,
+    /// SurrealDB root/auth username (`CAIRN_DB_USER`, default `root`).
+    pub db_user: String,
+    /// SurrealDB root/auth password (`CAIRN_DB_PASS`).
+    pub db_pass: String,
+    /// SurrealDB namespace (`CAIRN_DB_NS`, default `cairn`). Lets multiple Cairn instances - or
+    /// isolated tests - share one SurrealDB server without colliding (SurrealDB's namespace is
+    /// the natural isolation boundary, replacing HelixDB's label-prefix scheme).
+    pub db_ns: String,
+    /// Per-query deadline for the SurrealDB client (`CAIRN_DB_TIMEOUT_SECS`, default `10`).
+    pub db_timeout_secs: u64,
     /// Default remote Cairn server for `sync` / `pull` / `contribute` (`CAIRN_SERVER`).
     pub default_server: Option<String>,
     /// HMAC secret used to sign device-token JWTs (`CAIRN_SECRET_KEY`).
@@ -205,6 +215,61 @@ pub struct Config {
     /// a single implicit org - `OrgId::default()` - so the on-disk schema doesn't
     /// change for existing users.
     pub multi_tenant: bool,
+    /// Days a `Session`-scoped memory can go untouched before the nightly `session-gc` cron
+    /// job promotes it to `Global` scope (`CAIRN_SESSION_TTL_DAYS`, default `2`). `0` disables
+    /// the job - Session-scoped memories are then kept forever unless promoted manually.
+    pub session_ttl_days: u32,
+    /// Confidence half-life for the weekly `memory-decay` cron job
+    /// (`CAIRN_DECAY_PERIOD_DAYS`, default `30`) - see
+    /// [`cairn_memory::apply_decay`](../../cairn_memory/fn.apply_decay.html).
+    pub decay_period_days: u32,
+    /// How long `access_log` rows (v0.8.0 Sprint 2) are kept before the monthly
+    /// `access-log-prune` cron job deletes them (`CAIRN_ACCESS_LOG_RETENTION_DAYS`, default
+    /// `90`).
+    pub access_log_retention_days: u32,
+    /// Whether the in-process cron scheduler runs at all (`CAIRN_CRON_ENABLED`, default
+    /// `true`). Set `false` to disable every background job - useful for a horizontally-scaled
+    /// deployment where only one replica should run cron.
+    pub cron_enabled: bool,
+    /// Promotion auto-threshold (v0.8.0 Sprint 8). A `Project`-scoped memory whose
+    /// `promo_score` exceeds this auto-promotes to `Global` on the next `llm-intelligence`
+    /// cron run - the `[0.70, 0.90]` human-review band from Sprint 5 only ever applies below
+    /// this threshold. (`CAIRN_PROMOTE_THRESHOLD`, default `0.85`).
+    pub promote_threshold: f32,
+    /// Days an auto-promoted `Global` memory can go unused (by any project) before the nightly
+    /// `memory-demote` cron job reverts it back to its original `Project` scope
+    /// (`CAIRN_DEMOTE_IDLE_DAYS`, default `45`). Human-promoted/pinned memories are exempt.
+    pub demote_idle_days: u32,
+    /// Drift auto-approval policy (v0.8.0 Sprint 8): `"safe"` (default - `ok` always
+    /// auto-approves, `warn` auto-approves only under `drift_safe_globs`, `danger` never
+    /// auto-approves), `"off"` (fully manual), or `"all"` (`ok`+`warn` always auto-approve;
+    /// `danger` still never does). (`CAIRN_DRIFT_AUTOPILOT`)
+    pub drift_autopilot: String,
+    /// Glob patterns considered low-stakes enough for a `warn`-risk drift event to auto-approve
+    /// under the `"safe"` policy (`CAIRN_DRIFT_SAFE_GLOBS`, comma-separated, default
+    /// `docs/**,*.md,**/tests/**,**/*.test.*`).
+    pub drift_safe_globs: Vec<String>,
+    /// Whether a session with no manually-set anchor gets one derived automatically from its
+    /// first substantive prompt (`CAIRN_AUTO_ANCHOR`, default `true`).
+    pub auto_anchor: bool,
+    /// Daily token budget for background LLM calls (v0.8.0 Sprint 9) - concept extraction,
+    /// contradiction detection, and promotion-scoring's borderline-case judgment step all
+    /// check remaining budget first and fall back to their non-LLM heuristic once it's spent,
+    /// rather than overspending or hard-failing. `0` means unlimited.
+    /// (`CAIRN_LLM_DAILY_BUDGET`, default `200_000`).
+    pub llm_daily_budget: u64,
+    /// Whether the weekly `tune` cron job nudges `promote_threshold` from measured retrieval
+    /// quality (the followup-rate signal - see `cairn_memory::FollowupTracker`). Bounded
+    /// (±0.05/week, clamped to `[0.5, 0.95]`) and logged; `false` pins every threshold at its
+    /// configured value exactly as in Sprints 1-8. (`CAIRN_SELFTUNE`, default `true`).
+    pub selftune: bool,
+    /// Cap on Working-tier memories kept per project (v0.8.0 Sprint 9). Beyond this, the
+    /// oldest lowest-confidence rows are deleted by the `memory-decay` cron job - a genuine,
+    /// permanent deletion via the same `delete_memory` path `DELETE /api/memory/:id` already
+    /// uses (Cairn's lossless-retention guarantee covers compressed *file reads*, not the
+    /// memory lifecycle - deleting a memory has always been permanent, autopilot or not).
+    /// (`CAIRN_MAX_WORKING_PER_PROJECT`, default `500`).
+    pub max_working_per_project: usize,
 }
 
 impl Config {
@@ -221,9 +286,13 @@ impl Config {
             port: env_str("CAIRN_PORT")
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(7777),
-            helix_url: env_str("CAIRN_HELIX_URL"),
-            helix_token: env_str("CAIRN_HELIX_TOKEN"),
-            helix_ns: env_str("CAIRN_HELIX_NS"),
+            db_url: env_str("CAIRN_DB_URL").unwrap_or_else(|| "ws://localhost:8000".to_string()),
+            db_user: env_str("CAIRN_DB_USER").unwrap_or_else(|| "root".to_string()),
+            db_pass: env_str("CAIRN_DB_PASS").unwrap_or_default(),
+            db_ns: env_str("CAIRN_DB_NS").unwrap_or_else(|| "cairn".to_string()),
+            db_timeout_secs: env_str("CAIRN_DB_TIMEOUT_SECS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(10),
             default_server: env_str("CAIRN_SERVER"),
             secret_key: env_str("CAIRN_SECRET_KEY").map(|s| s.into_bytes()),
             tls: match (env_path("CAIRN_TLS_CERT"), env_path("CAIRN_TLS_KEY")) {
@@ -282,6 +351,53 @@ impl Config {
                     .unwrap_or(24),
             },
             multi_tenant: env_bool("CAIRN_MULTI_TENANT"),
+            session_ttl_days: env_str("CAIRN_SESSION_TTL_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2),
+            decay_period_days: env_str("CAIRN_DECAY_PERIOD_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(30),
+            access_log_retention_days: env_str("CAIRN_ACCESS_LOG_RETENTION_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(90),
+            cron_enabled: std::env::var("CAIRN_CRON_ENABLED")
+                .ok()
+                .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+                .unwrap_or(true),
+            promote_threshold: env_str("CAIRN_PROMOTE_THRESHOLD")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0.85),
+            demote_idle_days: env_str("CAIRN_DEMOTE_IDLE_DAYS")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(45),
+            drift_autopilot: env_str("CAIRN_DRIFT_AUTOPILOT").unwrap_or_else(|| "safe".to_string()),
+            drift_safe_globs: env_str("CAIRN_DRIFT_SAFE_GLOBS")
+                .map(|s| s.split(',').map(|g| g.trim().to_string()).collect())
+                .unwrap_or_else(|| {
+                    ["docs/**", "*.md", "**/tests/**", "**/*.test.*"]
+                        .iter()
+                        .map(|s| s.to_string())
+                        .collect()
+                }),
+            auto_anchor: std::env::var("CAIRN_AUTO_ANCHOR")
+                .ok()
+                .map(|s| !matches!(s.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no"))
+                .unwrap_or(true),
+            llm_daily_budget: env_str("CAIRN_LLM_DAILY_BUDGET")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200_000),
+            selftune: std::env::var("CAIRN_SELFTUNE")
+                .ok()
+                .map(|s| {
+                    !matches!(
+                        s.trim().to_ascii_lowercase().as_str(),
+                        "0" | "false" | "off" | "no"
+                    )
+                })
+                .unwrap_or(true),
+            max_working_per_project: env_str("CAIRN_MAX_WORKING_PER_PROJECT")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(500),
             data_dir,
         };
         std::fs::create_dir_all(cfg.blobs_dir())?;
@@ -355,9 +471,11 @@ mod tests {
             // placeholders so the struct literal stays exhaustive.
             data_dir: std::env::temp_dir(),
             port: 7777,
-            helix_url: None,
-            helix_token: None,
-            helix_ns: None,
+            db_url: "ws://localhost:8000".into(),
+            db_user: "root".into(),
+            db_pass: String::new(),
+            db_ns: "cairn".into(),
+            db_timeout_secs: 10,
             default_server: None,
             secret_key: None,
             tls: None,
@@ -386,6 +504,21 @@ mod tests {
             },
             admin: AdminConfig::default(),
             multi_tenant: false,
+            session_ttl_days: 2,
+            decay_period_days: 30,
+            access_log_retention_days: 90,
+            cron_enabled: true,
+            promote_threshold: 0.85,
+            demote_idle_days: 45,
+            drift_autopilot: "safe".to_string(),
+            drift_safe_globs: ["docs/**", "*.md", "**/tests/**", "**/*.test.*"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            auto_anchor: true,
+            llm_daily_budget: 200_000,
+            selftune: true,
+            max_working_per_project: 500,
         }
     }
 

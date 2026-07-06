@@ -1,7 +1,7 @@
 "use client";
 
+import { useState } from "react";
 import Link from "next/link";
-import { useQuery } from "@tanstack/react-query";
 import {
   Card,
   CardContent,
@@ -10,38 +10,93 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   Item,
+  ItemActions,
   ItemContent,
   ItemDescription,
   ItemTitle,
 } from "@/components/ui/item";
-import { getJSON } from "@/lib/api";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { Trash2 } from "lucide-react";
+import {
+  useAddPreferenceMutation,
+  useDeletePreferenceMutation,
+  usePreferencesQuery,
+} from "@/lib/queries";
+import type { Memory } from "@/lib/api";
 
+// Web redesign v2 follow-up: preferences were read-only with no explanation of what they were
+// for. This is the one profile surface where manual add/delete makes sense - a standing
+// preference is a deliberate, rare, one-time-ish decision (a config-style entry), not
+// something an agent writes constantly like a memory.
 export default function ProfilePage() {
-  const prefs = useQuery({
-    queryKey: ["profile", "list"],
-    queryFn: () => getJSON<MemoryLite[]>("/api/profile"),
-  });
+  const prefs = usePreferencesQuery();
+  const add = useAddPreferenceMutation();
+  const del = useDeletePreferenceMutation();
+  const [rule, setRule] = useState("");
+  const [deleteTarget, setDeleteTarget] = useState<Memory | null>(null);
+
+  function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = rule.trim();
+    if (!trimmed) return;
+    add.mutate(trimmed, { onSuccess: () => setRule("") });
+  }
 
   return (
     <div className="space-y-6 max-w-3xl">
       <header>
-        <h1 className="text-2xl font-semibold tracking-tight">Profile</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Preferences</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Standing preferences that every Cairn-backed agent honors. Use{" "}
-          <code>cairn prefer</code> or the <code>prefer</code> MCP tool to add
-          or update them.
+          Standing rules every Cairn-backed agent loads at session start - before wakeup
+          memories, before anything else. Agents record them automatically with the{" "}
+          <code>prefer</code> tool when you say things like &quot;always use ripgrep&quot; or
+          &quot;keep responses terse&quot;; add or remove them here for anything you want to set
+          once and have every future session honor.
         </p>
       </header>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Add a preference</CardTitle>
+          <CardDescription>
+            Phrase it as a standing instruction - it&apos;s injected verbatim into every
+            session.
+          </CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={onSubmit} className="flex gap-2">
+            <Input
+              value={rule}
+              onChange={(e) => setRule(e.target.value)}
+              placeholder="Always use ripgrep instead of grep"
+            />
+            <Button type="submit" disabled={!rule.trim() || add.isPending}>
+              Add
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>
           <CardTitle>Active preferences</CardTitle>
           <CardDescription>
             {prefs.data
-              ? `${prefs.data.length} stored . sorted newest first`
+              ? `${prefs.data.length} stored . sorted newest first . injected at every session start`
               : "Loading..."}
           </CardDescription>
         </CardHeader>
@@ -54,7 +109,8 @@ export default function ProfilePage() {
             </div>
           ) : prefs.data && prefs.data.length === 0 ? (
             <p className="text-sm text-muted-foreground">
-              No preferences yet. Use <code>cairn prefer</code> to add one.
+              No preferences yet. Add one above, or let an agent record one with the{" "}
+              <code>prefer</code> tool.
             </p>
           ) : (
             <ul className="space-y-2">
@@ -62,7 +118,7 @@ export default function ProfilePage() {
                 <Item key={p.id} variant="outline" size="sm">
                   <ItemContent>
                     <ItemTitle className="line-clamp-2">{p.content}</ItemTitle>
-                    <ItemDescription className="flex items-center gap-2">
+                    <ItemDescription className="flex items-center gap-2 flex-wrap">
                       <Badge
                         variant="outline"
                         className="font-mono text-[10px] uppercase tracking-wider"
@@ -85,6 +141,16 @@ export default function ProfilePage() {
                       )}
                     </ItemDescription>
                   </ItemContent>
+                  <ItemActions>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="text-destructive hover:text-destructive"
+                      onClick={() => setDeleteTarget(p)}
+                    >
+                      <Trash2 className="size-3.5" aria-hidden="true" />
+                    </Button>
+                  </ItemActions>
                 </Item>
               ))}
             </ul>
@@ -93,25 +159,39 @@ export default function ProfilePage() {
       </Card>
 
       <p className="text-[11px] text-muted-foreground">
-        See{" "}
-        <Link href="/memory?tab=wakeup" className="underline">
-          Wakeup
+        Use the{" "}
+        <Link href="/memory" className="underline">
+          memory browser&apos;s Wakeup-order toggle
         </Link>{" "}
-        to inspect how preferences flow into session bootstrap.
+        to see preferences alongside the rest of session bootstrap.
       </p>
+
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete this preference?</AlertDialogTitle>
+            <AlertDialogDescription>
+              &quot;{deleteTarget?.content}&quot; will no longer be injected into future
+              sessions.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={del.isPending}
+              onClick={() => {
+                const target = deleteTarget;
+                setDeleteTarget(null);
+                if (target) del.mutate(target.id);
+              }}
+            >
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
-}
-
-interface MemoryLite {
-  id: string;
-  kind: string;
-  tier: string;
-  content: string;
-  confidence: number;
-  pinned: boolean;
-  suspicious: boolean;
-  created_at: string;
 }
 
 function ConfidenceBar({ value }: { value: number }) {

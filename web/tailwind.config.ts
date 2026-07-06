@@ -47,15 +47,9 @@ export default {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
-        // Cairn brand aliases --- keep inline references working alongside shadcn.
-        ink: "#0B0F14",
-        surface: "#12181F",
-        surface2: "#1A2129",
-        slate: "#8A94A6",
-        offwhite: "#ECEFF4",
-        ember: "#FB923C",
-        teal: "#2DD4BF",
-        line: "#222B35",
+        // `line` is the one Cairn brand alias actually referenced (`border-line`) across
+        // the app; theme colors live in the CSS variables above instead of hardcoded hexes.
+        line: "#20242C",
         sidebar: {
           DEFAULT: "hsl(var(--sidebar-background))",
           foreground: "hsl(var(--sidebar-foreground))",
@@ -73,16 +67,19 @@ export default {
         sm: "calc(var(--radius) - 4px)",
       },
       fontFamily: {
+        // next/font variables (Inter / JetBrains Mono, self-hosted at build) with
+        // system fallbacks for anything rendered before hydration.
         sans: [
+          "var(--font-sans)",
           "ui-sans-serif",
           "system-ui",
           "-apple-system",
           "Segoe UI",
           "Roboto",
-          "Inter",
           "sans-serif",
         ],
         mono: [
+          "var(--font-mono)",
           "ui-monospace",
           "SFMono-Regular",
           "Menlo",

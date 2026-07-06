@@ -88,13 +88,71 @@ impl std::str::FromStr for MemoryKind {
     }
 }
 
+/// A memory's visibility boundary (v0.8.0 Sprint 2). Recall always includes `Global`, plus
+/// `Project`/`Session` memories whose `scope_id` matches the caller's current project/session -
+/// this is an access-control boundary, distinct from `Memory::session_id` (which just records
+/// provenance/diversity metadata and never hides a memory from other sessions).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ScopeType {
+    #[default]
+    Global,
+    Project,
+    Session,
+}
+
+impl ScopeType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ScopeType::Global => "global",
+            ScopeType::Project => "project",
+            ScopeType::Session => "session",
+        }
+    }
+}
+
+impl std::str::FromStr for ScopeType {
+    type Err = crate::Error;
+    fn from_str(s: &str) -> crate::Result<Self> {
+        Ok(match s {
+            "global" => Self::Global,
+            "project" => Self::Project,
+            "session" => Self::Session,
+            other => {
+                return Err(crate::Error::Invalid(format!(
+                    "unknown scope type: {other}"
+                )))
+            }
+        })
+    }
+}
+
+/// The caller's current project/session context for scope-aware recall (v0.8.0 Sprint 2).
+/// Built by `cairn-api` from `X-Cairn-Project`/`X-Cairn-Session` request headers today;
+/// `cairn-mcp`'s stdio server has no per-request headers, so it passes `ScopeCtx::default()`
+/// (Global-only) until Sprint 3's auto project detection wires a real value through.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScopeCtx {
+    pub project_id: Option<String>,
+    pub session_id: Option<String>,
+}
+
 /// A persisted memory.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Memory {
     pub id: String,
     pub kind: MemoryKind,
     pub tier: MemoryTier,
+    /// Short scannable label (web redesign v2 follow-up). `None` for memories written before
+    /// this field existed or by callers that don't set one - the dashboard falls back to the
+    /// first line of `content` as a display title in that case.
+    #[serde(default)]
+    pub title: Option<String>,
     pub content: String,
+    /// Why this memory matters / the reasoning behind it, separate from the memory's own
+    /// content - e.g. "chose X because Y broke last time". `None` when not provided.
+    #[serde(default)]
+    pub reasoning: Option<String>,
     pub concepts: Vec<String>,
     pub files: Vec<String>,
     pub session_id: Option<String>,
@@ -129,6 +187,24 @@ pub struct Memory {
     /// Edges to file paths / symbols / projects this memory applies to (code-graph-style relevance).
     #[serde(default)]
     pub applies_to: Vec<String>,
+    /// Visibility boundary (v0.8.0 Sprint 2). Defaults to `Global` so pre-Sprint-2 records and
+    /// callers that don't care about scoping keep working unchanged.
+    #[serde(default)]
+    pub scope_type: ScopeType,
+    /// `None` for `Global`; the project id or session id for `Project`/`Session` respectively.
+    #[serde(default)]
+    pub scope_id: Option<String>,
+    /// `Project`-scope promotion-worthiness, `[0.0, 1.0]` (v0.8.0 Sprint 5). Written by the
+    /// `llm-intelligence` cron job's promotion-scoring pass; `0.0` for a memory that has never
+    /// been scored. A score in `[0.70, 0.90]` surfaces the memory at
+    /// `GET /api/memory/promotion-candidates` for human review.
+    #[serde(default)]
+    pub promo_score: f32,
+    /// Once `true`, this memory is permanently excluded from promotion scoring/suggestions -
+    /// set by `POST /api/memory/:id/dismiss-promotion` ("don't ask again") or implicitly once
+    /// `POST /api/memory/:id/promote` has already promoted it. Defaults to `false`.
+    #[serde(default)]
+    pub promo_locked: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -165,6 +241,10 @@ fn default_confidence() -> f32 {
 pub struct NewMemory {
     pub content: String,
     #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub reasoning: Option<String>,
+    #[serde(default)]
     pub kind: Option<MemoryKind>,
     #[serde(default)]
     pub tier: Option<MemoryTier>,
@@ -198,6 +278,12 @@ pub struct NewMemory {
     pub supersedes: Vec<String>,
     #[serde(default)]
     pub applies_to: Vec<String>,
+    /// Visibility boundary for the new memory (v0.8.0 Sprint 2). Defaults to `Global`.
+    #[serde(default)]
+    pub scope_type: ScopeType,
+    /// Required (and meaningful) only when `scope_type` is `Project` or `Session`.
+    #[serde(default)]
+    pub scope_id: Option<String>,
 }
 
 impl NewMemory {
@@ -215,7 +301,9 @@ impl NewMemory {
             id: Uuid::new_v4().to_string(),
             kind: self.kind.unwrap_or(MemoryKind::Note),
             tier: self.tier.unwrap_or(MemoryTier::Working),
+            title: self.title,
             content: self.content,
+            reasoning: self.reasoning,
             concepts: self.concepts,
             files: self.files,
             session_id: self.session_id,
@@ -229,6 +317,10 @@ impl NewMemory {
             contradicts: self.contradicts,
             supersedes: self.supersedes,
             applies_to: self.applies_to,
+            scope_type: self.scope_type,
+            scope_id: self.scope_id,
+            promo_score: 0.0,
+            promo_locked: false,
             created_at: now,
             updated_at: now,
         }

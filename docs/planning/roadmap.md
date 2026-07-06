@@ -2,7 +2,7 @@
 title: "Roadmap"
 type: roadmap
 status: living
-updated: 2026-07-01
+updated: 2026-07-05
 ---
 
 # Roadmap
@@ -67,9 +67,9 @@ gantt
 
 | Item | Status | Notes |
 |---|---|---|
-| Cargo workspace + crate structure | Done | 21 crates (8 added in 0.5.0: session, pack, registry, sync, bench, proactive, proxy, ingest; cairn-server dropped in 0.6.0 - its bin now lives in cairn-api) |
+| Cargo workspace + crate structure | Done | 24 crates (8 added in 0.5.0: session, pack, registry, sync, bench, proactive, proxy, ingest; cairn-server dropped in 0.6.0 - its bin now lives in cairn-api; rerank added in 0.7.0; document added in 0.8.0 Sprint 6) |
 | Next.js web app (admin console, sidebar dashboard) | Done | Static export, embedded via rust-embed; cairn-api/build.rs creates `web/out/` at compile time when missing |
-| Docker Compose stack (Cairn + HelixDB + MinIO) | Done | `docker compose up -d` |
+| Docker Compose stack (Cairn + SurrealDB) | Done | `docker compose up -d`. Originally Cairn + HelixDB + MinIO; both replaced by SurrealDB in v0.8.0 Sprint 1 |
 | CI pipeline (test/clippy/fmt) | Done | GitHub Actions |
 | Brand identity (name/logo/palette) | Done | Cairn - 3-stone cairn, ember accent |
 
@@ -111,7 +111,7 @@ gantt
 | `cairn setup <agent>` | Done | Claude Code, Codex CLI, OpenCode |
 | `cairn setup --all` (auto-detect) | Done | Detects from project/home markers |
 | Lifecycle hooks (Claude Code) | Done | SessionStart/UserPromptSubmit/PostToolUse/SessionEnd |
-| Remote proxy MCP mode | Done | `CAIRN_SERVER` + `CAIRN_TOKEN`, no local HelixDB |
+| Remote proxy MCP mode | Done | `CAIRN_SERVER` + `CAIRN_TOKEN`, no local SurrealDB |
 | Path rewriting for remote file tools | Done | Host -> workspace-relative, mounted at `/workspace` |
 | OpenCode MCP integration | Done | Config at `~/.config/opencode/opencode.json`, verified end-to-end |
 | TLS gate | Done | Refuses HTTP on non-loopback unless `CAIRN_INSECURE=1` or TLS set |
@@ -135,28 +135,29 @@ gantt
 |---|---|---|
 | `cairn-share`: export/import sanitized bundles | Done | Redacts PII, withholds hard secrets |
 | `cairn-share`: pool contribute/pull | Done | Federated sanitized knowledge (admin-scoped token required) |
-| Health checks in Docker Compose | Done | minio/helix/cairn all `service_healthy`; `depends_on: service_healthy`; minio-init bounded retry |
+| Health checks in Docker Compose | Done | All services `service_healthy`; `depends_on: service_healthy`. Originally minio/helix/cairn with a minio-init bounded retry; stack is now surreal/cairn since v0.8.0 Sprint 1 |
 | CI smoke test (compose + API) | Done | `ci-smoke` job asserted `{"tools":[...]}` envelope + 5 tools. **Superseded** by the 54-test live suite (see `docs/testing/overview.md`); removed from CI. |
 | Single admin account + cookie session (0.4.0) | Done | Argon2id hash, httpOnly HMAC-SHA256 cookie, sliding TTL, generation counter for instant invalidation |
-| Admin recovery: `cairn-server admin password` + `reset` | Done | Loopback-only, mirrors the TLS gate; resets write a tombstone (HelixDB append-only schema) |
+| Admin recovery: `cairn-server admin password` + `reset` | Done | Loopback-only, mirrors the TLS gate; resets write a `__deleted__` tombstone sentinel rather than a physical delete, by design - kept identical across the HelixDB and SurrealDB backends |
 | Web: sidebar dashboard + login + setup wizard | Done | SessionGate probes `/api/auth/status` + `/me`; `aria-current` sidebar, K palette, toast system |
 | Admin token issuance from the dashboard | Done | `/api/devices/{tokens, pair-codes, audit}` admin endpoints; CLI flow unchanged |
 | Security headers middleware | Done | `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy: clipboard-write=(self)` |
+| Hybrid search (BM25 + vector + graph, RRF) | Done | BM25 + HNSW vectors + graph proximity, RRF fusion with dynamic renormalization and session diversification. Graph leg completed v0.7.0 |
+| Rerank + MMR diversity | Done | Cross-encoder reranking (`cairn-rerank`, fastembed, `local` feature) v0.7.0; MMR in base recall v0.8.0 Sprint 7 |
 
 ### In progress / partial
 
 | Item | Status | Notes |
 |---|---|---|
 | Full 4-tier consolidation/decay | Partial | Consolidation implemented, decay tuning ongoing |
-| Hybrid search (BM25 + vector + graph, RRF) | Partial | BM25 done, HNSW vectors via HelixDB, **graph leg next** |
 | Federation (signed packs, trust/scopes) | Partial | Share/pool exists, full federation protocol TBD |
+| Multi-tenant `OrgId` end-to-end | Partial | The `OrgId` type + storage/query scoping have existed since v0.5.0 Sprint 19, but the JWT `Claims` struct (`crates/cairn-api/src/auth.rs`) has no `org_id` field - no bearer token can carry an org identity yet, so every call site (`recall`, `/api/search`, and any future `_for_org` handler) can only ever pass `OrgId::default()`. `Config::multi_tenant` toggles scoping logic that has nothing to scope by. Found during v0.8.0's PR review (2026-07-06); needs a real design decision (token-embedded claim vs. header vs. admin-assigned mapping) before `CAIRN_MULTI_TENANT=true` means anything in a deployment with more than one org |
 
 ### Backlog
 
 | Item | Status | Notes |
 |---|---|---|
-| Property graph + impact analysis | Not started | Feeds the graph leg of hybrid search; planned as `cairn-graph` or in `cairn-context` |
-| Rerank + MMR diversity | Not started | Post-retrieval quality improvements; high-leverage, small change |
+| Property graph + impact analysis | Not started | v0.7.0's "graph proximity" search signal reuses existing memory-graph edges as a ranking input; a standalone property graph + impact-analysis subsystem (`cairn-graph` or in `cairn-context`) is still not started |
 | Offline-first sync (automerge CRDT) | Not started | Currently last-write-wins |
 | E2E encryption for sync | Not started | Optional, for privacy-sensitive setups |
 | Collective voting/provenance/decay | Not started | Community governance for shared knowledge |
@@ -221,6 +222,9 @@ The product is feature-complete enough to install and use. The remaining work is
 | Phase 5 (Sprint 23) - mobile companion PWA scaffold + biometric gate | Passed | `06e6740` |
 | **Sprint 25 - dashboard overview + sidebar refresh** - KPI hero, HealthRow, ActivityTimeline, SavingsChart (Recharts), DriftAnchorCard, recent memory; collapsible sidebar (8 groups, `localStorage` persisted) | Passed | branch `sprint/25-dashboard-overview` |
 | **Sprint 27 - UI/UX audit + flat routes + HelpDialog** - removed landing page, flat URLs (`/memory`, `/trust`, `/you`), Sprint 26 InfoCard duplicate bug fixed (Trust Score had 11 nested cards), replaced with `?` HelpButton -> Dialog (What/How/Impact), Sidebar v3 (4 entries, WORKSPACE label), Trust Score redesigned (7xl score, 4-up grid) | Passed | branch `sprint/27-ui-ux-audit`, PR #15 |
+| **v0.7.0 - engine intelligence + dashboard UX + new crates** - triple-stream search (BM25 + HNSW vector + graph proximity, RRF) completes the hybrid-search graph leg; LLM consolidation, contradiction detection, follow-up/bounce trackers; context injection now opt-in (`CAIRN_INJECT_CONTEXT`); Compression Lab, architecture report, context pressure gauge; `cairn-rerank` crate | Passed | 555 tests passing, 0 failed; `447fcaf` |
+| **v0.7.1 - live-e2e coverage + dashboard fixes + docs reorg** - 30 documented surfaces walked against a real Docker stack (auth, memory, compression, tiers, profile, guard, share, ingest, registry, MCP transport); found and fixed 3 dashboard crashes, a `static_handler` 404 bug, a `parse_vtt` header-validation gap, an OpenAPI gap, and a fresh-boot tracker panic; `docs/` reorganized by reader intent | Passed | tag `v0.7.1` |
+| **v0.8.0 - intelligent memory + observability-first dashboard** - Sprints 1-9: SurrealDB replaces HelixDB + MinIO, scope model (Global/Project/Session), auto project detection, cron scheduler, LLM concept extraction, RAG documents, MMR, full-auto promotion/drift/anchor autopilot, resilience/self-tuning. Dashboard: ground-up "basalt & ember" redesign, Memory Browser (22-field drawer), Registry/Trust removed from web (kept server/CLI/MCP-side), memory `title`/`reasoning`, project-scoped documents, useful Preferences page | Passed | PR #24, all CI green |
 
 ---
 

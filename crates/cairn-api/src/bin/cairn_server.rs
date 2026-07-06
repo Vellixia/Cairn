@@ -32,6 +32,13 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState::new(&cfg).context("building app state (open store)")?;
     cairn_api::admin::bootstrap_admin_from_env(&state).context("admin bootstrap")?;
 
+    // v0.8.0 Sprint 4: background jobs (session-gc, memory-decay, access-log-prune). The
+    // returned handle must stay alive for the process lifetime - dropping it stops the jobs -
+    // so it's bound here and never touched again, living until `main` returns.
+    let _cron = cairn_api::cron::start(state.clone())
+        .await
+        .context("starting cron scheduler")?;
+
     let addr: SocketAddr = format!("{}:{}", cfg.host, cfg.port)
         .parse()
         .with_context(|| format!("invalid bind address {}:{}", cfg.host, cfg.port))?;

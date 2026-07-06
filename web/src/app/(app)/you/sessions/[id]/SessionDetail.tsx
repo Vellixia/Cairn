@@ -11,6 +11,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Badge } from "@/components/ui/badge";
 import { getJSON } from "@/lib/api";
+import { useUrlId } from "@/lib/useUrlId";
 
 interface Session {
   id: string;
@@ -25,7 +26,8 @@ interface Session {
   memory_ids: string[];
 }
 
-export default function SessionDetail({ id }: { id: string }) {
+export default function SessionDetail() {
+  const id = useUrlId() ?? "new";
   const session = useQuery({
     queryKey: ["sessions", id],
     queryFn: () => getJSON<Session>(`/api/sessions/${id}`),

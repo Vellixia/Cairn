@@ -28,6 +28,7 @@ cairn-registry.workspace = true
 cairn-embed.workspace = true
 cairn-mcp.workspace = true
 cairn-ingest.workspace = true
+cairn-document.workspace = true
 serde.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
@@ -35,6 +36,7 @@ chrono.workspace = true
 axum.workspace = true
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tokio.workspace = true
+tokio-cron-scheduler.workspace = true
 tower-http.workspace = true
 rust-embed.workspace = true
 tracing.workspace = true
@@ -47,6 +49,7 @@ hmac.workspace = true
 sha2.workspace = true
 hex.workspace = true
 rand.workspace = true
+url.workspace = true
 async-stream = "0.3"
 futures-core = "0.3"
 

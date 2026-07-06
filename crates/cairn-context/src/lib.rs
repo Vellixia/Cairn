@@ -460,7 +460,7 @@ mod tests {
     use cairn_store::Store;
     use std::time::{Duration, SystemTime};
 
-    /// `None` when `CAIRN_HELIX_URL` is unset (offline runs skip these). The temp dir is a scratch
+    /// `None` when `CAIRN_DB_URL` is unset (offline runs skip these). The temp dir is a scratch
     /// workspace for the test's files (separate from the store).
     fn engine() -> Option<(ContextEngine, tempfile::TempDir)> {
         let store = Arc::new(Store::open_for_test()?);
@@ -634,7 +634,7 @@ pub fn build() -> Widget { Widget::new(1) }
         assert_eq!(r.view, body);
     }
 
-    /// A workspace-rooted engine, skipped when Helix is offline.
+    /// A workspace-rooted engine, skipped when the database is offline.
     fn rooted_engine() -> Option<(ContextEngine, tempfile::TempDir)> {
         let store = Arc::new(Store::open_for_test()?);
         let dir = tempfile::tempdir().unwrap();

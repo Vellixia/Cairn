@@ -23,13 +23,32 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
-import { useLogoutMutation } from "@/lib/queries";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
+import { useConfigQuery, useLogoutMutation } from "@/lib/queries";
 import { useMeStore } from "@/lib/stores/me";
+import type { ConfigEntry } from "@/lib/api";
+
+const CONFIG_GROUP_ORDER = ["server", "database", "intelligence", "automation", "guard"];
+
+function configValue(v: unknown): string {
+  if (Array.isArray(v)) return v.length > 0 ? v.join(", ") : "(none)";
+  if (typeof v === "boolean") return v ? "on" : "off";
+  return String(v);
+}
 
 export default function SettingsPage() {
   const router = useRouter();
   const me = useMeStore((s) => s.me);
   const logout = useLogoutMutation();
+  const config = useConfigQuery();
+
+  const grouped = new Map<string, ConfigEntry[]>();
+  for (const e of config.data ?? []) {
+    const list = grouped.get(e.group) ?? [];
+    list.push(e);
+    grouped.set(e.group, list);
+  }
 
   function handleLogout() {
     logout.mutate(undefined, {
@@ -132,6 +151,50 @@ export default function SettingsPage() {
           <Button asChild variant="outline" size="sm">
             <Link href="/you?tab=profile">Open profile</Link>
           </Button>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Server configuration</CardTitle>
+          <CardDescription>
+            The effective value of every knob and the env var that changes it. Config is
+            read once at boot - edit your <code>.env</code> (or environment) and restart the
+            server to apply. Secrets show only set / not set.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-5">
+          {config.isLoading ? (
+            <div className="space-y-2">
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+              <Skeleton className="h-8 w-full" />
+            </div>
+          ) : (
+            CONFIG_GROUP_ORDER.filter((g) => grouped.has(g)).map((group) => (
+              <div key={group}>
+                <p className="mb-2 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  {group}
+                </p>
+                <ul className="divide-y divide-line/60 rounded-md border border-line">
+                  {grouped.get(group)!.map((e) => (
+                    <li key={e.key} className="flex items-center gap-3 px-3 py-2 text-xs">
+                      <div className="min-w-0 flex-1">
+                        <p className="font-mono font-medium">{e.key}</p>
+                        <p className="mt-0.5 text-muted-foreground">{e.description}</p>
+                      </div>
+                      <Badge variant="secondary" className="max-w-[180px] truncate font-mono text-[10px]">
+                        {configValue(e.value)}
+                      </Badge>
+                      <code className="hidden whitespace-nowrap font-mono text-[10px] text-muted-foreground sm:block">
+                        {e.env}
+                      </code>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))
+          )}
         </CardContent>
       </Card>
 

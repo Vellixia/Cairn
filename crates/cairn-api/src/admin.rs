@@ -4,7 +4,7 @@
 //! [`AdminRecord`](cairn_core::AdminRecord). Two concurrent `/setup` requests can't both win
 //! because [`Store::set_meta_if_absent`](cairn_store::Store::set_meta_if_absent) is atomic. The
 //! in-memory [`AuditLog`] is best-effort - restart loses it - which keeps the surface small and
-//! avoids a HelixDB schema migration for 0.4.0.
+//! avoids a database schema migration for 0.4.0.
 
 use crate::session::{build_clear_cookie, build_set_cookie, extract_cookie, SessionPayload};
 use crate::AppState;
@@ -45,7 +45,14 @@ impl AuditLog {
     /// replay. We never let a write to one block the other - best-effort durable write that
     /// fails (e.g. backend transiently unreachable) is logged but doesn't lose the in-memory
     /// event the admin is currently looking at.
-    pub fn record(&self, store: &cairn_store::Store, kind: &str, actor: &str, detail: String) {
+    pub fn record(
+        &self,
+        store: &cairn_store::Store,
+        events: &crate::events::EventBroker,
+        kind: &str,
+        actor: &str,
+        detail: String,
+    ) {
         let ts = Utc::now().timestamp();
         {
             let mut q = self.inner.lock().expect("audit log mutex");
@@ -62,6 +69,7 @@ impl AuditLog {
         match store.append_audit(ts, kind, actor, &detail) {
             Ok(id) => {
                 tracing::trace!(event_id = %id, kind, actor, "audit persisted");
+                crate::events::publish_audit(events, &id, ts, kind, actor, &detail);
             }
             Err(e) => {
                 tracing::warn!(error = %e, kind, actor, "audit durable write failed");
@@ -144,15 +152,6 @@ pub fn load_admin(state: &AppState) -> cairn_core::Result<Option<AdminRecord>> {
     };
     let rec: AdminRecord = serde_json::from_str(&raw)?;
     Ok(Some(rec))
-}
-
-/// Persist (or rotate) the admin record. Kept for the password-rotation
-/// follow-up; until then it's dead code.
-#[allow(dead_code)] // planned for password-rotation follow-up
-pub fn save_admin(state: &AppState, rec: &AdminRecord) -> cairn_core::Result<()> {
-    let json = serde_json::to_string(rec)?;
-    state.store.set_meta(ADMIN_META_KEY, &json)?;
-    Ok(())
 }
 
 /// Env-only admin bootstrap. Called once at server startup after the store is open and before
@@ -288,6 +287,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
         Ok(None) => {
             state.audit_log.record(
                 &state.store,
+                &state.events,
                 "login_failed",
                 &req.username,
                 "no admin configured".to_string(),
@@ -303,6 +303,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     if rec.username != req.username {
         state.audit_log.record(
             &state.store,
+            &state.events,
             "login_failed",
             &req.username,
             "username mismatch".to_string(),
@@ -320,6 +321,7 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
     if !ok {
         state.audit_log.record(
             &state.store,
+            &state.events,
             "login_failed",
             &req.username,
             "bad password".to_string(),
@@ -331,9 +333,13 @@ pub async fn login(State(state): State<AppState>, Json(req): Json<LoginRequest>)
             .into_response();
     }
     // Success.
-    state
-        .audit_log
-        .record(&state.store, "login_ok", &rec.username, String::new());
+    state.audit_log.record(
+        &state.store,
+        &state.events,
+        "login_ok",
+        &rec.username,
+        String::new(),
+    );
     let payload = mint_session(&state, &rec);
     let Some(signer) = state.session_signer.as_ref() else {
         return error_response("CAIRN_SECRET_KEY is required for cookie sessions");
@@ -471,9 +477,13 @@ pub async fn setup(State(state): State<AppState>, Json(req): Json<SetupRequest>)
             );
         }
     }
-    state
-        .audit_log
-        .record(&state.store, "setup", &rec.username, String::new());
+    state.audit_log.record(
+        &state.store,
+        &state.events,
+        "setup",
+        &rec.username,
+        String::new(),
+    );
     let payload = mint_session(&state, &rec);
     let Some(signer) = state.session_signer.as_ref() else {
         return error_response("CAIRN_SECRET_KEY is required for cookie sessions");
@@ -555,7 +565,7 @@ mod tests {
 
     /// A helper for tests that don't care about durable persistence - the production `record`
     /// writes to the store, but tests run with `cairn_store::Store` and that requires a live
-    /// HelixDB. Tests want to assert in-memory ring behavior, so they use this stub.
+    /// database. Tests want to assert in-memory ring behavior, so they use this stub.
     impl AuditLog {
         pub fn record_dummy(&self, detail: String) {
             let mut q = self.inner.lock().expect("audit log mutex");
@@ -605,7 +615,7 @@ mod tests {
 
     /// `bootstrap_admin_from_env` validation is independent of the live Store - these tests
     /// cover the static rules. The full integration test (real bootstrap, then reload) runs in
-    /// the cairn-api crate's tests/ dir because it needs a HelixDB fixture.
+    /// the cairn-api crate's tests/ dir because it needs a live-database fixture.
     #[test]
     fn bootstrap_input_rules_password_too_short() {
         assert!("1234567".len() < 8);

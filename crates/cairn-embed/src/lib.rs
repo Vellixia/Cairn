@@ -1,4 +1,4 @@
-//! Pluggable text embeddings - Cairn turns memory content into vectors so HelixDB can do semantic
+//! Pluggable text embeddings - Cairn turns memory content into vectors so the store can do semantic
 //! (vector) recall alongside BM25.
 //!
 //! Three providers, chosen by [`cairn_core::EmbedConfig`] (`CAIRN_EMBED_PROVIDER`):
@@ -15,7 +15,7 @@ use cairn_core::{EmbedConfig, Error, Result};
 pub trait Embedder: Send + Sync {
     /// Embed a batch of texts, preserving order.
     fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>>;
-    /// The dimensionality of the vectors this embedder produces (the HelixDB vector index width).
+    /// The dimensionality of the vectors this embedder produces (the vector index width).
     fn dim(&self) -> usize;
     /// Convenience: embed a single string.
     fn embed_one(&self, text: &str) -> Result<Vec<f32>> {
@@ -233,7 +233,7 @@ fn json_vec(v: Option<&serde_json::Value>) -> Result<Vec<f32>> {
         .ok_or_else(|| Error::Other("embedding response: expected a number array".into()))
 }
 
-/// Known output dimensions for common models (so the Helix vector index can be sized up front).
+/// Known output dimensions for common models (so the vector index can be sized up front).
 fn known_dim(model: &str) -> Option<usize> {
     match model {
         m if m.contains("text-embedding-3-large") => Some(3072),
@@ -277,9 +277,7 @@ mod local {
             )
             .map_err(|e| Error::Other(format!("loading local embedding model: {e}")))?;
 
-            if let Err(e) = verify_model_artifact(cfg) {
-                return Err(e);
-            }
+            verify_model_artifact(cfg)?;
 
             Ok(Self {
                 model: Mutex::new(model),
@@ -412,13 +410,13 @@ mod local {
                 };
                 if ft.is_dir() {
                     if let Some((modified, found)) = inner(&path, depth + 1) {
-                        if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+                        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
                             newest = Some((modified, found));
                         }
                     }
                 } else if path.file_name().and_then(|s| s.to_str()) == Some("model.onnx") {
                     if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                        if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+                        if newest.as_ref().is_none_or(|(t, _)| modified > *t) {
                             newest = Some((modified, path));
                         }
                     }

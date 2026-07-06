@@ -10,7 +10,7 @@ publish = false
 # It's a real workspace member so `cargo test --workspace` picks it up; its
 # runtime types come in as dev-dependencies and never link into a release graph.
 #
-# Boundary: tests must be hermetic. No network. No real HelixDB. No real docker.
+# Boundary: tests must be hermetic. No network. No live database. No real docker.
 # Mock data lives in `src/fixtures.rs`; an in-memory cairn-store shim lives in
 # `src/mock_store.rs`. Add a new test file under `tests/<topic>.rs` to cover
 # another business flow.

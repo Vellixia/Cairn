@@ -31,7 +31,7 @@ flowchart LR
 
     CLI["cairn<br/>MCP + hooks + setup"]
     Server["cairn-server<br/>in-container<br/>REST API + web UI"]
-    Store["HelixDB<br/>graph + vectors<br/>+ blob store"]
+    Store["SurrealDB<br/>graph + vectors<br/>+ blob store"]
 
     Agents -->|"MCP stdio"| CLI
     CLI -->|"HTTP"| Server
@@ -118,9 +118,9 @@ irm https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.ps1 | 
 ```
 
 ```sh
-# Docker - the full stack (Cairn + HelixDB + MinIO), the easiest path
-cp .env.example .env          # set MinIO + admin credentials (see .env.example)
-docker compose up -d          # builds Cairn, pulls HelixDB + MinIO, wires them together
+# Docker - the full stack (Cairn + SurrealDB), the easiest path
+cp .env.example .env          # set database + admin credentials (see .env.example)
+docker compose up -d          # builds Cairn, pulls SurrealDB, wires them together
 # -> http://localhost:7777
 # First-boot admin is bootstrapped from CAIRN_ADMIN_USERNAME + CAIRN_ADMIN_PASSWORD.
 # Comment out CAIRN_ADMIN_PASSWORD to fall back to the /setup wizard on first visit.
@@ -133,12 +133,28 @@ cargo install --git https://github.com/Vellixia/Cairn cairn
 
 ### 2. Start the server
 
-`docker compose up -d` brings up Cairn + HelixDB + MinIO. The admin record
+`docker compose up -d` brings up Cairn + SurrealDB. The admin record
 is bootstrapped from `CAIRN_ADMIN_USERNAME` + `CAIRN_ADMIN_PASSWORD` in
 `.env` on first boot. See [docs/guides/admin.md](docs/guides/admin.md) for the full
 admin surface (mint tokens, pair codes, password rotation).
 
 ### 3. Connect an agent
+
+Fastest path: mint a pairing code from the dashboard (**You -> Pair -> Generate code**) and
+claim it from the CLI - no manual token copy-paste, and it wires every agent it detects in one
+shot:
+
+```sh
+cairn pair <CODE>          # claims the code, writes ~/.cairn/config.toml, wires detected agents
+```
+
+Zero-flag onboarding works the same way against a local dev server (probes `localhost:7777`):
+
+```sh
+cairn onboard               # or: cairn onboard --code <CODE> for a remote server
+```
+
+Or wire agents by hand:
 
 ```sh
 cairn setup --all         # auto-detect every installed agent and wire up MCP
@@ -146,14 +162,16 @@ cairn setup --all         # auto-detect every installed agent and wire up MCP
 cairn setup opencode --server http://localhost:7777 --token <token>
 ```
 
-Supports Claude Code (MCP + lifecycle hooks), Codex CLI, and OpenCode.
-See [Architecture - Connecting an agent](docs/reference/architecture.md#connecting-an-agent-by-hand) for manual setup.
+Supports Claude Code (MCP + lifecycle hooks + an on-demand `cairn` skill), Codex CLI, and
+OpenCode. See [Architecture - Connecting an agent](docs/reference/architecture.md#connecting-an-agent-by-hand)
+for manual setup.
 
 ### 4. Verify
 
 ```sh
-cairn doctor              # checks server connectivity + agent config
-cairn status              # shows server, token, and agent status
+cairn doctor --json | jq   # checks server connectivity + agent config, machine-readable
+cairn status               # shows server, token, and agent status, with their sources
+cairn statusline           # one ambient line: memories, anchor, tokens saved, offline backlog
 ```
 
 ## OpenCode quickstart
@@ -166,16 +184,16 @@ The fastest path from `git clone` to a Cairn-aware session:
 curl -fsSL https://raw.githubusercontent.com/Vellixia/Cairn/main/scripts/install.sh | sh
 
 # 2. Start the server stack
-docker compose up -d                     # HelixDB + MinIO + Cairn on :7777
+docker compose up -d                     # SurrealDB + Cairn on :7777
 
-# 3. Wire OpenCode (creates ~/.config/opencode/opencode.json with the MCP entry)
-cairn setup opencode --server http://localhost:7777
+# 3. Pair the device (mints + claims a token in one step, no copy-paste):
+#    open http://127.0.0.1:7777/you/pair, click "Generate code", then:
+cairn pair <CODE>                        # wires every detected agent, including OpenCode
 
-# 4. Generate a token (one-time, copy it).
-# Mint a device token via the dashboard: open http://127.0.0.1:7777/settings/tokens
-# and click "Mint token". The bearer appears once in the success toast.
+# Or wire OpenCode by hand with a token minted from You -> Tokens:
+cairn setup opencode --server http://localhost:7777 --token <token>
 
-# 5. Restart OpenCode so the MCP entry picks up. You'll see `cairn` in the tool list.
+# 4. Restart OpenCode so the MCP entry picks up. You'll see `cairn` in the tool list.
 ```
 
 After that, OpenCode's tool palette includes `cairn_recall`, `cairn_remember`, `cairn_read`,

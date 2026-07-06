@@ -18,6 +18,7 @@ members = [
     "crates/cairn-proxy",
     "crates/cairn-proactive",
     "crates/cairn-ingest",
+    "crates/cairn-document",
     "crates/cairn-embed",
     "crates/cairn-api",
     "crates/cairn-mcp",
@@ -32,10 +33,8 @@ edition = "2021"
 license = "Apache-2.0"
 authors = ["Cairn contributors"]
 repository = "https://github.com/Vellixia/cairn"
-# MSRV 1.85 - required by quinn-proto 0.11.15 (RUSTSEC-2026-0185 fix; see
-# [patch.crates-io] below). Bumped from 1.80 on 2026-06-22 to clear the
-# advisory; nothing in the workspace itself requires >1.80 features.
-rust-version = "1.85"
+# MSRV 1.89 - required by `surrealdb ~3.1` (v0.8.0 Sprint 1). Bumped from 1.85 on 2026-07-02.
+rust-version = "1.89"
 
 [workspace.dependencies]
 # internal crates
@@ -51,15 +50,11 @@ cairn-share = { path = "crates/cairn-share" }
 cairn-session = { path = "crates/cairn-session" }
 cairn-pack = { path = "crates/cairn-pack" }
 cairn-registry = { path = "crates/cairn-registry" }
-cairn-sync = { path = "crates/cairn-sync" }
-cairn-bench = { path = "crates/cairn-bench" }
-cairn-proxy = { path = "crates/cairn-proxy" }
 cairn-proactive = { path = "crates/cairn-proactive" }
 cairn-ingest = { path = "crates/cairn-ingest" }
+cairn-document = { path = "crates/cairn-document" }
 cairn-embed = { path = "crates/cairn-embed" }
-cairn-api = { path = "crates/cairn-api" }
 cairn-mcp = { path = "crates/cairn-mcp" }
-cairn-client = { path = "crates/cairn-client" }
 cairn-rerank = { path = "crates/cairn-rerank" }
 
 # Pinned to specific minor versions via tilde (~major.minor) so CI can fail
@@ -76,6 +71,11 @@ uuid = { version = "~1.23", features = ["v4", "serde"] }
 directories = "~5.0"
 similar = "~2.7"
 tokio = { version = "~1.52", features = ["full"] }
+# v0.8.0 Sprint 4 in-process cron scheduler. Real dependency footprint (verified via
+# `cargo add --dry-run` + a probe build): chrono-tz + croner (the cron-expression parser) +
+# uuid/tracing/strum/darling, all either already-present workspace deps or lightweight. The
+# nats/postgres features exist for distributed-scheduler use cases we don't need - not enabled.
+tokio-cron-scheduler = { version = "~0.15", default-features = false }
 axum = "~0.7"
 tower = "~0.5"
 tower-http = { version = "~0.5", features = ["fs", "cors", "trace", "limit"] }
@@ -85,13 +85,12 @@ tracing-subscriber = { version = "~0.3", features = ["env-filter"] }
 tempfile = "~3.27"
 rust-embed = "~8.11"
 ureq = { version = "~2.12", features = ["json"] }
-dotenvy = "~0.15"
 jsonwebtoken = "~9.3"
 regex = "~1.12"
 # Format- and comment-preserving TOML editor for Codex config.toml merges (already in the
 # lockfile transitively at 0.22.x, so this adds no new version).
 toml_edit = "~0.22"
-helix-db = "~2.0"
+surrealdb = { version = "~3.1", default-features = false, features = ["protocol-ws"] }
 self_update = { version = "~0.44", default-features = false, features = ["ureq", "rustls", "archive-tar", "compression-flate2", "archive-zip", "compression-zip-deflate"] }
 url = "~2.5"
 argon2 = "~0.5"
@@ -105,14 +104,3 @@ rand_core = "~0.6"
 opt-level = 3
 lto = "thin"
 strip = true
-
-# Security override: RUSTSEC-2026-0185 (GHSA-4w2j-m93h-cj5j) - quinn-proto
-# 0.11.14 is vulnerable to unbounded out-of-order stream reassembly (CVSS 7.5
-# HIGH, unauth network DoS). The fix landed in quinn-proto 0.11.15
-# (2026-06-22). helix-db 2.0.x pins reqwest 0.13.4 which transitively pins
-# quinn-proto exactly to 0.11.14, so the resolver cannot pick the patched
-# version on its own. Force it here until helix-db upstream updates the
-# pin. Remove this patch once helix-db (or a replacement) bumps reqwest or
-# quinn-proto to >=0.11.15 transitively.
-[patch.crates-io]
-quinn-proto = { git = "https://github.com/quinn-rs/quinn", tag = "quinn-proto-0.11.15" }
