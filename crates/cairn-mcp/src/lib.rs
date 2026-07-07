@@ -13,6 +13,7 @@
 use cairn_assemble::Assembler;
 #[cfg(feature = "engine")]
 use cairn_context::{ContextEngine, ReadMode};
+use cairn_core::ContentHash;
 #[cfg(feature = "engine")]
 use cairn_core::{Config, NewMemory, Result};
 #[cfg(feature = "engine")]
@@ -26,9 +27,11 @@ use cairn_shell::ShellCompressor;
 #[cfg(feature = "engine")]
 use cairn_store::Store;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{BufRead, Write};
 #[cfg(feature = "engine")]
 use std::sync::Arc;
+use std::sync::Mutex;
 
 /// Default protocol version we advertise if the client doesn't specify one.
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -904,6 +907,9 @@ pub struct RemoteProxy {
     token: Option<String>,
     /// The host directory where `cairn mcp` was launched (the project root from the agent).
     host_workspace: std::path::PathBuf,
+    /// Content cache for files read locally: sha256 hex -> file content.
+    /// Enables `expand` to recover the original without a blob store.
+    file_cache: Mutex<HashMap<String, String>>,
 }
 
 impl RemoteProxy {
@@ -912,6 +918,7 @@ impl RemoteProxy {
             server: server.trim_end_matches('/').to_string(),
             token,
             host_workspace: std::env::current_dir().unwrap_or_default(),
+            file_cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -988,23 +995,70 @@ impl RemoteProxy {
         let Some(params) = params else {
             return err(id, -32602, "missing params");
         };
-        // For file-local tools, rewrite absolute host paths to workspace-relative paths so the
-        // remote server (which has the project mounted at its workspace root) can find them.
         let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-        let rewritten = if matches!(name, "read" | "verify" | "checkpoint" | "rollback") {
-            self.rewrite_file_path(params)
-        } else {
-            params.clone()
-        };
-        match self.post("/api/tools/call", &rewritten) {
-            Ok(v) => ok(id, v),
-            Err(e) => {
-                let msg = format!("tool call failed: {e}");
-                ok(
-                    id,
-                    json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
-                )
+        let args = params
+            .get("arguments")
+            .and_then(|a| a.as_object())
+            .cloned()
+            .unwrap_or_default();
+        // Handle file-local tools on the host so reads always work regardless of whether the
+        // project is mounted on the remote server.
+        match name {
+            "read" => {
+                let path = args.get("path").and_then(Value::as_str).unwrap_or("");
+                let mode = args.get("mode").and_then(Value::as_str).unwrap_or("auto");
+                match self.read_file_local(path, mode) {
+                    Ok(text) => ok(id, json!({ "content": [{ "type": "text", "text": text }] })),
+                    Err(msg) => ok(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                    ),
+                }
             }
+            "expand" => {
+                let hash = args.get("hash").and_then(Value::as_str).unwrap_or("");
+                // Try local cache first, fall back to remote proxy.
+                match self.expand_local(hash) {
+                    Ok(text) => ok(id, json!({ "content": [{ "type": "text", "text": text }] })),
+                    Err(_) => {
+                        // Forward to remote server as fallback.
+                        match self.post("/api/tools/call", params) {
+                            Ok(v) => ok(id, v),
+                            Err(e) => {
+                                let msg = format!("expand failed: {e}");
+                                ok(
+                                    id,
+                                    json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            "verify" | "checkpoint" | "rollback" => {
+                // Rewrite absolute host paths to workspace-relative before forwarding.
+                let rewritten = self.rewrite_file_path(params);
+                match self.post("/api/tools/call", &rewritten) {
+                    Ok(v) => ok(id, v),
+                    Err(e) => {
+                        let msg = format!("tool call failed: {e}");
+                        ok(
+                            id,
+                            json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                        )
+                    }
+                }
+            }
+            _ => match self.post("/api/tools/call", params) {
+                Ok(v) => ok(id, v),
+                Err(e) => {
+                    let msg = format!("tool call failed: {e}");
+                    ok(
+                        id,
+                        json!({ "content": [{ "type": "text", "text": msg }], "isError": true }),
+                    )
+                }
+            },
         }
     }
 
@@ -1026,6 +1080,50 @@ impl RemoteProxy {
             }
         }
         out
+    }
+
+    /// Read a file from the host filesystem and return it in `ReadResult` JSON format.
+    /// Relative paths are resolved against `host_workspace`. The content is cached by SHA-256
+    /// so `expand` can recover it without a blob store.
+    fn read_file_local(&self, path: &str, _mode: &str) -> std::result::Result<String, String> {
+        let p = std::path::Path::new(path);
+        let resolved = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.host_workspace.join(p)
+        };
+        let content = std::fs::read_to_string(&resolved)
+            .map_err(|e| format!("{}: {e}", resolved.display()))?;
+        let lines = content.lines().count();
+        let bytes = content.len();
+        let hash = ContentHash::of(content.as_bytes());
+        let handle = hash.short().to_string();
+        // Cache by full hash AND short handle so `expand` works with either.
+        let mut cache = self.file_cache.lock().unwrap();
+        cache.insert(hash.0.clone(), content.clone());
+        cache.insert(handle.clone(), content.clone());
+        let result = json!({
+            "path": resolved.to_string_lossy(),
+            "hash": hash.0,
+            "handle": handle,
+            "status": "full",
+            "lines": lines,
+            "bytes": bytes,
+            "view": content,
+            "note": format!("full file; {lines} lines"),
+            "est_tokens": bytes / 4,
+        });
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+
+    /// Look up a file previously read by `read_file_local` and return its content.
+    fn expand_local(&self, hash: &str) -> std::result::Result<String, String> {
+        self.file_cache
+            .lock()
+            .unwrap()
+            .get(hash)
+            .cloned()
+            .ok_or_else(|| format!("unknown handle: {hash}"))
     }
 
     fn get(&self, path: &str) -> std::result::Result<Value, String> {
