@@ -21,6 +21,14 @@ Cairn sits between your AI coding agents (Claude Code, Codex CLI, OpenCode) and 
 It runs as one small server you self-host once via Docker, and every device + agent connects to
 it through a single MCP endpoint plus lifecycle hooks.
 
+> **Pre-1.0 software.** Cairn has not shipped a 1.0. The current release is **v0.8.x** and is
+> **under active development** - interfaces (MCP tool names/shapes, HTTP API, CLI flags, config
+> keys, hook payloads) may change between minor versions without prior notice, and there is no
+> stability guarantee until 1.0 lands. It is usable today (the project dogfoods itself - every
+> Cairn agent session runs against a live Cairn server), but if you adopt it for production work,
+> expect breaking changes on the upgrade path and pin the version you install. See
+> [Roadmap](docs/planning/roadmap.md) for what's done and what's next toward 1.0.
+
 ```mermaid
 flowchart LR
     subgraph Agents["Your agents"]
@@ -215,7 +223,10 @@ After that, OpenCode's tool palette includes `cairn_recall`, `cairn_remember`, `
 
 ## Status
 
-šS Active development - v0.5.0 is feature-complete. See [Roadmap](docs/planning/roadmap.md) for
+**Active development - pre-1.0.** v0.8.x is feature-complete for the
+memory/context/reliability surface but is **not stable** - breaking changes
+on the upgrade path to 1.0 are expected. Dogfooded daily; not yet a
+"install and forget" product. See [Roadmap](docs/planning/roadmap.md) for
 what's done and what's next.
 
 ## Where to go next

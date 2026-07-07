@@ -417,7 +417,7 @@ Historical category table (v0.4.0, kept for diff context):
 - [x] **11.3** Path outside workspace
   - Method: `read` with path `/etc/passwd`
   - Expected: Rejected by workspace root guard
-  - Result: **PASS** - `error: path escapes workspace root: /etc/passwd`
+  - Result: **PASS** - `error: path /etc/passwd is outside the workspace root; ...`
 
 ---
 

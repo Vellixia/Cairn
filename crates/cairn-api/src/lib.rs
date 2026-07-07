@@ -1475,23 +1475,26 @@ async fn delete_memory(
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 struct PinBody {
+    #[serde(default = "default_pinned_true")]
     pinned: bool,
 }
 
-/// POST `/api/memory/:id/pin` - pin or unpin a memory.
+fn default_pinned_true() -> bool {
+    true
+}
+
+/// POST `/api/memory/:id/pin` - pin or unpin a memory. An empty body defaults
+/// `pinned=true` (the common case); send `{"pinned": false}` to unpin.
 async fn pin_memory(
     State(s): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-    Json(body): Json<PinBody>,
+    body: Option<Json<PinBody>>,
 ) -> Result<Json<Memory>, ApiError> {
-    if s.mem.pin(&id, body.pinned)? {
-        crate::events::publish_memory(
-            &s.events,
-            if body.pinned { "pinned" } else { "unpinned" },
-            &id,
-        );
+    let pinned = body.map(|b| b.pinned).unwrap_or(true);
+    if s.mem.pin(&id, pinned)? {
+        crate::events::publish_memory(&s.events, if pinned { "pinned" } else { "unpinned" }, &id);
         let m = s
             .mem
             .get(&id)?
@@ -3255,7 +3258,7 @@ mod tests {
         pin_memory(
             State(state.clone()),
             axum::extract::Path(m.id.clone()),
-            Json(PinBody { pinned: true }),
+            Some(Json(PinBody { pinned: true })),
         )
         .await
         .unwrap();

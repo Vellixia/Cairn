@@ -135,11 +135,18 @@ impl McpServer {
                     .and_then(Value::as_str)
                     .unwrap_or(PROTOCOL_VERSION)
                     .to_string();
+                let capabilities = match &self.config.workspace_root {
+                    Some(root) => json!({
+                        "tools": {},
+                        "workspaceRoot": root.display().to_string()
+                    }),
+                    None => json!({ "tools": {} }),
+                };
                 Some(ok(
                     id,
                     json!({
                         "protocolVersion": ver,
-                        "capabilities": { "tools": {} },
+                        "capabilities": capabilities,
                         "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") },
                         "instructions": guidance::GUIDANCE_COMPACT
                     }),
@@ -214,7 +221,7 @@ impl McpServer {
             .unwrap_or_else(|| json!({}));
         match self.dispatch(name, &args) {
             Ok(text) => ok(id, json!({ "content": [{ "type": "text", "text": text }] })),
-            Err(msg) if msg.contains("escapes workspace root") => {
+            Err(msg) if msg.contains("outside the workspace root") => {
                 err(id, -32602, &format!("workspace root violation: {msg}"))
             }
             Err(msg) => ok(
@@ -380,8 +387,12 @@ impl McpServer {
             "proactive_recall" => {
                 let prompt = str_arg(args.get("prompt")).ok_or("missing 'prompt'")?;
                 let project_root = str_arg(args.get("project_root"));
-                let mems = proactive_recall(self, prompt, project_root);
-                serde_json::to_string_pretty(&mems).map_err(|e| e.to_string())
+                let (mems, reason) = proactive_recall(self, prompt, project_root);
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "matches": mems,
+                    "reason": reason,
+                }))
+                .map_err(|e| e.to_string())
             }
             // -- v0.5.0 Sprint 10: graph + memory CRUD extensions --
             "memory_edit" => {
@@ -532,10 +543,10 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "expand",
-            "description": "Recover the exact, byte-identical original for a handle returned by `read` (or any Cairn content hash).",
+            "description": "Recover the exact, byte-identical original for a handle (short or full) returned by `read`. Handles are content-addressed blobs in the store - they never expire and survive across sessions. Pass the `handle` field from a `read` result or the full `hash`.",
             "inputSchema": {
                 "type": "object",
-                "properties": { "hash": { "type": "string", "description": "The handle / content hash." } },
+                "properties": { "hash": { "type": "string", "description": "The handle (short, 12 chars) or full content hash returned by `read`." } },
                 "required": ["hash"]
             }
         },
@@ -660,7 +671,7 @@ pub fn tool_defs() -> Value {
         // -- v0.5.0 Sprint 18: proactive recall --
         {
             "name": "proactive_recall",
-            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply - saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project.",
+            "description": "Run the proactive-recall hook for a prompt. Classifies whether the prompt is a question or task that would benefit from memory recall, and (if yes) returns up to 3 relevant memories to prepend to your context. Use this at the start of every turn when you suspect prior decisions may apply - saves a round-trip `cairn_recall` call. Honors the per-project opt-out: set `cairn prefer cairn.proactive_recall=false --applies-to <project_root>` to disable for a project. Returns `{matches: [...], reason: \"recalled\" | \"<skip reason>\"}` so callers can distinguish 'no relevant memories' from 'the classifier skipped this prompt'.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -672,7 +683,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "sanitize",
-            "description": "Check text for secrets/PII before you share, log, or commit it. Redacts API keys, tokens, private keys, JWTs, secret=value assignments, emails, IPs, and home-directory paths, and classifies the result as shareable, needs_review, or private. Returns the redacted text plus the findings.",
+            "description": "Check text for secrets/PII before you share, log, or commit it. Redacts API keys, tokens, private keys, JWTs, secret=value assignments, emails, IPs, and home-directory paths, and classifies the result as shareable, needs_review, or private. Returns the redacted text plus the findings. Note: secret patterns require minimum lengths (e.g. 20+ chars after `sk-` for OpenAI keys) to avoid false positives on prose - short fragments like `sk-abc123` are deliberately not flagged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -799,14 +810,16 @@ fn str_arg(v: Option<&Value>) -> Option<&str> {
 // -- v0.5.0 Sprint 18: Proactive Recall --
 
 /// Run the proactive recall hook for `prompt`. Returns the list of memories to
-/// prepend to the agent's context, or an empty list if the hook decides no
-/// recall is warranted (intent didn't match, project opted out, or no matches).
+/// prepend to the agent's context, plus a short reason string explaining why
+/// recall was or wasn't performed (intent didn't match, project opted out, or
+/// no matches). The reason is surfaced in the MCP tool response so callers can
+/// distinguish "no relevant memories" from "the classifier skipped this prompt".
 #[cfg(feature = "engine")]
 pub fn proactive_recall(
     server: &McpServer,
     prompt: &str,
     project_root: Option<&str>,
-) -> Vec<cairn_core::Memory> {
+) -> (Vec<cairn_core::Memory>, &'static str) {
     let store = server.store.clone();
     let mem = server.mem.clone();
 
@@ -829,10 +842,10 @@ pub fn proactive_recall(
     .with_threshold(0.4);
 
     match hook.on_turn(prompt, project_root) {
-        cairn_proactive::HookOutcome::Recalled(mems) => mems,
+        cairn_proactive::HookOutcome::Recalled(mems) => (mems, "recalled"),
         cairn_proactive::HookOutcome::Skipped { reason } => {
             tracing::debug!(reason, "proactive recall skipped");
-            Vec::new()
+            (Vec::new(), reason)
         }
     }
 }
@@ -947,7 +960,10 @@ impl RemoteProxy {
                     id,
                     json!({
                         "protocolVersion": ver,
-                        "capabilities": { "tools": {} },
+                        "capabilities": {
+                            "tools": {},
+                            "workspaceRoot": self.host_workspace.display().to_string()
+                        },
                         "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") },
                         "instructions": guidance::GUIDANCE_COMPACT
                     }),

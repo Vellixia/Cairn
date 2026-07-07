@@ -2,6 +2,60 @@
 
 All notable changes to Cairn are documented here. Versions follow [Semantic Versioning](https://semver.org/).
 
+> **Pre-1.0 notice:** Until 1.0 lands, minor versions may carry breaking changes
+> on the upgrade path. Pin the version you install and re-read this file on every bump.
+
+## [0.8.2] - 2026-07-07 - Hardening: expand short handles, error clarity, hook UX
+
+Follow-up to v0.8.1 addressing the external audit report (E001-E003, W001-W005).
+No new features; behavior fixes and developer-facing clarity.
+
+### Fixed
+- **`expand` now resolves short handles** (E001). `read` advertises
+  `handle = hash.short()` (12 chars) as the value to pass to `expand`, but
+  `expand` previously only accepted the full 64-char content hash - any caller
+  that followed the advertised contract got `unknown handle`. The blob store
+  now resolves short prefixes to the full hash via a shard-directory scan, and
+  `ContextEngine::expand` retries with the resolved full hash on a miss.
+  Handles were never TTL'd or session-bound (they're content-addressed blobs in
+  the store); the failure was a contract mismatch, not expiration.
+- **Workspace escape error message** (E002) now names the configured
+  `CAIRN_WORKSPACE_ROOT` and points at the env var, instead of the bare
+  `path escapes workspace root: <path>`.
+- **`POST /api/memory/:id/pin` accepts an empty body** (W004), defaulting
+  `pinned=true`. Previously the Axum `Json` extractor required a
+  `Content-Type: application/json` header and a parseable body even though pin
+  is the common case. Send `{"pinned": false}` to unpin; empty body pins.
+
+### Changed
+- **MCP `initialize` response now includes `workspaceRoot`** in `capabilities`
+  when a workspace root is configured, so MCP clients can discover the
+  confinement boundary without a separate round-trip.
+- **`proactive_recall` MCP tool returns `{matches, reason}`** instead of a bare
+  array. The `reason` string distinguishes "no relevant memories" from "the
+  classifier skipped this prompt" - previously the skip reason was only visible
+  in `tracing::debug`.
+- **Claude Code `health()` now checks `settings.json`** (E003 follow-up). Flags
+  a missing or unparseable `<project>/.claude/settings.json` when Claude Code
+  is detected, since without that file the lifecycle hooks silently stop
+  firing. The install path itself was already correct (project-scoped); this
+  adds a doctor-level guard against the file going missing or getting
+  clobbered.
+
+### Docs
+- **`cairn hook --help`** now explains the stdin JSON protocol and lists every
+  event name, so `cairn hook UserPromptSubmit --prompt "..."` failures
+  (W002/W003) point at the right answer instead of just rejecting the flag.
+- **`AGENTS.md`** has a new "Hook stdin format" table mapping each event to its
+  JSON shape.
+- **`expand` and `sanitize` MCP tool schemas** carry the missing notes:
+  `expand` clarifies that handles never expire and short/full are both
+  accepted; `sanitize` documents the min-length thresholds that deliberately
+  skip short fragments like `sk-abc123` (W001).
+- **README + docs/README** now carry a pre-1.0 disclaimer: Cairn is under active
+  development, interfaces may change between minor versions without prior
+  notice, and there is no stability guarantee until 1.0.
+
 ## [0.8.0] - 2026-07-05 - Intelligent memory + observability-first dashboard
 
 Two threads landed together: nine backend sprints deepening the memory

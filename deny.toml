@@ -68,14 +68,13 @@ skip = [
     { name = "windows_x86_64_msvc", version = "0.x" },
 
     # Apple platform crates - same rationale as Windows target crates.
-    { name = "core-foundation", version = "0.x" },
     { name = "r-efi", version = "5.x" },
 
-    # String-handling crates with multiple majors in the dependency tree.
-    # memchr 2.x and serde_json 1.x are pulled in by both tree-sitter and the main crate set.
-    { name = "memchr", version = "2.x" },
-    { name = "serde_json", version = "1.x" },
-    { name = "serde_core", version = "1.x" },
+    # The following were previously duplicate but are now single-version in the
+    # tree (cargo-deny flagged them as unnecessary-skip): memchr, serde_json,
+    # serde_core, tower-http, ahash, foldhash, base64, syn. Removed to keep the
+    # skip list honest. If a future dep bump re-introduces duplicates, cargo-deny
+    # will catch it (multiple-versions = "deny").
 
     # Workspace intentionally pins to ureq 2.x; ureq 3.x has API differences.
     # The skip is a safety net for transitive deps that may pull 3.x.
@@ -90,7 +89,6 @@ skip = [
     # duplicates; same crate, different feature flags resolving to different versions.
     { name = "getrandom", version = "0.x" },
     { name = "webpki-roots", version = "0.x" },
-    { name = "tower-http", version = "0.x" },
     { name = "wit-bindgen", version = "0.x" },
 
     # --- surrealdb (v0.8.0 Sprint 1) ---------------------------------------------------------
@@ -105,26 +103,20 @@ skip = [
     { name = "axum", version = "0.x" },
     { name = "axum-core", version = "0.x" },
     { name = "matchit", version = "0.x" },
-    { name = "reqwest", version = "0.x" },
     { name = "jsonwebtoken", version = "*" }, # 9.x (ours) vs 10.x (surrealdb-core)
-    { name = "syn", version = "*" },          # 1.x (older transitive) vs 2.x (surrealdb-core)
     { name = "heck", version = "0.x" },
 
     # surrealdb-core's own rand/hash/crypto pins (independent of our `rand ~0.8` workspace pin).
     { name = "rand", version = "0.x" },
     { name = "rand_chacha", version = "0.x" },
     { name = "rand_core", version = "0.x" },
-    { name = "ahash", version = "0.x" },
-    { name = "foldhash", version = "0.x" },
     { name = "hashbrown", version = "0.x" },
     { name = "cpufeatures", version = "0.x" },
     { name = "untrusted", version = "0.x" },
-    { name = "base64", version = "0.x" }, # our workspace pin is `base64 ~0.22`; this is the 0.13 outlier
 
     # rkyv zero-copy serialization family - used internally by surrealkv/surrealdb-core for its
-    # storage layer. All entries here belong to the same rkyv 0.7-vs-0.8 major-version split.
-    { name = "rkyv", version = "0.x" },
-    { name = "rkyv_derive", version = "0.x" },
+    # storage layer. rkyv/rkyv_derive themselves are no longer in the tree (unmatched-skip),
+    # but the derived types below still appear as duplicates. Re-evaluate when surrealdb bumps.
     { name = "ptr_meta", version = "0.x" },
     { name = "ptr_meta_derive", version = "0.x" },
     { name = "rend", version = "0.x" },
