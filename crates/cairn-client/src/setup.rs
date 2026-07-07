@@ -59,6 +59,9 @@ pub fn run(
     if effective_server.is_some() || effective_token.is_some() {
         let is_fresh_config = crate::config::config_path().is_some_and(|p| !p.exists());
         crate::config::save_server(effective_server, effective_token)?;
+        if let Some(tok) = effective_token {
+            crate::config::warn_if_env_token_shadows(tok);
+        }
         if is_fresh_config {
             crate::config::save_inject_context_default(true)?;
             println!(

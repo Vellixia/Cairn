@@ -264,6 +264,19 @@ pub fn save_server(server_url: Option<&str>, token: Option<&str>) -> Result<()> 
     write_config_file(&path, &doc.to_string())
 }
 
+/// After `save_server` writes a token to `~/.cairn/config.toml`, check whether
+/// the `CAIRN_TOKEN` env var holds a *different* value that would shadow it.
+/// Prints a warning via `eprintln!` when detected. Callers pass the token that
+/// was just saved; identical env/file values are silently ignored (unsetting
+/// the env var would change nothing).
+pub fn warn_if_env_token_shadows(token: &str) {
+    if let Ok(env_val) = std::env::var("CAIRN_TOKEN") {
+        if !env_val.is_empty() && env_val != token {
+            eprintln!("warning: {}", shadow_note("token", "CAIRN_TOKEN"));
+        }
+    }
+}
+
 /// Set `[hooks] inject_context = <value>` - called on new `onboard`/`setup`
 /// runs so freshly-onboarded users get the flagship feature on by default
 /// (existing installs, which never touch this function unless they

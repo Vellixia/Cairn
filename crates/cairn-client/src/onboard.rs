@@ -54,6 +54,7 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         crate::http::validate_token(srv, tok)?;
         let is_fresh_config = crate::config::config_path().is_some_and(|p| !p.exists());
         crate::config::save_server(Some(srv), Some(tok))?;
+        crate::config::warn_if_env_token_shadows(tok);
         if is_fresh_config {
             crate::config::save_inject_context_default(true)?;
         }
