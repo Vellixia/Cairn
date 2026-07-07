@@ -11,6 +11,12 @@ This is the catalog of every doc in this repo. If you're new, start with the roo
 [README.md](../README.md) (for users) or [AGENTS.md](../AGENTS.md) (for AI agents) — they
 route you here for anything deeper.
 
+> **Pre-1.0 software.** Cairn is under active development (current: **v0.8.x**) and has not
+> shipped a 1.0. Interfaces — MCP tool names/shapes, HTTP API, CLI flags, config keys, hook
+> payloads — may change between minor versions without prior notice, and there is no
+> stability guarantee until 1.0 lands. These docs describe the current state, not a frozen
+> contract. Pin the version you install and re-read the upgrade notes on every bump.
+
 Writing a new doc? Read [CONVENTIONS.md](CONVENTIONS.md) first — it explains where things go
 and which template to use.
 

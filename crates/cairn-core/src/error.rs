@@ -25,7 +25,7 @@ pub enum Error {
     #[error("{0}")]
     Other(String),
 
-    #[error("path escapes workspace root: {0}")]
+    #[error("path {0} is outside the workspace root; only files under the configured CAIRN_WORKSPACE_ROOT can be accessed (configure via the env var or `--workspace-root`)")]
     WorkspaceEscape(PathBuf),
 }
 

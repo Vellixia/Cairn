@@ -345,12 +345,22 @@ impl ContextEngine {
         Ok(result)
     }
 
-    /// Recover the exact original bytes for a handle (full or short hash), as a string.
+    /// Recover the exact original bytes for a handle (full or short hash), as a
+    /// string. Short handles (the 12-char `handle` field advertised by `read`)
+    /// are resolved to the full hash by scanning the blob shard directory.
     pub fn expand(&self, hash: &str) -> Result<Option<String>> {
-        // Accept short handles by scanning is overkill here; require the full hash for now,
-        // but tolerate a full hash passed as-is.
         let ch = ContentHash(hash.to_string());
-        self.store.blobs().get_str(&ch)
+        if let Some(s) = self.store.blobs().get_str(&ch)? {
+            return Ok(Some(s));
+        }
+        // Allow short handles (hash.short()) by resolving the prefix to the
+        // full content hash, then retrying the blob lookup.
+        if hash.len() < 64 {
+            if let Some(full) = self.store.blobs().resolve_short(hash)? {
+                return self.store.blobs().get_str(&full);
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -666,7 +676,7 @@ pub fn build() -> Widget { Widget::new(1) }
             .read(&outside, ReadMode::Full)
             .expect_err("absolute outside path must be rejected");
         assert!(
-            err.to_string().contains("escapes workspace root"),
+            err.to_string().contains("outside the workspace root"),
             "was: {err}"
         );
 
@@ -675,7 +685,7 @@ pub fn build() -> Widget { Widget::new(1) }
             .read(&traversal, ReadMode::Full)
             .expect_err("../ traversal must be rejected");
         assert!(
-            err.to_string().contains("escapes workspace root"),
+            err.to_string().contains("outside the workspace root"),
             "was: {err}"
         );
     }
@@ -695,7 +705,7 @@ pub fn build() -> Widget { Widget::new(1) }
             .write(&traversal, "x")
             .expect_err("../ traversal must be rejected");
         assert!(
-            err.to_string().contains("escapes workspace root"),
+            err.to_string().contains("outside the workspace root"),
             "was: {err}"
         );
     }
@@ -716,7 +726,7 @@ pub fn build() -> Widget { Widget::new(1) }
             .read(&link, ReadMode::Full)
             .expect_err("symlink escaping root must be rejected");
         assert!(
-            err.to_string().contains("escapes workspace root"),
+            err.to_string().contains("outside the workspace root"),
             "was: {err}"
         );
     }
@@ -746,14 +756,14 @@ pub fn build() -> Widget { Widget::new(1) }
         std::fs::write(&outside, "y").unwrap();
         let err = resolve_within_root(Some(root), &outside).unwrap_err();
         assert!(
-            err.to_string().contains("escapes workspace root"),
+            err.to_string().contains("outside the workspace root"),
             "was: {err}"
         );
 
         // Traversal via .. is rejected even when the target does not exist.
         let err = resolve_within_root(Some(root), Path::new("../nope.txt")).unwrap_err();
         assert!(
-            err.to_string().contains("escapes workspace root"),
+            err.to_string().contains("outside the workspace root"),
             "was: {err}"
         );
 

@@ -57,4 +57,31 @@ impl BlobStore {
     pub fn has(&self, hash: &ContentHash) -> bool {
         self.path_for(hash).exists()
     }
+
+    /// Resolve a short handle (prefix of the full content hash) to the full
+    /// `ContentHash`, scanning the shard directory. Returns `None` when no blob
+    /// matches the prefix. Handles shorter than 2 chars cannot map to a shard
+    /// and are rejected.
+    ///
+    /// `read` advertises `handle = hash.short()` (12 chars) as the value to pass
+    /// to `expand`, while `expand` looks up by full hash. This bridges the gap.
+    pub fn resolve_short(&self, prefix: &str) -> Result<Option<ContentHash>> {
+        if prefix.len() < 2 {
+            return Ok(None);
+        }
+        let shard = &prefix[..2];
+        let dir = self.root.join(shard);
+        if !dir.exists() {
+            return Ok(None);
+        }
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with(prefix) {
+                return Ok(Some(ContentHash(name.into_owned())));
+            }
+        }
+        Ok(None)
+    }
 }

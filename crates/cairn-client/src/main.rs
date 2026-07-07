@@ -115,7 +115,17 @@ enum Cmd {
     /// Run the MCP server over stdio (launched by AI agents).
     Mcp,
     /// Internal: handle a lifecycle hook event (launched by AI agents).
-    Hook { event: String },
+    ///
+    /// Not meant to be invoked by humans directly - agents call this as a
+    /// subprocess for SessionStart / UserPromptSubmit / PostToolUse / SessionEnd /
+    /// PreCompact / PreToolUse events. The hook payload is read from stdin as JSON
+    /// (Claude Code's hook protocol); no CLI flags for prompt/tool-name/etc are
+    /// accepted. Debug with `CAIRN_HOOK_DEBUG=1` to see what's sent to the server.
+    Hook {
+        /// The hook event name (SessionStart, UserPromptSubmit, PostToolUse,
+        /// SessionEnd, PreCompact, PreToolUse).
+        event: String,
+    },
     /// Check for a newer release on GitHub and upgrade the binary.
     Upgrade {
         /// Only report whether an upgrade is available; do not download.

@@ -162,7 +162,9 @@ impl Agent for ClaudeCode {
 
     /// Flags a skill file written by an older binary (rev marker doesn't match the guidance
     /// module's current [`cairn_mcp::guidance::GUIDANCE_REV`]) so `doctor --fix` re-runs
-    /// `install()` to refresh it.
+    /// `install()` to refresh it. Also flags a missing or unparseable `settings.json` when
+    /// Claude Code is in use - without that file the lifecycle hooks never fire, so
+    /// SessionStart context injection and PostToolUse guards silently stop working.
     fn health(&self, project: &Path, home: Option<&Path>) -> Vec<String> {
         let want = format!("cairn-guidance-rev: {}", cairn_mcp::guidance::GUIDANCE_REV);
         let candidates: Vec<std::path::PathBuf> = [Some(skill_dir(project)), home.map(skill_dir)]
@@ -182,10 +184,41 @@ impl Agent for ClaudeCode {
             .map(|f| format!("{} has a stale guidance revision", f.display()))
             .collect();
 
+        let detected = self.detect(project, home);
+
+        // Settings.json health: if Claude Code is in use, the hooks file must exist
+        // and parse as JSON. A missing or corrupt settings.json means hooks never
+        // fire - the silent-failure mode E003 was about.
+        if detected {
+            let settings = paths::claude_settings(project);
+            if !settings.exists() {
+                issues.push(format!(
+                    "{} is missing - Claude Code lifecycle hooks will not fire (run `cairn setup claude-code`)",
+                    settings.display()
+                ));
+            } else {
+                match std::fs::read_to_string(&settings) {
+                    Ok(text) => {
+                        if serde_json::from_str::<serde_json::Value>(&text).is_err() {
+                            issues.push(format!(
+                                "{} is not valid JSON - hooks may not fire (re-run `cairn setup claude-code`)",
+                                settings.display()
+                            ));
+                        }
+                    }
+                    Err(_) => {
+                        issues.push(format!(
+                            "{} could not be read - hooks may not fire",
+                            settings.display()
+                        ));
+                    }
+                }
+            }
+        }
+
         // Only flag a MISSING skill when Claude Code is actually in use - otherwise every
         // `cairn doctor` run would complain about a skill nobody asked for.
-        if issues.is_empty() && self.detect(project, home) && !candidates.iter().any(|f| f.exists())
-        {
+        if issues.is_empty() && detected && !candidates.iter().any(|f| f.exists()) {
             issues.push(
                 "no Cairn skill installed (run `cairn setup claude-code` to add the playbook)"
                     .to_string(),
@@ -407,9 +440,43 @@ mod tests {
         );
 
         std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        // Write a valid settings.json so the settings-health check doesn't fire;
+        // this test is specifically about the missing-skill flag.
+        std::fs::write(dir.path().join(".claude/settings.json"), r#"{"hooks":{}}"#).unwrap();
         let issues = ClaudeCode.health(dir.path(), None);
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("no Cairn skill installed"));
+    }
+
+    #[test]
+    fn health_flags_a_missing_or_corrupt_settings_json_when_claude_code_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        // Install a skill so the missing-skill flag doesn't interfere.
+        let ctx = InstallCtx {
+            project: dir.path(),
+            home: None,
+            scope: Scope::Project,
+        };
+        ClaudeCode.install(&ctx).unwrap();
+
+        // Corrupt JSON in settings.json.
+        std::fs::write(dir.path().join(".claude/settings.json"), "not json").unwrap();
+        let issues = ClaudeCode.health(dir.path(), None);
+        assert!(
+            issues.iter().any(|i| i.contains("not valid JSON")),
+            "expected a corrupt-settings flag, got {issues:?}"
+        );
+
+        // Missing settings.json.
+        std::fs::remove_file(dir.path().join(".claude/settings.json")).unwrap();
+        let issues = ClaudeCode.health(dir.path(), None);
+        assert!(
+            issues
+                .iter()
+                .any(|i| i.contains("settings.json") && i.contains("missing")),
+            "expected a missing-settings flag, got {issues:?}"
+        );
     }
 
     #[test]
@@ -449,6 +516,9 @@ mod tests {
 
         let skill_dir = dir.path().join(".claude/skills/cairn");
         std::fs::create_dir_all(&skill_dir).unwrap();
+        // Write a valid settings.json so the settings-health check doesn't
+        // fire alongside the stale-skill check this test is about.
+        std::fs::write(dir.path().join(".claude/settings.json"), r#"{"hooks":{}}"#).unwrap();
         std::fs::write(
             skill_dir.join("SKILL.md"),
             "---\nname: cairn\n---\n<!-- cairn-guidance-rev: 0 -->\n\nstale content",

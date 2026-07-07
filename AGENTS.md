@@ -132,6 +132,26 @@ resolved finding is `docs/testing/findings/README.md`.
 - Doc authoring conventions (folder structure, templates, naming, frontmatter) live in
   [`docs/CONVENTIONS.md`](docs/CONVENTIONS.md) - read it before adding a new doc.
 
+## Hook stdin format (for `cairn hook <event>`)
+
+`cairn hook` is invoked by AI agents as a subprocess, not by humans. The hook
+event payload arrives on **stdin as JSON** (Claude Code's hook protocol); no
+CLI flags like `--prompt` or `--tool-name` are accepted. Each event has its
+own JSON shape:
+
+| Event | stdin JSON shape | Notes |
+|-------|------------------|-------|
+| `SessionStart` | `{"session_id": "...", "cwd": "..."}` | Context injection + autopilot digest |
+| `UserPromptSubmit` | `{"prompt": "..."}` | Auto-anchor derivation |
+| `PostToolUse` | `{"tool_name": "Edit", "tool_input": {...}, "tool_response": {...}}` | Verify-after-edit guard |
+| `PreToolUse` | `{"tool_name": "Edit", "tool_input": {...}}` | Pre-write guard + Bash sanitize |
+| `SessionEnd` | `{"session_id": "..."}` | Session summary flush |
+| `PreCompact` | `{}` | Flush session state before context compaction |
+
+Debug with `CAIRN_HOOK_DEBUG=1` to see the server request/response for each
+hook invocation. Missing or malformed stdin is treated as a no-op (the hook
+fails open - agent workflow never blocks on a hook error).
+
 ## Runtime prerequisites
 
 - **SurrealDB required.** Set `CAIRN_DB_URL` (default `ws://localhost:8000`) or use `docker compose up -d surreal`.
