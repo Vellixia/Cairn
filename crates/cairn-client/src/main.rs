@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 
 mod agents;
 mod config;
+mod credentials;
 mod debuglog;
 mod doctor;
 mod documents;
@@ -32,19 +33,23 @@ mod setup;
 mod spool;
 mod status;
 mod statusline;
+mod uninstall;
 mod update;
 
-/// Returns the effective server URL (env, then `~/.cairn/config.toml`), or an
-/// error with guidance.
-fn require_server() -> Result<String> {
-    config::resolve(None).server.map(|(s, _)| s).ok_or_else(|| {
-        anyhow!(
+/// Returns resolved config, or an error with guidance when no server is
+/// configured.
+fn require_resolved() -> Result<config::Resolved> {
+    let r = config::resolve(None);
+    if r.server.is_some() {
+        Ok(r)
+    } else {
+        Err(anyhow!(
             "No Cairn server configured. Mint a token from the dashboard's You > Tokens \
              page, then run:\n\
              \n  cairn onboard --server <url> --token <jwt>\n\
              \n  Or: cairn setup --all --server <url> --token <jwt>"
-        )
-    })
+        ))
+    }
 }
 
 #[derive(Parser)]
@@ -112,6 +117,12 @@ enum Cmd {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Remove all Cairn-managed entries, state, and config.
+    Uninstall {
+        /// Only show what would be removed; do not actually delete.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Run the MCP server over stdio (launched by AI agents).
     Mcp,
     /// Internal: handle a lifecycle hook event (launched by AI agents).
@@ -171,7 +182,12 @@ fn main() -> Result<()> {
 
     match cli.cmd {
         Cmd::Doctor { fix, json } => {
-            doctor::run_and_exit(doctor::DoctorOptions { fix, json })?;
+            doctor::run_and_exit(doctor::DoctorOptions {
+                fix,
+                json,
+                server_override: None,
+                token_override: None,
+            })?;
         }
         Cmd::Onboard {
             skip_agents,
@@ -209,8 +225,10 @@ fn main() -> Result<()> {
         Cmd::Reset { dry_run } => {
             reset::run(dry_run)?;
         }
+        Cmd::Uninstall { dry_run } => {
+            uninstall::run(dry_run)?;
+        }
         Cmd::Mcp => {
-            let _server = require_server()?;
             // `cairn_core::Config::resolve` (a lower-level, cairn-client-agnostic crate)
             // only ever reads `CAIRN_SERVER`/`CAIRN_TOKEN` from the process env - it has
             // no notion of `~/.cairn/config.toml`. Inject the client's resolved values
@@ -218,7 +236,7 @@ fn main() -> Result<()> {
             // before calling it, so agent MCP entries can omit the env block entirely
             // and still work. Safe to `set_var` here: this is the very first thing this
             // (single-threaded, non-tokio) process does after arg parsing.
-            let resolved = config::resolve(None);
+            let resolved = require_resolved()?;
             if let Some((server, _)) = &resolved.server {
                 std::env::set_var("CAIRN_SERVER", server);
             }

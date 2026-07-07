@@ -21,6 +21,11 @@ pub struct DoctorOptions {
     pub fix: bool,
     /// Output machine-readable JSON instead of human-readable text.
     pub json: bool,
+    /// Use these values instead of env/config when checking the remote server.
+    /// Set by `onboard` so a user's `--server`/`--token` flags override stale
+    /// env vars during the verify step.
+    pub server_override: Option<String>,
+    pub token_override: Option<String>,
 }
 
 /// Outcome of `doctor run`. Used by `onboard` to decide whether to proceed.
@@ -65,13 +70,37 @@ pub fn run(opts: DoctorOptions) -> Diagnosis {
         }
     };
     checks.push(check_data_dir(&cfg, opts.fix));
-    checks.push(check_remote_server());
+
+    let (project_id, _) = crate::project::detect_project();
+    let resolved = crate::config::resolve(project_id.as_deref());
+
+    // Apply overrides from --server/--token flags (set by onboard) so a user
+    // explicitly providing credentials on the CLI doesn't get blocked by a
+    // stale env var that beats config during re-resolution.
+    let (effective_server, server_src) = match &opts.server_override {
+        Some(s) => (Some(s.clone()), crate::config::Source::Flag),
+        None => resolved
+            .server
+            .as_ref()
+            .map(|(s, src)| (Some(s.clone()), *src))
+            .unwrap_or((None, crate::config::Source::Default)),
+    };
+    let effective_token = opts
+        .token_override
+        .clone()
+        .or_else(|| resolved.token.as_ref().map(|(t, _)| t.clone()));
+
+    checks.push(check_remote_server(
+        &effective_server,
+        server_src,
+        &effective_token,
+    ));
     checks.push(check_env_shadows_file());
     checks.push(check_agents());
     checks.push(check_project());
     checks.push(check_config_health(opts.fix));
-    checks.push(check_token_expiry());
-    checks.push(check_version_skew());
+    checks.push(check_token_expiry(&effective_token));
+    checks.push(check_version_skew(&effective_server));
     checks.push(check_spool_backlog());
 
     finalize(checks, opts.json)
@@ -166,20 +195,17 @@ fn check_data_dir(cfg: &cairn_core::Config, fix: bool) -> Check {
     }
 }
 
-fn check_remote_server() -> Check {
-    // Env and `~/.cairn/config.toml` both count - a server configured only via
-    // the config file (the common case post-v0.8.0-redesign) must show as
-    // configured here, not as "unset", or doctor would contradict what
-    // `cairn hook`/`cairn mcp` actually do.
-    let (project_id, _) = crate::project::detect_project();
-    let resolved = crate::config::resolve(project_id.as_deref());
-    match resolved.server {
-        Some((s, src)) => {
-            let src = src.label();
-            let (ok, detail) = match resolved.token {
-                Some((t, _)) => {
-                    // Validate the token with a real, timeout-bounded request.
-                    let client = crate::http::ApiClient::new(&s, Some(&t));
+fn check_remote_server(
+    effective_server: &Option<String>,
+    server_src: crate::config::Source,
+    effective_token: &Option<String>,
+) -> Check {
+    match effective_server {
+        Some(s) => {
+            let src = server_src.label();
+            let (ok, detail) = match effective_token {
+                Some(t) => {
+                    let client = crate::http::ApiClient::new(s, Some(t));
                     match client.get("/api/memory/wakeup").query("limit", "1").call() {
                         Ok(resp) if resp.status() == 200 => {
                             (true, format!("{s} (from {src}, token valid)"))
@@ -372,17 +398,15 @@ fn check_config_health(fix: bool) -> Check {
 
 /// Warn when the configured token expires within 7 days (or has already
 /// expired) so a user notices before every request starts 401ing.
-fn check_token_expiry() -> Check {
-    let (project_id, _) = crate::project::detect_project();
-    let resolved = crate::config::resolve(project_id.as_deref());
-    let Some((token, _)) = resolved.token else {
+fn check_token_expiry(effective_token: &Option<String>) -> Check {
+    let Some(token) = effective_token else {
         return Check {
             name: "token expiry",
             ok: true,
             detail: "(no token configured)".into(),
         };
     };
-    let Some(info) = crate::status::decode_jwt_info(&token) else {
+    let Some(info) = crate::status::decode_jwt_info(token) else {
         return Check {
             name: "token expiry",
             ok: true,
@@ -430,10 +454,8 @@ fn check_token_expiry() -> Check {
 /// Informational: how far client and server versions have drifted. Skew alone isn't a
 /// failure (rolling upgrades are normal) - this exists so a confusing bug report can be
 /// ruled in/out by version mismatch at a glance.
-fn check_version_skew() -> Check {
-    let (project_id, _) = crate::project::detect_project();
-    let resolved = crate::config::resolve(project_id.as_deref());
-    let Some((server, _)) = resolved.server else {
+fn check_version_skew(effective_server: &Option<String>) -> Check {
+    let Some(server) = effective_server else {
         return Check {
             name: "version",
             ok: true,
@@ -441,7 +463,7 @@ fn check_version_skew() -> Check {
         };
     };
     let client_version = env!("CARGO_PKG_VERSION");
-    let client = crate::http::ApiClient::new(&server, None);
+    let client = crate::http::ApiClient::new(server, None);
     match client.server_version() {
         Some(server_version) if server_version == client_version => Check {
             name: "version",

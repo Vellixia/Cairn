@@ -45,24 +45,13 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         eprintln!("[cairn]  Cairn onboard - zero-prompt setup\n");
     }
 
-    let (server, token) = resolve_credentials(&opts)?;
-
-    // Validate once, up front, and persist immediately - mirrors `setup::run`'s own
-    // validate-then-save sequencing so `onboard` can't wire agents against a token
-    // it never actually checked.
-    if let (Some(srv), Some(tok)) = (&server, &token) {
-        crate::http::validate_token(srv, tok)?;
-        let is_fresh_config = crate::config::config_path().is_some_and(|p| !p.exists());
-        crate::config::save_server(Some(srv), Some(tok))?;
-        crate::config::warn_if_env_token_shadows(tok);
-        if is_fresh_config {
-            crate::config::save_inject_context_default(true)?;
-        }
-    }
+    let (server, token) = resolve_and_persist_with_fallback(&opts)?;
 
     let mut diag = doctor::run(doctor::DoctorOptions {
         fix: opts.fix,
         json: false,
+        server_override: server.clone(),
+        token_override: token.clone(),
     });
 
     // If --fix is set and we got failures, re-run to confirm.
@@ -70,6 +59,8 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
         diag = doctor::run(doctor::DoctorOptions {
             fix: false,
             json: false,
+            server_override: server.clone(),
+            token_override: token.clone(),
         });
     }
 
@@ -110,29 +101,20 @@ pub fn run(opts: OnboardOptions) -> Result<()> {
     Ok(())
 }
 
-/// Resolve server+token from, in priority order: `--server`/`--token` flags,
-/// `CAIRN_SERVER`/`CAIRN_TOKEN` env, `~/.cairn/config.toml` - or, only when
-/// NOTHING else supplied credentials, a one-shot probe of
-/// `http://localhost:7777` that prints guidance on how to get a token if a
-/// server answers but isn't yet authenticated against.
-fn resolve_credentials(opts: &OnboardOptions) -> Result<(Option<String>, Option<String>)> {
-    if opts.server.is_some() || opts.token.is_some() {
-        return Ok((opts.server.clone(), opts.token.clone()));
+/// Like `crate::credentials::resolve_and_persist`, but when nothing is found
+/// via flags/env/config, probes `http://localhost:7777` (the docker-compose
+/// default) and prints guidance before returning `(None, None)`.
+fn resolve_and_persist_with_fallback(
+    opts: &OnboardOptions,
+) -> Result<(Option<String>, Option<String>)> {
+    let (server, token) =
+        crate::credentials::resolve_and_persist(opts.server.as_deref(), opts.token.as_deref())?;
+
+    if server.is_some() || token.is_some() {
+        return Ok((server, token));
     }
-    if let Ok(s) = std::env::var("CAIRN_SERVER") {
-        if !s.trim().is_empty() {
-            let token = std::env::var("CAIRN_TOKEN").ok().filter(|t| !t.is_empty());
-            return Ok((Some(s), token));
-        }
-    }
-    let resolved = crate::config::resolve(None);
-    if resolved.server.is_some() {
-        return Ok((
-            resolved.server.map(|(s, _)| s),
-            resolved.token.map(|(t, _)| t),
-        ));
-    }
-    // Nothing configured anywhere - try localhost, the docker-compose default port.
+
+    // Nothing configured anywhere — try localhost, the docker-compose default port.
     let localhost = "http://localhost:7777";
     let client = crate::http::ApiClient::new(localhost, None);
     if client.server_version().is_some() {

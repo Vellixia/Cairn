@@ -11,6 +11,27 @@
         "matcher": "Edit|Write|MultiEdit|NotebookEdit"
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook PreCompact",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook PreToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash"
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
