@@ -13,11 +13,11 @@ fn server_and_token() -> Result<(String, String, Option<String>)> {
     let server = resolved
         .server
         .map(|(s, _)| s)
-        .context("no server configured - run `cairn onboard` first")?;
+        .context("no server configured - run `cairn setup --all` first")?;
     let token = resolved
         .token
         .map(|(t, _)| t)
-        .context("no token configured - run `cairn onboard` first")?;
+        .context("no token configured - run `cairn setup --all` first")?;
     Ok((server.trim_end_matches('/').to_string(), token, project_id))
 }
 

@@ -48,17 +48,21 @@ pub fn claude_settings(project: &Path) -> PathBuf {
     project.join(".claude").join("settings.json")
 }
 
-/// OpenCode's global config path. OpenCode follows XDG-ish directories on all
-/// platforms: `~/.config/opencode/opencode.json` on Windows and Unix alike.
+/// OpenCode's global config path. On Windows, OpenCode stores its config at
+/// `%APPDATA%\opencode\opencode.json`. On Unix, it follows XDG:
+/// `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json`.
 pub fn opencode_config_path() -> PathBuf {
     // XDG_CONFIG_HOME already IS the config root (e.g. ~/.config); don't add .config again.
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("opencode").join("opencode.json");
     }
-    let base = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // On Windows, OpenCode stores config at %APPDATA%\opencode\opencode.json.
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata)
+            .join("opencode")
+            .join("opencode.json");
+    }
+    let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join(".config").join("opencode").join("opencode.json")
 }
 

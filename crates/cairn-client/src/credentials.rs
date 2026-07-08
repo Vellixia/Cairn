@@ -1,4 +1,4 @@
-//! Shared credential resolution + persistence for `cairn setup` and `cairn onboard`.
+//! Shared credential resolution + persistence for `cairn setup`.
 //!
 //! Resolution order: CLI flags → `CAIRN_SERVER`/`CAIRN_TOKEN` env vars
 //! → `~/.cairn/config.toml`. If both server and token are found, validates

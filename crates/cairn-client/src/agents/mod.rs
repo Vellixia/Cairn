@@ -1,8 +1,8 @@
 //! Per-agent installer registry. Each supported AI agent (Claude Code, Codex,
 //! OpenCode) implements the [`Agent`] trait; `cairn setup`/`doctor`/`status`/
 //! `reset` all go through the [`AGENTS`] registry instead of hand-rolling
-//! per-agent path/detect/install/remove logic four times over. Adding agent #4
-//! is one new file in this directory plus one line in [`AGENTS`].
+//! per-agent path/detect/install/remove logic four times over. Adding a new
+//! agent is one new file in this directory plus one line in [`AGENTS`].
 
 mod claude_code;
 mod codex;
@@ -317,6 +317,7 @@ mod tests {
         assert_eq!(find("oc").map(Agent::id), Some("opencode"));
         assert!(find("emacs").is_none());
         assert!(find("cursor").is_none());
+        assert!(find("claude-desktop").is_none());
     }
 
     #[test]

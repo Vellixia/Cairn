@@ -15,10 +15,10 @@
 use crate::agents::{self, InstallCtx, Scope};
 use crate::paths;
 use anyhow::{anyhow, Result};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Resolve server+token from flags/env/config, return the number of agents
-/// actually installed so `cairn onboard` can report a count.
+/// actually installed.
 pub fn run(
     agent: Option<&str>,
     all: bool,
@@ -26,8 +26,11 @@ pub fn run(
     token: Option<&str>,
     project_flag: bool,
 ) -> Result<usize> {
-    let (effective_server, effective_token) =
-        crate::credentials::resolve_and_persist(server, token)?;
+    if all && is_reonboarding() {
+        eprintln!("[cairn]  Re-onboarding - updating agent wiring\n");
+    }
+
+    let (effective_server, effective_token) = resolve_with_fallback(server, token)?;
 
     let project = std::env::current_dir()?;
     let home = paths::home_dir();
@@ -47,15 +50,21 @@ pub fn run(
             println!("cairn: no supported agents detected here or in your home directory.");
             println!("Install one explicitly, e.g. `cairn setup claude-code`.");
             println!("Supported: {}.", agents::ids().join(", "));
-        } else if let Some(srv) = effective_server.as_deref() {
-            if effective_token.is_some() {
-                println!("\nCairn server: {srv}. Open a session in your agent.");
-            } else {
-                println!("\nCairn server: {srv} (not persisted; pass --token to save it).");
-            }
         } else {
-            println!("\nNo server configured. Run with --server <url> or set CAIRN_SERVER.");
+            eprintln!("✓ wired {} agent(s)\n", detected.len());
         }
+
+        eprintln!("Done. Next steps:");
+        if let Some(srv) = effective_server.as_deref() {
+            eprintln!("  - server: {srv}");
+        } else {
+            eprintln!("  - no server configured yet -- Cairn is running in local-only mode");
+            eprintln!("  - to connect to a server: mint a token from the dashboard's You > Tokens \
+                       page, then run `cairn setup --all --server <url> --token <jwt>`");
+        }
+        eprintln!("  - open a session in your AI agent (Claude Code, OpenCode, Codex)");
+        eprintln!("  - check status with `cairn status`");
+
         return Ok(detected.len());
     }
 
@@ -79,6 +88,38 @@ pub fn run(
     Ok(1)
 }
 
+fn resolve_with_fallback(
+    server: Option<&str>,
+    token: Option<&str>,
+) -> Result<(Option<String>, Option<String>)> {
+    let (server, token) = crate::credentials::resolve_and_persist(server, token)?;
+
+    if server.is_some() || token.is_some() {
+        return Ok((server, token));
+    }
+
+    let localhost = "http://localhost:7777";
+    let client = crate::http::ApiClient::new(localhost, None);
+    if client.server_version().is_some() {
+        eprintln!(
+            "cairn: found a Cairn server at {localhost} but no token configured.\n\
+             Open {localhost}/you/tokens in your browser to mint a token, then run:\n\
+             \n  cairn setup --all --server {localhost} --token <jwt>\n\
+             \nContinuing setup without a server for now (local-only checks)."
+        );
+    } else {
+        eprintln!(
+            "cairn: no Cairn server configured (checked --server/--token flags, \
+             CAIRN_SERVER/CAIRN_TOKEN env vars, ~/.cairn/config.toml, and {localhost}) \
+             -- continuing in local-only mode.\n\
+             To connect to a server: mint a token from the dashboard's You > Tokens page, \
+             then run `cairn setup --all --server <url> --token <jwt>`.\n\
+             If local-only mode is what you want, no action needed."
+        );
+    }
+    Ok((None, None))
+}
+
 fn install_one(
     a: &dyn agents::Agent,
     project: &Path,
@@ -96,14 +137,23 @@ fn install_one(
     Ok(())
 }
 
+/// True when any agent already has a cairn-owned entry in its config.
+fn is_reonboarding() -> bool {
+    let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let home = crate::paths::home_dir();
+    crate::agents::AGENTS.iter().any(|a| {
+        a.removal_plan(&project, home.as_deref())
+            .iter()
+            .any(|action| action.would_change().unwrap_or(false))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn unknown_agent_name_is_rejected_with_supported_list() {
-        // Pin CAIRN_SERVER/CAIRN_TOKEN unset so this can never attempt a real
-        // network validation call if the ambient shell happens to export them.
         crate::env_guard::with_env(&[("CAIRN_SERVER", None), ("CAIRN_TOKEN", None)], || {
             let err = run(Some("emacs"), false, None, None, false).unwrap_err();
             let msg = err.to_string();

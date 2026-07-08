@@ -10,8 +10,8 @@ updated: 2026-07-01
 The Cairn **server** runs **inside a Docker container**; there is no
 `cairn-server` binary on the host. The **client** binary (`cairn`,
 `crates/cairn-client/`) is a real, separate binary that does run on the
-host - it's what you use to talk to the containerized server (`onboard`,
-`setup`, `doctor`, MCP, hooks, etc.). All admin operations happen either:
+host - it's what you use to talk to the containerized server (`setup`,
+`doctor`, MCP, hooks, etc.). All admin operations happen either:
 
 1. **At first boot, from environment variables** - `CAIRN_ADMIN_USERNAME` +
    `CAIRN_ADMIN_PASSWORD` in `.env` (or compose `environment:`).
@@ -63,7 +63,7 @@ it to `cairn setup <agent> --token <token>` to wire an AI agent, or run
 on the new device:
 
 ```sh
-cairn onboard --server http://your-host:7777 --token <jwt>
+cairn setup --all --server http://your-host:7777 --token <jwt>
 ```
 
 ### Rotate the admin password
@@ -121,7 +121,7 @@ return metadata.
 This is specifically about the **server** (`cairn-server`, the in-container
 axum process) - not the client. The `cairn` client binary
 (`crates/cairn-client/`) is real and is exactly what you run on the host
-for everything in this guide (`cairn onboard`, `cairn setup`, `cairn
+for everything in this guide (`cairn setup`, `cairn
 doctor`, ...). What doesn't exist on the host is a `cairn-server` binary
 or a `docker exec`-into-the-container admin workflow: Docker is the only
 install path for the server (see `docs/reference/decisions.md` ADR-029),

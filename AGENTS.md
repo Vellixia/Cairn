@@ -91,7 +91,7 @@ resolved finding is `docs/testing/findings/README.md`.
 | Binary | Lives in | Purpose |
 |--------|----------|---------|
 | `cairn-server` (in-container) | Docker image (`cairn-api` bin) | Long-lived server: binds :7777, serves the API + web UI, runs env-only admin bootstrap |
-| `cairn` (host) | release tarball (`cairn-client` crate) | Client: `mcp`, `setup`, `onboard`, `doctor`, `hook`, `status`, `reset`, `upgrade` |
+| `cairn` (host) | release tarball (`cairn-client` crate) | Client: `mcp`, `setup`, `doctor`, `hook`, `status`, `reset`, `upgrade` |
 
 **Dep graph:** `cairn-core` -> `cairn-store` -> domain crates (`context`, `memory`, `guard`, `shell`, `profile`, `embed`, `share`, `assemble`, `document`) -> `cairn-mcp` -> `cairn-api`. `cairn-client` is a thin remote-only HTTP wrapper (no local engines).
 
@@ -195,3 +195,4 @@ You have **Cairn** (MCP server `cairn`): persistent memory, lean context, and ed
 
 Everything Cairn shows is lossless --- the full original is always one `expand` away.
 <!-- END CAIRN -->
+

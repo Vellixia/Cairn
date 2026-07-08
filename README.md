@@ -152,14 +152,14 @@ Fastest path: log in to the dashboard, open **You -> Tokens**, and click "Mint t
 JWT. Then run:
 
 ```sh
-cairn onboard --server <url> --token <jwt>   # writes ~/.cairn/config.toml, wires detected agents
+cairn setup --all --server <url> --token <jwt>   # writes ~/.cairn/config.toml, wires detected agents
 ```
 
-Against a local dev server, `--server` can be omitted (`cairn onboard` probes
+Against a local dev server, `--server` can be omitted (`cairn setup --all` probes
 `localhost:7777` automatically) - you still need `--token`:
 
 ```sh
-cairn onboard --token <jwt>
+cairn setup --all --token <jwt>
 ```
 
 Or wire agents by hand:
@@ -196,7 +196,7 @@ docker compose up -d                     # SurrealDB + Cairn on :7777
 
 # 3. Mint a token and onboard (wires every detected agent, including OpenCode):
 #    open http://127.0.0.1:7777/you/tokens, click "Mint token", copy the JWT, then:
-cairn onboard --server http://localhost:7777 --token <jwt>
+cairn setup --all --server http://localhost:7777 --token <jwt>
 
 # Or wire OpenCode by hand with the same token:
 cairn setup opencode --server http://localhost:7777 --token <jwt>

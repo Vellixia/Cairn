@@ -888,8 +888,8 @@ pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
         #[cfg(not(feature = "engine"))]
         {
             Err(std::io::Error::other(
-                "no server configured, and this build has no local engine support -- \
-                 set CAIRN_SERVER or run `cairn onboard --server <url> --token <jwt>`",
+                 "no server configured, and this build has no local engine support -- \
+                  set CAIRN_SERVER or run `cairn setup --all --server <url> --token <jwt>`",
             ))
         }
     }

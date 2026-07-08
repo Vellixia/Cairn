@@ -28,8 +28,9 @@ impl Agent for Codex {
     fn detect(&self, project: &Path, home: Option<&Path>) -> bool {
         let home_has = |rel: &str| home.is_some_and(|h| h.join(rel).exists());
         paths::codex_config_path(home).exists()
-            || project.join(".codex").join("config.toml").exists()
+            || home_has(".codex")
             || home_has(".codex/config.toml")
+            || project.join(".codex").exists()
     }
 
     fn install(&self, ctx: &InstallCtx) -> Result<InstallReport> {

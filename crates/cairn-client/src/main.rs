@@ -5,7 +5,7 @@
 //! config management.
 //!
 //! Quick start:
-//!   cairn onboard --server https://cairn.example.com --token <jwt>
+//!   cairn setup --all --server https://cairn.example.com --token <jwt>
 
 use std::path::PathBuf;
 
@@ -23,7 +23,6 @@ mod env_guard;
 mod hook;
 mod http;
 mod jsonedit;
-mod onboard;
 mod paths;
 mod project;
 mod reset;
@@ -46,8 +45,7 @@ fn require_resolved() -> Result<config::Resolved> {
         Err(anyhow!(
             "No Cairn server configured. Mint a token from the dashboard's You > Tokens \
              page, then run:\n\
-             \n  cairn onboard --server <url> --token <jwt>\n\
-             \n  Or: cairn setup --all --server <url> --token <jwt>"
+             \n  cairn setup --all --server <url> --token <jwt>"
         ))
     }
 }
@@ -58,8 +56,8 @@ fn require_resolved() -> Result<config::Resolved> {
     version,
     about = "Cairn client - connect AI agents to a Cairn server.",
     long_about = "Cairn gives AI agents persistent memory, lean context, and edit safety.\n\n\
-                  Getting started:\n\
-                  \n  cairn onboard --server <url> --token <jwt>\n\
+                   Getting started:\n\
+                   \n  cairn setup --all --server <url> --token <jwt>\n\
                   \n  See https://github.com/Vellixia/Cairn for docs."
 )]
 struct Cli {
@@ -78,15 +76,6 @@ enum Cmd {
         /// Output machine-readable JSON.
         #[arg(long)]
         json: bool,
-    },
-    /// First-run setup: doctor + wire all agents.
-    Onboard {
-        #[arg(long)]
-        skip_agents: bool,
-        #[arg(long)]
-        server: Option<String>,
-        #[arg(long)]
-        token: Option<String>,
     },
     /// Configure an agent (or --all detected) to use a Cairn server.
     Setup {
@@ -187,18 +176,6 @@ fn main() -> Result<()> {
                 json,
                 server_override: None,
                 token_override: None,
-            })?;
-        }
-        Cmd::Onboard {
-            skip_agents,
-            server,
-            token,
-        } => {
-            onboard::run(onboard::OnboardOptions {
-                skip_agents,
-                fix: true,
-                server,
-                token,
             })?;
         }
         Cmd::Setup {

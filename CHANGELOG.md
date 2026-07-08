@@ -5,6 +5,11 @@ All notable changes to Cairn are documented here. Versions follow [Semantic Vers
 > **Pre-1.0 notice:** Until 1.0 lands, minor versions may carry breaking changes
 > on the upgrade path. Pin the version you install and re-read this file on every bump.
 
+## [0.8.3] - 2026-07-08
+
+### Changed
+- Bumped workspace version to 0.8.3.
+
 ## [0.8.2] - 2026-07-07 - Hardening: expand short handles, error clarity, hook UX
 
 Follow-up to v0.8.1 addressing the external audit report (E001-E003, W001-W005).
