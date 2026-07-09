@@ -22,7 +22,7 @@ pub struct DoctorOptions {
     /// Output machine-readable JSON instead of human-readable text.
     pub json: bool,
     /// Use these values instead of env/config when checking the remote server.
-    /// Set by `onboard` so a user's `--server`/`--token` flags override stale
+    /// Set by `setup` so a user's `--server`/`--token` flags override stale
     /// env vars during the verify step.
     pub server_override: Option<String>,
     pub token_override: Option<String>,
@@ -427,7 +427,7 @@ fn check_token_expiry(effective_token: &Option<String>) -> Check {
                     ok: false,
                     detail: format!(
                         "EXPIRED {:.1} day(s) ago -- mint a fresh token from the dashboard's \
-                         You > Tokens page and run `cairn setup --server <url> --token <jwt>`",
+                         You > Tokens page and run `cairn setup --all --server <url> --token <jwt>`",
                         -days_left
                     ),
                 }
@@ -437,7 +437,7 @@ fn check_token_expiry(effective_token: &Option<String>) -> Check {
                     ok: false,
                     detail: format!(
                         "expires in {days_left:.1} day(s) -- mint a fresh token from the \
-                         dashboard's You > Tokens page and run `cairn setup --server <url> --token <jwt>` soon"
+                         dashboard's You > Tokens page and run `cairn setup --all --server <url> --token <jwt>` soon"
                     ),
                 }
             } else {

@@ -31,7 +31,7 @@ Mint a token from the dashboard (**You > Tokens** → "Mint token"), then run:
 cairn setup --all --server <url> --token <jwt>
 ```
 
-This resolves credentials, saves `server`/`token` to
+This resolves credentials, validates the token against the server, saves `server`/`token` to
 `~/.cairn/config.toml`, turns on context injection by default (~1k tokens/prompt on
 `UserPromptSubmit`; disable with `CAIRN_INJECT_CONTEXT=false`), and auto-detects and wires every
 supported agent found in the current project or your home directory. `--server` can be omitted

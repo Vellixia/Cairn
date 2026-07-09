@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "cairn": {
-      "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe",
+      "command": "cairn",
       "args": ["mcp"]
     }
   }

@@ -56,11 +56,17 @@ pub fn run(
 
         eprintln!("Done. Next steps:");
         if let Some(srv) = effective_server.as_deref() {
-            eprintln!("  - server: {srv}");
+            if effective_token.is_some() {
+                eprintln!("  - server: {srv}");
+            } else {
+                eprintln!("  - server: {srv} (not persisted; pass --token to save it)");
+            }
         } else {
             eprintln!("  - no server configured yet -- Cairn is running in local-only mode");
-            eprintln!("  - to connect to a server: mint a token from the dashboard's You > Tokens \
-                       page, then run `cairn setup --all --server <url> --token <jwt>`");
+            eprintln!(
+                "  - to connect to a server: mint a token from the dashboard's You > Tokens \
+                       page, then run `cairn setup --all --server <url> --token <jwt>`"
+            );
         }
         eprintln!("  - open a session in your AI agent (Claude Code, OpenCode, Codex)");
         eprintln!("  - check status with `cairn status`");
