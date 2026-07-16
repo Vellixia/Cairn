@@ -10,7 +10,7 @@ updated: 2026-07-04
 ## What this covers
 
 How to connect Claude Code, Codex CLI, or OpenCode to a Cairn server: minting a token and
-running `cairn onboard`, the manual `cairn setup <agent>` fallback, exactly what each
+running `cairn setup --all`, the manual `cairn setup <agent>` fallback, exactly what each
 install writes to disk, how to verify the connection, and the optional real-time edit/command
 guard.
 
@@ -28,16 +28,15 @@ guard.
 Mint a token from the dashboard (**You > Tokens** → "Mint token"), then run:
 
 ```sh
-cairn onboard --server <url> --token <jwt>
+cairn setup --all --server <url> --token <jwt>
 ```
 
-This resolves credentials, validates the token, runs `cairn doctor`, saves `server`/`token` to
+This resolves credentials, validates the token against the server, saves `server`/`token` to
 `~/.cairn/config.toml`, turns on context injection by default (~1k tokens/prompt on
 `UserPromptSubmit`; disable with `CAIRN_INJECT_CONTEXT=false`), and auto-detects and wires every
 supported agent found in the current project or your home directory. `--server` can be omitted
-against a local dev server (it probes `localhost:7777` automatically); add `--skip-agents` to
-save the token without touching any agent config. `cairn onboard` is idempotent: re-running it
-just updates existing wiring (printed as "re-onboarding").
+against a local dev server (it probes `localhost:7777` automatically). `cairn setup --all` is
+idempotent: re-running it just updates existing wiring (printed as "re-onboarding").
 
 ### 2. Fallback: manual per-agent setup
 
@@ -62,7 +61,7 @@ merged in, and running it twice changes nothing.
 
 ### 3. What gets installed per agent
 
-Every `cairn setup <agent>` run (and, transitively, `cairn onboard`) writes:
+Every `cairn setup <agent>` run (and, transitively, `cairn setup --all`) writes:
 
 | | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
@@ -110,11 +109,11 @@ Two mechanisms teach the model to use Cairn without you maintaining anything by 
   zero. Codex and OpenCode have no skill system, so they get the fuller version inlined
   directly into their `AGENTS.md` managed block instead (see the table above).
 
-Cairn's MCP server currently exposes 28 tools — `read`/`expand`, `remember`/`recall`/`search`,
+Cairn's MCP server currently exposes 31 tools — `read`/`expand`, `remember`/`recall`/`search`,
 `assemble`, `wakeup`, `checkpoint`/`rollback`/`checkpoints`, `anchor`, `prefer`/`profile`,
-`compress`, `consolidate`, `verify`, `sanitize`, `proactive_recall`, the eight-strong
+`compress`, `consolidate`, `verify`/`verify_baseline`, `sanitize`, `proactive_recall`, the eight-strong
 `memory_*` family (`edit`/`delete`/`pin`/`promote`/`reinforce`/`timeline`/`crystallize`/
-`graph`), `metrics`, and `registry_search` — see `cairn_mcp::tool_defs()` for the authoritative,
+`graph`), `document_ingest`/`document_search`, `metrics`, and `registry_search` — see `cairn_mcp::tool_defs()` for the authoritative,
 current list.
 
 ### 6. Optional: the real-time guard
@@ -147,7 +146,7 @@ Codex and OpenCode hooks have no way to return a permission decision.
   double-registered OpenCode plugin) — re-run `cairn setup <agent>` (or `cairn doctor --fix`);
   installs are idempotent, so this just refreshes what's stale.
 - **Token expired or expiring soon** — `cairn doctor`/`cairn status` flag this explicitly; mint
-  a fresh token from the dashboard (**You > Tokens**) and re-run `cairn onboard --server <url>
+   a fresh token from the dashboard (**You > Tokens**) and re-run `cairn setup --all --server <url>
   --token <jwt>`.
 - **Hooks seem to do nothing** — confirm `cairn status` shows a server and a valid token. Each
   hook runs as its own short-lived process and only sees `~/.cairn/config.toml`/env, not

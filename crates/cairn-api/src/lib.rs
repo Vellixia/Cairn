@@ -283,6 +283,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/cron/health", get(cron_health))
         .route("/api/memory/heatmap", get(memory_heatmap))
         .route("/api/guard/verify", post(verify))
+        .route("/api/guard/verify-baseline", post(verify_baseline))
         .route("/api/guard/anchor", get(get_anchor).post(post_anchor))
         .route("/api/guard/anchor/auto", post(auto_anchor))
         .route("/api/guard/checkpoint", post(create_checkpoint))
@@ -540,6 +541,8 @@ async fn static_handler(uri: axum::http::Uri, req: Request) -> Response {
         path.clone()
     } else if <WebAssets as RustEmbed>::get(&format!("{path}.html")).is_some() {
         format!("{path}.html")
+    } else if <WebAssets as RustEmbed>::get(&format!("{path}/index.html")).is_some() {
+        format!("{path}/index.html")
     } else if looks_like_asset {
         return (
             axum::http::StatusCode::NOT_FOUND,
@@ -607,11 +610,24 @@ fn find_route_family_shell(path: &str) -> Option<String> {
 /// `you/sessions/new.html`), so there's exactly one shell to find per route family. Returns
 /// `None` if no prefix at any depth matches. Split from [`find_route_family_shell`] so the
 /// matching logic is testable without depending on `web/out/` actually being built.
+///
+/// Bug R4 fix: prefer `[param]`-style placeholders (e.g. `[name].html`) over plain listing
+/// pages (e.g. `packs.html`). Without this, `/registry/packs/some-name` falls up to
+/// `registry/packs.html` (the listing page) instead of a detail-route shell.
 fn find_shell_in(path: &str, files: impl Iterator<Item = String>) -> Option<String> {
     let segments: Vec<&str> = path.split('/').collect();
     let files: Vec<String> = files.collect();
     for take in (1..segments.len()).rev() {
         let want_prefix = format!("{}/", segments[..take].join("/"));
+        // Prefer a dynamic-param placeholder ([id].html, [name].html) one level under the prefix.
+        if let Some(hit) = files.iter().find(|f| {
+            f.starts_with(&want_prefix)
+                && f.ends_with(".html")
+                && f[want_prefix.len()..].contains('[')
+        }) {
+            return Some(hit.clone());
+        }
+        // Fall back to any other HTML one level under (e.g. `new.html`, `placeholder.html`).
         if let Some(hit) = files
             .iter()
             .find(|f| f.starts_with(&want_prefix) && f.ends_with(".html"))
@@ -863,7 +879,7 @@ async fn config_view(State(s): State<AppState>) -> Json<Vec<ConfigEntry>> {
         ConfigEntry { key: "embed.api_key", value: secret(c.embed.api_key.is_some()), env: "CAIRN_EMBED_API_KEY", group: "intelligence", description: "API key for remote embedding providers." },
         ConfigEntry { key: "llm_consolidation.enabled", value: json!(c.llm_consolidation.enabled), env: "CAIRN_LLM_CONSOLIDATION", group: "intelligence", description: "LLM-driven consolidation, concept extraction, and query expansion." },
         ConfigEntry { key: "llm_daily_budget", value: json!(c.llm_daily_budget), env: "CAIRN_LLM_DAILY_BUDGET", group: "intelligence", description: "Daily token budget for background LLM calls; 0 = unlimited. Heuristic fallback once spent." },
-        ConfigEntry { key: "rerank.enabled", value: json!(c.rerank.enabled), env: "CAIRN_RERANK", group: "intelligence", description: "Cross-encoder reranking for search." },
+        ConfigEntry { key: "rerank.enabled", value: json!(c.rerank.enabled), env: "CAIRN_RERANKER_ENABLED", group: "intelligence", description: "Cross-encoder reranking for search." },
         ConfigEntry { key: "selftune", value: json!(c.selftune), env: "CAIRN_SELFTUNE", group: "automation", description: "Weekly tune job nudges promote_threshold from measured retrieval quality (bounded)." },
         ConfigEntry { key: "cron_enabled", value: json!(c.cron_enabled), env: "CAIRN_CRON_ENABLED", group: "automation", description: "Master switch for every background job." },
         ConfigEntry { key: "session_ttl_days", value: json!(c.session_ttl_days), env: "CAIRN_SESSION_TTL_DAYS", group: "automation", description: "Idle days before session-gc promotes Session-scoped memories to Global; 0 disables." },
@@ -1675,10 +1691,20 @@ struct HeatmapQuery {
 // (cairn-guard/src/autopilot.rs) - the manual approve/reject endpoints were removed because
 // the dashboard is observability-only. This list endpoint is the read-only audit trail.
 
+#[derive(Deserialize)]
+struct DriftFilter {
+    #[serde(default)]
+    status: Option<cairn_session::DriftStatus>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
 async fn list_drift(
     State(s): State<AppState>,
+    Query(q): Query<DriftFilter>,
 ) -> Result<Json<Vec<cairn_session::DriftEvent>>, ApiError> {
-    Ok(Json(s.sessions.recent_drift(200, None)?))
+    let limit = q.limit.unwrap_or(200);
+    Ok(Json(s.sessions.recent_drift(limit, q.status)?))
 }
 
 async fn list_sessions(
@@ -1801,6 +1827,36 @@ async fn verify(
         };
         let _ = s.sessions.append_drift(&ev);
         crate::events::publish_drift(&s.events, &b.path, report.risk.as_str());
+    }
+    Ok(Json(report))
+}
+
+/// `POST /api/guard/verify-baseline` — compare the current on-disk file against the version
+/// Cairn recorded when the agent last read it (PostToolUse corruption detection, Bug #3 fix).
+/// Returns `None` if Cairn has no baseline for this path (file was never read through Cairn).
+async fn verify_baseline(
+    State(s): State<AppState>,
+    Json(b): Json<VerifyBody>,
+) -> Result<Json<Option<VerifyReport>>, ApiError> {
+    let report = s.guard.verify_against_baseline(Path::new(&b.path))?;
+    if let Some(ref report) = report {
+        let _ = s.guard.note_verify(report);
+        if matches!(
+            report.risk,
+            cairn_guard::Risk::Warn | cairn_guard::Risk::Danger
+        ) {
+            let ev = cairn_session::DriftEvent {
+                id: s.sessions.next_drift_id(),
+                ts: Utc::now(),
+                path: b.path.clone(),
+                risk: report.risk.as_str().to_string(),
+                kind: "verify-baseline".into(),
+                detail: report.message.clone(),
+                status: cairn_session::DriftStatus::Pending,
+            };
+            let _ = s.sessions.append_drift(&ev);
+            crate::events::publish_drift(&s.events, &b.path, report.risk.as_str());
+        }
     }
     Ok(Json(report))
 }
@@ -2141,10 +2197,21 @@ struct ToolCallBody {
 
 async fn tools_call(
     State(s): State<AppState>,
+    Extension(scope): Extension<ScopeCtx>,
     Json(b): Json<ToolCallBody>,
 ) -> Result<Json<Value>, ApiError> {
-    let mcp = cairn_mcp::McpServer::new(&s.cfg).map_err(|e| ApiError::internal(e.to_string()))?;
-    match mcp.dispatch(&b.name, &b.arguments) {
+    let mcp = cairn_mcp::McpServer::from_engines(
+        s.cfg.clone(),
+        s.store.clone(),
+        s.ctx.clone(),
+        s.guard.clone(),
+        s.mem.clone(),
+        s.asm.clone(),
+        s.shell.clone(),
+        s.profile.clone(),
+        s.registry.clone(),
+    );
+    match mcp.dispatch(&b.name, &b.arguments, &scope) {
         Ok(text) => Ok(Json(
             json!({ "content": [{ "type": "text", "text": text }] }),
         )),
@@ -2731,6 +2798,7 @@ mod tests {
 
         let called = tools_call(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             Json(ToolCallBody {
                 name: "remember".into(),
                 arguments: json!({"content": "cairn exposes mcp tools over http", "kind": "decision"}),
@@ -2744,6 +2812,7 @@ mod tests {
 
         let recalled = tools_call(
             State(state.clone()),
+            Extension(ScopeCtx::default()),
             Json(ToolCallBody {
                 name: "recall".into(),
                 arguments: json!({"query": "mcp http", "limit": 5}),
@@ -3538,7 +3607,16 @@ mod tests {
         .await
         .unwrap();
 
-        let drifts = list_drift(State(state.clone())).await.unwrap().0;
+        let drifts = list_drift(
+            State(state.clone()),
+            Query(DriftFilter {
+                status: None,
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
         assert!(
             !drifts.is_empty(),
             "verify-d danger should produce a drift event"

@@ -753,6 +753,8 @@ mod tests {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            related_to: vec![],
+            depends_on: vec![],
             scope_type: cairn_core::ScopeType::Global,
             scope_id: None,
             promo_score: 0.0,

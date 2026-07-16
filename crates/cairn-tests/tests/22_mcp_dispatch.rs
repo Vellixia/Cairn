@@ -6,6 +6,7 @@
 //! `Store` and calls the public `dispatch` entry point to drive a real
 //! JSON-RPC-style tool call.
 
+use cairn_core::ScopeCtx;
 use cairn_mcp::McpServer;
 use cairn_store::Store;
 use serde_json::json;
@@ -93,6 +94,7 @@ fn dispatch_remember_and_recall_round_trip_a_fact() {
         .dispatch(
             "remember",
             &json!({ "content": "rust uses ownership", "kind": "fact" }),
+            &ScopeCtx::default(),
         )
         .expect("remember dispatch");
     // `dispatch("remember")` returns a short status string, not JSON.
@@ -108,7 +110,11 @@ fn dispatch_remember_and_recall_round_trip_a_fact() {
     assert!(!id.is_empty(), "remembered id must be non-empty");
 
     let recall_out = srv
-        .dispatch("recall", &json!({ "query": "rust ownership", "limit": 5 }))
+        .dispatch(
+            "recall",
+            &json!({ "query": "rust ownership", "limit": 5 }),
+            &ScopeCtx::default(),
+        )
         .expect("recall dispatch");
     // `dispatch("recall")` returns a multi-line score summary, not JSON.
     assert!(
@@ -129,12 +135,14 @@ fn dispatch_assemble_returns_included_items() {
     srv.dispatch(
         "remember",
         &json!({ "content": "the build uses tokio + axum", "kind": "fact" }),
+        &ScopeCtx::default(),
     )
     .expect("seed remember");
     let out = srv
         .dispatch(
             "assemble",
             &json!({ "query": "tokio build", "budget_tokens": 500 }),
+            &ScopeCtx::default(),
         )
         .expect("assemble dispatch");
     let v: serde_json::Value = serde_json::from_str(&out).expect("json");
@@ -148,7 +156,7 @@ fn dispatch_assemble_returns_included_items() {
 #[test]
 fn dispatch_unknown_tool_returns_an_err_string() {
     let Some((srv, _dir)) = server() else { return };
-    let out = srv.dispatch("does_not_exist", &json!({}));
+    let out = srv.dispatch("does_not_exist", &json!({}), &ScopeCtx::default());
     let err_msg = match out {
         Ok(_) => panic!("unknown tool must surface as Err; got Ok"),
         Err(e) => e,
@@ -167,6 +175,7 @@ fn dispatch_sanitize_runs_share_through_mcp() {
         .dispatch(
             "sanitize",
             &json!({ "text": "my api key is sk-abcdefghijklmnopqrstuvwxyz0123456789" }),
+            &ScopeCtx::default(),
         )
         .expect("sanitize dispatch");
     // Sanitize returns a JSON envelope with the redacted text + findings.

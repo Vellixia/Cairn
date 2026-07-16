@@ -158,7 +158,44 @@ impl MemoryEngine {
 
     /// Persist a memory. If an identical one already exists, return it instead of duplicating.
     pub fn remember(&self, input: NewMemory) -> Result<Memory> {
-        let memory = input.into_memory();
+        let mut memory = input.into_memory();
+        // Auto-derive applies_to edges from files: file relevance is the most common
+        // graph edge type, and wiring it here means every remember with files feeds
+        // the provenance graph without callers needing to set applies_to separately.
+        for f in &memory.files {
+            if !memory.applies_to.contains(f) {
+                memory.applies_to.push(f.clone());
+            }
+        }
+        // Bug #6 fix: auto-derive depends_on edges from simple import analysis.
+        // Scans the memory's files for import/use/require statements and records
+        // the imported file paths as dependencies.
+        if !memory.files.is_empty() {
+            let deps = extract_dependencies(&memory.files);
+            for d in deps {
+                if !memory.depends_on.contains(&d) {
+                    memory.depends_on.push(d);
+                }
+            }
+        }
+        // Bug #6 fix: auto-derive related_to edges from shared concepts.
+        // Finds existing memories that share ≥1 concept with this one and creates
+        // bidirectional related_to edges.
+        if !memory.concepts.is_empty() {
+            let existing = self.store.all_memories()?;
+            for other in &existing {
+                if other.id == memory.id {
+                    continue;
+                }
+                let shared = memory
+                    .concepts
+                    .iter()
+                    .any(|c| other.concepts.iter().any(|oc| oc == c));
+                if shared && !memory.related_to.contains(&other.id) {
+                    memory.related_to.push(other.id.clone());
+                }
+            }
+        }
         let hash = ContentHash::of_str(&memory.content);
         if let Some(existing) = self.store.find_memory_by_content_hash(hash.as_str())? {
             return Ok(existing);
@@ -170,7 +207,35 @@ impl MemoryEngine {
     /// Persist a memory tagged with `org_id` (v0.5.0 Sprint 19). The single-tenant
     /// `remember` is a thin wrapper that calls this with `OrgId::default()`.
     pub fn remember_for_org(&self, input: NewMemory, org_id: OrgId) -> Result<Memory> {
-        let memory = input.into_memory_for_org(org_id);
+        let mut memory = input.into_memory_for_org(org_id);
+        for f in &memory.files {
+            if !memory.applies_to.contains(f) {
+                memory.applies_to.push(f.clone());
+            }
+        }
+        if !memory.files.is_empty() {
+            let deps = extract_dependencies(&memory.files);
+            for d in deps {
+                if !memory.depends_on.contains(&d) {
+                    memory.depends_on.push(d);
+                }
+            }
+        }
+        if !memory.concepts.is_empty() {
+            let existing = self.store.all_memories()?;
+            for other in &existing {
+                if other.id == memory.id {
+                    continue;
+                }
+                let shared = memory
+                    .concepts
+                    .iter()
+                    .any(|c| other.concepts.iter().any(|oc| oc == c));
+                if shared && !memory.related_to.contains(&other.id) {
+                    memory.related_to.push(other.id.clone());
+                }
+            }
+        }
         let hash = ContentHash::of_str(&memory.content);
         if let Some(existing) = self.store.find_memory_by_content_hash(hash.as_str())? {
             // Even if a different tenant wrote it, dedup is per-content so we
@@ -564,20 +629,24 @@ impl MemoryEngine {
                 by_project.entry(pid).or_default().push(m);
             }
         }
-        let mut deleted = 0;
+        let mut demoted = 0;
         for mut memories in by_project.into_values() {
             if memories.len() <= max_per_project {
                 continue;
             }
             memories.sort_by_key(|m| m.updated_at);
             let excess = memories.len() - max_per_project;
-            for m in &memories[..excess] {
-                if self.store.delete_memory(&m.id)? {
-                    deleted += 1;
-                }
+            for m in &mut memories[..excess] {
+                // Bug #7 fix: demote to Episodic instead of deleting. This preserves
+                // the memory's content and edges — it moves to a longer-lived tier
+                // rather than being lost entirely (agentmemory's auto-page pattern).
+                m.tier = MemoryTier::Episodic;
+                m.updated_at = Utc::now();
+                self.store.upsert_memory(m)?;
+                demoted += 1;
             }
         }
-        Ok(deleted)
+        Ok(demoted)
     }
 
     /// v0.8.0 Sprint 5 `llm-intelligence` cron job, phase 1: fill in `concepts` for any memory
@@ -679,10 +748,20 @@ impl MemoryEngine {
                         (&candidate, &m)
                     };
                     if newer.confidence > older.confidence {
-                        let mut updated_newer = newer.clone();
-                        updated_newer.supersedes.push(older.id.clone());
-                        updated_newer.updated_at = Utc::now();
-                        self.store.upsert_memory(&updated_newer)?;
+                        // Bug #9 fix: cross-project corruption guard — refuse to supersede
+                        // a memory from a different project. A Project-scoped memory should
+                        // never be superseded by a memory from another project; only
+                        // same-scope or Global→Global supersessions are allowed.
+                        let same_scope = newer.scope_type == older.scope_type
+                            && newer.scope_id == older.scope_id;
+                        let both_global = newer.scope_type == ScopeType::Global
+                            && older.scope_type == ScopeType::Global;
+                        if same_scope || both_global {
+                            let mut updated_newer = newer.clone();
+                            updated_newer.supersedes.push(older.id.clone());
+                            updated_newer.updated_at = Utc::now();
+                            self.store.upsert_memory(&updated_newer)?;
+                        }
                     } else {
                         let mut updated = m.clone();
                         updated.contradicts.push(candidate.id);
@@ -1424,9 +1503,93 @@ impl MemoryEngine {
                     kind: "applies_to".into(),
                 });
             }
+            for target in &m.related_to {
+                edges.push(MemoryGraphEdge {
+                    source: m.id.clone(),
+                    target: target.clone(),
+                    kind: "related_to".into(),
+                });
+            }
+            for target in &m.depends_on {
+                edges.push(MemoryGraphEdge {
+                    source: m.id.clone(),
+                    target: target.clone(),
+                    kind: "depends_on".into(),
+                });
+            }
         }
         Ok(MemoryGraph { nodes, edges })
     }
+}
+
+/// Bug #6 fix: extract dependency file paths from a list of source files.
+/// Scans each file for import/use/require/include statements and returns the
+/// referenced file paths (best-effort, no AST parsing — regex heuristics).
+fn extract_dependencies(files: &[String]) -> Vec<String> {
+    let mut deps = Vec::new();
+    for file in files {
+        let content = match std::fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        // Rust: use / mod
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("use ") {
+                let path = rest.trim_end_matches(';').trim();
+                if !path.is_empty() {
+                    deps.push(format!("rust:{path}"));
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("mod ") {
+                let path = rest.trim_end_matches(';').trim();
+                if !path.is_empty() && !path.contains('(') {
+                    deps.push(format!("rust:mod:{path}"));
+                }
+            }
+        }
+        // TypeScript/JavaScript: import ... from / require(...)
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("import ") || trimmed.starts_with("export ") {
+                if let Some(pos) = trimmed.find("from '") {
+                    if let Some(end) = trimmed[pos + 6..].find('\'') {
+                        let path = &trimmed[pos + 6..pos + 6 + end];
+                        deps.push(format!("js:{path}"));
+                    }
+                } else if let Some(pos) = trimmed.find("from \"") {
+                    if let Some(end) = trimmed[pos + 6..].find('"') {
+                        let path = &trimmed[pos + 6..pos + 6 + end];
+                        deps.push(format!("js:{path}"));
+                    }
+                }
+            } else if let Some(pos) = trimmed.find("require('") {
+                if let Some(end) = trimmed[pos + 9..].find('\'') {
+                    let path = &trimmed[pos + 9..pos + 9 + end];
+                    deps.push(format!("js:{path}"));
+                }
+            }
+        }
+        // Python: import / from ... import
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("import ") {
+                let path = rest.split_whitespace().next().unwrap_or("");
+                if !path.is_empty() {
+                    deps.push(format!("py:{path}"));
+                }
+            } else if let Some(rest) = trimmed.strip_prefix("from ") {
+                if let Some(pos) = rest.find(" import") {
+                    let path = rest[..pos].trim();
+                    if !path.is_empty() {
+                        deps.push(format!("py:{path}"));
+                    }
+                }
+            }
+        }
+    }
+    deps.sort();
+    deps.dedup();
+    deps
 }
 
 /// A trimmed memory for graph rendering - keeps the payload small for the dashboard.
@@ -2389,6 +2552,8 @@ mod tests {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            related_to: vec![],
+            depends_on: vec![],
             scope_type: cairn_core::ScopeType::Global,
             scope_id: None,
             promo_score: 0.0,

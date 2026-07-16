@@ -123,7 +123,7 @@ Signal-dense landing page composed of:
 1. **KPI hero** - 4 cards: Memories, Reliability, Token savings, Active
    devices. Tones follow semantic color tokens (`positive` / `warning` /
    `danger` / `info` / `neutral`).
-2. **HealthRow** - 5 status pills (Server, Helix, Embedder, Reliability, PWA)
+2. **HealthRow** - 5 status pills (Server, Database, Embedder, Reliability, PWA)
    refetched every 30 s. Backed by existing `/api/health`,
    `/api/setup/health`, `/api/stats` - no new backend.
 3. **ActivityTimeline** - last 8 audit events from `/api/devices/audit`.

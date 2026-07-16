@@ -74,6 +74,14 @@ impl Agent for OpenCode {
         let plugin_path = write_opencode_plugin()?;
         strip_cairn_plugin_entries(&mut cfg);
 
+        // Write the skill file so the model knows how to use Cairn.
+        let skill_dir = paths::opencode_skills_dir();
+        std::fs::create_dir_all(&skill_dir)
+            .with_context(|| format!("creating {}", skill_dir.display()))?;
+        let skill_path = skill_dir.join("SKILL.md");
+        std::fs::write(&skill_path, cairn_mcp::guidance::skill_md())
+            .with_context(|| format!("writing {}", skill_path.display()))?;
+
         write_json(&path, &Value::Object(cfg))?;
 
         Ok(InstallReport {
@@ -85,6 +93,10 @@ impl Agent for OpenCode {
                 InstalledFile {
                     path: plugin_path,
                     note: "plugin: session + tool hooks, auto-loaded",
+                },
+                InstalledFile {
+                    path: skill_path,
+                    note: "skill: cairn playbook (loads on-demand)",
                 },
             ],
             hint: None,
@@ -103,12 +115,32 @@ impl Agent for OpenCode {
             RemovalAction::DeleteFile {
                 file: paths::opencode_plugin_path(),
             },
+            RemovalAction::DeleteFile {
+                file: paths::opencode_skills_dir().join("SKILL.md"),
+            },
+            RemovalAction::DeleteFile {
+                file: paths::opencode_global_agents_md(),
+            },
         ]
     }
 
     fn health(&self, _project: &Path, _home: Option<&Path>) -> Vec<String> {
         let mut issues = Vec::new();
         let cfg = paths::opencode_config_path();
+
+        let want = format!("cairn-guidance-rev: {}", cairn_mcp::guidance::GUIDANCE_REV);
+        let skill_path = paths::opencode_skills_dir().join("SKILL.md");
+        if skill_path.exists()
+            && !std::fs::read_to_string(&skill_path)
+                .unwrap_or_default()
+                .contains(&want)
+        {
+            issues.push(format!(
+                "{} has a stale guidance revision (`cairn setup opencode` to refresh)",
+                skill_path.display()
+            ));
+        }
+
         let double_registered = cfg
             .exists()
             .then(|| fs::read_to_string(&cfg).ok())

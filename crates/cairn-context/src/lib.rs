@@ -23,6 +23,7 @@ pub use bounce_tracker::{BounceStats, BounceTracker};
 pub use context_ledger::{
     ContextLedger, ContextPressure, LedgerEntry, PressureAction, DEFAULT_WINDOW_SIZE,
 };
+pub use outline::{outline as file_outline, supported as outline_supported, Outline};
 
 /// How to render a file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -440,7 +441,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 }
 
 /// A compact diff: only added/removed lines (prefixed `+`/`-`), equal lines omitted.
-fn diff_only(old: &str, new: &str) -> String {
+pub fn diff_only(old: &str, new: &str) -> String {
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old, new);
     let mut out = String::new();
@@ -460,7 +461,7 @@ fn diff_only(old: &str, new: &str) -> String {
     out
 }
 
-fn estimate_tokens(s: &str) -> usize {
+pub fn estimate_tokens(s: &str) -> usize {
     (s.len() / 4).max(1)
 }
 

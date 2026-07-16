@@ -4,18 +4,39 @@
       {
         "hooks": [
           {
-            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook PostToolUse",
+            "command": "cairn hook PostToolUse",
             "type": "command"
           }
         ],
         "matcher": "Edit|Write|MultiEdit|NotebookEdit"
       }
     ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "command": "cairn hook PreCompact",
+            "type": "command"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "cairn hook PreToolUse",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash"
+      }
+    ],
     "SessionEnd": [
       {
         "hooks": [
           {
-            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook SessionEnd",
+            "command": "cairn hook SessionEnd",
             "type": "command"
           }
         ]
@@ -25,7 +46,7 @@
       {
         "hooks": [
           {
-            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook SessionStart",
+            "command": "cairn hook SessionStart",
             "type": "command"
           }
         ]
@@ -35,7 +56,7 @@
       {
         "hooks": [
           {
-            "command": "C:\\Users\\andre\\.local\\bin\\cairn.exe hook UserPromptSubmit",
+            "command": "cairn hook UserPromptSubmit",
             "type": "command"
           }
         ]

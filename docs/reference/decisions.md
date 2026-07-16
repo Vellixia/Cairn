@@ -1100,6 +1100,180 @@ ADR-029.
 
 ---
 
+## ADR-031: MCP write path is scope-aware; default Project when detected
+
+**Date:** 2026-07-14  
+**Status:** Accepted
+
+### Context
+
+Cairn's scope system (`ScopeType {Global, Project, Session}`, `Memory.scope_type/scope_id`,
+`ScopeCtx` middleware reading `X-Cairn-Project` headers) was fully built in v0.8.0 Sprint 2,
+but the **MCP write path** — the surface agents actually use — never set `scope_type`. Every
+`remember` call via MCP defaulted to `Global`, so project memory counts were structurally 0,
+and the promotion pipeline (`run_promotion_scoring` → `run_auto_promote`, which only operates
+on `Project`-scoped memories) had nothing to act on.
+
+Additionally:
+- `McpServer::dispatch` had no `ScopeCtx` parameter — the `tools_call` HTTP handler dropped
+  the scope header before calling dispatch.
+- The `remember` tool schema exposed no `scope_type`, `scope_id`, `files`, or `concepts` args.
+- The `document_ingest` / `document_search` RAG tools existed only as HTTP endpoints, not as
+  MCP tools — agents had no way to ingest or query documents.
+- `MemoryEngine::remember` didn't auto-derive `applies_to` graph edges from `files`, so the
+  memory graph was sparse even when memories referenced files.
+
+### Decision
+
+1. **`dispatch` takes `&ScopeCtx`** — the `tools_call` handler extracts it from request
+   extensions and passes it through. Stdio-only paths pass `ScopeCtx::default()`.
+
+2. **`remember` defaults to `Project` when `scope.project_id` is `Some`** — agents don't need
+   to explicitly set scope; memories written inside a repo are project-scoped automatically.
+   An explicit `scope_type` arg always overrides the default.
+
+3. **`remember` schema now includes `scope_type`, `scope_id`, `concepts`, and `files`** —
+   agents can override scope and feed the provenance graph in a single call.
+
+4. **`MemoryEngine::remember` auto-derives `applies_to` from `files`** — every file path in
+   `files` becomes a graph edge, making the memory graph useful without crystallize/consolidate.
+
+5. **`document_ingest` and `document_search` are MCP tools** — agents can ingest files/URLs
+   and search document chunks directly, project-scoped via the same `ScopeCtx`.
+
+6. **Client hook `UserPromptSubmit` writes `scope_type: "project"` when `project_id` is set**
+   — auto-captured prompts are project-scoped too.
+
+### Consequences
+
+- Existing memories stay `Global` (forward-only fix; no backfill).
+- The promote-to-global flow is now functional: project memories accumulate → promotion
+  scoring runs → candidates surface → `promote_memory` moves them to `Global`.
+- Local stdio MCP (no `CAIRN_SERVER`) has no project header source; those installs stay
+  `Global` until a future `detect_project()` wiring on the local path.
+
+### Trade-offs
+
+- Defaulting to `Project` changes behavior for every agent using Cairn — memories that used
+  to be globally visible are now project-scoped. This is the intended design ("project first,
+  then promote to global"), but agents that relied on implicit global visibility will need
+  to either set `scope_type: "global"` explicitly or let the promotion pipeline handle it.
+- The `dispatch` signature change ripples to all callers (contained: `tools_call` + tests).
+
+---
+
+## ADR-032: Shared engines in tools_call; stateful RemoteProxy read; PostToolUse verify
+
+**Date:** 2026-07-14  
+**Status:** Accepted
+
+### Context
+
+An audit against the reference implementations (agentmemory + lean-ctx) found that
+Cairn's core guardrails were structurally bypassed on the production path:
+
+1. `tools_call` created a fresh `McpServer` per request, opening a new `Store` +
+   `ContextEngine` + `Guard` — the `AppState`'s shared `Arc` engines were never used.
+   Every read had an empty cache (always `Full`), checkpoints saw stale file versions,
+   and verify-against-baseline could never find its baseline.
+
+2. `RemoteProxy.read_file_local` was completely stateless — always returned `Full`,
+   ignored `mode`, no mtime cache, no diff logic.
+
+3. `Guard::verify_against_baseline` (post-edit corruption detection) was never called
+   by any hook or tool — dead code in production.
+
+### Decision
+
+1. **`tools_call` uses `McpServer::from_engines()`** with `AppState`'s shared `Arc`
+   handles. The read cache, file version baselines, and guard workspace scoping now
+   persist across tool calls. This is the single highest-impact fix.
+
+2. **`RemoteProxy` gets a `LocalReader`** with mtime cache + diff support. Re-reads
+   of unchanged files return a tiny `Cached` view; changed files return only the
+   `Diff`. Structural modes (`signatures`/`map`) fall back to `Full` on the proxy
+   path (tree-sitter isn't available without `engine`).
+
+3. **`PostToolUse` hook calls `POST /api/guard/verify-baseline`** for each edited
+   file path (fire-and-forget, spooled). The `verify_baseline` MCP tool is also
+   exposed for direct agent use.
+
+4. **Working tier cap demotes to `Episodic`** instead of deleting (Bug #7).
+
+5. **Cross-project corruption guard** in contradiction detection's auto-resolve
+   path (Bug #9).
+
+6. **Semantic graph edges** `related_to` (shared concepts) and `depends_on` (import
+   analysis) auto-derived at write time (Bug #6).
+
+### Consequences
+
+- The "drift from context" complaint is fixed: reads through `/api/tools/call` now
+  use the shared `ContextEngine` with its mtime cache and diff logic.
+- The "checkpoint problems" complaint is fixed: `checkpoint()` now sees the same
+  file versions that `read()` recorded.
+- Post-edit corruption is now detectable: `PostToolUse` verify-against-baseline
+  catches silent deletions after a read.
+- `Memory` struct gains two new `Vec<String>` fields (`related_to`, `depends_on`),
+  both `#[serde(default)]` — backward compatible with existing SurrealDB records.
+
+### Trade-offs
+
+- `from_engines` has 9 parameters (clippy::too_many_arguments suppressed). A builder
+  pattern could reduce this, but the explicit list is clearer for a production path.
+- `LocalReader` doesn't support `signatures`/`map` modes (no tree-sitter on the
+  proxy path). Agents on the RemoteProxy path get `auto`/`full`/`cached`/`diff` only.
+- `extract_dependencies` uses regex heuristics, not AST parsing. False positives
+  possible in comments/strings. Good enough for graph edge density; not for semantic
+  analysis.
+
+---
+
+## ADR-033: Web UI + Rust engine audit remediation
+
+**Date:** 2026-07-14  
+**Status:** Accepted
+
+### Context
+
+A comprehensive audit against the reference implementations (agentmemory + lean-ctx)
+found issues across both the Rust engine and the web UI. The Rust issues were primarily
+in the promotion scoring pipeline and the static handler. The web UI issues ranged from
+crashes (setup page 404, mobile page JSON parse error) to data consistency (duplicate
+fetches, SSE invalidation gaps, duplicated type definitions).
+
+### Decision
+
+**Rust engine:**
+1. **Promotion scoring weights (R1):** Changed from `kind_prior * 0.4 + cross_score * 0.6`
+   to `kind_prior * 0.8 + cross_score * 0.2`. The old weights made the ceiling 0.36 when
+   `cross_project_hits` was always 0 (scope isolation), below every threshold. The new
+   weights let a high `kind_prior` alone reach the candidate band.
+2. **Drift log filter (R3):** Added `Query<DriftFilter>` extraction to `list_drift` handler.
+3. **Static handler (R4):** Added `<path>/index.html` lookup and `[param]`-style placeholder
+   preference in `find_shell_in`.
+
+**Web UI:**
+4. **Setup page navigation (W1):** Fixed `router.push("/dashboard")` → `router.push("/")`.
+5. **Mobile page typed wrapper (W2):** Replaced raw `fetch()` with typed `request()` wrapper.
+6. **Heatmap alignment (W10):** Fixed `buildMonthLabels` week boundary to match `generateGrid`.
+7. **Duplicate fetch (W5):** Consolidated `qk.activityAudit` → `qk.devicesAudit`.
+8. **SSE invalidation (W6/W14):** Added `session`, `metrics`, `ledger`, `config`, `profile`.
+9. **Type dedup (W7):** `stores/me.ts` now imports `Me` from `api.ts`.
+10. **Dead code (W13):** Removed `useTheme()` call in `sonner.tsx`.
+
+### Consequences
+
+- The auto-promotion pipeline is now functional: Project-scoped Facts score 0.72 (above
+  the 0.70 candidate threshold) without needing cross-project access.
+- The drift log filter works: `GET /api/guard/drift?status=pending` now filters correctly.
+- Dynamic routes like `/registry/packs/<name>` get the right client component shell.
+- The setup wizard no longer 404s after completion.
+- The mobile page no longer crashes on non-JSON responses.
+- Sessions, metrics, ledger, config, and profile views now auto-refresh via SSE.
+
+---
+
 ## See also
 
 - [Architecture](architecture.md) - how these decisions manifest in the code

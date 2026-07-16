@@ -18,5 +18,11 @@ tracing.workspace = true
 uuid.workspace = true
 ureq.workspace = true
 
+[features]
+default = []
+# Forward to cairn-rerank/local so the Dockerfile's --features embed-local
+# (passed to cairn-api) propagates through cairn-memory to cairn-rerank.
+local = ["cairn-rerank/local"]
+
 [dev-dependencies]
 tempfile.workspace = true

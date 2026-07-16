@@ -29,24 +29,148 @@ it through a single MCP endpoint plus lifecycle hooks.
 > expect breaking changes on the upgrade path and pin the version you install. See
 > [Roadmap](docs/planning/roadmap.md) for what's done and what's next toward 1.0.
 
+## Architecture Flow
+
 ```mermaid
-flowchart LR
-    subgraph Agents["Your agents"]
-        CC["Claude Code"]
-        CX["Codex CLI"]
-        OC["OpenCode"]
+flowchart TB
+    subgraph Host["Host machine (your laptop)"]
+        subgraph Agents["Your agents"]
+            CC["Claude Code"]
+            CX["Codex CLI"]
+            OC["OpenCode"]
+        end
+        CLI["cairn (host binary)<br/>RemoteProxy + hooks<br/>setup / doctor / status"]
     end
 
-    CLI["cairn<br/>MCP + hooks + setup"]
-    Server["cairn-server<br/>in-container<br/>REST API + web UI"]
-    Store["SurrealDB<br/>graph + vectors<br/>+ blob store"]
+    subgraph Container["Docker container"]
+        Server["cairn-server<br/>REST API + web UI<br/>shared ContextEngine<br/>+ MemoryEngine + Guard"]
+        Store["cairn-store<br/>SurrealDB backend"]
+    end
+
+    subgraph Backend["SurrealDB"]
+        Graph["graph + HNSW vectors<br/>+ blob store<br/>+ cron scheduler"]
+    end
 
     Agents -->|"MCP stdio"| CLI
-    CLI -->|"HTTP"| Server
+    CLI -->|"HTTP + JWT<br/>X-Cairn-Project header"| Server
     Server --> Store
-
-    CLI -->|"remember / recall<br/>read / expand<br/>verify / checkpoint"| Server
+    Store --> Graph
 ```
+
+### 24-crate workspace
+
+```mermaid
+graph BT
+    core["cairn-core<br/>types, config, OrgId, errors"]
+    store["cairn-store<br/>SurrealDB + BlobStore"]
+    context["cairn-context<br/>read, cache, AST, diff"]
+    memory["cairn-memory<br/>4-tier, RRF, MMR, graph"]
+    guard["cairn-guard<br/>verify, anchor, checkpoint"]
+    shell["cairn-shell<br/>compress, recover"]
+    profile["cairn-profile<br/>preferences"]
+    assemble["cairn-assemble<br/>token-budget assembly"]
+    share["cairn-share<br/>sanitization"]
+    embed["cairn-embed<br/>embeddings"]
+    document["cairn-document<br/>RAG chunking"]
+    rerank["cairn-rerank<br/>cross-encoder rerank"]
+    session["cairn-session<br/>CCP + drift log"]
+    pack["cairn-pack<br/>.cairnpkg + Ed25519"]
+    registry["cairn-registry<br/>pack registry"]
+    sync["cairn-sync<br/>CRDTs + E2E"]
+    bench["cairn-bench<br/>LongMemEval + horizon"]
+    proactive["cairn-proactive<br/>intent classifier"]
+    proxy["cairn-proxy<br/>reverse proxy"]
+    ingest["cairn-ingest<br/>transcript parsers"]
+    mcp["cairn-mcp<br/>32 MCP tools"]
+    api["cairn-api<br/>REST API + web UI"]
+    client["cairn-client<br/>host binary"]
+    tests["cairn-tests<br/>27 integration test files"]
+
+    core --> store
+    store --> context
+    store --> memory
+    store --> guard
+    store --> shell
+    store --> session
+    memory --> assemble
+    context --> mcp
+    memory --> mcp
+    guard --> mcp
+    assemble --> mcp
+    proactive --> mcp
+    mcp --> api
+    api --> client
+    mcp --> client
+```
+
+**Data flow:** Agent calls `cairn_read` via MCP stdio → `RemoteProxy` forwards to
+`/api/tools/call` → `McpServer::from_engines()` dispatches through `AppState`'s shared
+`Arc<ContextEngine>` (mtime cache persists) → `ContextEngine::read()` returns
+`Cached`/`Diff`/`Full` → file version recorded as edit baseline → result returned to agent.
+
+**Scope model:** Every memory carries `scope_type` (Global/Project/Session). The
+`X-Cairn-Project` header (auto-detected from git remote/root) scopes reads and writes.
+Project memories promote to Global via the `llm-intelligence` cron job's scoring pipeline.
+
+## Workflow — Session Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Hook as cairn hook
+    participant Server as cairn-server
+    participant Store as SurrealDB
+
+    Note over Agent,Store: SessionStart
+    Agent->>Hook: SessionStart {cwd, session_id}
+    Hook->>Server: GET /api/memory/wakeup (top 12)
+    Hook->>Server: GET /api/memory/autopilot-digest
+    Hook->>Server: PATCH /api/projects/upsert (auto-detect project)
+    Hook-->>Agent: context injection (wakeup + anchor + autopilot)
+
+    Note over Agent,Store: Agent reads a file
+    Agent->>Server: read(path, mode=auto) via MCP
+    Server->>Store: ContextEngine::read (mtime cache)
+    Store-->>Server: Cached (~19 tok) | Diff | Full
+    Server->>Store: record_file_version (edit baseline)
+    Server-->>Agent: ReadResult (handle + view)
+
+    Note over Agent,Store: Agent edits a file
+    Agent->>Server: verify(path, new_content) via MCP
+    Server->>Store: Guard::verify_edit (diff vs original)
+    Store-->>Server: VerifyReport (ok / warn / danger)
+    Server-->>Agent: risk assessment
+
+    Note over Agent,Store: PostToolUse (after edit lands)
+    Agent->>Hook: PostToolUse {tool_name: Edit, tool_input}
+    Hook->>Server: POST /api/guard/verify-baseline (corruption check)
+    Server->>Store: Guard::verify_against_baseline (vs read-time version)
+    Store-->>Server: None (clean) | VerifyReport (corruption detected)
+
+    Note over Agent,Store: UserPromptSubmit
+    Agent->>Hook: UserPromptSubmit {prompt}
+    Hook->>Server: POST /api/guard/anchor/auto (derive anchor)
+    Hook->>Server: POST /api/memory (save prompt, scope=project)
+    Hook-->>Agent: proactive_recall (up to 3 memories if intent matches)
+
+    Note over Agent,Store: SessionEnd / PreCompact
+    Agent->>Hook: SessionEnd
+    Hook->>Server: POST /api/memory/consolidate (tier promotion)
+    Hook->>Server: POST /api/memory/session-summary (LLM synthesis)
+    Hook->>Server: POST /api/memory (touched files list, scope=session)
+```
+
+### What happens at each step
+
+| Event | What Cairn does |
+|---|---|
+| **SessionStart** | Injects wakeup memories + task anchor + autopilot digest. Auto-detects project from git remote/root, registers it via `PATCH /api/projects/upsert`. Spools offline if server unreachable. |
+| **Agent reads** | `read` checks mtime cache → `Cached` (~19 tok if unchanged), `Diff` (only changed lines), or `Full`. Records file version as edit baseline. AST outlines for 11 languages (`signatures`/`map` mode). Original retained in blob store — `expand` recovers it byte-identical. |
+| **Agent edits** | `verify` compares proposed content vs on-disk original. Flags large unreplaced deletions (silent corruption). Retains pre-edit version in blob store. |
+| **PostToolUse** | `verify_baseline` compares current file vs the version recorded at read time. Catches corruption introduced *after* the read but *before* the next read. Fire-and-forget (spooled). |
+| **UserPromptSubmit** | Auto-derives task anchor from first substantive prompt. Saves prompt as project-scoped episodic memory. Proactive recall classifier auto-injects up to 3 relevant memories. |
+| **SessionEnd** | Consolidates memory across tiers (working → episodic → semantic → procedural). LLM synthesizes session summary (if enabled). Flushes touched-files list as session-scoped memory. |
+| **Cron (nightly)** | `llm-intelligence` job: concept extraction, contradiction detection, promotion scoring, auto-promote Project→Global, auto-demote stale Global→Project, session GC, memory decay. Self-tuning promotion threshold. |
 
 ## Why
 
@@ -65,32 +189,38 @@ time**. Cairn fixes that.
 ### Memory
 
 - **Cross-session recall** - decisions, findings, and rationale from last week are visible today, ranked by confidence x relevance.
-- **4-tier memory** - working -> episodic -> semantic -> procedural. Memories consolidate and crystallize over time.
-- **Provenance graph** - every memory tracks `derived_from`, `contradicts`, `supersedes`, and `applies_to` edges. The dashboard renders the full graph.
+- **4-tier memory** - working -> episodic -> semantic -> procedural. Memories consolidate and crystallize over time. Working-tier overflow auto-pages to episodic instead of deleting.
+- **Project→Global scoping** - memories default to Project scope when a project is detected (via `X-Cairn-Project` header from git remote/root). The `llm-intelligence` cron job scores Project memories and auto-promotes worthy ones to Global. Demote reverts stale Global memories back to their origin project.
+- **Provenance graph** - 6 edge types: `derived_from`, `contradicts`, `supersedes`, `applies_to` (file relevance), `related_to` (shared concepts, auto-derived), `depends_on` (import analysis, auto-derived). The dashboard renders the full graph.
 - **Confidence reinforcement** - the agentmemory curve `c' = min(1.0, c + 0.1*(1-c))` on every successful recall. Pinned memories bypass decay.
 - **Proactive recall** - an intent classifier runs before each agent turn and auto-injects up to 3 relevant memories when the prompt has recall cues. Per-project opt-out.
-- **Hybrid search** - BM25 lexical + semantic vector recall fused via Reciprocal Rank Fusion, with MMR diversity reranking (Î>>=0.7).
+- **Hybrid search** - BM25 lexical + semantic vector recall fused via Reciprocal Rank Fusion, with MMR diversity reranking (λ>=0.7). Optional LLM query expansion.
+- **Document RAG** - `document_ingest` + `document_search` MCP tools. Paragraph-aware chunking, project-scoped document store, blended into `assemble` context blocks.
+- **Cross-project corruption guard** - consolidation and contradiction auto-resolve refuse to supersede memories from different project scopes.
 - **Multi-tenant** - every memory carries an `OrgId`. Tenant isolation enforced before any ranking work. Single-tenant installs see no change.
 
 ### Context compression
 
 - **AST-aware reads** - tree-sitter outlines for 11 languages (rust, python, javascript, typescript, go, c, cpp, java, c#, ruby, bash). A 3,200-token file becomes ~210 tokens. The full original is one `expand` away.
-- **Cache-aware re-reads** - unchanged files cost ~19 tokens (just the handle). No context ever lost.
+- **Cache-aware re-reads** - unchanged files cost ~19 tokens (just the handle). No context ever lost. Works on both the server path (shared `ContextEngine`) and the proxy path (`LocalReader` with mtime cache + diff).
+- **Stateful proxy reads** - `RemoteProxy`'s `LocalReader` tracks file mtime, returns `Cached` for unchanged files, `Diff` for changed files (with 60% auto-delta fallback to `Full` when the diff would be noisier than the original).
+- **Shared engines** - `/api/tools/call` shares `AppState`'s long-lived `ContextEngine`, `Guard`, and `MemoryEngine` across all tool calls. The read cache, file version baselines, and guard workspace scoping persist.
 - **Shell compression** - verbose command output (153 lines) compresses to 1 line, fully recoverable.
-- **Token-budget assembly** - edge-ordered context assembly under a budget. Anti-context-rot.
+- **Token-budget assembly** - edge-ordered context assembly under a budget. Merges memories + document chunks. Anti-context-rot.
 
 ### Reliability
 
-- **Edit verification** - compares proposed edits against the retained original. Flags large unreplaced deletions (silent corruption).
-- **Checkpoint / rollback** - snapshot tracked files before risky edits. One command undoes damage.
-- **Task anchor** - the current goal is re-injected at session start so the model doesn't drift.
-- **Drift detection** - sessions record checkpoints; the dashboard surfaces drift for review + approval.
+- **Edit verification** - `verify` compares proposed edits against the retained original. Flags large unreplaced deletions (silent corruption).
+- **Post-edit corruption detection** - `verify_baseline` compares the current file against the version Cairn recorded when the agent last read it. The `PostToolUse` hook fires it automatically for every edited file.
+- **Checkpoint / rollback** - snapshot tracked files before risky edits. One command undoes damage. Checkpoints see the same file versions that reads recorded (shared engine state).
+- **Task anchor** - the current goal is re-injected at session start so the model doesn't drift. Auto-derived from the first substantive prompt.
+- **Drift detection** - sessions record checkpoints; the dashboard surfaces drift for review + autopilot approval. Filter by status (`?status=pending`).
 - **HMAC-signed savings ledger** - every context assembly is signed. `/api/ledger/verify` detects tampering.
 
 ### Collaboration
 
 - **`.cairnpkg` format** - share memory packs as signed tarballs. Ed25519 signatures. Per-file SHA-256 integrity.
-- **Self-hosted registry** - publish, search, install, revoke packs via `/registry/*` HTTP endpoints. Trust scopes (Local / Team / Public).
+- **Self-hosted registry** - publish, search, install, revoke packs via `/api/registry/*` HTTP endpoints. Trust scopes (Local / Team / Public).
 - **Federation** - pull-based revocation propagation. Offline-first CRDT sync (GCounter + ORSet + vector clocks).
 - **E2E encrypted sync** - Argon2id -> ChaCha20-Poly1305 AEAD. The server never sees plaintext.
 
@@ -103,7 +233,7 @@ time**. Cairn fixes that.
 
 ## Proof
 
-Measured on Cairn's own `crates/` (25 files):
+Measured on Cairn's own `crates/` (24 crates, 27 integration test files):
 
 | Mechanism | Before | After | Saved |
 |---|---|---|---|
@@ -152,14 +282,14 @@ Fastest path: log in to the dashboard, open **You -> Tokens**, and click "Mint t
 JWT. Then run:
 
 ```sh
-cairn onboard --server <url> --token <jwt>   # writes ~/.cairn/config.toml, wires detected agents
+cairn setup --all --server <url> --token <jwt>   # writes ~/.cairn/config.toml, wires detected agents
 ```
 
-Against a local dev server, `--server` can be omitted (`cairn onboard` probes
+Against a local dev server, `--server` can be omitted (`cairn setup --all` probes
 `localhost:7777` automatically) - you still need `--token`:
 
 ```sh
-cairn onboard --token <jwt>
+cairn setup --all --token <jwt>
 ```
 
 Or wire agents by hand:
@@ -196,7 +326,7 @@ docker compose up -d                     # SurrealDB + Cairn on :7777
 
 # 3. Mint a token and onboard (wires every detected agent, including OpenCode):
 #    open http://127.0.0.1:7777/you/tokens, click "Mint token", copy the JWT, then:
-cairn onboard --server http://localhost:7777 --token <jwt>
+cairn setup --all --server http://localhost:7777 --token <jwt>
 
 # Or wire OpenCode by hand with the same token:
 cairn setup opencode --server http://localhost:7777 --token <jwt>
@@ -205,21 +335,28 @@ cairn setup opencode --server http://localhost:7777 --token <jwt>
 ```
 
 After that, OpenCode's tool palette includes `cairn_recall`, `cairn_remember`, `cairn_read`,
-`cairn_verify`, `cairn_assemble`, `proactive_recall`, `memory_graph`, `memory_crystallize`,
-`search`, `metrics`, and 30+ more - see [MCP tools](docs/reference/architecture.md#mcp-tool-surface).
+`cairn_verify`, `cairn_verify_baseline`, `cairn_assemble`, `proactive_recall`, `memory_graph`,
+`memory_crystallize`, `document_ingest`, `document_search`, `search`, `metrics`, and 20+ more -
+see [MCP tools](docs/reference/architecture.md#mcp-tool-surface).
 
 ### What Cairn gives OpenCode out of the box
 
 - **Cross-session memory.** Decisions from last week are visible today via `cairn_recall`
   at session start, ranked by `confidence x applies_to`.
+- **Project-scoped memory.** Memories default to Project scope when a project is detected.
+  Good ones promote to Global via the nightly scoring pipeline.
 - **Lean file reads.** `cairn_read` returns the AST outline (~90% smaller than the full
   file); the original is one `cairn_expand` away. No context lost.
+- **Post-edit corruption detection.** `cairn_verify_baseline` compares the current file
+  against the version recorded at read time. The PostToolUse hook fires it automatically.
 - **Drift detection.** Each session records checkpoints; `cairn doctor --fix`
   re-anchors the model on long tasks.
 - **One-line rules.** The MCP `prefer` tool turns "always use ripgrep" into a memory that
   re-fires on every session until contradicted.
 - **Proactive recall.** The intent classifier fires before each turn - if the prompt
   has recall cues, relevant memories are auto-injected. No manual recall needed.
+- **Document RAG.** `document_ingest` reads a file or URL, chunks it, and stores it for
+  semantic search. `document_search` queries the chunks. Project-scoped.
 
 ## Status
 

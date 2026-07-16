@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-api"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-assemble"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-bench"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -793,7 +793,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-client"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-context"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-store",
@@ -837,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-core"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "argon2",
  "chrono",
@@ -853,7 +853,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-document"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -863,7 +863,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-embed"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "fastembed",
@@ -875,7 +875,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-guard"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-profile",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-ingest"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "chrono",
@@ -903,11 +903,12 @@ dependencies = [
 
 [[package]]
 name = "cairn-mcp"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-assemble",
  "cairn-context",
  "cairn-core",
+ "cairn-document",
  "cairn-guard",
  "cairn-memory",
  "cairn-proactive",
@@ -919,6 +920,7 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+ "similar",
  "tempfile",
  "tracing",
  "ureq 2.12.1",
@@ -926,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-memory"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-rerank",
@@ -943,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-pack"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-share",
@@ -962,7 +964,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-proactive"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -976,7 +978,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-profile"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-memory",
@@ -986,7 +988,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-proxy"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "axum 0.7.9",
  "cairn-pack",
@@ -1009,7 +1011,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-registry"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "async-trait",
  "axum 0.7.9",
@@ -1038,7 +1040,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-rerank"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "fastembed",
@@ -1050,7 +1052,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-session"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-store",
@@ -1065,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-share"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "regex",
@@ -1075,7 +1077,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-shell"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-store",
@@ -1085,7 +1087,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-store"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "cairn-core",
  "cairn-embed",
@@ -1102,7 +1104,7 @@ dependencies = [
 
 [[package]]
 name = "cairn-sync"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "argon2",
  "cairn-core",
@@ -1127,6 +1129,7 @@ dependencies = [
  "cairn-bench",
  "cairn-context",
  "cairn-core",
+ "cairn-document",
  "cairn-embed",
  "cairn-guard",
  "cairn-ingest",

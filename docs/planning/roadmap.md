@@ -84,8 +84,8 @@ gantt
 | `cairn-shell`: compress + recover | Done | RTK-style filter/group/dedup, lossless via blob store |
 | `cairn-memory`: remember/recall/wakeup | Done | 4-tier, BM25 lexical recall, Ebbinghaus decay |
 | `cairn-assemble`: token-budgeted context assembly | Done | Edge-ordered, reports dropped items |
-| `cairn-mcp`: MCP server over stdio | Done | 29 tools + 10 graph actions = 39, local + remote proxy modes |
-| `cairn-api`: REST API | Done | 27 endpoints, embedded web UI |
+| `cairn-mcp` | MCP server over stdio. Local mode (opens the SurrealDB store) or remote proxy mode (forwards to `cairn-api`). 31 tools, 6 resources, 5 prompts. |
+| `cairn-api`: REST API | Done | ~80 endpoints, embedded web UI |
 | `cairn`: `bench` command | Done | Measures token savings on a codebase |
 | Web UI: landing page | Done | Next.js static export |
 | Web UI: dashboard shell | Done | Overview, memory, context views |
@@ -233,7 +233,7 @@ The product is feature-complete enough to install and use. The remaining work is
 - [Architecture](../reference/architecture.md) - how it works today
 - [Web](../guides/web-auth.md) - admin/CLI auth split, dashboard surface
 - [Upgrading](../guides/upgrading.md) - 0.4.0 -> 0.5.0 migration
-- [Decisions](../reference/decisions.md) - ADRs 001--014, 016--027 (binary split through v0.5.0 Phase 5; ADR-015 superseded)
+- [Decisions](../reference/decisions.md) - ADRs 001--014, 016--033 (ADR-015 superseded)
 - [Benchmarks](../testing/benchmarks.md) - measured numbers (LongMemEval + horizon + retention, Sprint 16)
 - [Security](../../SECURITY.md) - threat model + hardening checklist
 - [Audit Report](../audits/report.md) - security findings with fix status

@@ -43,6 +43,7 @@ cairn-proactive = { path = "../cairn-proactive" }
 cairn-ingest = { path = "../cairn-ingest" }
 cairn-embed = { path = "../cairn-embed" }
 cairn-mcp = { path = "../cairn-mcp", features = ["engine"] }
+cairn-document = { path = "../cairn-document" }
 cairn-rerank = { path = "../cairn-rerank" }
 cairn-api = { path = "../cairn-api" }
 

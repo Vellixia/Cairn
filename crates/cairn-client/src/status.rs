@@ -139,7 +139,7 @@ pub fn run(json_output: bool) -> Result<()> {
             println!("Agents:     {}", status.agents.join(", "));
         }
         if status.server.is_none() || status.token.is_none() {
-            println!("\nRun `cairn onboard --server <url> --token <jwt>` to configure.");
+            println!("\nRun `cairn setup --server <url> --token <jwt>` to configure.");
         }
     }
 

@@ -48,17 +48,21 @@ pub fn claude_settings(project: &Path) -> PathBuf {
     project.join(".claude").join("settings.json")
 }
 
-/// OpenCode's global config path. OpenCode follows XDG-ish directories on all
-/// platforms: `~/.config/opencode/opencode.json` on Windows and Unix alike.
+/// OpenCode's global config path. On Windows, OpenCode stores its config at
+/// `%APPDATA%\opencode\opencode.json`. On Unix, it follows XDG:
+/// `$XDG_CONFIG_HOME/opencode/opencode.json` or `~/.config/opencode/opencode.json`.
 pub fn opencode_config_path() -> PathBuf {
     // XDG_CONFIG_HOME already IS the config root (e.g. ~/.config); don't add .config again.
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
         return PathBuf::from(xdg).join("opencode").join("opencode.json");
     }
-    let base = std::env::var_os("USERPROFILE")
-        .map(PathBuf::from)
-        .or_else(home_dir)
-        .unwrap_or_else(|| PathBuf::from("."));
+    // On Windows, OpenCode stores config at %APPDATA%\opencode\opencode.json.
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        return PathBuf::from(appdata)
+            .join("opencode")
+            .join("opencode.json");
+    }
+    let base = home_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join(".config").join("opencode").join("opencode.json")
 }
 
@@ -90,4 +94,34 @@ pub fn codex_config_path(home: Option<&Path>) -> PathBuf {
 /// Codex CLI's lifecycle-hooks file: `~/.codex/hooks.json`.
 pub fn codex_hooks_path(home: &Path) -> PathBuf {
     home.join(".codex").join("hooks.json")
+}
+
+/// Codex CLI's skill directory: `~/.codex/skills/cairn/`.
+pub fn codex_skills_dir(home: &Path) -> PathBuf {
+    home.join(".codex").join("skills").join("cairn")
+}
+
+/// Codex CLI's global instructions file: `~/.codex/AGENTS.md`.
+pub fn codex_global_agents_md(home: &Path) -> PathBuf {
+    home.join(".codex").join("AGENTS.md")
+}
+
+/// OpenCode's skill directory, derived from the config path's parent so
+/// it follows the same `XDG_CONFIG_HOME` resolution.
+pub fn opencode_skills_dir() -> PathBuf {
+    opencode_config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".opencode"))
+        .join("skills")
+        .join("cairn")
+}
+
+/// OpenCode's global instructions file, derived from the config path's parent.
+pub fn opencode_global_agents_md() -> PathBuf {
+    opencode_config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".opencode"))
+        .join("AGENTS.md")
 }

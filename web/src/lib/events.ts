@@ -19,6 +19,11 @@ const INVALIDATION_MAP: Record<string, readonly QueryKey[]> = {
   project: [["projects"]],
   document: [["documents"]],
   cron: [["cron"], ["automation"]],
+  session: [["sessions"], ["session"]],
+  metrics: [["metrics"], ["dashboard", "metrics"]],
+  ledger: [["ledger"]],
+  config: [["config"]],
+  profile: [["profile"]],
 };
 
 /**

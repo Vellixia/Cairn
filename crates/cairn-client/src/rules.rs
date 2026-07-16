@@ -14,23 +14,36 @@ use anyhow::{bail, Result};
 use std::fs;
 use std::path::Path;
 
+use crate::paths;
+
 /// Agents we can write rules for (`agents` = a generic AGENTS.md).
 const KNOWN: &[&str] = &["claude-code", "codex", "opencode", "agents"];
 
 const BEGIN: &str = "<!-- BEGIN CAIRN (managed by `cairn rules`) -->";
 const END: &str = "<!-- END CAIRN -->";
 
-/// Write the Cairn rules into `id`'s native instruction file under `project`.
-pub fn write_for(id: &str, project: &Path) -> Result<()> {
+/// Write the Cairn rules into `id`'s native instruction file. For agents that are always
+/// global (Codex, OpenCode), the block goes to the agent's home-directory instructions file;
+/// for Claude Code (which has a skill system carrying the full playbook), the block stays at
+/// the project root as a slim pointer.
+pub fn write_for(id: &str, project: &Path, home: Option<&Path>) -> Result<()> {
     let (path, block) = match id {
         "claude-code" => (
             project.join("CLAUDE.md"),
             cairn_mcp::guidance::claude_md_block(),
         ),
-        // Codex CLI reads AGENTS.md from the project root (or `$CODEX_HOME/AGENTS.md` for
-        // user-scope rules); OpenCode has no rules-file convention of its own and shares the
-        // same generic AGENTS.md target. We use the project root to stay scoped.
-        "codex" | "agents" | "opencode" => (
+        "codex" => {
+            let h = home.unwrap_or(project);
+            (
+                paths::codex_global_agents_md(h),
+                cairn_mcp::guidance::agents_md_block(),
+            )
+        }
+        "opencode" => (
+            paths::opencode_global_agents_md(),
+            cairn_mcp::guidance::agents_md_block(),
+        ),
+        "agents" => (
             project.join("AGENTS.md"),
             cairn_mcp::guidance::agents_md_block(),
         ),
@@ -77,9 +90,9 @@ mod tests {
         let p = dir.path().join("CLAUDE.md");
         fs::write(&p, "# My project rules\n\nAlways write tests.\n").unwrap();
 
-        write_for("claude-code", dir.path()).unwrap();
+        write_for("claude-code", dir.path(), None).unwrap();
         let after_first = fs::read_to_string(&p).unwrap();
-        write_for("claude-code", dir.path()).unwrap(); // twice
+        write_for("claude-code", dir.path(), None).unwrap(); // twice
         let after_second = fs::read_to_string(&p).unwrap();
 
         assert_eq!(after_first, after_second);
@@ -93,24 +106,48 @@ mod tests {
     }
 
     #[test]
-    fn codex_targets_agents_md_at_project_root_with_the_fuller_block() {
+    fn codex_writes_to_global_codex_agents_md() {
         let dir = tempfile::tempdir().unwrap();
-        write_for("codex", dir.path()).unwrap();
-        let p = dir.path().join("AGENTS.md");
+        write_for("codex", dir.path(), Some(dir.path())).unwrap();
+        let p = dir.path().join(".codex").join("AGENTS.md");
         assert!(p.exists());
         let content = fs::read_to_string(&p).unwrap();
         assert!(content.contains(BEGIN));
-        // Codex has no skill system to fall back on, so AGENTS.md carries the fuller block
-        // (same content class as the pre-Sprint-10 CLAUDE.md block) rather than a slim pointer.
+        // Codex has no skill system to fall back on, so AGENTS.md carries the fuller block.
         assert!(content.contains("prefer these tools"));
         assert!(content.contains("`recall`"));
     }
 
     #[test]
-    fn opencode_shares_the_same_agents_md_target_and_block_as_codex() {
+    fn codex_writes_to_project_when_no_home() {
         let dir = tempfile::tempdir().unwrap();
-        write_for("opencode", dir.path()).unwrap();
-        let content = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
+        write_for("codex", dir.path(), None).unwrap();
+        let p = dir.path().join(".codex").join("AGENTS.md");
+        assert!(p.exists());
+        let content = fs::read_to_string(&p).unwrap();
+        assert!(content.contains("prefer these tools"));
+    }
+
+    #[test]
+    fn opencode_writes_to_global_opencode_agents_md() {
+        let home = tempfile::tempdir().unwrap();
+        let home_str = home.path().to_string_lossy().into_owned();
+        crate::env_guard::with_env(&[("XDG_CONFIG_HOME", Some(&home_str))], || {
+            write_for("opencode", home.path(), None).unwrap();
+            let p = paths::opencode_global_agents_md();
+            assert!(p.exists());
+            let content = fs::read_to_string(&p).unwrap();
+            assert!(content.contains("prefer these tools"));
+        });
+    }
+
+    #[test]
+    fn agents_writes_to_project_agents_md() {
+        let dir = tempfile::tempdir().unwrap();
+        write_for("agents", dir.path(), None).unwrap();
+        let p = dir.path().join("AGENTS.md");
+        assert!(p.exists());
+        let content = fs::read_to_string(&p).unwrap();
         assert!(content.contains("prefer these tools"));
     }
 }

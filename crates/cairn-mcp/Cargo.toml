@@ -25,10 +25,12 @@ cairn-profile = { workspace = true, optional = true }
 cairn-share = { workspace = true, optional = true }
 cairn-proactive = { workspace = true, optional = true }
 cairn-registry = { workspace = true, optional = true }
+cairn-document = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 ureq.workspace = true
 tracing.workspace = true
+similar.workspace = true
 
 chrono.workspace = true
 
@@ -45,6 +47,7 @@ engine = [
     "dep:cairn-share",
     "dep:cairn-proactive",
     "dep:cairn-registry",
+    "dep:cairn-document",
 ]
 
 [dev-dependencies]

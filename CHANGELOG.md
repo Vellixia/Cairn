@@ -5,6 +5,119 @@ All notable changes to Cairn are documented here. Versions follow [Semantic Vers
 > **Pre-1.0 notice:** Until 1.0 lands, minor versions may carry breaking changes
 > on the upgrade path. Pin the version you install and re-read this file on every bump.
 
+## [Unreleased]
+
+### Fixed — Web UI audit remediation
+- **Setup page navigates to non-existent `/dashboard` (W1).** Changed
+  `router.push("/dashboard")` to `router.push("/")` — the overview lives at
+  the root route, not `/dashboard`.
+- **Mobile page raw `fetch()` bypassing typed wrapper (W2).** Replaced raw
+  `fetch()` calls with the typed `request()` wrapper from `@/lib/api`. Fixes
+  the JSON parse error on non-JSON responses and adds 401 redirect support.
+- **Heatmap month labels misaligned (W10).** `buildMonthLabels` incremented
+  week on Monday; `generateGrid` on Sunday. Fixed to use Sunday consistently.
+- **Duplicate fetch for `/api/devices/audit` (W5).** `ActivityTimeline` used
+  `qk.activityAudit` while `useDevicesAuditQuery` used `qk.devicesAudit` —
+  same endpoint, two keys, double fetch. Consolidated to `qk.devicesAudit`.
+- **SSE invalidation gaps (W6/W14).** Added `session`, `metrics`, `ledger`,
+  `config`, `profile` to `INVALIDATION_MAP` — those views now auto-refresh
+  on server events.
+- **Duplicated `Me` interface (W7).** `stores/me.ts` had its own `Me` type;
+  now imports from `api.ts` (single source of truth).
+- **`sonner.tsx` dead `useTheme()` call (W13).** No `ThemeProvider` mounted,
+  so `useTheme()` always returned `"system"`. Removed the call, hardcoded
+  `theme="dark"` (matching the app's dark-only design).
+
+### Fixed — Rust engine audit remediation
+- **Promotion scoring ceiling unreachable (R1).** `fast_promotion_score`
+  weights were `kind_prior * 0.4 + cross_score * 0.6` — with
+  `cross_project_hits` always 0 (scope isolation), the ceiling was 0.36,
+  below every threshold. Changed to `kind_prior * 0.8 + cross_score * 0.2`
+  so a high `kind_prior` alone reaches the candidate band (Fact = 0.72).
+- **Drift log filter ignored (R3).** `list_drift` handler hardcoded `None`
+  for the status filter. Now extracts `Query<DriftFilter>` with optional
+  `status` and `limit` params.
+- **Static handler missing `<path>/index.html` lookup (R4).** Added the
+  Next.js nested-folder convention to the lookup chain. Also made
+  `find_shell_in` prefer `[param]`-style placeholders over plain listing
+  pages so dynamic routes get the right client component shell.
+
+### Fixed — Audit remediation (Bugs #1–#9 vs reference implementations)
+- **Shared engines in `tools_call` (Bug #1).** The `/api/tools/call` handler
+  created a fresh `McpServer::new()` per request, opening a new `Store` +
+  `ContextEngine` + `Guard` — bypassing `AppState`'s shared `Arc` engines.
+  Every read went through an empty cache (always `Full`, never `Cached` or
+  `Diff`), every checkpoint saw stale file versions, and verify-against-baseline
+  could never find the baseline. Now uses `McpServer::from_engines()` with
+  `AppState`'s shared engines. Fixes drift from context and checkpoint problems.
+- **RemoteProxy `LocalReader` (Bug #2).** The old `read_file_local` was
+  stateless — always returned `Full`, ignored `mode`, no mtime cache, no diff.
+  Replaced with `LocalReader` that tracks mtime (re-read killer: `Cached` for
+  unchanged files), produces `Diff` on change (with 60% auto-delta fallback),
+  and respects `mode` (auto/full; signatures/map fall back to full on proxy path
+  since tree-sitter isn't available without `engine`).
+- **PostToolUse verify-against-baseline (Bug #3).** `Guard::verify_against_baseline`
+  was never called by any hook or tool — post-edit corruption detection was dead
+  code. Now `PostToolUse` hook calls `POST /api/guard/verify-baseline` for each
+  edited file (fire-and-forget, spooled). New MCP tool `verify_baseline` added.
+- **Working tier cap demotes instead of deletes (Bug #7).** `run_working_tier_cap`
+  previously deleted oldest excess working memories. Now demotes them to
+  `Episodic` tier (agentmemory's auto-page pattern) — content and edges preserved.
+- **Cross-project corruption guard (Bug #9).** `run_contradiction_detection`'s
+  auto-resolve supersedes path could supersede a memory from a different project.
+  Now refuses to supersede across project boundaries (same-scope or Global-only).
+
+### Added — Audit remediation
+- **`verify_baseline` MCP tool.** Compare current on-disk file against the
+  version recorded when the agent last read it (PostToolUse corruption check).
+- **`POST /api/guard/verify-baseline` API endpoint.** Same as the MCP tool,
+  for direct API consumers.
+- **Semantic graph edges (Bug #6).** Two new edge types: `related_to` (auto-derived
+  from shared `concepts` at write time — bidirectional between memories sharing ≥1
+  concept) and `depends_on` (auto-derived from simple import analysis of `files` —
+  scans for `use`/`import`/`require`/`#include` statements). `EdgeKind` enum extended.
+  `Memory` struct gains `related_to` and `depends_on` fields.
+
+### Changed — Audit remediation
+- **`McpServer::dispatch` signature** now requires `&ScopeCtx` (from previous
+  release). `tools_call` now passes `AppState`'s shared scope.
+- **`McpServer::from_engines`** new constructor accepting pre-built `Arc` handles.
+- **`Memory` struct** gains `related_to: Vec<String>` and `depends_on: Vec<String>`
+  fields (both `#[serde(default)]`, backward compatible).
+
+### Fixed
+- **Project memory scoping end-to-end.** The MCP `remember` tool never set
+  `scope_type`, so every memory written by an agent defaulted to `Global` —
+  project memory counts were structurally 0, and the promotion pipeline had
+  nothing to act on. `dispatch` now takes a `ScopeCtx` parameter, threaded
+  from the `tools_call` HTTP handler's `X-Cairn-Project` header. `remember`
+  defaults to `Project` scope when a project is detected; explicit
+  `scope_type` overrides the default. The client hook's `UserPromptSubmit`
+  write also sets `scope_type: "project"` when a project is active.
+- **Memory graph feeds from `files`.** `MemoryEngine::remember` now
+  auto-derives `applies_to` edges from the `files` field, so every remember
+  with file paths populates the provenance graph without needing
+  crystallize/consolidate.
+
+### Added
+- **`scope_type`, `scope_id`, `concepts`, `files` args on the `remember`
+  MCP tool.** Agents can now explicitly control scope and feed graph edges.
+- **`document_ingest` MCP tool.** Ingest a file or URL into the document
+  store for semantic search. Reads locally when `content` is omitted;
+  project-scoped via the same `ScopeCtx`.
+- **`document_search` MCP tool.** Search ingested document chunks by
+  semantic similarity. Project-scoped via `ScopeCtx`.
+
+### Changed
+- **`McpServer::dispatch` signature** now requires a `&ScopeCtx` third
+  parameter. The `tools_call` HTTP handler extracts it from request
+  extensions; stdio-only paths pass `ScopeCtx::default()`.
+
+## [0.8.3] - 2026-07-08
+
+### Changed
+- Bumped workspace version to 0.8.3.
+
 ## [0.8.2] - 2026-07-07 - Hardening: expand short handles, error clarity, hook UX
 
 Follow-up to v0.8.1 addressing the external audit report (E001-E003, W001-W005).

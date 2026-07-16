@@ -14,6 +14,7 @@
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 pub fn config_path() -> Option<PathBuf> {
     crate::paths::cairn_home().map(|h| h.join("config.toml"))
@@ -99,6 +100,7 @@ pub enum Source {
     Env,
     File,
     Default,
+    Flag,
 }
 
 impl Source {
@@ -107,6 +109,7 @@ impl Source {
             Source::Env => "env",
             Source::File => "config",
             Source::Default => "default",
+            Source::Flag => "flags",
         }
     }
 }
@@ -263,6 +266,25 @@ pub fn save_server(server_url: Option<&str>, token: Option<&str>) -> Result<()> 
 
     write_config_file(&path, &doc.to_string())
 }
+
+/// After `save_server` writes a token to `~/.cairn/config.toml`, check whether
+/// the `CAIRN_TOKEN` env var holds a *different* value that would shadow it.
+/// Prints a warning via `eprintln!` when detected. Callers pass the token that
+/// was just saved; identical env/file values are silently ignored (unsetting
+/// the env var would change nothing).
+///
+/// Uses a `OnceLock` to fire at most once per process — this is called from
+/// both `crate::credentials::resolve_and_persist` and
+/// `crate::status::run`; a single process must not double-warn.
+pub fn warn_if_env_token_shadows(token: &str) {
+    if let Ok(env_val) = std::env::var("CAIRN_TOKEN") {
+        if !env_val.is_empty() && env_val != token && WARNED_ENV_TOKEN_SHADOW.set(()).is_ok() {
+            eprintln!("warning: {}", shadow_note("token", "CAIRN_TOKEN"));
+        }
+    }
+}
+
+static WARNED_ENV_TOKEN_SHADOW: OnceLock<()> = OnceLock::new();
 
 /// Set `[hooks] inject_context = <value>` - called on new `onboard`/`setup`
 /// runs so freshly-onboarded users get the flagship feature on by default

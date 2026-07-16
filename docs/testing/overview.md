@@ -29,11 +29,11 @@ network and no live database** - they construct a real `cairn_store::Store` back
 new in-memory `MemoryBackend` (added in 0.7.1) and exercise every engine.
 
 ```sh
-cargo test -p cairn-tests                       # 26 files, 204 tests (as of v0.8.0)
+cargo test -p cairn-tests                       # 27 files, 210+ tests (as of v0.8.x)
 cargo test -p cairn-tests --test 19_memory_engine     # one
 ```
 
-Coverage (17 of 26 files itemized below; v0.8.0 added 9 more HTTP-API-focused files -
+Coverage (17 of 27 files itemized below; v0.8.0 added 9 more HTTP-API-focused files -
 `02, 14, 21, 24-29` - not yet itemized here in detail, see
 `crates/cairn-tests/tests/<NN>_*.rs` directly or `docs/planning/plans/v0.8.0.md`'s per-sprint
 "What shipped" sections for what each one covers):
@@ -141,7 +141,7 @@ on real DOM state, not URL string matches.
 
 | Component | Status |
 |---|---|
-| Docker stack (cairn + helix + minio) | Running |
+| Docker stack (cairn + surreal) | Running |
 | Cairn server | `http://localhost:7777` (HTTP, `CAIRN_INSECURE=1`) |
 | Device token | `opencode-test` (write scope) |
 | OpenCode MCP | `cairn` connected |

@@ -102,6 +102,7 @@ fn build_capabilities(s: &AppState) -> Capabilities {
         "/api/guard/anchor".into(),
         "/api/guard/checkpoint".into(),
         "/api/guard/rollback".into(),
+        "/api/guard/verify-baseline".into(),
         "/api/sessions".into(),
         "/api/sessions/latest".into(),
         "/api/auth/status".into(),

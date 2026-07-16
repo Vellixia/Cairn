@@ -131,7 +131,7 @@ export interface ActivityTimelineProps {
 
 export function ActivityTimeline({ limit = 8 }: ActivityTimelineProps) {
   const auditQ = useQuery({
-    queryKey: qk.activityAudit,
+    queryKey: qk.devicesAudit,
     queryFn: () => getJSON<AuditEvent[]>("/api/devices/audit"),
   });
   const statsQ = useQuery({
