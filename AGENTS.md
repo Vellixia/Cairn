@@ -40,7 +40,7 @@ maintained by a per-test in-memory `cairn_store::Store`, exercising every engine
 running backend.
 
 ```sh
-cargo test -p cairn-tests                 # 26 files, 204 tests (as of v0.8.0)
+cargo test -p cairn-tests                 # 27 files, 210+ tests (as of v0.8.x)
 cargo test -p cairn-tests --test 18_context_engine  # just one
 ```
 
@@ -78,15 +78,15 @@ resolved finding is `docs/testing/findings/README.md`.
 
 - A step that times out, returns no snapshot, or returns an identical-looking screenshot
   to the previous step is a **failure**. Write a finding. Never "PASS" the flow.
-- Two findings are confirmed real bugs from previous runs: `/memory/architecture` Next.js
-  client-side crash, `/mobile` JSON parse error. Both surface when the agent actually
-  inspects the page; they were missed by the old PowerShell harness because URL pattern +
-  exit code 0 was the only "assertion".
+- **Previously confirmed bugs now resolved:** `/memory/architecture` client-side crash
+  (missing `helpCopy.ts` key — fixed, `HelpButton` now has a fallback) and `/mobile` JSON
+  parse error (raw `fetch` bypassing typed wrapper — fixed, now uses `request()`). Both were
+  missed by the old PowerShell harness because URL pattern + exit code 0 was the only "assertion".
 - **No fake passes.** If you can't confirm, write a finding.
 
 ## Architecture
 
-23-crate Rust workspace (MSRV 1.89) + Next.js static-export web UI. Two binaries:
+24-crate Rust workspace (MSRV 1.89) + Next.js static-export web UI. Two binaries:
 
 | Binary | Lives in | Purpose |
 |--------|----------|---------|

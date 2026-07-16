@@ -1,11 +1,5 @@
 import { create } from "zustand";
-
-export interface Me {
-  username: string;
-  generation: number;
-  login_at: number;
-  expires_at: number;
-}
+import type { Me } from "@/lib/api";
 
 interface MeState {
   me: Me | null;

@@ -43,7 +43,7 @@ rebuilt only when the Docker image is rebuilt. See ADR-029.
 
 ---
 
-## Cargo Workspace - 21 Crates
+## Cargo Workspace - 24 Crates
 
 ### Dependency Graph
 
@@ -67,7 +67,7 @@ graph BT
     proactive["cairn-proactive<br/>intent classifier + auto-inject"]
     proxy["cairn-proxy<br/>cairn.sh reverse proxy"]
     ingest["cairn-ingest<br/>VTT/SRT/JSON transcript parsers"]
-    mcp["cairn-mcp<br/>MCP server (stdio) - 29 tools + 10 graph actions - 6 resources - 5 prompts"]
+    mcp["cairn-mcp<br/>MCP server (stdio) - 31 tools - 6 resources - 5 prompts"]
     api["cairn-api<br/>REST API + web UI + registry + extensions + push"]
     server["cairn-server<br/>in-container bin<br/>(cairn-api::bin::cairn_server)"]
     cli["cairn<br/>host binary<br/>(cairn-client crate)"] 
@@ -109,14 +109,16 @@ graph BT
 |---|---|
 | `cairn-core` | Domain types, config resolution, errors, hashing, `OrgId`. No deps on other cairn crates. |
 | `cairn-store` | SurrealDB backend (graph + vector) + content-hash `BlobStore`. Token/memory/checkpoint/audit persistence. |
-| `cairn-context` | Read modes (full/signatures/map/auto), content-hash + mtime cache (~13-tok re-reads), tree-sitter AST outlines (11 languages), `expand` recovery, `Assembler` (token-budgeted context). |
-| `cairn-memory` | 4-tier memory (working/episodic/semantic/procedural), consolidation, Ebbinghaus decay, SHA-256 dedup, BM25 + semantic fusion via RRF, MMR diversity rerank, crystallize, provenance graph. |
+| `cairn-context` | Read modes (full/signatures/map/auto), content-hash + mtime cache (~13-tok re-reads), tree-sitter AST outlines (11 languages), `expand` recovery, `diff_only` + `estimate_tokens` (pub), `BounceTracker`, `ContextLedger`. |
+| `cairn-memory` | 4-tier memory (working/episodic/semantic/procedural), consolidation, Ebbinghaus decay, SHA-256 dedup, BM25 + semantic fusion via RRF, MMR diversity rerank, crystallize, provenance graph (6 edge types: `derived_from`, `contradicts`, `supersedes`, `applies_to`, `related_to`, `depends_on`), auto-derive edges from files + concepts. |
 | `cairn-assemble` | Edge-ordered context assembly under a token budget. Anti-context-rot. |
 | `cairn-guard` | Verify edits vs originals, task anchor, checkpoint/rollback, reliability scoring. |
 | `cairn-shell` | RTK-style command-output compression (filter/group/dedup), lossless via blob store. |
 | `cairn-profile` | Preference/behavior learning, injected at session start. |
 | `cairn-share` | Privacy-first sanitization: secret/PII detection, redaction, classification (shareable/review/private). |
 | `cairn-embed` | Pluggable embeddings: local (fastembed/ONNX all-MiniLM-L6-v2), OpenAI, Ollama, hashing fallback. |
+| `cairn-document` | RAG document ingestion: paragraph-aware chunking, `read_source` (file/URL), `chunk_text`. No store access — caller persists chunks. |
+| `cairn-rerank` | Cross-encoder reranking interface (fastembed/ONNX backend, `local` feature). |
 | `cairn-session` | Cross-Session Protocol (JSONL sessions + drift log), approve/reject workflow. |
 | `cairn-pack` | `.cairnpkg` format - hand-rolled ustar, SHA-256 per-file integrity, HMAC signature, Ed25519 signing. |
 | `cairn-registry` | Self-hosted pack registry: HTTP endpoints under `/api/registry/*`, trust scopes, revocation cascade. |
@@ -125,14 +127,14 @@ graph BT
 | `cairn-proactive` | Intent classifier (local heuristic, sub-ms), `ProactiveHook`, per-project opt-out. |
 | `cairn-proxy` | `cairn.sh` reverse proxy: parallel fan-out to multiple registries, best-effort merge. |
 | `cairn-ingest` | VTT/SRT/JSON transcript parsers + speaker-window chunking (default 60s). |
-| `cairn-mcp` | MCP server over stdio. Local mode (opens the SurrealDB store) or remote proxy mode (forwards to `cairn-api`). 29 tools + 10 graph actions = 39, 6 resources, 5 prompts. |
+| `cairn-mcp` | MCP server over stdio. Local mode (opens the SurrealDB store) or remote proxy mode (forwards to `cairn-api`). 31 tools, 6 resources, 5 prompts. `McpServer::from_engines()` shares AppState's `Arc` handles. `RemoteProxy` with `LocalReader` (mtime cache + diff). |
 | `cairn-api` | Axum REST API + embedded web UI (rust-embed). Auth middleware (cookie session + JWT device tokens), CORS, per-request CSP nonce. Registry + extensions + push + ingest routes. |
 | `cairn-api` (bin `cairn-server`) | In-container entrypoint. Resolves config, opens the store, runs `bootstrap_admin_from_env`, binds :7777, serves the API + web UI. Built into the Docker image; never ships in host tarballs. |
 | `cairn-client` | Host binary `cairn`: `mcp`, `setup`, `run`, `hook`, `sync`, `bench`, `pack`, `graph`, `memory`, `search`, `doctor`, `onboard`, etc. |
 
 ---
 
-## MCP Tool Surface (29 tools + 10 graph actions = 39)
+## MCP Tool Surface (31 tools)
 
 All tools are exposed via `cairn mcp` (stdio) and mirrored at `/api/tools/list` + `/api/tools/call`.
 
@@ -141,15 +143,15 @@ All tools are exposed via `cairn mcp` (stdio) and mirrored at `/api/tools/list` 
 | **Context** | `read`, `expand` |
 | **Memory** | `remember`, `recall`, `wakeup`, `consolidate`, `memory_edit`, `memory_delete`, `memory_pin`, `memory_promote`, `memory_reinforce`, `memory_timeline`, `memory_crystallize`, `memory_graph` |
 | **Assembly** | `assemble` |
-| **Guardrails** | `checkpoint`, `rollback`, `checkpoints`, `verify`, `anchor` |
+| **Guardrails** | `checkpoint`, `rollback`, `checkpoints`, `verify`, `verify_baseline`, `anchor` |
 | **Profile** | `prefer`, `profile` |
-| **Shell** | `compress`, `run` |
+| **Shell** | `compress` |
 | **Sanitization** | `sanitize` |
-| **Graph** | `graph` (action: `related` / `impact` / `callgraph` / `symbol` / `routes` / `smells` / `index` / `architecture` / `refactor` / `benchmark`) |
+| **Documents** | `document_ingest`, `document_search` |
 | **Search** | `search` |
-| **Metrics** | `metrics`, `stats` |
-| **Sessions** | `sessions`, `session` |
+| **Metrics** | `metrics` |
 | **Proactive** | `proactive_recall` |
+| **Registry** | `registry_search` |
 
 ### MCP Resources (6)
 
@@ -181,43 +183,118 @@ All tools are exposed via `cairn mcp` (stdio) and mirrored at `/api/tools/list` 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/health` | Server health + version |
+| GET | `/api/health/deep` | Deep health (DB + embedder + config) |
+| GET | `/api/auth/status` | Auth status (is a session active?) |
 | POST | `/api/auth/login` | Admin login (sets `cairn_session` cookie) |
-| POST | `/api/auth/logout` | Clear session cookie |
-| GET | `/api/auth/me` | Current user info |
 | POST | `/api/auth/setup` | First-run admin creation |
 | GET | `/api/setup/health` | Setup wizard health check |
+| GET | `/api/setup/embed-default` | Default embed provider for setup wizard |
 
 ### Authenticated (cookie or bearer token)
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/tools/list` | MCP tool definitions |
-| POST | `/api/tools/call` | Dispatch a tool by name |
-| POST | `/api/memory` | Store a memory |
-| GET | `/api/search` | Hybrid search (BM25 + semantic) |
+| POST | `/api/tools/call` | Dispatch a tool by name (shared engines) |
+| GET | `/api/capabilities` | Server capabilities (endpoints, tools, features) |
+| GET | `/api/openapi.json` | OpenAPI spec |
+| GET | `/api/config` | Effective config (read-only) |
+| GET | `/api/stats` | Server stats (memory count, tokens saved, etc.) |
 | GET | `/api/metrics` | Live cost-savings metrics |
+| GET | `/api/metrics/savings` | Mobile savings snapshot |
 | GET | `/api/events` | SSE event stream (with `Last-Event-ID` replay) |
 | GET | `/api/ledger` | Savings ledger entries |
 | GET | `/api/ledger/verify` | Verify HMAC chain integrity |
-| GET | `/api/sessions` | List sessions |
-| GET | `/api/sessions/:id` | Session detail |
-| GET | `/api/drift` | Drift items (filter: `?status=pending`) |
-| POST | `/api/drift/:id/approve` | Approve a drift item |
-| POST | `/api/drift/:id/reject` | Reject a drift item |
+| GET | `/api/profile` | User preferences |
+| POST | `/api/profile` | Record a preference (`prefer`) |
+| POST | `/api/auth/logout` | Clear session cookie |
+| GET | `/api/auth/me` | Current user info |
+
+### Memory
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/memory` | List memories (filter: scope, tier, kind, pinned, suspicious, q) |
+| POST | `/api/memory` | Store a memory (scope-aware: defaults to Project when `X-Cairn-Project` set) |
+| GET | `/api/memory/recall` | Recall by query (ranked by relevance + recency + importance) |
+| GET | `/api/memory/wakeup` | Session-start bootstrap (highest-value memories) |
+| POST | `/api/memory/consolidate` | Consolidate across tiers |
+| POST | `/api/memory/crystallize` | Promote working-tier memories into a semantic crystal |
+| GET | `/api/memory/graph` | Memory provenance graph (6 edge types) |
+| GET | `/api/memory/heatmap` | Activity heatmap (daily counts) |
+| GET | `/api/memory/architecture-report` | Architecture report (graph analysis) |
+| GET | `/api/memory/by-scope` | Memories by exact scope (project/session/global) |
+| GET | `/api/memory/promotion-candidates` | Project-scoped memories in the review band [0.70, 0.90] |
+| GET | `/api/memory/promotion-log` | Promotion/demotion event log |
+| GET | `/api/memory/autopilot-digest` | "Since you were away" digest (promotions, demotions, drift) |
+| POST | `/api/memory/session-summary` | LLM-synthesized session summary |
+| POST | `/api/memory/gotcha` | Record a failure event (auto-promotes to gotcha on cluster) |
+| GET | `/api/memory/gotcha/wakeup` | Top-K gotcha clusters for proactive recall |
+| GET | `/api/search` | Hybrid search (BM25 + semantic + graph, RRF-fused, MMR-reranked) |
+| POST | `/api/memory/:id/pin` | Pin/unpin a memory |
+| POST | `/api/memory/:id/reinforce` | Reinforce confidence (agentmemory curve) |
+| POST | `/api/memory/:id/promote` | Approve a promotion candidate (moves to Global, locks) |
+| POST | `/api/memory/:id/dismiss-promotion` | Dismiss a promotion candidate (locks without promoting) |
+| POST | `/api/memory/:id/demote` | Undo a promotion (reverts to origin scope via promotion log) |
+
+### Context + Guard
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/context/read` | Read a file (cache-aware: Full/Cached/Diff/Outline) |
+| GET | `/api/context/expand` | Recover original bytes for a content hash handle |
+| GET | `/api/context/assemble` | Token-budgeted context assembly (memories + documents) |
+| GET | `/api/context/pressure` | Context pressure gauge (ContextLedger) |
+| POST | `/api/guard/verify` | Verify a proposed edit (flags large unreplaced deletions) |
+| POST | `/api/guard/verify-baseline` | Verify current file vs read-time baseline (PostToolUse check) |
+| GET | `/api/guard/anchor` | Get the current task anchor |
+| POST | `/api/guard/anchor` | Set the task anchor |
+| POST | `/api/guard/anchor/auto` | Auto-derive anchor from prompt (if none set) |
+| POST | `/api/guard/checkpoint` | Snapshot tracked files |
+| GET | `/api/guard/checkpoints` | List checkpoints |
+| POST | `/api/guard/rollback` | Roll back to a checkpoint |
+| GET | `/api/guard/drift` | Drift event log (filter: `?status=pending&limit=N`) |
+
+### Shell + Share + Documents
+
+| Method | Path | Description |
+|---|---|---|
+| POST | `/api/shell/compress` | Compress verbose command output |
+| POST | `/api/share/sanitize` | Sanitize text for secrets/PII |
+| GET | `/api/share/export` | Export sanitized memory bundle |
+| POST | `/api/share/import` | Import a sanitized bundle |
+| GET | `/api/documents` | List ingested documents (filter: `?project_id=...`) |
+| POST | `/api/documents/ingest` | Chunk and store a document (project-scoped) |
+| GET | `/api/documents/search` | Semantic search over document chunks |
+| DELETE | `/api/documents/:id` | Delete an ingested document |
+| POST | `/api/ingest/transcript` | Ingest a transcript (VTT/SRT/JSON) |
+
+### Devices + Sessions + Projects + Cron
+
+| Method | Path | Description |
+|---|---|---|
 | GET | `/api/devices/tokens` | List device tokens |
 | POST | `/api/devices/tokens` | Create a device token |
-| POST | `/api/devices/tokens/:id/revoke` | Revoke a device token |
+| POST | `/api/devices/tokens/:id/revoke` | Revoke a token |
 | GET | `/api/devices/audit` | Audit log |
+| POST | `/api/extensions/capture` | Browser extension capture (loopback-only) |
 | POST | `/api/push/subscribe` | Subscribe to push notifications |
 | POST | `/api/push/unsubscribe` | Unsubscribe |
 | GET | `/api/push/list` | List push subscriptions |
-| POST | `/api/extensions/capture` | Browser extension capture (loopback-only) |
-| POST | `/api/ingest/transcript` | Ingest a transcript (VTT/SRT/JSON) |
+| GET | `/api/sessions` | List sessions |
+| POST | `/api/sessions` | Create a session |
+| GET | `/api/sessions/latest` | Latest session |
+| GET | `/api/sessions/:id` | Session detail |
+| PATCH | `/api/sessions/:id` | Update a session |
+| GET | `/api/projects` | List projects |
+| GET | `/api/projects/:id` | Project detail |
+| PATCH | `/api/projects/upsert` | Register/update a project (auto-detection) |
+| GET | `/api/cron/jobs` | List cron jobs + last-run status |
+| POST | `/api/cron/run/:job` | Manually trigger a cron job |
+| GET | `/api/cron/history` | Cron run history |
+| GET | `/api/cron/health` | Cron scheduler health |
 
-### Registry (`/api/registry/*`)
-
-Mounted under `/api/registry` (not `/registry`) so it doesn't shadow the dashboard's own
-`/registry` and `/registry/packs` page routes, which are served by the static-file fallback.
+### Registry + Pool + Sync (`/api/registry/*`, `/api/pool/*`, `/api/sync/*`)
 
 | Method | Path | Description |
 |---|---|---|
@@ -230,6 +307,10 @@ Mounted under `/api/registry` (not `/registry`) so it doesn't shadow the dashboa
 | GET | `/api/registry/search` | Search packs (`?q=...`) |
 | GET | `/api/registry/trusted-keys` | List trust grants |
 | GET | `/api/registry/revocations` | Revocation log (`?since=<unix>`) |
+| GET | `/api/pool` | List pool contributions |
+| POST | `/api/pool/contribute` | Contribute sanitized knowledge to the pool |
+| GET | `/api/sync/pull` | Pull sync data (CRDT) |
+| POST | `/api/sync/push` | Push sync data (CRDT) |
 
 ---
 
@@ -335,7 +416,7 @@ also write a `[mcp_servers.cairn.env]` sub-block with
 
 - [Plan v0.5.0](../archive/plan-v0.5.0.md) - 23-sprint plan, success metrics, risks
 - [Benchmarks](../testing/benchmarks.md) - measured token savings + methodology
-- [Decisions](decisions.md) - 26 ADRs
+- [Decisions](decisions.md) - 33 ADRs
 - [Roadmap](../planning/roadmap.md) - what's done, what's next
 - [Security](../../SECURITY.md) - threat model + hardening checklist
 - [E2E Tests](../testing/e2e.md) - 20-scenario end-to-end test harness

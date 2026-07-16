@@ -79,7 +79,7 @@ function buildMonthLabels(start: Date, end: Date) {
       lastMonth = cursor.getMonth();
     }
     cursor.setDate(cursor.getDate() + 1);
-    if (cursor.getDay() === 1) week++;
+    if (cursor.getDay() === 6) week++; // Sunday — matches generateGrid's week boundary
   }
   return labels;
 }

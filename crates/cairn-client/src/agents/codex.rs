@@ -57,6 +57,17 @@ impl Agent for Codex {
                 path: hooks_path,
                 note: "hooks: SessionStart, UserPromptSubmit, PostToolUse, Stop",
             });
+
+            let skill_dir = paths::codex_skills_dir(h);
+            std::fs::create_dir_all(&skill_dir)
+                .with_context(|| format!("creating {}", skill_dir.display()))?;
+            let skill_path = skill_dir.join("SKILL.md");
+            std::fs::write(&skill_path, cairn_mcp::guidance::skill_md())
+                .with_context(|| format!("writing {}", skill_path.display()))?;
+            files.push(InstalledFile {
+                path: skill_path,
+                note: "skill: cairn playbook (loads on-demand)",
+            });
         }
         Ok(InstallReport { files, hint: None })
     }
@@ -65,9 +76,17 @@ impl Agent for Codex {
         let Some(h) = home else {
             return Vec::new();
         };
-        let mut actions = vec![RemovalAction::RemoveCodexTable {
-            file: paths::codex_config_path(Some(h)),
-        }];
+        let mut actions = vec![
+            RemovalAction::RemoveCodexTable {
+                file: paths::codex_config_path(Some(h)),
+            },
+            RemovalAction::DeleteFile {
+                file: paths::codex_skills_dir(h).join("SKILL.md"),
+            },
+            RemovalAction::DeleteFile {
+                file: paths::codex_global_agents_md(h),
+            },
+        ];
         let hooks_path = paths::codex_hooks_path(h);
         for event in ["SessionStart", "UserPromptSubmit", "PostToolUse", "Stop"] {
             actions.push(RemovalAction::StripCairnHooks {
@@ -83,8 +102,22 @@ impl Agent for Codex {
         let Some(h) = home else {
             return issues;
         };
+
+        let want = format!("cairn-guidance-rev: {}", cairn_mcp::guidance::GUIDANCE_REV);
+        let skill_path = paths::codex_skills_dir(h).join("SKILL.md");
+        if skill_path.exists()
+            && !std::fs::read_to_string(&skill_path)
+                .unwrap_or_default()
+                .contains(&want)
+        {
+            issues.push(format!(
+                "{} has a stale guidance revision",
+                skill_path.display()
+            ));
+        }
+
         let hooks_path = paths::codex_hooks_path(h);
-        let Ok(text) = fs::read_to_string(&hooks_path) else {
+        let Ok(text) = std::fs::read_to_string(&hooks_path) else {
             return issues;
         };
         let Ok(v) = serde_json::from_str::<Value>(&text) else {

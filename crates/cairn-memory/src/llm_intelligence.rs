@@ -122,9 +122,16 @@ pub(crate) fn kind_prior_score(kind: MemoryKind) -> f32 {
 /// Combine the kind prior with the cross-project access signal into a fast, LLM-free score.
 /// `cross_project_hits` saturates at 3 hits (`/3.0` capped to `1.0`) - a memory doesn't need to
 /// be accessed from every other project to prove it's broadly useful.
+///
+/// Bug R1 fix: the old weights (kind_prior * 0.4 + cross_score * 0.6) made the ceiling
+/// 0.36 when cross_project_hits was always 0 (Project-scoped memories are only recalled
+/// under their own project — scope isolation makes cross-project access structurally
+/// impossible). The new weights (kind_prior * 0.8 + cross_score * 0.2) let a high
+/// kind_prior alone reach the candidate band: Fact = 0.72, Gotcha = 0.56, Decision = 0.48.
+/// Cross-project hits still provide a boost (up to +0.2) when the signal exists.
 pub(crate) fn fast_promotion_score(kind: MemoryKind, cross_project_hits: i64) -> f32 {
     let cross_score = (cross_project_hits as f32 / 3.0).min(1.0);
-    kind_prior_score(kind) * 0.4 + cross_score * 0.6
+    kind_prior_score(kind) * 0.8 + cross_score * 0.2
 }
 
 #[cfg(test)]

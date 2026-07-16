@@ -513,20 +513,25 @@ impl RemoteClient {
                         "content": prompt,
                         "kind": "note",
                         "tier": "episodic",
-                        "importance": 0.3
+                        "importance": 0.3,
+                        "scope_type": if self.project_id.is_some() { "project" } else { "global" }
                     }),
                     log,
                 );
             }
             "PostToolUse" => {
-                // v0.8.0 client redesign: previously a documented no-op fired on every single
-                // edit. Zero network cost on this hot path - just append to a local per-session
-                // buffer; `SessionEnd`/`PreCompact` flush the deduped list as one memory.
+                // Record touched paths for the session buffer (existing behavior).
                 if let (Some(sid), Some(path)) = (
                     &self.session_id,
                     crate::sessionbuf::extract_touched_path(payload),
                 ) {
                     crate::sessionbuf::record_touch(sid, &path);
+                }
+                // Bug #3 fix: verify the edited file against its read baseline to detect
+                // silent corruption. Fire-and-forget (spooled) — a network hiccup just
+                // queues it for the next SessionStart to retry.
+                if let Some(path) = crate::sessionbuf::extract_touched_path(payload) {
+                    self.post_spooled("/api/guard/verify-baseline", json!({ "path": path }), log);
                 }
             }
             "SessionEnd" | "PreCompact" => {

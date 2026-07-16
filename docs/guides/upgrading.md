@@ -26,7 +26,7 @@ crates). The single-admin/cookie-session model from 0.4.0 is unchanged - this re
 
 ## What changed for operators
 
-- 21 crates in the workspace. The old 14-crate dep graph is gone - `cairn-session`,
+- 24 crates in the workspace. The old 14-crate dep graph is gone - `cairn-session`,
   `cairn-pack`, `cairn-registry`, `cairn-sync`, `cairn-bench`, `cairn-proactive`,
   `cairn-proxy`, and `cairn-ingest` are new.
 - **A datastore is required.** `cairn-store` ships a pluggable backend (currently

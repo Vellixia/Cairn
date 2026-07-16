@@ -8,9 +8,10 @@
 use anyhow::Result;
 
 /// Resolve server+token from CLI flags, env vars, or config file (in that
-/// order). If both are found, validates the token against the server and
+/// order). When both are found, validates the token against the server and
 /// persists both to `~/.cairn/config.toml`. Warns once if `CAIRN_TOKEN` env
-/// var shadows the saved value.
+/// var shadows the saved value. When only one is found, falls back to config
+/// for the missing piece.
 ///
 /// Returns the effective `(server, token)` — either may be `None`.
 pub fn resolve_and_persist(
@@ -38,15 +39,15 @@ pub fn resolve_and_persist(
         return Ok((server, token));
     }
 
-    if cli_server.is_none() && cli_token.is_none() && server.is_none() && token.is_none() {
-        let resolved = crate::config::resolve(None);
-        return Ok((
-            resolved.server.map(|(s, _)| s),
-            resolved.token.map(|(t, _)| t),
-        ));
-    }
+    // Partial credentials: fill in missing pieces from config.
+    let resolved = crate::config::resolve(None);
+    let config_server = resolved.server.map(|(s, _)| s);
+    let config_token = resolved.token.map(|(t, _)| t);
 
-    Ok((server, token))
+    let effective_server = server.or(config_server);
+    let effective_token = token.or(config_token);
+
+    Ok((effective_server, effective_token))
 }
 
 fn persist(server: &str, token: &str) -> Result<()> {
@@ -71,15 +72,21 @@ mod tests {
     use crate::env_guard;
 
     #[test]
-    fn partial_creds_returns_partial_no_validate() {
+    fn partial_creds_falls_back_to_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_string_lossy().into_owned();
         env_guard::with_env(
             &[
+                ("HOME", Some(&home)),
+                ("USERPROFILE", Some(&home)),
                 ("CAIRN_SERVER", Some("http://env.example.com")),
                 ("CAIRN_TOKEN", None),
+                ("XDG_CONFIG_HOME", None),
             ],
             || {
                 let (srv, tok) = resolve_and_persist(None, None).unwrap();
                 assert_eq!(srv.unwrap(), "http://env.example.com");
+                // No token in env or config → None
                 assert!(tok.is_none());
             },
         );
@@ -87,10 +94,15 @@ mod tests {
 
     #[test]
     fn empty_env_server_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().to_string_lossy().into_owned();
         env_guard::with_env(
             &[
+                ("HOME", Some(&home)),
+                ("USERPROFILE", Some(&home)),
                 ("CAIRN_SERVER", Some("")),
                 ("CAIRN_TOKEN", Some("env-token")),
+                ("XDG_CONFIG_HOME", None),
             ],
             || {
                 let (srv, tok) = resolve_and_persist(None, None).unwrap();

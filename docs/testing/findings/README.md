@@ -2,7 +2,7 @@
 title: Findings Registry
 type: index
 status: living
-updated: 2026-07-01
+updated: 2026-07-14
 ---
 
 # Findings Registry
@@ -18,11 +18,9 @@ into `open/`. See [docs/CONVENTIONS.md](../../CONVENTIONS.md) for the full autho
 
 | Finding | Severity | Discovered | Notes |
 |---|---|---|---|
-| [hook-session-start-wrong-http-method](open/hook-session-start-wrong-http-method.md) | high | 2026-07-03 | `cairn hook SessionStart` POSTs to `/api/projects/upsert`, a PATCH-only route - 405, silently dropped; auto project detection (v0.8.0 Sprint 3) has never worked end-to-end |
-| [promotion-scoring-ceiling-unreachable](open/promotion-scoring-ceiling-unreachable.md) | high | 2026-07-03 | `promo_score` can never exceed 0.36 (`cross_project_hits` is always 0 by construction) - promotion candidates `[0.70,0.90]`, the LLM tie-break `[0.40,0.85]`, and full-auto promotion (`>=0.85`, or the Sprint 9 self-tuned floor of `0.5`) are all unreachable in practice |
-| [drift-log-filter-bug](open/drift-log-filter-bug.md) | medium (functional) | 2026-06-30 | `GET /api/guard/drift?status=` query param ignored by handler; documented, not fixed by decision (no mid-run rebuilds rule) |
-| [pack-detail-static-fallback](open/pack-detail-static-fallback.md) | high | 2026-06-30 | Pack detail page unreachable for any slug other than `new`; `static_handler` fallback serves the wrong shell |
-| [palette-trust-crash](open/palette-trust-crash.md) | high (P1) | 2026-06-30 | Command-palette `Enter` navigation to `/registry/trust` or `/registry/revocations` crashes on production build only (0% repro on dev) |
+| [promotion-scoring-ceiling-unreachable](open/promotion-scoring-ceiling-unreachable.md) | high | 2026-07-03 | `promo_score` could never exceed 0.36 (`cross_project_hits` always 0) — **fixed**: weights changed to `kind_prior*0.8 + cross*0.2`, Fact now scores 0.72. Awaiting finding file move. |
+| [drift-log-filter-bug](open/drift-log-filter-bug.md) | medium (functional) | 2026-06-30 | `GET /api/guard/drift?status=` query param ignored — **fixed**: `list_drift` now extracts `Query<DriftFilter>` with `status` + `limit`. Awaiting finding file move. |
+| [pack-detail-static-fallback](open/pack-detail-static-fallback.md) | high | 2026-06-30 | Pack detail page unreachable for any slug; `static_handler` fallback serves the wrong shell — **fixed**: added `<path>/index.html` lookup + `[param]`-style placeholder preference in `find_shell_in`. Awaiting finding file move. |
 | [command-palette-needs-ctrl-k](open/command-palette-needs-ctrl-k.md) | low (UX) | 2026-06-30 | Palette shortcut is `Ctrl+K` only; bare `K` does nothing and isn't advertised |
 | [no-trust-anchor-route](open/no-trust-anchor-route.md) | low (gap) | 2026-06-30 | No dedicated `/trust/anchor` route; anchor widget only reachable from `/` |
 | [no-assemble-route](open/no-assemble-route.md) | low (gap) | 2026-06-30 | No dashboard UI drives `/api/context/assemble`; flow skipped for lack of a testable surface |
@@ -31,6 +29,8 @@ into `open/`. See [docs/CONVENTIONS.md](../../CONVENTIONS.md) for the full autho
 
 | Finding | Severity | Discovered | Fixed | Notes |
 |---|---|---|---|---|
+| [hook-session-start-wrong-http-method](resolved/hook-session-start-wrong-http-method.md) | high | 2026-07-03 | 2026-07-14 | `cairn hook SessionStart` POSTs to a PATCH-only route — **fixed**: now uses `patch_spooled` |
+| [palette-trust-crash](resolved/palette-trust-crash.md) | high (P1) | 2026-06-30 | 2026-07-14 | Command-palette navigation to `/registry/trust` / `/registry/revocations` crashed on production build — **resolved**: routes removed (Trust hub folded into Automation); crash can't reproduce |
 | [post-login-dashboard-redirect](resolved/post-login-dashboard-redirect.md) | medium | 2026-06-30 | 2026-06-30 | Login redirected to nonexistent `/dashboard`; changed default redirect target to `/` |
 | [registry-pack-detail-404](resolved/registry-pack-detail-404.md) | bug | 2026-06-30 | 2026-06-30 | Pack detail page called `/registry/packs/:name` instead of `/api/registry/packs/:name` |
 | [registry-search-broken](resolved/registry-search-broken.md) | bug | 2026-06-30 | 2026-06-30 | Pack search box called `/registry/search` instead of `/api/registry/search` |

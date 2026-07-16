@@ -32,7 +32,7 @@ services:
         echo "surreal credentials OK"
 
   surreal:
-    image: surrealdb/surrealdb:v3
+    image: surrealdb/surrealdb:v3.1
     container_name: cairn-surreal
     depends_on:
       surreal-guard:
@@ -133,10 +133,12 @@ services:
   cairn:
     build:
       context: .
-      # Slim default build: no in-process local embeddings (avoids pulling fastembed/ort/aws-lc-sys).
-      # Opt back into the heavier image with:  docker build --build-arg CAIRN_FEATURES=embed-local .
+      # Heavy build: enables in-process local embeddings (fastembed/ONNX all-MiniLM-L6-v2)
+      # and local reranker (fastembed/ONNX jina-reranker-v1-turbo-en). The model is downloaded
+      # on first use (~110MB, cached in the cairn-data volume). To go back to the slim build
+      # (hosted embeddings only, no local reranker), set CAIRN_FEATURES: "" and rebuild.
       args:
-        CAIRN_FEATURES: ""
+        CAIRN_FEATURES: "embed-local"
     image: cairn:dev
     container_name: cairn
     # Non-root user from the Dockerfile (cairn, uid 10001). After cairn-init runs the
@@ -171,6 +173,7 @@ services:
       # cairn container, and set CAIRN_TLS_CERT + CAIRN_TLS_KEY on that proxy. See
       # docs/reference/architecture.md for the recommended topology.
       CAIRN_INSECURE: "1"
+      RUST_LOG: "cairn_store=info,cairn_api=info,cairn_memory=info"
       # Mount the host project so cairn read/verify/checkpoint tools can access local files.
       CAIRN_WORKSPACE_ROOT: /workspace
     env_file:

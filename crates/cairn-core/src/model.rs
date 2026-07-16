@@ -187,6 +187,14 @@ pub struct Memory {
     /// Edges to file paths / symbols / projects this memory applies to (code-graph-style relevance).
     #[serde(default)]
     pub applies_to: Vec<String>,
+    /// Edges to memory ids this one is related to (shared concepts, same topic).
+    /// Auto-derived from shared `concepts` at write time (Bug #6 fix).
+    #[serde(default)]
+    pub related_to: Vec<String>,
+    /// Edges to file paths this memory depends on (imported modules, required files).
+    /// Auto-derived from simple import analysis of `files` at write time (Bug #6 fix).
+    #[serde(default)]
+    pub depends_on: Vec<String>,
     /// Visibility boundary (v0.8.0 Sprint 2). Defaults to `Global` so pre-Sprint-2 records and
     /// callers that don't care about scoping keep working unchanged.
     #[serde(default)]
@@ -217,6 +225,8 @@ pub enum EdgeKind {
     Contradicts,
     Supersedes,
     AppliesTo,
+    RelatedTo,
+    DependsOn,
 }
 
 impl EdgeKind {
@@ -226,6 +236,8 @@ impl EdgeKind {
             EdgeKind::Contradicts => "contradicts",
             EdgeKind::Supersedes => "supersedes",
             EdgeKind::AppliesTo => "applies_to",
+            EdgeKind::RelatedTo => "related_to",
+            EdgeKind::DependsOn => "depends_on",
         }
     }
 }
@@ -278,6 +290,10 @@ pub struct NewMemory {
     pub supersedes: Vec<String>,
     #[serde(default)]
     pub applies_to: Vec<String>,
+    #[serde(default)]
+    pub related_to: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
     /// Visibility boundary for the new memory (v0.8.0 Sprint 2). Defaults to `Global`.
     #[serde(default)]
     pub scope_type: ScopeType,
@@ -317,6 +333,8 @@ impl NewMemory {
             contradicts: self.contradicts,
             supersedes: self.supersedes,
             applies_to: self.applies_to,
+            related_to: self.related_to,
+            depends_on: self.depends_on,
             scope_type: self.scope_type,
             scope_id: self.scope_id,
             promo_score: 0.0,

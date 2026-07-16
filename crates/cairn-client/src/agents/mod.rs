@@ -31,7 +31,7 @@ pub enum Scope {
 }
 
 /// Everything an `install()` call needs. Borrowing rather than owning keeps
-/// this cheap to build per-agent in a loop (`setup --all`).
+/// this cheap to build per-agent in a loop (`setup`).
 ///
 /// No `server`/`token` fields: since the v0.8.0 client redesign, agent config files never
 /// embed credentials - they get a bare MCP entry referencing `cairn mcp`/`cairn hook`, which

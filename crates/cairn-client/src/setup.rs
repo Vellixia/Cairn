@@ -1,4 +1,4 @@
-//! `cairn setup [agent|--all]` - wire AI agents up to a Cairn server.
+//! `cairn setup [agent]` - wire AI agents up to a Cairn server.
 //!
 //! Every merge is **non-destructive**: existing config is preserved and our entries are added
 //! idempotently (running twice changes nothing). Per-agent file formats and locations live in
@@ -9,8 +9,8 @@
 //! `CAIRN_TOKEN` env vars so `cairn mcp` runs in remote-proxy mode; otherwise it runs in local
 //! mode.
 //!
-//! `--all` configures only the agents it actually detects (project markers or home-dir install);
-//! naming an agent explicitly configures it regardless.
+//! Without an explicit agent name, all detected agents are configured. Naming an agent
+//! explicitly configures only that one.
 
 use crate::agents::{self, InstallCtx, Scope};
 use crate::paths;
@@ -21,15 +21,10 @@ use std::path::{Path, PathBuf};
 /// actually installed.
 pub fn run(
     agent: Option<&str>,
-    all: bool,
     server: Option<&str>,
     token: Option<&str>,
     project_flag: bool,
 ) -> Result<usize> {
-    if all && is_reonboarding() {
-        eprintln!("[cairn]  Re-onboarding - updating agent wiring\n");
-    }
-
     let (effective_server, effective_token) = resolve_with_fallback(server, token)?;
 
     let project = std::env::current_dir()?;
@@ -41,57 +36,61 @@ pub fn run(
         Scope::Global
     };
 
-    if all {
-        let detected = agents::detect_all(&project, home.as_deref());
-        for a in &detected {
-            install_one(*a, &project, home.as_deref(), scope)?;
-        }
-        if detected.is_empty() {
-            println!("cairn: no supported agents detected here or in your home directory.");
-            println!("Install one explicitly, e.g. `cairn setup claude-code`.");
-            println!("Supported: {}.", agents::ids().join(", "));
-        } else {
-            eprintln!("✓ wired {} agent(s)\n", detected.len());
-        }
-
-        eprintln!("Done. Next steps:");
+    if let Some(requested) = agent {
+        let a = agents::find(requested).ok_or_else(|| {
+            anyhow!(
+                "unknown agent '{requested}'. Supported: {}.",
+                agents::ids().join(", ")
+            )
+        })?;
+        install_one(a, &project, home.as_deref(), scope)?;
         if let Some(srv) = effective_server.as_deref() {
             if effective_token.is_some() {
-                eprintln!("  - server: {srv}");
+                println!("\nCairn server: {srv}. Open a session in your agent.");
             } else {
-                eprintln!("  - server: {srv} (not persisted; pass --token to save it)");
+                println!("\nCairn server: {srv} (not persisted; pass --token to save it).");
             }
         } else {
-            eprintln!("  - no server configured yet -- Cairn is running in local-only mode");
-            eprintln!(
-                "  - to connect to a server: mint a token from the dashboard's You > Tokens \
-                       page, then run `cairn setup --all --server <url> --token <jwt>`"
-            );
+            println!("\nNo server configured. Run with --server <url> or set CAIRN_SERVER.");
         }
-        eprintln!("  - open a session in your AI agent (Claude Code, OpenCode, Codex)");
-        eprintln!("  - check status with `cairn status`");
-
-        return Ok(detected.len());
+        return Ok(1);
     }
 
-    let requested = agent.unwrap_or("claude-code");
-    let a = agents::find(requested).ok_or_else(|| {
-        anyhow!(
-            "unknown agent '{requested}'. Supported: {}.",
-            agents::ids().join(", ")
-        )
-    })?;
-    install_one(a, &project, home.as_deref(), scope)?;
+    // No agent specified: detect and configure all.
+    if is_reonboarding() {
+        eprintln!("[cairn]  Re-onboarding - updating agent wiring\n");
+    }
+
+    let detected = agents::detect_all(&project, home.as_deref());
+    for a in &detected {
+        install_one(*a, &project, home.as_deref(), scope)?;
+    }
+    if detected.is_empty() {
+        println!("cairn: no supported agents detected here or in your home directory.");
+        println!("Install one explicitly, e.g. `cairn setup claude-code`.");
+        println!("Supported: {}.", agents::ids().join(", "));
+    } else {
+        eprintln!("\u{2713} wired {} agent(s)\n", detected.len());
+    }
+
+    eprintln!("Done. Next steps:");
     if let Some(srv) = effective_server.as_deref() {
         if effective_token.is_some() {
-            println!("\nCairn server: {srv}. Open a session in your agent.");
+            eprintln!("  - server: {srv}");
         } else {
-            println!("\nCairn server: {srv} (not persisted; pass --token to save it).");
+            eprintln!("  - server: {srv} (not persisted; pass --token to save it)");
         }
     } else {
-        println!("\nNo server configured. Run with --server <url> or set CAIRN_SERVER.");
+        eprintln!("  - no server configured yet -- Cairn is running in local-only mode");
+        eprintln!(
+            "  - to connect to a server: mint a token from the dashboard's You > Tokens \
+                   page, then run `cairn setup --server <url> --token <jwt>`"
+        );
     }
-    Ok(1)
+    eprintln!("  - open a session in your AI agent (Claude Code, OpenCode, Codex)");
+    eprintln!("  - check status with `cairn status`");
+
+    Ok(detected.len())
 }
 
 fn resolve_with_fallback(
@@ -110,7 +109,7 @@ fn resolve_with_fallback(
         eprintln!(
             "cairn: found a Cairn server at {localhost} but no token configured.\n\
              Open {localhost}/you/tokens in your browser to mint a token, then run:\n\
-             \n  cairn setup --all --server {localhost} --token <jwt>\n\
+             \n  cairn setup --server {localhost} --token <jwt>\n\
              \nContinuing setup without a server for now (local-only checks)."
         );
     } else {
@@ -119,7 +118,7 @@ fn resolve_with_fallback(
              CAIRN_SERVER/CAIRN_TOKEN env vars, ~/.cairn/config.toml, and {localhost}) \
              -- continuing in local-only mode.\n\
              To connect to a server: mint a token from the dashboard's You > Tokens page, \
-             then run `cairn setup --all --server <url> --token <jwt>`.\n\
+             then run `cairn setup --server <url> --token <jwt>`.\n\
              If local-only mode is what you want, no action needed."
         );
     }
@@ -139,7 +138,7 @@ fn install_one(
     };
     let report = a.install(&ctx)?;
     report.print(a.label());
-    crate::rules::write_for(a.id(), project)?;
+    crate::rules::write_for(a.id(), project, home)?;
     Ok(())
 }
 
@@ -161,7 +160,7 @@ mod tests {
     #[test]
     fn unknown_agent_name_is_rejected_with_supported_list() {
         crate::env_guard::with_env(&[("CAIRN_SERVER", None), ("CAIRN_TOKEN", None)], || {
-            let err = run(Some("emacs"), false, None, None, false).unwrap_err();
+            let err = run(Some("emacs"), None, None, false).unwrap_err();
             let msg = err.to_string();
             assert!(msg.contains("emacs"));
             assert!(msg.contains("claude-code"));

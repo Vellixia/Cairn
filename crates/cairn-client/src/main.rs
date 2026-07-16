@@ -5,7 +5,7 @@
 //! config management.
 //!
 //! Quick start:
-//!   cairn setup --all --server https://cairn.example.com --token <jwt>
+//!   cairn setup --server https://cairn.example.com --token <jwt>
 
 use std::path::PathBuf;
 
@@ -44,8 +44,8 @@ fn require_resolved() -> Result<config::Resolved> {
     } else {
         Err(anyhow!(
             "No Cairn server configured. Mint a token from the dashboard's You > Tokens \
-             page, then run:\n\
-             \n  cairn setup --all --server <url> --token <jwt>"
+              page, then run:\n\
+              \n  cairn setup --server <url> --token <jwt>"
         ))
     }
 }
@@ -57,7 +57,7 @@ fn require_resolved() -> Result<config::Resolved> {
     about = "Cairn client - connect AI agents to a Cairn server.",
     long_about = "Cairn gives AI agents persistent memory, lean context, and edit safety.\n\n\
                    Getting started:\n\
-                   \n  cairn setup --all --server <url> --token <jwt>\n\
+                   \n  cairn setup --server <url> --token <jwt>\n\
                   \n  See https://github.com/Vellixia/Cairn for docs."
 )]
 struct Cli {
@@ -77,12 +77,11 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Configure an agent (or --all detected) to use a Cairn server.
+    /// Configure agents to use a Cairn server. Without an agent name, detects
+    /// and configures all supported agents.
     Setup {
         /// Agent name: claude-code, codex, or opencode.
         agent: Option<String>,
-        #[arg(long)]
-        all: bool,
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
@@ -120,7 +119,7 @@ enum Cmd {
     /// subprocess for SessionStart / UserPromptSubmit / PostToolUse / SessionEnd /
     /// PreCompact / PreToolUse events. The hook payload is read from stdin as JSON
     /// (Claude Code's hook protocol); no CLI flags for prompt/tool-name/etc are
-    /// accepted. Debug with `CAIRN_HOOK_DEBUG=1` to see what's sent to the server.
+    /// accepted. Debug with `CAIRN_DEBUG=1` to see what's sent to the server.
     Hook {
         /// The hook event name (SessionStart, UserPromptSubmit, PostToolUse,
         /// SessionEnd, PreCompact, PreToolUse).
@@ -180,14 +179,12 @@ fn main() -> Result<()> {
         }
         Cmd::Setup {
             agent,
-            all,
             server,
             token,
             project,
         } => {
             setup::run(
                 agent.as_deref(),
-                all,
                 server.as_deref(),
                 token.as_deref(),
                 project,

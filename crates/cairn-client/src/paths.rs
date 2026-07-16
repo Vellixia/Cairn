@@ -95,3 +95,33 @@ pub fn codex_config_path(home: Option<&Path>) -> PathBuf {
 pub fn codex_hooks_path(home: &Path) -> PathBuf {
     home.join(".codex").join("hooks.json")
 }
+
+/// Codex CLI's skill directory: `~/.codex/skills/cairn/`.
+pub fn codex_skills_dir(home: &Path) -> PathBuf {
+    home.join(".codex").join("skills").join("cairn")
+}
+
+/// Codex CLI's global instructions file: `~/.codex/AGENTS.md`.
+pub fn codex_global_agents_md(home: &Path) -> PathBuf {
+    home.join(".codex").join("AGENTS.md")
+}
+
+/// OpenCode's skill directory, derived from the config path's parent so
+/// it follows the same `XDG_CONFIG_HOME` resolution.
+pub fn opencode_skills_dir() -> PathBuf {
+    opencode_config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".opencode"))
+        .join("skills")
+        .join("cairn")
+}
+
+/// OpenCode's global instructions file, derived from the config path's parent.
+pub fn opencode_global_agents_md() -> PathBuf {
+    opencode_config_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".opencode"))
+        .join("AGENTS.md")
+}

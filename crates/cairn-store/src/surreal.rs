@@ -248,6 +248,8 @@ impl StoreBackend for SurrealStore {
                 "contradicts": m.contradicts,
                 "supersedes": m.supersedes,
                 "applies_to": m.applies_to,
+                "related_to": m.related_to,
+                "depends_on": m.depends_on,
                 "scope_type": m.scope_type.as_str(),
                 "scope_id": m.scope_id.clone().unwrap_or_default(),
                 "promo_score": m.promo_score,
@@ -257,7 +259,13 @@ impl StoreBackend for SurrealStore {
                 "embedding": embedding,
             },
         });
-        self.q("CREATE type::record('memory', $id) CONTENT $data", vars)?;
+        tracing::info!(id = %m.id, "insert_memory: executing CREATE query");
+        let result = self.q("CREATE type::record('memory', $id) CONTENT $data", vars);
+        match &result {
+            Ok(_) => tracing::info!(id = %m.id, "insert_memory: CREATE query returned Ok"),
+            Err(e) => tracing::error!(id = %m.id, error = %e, "insert_memory: CREATE query returned Err"),
+        }
+        result?;
         Ok(())
     }
 
@@ -1088,6 +1096,8 @@ fn memory_from_props(m: &Map<String, Json>) -> Memory {
         contradicts: get_str_vec(m, "contradicts"),
         supersedes: get_str_vec(m, "supersedes"),
         applies_to: get_str_vec(m, "applies_to"),
+        related_to: get_str_vec(m, "related_to"),
+        depends_on: get_str_vec(m, "depends_on"),
         scope_type: ScopeType::from_str(&get_str(m, "scope_type")).unwrap_or(ScopeType::Global),
         scope_id: {
             let sid = get_str(m, "scope_id");
@@ -1238,6 +1248,8 @@ mod live {
             contradicts: vec![],
             supersedes: vec![],
             applies_to: vec![],
+            related_to: vec![],
+            depends_on: vec![],
             scope_type: ScopeType::Global,
             scope_id: None,
             promo_score: 0.0,

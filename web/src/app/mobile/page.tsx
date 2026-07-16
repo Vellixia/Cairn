@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { request, type DriftEvent } from "@/lib/api";
 
 /**
  * Mobile companion PWA (v0.5.0 Sprint 23; web redesign v2 made it read-only).
@@ -79,15 +80,14 @@ export default function MobileCompanion() {
 
   const loadStats = useCallback(async () => {
     try {
-      const res = await fetch("/api/metrics/savings", { credentials: "include" });
-      if (res.ok) {
-        const j = await res.json();
-        setStats({
-          tokens_saved_today: j.tokens_saved_today ?? 0,
-          drift_pending: j.drift_pending ?? 0,
-          recent_pack_installs: j.recent_pack_installs ?? 0,
-        });
-      }
+      const j = await request<{ tokens_saved_today: number; drift_pending: number; recent_pack_installs: number }>(
+        "/api/metrics/savings",
+      );
+      setStats({
+        tokens_saved_today: j.tokens_saved_today ?? 0,
+        drift_pending: j.drift_pending ?? 0,
+        recent_pack_installs: j.recent_pack_installs ?? 0,
+      });
     } catch (e) {
       setError(String(e));
     }
@@ -95,14 +95,14 @@ export default function MobileCompanion() {
 
   const loadDrift = useCallback(async () => {
     try {
-      const res = await fetch("/api/guard/drift", { credentials: "include" });
-      if (res.ok) {
-        const j = await res.json();
-        // `/api/guard/drift` returns a flat array; accept both shapes so a
-        // future `{items: [...]}` shape doesn't break the mobile page.
-        const list: DriftRow[] = Array.isArray(j) ? j : j.items ?? [];
-        setDrift(list.slice(0, 10));
-      }
+      const list = await request<DriftEvent[]>("/api/guard/drift");
+      setDrift(list.slice(0, 10).map((d) => ({
+        id: d.id,
+        path: d.path,
+        risk: d.risk,
+        detail: d.detail,
+        ts: d.ts,
+      })));
     } catch (e) {
       setError(String(e));
     }

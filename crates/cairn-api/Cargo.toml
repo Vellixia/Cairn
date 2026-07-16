@@ -13,6 +13,12 @@ repository.workspace = true
 name = "cairn-server"
 path = "src/bin/cairn_server.rs"
 
+[features]
+default = []
+# Enable in-process local embeddings (fastembed/ONNX) + local reranker (fastembed/ONNX).
+# Off in the lean Docker image; opt in with: docker build --build-arg CAIRN_FEATURES=embed-local .
+embed-local = ["cairn-embed/local", "cairn-memory/local"]
+
 [dependencies]
 cairn-core.workspace = true
 cairn-store.workspace = true

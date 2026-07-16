@@ -109,11 +109,11 @@ Two mechanisms teach the model to use Cairn without you maintaining anything by 
   zero. Codex and OpenCode have no skill system, so they get the fuller version inlined
   directly into their `AGENTS.md` managed block instead (see the table above).
 
-Cairn's MCP server currently exposes 28 tools — `read`/`expand`, `remember`/`recall`/`search`,
+Cairn's MCP server currently exposes 31 tools — `read`/`expand`, `remember`/`recall`/`search`,
 `assemble`, `wakeup`, `checkpoint`/`rollback`/`checkpoints`, `anchor`, `prefer`/`profile`,
-`compress`, `consolidate`, `verify`, `sanitize`, `proactive_recall`, the eight-strong
+`compress`, `consolidate`, `verify`/`verify_baseline`, `sanitize`, `proactive_recall`, the eight-strong
 `memory_*` family (`edit`/`delete`/`pin`/`promote`/`reinforce`/`timeline`/`crystallize`/
-`graph`), `metrics`, and `registry_search` — see `cairn_mcp::tool_defs()` for the authoritative,
+`graph`), `document_ingest`/`document_search`, `metrics`, and `registry_search` — see `cairn_mcp::tool_defs()` for the authoritative,
 current list.
 
 ### 6. Optional: the real-time guard

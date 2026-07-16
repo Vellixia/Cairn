@@ -129,7 +129,7 @@ export default function SetupPage() {
       {step === 2 && (
         <Step2Health
           health={health}
-          onContinue={() => router.push("/dashboard")}
+          onContinue={() => router.push("/")}
         />
       )}
     </div>

@@ -15,7 +15,7 @@ use cairn_assemble::Assembler;
 use cairn_context::{ContextEngine, ReadMode};
 use cairn_core::ContentHash;
 #[cfg(feature = "engine")]
-use cairn_core::{Config, NewMemory, Result};
+use cairn_core::{Config, NewMemory, Result, ScopeCtx};
 #[cfg(feature = "engine")]
 use cairn_guard::Guard;
 #[cfg(feature = "engine")]
@@ -72,7 +72,7 @@ impl McpServer {
     }
 
     /// Construct an `McpServer` from a caller-supplied `Arc<Store>`. Used by the hermetic
-    /// test bucket to wire a fully-in-memory store; production callers should keep using
+    /// test bucket to wire a fully in-memory store; production callers should keep using
     /// `new`.
     pub fn with_store(cfg: &Config, store: Arc<Store>) -> Result<Self> {
         let mem = Arc::new(MemoryEngine::new(store.clone()));
@@ -93,6 +93,37 @@ impl McpServer {
                 .ok(),
             config: cfg.clone(),
         })
+    }
+
+    /// Construct an `McpServer` from pre-built shared engines — the production path for
+    /// `/api/tools/call`. This avoids opening a fresh `Store` + `ContextEngine` + `Guard`
+    /// per request (which would lose the in-memory read cache, file version baselines,
+    /// and guard workspace scoping). All engines are shared `Arc` handles from `AppState`,
+    /// so tool calls see the same cache and file version state as direct API handlers.
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_engines(
+        config: Config,
+        store: Arc<Store>,
+        ctx: Arc<ContextEngine>,
+        guard: Arc<Guard>,
+        mem: Arc<MemoryEngine>,
+        asm: Arc<Assembler>,
+        shell: Arc<ShellCompressor>,
+        profile: Arc<Profile>,
+        registry: Option<Arc<cairn_registry::Registry>>,
+    ) -> Self {
+        Self {
+            ctx,
+            guard,
+            asm,
+            shell,
+            profile,
+            san: cairn_share::Sanitizer::new(),
+            mem,
+            store,
+            registry,
+            config,
+        }
     }
 
     /// Run the stdio loop until stdin closes. Never writes anything but protocol JSON to stdout.
@@ -222,7 +253,8 @@ impl McpServer {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        match self.dispatch(name, &args) {
+        let scope = ScopeCtx::default();
+        match self.dispatch(name, &args, &scope) {
             Ok(text) => ok(id, json!({ "content": [{ "type": "text", "text": text }] })),
             Err(msg) if msg.contains("outside the workspace root") => {
                 err(id, -32602, &format!("workspace root violation: {msg}"))
@@ -244,7 +276,14 @@ impl McpServer {
     }
 
     /// Dispatch a single tool call. Public so the HTTP API can expose the same tool surface.
-    pub fn dispatch(&self, name: &str, args: &Value) -> std::result::Result<String, String> {
+    /// `scope` carries the current project/session from request headers (or `ScopeCtx::default()`
+    /// for stdio-only paths). Write tools default to Project scope when a project is detected.
+    pub fn dispatch(
+        &self,
+        name: &str,
+        args: &Value,
+        scope: &ScopeCtx,
+    ) -> std::result::Result<String, String> {
         match name {
             "read" => {
                 let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
@@ -271,12 +310,51 @@ impl McpServer {
                     .get("importance")
                     .and_then(Value::as_f64)
                     .map(|i| i as f32);
+                nm.scope_type = str_arg(args.get("scope_type"))
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or_else(|| {
+                        if scope.project_id.is_some() {
+                            cairn_core::ScopeType::Project
+                        } else {
+                            cairn_core::ScopeType::Global
+                        }
+                    });
+                nm.scope_id = str_arg(args.get("scope_id")).map(String::from).or_else(|| {
+                    if nm.scope_type == cairn_core::ScopeType::Project {
+                        scope.project_id.clone()
+                    } else if nm.scope_type == cairn_core::ScopeType::Session {
+                        scope.session_id.clone()
+                    } else {
+                        None
+                    }
+                });
+                nm.concepts = args
+                    .get("concepts")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                nm.files = args
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(Value::as_str)
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let m = self.mem.remember(nm).map_err(|e| e.to_string())?;
                 Ok(format!(
-                    "remembered {} ({}/{})",
+                    "remembered {} ({}/{}/{})",
                     m.id,
                     m.kind.as_str(),
-                    m.tier.as_str()
+                    m.tier.as_str(),
+                    m.scope_type.as_str()
                 ))
             }
             "recall" => {
@@ -381,6 +459,23 @@ impl McpServer {
                     .verify_edit(&resolved, content)
                     .map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&r).map_err(|e| e.to_string())
+            }
+            "verify_baseline" => {
+                let path = str_arg(args.get("path")).ok_or("missing 'path'")?;
+                let resolved = self.resolve_tool_path(path)?;
+                match self
+                    .guard
+                    .verify_against_baseline(&resolved)
+                    .map_err(|e| e.to_string())?
+                {
+                    Some(report) => {
+                        let _ = self.guard.note_verify(&report);
+                        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
+                    }
+                    None => {
+                        Ok("no baseline for this path (file was never read through Cairn)".into())
+                    }
+                }
             }
             "sanitize" => {
                 let text = str_arg(args.get("text")).ok_or("missing 'text'")?;
@@ -524,6 +619,56 @@ impl McpServer {
                 let results = reg.search(query).map_err(|e| e.to_string())?;
                 serde_json::to_string_pretty(&results).map_err(|e| e.to_string())
             }
+            // -- v0.9.0: document RAG tools --
+            "document_ingest" => {
+                let source = str_arg(args.get("source")).ok_or("missing 'source'")?;
+                let content = match str_arg(args.get("content")) {
+                    Some(c) => c.to_string(),
+                    None => cairn_document::read_source(source).map_err(|e| e.to_string())?,
+                };
+                if content.trim().is_empty() {
+                    return Err("content must not be empty".into());
+                }
+                let title = str_arg(args.get("title")).unwrap_or(source).to_string();
+                let chunks =
+                    cairn_document::chunk_text(&content, cairn_document::DEFAULT_CHUNK_CHARS);
+                self.store
+                    .replace_document(source, &title, &chunks, scope.project_id.as_deref())
+                    .map_err(|e| e.to_string())?;
+                let doc = self
+                    .store
+                    .list_documents(None)
+                    .map_err(|e| e.to_string())?
+                    .into_iter()
+                    .find(|d| d.source == source)
+                    .ok_or_else(|| "document vanished after ingest".to_string())?;
+                Ok(format!(
+                    "ingested {} chunks from {}",
+                    chunks.len(),
+                    doc.source
+                ))
+            }
+            "document_search" => {
+                let query = str_arg(args.get("query")).ok_or("missing 'query'")?;
+                let limit = args.get("limit").and_then(Value::as_u64).unwrap_or(10) as usize;
+                let chunks = self
+                    .store
+                    .search_documents(query, limit, scope.project_id.as_deref())
+                    .map_err(|e| e.to_string())?;
+                if chunks.is_empty() {
+                    return Ok("(no document chunks match)".into());
+                }
+                let mut out = String::new();
+                for (i, c) in chunks.iter().enumerate() {
+                    out.push_str(&format!(
+                        "[{}] {} (from {})\n",
+                        i + 1,
+                        c.content.chars().take(300).collect::<String>(),
+                        c.source
+                    ));
+                }
+                Ok(out)
+            }
             other => Err(format!("unknown tool: {other}")),
         }
     }
@@ -555,7 +700,7 @@ pub fn tool_defs() -> Value {
         },
         {
             "name": "remember",
-            "description": "Save a durable memory so future sessions on any device recall it. Include title and reasoning when the memory isn't self-explanatory from content alone - they show up as the scannable headline and the \"why\" in the dashboard's Memory Browser.",
+            "description": "Save a durable memory so future sessions on any device recall it. Include title and reasoning when the memory isn't self-explanatory from content alone - they show up as the scannable headline and the \"why\" in the dashboard's Memory Browser. Defaults to project scope when a project is detected; promote good ones to global later.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -564,7 +709,11 @@ pub fn tool_defs() -> Value {
                     "reasoning": { "type": "string", "description": "Why this matters or why this decision was made, kept separate from content - e.g. 'grep missed matches in binary-adjacent files last time'." },
                     "kind": { "type": "string", "enum": ["fact", "decision", "task", "preference", "gotcha", "note"] },
                     "tier": { "type": "string", "enum": ["working", "episodic", "semantic", "procedural"] },
-                    "importance": { "type": "number", "minimum": 0, "maximum": 1 }
+                    "importance": { "type": "number", "minimum": 0, "maximum": 1 },
+                    "scope_type": { "type": "string", "enum": ["global", "project", "session"], "description": "Visibility boundary. Defaults to 'project' when a project is detected, 'global' otherwise. Write at project scope first, then promote to global when the memory proves useful across projects." },
+                    "scope_id": { "type": "string", "description": "Project or session id for scoped memories. Auto-filled from the current context when omitted (default)." },
+                    "concepts": { "type": "array", "items": { "type": "string" }, "description": "Comma-separated key concepts" },
+                    "files": { "type": "array", "items": { "type": "string" }, "description": "Comma-separated relevant file paths" }
                 },
                 "required": ["content"]
             }
@@ -669,6 +818,17 @@ pub fn tool_defs() -> Value {
                     "content": { "type": "string", "description": "The proposed new full file content." }
                 },
                 "required": ["path", "content"]
+            }
+        },
+        {
+            "name": "verify_baseline",
+            "description": "Compare the current on-disk file against the version Cairn recorded when you last read it. Detects silent corruption introduced after a read (PostToolUse check). Returns 'no baseline' if the file was never read through Cairn.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "File path to check against its read baseline." }
+                },
+                "required": ["path"]
             }
         },
         // -- v0.5.0 Sprint 18: proactive recall --
@@ -800,6 +960,32 @@ pub fn tool_defs() -> Value {
                 "properties": { "query": { "type": "string" } },
                 "required": ["query"]
             }
+        },
+        // -- v0.9.0: document RAG tools --
+        {
+            "name": "document_ingest",
+            "description": "Ingest a file or URL into the document store for semantic search. Reads the source locally (or uses provided content), chunks it, and stores for later retrieval via document_search or assemble. Project-scoped when a project is detected.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string", "description": "File path or URL to read. Use with content omitted for local files." },
+                    "content": { "type": "string", "description": "Optional pre-read content. When omitted, the tool reads source from the local filesystem." },
+                    "title": { "type": "string", "description": "Defaults to source when omitted." }
+                },
+                "required": ["source"]
+            }
+        },
+        {
+            "name": "document_search",
+            "description": "Search ingested document chunks by semantic similarity. Returns the most relevant chunks with scores. Project-scoped when a project is detected.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" },
+                    "limit": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["query"]
+            }
         }
     ])
 }
@@ -876,6 +1062,7 @@ pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
         // Use the configured workspace root (or cwd) as the host project dir for path rewriting.
         if let Some(root) = &cfg.workspace_root {
             proxy.host_workspace = root.clone();
+            proxy.reader.lock().unwrap().workspace = root.clone();
         }
         proxy.serve_stdio()
     } else {
@@ -895,6 +1082,181 @@ pub fn serve_stdio(cfg: &cairn_core::Config) -> std::io::Result<()> {
     }
 }
 
+/// A stateful local file reader with mtime cache + diff support (Bug #2 fix).
+///
+/// Replaces the old stateless `read_file_local` that always returned `Full`. This reader:
+/// - Tracks file mtime — if unchanged since last read, returns a tiny `Cached` view (~13 tokens).
+/// - If the file changed, returns only the `Diff` (added/removed lines).
+/// - Falls back to `Full` for first reads or when the diff would be ≥60% of the full file.
+/// - Caches content by content hash so `expand` recovers the original without a blob store.
+///
+/// Does NOT support `signatures`/`map` modes (those need tree-sitter, only available with
+/// the `engine` feature). Structural mode requests fall back to `Full` on this path.
+struct LocalReader {
+    workspace: std::path::PathBuf,
+    /// path → (mtime_ns, content_hash, content, lines)
+    cache: HashMap<String, LocalCacheEntry>,
+}
+
+struct LocalCacheEntry {
+    mtime_ns: u128,
+    hash: String,
+    content: String,
+    lines: usize,
+}
+
+impl LocalReader {
+    fn new(workspace: std::path::PathBuf) -> Self {
+        Self {
+            workspace,
+            cache: HashMap::new(),
+        }
+    }
+
+    fn read(
+        &mut self,
+        path: &str,
+        mode: &str,
+        blob_cache: &Mutex<HashMap<String, String>>,
+    ) -> std::result::Result<String, String> {
+        let p = std::path::Path::new(path);
+        let resolved = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            self.workspace.join(p)
+        };
+        let key = resolved.to_string_lossy().to_string();
+
+        let meta =
+            std::fs::metadata(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))?;
+        let mtime_ns = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
+        // Re-read killer: if the file hasn't changed (mtime match), return a tiny Cached view.
+        if mode == "auto" || mode == "full" {
+            if let Some(entry) = self.cache.get(&key) {
+                if entry.mtime_ns == mtime_ns && mode == "auto" {
+                    let note = format!(
+                        "unchanged since last read; {} lines; `expand {}` for the full file",
+                        entry.lines, entry.hash
+                    );
+                    let result = json!({
+                        "path": key,
+                        "hash": entry.hash,
+                        "handle": &entry.hash[..12.min(entry.hash.len())],
+                        "status": "cached",
+                        "lines": entry.lines,
+                        "bytes": entry.content.len(),
+                        "view": "",
+                        "note": note,
+                        "est_tokens": note.len() / 4,
+                    });
+                    return serde_json::to_string_pretty(&result).map_err(|e| e.to_string());
+                }
+            }
+        }
+
+        // Read fresh content.
+        let content = std::fs::read_to_string(&resolved)
+            .map_err(|e| format!("{}: {e}", resolved.display()))?;
+        let bytes = content.len();
+        let lines = content.lines().count();
+        let hash = ContentHash::of(content.as_bytes());
+        let handle = hash.short().to_string();
+
+        // Cache by hash for expand().
+        {
+            let mut bc = blob_cache.lock().unwrap();
+            bc.insert(hash.0.clone(), content.clone());
+            bc.insert(handle.clone(), content.clone());
+        }
+
+        let original_tokens = bytes / 4;
+
+        // Check for diff (Auto mode, file changed).
+        let prev = self.cache.get(&key).map(|e| e.content.clone());
+        let (status, view, note, est_tokens) = match (&prev, mode) {
+            (Some(prev_content), "auto") if *prev_content != content => {
+                let diff = local_diff_only(prev_content, &content);
+                let diff_tokens = diff.len() / 4;
+                if diff_tokens >= (original_tokens * 3) / 5 {
+                    // Diff ≥ 60% of full → ship full instead.
+                    (
+                        "full",
+                        content.clone(),
+                        format!("full file; {lines} lines; handle {handle}"),
+                        original_tokens,
+                    )
+                } else {
+                    (
+                        "diff",
+                        diff,
+                        format!(
+                            "changed since last read; showing diff only; `expand {}` for the full file",
+                            handle
+                        ),
+                        diff_tokens,
+                    )
+                }
+            }
+            _ => (
+                "full",
+                content.clone(),
+                format!("full file; {lines} lines; handle {handle}"),
+                original_tokens,
+            ),
+        };
+
+        // Update cache.
+        self.cache.insert(
+            key.clone(),
+            LocalCacheEntry {
+                mtime_ns,
+                hash: hash.0.clone(),
+                content,
+                lines,
+            },
+        );
+
+        let result = json!({
+            "path": key,
+            "hash": hash.0,
+            "handle": handle,
+            "status": status,
+            "lines": lines,
+            "bytes": bytes,
+            "view": view,
+            "note": note,
+            "est_tokens": est_tokens,
+        });
+        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+    }
+}
+
+/// A compact diff: only added/removed lines (prefixed `+`/`-`), equal lines omitted.
+fn local_diff_only(old: &str, new: &str) -> String {
+    let diff = similar::TextDiff::from_lines(old, new);
+    let mut out = String::new();
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            similar::ChangeTag::Delete => {
+                out.push('-');
+                out.push_str(change.value());
+            }
+            similar::ChangeTag::Insert => {
+                out.push('+');
+                out.push_str(change.value());
+            }
+            similar::ChangeTag::Equal => {}
+        }
+    }
+    out
+}
+
 /// An MCP stdio server that forwards tool calls to a remote Cairn HTTP API.
 ///
 /// File-local tools (`read`, `verify`, `checkpoint`, `rollback`) get their `path` argument
@@ -910,15 +1272,19 @@ pub struct RemoteProxy {
     /// Content cache for files read locally: sha256 hex -> file content.
     /// Enables `expand` to recover the original without a blob store.
     file_cache: Mutex<HashMap<String, String>>,
+    /// Stateful local reader with mtime cache + diff support (Bug #2 fix).
+    reader: Mutex<LocalReader>,
 }
 
 impl RemoteProxy {
     pub fn new(server: &str, token: Option<String>) -> Self {
+        let workspace = std::env::current_dir().unwrap_or_default();
         Self {
             server: server.trim_end_matches('/').to_string(),
             token,
-            host_workspace: std::env::current_dir().unwrap_or_default(),
+            host_workspace: workspace.clone(),
             file_cache: Mutex::new(HashMap::new()),
+            reader: Mutex::new(LocalReader::new(workspace)),
         }
     }
 
@@ -1007,7 +1373,8 @@ impl RemoteProxy {
             "read" => {
                 let path = args.get("path").and_then(Value::as_str).unwrap_or("");
                 let mode = args.get("mode").and_then(Value::as_str).unwrap_or("auto");
-                match self.read_file_local(path, mode) {
+                let mut reader = self.reader.lock().unwrap();
+                match reader.read(path, mode, &self.file_cache) {
                     Ok(text) => ok(id, json!({ "content": [{ "type": "text", "text": text }] })),
                     Err(msg) => ok(
                         id,
@@ -1082,38 +1449,14 @@ impl RemoteProxy {
         out
     }
 
-    /// Read a file from the host filesystem and return it in `ReadResult` JSON format.
-    /// Relative paths are resolved against `host_workspace`. The content is cached by SHA-256
-    /// so `expand` can recover it without a blob store.
+    /// Read a file from the host filesystem with mtime cache + diff support.
+    /// Deprecated — use `LocalReader::read` instead. Kept for backward compat.
+    #[allow(dead_code)]
     fn read_file_local(&self, path: &str, _mode: &str) -> std::result::Result<String, String> {
-        let p = std::path::Path::new(path);
-        let resolved = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            self.host_workspace.join(p)
-        };
-        let content = std::fs::read_to_string(&resolved)
-            .map_err(|e| format!("{}: {e}", resolved.display()))?;
-        let lines = content.lines().count();
-        let bytes = content.len();
-        let hash = ContentHash::of(content.as_bytes());
-        let handle = hash.short().to_string();
-        // Cache by full hash AND short handle so `expand` works with either.
-        let mut cache = self.file_cache.lock().unwrap();
-        cache.insert(hash.0.clone(), content.clone());
-        cache.insert(handle.clone(), content.clone());
-        let result = json!({
-            "path": resolved.to_string_lossy(),
-            "hash": hash.0,
-            "handle": handle,
-            "status": "full",
-            "lines": lines,
-            "bytes": bytes,
-            "view": content,
-            "note": format!("full file; {lines} lines"),
-            "est_tokens": bytes / 4,
-        });
-        serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        self.reader
+            .lock()
+            .unwrap()
+            .read(path, "auto", &self.file_cache)
     }
 
     /// Look up a file previously read by `read_file_local` and return its content.
