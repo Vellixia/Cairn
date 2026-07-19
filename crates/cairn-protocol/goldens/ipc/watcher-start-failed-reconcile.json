@@ -1,0 +1,11 @@
+{
+  "id": "watcher-contract-1",
+  "error": {
+    "code": "WATCHER_START_FAILED",
+    "message": "session watcher readiness failed",
+    "data": {
+      "kind": "watcher_start_failure",
+      "stage": "reconcile"
+    }
+  }
+}

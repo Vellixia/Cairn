@@ -1,75 +1,266 @@
-name: ci
+name: CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
+  schedule:
+    # Nightly perf suite (SC-007/SC-003 bounds).
+    - cron: "0 3 * * *"
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  rust:
-    name: rust (fmt, clippy, test)
-    runs-on: ubuntu-latest
+  test:
+    name: build + test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: actions/checkout@v4
         with:
-          toolchain: stable
-          components: rustfmt, clippy
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Configure git identity for fixtures
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --workspace
+      - name: Test
+        run: cargo test --workspace --all-targets
+      - name: Schema golden diff gate
+        # Breaking-change tripwire: goldens must be committed, not regenerated.
+        run: |
+          git diff --exit-code -- crates/cairn-protocol/schemas
+        shell: bash
 
-      # web/out only contains .gitkeep here; the binary embeds it and falls back to the
-      # built-in page, so the Rust build does not require a web build.
-      - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo build --workspace --locked
-      - name: cargo test
-        run: cargo test --workspace
-
-  rust-msrv:
-    name: rust (MSRV 1.89)
-    runs-on: ubuntu-latest
+  windows-pipe-acl:
+    name: named-pipe ACL negative test (analysis I1)
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: actions/checkout@v4
         with:
-          toolchain: "1.89"
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --workspace --locked
+      - name: Build daemon
+        run: cargo build -p cairn-daemon
+      - name: Second local user cannot connect
+        shell: pwsh
+        run: |
+          # Start the daemon as the current user on a known pipe.
+          $env:CAIRN_PIPE_NAME = "cairn-acl-test"
+          $env:CAIRN_DATA_DIR = "$env:TEMP\cairn-acl-data"
+          Start-Process -FilePath "target\debug\cairnd.exe" -WindowStyle Hidden
+          Start-Sleep -Seconds 3
 
-  security:
-    name: security (audit, deny)
-    runs-on: ubuntu-latest
+          # Create a low-privilege local user and try to open the pipe as them.
+          $pw = ConvertTo-SecureString "Ephemeral#Pw12345" -AsPlainText -Force
+          New-LocalUser -Name "cairnacltest" -Password $pw -Description "ACL test" | Out-Null
+          try {
+            $cred = New-Object System.Management.Automation.PSCredential("cairnacltest", $pw)
+            $probe = @'
+          try {
+            $pipe = New-Object System.IO.Pipes.NamedPipeClientStream(".", "cairn-acl-test", [System.IO.Pipes.PipeDirection]::InOut)
+            $pipe.Connect(2000)
+            Write-Output "CONNECTED"
+          } catch {
+            Write-Output "DENIED"
+          }
+          '@
+            $probePath = "$env:TEMP\probe.ps1"
+            Set-Content -Path $probePath -Value $probe
+            $result = Start-Process -FilePath "powershell" -ArgumentList "-ExecutionPolicy","Bypass","-File",$probePath -Credential $cred -PassThru -Wait -RedirectStandardOutput "$env:TEMP\probe-out.txt"
+            $outcome = Get-Content "$env:TEMP\probe-out.txt" -Raw
+            Write-Host "probe outcome: $outcome"
+            if ($outcome -match "CONNECTED") {
+              throw "SECURITY FAILURE: another user connected to the daemon pipe"
+            }
+          } finally {
+            Remove-LocalUser -Name "cairnacltest" -ErrorAction SilentlyContinue
+            Stop-Process -Name cairnd -Force -ErrorAction SilentlyContinue
+          }
+
+  windows-feature001-evidence:
+    name: Windows Feature 001 Scenarios 1-6
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@v1
+      - uses: actions/checkout@v4
         with:
-          toolchain: stable
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-audit
-        run: cargo install cargo-audit --locked
-      - name: Audit advisories
-        run: cargo audit --deny warnings
-      - name: Install cargo-deny
-        run: cargo install cargo-deny --locked
-      - name: Check bans / advisories / sources
-        run: cargo deny check advisories bans sources
+      - name: Record exact Windows implementation environment
+        shell: pwsh
+        run: |
+          Write-Host "implementation_sha=$(git rev-parse HEAD)"
+          $os = Get-CimInstance Win32_OperatingSystem
+          Write-Host "os=$($os.Caption) $($os.Version)"
+          Write-Host "architecture=$env:PROCESSOR_ARCHITECTURE"
+          rustc --version
+          cargo --version
+      - name: Configure git identity for fixtures
+        shell: pwsh
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Format check
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Workspace tests
+        run: cargo test --workspace --all-targets
+      - name: Scenario 1 - registration and exact inspection
+        run: cargo test -p cairn-daemon --test us1_register_inspect -- --nocapture
+      - name: Scenario 2 - snapshot-bound deterministic session
+        run: cargo test -p cairn-daemon --test us2_agent_sim --test us2_sessions -- --nocapture
+      - name: Scenario 3 - live tracking and event counts
+        run: cargo test -p cairn-daemon --test us3_tracking --test us3_events -- --nocapture
+      - name: Scenario 4 - forced-kill recovery
+        shell: pwsh
+        run: |
+          $env:CAIRN_CRASH_ITERS = "1"
+          $env:CAIRN_CRASH_EXPECTED_ITERS = "1"
+          cargo test -p cairn-daemon --test us4_recovery --test us4_crash_restart -- --nocapture
+      - name: Scenario 5 - privacy audit
+        run: cargo test -p cairn-daemon --test privacy_audit -- --nocapture
+      - name: Scenario 6 - offline/failure contract realization
+        run: cargo test -p cairn-cli --test us1_cli_contract --test us2_cli_contract --test us4_cli_contract -- --nocapture
+      - name: Record scenario results
+        shell: pwsh
+        run: |
+          Write-Host "feature001_scenario_1=pass"
+          Write-Host "feature001_scenario_2=pass"
+          Write-Host "feature001_scenario_3=pass"
+          Write-Host "feature001_scenario_4=pass"
+          Write-Host "feature001_scenario_5=pass"
+          Write-Host "feature001_scenario_6=pass"
+          Write-Host "event_counts=printed_by_us2_agent_sim_us3_tracking_and_us4_crash_restart"
 
-  web:
-    name: web (build, lint, typecheck, test)
+  sc005-acceptance:
+    name: SC-005 exactly 100 forced daemon kills
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: web
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/checkout@v4
         with:
-          node-version: 22
-      - run: npm ci
-      - run: npm run build
-      - run: npm run lint
-      - run: npm run typecheck
-      - run: npm test
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Configure git identity for fixtures
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Record exact implementation SHA
+        run: echo "implementation_sha=$(git rev-parse HEAD)"
+      - name: Run exactly-100-kill acceptance
+        env:
+          CAIRN_CRASH_ITERS: "100"
+          CAIRN_CRASH_EXPECTED_ITERS: "100"
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture 2>&1 | tee sc005-output.txt
+          grep -F "configured_iterations=100 completed_forced_kills=100 committed_event_loss=0 invalid_session_outcomes=0" sc005-output.txt
+          echo "configured_iterations=100"
+          echo "completed_forced_kills=100"
+          echo "committed_event_loss=0"
+          echo "invalid_session_outcomes=0"
+
+  linux-network-isolated:
+    name: Linux network-isolated Feature 001 validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Configure git identity for fixtures
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Record exact Linux implementation environment
+        run: |
+          echo "implementation_sha=$(git rev-parse HEAD)"
+          . /etc/os-release
+          echo "os=$PRETTY_NAME"
+          echo "architecture=$(uname -m)"
+          rustc --version
+          cargo --version
+      - name: Fetch dependencies before isolation
+        run: cargo fetch --locked
+      - name: Build required binaries and tests before isolation
+        run: cargo test --workspace --all-targets --no-run --locked
+      - name: Fetch the isolation container before disabling networking
+        run: docker pull rust:1-bookworm
+      - name: Validate inside a no-network container
+        shell: bash
+        run: |
+          docker info >/dev/null
+          echo "isolation_mechanism=docker --network none"
+          docker run --rm --network none \
+            --volume "${{ github.workspace }}:/workspace" \
+            --volume "/home/runner/.cargo/registry:/usr/local/cargo/registry" \
+            --volume "/home/runner/.cargo/git:/usr/local/cargo/git" \
+            --workdir /workspace \
+            --env CARGO_NET_OFFLINE=true \
+            rust:1-bookworm \
+            bash -euxo pipefail -c '
+              test -f /workspace/Cargo.toml
+              printf "filesystem-ok\n" > /workspace/target/network-isolation-filesystem-proof
+              grep -F "filesystem-ok" /workspace/target/network-isolation-filesystem-proof
+              echo "local_filesystem=available"
+              if curl --silent --show-error --connect-timeout 2 https://example.com >/dev/null; then
+                echo "external network unexpectedly reachable" >&2
+                exit 1
+              fi
+              echo "external_network=unreachable"
+              cargo test --offline --locked -p cairn-daemon \
+                --test us1_register_inspect \
+                --test us2_agent_sim \
+                --test us3_tracking \
+                --test us4_recovery \
+                --test privacy_audit -- --nocapture
+              echo "local_ipc=available"
+              cargo test --offline --locked -p cairn-cli \
+                --test us1_cli_contract \
+                --test us2_cli_contract \
+                --test us4_cli_contract -- --nocapture
+              echo "feature001_network_isolated_scenarios=pass"
+            '
+
+  sc007-performance:
+    name: SC-007 explicit performance acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Configure git identity for fixtures
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Record exact performance environment
+        run: |
+          echo "implementation_sha=$(git rev-parse HEAD)"
+          . /etc/os-release
+          echo "os=$PRETTY_NAME"
+          echo "architecture=$(uname -m)"
+          rustc --version
+          cargo --version
+      - name: Run perf suite
+        env:
+          RUST_TEST_NOCAPTURE: "1"
+        run: cargo test -p cairn-daemon --test perf -- --ignored

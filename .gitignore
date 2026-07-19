@@ -1,73 +1,15 @@
-# Rust
-/target
-**/*.rs.bk
-
-# Node / web
-/web/node_modules
-/web/.next
-/web/out
-!/web/out/.gitkeep
-/web/out/_next/static/**/*.js.map
-/web/dist
-
-# TypeScript build cache
-*.tsbuildinfo
-
-# Audit / internal screenshots — not for the public repo
-/docs/img
-!/docs/img/.gitkeep
-
-# Live E2E walk + dashboard flow test screenshots and evidence captures —
-# regenerated on every test run, not for the public repo (same policy as
-# /docs/img above).
-/docs/testing/live-e2e/screenshots/*
-!/docs/testing/live-e2e/screenshots/.gitkeep
-/docs/testing/live-e2e/evidence/
-/web/test/screenshots/
-
-# Local dogfood testing artifacts
-/dogfood-output
-
-# Cairn runtime data
-/data
-/.cairn
-/.e2e-data
-*.db
-*.sqlite
-*.sqlite3
-
-# fastembed / HuggingFace model cache — 86 MB+ ONNX binary, auto-downloaded at runtime
-.fastembed_cache/
-**/.fastembed_cache/
-
-# Env / secrets
-.env
-.env.*
-!.env.example
-
-# OS
+target/
+debug/
+release/
+*.rs.bk
+*.rlib
+*.prof*
+*.log
+.env*
+.idea/
+.vscode/
+.specify/workflows/runs/
 .DS_Store
 Thumbs.db
-
-# Working-tree scratch files (build logs, dump outputs, ad-hoc notes,
-# local experiment captures). Anything matched by these patterns is
-# expected to be regenerated on demand and never committed. Explicit
-# allowlist below keeps source-of-truth files (Cargo.toml, README.md,
-# etc.) from being ignored.
-/*.log
-/*.txt
-!/CONTRIBUTING.md
-!/LICENSE
-!/README.md
-!/CHANGELOG.md
-!/SECURITY.md
-!/AGENTS.md
-!/CLAUDE.md
-!/Cargo.toml
-!/Cargo.lock
-!/deny.toml
-!/rust-toolchain.toml
-
-# Local dev overrides (not for commit)
-docker-compose.override.yml
-.claude/launch.json
+*.tmp
+*.swp

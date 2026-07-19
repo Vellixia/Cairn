@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionStopResult",
+  "type": "object",
+  "required": [
+    "session"
+  ],
+  "properties": {
+    "session": {
+      "$ref": "#/definitions/SessionDto"
+    }
+  },
+  "definitions": {
+    "SessionDto": {
+      "type": "object",
+      "required": [
+        "agent_instance_id",
+        "agent_type",
+        "current_snapshot",
+        "last_heartbeat_at",
+        "lease_expires_at",
+        "local_user",
+        "repository_id",
+        "session_id",
+        "start_snapshot",
+        "started_at",
+        "state",
+        "worktree_id"
+      ],
+      "properties": {
+        "agent_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "agent_type": {
+          "type": "string"
+        },
+        "current_snapshot": {
+          "$ref": "#/definitions/SnapshotDto"
+        },
+        "ended_at": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "last_heartbeat_at": {
+          "type": "string"
+        },
+        "lease_expires_at": {
+          "type": "string"
+        },
+        "local_user": {
+          "type": "string"
+        },
+        "recovering_since": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "start_snapshot": {
+          "$ref": "#/definitions/SnapshotDto"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/SessionState"
+        },
+        "worktree_id": {
+          "type": "string"
+        }
+      }
+    },
+    "SessionState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "recovering",
+        "stopped",
+        "interrupted"
+      ]
+    },
+    "SnapshotDto": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "detached",
+        "head_commit",
+        "snapshot_fp",
+        "snapshot_id",
+        "staged_fp",
+        "unstaged_fp",
+        "untracked_fp"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "head_commit": {
+          "type": "string"
+        },
+        "snapshot_fp": {
+          "type": "string"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "staged_fp": {
+          "type": "string"
+        },
+        "unstaged_fp": {
+          "type": "string"
+        },
+        "untracked_fp": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

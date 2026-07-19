@@ -1,0 +1,9 @@
+{
+  "id": "watcher-contract-1",
+  "method": "v1.session.start",
+  "params": {
+    "path": "/fixture/repository",
+    "agent_type": "contract-agent",
+    "agent_instance_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0a"
+  }
+}

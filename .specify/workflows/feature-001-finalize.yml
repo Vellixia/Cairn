@@ -1,0 +1,727 @@
+schema_version: "1.0"
+
+workflow:
+  id: "feature-001-finalize"
+  name: "Cairn Feature 001 Finalize"
+  version: "1.0.0"
+  author: "Cairn"
+  description: >-
+    Freezes Feature 001, gathers exact-commit macOS and GitHub Actions
+    evidence, updates evidence artifacts, converges, analyzes, and requires
+    76/76 completion without touching Feature 002.
+  integration: "codex"
+
+requires:
+  speckit_version: ">=0.13.0"
+  integrations:
+    any: ["codex"]
+
+inputs:
+  ci_run_id:
+    type: string
+    default: ""
+    prompt: >-
+      Optional GitHub Actions run ID for the frozen implementation SHA. Leave
+      empty to reuse or dispatch the exact-SHA CI workflow.
+
+steps:
+  - id: review-configuration
+    type: gate
+    message: >-
+      Review .specify/extensions.yml and this workflow before beginning the
+      Feature 001 evidence run. Approve only when the configuration is ready.
+    options: [approve, reject]
+    on_reject: abort
+
+  - id: repository-auth-preflight
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      test "$(uname -s)" = "Darwin"
+      for required_tool in git cargo rustc gh jq codex specify; do
+        command -v "$required_tool" >/dev/null
+      done
+      test "$(git rev-parse --is-inside-work-tree)" = "true"
+      repo_root="$(git rev-parse --show-toplevel)"
+      test "$repo_root" = "$PWD"
+      branch="$(git symbolic-ref --quiet --short HEAD)"
+      test -n "$branch"
+      test "$branch" != "main"
+      test "$branch" != "master"
+      test -n "$(git config user.name)"
+      test -n "$(git config user.email)"
+      git diff --check
+      test -z "$(git diff --name-only --diff-filter=U)"
+      git remote get-url origin >/dev/null
+      git ls-remote origin HEAD >/dev/null
+      gh auth status
+      codex login status
+      jq -e '.feature_directory == "specs/001-local-session-foundation"' \
+        .specify/feature.json >/dev/null
+      test -f specs/001-local-session-foundation/spec.md
+      test -f specs/001-local-session-foundation/plan.md
+      test -f specs/001-local-session-foundation/tasks.md
+      test -f specs/001-local-session-foundation/evidence/quickstart-run.md
+      specify extension list | grep -F "Verify Extension (v1.0.3)" >/dev/null
+      specify extension list | grep -F "Verify Tasks Extension (v1.0.0)" >/dev/null
+
+  - id: feature-002-change-check
+    type: shell
+    timeout: 60
+    run: |
+      set -eu
+      run_dir=".specify/workflows/runs/{{ context.run_id }}/evidence"
+      mkdir -p "$run_dir"
+      changed_paths="$(
+        git diff --name-only --diff-filter=ACMRTUXB HEAD
+        git ls-files --others --exclude-standard
+      )"
+      if printf '%s\n' "$changed_paths" | \
+        grep -E '(^|/)(002-[^/]+|feature-002)(/|$)' \
+        > "$run_dir/feature-002-paths.txt"; then
+        echo "Feature 002 changes are present; refusing to continue." >&2
+        cat "$run_dir/feature-002-paths.txt" >&2
+        exit 1
+      fi
+
+  - id: prefreeze-task-inventory
+    type: shell
+    timeout: 60
+    run: |
+      set -eu
+      tasks="specs/001-local-session-foundation/tasks.md"
+      total="$(grep -Ec '^- \[[ xX]\] T[0-9]{3}[[:space:]]' "$tasks")"
+      unique="$(
+        grep -E '^- \[[ xX]\] T[0-9]{3}[[:space:]]' "$tasks" |
+        sed -E 's/^- \[[ xX]\] (T[0-9]{3}).*/\1/' |
+        LC_ALL=C sort -u |
+        wc -l |
+        tr -d ' '
+      )"
+      test "$total" -eq 76
+      test "$unique" -eq 76
+
+  - id: cargo-fmt-check
+    type: shell
+    timeout: 900
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/prefreeze-fmt.log"
+      if ! cargo fmt --check > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 40 "$log"
+
+  - id: cargo-clippy
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/prefreeze-clippy.log"
+      if ! cargo clippy --workspace --all-targets -- -D warnings > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 40 "$log"
+
+  - id: cargo-test-workspace
+    type: shell
+    timeout: 7200
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/prefreeze-workspace-tests.log"
+      if ! cargo test --workspace --all-targets > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 80 "$log"
+
+  - id: sc007-prefreeze-performance
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/prefreeze-sc007.log"
+      if ! RUST_TEST_NOCAPTURE=1 \
+        cargo test -p cairn-daemon --test perf -- --ignored > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      grep -E 'SC-007 acceptance: tracked_files=10000 inspect_ms=[0-9]+ snapshot_ms=[0-9]+ inspect_limit_ms=2000 snapshot_limit_ms=2000' "$log"
+
+  - id: freeze-implementation
+    type: shell
+    timeout: 300
+    output_format: json
+    run: |
+      set -eu
+      git add -A
+      staged_paths="$(git diff --cached --name-only --diff-filter=ACMRTUXB)"
+      test -n "$staged_paths"
+      if printf '%s\n' "$staged_paths" | \
+        grep -E '(^|/)(002-[^/]+|feature-002)(/|$)' >/dev/null; then
+        echo "Feature 002 was staged; refusing to freeze." >&2
+        exit 1
+      fi
+      git commit -m "feat(session): complete Feature 001 implementation" >/dev/null
+      implementation_sha="$(git rev-parse HEAD)"
+      implementation_tree="$(git rev-parse 'HEAD^{tree}')"
+      printf '{"sha":"%s","tree":"%s"}\n' \
+        "$implementation_sha" "$implementation_tree"
+
+  - id: frozen-tree-clean-check
+    type: shell
+    timeout: 60
+    run: |
+      set -eu
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      test "$(git rev-parse HEAD)" = "$expected_sha"
+      git diff --quiet
+      git diff --cached --quiet
+      test -z "$(git ls-files --others --exclude-standard)"
+
+  - id: create-clean-detached-macos-worktree
+    type: shell
+    timeout: 300
+    output_format: json
+    run: |
+      set -eu
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      worktree_path="/tmp/cairn-feature001-{{ context.run_id }}"
+      run_dir=".specify/workflows/runs/{{ context.run_id }}/evidence"
+      mkdir -p "$run_dir"
+      if test -e "$worktree_path"; then
+        test -e "$worktree_path/.git"
+        test "$(git -C "$worktree_path" rev-parse HEAD)" = "$expected_sha"
+      else
+        git worktree add --detach "$worktree_path" "$expected_sha" >/dev/null
+      fi
+      test -z "$(git -C "$worktree_path" symbolic-ref --quiet HEAD || true)"
+      test -z "$(git -C "$worktree_path" status --porcelain=v1 --untracked-files=all)"
+      printf '%s\n' "$worktree_path" > "$run_dir/macos-worktree-path.txt"
+      printf '{"path":"%s","sha":"%s"}\n' "$worktree_path" "$expected_sha"
+
+  - id: record-macos-environment
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/macos-environment.log"
+      {
+        echo "implementation_sha=$(git -C "$worktree_path" rev-parse HEAD)"
+        sw_vers
+        echo "architecture=$(uname -m)"
+        rustc --version
+        cargo --version
+        echo "detached_head=true"
+        echo "clean_checkout=true"
+      } > "$log"
+      grep -F "implementation_sha=$expected_sha" "$log"
+
+  - id: clean-macos-quality
+    type: shell
+    timeout: 10800
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      run_dir="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence"
+      if ! (cd "$worktree_path" && cargo fmt --check) \
+        > "$run_dir/macos-fmt.log" 2>&1; then
+        tail -n 200 "$run_dir/macos-fmt.log" >&2
+        exit 1
+      fi
+      if ! (cd "$worktree_path" && \
+        cargo clippy --workspace --all-targets -- -D warnings) \
+        > "$run_dir/macos-clippy.log" 2>&1; then
+        tail -n 200 "$run_dir/macos-clippy.log" >&2
+        exit 1
+      fi
+      if ! (cd "$worktree_path" && cargo test --workspace --all-targets) \
+        > "$run_dir/macos-workspace-tests.log" 2>&1; then
+        tail -n 200 "$run_dir/macos-workspace-tests.log" >&2
+        exit 1
+      fi
+      tail -n 80 "$run_dir/macos-workspace-tests.log"
+
+  - id: macos-scenario-1
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      log="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence/macos-scenario-1.log"
+      if ! (cd "$worktree_path" && \
+        cargo test -p cairn-daemon --test us1_register_inspect -- --nocapture) \
+        > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 60 "$log"
+
+  - id: macos-scenario-2
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      log="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence/macos-scenario-2.log"
+      if ! (cd "$worktree_path" && \
+        cargo test -p cairn-daemon --test us2_agent_sim --test us2_sessions -- --nocapture) \
+        > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 80 "$log"
+
+  - id: macos-scenario-3
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      log="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence/macos-scenario-3.log"
+      if ! (cd "$worktree_path" && \
+        cargo test -p cairn-daemon --test us3_tracking --test us3_events -- --nocapture) \
+        > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 100 "$log"
+
+  - id: macos-scenario-4
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      log="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence/macos-scenario-4.log"
+      if ! (cd "$worktree_path" && \
+        CAIRN_CRASH_ITERS=1 CAIRN_CRASH_EXPECTED_ITERS=1 \
+        cargo test -p cairn-daemon --test us4_recovery --test us4_crash_restart -- --nocapture) \
+        > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      grep -F "configured_iterations=1 completed_forced_kills=1 committed_event_loss=0 invalid_session_outcomes=0" "$log"
+
+  - id: macos-scenario-5
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      log="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence/macos-scenario-5.log"
+      if ! (cd "$worktree_path" && \
+        cargo test -p cairn-daemon --test privacy_audit -- --nocapture) \
+        > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 60 "$log"
+
+  - id: macos-scenario-6
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      log="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence/macos-scenario-6.log"
+      if ! (cd "$worktree_path" && \
+        cargo test -p cairn-cli --test us1_cli_contract --test us2_cli_contract \
+        --test us4_cli_contract -- --nocapture) \
+        > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      tail -n 80 "$log"
+
+  - id: sc007-exact-commit-performance
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      run_dir="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence"
+      log="$run_dir/macos-sc007.log"
+      echo "implementation_sha=$expected_sha" > "$run_dir/macos-sc007-environment.log"
+      sw_vers >> "$run_dir/macos-sc007-environment.log"
+      echo "architecture=$(uname -m)" >> "$run_dir/macos-sc007-environment.log"
+      if ! (cd "$worktree_path" && \
+        RUST_TEST_NOCAPTURE=1 \
+        cargo test -p cairn-daemon --test perf -- --ignored) > "$log" 2>&1; then
+        tail -n 200 "$log" >&2
+        exit 1
+      fi
+      grep -E 'SC-007 acceptance: tracked_files=10000 inspect_ms=[0-9]+ snapshot_ms=[0-9]+ inspect_limit_ms=2000 snapshot_limit_ms=2000' "$log"
+
+  - id: detached-worktree-final-check
+    type: shell
+    timeout: 60
+    run: |
+      set -eu
+      worktree_path="{{ steps.create-clean-detached-macos-worktree.output.data.path }}"
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      test "$(git -C "$worktree_path" rev-parse HEAD)" = "$expected_sha"
+      test -z "$(git -C "$worktree_path" symbolic-ref --quiet HEAD || true)"
+      test -z "$(git -C "$worktree_path" status --porcelain=v1 --untracked-files=all)"
+
+  - id: push-implementation-no-force
+    type: shell
+    timeout: 600
+    run: |
+      set -eu
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      branch="$(git symbolic-ref --quiet --short HEAD)"
+      test "$(git rev-parse HEAD)" = "$expected_sha"
+      git diff --quiet
+      git diff --cached --quiet
+      test -z "$(git ls-files --others --exclude-standard)"
+      git push --set-upstream origin "HEAD:refs/heads/$branch"
+      remote_sha="$(git ls-remote --heads origin "$branch" | awk '{print $1}')"
+      test "$remote_sha" = "$expected_sha"
+
+  - id: dispatch-exact-sha-ci
+    type: shell
+    timeout: 900
+    output_format: json
+    run: |
+      set -eu
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      branch="$(git symbolic-ref --quiet --short HEAD)"
+      override_run_id="{{ inputs.ci_run_id }}"
+      selected=""
+      if test -n "$override_run_id"; then
+        selected="$(gh run view "$override_run_id" \
+          --json databaseId,headSha,status,conclusion,url,createdAt)"
+      else
+        selected="$(
+          gh run list --workflow ci.yml --commit "$expected_sha" \
+            --event workflow_dispatch --limit 20 \
+            --json databaseId,headSha,status,conclusion,url,createdAt |
+          jq -c --arg sha "$expected_sha" \
+            '[.[] | select(.headSha == $sha)] | sort_by(.createdAt) | last // empty'
+        )"
+        if test -z "$selected"; then
+          remote_sha="$(git ls-remote --heads origin "$branch" | awk '{print $1}')"
+          test "$remote_sha" = "$expected_sha"
+          gh workflow run ci.yml --ref "$branch"
+          attempt=0
+          while test "$attempt" -lt 60; do
+            selected="$(
+              gh run list --workflow ci.yml --commit "$expected_sha" \
+                --event workflow_dispatch --limit 20 \
+                --json databaseId,headSha,status,conclusion,url,createdAt |
+              jq -c --arg sha "$expected_sha" \
+                '[.[] | select(.headSha == $sha)] | sort_by(.createdAt) | last // empty'
+            )"
+            test -n "$selected" && break
+            attempt=$((attempt + 1))
+            sleep 5
+          done
+        fi
+      fi
+      test -n "$selected"
+      selected_sha="$(printf '%s' "$selected" | jq -r '.headSha')"
+      test "$selected_sha" = "$expected_sha"
+      printf '%s\n' "$selected"
+
+  - id: wait-exact-sha-github-actions
+    type: shell
+    timeout: 14400
+    run: |
+      set -eu
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      selected_run_id="{{ steps.dispatch-exact-sha-ci.output.data.databaseId }}"
+      override_run_id="{{ inputs.ci_run_id }}"
+      test -z "$override_run_id" || selected_run_id="$override_run_id"
+      gh run watch "$selected_run_id" --exit-status
+      run_dir=".specify/workflows/runs/{{ context.run_id }}/evidence"
+      gh run view "$selected_run_id" \
+        --json databaseId,headSha,headBranch,status,conclusion,url,jobs,workflowName,createdAt,updatedAt \
+        > "$run_dir/github-run.json"
+      jq -e --arg sha "$expected_sha" \
+        '.headSha == $sha and .status == "completed" and .conclusion == "success"' \
+        "$run_dir/github-run.json" >/dev/null
+
+  - id: capture-ci-logs
+    type: shell
+    timeout: 1800
+    run: |
+      set -eu
+      selected_run_id="{{ steps.dispatch-exact-sha-ci.output.data.databaseId }}"
+      override_run_id="{{ inputs.ci_run_id }}"
+      test -z "$override_run_id" || selected_run_id="$override_run_id"
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/github-run.log"
+      gh run view "$selected_run_id" --log > "$log"
+      test -s "$log"
+
+  - id: required-ci-jobs-executed
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      metadata=".specify/workflows/runs/{{ context.run_id }}/evidence/github-run.json"
+      require_successful_job() {
+        job_name="$1"
+        count="$(jq --arg name "$job_name" '[.jobs[] | select(.name == $name)] | length' "$metadata")"
+        test "$count" -eq 1
+        conclusion="$(jq -r --arg name "$job_name" '.jobs[] | select(.name == $name) | .conclusion' "$metadata")"
+        test "$conclusion" = "success"
+      }
+      require_successful_job "build + test (ubuntu-latest)"
+      require_successful_job "build + test (windows-latest)"
+      require_successful_job "build + test (macos-latest)"
+      require_successful_job "named-pipe ACL negative test (analysis I1)"
+      require_successful_job "Windows Feature 001 Scenarios 1-6"
+      require_successful_job "SC-005 exactly 100 forced daemon kills"
+      require_successful_job "Linux network-isolated Feature 001 validation"
+      require_successful_job "SC-007 explicit performance acceptance"
+
+  - id: verify-windows-scenarios-1-6
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/github-run.log"
+      for scenario in 1 2 3 4 5 6; do
+        grep -F "feature001_scenario_${scenario}=pass" "$log" >/dev/null
+      done
+      grep -F "event_counts=printed_by_us2_agent_sim_us3_tracking_and_us4_crash_restart" "$log" >/dev/null
+
+  - id: verify-linux-network-isolation
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/github-run.log"
+      grep -F "isolation_mechanism=docker --network none" "$log" >/dev/null
+      grep -F "external_network=unreachable" "$log" >/dev/null
+      grep -F "local_filesystem=available" "$log" >/dev/null
+      grep -F "local_ipc=available" "$log" >/dev/null
+      grep -F "feature001_network_isolated_scenarios=pass" "$log" >/dev/null
+
+  - id: verify-exactly-100-kills
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/github-run.log"
+      grep -F "configured_iterations=100 completed_forced_kills=100 committed_event_loss=0 invalid_session_outcomes=0" "$log" >/dev/null
+
+  - id: verify-ci-performance-evidence
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      log=".specify/workflows/runs/{{ context.run_id }}/evidence/github-run.log"
+      grep -E 'SC-007 acceptance: tracked_files=10000 inspect_ms=[0-9]+ snapshot_ms=[0-9]+ inspect_limit_ms=2000 snapshot_limit_ms=2000' "$log" >/dev/null
+
+  - id: update-evidence-document
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      run_dir="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence"
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      codex exec --sandbox workspace-write -C "$PWD" \
+        --output-last-message "$run_dir/evidence-update-agent.md" \
+        "Update Cairn Feature 001 evidence from the completed run at $run_dir. Read github-run.json, github-run.log, every macos-*.log, and the prefreeze logs. Update only specs/001-local-session-foundation/evidence/quickstart-run.md and specs/001-local-session-foundation/tasks.md. Record the exact frozen implementation SHA $expected_sha, macOS environment and clean detached checkout, exact commands and Scenarios 1-6 results/event counts, the GitHub Actions run URL and exact-SHA Windows results, Linux docker --network none proofs, exactly 100 kills with zero loss/invalid outcomes, and SC-007 10,000-file durations and limits. Replace stale configured-only or dirty-tree completion claims without deleting useful historical disclosures. Mark T059, T069, and T071-T075 complete only when the captured evidence proves each task. Leave T076 incomplete. Do not modify runtime code, configuration, Feature 002, or any other file. Do not invent evidence; exit with a clear failure if any required value is absent." \
+        > "$run_dir/evidence-update-transcript.log" 2>&1
+      test -s "$run_dir/evidence-update-agent.md"
+
+  - id: validate-evidence-update-scope
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      metadata=".specify/workflows/runs/{{ context.run_id }}/evidence/github-run.json"
+      evidence="specs/001-local-session-foundation/evidence/quickstart-run.md"
+      tasks="specs/001-local-session-foundation/tasks.md"
+      changed="$(git diff --name-only "$expected_sha")"
+      test -n "$changed"
+      unexpected="$(printf '%s\n' "$changed" | grep -Ev '^(specs/001-local-session-foundation/tasks\.md|specs/001-local-session-foundation/evidence/quickstart-run\.md)$' || true)"
+      test -z "$unexpected"
+      grep -F "$expected_sha" "$evidence" >/dev/null
+      run_url="$(jq -r '.url' "$metadata")"
+      grep -F "$run_url" "$evidence" >/dev/null
+      for task_id in T059 T069 T071 T072 T073 T074 T075; do
+        grep -E "^- \[[xX]\] ${task_id}[[:space:]]" "$tasks" >/dev/null
+      done
+      grep -E '^- \[ \] T076[[:space:]]' "$tasks" >/dev/null
+
+  - id: speckit-converge
+    type: shell
+    timeout: 7200
+    run: |
+      set -eu
+      run_dir="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence"
+      codex exec --sandbox workspace-write -C "$PWD" \
+        --output-last-message "$run_dir/speckit-converge-report.md" \
+        "/speckit-converge Feature 001 only. Preserve the append-only contract. Do not inspect or modify Feature 002. Do not modify runtime code; this is the convergence assessment after exact-commit evidence collection." \
+        > "$run_dir/speckit-converge-transcript.log" 2>&1
+      test -s "$run_dir/speckit-converge-report.md"
+
+  - id: reject-unresolved-convergence
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      report=".specify/workflows/runs/{{ context.run_id }}/evidence/speckit-converge-report.md"
+      if grep -E '\|[[:space:]]*(CRITICAL|HIGH|MEDIUM)[[:space:]]*\|' "$report"; then
+        echo "Convergence reported an unresolved CRITICAL, HIGH, or MEDIUM issue." >&2
+        exit 1
+      fi
+      grep -E 'Converged|Convergence Findings|tasks_appended' "$report" >/dev/null
+
+  - id: speckit-analyze
+    type: shell
+    timeout: 7200
+    run: |
+      set -eu
+      run_dir="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence"
+      before="$(git diff --binary | shasum -a 256 | awk '{print $1}')"
+      codex exec --sandbox read-only -C "$PWD" \
+        --output-last-message "$run_dir/speckit-analyze-report.md" \
+        "/speckit-analyze Feature 001 final completion analysis. Treat the frozen implementation SHA and captured evidence as authoritative. Do not inspect or modify Feature 002." \
+        > "$run_dir/speckit-analyze-transcript.log" 2>&1
+      after="$(git diff --binary | shasum -a 256 | awk '{print $1}')"
+      test "$before" = "$after"
+      test -s "$run_dir/speckit-analyze-report.md"
+
+  - id: reject-severe-analysis-findings
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      report=".specify/workflows/runs/{{ context.run_id }}/evidence/speckit-analyze-report.md"
+      if grep -E '\|[[:space:]]*(CRITICAL|HIGH|MEDIUM)[[:space:]]*\|' "$report"; then
+        echo "Spec Kit analysis reported a CRITICAL, HIGH, or MEDIUM issue." >&2
+        exit 1
+      fi
+      grep -F "Specification Analysis Report" "$report" >/dev/null
+
+  - id: finalize-task-076-and-evidence
+    type: shell
+    timeout: 3600
+    run: |
+      set -eu
+      run_dir="$PWD/.specify/workflows/runs/{{ context.run_id }}/evidence"
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      codex exec --sandbox workspace-write -C "$PWD" \
+        --output-last-message "$run_dir/finalize-evidence-agent.md" \
+        "Finalize Cairn Feature 001 documentation after the successful converge and analyze reports in $run_dir. Update only specs/001-local-session-foundation/evidence/quickstart-run.md and specs/001-local-session-foundation/tasks.md. Mark T076 complete and declare 76/76 only if the reports and captured logs prove every T076 clause, all tasks are otherwise complete, the exact frozen implementation SHA is $expected_sha, and Feature 002 remains untouched. Add exactly one line '**Evidence payload commit**: PENDING_EVIDENCE_COMMIT' for the workflow to replace after committing the evidence payload. Do not modify runtime code, configuration, Feature 002, or any other file. Do not fabricate evidence." \
+        > "$run_dir/finalize-evidence-transcript.log" 2>&1
+      test -s "$run_dir/finalize-evidence-agent.md"
+
+  - id: final-76-of-76-check
+    type: shell
+    timeout: 180
+    run: |
+      set -eu
+      expected_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      tasks="specs/001-local-session-foundation/tasks.md"
+      evidence="specs/001-local-session-foundation/evidence/quickstart-run.md"
+      total="$(grep -Ec '^- \[[ xX]\] T[0-9]{3}[[:space:]]' "$tasks")"
+      complete="$(grep -Ec '^- \[[xX]\] T[0-9]{3}[[:space:]]' "$tasks")"
+      incomplete="$(grep -Ec '^- \[ \] T[0-9]{3}[[:space:]]' "$tasks" || true)"
+      test "$total" -eq 76
+      test "$complete" -eq 76
+      test "$incomplete" -eq 0
+      grep -F "76/76" "$evidence" >/dev/null
+      grep -F "$expected_sha" "$evidence" >/dev/null
+      grep -F "**Evidence payload commit**: PENDING_EVIDENCE_COMMIT" "$evidence" >/dev/null
+      changed="$(git diff --name-only "$expected_sha")"
+      unexpected="$(printf '%s\n' "$changed" | grep -Ev '^(specs/001-local-session-foundation/tasks\.md|specs/001-local-session-foundation/evidence/quickstart-run\.md)$' || true)"
+      test -z "$unexpected"
+      if printf '%s\n' "$changed" | \
+        grep -E '(^|/)(002-[^/]+|feature-002)(/|$)' >/dev/null; then
+        exit 1
+      fi
+
+  - id: commit-evidence-payload
+    type: shell
+    timeout: 300
+    output_format: json
+    run: |
+      set -eu
+      git add specs/001-local-session-foundation/tasks.md \
+        specs/001-local-session-foundation/evidence/quickstart-run.md
+      staged="$(git diff --cached --name-only)"
+      test "$(printf '%s\n' "$staged" | grep -c .)" -eq 2
+      printf '%s\n' "$staged" | \
+        grep -Fx "specs/001-local-session-foundation/tasks.md" >/dev/null
+      printf '%s\n' "$staged" | \
+        grep -Fx "specs/001-local-session-foundation/evidence/quickstart-run.md" >/dev/null
+      git commit -m "docs(evidence): finalize Feature 001 acceptance" >/dev/null
+      evidence_payload_sha="$(git rev-parse HEAD)"
+      printf '{"sha":"%s"}\n' "$evidence_payload_sha"
+
+  - id: record-evidence-payload-commit
+    type: shell
+    timeout: 120
+    run: |
+      set -eu
+      evidence="specs/001-local-session-foundation/evidence/quickstart-run.md"
+      payload_sha="{{ steps.commit-evidence-payload.output.data.sha }}"
+      temp_file=".specify/workflows/runs/{{ context.run_id }}/evidence/quickstart-run.updated.md"
+      awk -v sha="$payload_sha" '
+        $0 == "**Evidence payload commit**: PENDING_EVIDENCE_COMMIT" {
+          print "**Evidence payload commit**: " sha
+          replaced = 1
+          next
+        }
+        { print }
+        END { if (!replaced) exit 1 }
+      ' "$evidence" > "$temp_file"
+      mv "$temp_file" "$evidence"
+      grep -F "**Evidence payload commit**: $payload_sha" "$evidence" >/dev/null
+      git add "$evidence"
+      git commit -m "docs(evidence): record Feature 001 evidence commit" >/dev/null
+
+  - id: final-execution-audit
+    type: shell
+    timeout: 180
+    run: |
+      set -eu
+      state=".specify/workflows/runs/{{ context.run_id }}/state.json"
+      for required_step in \
+        cargo-fmt-check cargo-clippy cargo-test-workspace \
+        sc007-prefreeze-performance freeze-implementation frozen-tree-clean-check \
+        create-clean-detached-macos-worktree clean-macos-quality \
+        macos-scenario-1 macos-scenario-2 macos-scenario-3 \
+        macos-scenario-4 macos-scenario-5 macos-scenario-6 \
+        sc007-exact-commit-performance detached-worktree-final-check \
+        push-implementation-no-force dispatch-exact-sha-ci \
+        wait-exact-sha-github-actions capture-ci-logs required-ci-jobs-executed \
+        verify-windows-scenarios-1-6 verify-linux-network-isolation \
+        verify-exactly-100-kills verify-ci-performance-evidence \
+        update-evidence-document validate-evidence-update-scope \
+        speckit-converge reject-unresolved-convergence \
+        speckit-analyze reject-severe-analysis-findings \
+        finalize-task-076-and-evidence final-76-of-76-check \
+        commit-evidence-payload record-evidence-payload-commit; do
+        jq -e --arg step "$required_step" \
+          '.step_results[$step].status == "completed"' "$state" >/dev/null
+      done
+      git diff --quiet
+      git diff --cached --quiet
+      test -z "$(git ls-files --others --exclude-standard)"
+
+  - id: push-evidence-no-force
+    type: shell
+    timeout: 600
+    run: |
+      set -eu
+      branch="$(git symbolic-ref --quiet --short HEAD)"
+      final_sha="$(git rev-parse HEAD)"
+      git push origin "HEAD:refs/heads/$branch"
+      remote_sha="$(git ls-remote --heads origin "$branch" | awk '{print $1}')"
+      test "$remote_sha" = "$final_sha"
+      implementation_sha="{{ steps.freeze-implementation.output.data.sha }}"
+      test "$final_sha" != "$implementation_sha"

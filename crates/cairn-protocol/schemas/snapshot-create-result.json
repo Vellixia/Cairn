@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SnapshotCreateResult",
+  "type": "object",
+  "required": [
+    "created",
+    "snapshot"
+  ],
+  "properties": {
+    "created": {
+      "type": "boolean"
+    },
+    "snapshot": {
+      "$ref": "#/definitions/SnapshotDto"
+    }
+  },
+  "definitions": {
+    "SnapshotDto": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "detached",
+        "head_commit",
+        "snapshot_fp",
+        "snapshot_id",
+        "staged_fp",
+        "unstaged_fp",
+        "untracked_fp"
+      ],
+      "properties": {
+        "branch": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at": {
+          "type": "string"
+        },
+        "detached": {
+          "type": "boolean"
+        },
+        "head_commit": {
+          "type": "string"
+        },
+        "snapshot_fp": {
+          "type": "string"
+        },
+        "snapshot_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "staged_fp": {
+          "type": "string"
+        },
+        "unstaged_fp": {
+          "type": "string"
+        },
+        "untracked_fp": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

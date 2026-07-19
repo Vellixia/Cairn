@@ -1,20 +1,29 @@
 [package]
 name = "cairn-session"
-description = "Cross-Session Protocol (CCP) - durable session state, auto-restore, drift logging."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
 
 [dependencies]
-cairn-core.workspace = true
-cairn-store.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-chrono.workspace = true
-uuid.workspace = true
-tokio.workspace = true
-tracing.workspace = true
+cairn-domain = { workspace = true }
+cairn-events = { workspace = true }
+cairn-storage-local = { workspace = true }
+base64 = { workspace = true }
+blake3 = { workspace = true }
+chrono = { workspace = true }
+rand = { workspace = true }
+serde_json = { workspace = true }
+sqlx = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
-[dev-dependencies]
-tempfile.workspace = true
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[lints]
+workspace = true

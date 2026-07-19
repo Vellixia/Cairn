@@ -1,0 +1,28 @@
+[package]
+name = "cairn-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cairn"
+path = "src/main.rs"
+
+[dependencies]
+cairn-protocol = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+cairn-daemon = { path = "../daemon" }
+cairn-session = { workspace = true }
+fixtures-repositories = { workspace = true }
+tempfile = { workspace = true }
+schemars = { workspace = true }
+
+[lints]
+workspace = true

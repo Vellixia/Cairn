@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionListResult",
+  "type": "object",
+  "required": [
+    "sessions"
+  ],
+  "properties": {
+    "sessions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/SessionSummaryDto"
+      }
+    }
+  },
+  "definitions": {
+    "SessionState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "recovering",
+        "stopped",
+        "interrupted"
+      ]
+    },
+    "SessionSummaryDto": {
+      "type": "object",
+      "required": [
+        "agent_instance_id",
+        "agent_type",
+        "session_id",
+        "started_at",
+        "state"
+      ],
+      "properties": {
+        "agent_instance_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "agent_type": {
+          "type": "string"
+        },
+        "session_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "started_at": {
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/definitions/SessionState"
+        }
+      }
+    }
+  }
+}

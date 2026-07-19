@@ -1,0 +1,45 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "DaemonStatusResult",
+  "type": "object",
+  "required": [
+    "active_sessions",
+    "db_healthy",
+    "db_path",
+    "pid",
+    "uptime_seconds",
+    "version",
+    "watched_repositories"
+  ],
+  "properties": {
+    "active_sessions": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "db_healthy": {
+      "type": "boolean"
+    },
+    "db_path": {
+      "type": "string"
+    },
+    "pid": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0.0
+    },
+    "uptime_seconds": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "version": {
+      "type": "string"
+    },
+    "watched_repositories": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  }
+}

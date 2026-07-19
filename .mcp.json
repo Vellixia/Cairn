@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "cairn": {
-      "command": "cairn",
-      "args": ["mcp"]
-    }
-  }
-}

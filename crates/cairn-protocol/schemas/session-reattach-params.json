@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionReattachParams",
+  "type": "object",
+  "required": [
+    "agent_instance_id",
+    "resume_token",
+    "session_id"
+  ],
+  "properties": {
+    "agent_instance_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "resume_token": {
+      "type": "string"
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  }
+}

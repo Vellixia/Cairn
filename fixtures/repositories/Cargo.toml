@@ -1,0 +1,12 @@
+[package]
+name = "fixtures-repositories"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,33 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionListParams",
+  "type": "object",
+  "properties": {
+    "repository_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/definitions/SessionState"
+      }
+    }
+  },
+  "definitions": {
+    "SessionState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "recovering",
+        "stopped",
+        "interrupted"
+      ]
+    }
+  }
+}

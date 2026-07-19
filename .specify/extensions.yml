@@ -1,0 +1,34 @@
+installed:
+- verify
+- verify-tasks
+settings:
+  # Hook-aware Spec Kit skills still must dispatch and await mandatory hooks.
+  # This setting alone is not execution.
+  auto_execute_hooks: true
+hooks:
+  before_implement:
+  - extension: speckit-core
+    command: speckit.analyze
+    enabled: true
+    optional: false
+    priority: 5
+    prompt: Verify Feature 001 specification, plan, and task consistency before implementation.
+    description: Mandatory pre-implementation artifact and task verification
+    condition: null
+  after_implement:
+  - extension: verify
+    command: speckit.verify.run
+    enabled: true
+    optional: false
+    priority: 10
+    prompt: Validate the completed Feature 001 implementation against its specification artifacts.
+    description: Mandatory post-implementation specification verification
+    condition: null
+  - extension: verify-tasks
+    command: speckit.verify-tasks.run
+    enabled: true
+    optional: false
+    priority: 20
+    prompt: Run verify-tasks in a fresh session and stop on unresolved phantom completions.
+    description: Mandatory post-implementation phantom-task verification
+    condition: null

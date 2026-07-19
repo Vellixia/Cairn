@@ -1,0 +1,204 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "InspectionDto",
+  "type": "object",
+  "required": [
+    "detached",
+    "ignored_summary",
+    "root",
+    "staged",
+    "unstaged",
+    "untracked",
+    "worktree"
+  ],
+  "properties": {
+    "branch": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "default_remote": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/RemoteDto"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "detached": {
+      "type": "boolean"
+    },
+    "head_commit": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "ignored_summary": {
+      "$ref": "#/definitions/IgnoredSummaryDto"
+    },
+    "in_progress": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "root": {
+      "type": "string"
+    },
+    "staged": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FileChangeDto"
+      }
+    },
+    "unstaged": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/FileChangeDto"
+      }
+    },
+    "untracked": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "worktree": {
+      "$ref": "#/definitions/WorktreeInfoDto"
+    }
+  },
+  "definitions": {
+    "FileChangeDto": {
+      "type": "object",
+      "required": [
+        "path",
+        "status"
+      ],
+      "properties": {
+        "orig_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        }
+      }
+    },
+    "IgnoredBySourceDto": {
+      "type": "object",
+      "required": [
+        "cairnignore",
+        "gitignore"
+      ],
+      "properties": {
+        "cairnignore": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "gitignore": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        }
+      }
+    },
+    "IgnoredRootDto": {
+      "type": "object",
+      "required": [
+        "count",
+        "path"
+      ],
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "path": {
+          "type": "string"
+        }
+      }
+    },
+    "IgnoredSummaryDto": {
+      "type": "object",
+      "required": [
+        "by_source",
+        "collapsed_roots",
+        "samples",
+        "total_count",
+        "truncated"
+      ],
+      "properties": {
+        "by_source": {
+          "$ref": "#/definitions/IgnoredBySourceDto"
+        },
+        "collapsed_roots": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/IgnoredRootDto"
+          }
+        },
+        "samples": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "total_count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "RemoteDto": {
+      "type": "object",
+      "required": [
+        "name",
+        "url"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "WorktreeInfoDto": {
+      "type": "object",
+      "required": [
+        "is_main",
+        "path"
+      ],
+      "properties": {
+        "is_main": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "worktree_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "CliEnvelope",
+  "description": "CLI machine-readable envelope (contracts/cli-json-contract.md).",
+  "type": "object",
+  "required": [
+    "command",
+    "ok",
+    "schema"
+  ],
+  "properties": {
+    "command": {
+      "type": "string"
+    },
+    "data": true,
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ErrorBody"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ok": {
+      "type": "boolean"
+    },
+    "schema": {
+      "type": "string"
+    }
+  },
+  "definitions": {
+    "ErrorBody": {
+      "title": "ErrorBody",
+      "type": "object",
+      "if": {
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "enum": [
+              "WATCHER_START_FAILED"
+            ]
+          }
+        }
+      },
+      "then": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "$ref": "#/definitions/ErrorData"
+          }
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/definitions/ErrorCode"
+        },
+        "data": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ErrorData"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "message": {
+          "type": "string"
+        }
+      }
+    },
+    "ErrorCode": {
+      "type": "string",
+      "enum": [
+        "NOT_A_REPOSITORY",
+        "NOT_A_WORKTREE",
+        "NOT_REGISTERED",
+        "IDENTITY_CONFLICT",
+        "SNAPSHOT_CONTENTION",
+        "SESSION_NOT_FOUND",
+        "SESSION_NOT_LIVE",
+        "SESSION_NOT_RECOVERING",
+        "SESSION_AMBIGUOUS",
+        "LEASE_MISMATCH",
+        "LEASE_EXPIRED",
+        "GRACE_EXPIRED",
+        "INVALID_AGENT_INSTANCE",
+        "WATCHER_START_FAILED",
+        "GIT_UNAVAILABLE",
+        "STATE_CORRUPTED",
+        "INTERNAL",
+        "DAEMON_UNAVAILABLE",
+        "USAGE"
+      ]
+    },
+    "ErrorData": {
+      "description": "Typed data carried by stable protocol errors. Watcher readiness failures deliberately expose only their discriminant and stable stage (FR-038).",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "stage"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "watcher_start_failure"
+              ]
+            },
+            "stage": {
+              "$ref": "#/definitions/WatcherStartStage"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "WatcherStartStage": {
+      "description": "Stage of the watcher-readiness protocol that failed (FR-038).",
+      "type": "string",
+      "enum": [
+        "install",
+        "reconcile"
+      ]
+    }
+  }
+}
