@@ -10,6 +10,7 @@ pub struct CliHarness {
     pub dir: tempfile::TempDir,
     pub config: cairn_daemon::DaemonConfig,
     shutdown: tokio::sync::watch::Sender<bool>,
+    daemon_result: tokio::sync::oneshot::Receiver<Result<(), String>>,
 }
 
 impl CliHarness {
@@ -41,13 +42,12 @@ impl CliHarness {
         std::fs::create_dir_all(&config.data_dir).expect("data dir");
         let (tx, rx) = tokio::sync::watch::channel(false);
         let cfg = config.clone();
-        tokio::spawn(async move {
-            let _ = cairn_daemon::run(cfg, rx).await;
-        });
-        let harness = Self {
+        let daemon_result = Self::spawn_daemon(cfg, rx);
+        let mut harness = Self {
             dir,
             config,
             shutdown: tx,
+            daemon_result,
         };
         harness.wait_ready().await;
         harness
@@ -62,10 +62,22 @@ impl CliHarness {
         let (tx, rx) = tokio::sync::watch::channel(false);
         self.shutdown = tx;
         let cfg = self.config.clone();
-        tokio::spawn(async move {
-            let _ = cairn_daemon::run(cfg, rx).await;
-        });
+        self.daemon_result = Self::spawn_daemon(cfg, rx);
         self.wait_ready().await;
+    }
+
+    fn spawn_daemon(
+        config: cairn_daemon::DaemonConfig,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let result = cairn_daemon::run(config, shutdown)
+                .await
+                .map_err(|error| format!("{error:#}"));
+            let _ = result_tx.send(result);
+        });
+        result_rx
     }
 
     /// Run `cairn` with data written to stdin and extra env vars.
@@ -113,15 +125,32 @@ impl CliHarness {
         .expect("join")
     }
 
-    async fn wait_ready(&self) {
-        for _ in 0..100 {
+    async fn wait_ready(&mut self) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            match self.daemon_result.try_recv() {
+                Ok(Ok(())) => panic!("daemon exited before becoming ready"),
+                Ok(Err(error)) => panic!("daemon failed before becoming ready: {error}"),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    panic!("daemon task ended without reporting its result")
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+            }
             let out = self.cairn(&["daemon", "status", "--json"], None).await;
             if out.status.code() == Some(0) {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            if tokio::time::Instant::now() >= deadline {
+                let status = out.status.code();
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                panic!(
+                    "daemon not ready for CLI tests after 15s: status={status:?} \
+                     stdout={stdout:?} stderr={stderr:?}"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        panic!("daemon not ready for CLI tests");
     }
 
     /// Run the real `cairn` binary with the daemon endpoint injected.
