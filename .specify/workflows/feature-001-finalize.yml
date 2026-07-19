@@ -409,7 +409,7 @@ steps:
         if test -z "$selected"; then
           remote_sha="$(git ls-remote --heads origin "$branch" | awk '{print $1}')"
           test "$remote_sha" = "$expected_sha"
-          gh workflow run ci.yml --ref "$branch"
+          gh workflow run ci.yml --ref "$branch" >/dev/null
           attempt=0
           while test "$attempt" -lt 60; do
             selected="$(

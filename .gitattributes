@@ -1,0 +1,11 @@
+# Keep line endings consistent across platforms: LF in the repository.
+* text=auto eol=lf
+
+# Windows-only scripts use CRLF.
+*.ps1 text eol=crlf
+
+# Treat common binaries as binary.
+*.png  binary
+*.jpg  binary
+*.ico  binary
+*.woff2 binary
