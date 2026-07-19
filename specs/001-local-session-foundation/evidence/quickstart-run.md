@@ -12,9 +12,9 @@
 
 **Frozen implementation commit tested**: `4a06c4125715bb4b78b54e49c81eccd82100a7b7`
 
-**Evidence document state**: this update is a post-freeze, currently uncommitted payload.
-No evidence-document commit SHA is present in the captured artifacts, so none is
-invented here; the final workflow records that distinct commit after T076.
+**Evidence payload commit**: 808fdc257a9f42b0a3370448f624618bfb95e2bc
+
+**Evidence document state**: exact-SHA evidence was committed before final convergence.
 
 The authoritative artifacts are the completed run under
 `.specify/workflows/runs/a10779ac/evidence/`: `github-run.json`, `github-run.log`, every
