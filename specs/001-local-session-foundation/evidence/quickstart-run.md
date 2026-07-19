@@ -1,10 +1,10 @@
 # Quickstart Evidence Run
 
-> **Completion status (2026-07-19): PRE-FINAL EVIDENCE COMPLETE / NOT YET
-> CONVERGED (75/76).** Completed macOS, Windows, Linux network-isolated,
-> exactly-100-kill, and SC-007 executions all test the same frozen Feature 001
-> implementation SHA. T059, T069, and T071–T075 are complete. T076 remains open until
-> the constitution-aligned analysis and separate final convergence declaration pass.
+> **Completion status (2026-07-19): FINAL / CONVERGED (76/76).** Completed macOS,
+> Windows, Linux network-isolated, exactly-100-kill, and SC-007 executions all test the
+> same frozen Feature 001 implementation SHA. The fresh constitution-aligned analysis
+> passed with 46/46 requirement coverage and no qualifying findings, the fresh convergence
+> found no uncovered work or new tasks, and T076 is complete. Feature 002 remains untouched.
 
 **Feature**: 001-local-session-foundation
 
@@ -14,7 +14,8 @@
 
 **Evidence payload commit**: 808fdc257a9f42b0a3370448f624618bfb95e2bc
 
-**Evidence document state**: exact-SHA evidence was committed before final convergence.
+**Evidence document state**: exact-SHA evidence was committed before the final declaration;
+this documentation-only update records the completed analysis and convergence gates.
 
 **Governance sequencing clarification**: Constitution v1.1.0 explicitly classifies this
 bootstrap-only v1 contract as `local_unbound`. The amendment changes no executable
@@ -23,7 +24,9 @@ implementation evidence below.
 
 The authoritative artifacts are the completed run under
 `.specify/workflows/runs/a10779ac/evidence/`: `github-run.json`, `github-run.log`, every
-`macos-*.log`, and the four `prefreeze-*.log` files.
+`macos-*.log`, the four `prefreeze-*.log` files, and the fresh
+`speckit-analyze-report.md` and `speckit-converge-report.md` reports with their captured
+transcripts.
 
 ## Frozen implementation and GitHub Actions run
 
@@ -300,9 +303,14 @@ Linux isolation, and the 100-kill job satisfy the pre-final T072 gate.
 | SC-007 | Explicit 10,000-file exact-commit results and 2-second limits above. |
 | SC-008 | Workspace `json_stability` coverage passed on macOS and Windows. |
 
-T076 remains deliberately incomplete. The exact-SHA evidence payload is already committed
-as `808fdc257a9f42b0a3370448f624618bfb95e2bc`; the separate final workflow step must still
-record the successful constitution-aligned analysis/convergence and the 76/76 declaration.
+T076 is complete. The fresh constitution-aligned analysis passed with 46/46 requirement
+coverage, zero ambiguities, zero duplications, and no CRITICAL, HIGH, or MEDIUM findings.
+The subsequent fresh convergence found no missing, partial, contradictory, or unrequested
+work and appended no task. With T001–T075 already complete, the authoritative Feature 001
+ledger is therefore **76/76**. The tested implementation remains
+`4a06c4125715bb4b78b54e49c81eccd82100a7b7`, its distinct completed evidence payload was
+already committed as `808fdc257a9f42b0a3370448f624618bfb95e2bc`, and Feature 002 remains
+untouched.
 
 ## Historical disclosures retained
 
