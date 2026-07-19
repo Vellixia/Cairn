@@ -1,299 +1,327 @@
 # Quickstart Evidence Run
 
-> **Completion status (2026-07-19): REMEDIATED LOCALLY / NOT CONVERGED.** Fresh macOS
-> watcher, workspace, quickstart, and exactly-100-kill results are recorded below. Linux
-> OS-level network-isolated validation has been configured but has not run, and the tested
-> implementation is still an uncommitted working tree based on the recorded HEAD SHA.
-> The typed watcher-error contract and authoritative installation-window deletion
-> requirements also postdate those results. Therefore T059, T061, T065, T069, T071–T076
-> remain open. Checked task boxes never replace missing acceptance evidence.
+> **Completion status (2026-07-19): PRE-FINAL EVIDENCE COMPLETE / NOT YET
+> CONVERGED (75/76).** Completed macOS, Windows, Linux network-isolated,
+> exactly-100-kill, and SC-007 executions all test the same frozen Feature 001
+> implementation SHA. T059, T069, and T071–T075 are complete. T076 remains open until
+> the separate final convergence gate runs and records the evidence payload commit.
 
 **Feature**: 001-local-session-foundation
-**Date**: 2026-07-16
-**OS**: Windows 11 Pro 10.0.26200 (real `cairn.exe` / `cairnd.exe` debug binaries, isolated data dir + pipe)
-**Second OS**: macOS execution recorded below; Linux isolation remains outstanding.
 
-## macOS remediation run — 2026-07-19
+**Evidence date**: 2026-07-19
+
+**Frozen implementation commit tested**: `4a06c4125715bb4b78b54e49c81eccd82100a7b7`
+
+**Evidence document state**: this update is a post-freeze, currently uncommitted payload.
+No evidence-document commit SHA is present in the captured artifacts, so none is
+invented here; the final workflow records that distinct commit after T076.
+
+The authoritative artifacts are the completed run under
+`.specify/workflows/runs/a10779ac/evidence/`: `github-run.json`, `github-run.log`, every
+`macos-*.log`, and the four `prefreeze-*.log` files.
+
+## Frozen implementation and GitHub Actions run
+
+GitHub Actions workflow `ci` completed successfully with `headSha` exactly
+`4a06c4125715bb4b78b54e49c81eccd82100a7b7`:
+
+- Run: [29690938663](https://github.com/Vellixia/Cairn/actions/runs/29690938663)
+- Status/conclusion: `completed` / `success`
+- Exact-SHA checkout evidence: the Windows, Linux isolation, SC-005, and SC-007 jobs
+  each configured `actions/checkout@v4` with
+  `ref: 4a06c4125715bb4b78b54e49c81eccd82100a7b7`; their logs show
+  `HEAD is now at 4a06c41 feat(session): complete Feature 001 implementation`.
+
+## macOS clean detached-checkout execution
+
+### Environment and checkout
+
+```text
+implementation_sha=4a06c4125715bb4b78b54e49c81eccd82100a7b7
+OS: macOS 26.5.2 (build 25F84)
+architecture=arm64
+rustc 1.90.0-nightly (abf50ae2e 2025-09-16) (1.90.0.0)
+cargo 1.90.0-nightly (840b83a10 2025-07-30) (1.90.0.0)
+worktree=/tmp/cairn-feature001-a10779ac-4a06c4125715bb4b78b54e49c81eccd82100a7b7
+detached_head=true
+clean_checkout=true
+```
+
+The run created the worktree with `git worktree add --detach`, verified that
+`symbolic-ref --quiet HEAD` returned no branch, and verified an empty
+`git status --porcelain=v1 --untracked-files=all` before and after execution. Compiler
+paths in the logs resolve the same worktree through macOS's `/private/tmp` alias.
+
+### Exact commands
+
+All commands ran from the clean detached worktree:
+
+```sh
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+
+cargo test -p cairn-daemon --test us1_register_inspect -- --nocapture
+cargo test -p cairn-daemon --test us2_agent_sim --test us2_sessions -- --nocapture
+cargo test -p cairn-daemon --test us3_tracking --test us3_events -- --nocapture
+CAIRN_CRASH_ITERS=1 CAIRN_CRASH_EXPECTED_ITERS=1 \
+  cargo test -p cairn-daemon --test us4_recovery --test us4_crash_restart -- --nocapture
+cargo test -p cairn-daemon --test privacy_audit -- --nocapture
+cargo test -p cairn-cli --test us1_cli_contract --test us2_cli_contract \
+  --test us4_cli_contract -- --nocapture
+
+RUST_TEST_NOCAPTURE=1 \
+  cargo test -p cairn-daemon --test perf -- --ignored
+```
+
+### Scenarios 1–6
+
+| Scenario | Captured result |
+|---|---|
+| 1 — registration and exact inspection | **PASS**: `us1_register_inspect`, 8 passed, 0 failed. Coverage includes fresh/idempotent registration, exact dirty inspection, non-Git and bare-repository rejection, identity restoration, detached HEAD/no remote, ignored pagination, and daemon health. |
+| 2 — snapshot-bound deterministic session | **PASS**: `us2_agent_sim` 1/1 and `us2_sessions` 7/7. Marker: `event_total=7 repository_state_changed=1 session_started=1 session_stopped=1`. |
+| 3 — live tracking and event counts | **PASS**: `us3_events` 2/2 and all `us3_tracking` tests 10/10. Marker: `repository_state_changed=1 branch_changed=1`. This includes authoritative installation-window reconciliation/deletion, failure stages, dropped notifications, coalescing, and no duplicate logical change event. |
+| 4 — forced-kill recovery | **PASS**: smoke crash run 1/1 and recovery suite 7/7. Marker: `configured_iterations=1 completed_forced_kills=1 committed_event_loss=0 invalid_session_outcomes=0`. The authoritative 100-kill result is recorded separately below. |
+| 5 — privacy audit | **PASS**: `privacy_audit`, 1 passed, 0 failed; persisted state and logs contained no secrets or tokens. |
+| 6 — offline/failure contract realization | **PASS**: CLI contracts 6/6 + 5/5 + 5/5. Both watcher install/reconcile goldens exited 1 as specified; repository, session, heartbeat, reattach, token-redaction, ambiguity, lease-expiry, and failure envelopes passed. |
+
+### Quality and SC-007
+
+- `cargo fmt --check`: **PASS**; its zero-byte log is the captured successful no-diff
+  output.
+- `cargo clippy --workspace --all-targets -- -D warnings`: **PASS**, 0 warnings.
+- `cargo test --workspace --all-targets`: **PASS**, 101 passed, 0 failed, 1 ignored
+  (the explicitly invoked performance test).
+- Exact-commit SC-007: **PASS** with `tracked_files=10000`, `inspect_ms=110`,
+  `snapshot_ms=228`, `inspect_limit_ms=2000`, and `snapshot_limit_ms=2000`.
+
+## Windows exact-SHA GitHub Actions execution
+
+The completed
+[Windows Feature 001 Scenarios 1-6 job](https://github.com/Vellixia/Cairn/actions/runs/29690938663/job/88203425635)
+checked out the frozen SHA directly and concluded `success`.
 
 ### Environment
 
 ```text
-OS: macOS 26.5.2 (build 25F84)
-Architecture: arm64 (Darwin RELEASE_ARM64_T8103)
-rustc: rustc 1.90.0-nightly (abf50ae2e 2025-09-16) (1.90.0.0)
-cargo: cargo 1.90.0-nightly (840b83a10 2025-07-30) (1.90.0.0)
-HEAD SHA: d3491b0ebc7d8574b7af8cb50ff0b7f8a4e705f0
-Working tree: dirty; the watcher-readiness implementation is not represented by that SHA
-Quickstart root: /private/tmp/cairn-quickstart-019f79bb/demo
-Data/socket: /private/tmp/cairn-quickstart-019f79bb/data and cairn.sock
+implementation_sha=4a06c4125715bb4b78b54e49c81eccd82100a7b7
+os=Microsoft Windows Server 2025 Datacenter 10.0.26100
+architecture=AMD64
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
 ```
 
-The dirty-tree disclosure is material: this is real local execution evidence, but it is
-not a reproducible tested-commit attestation. No commit was created because the user did
-not authorize committing the existing large working tree.
+### Exact commands
 
-### Exact command forms
-
-The real debug binaries were built with `cargo build --workspace`. Every CLI invocation
-used the same isolated environment:
-
-```text
-CAIRN_DATA_DIR=/private/tmp/cairn-quickstart-019f79bb/data
-CAIRN_SOCKET_PATH=/private/tmp/cairn-quickstart-019f79bb/cairn.sock
-CAIRN_PIPE_NAME=cairn-quickstart-019f79bb
-target/debug/cairnd
-target/debug/cairn <quickstart command> [--json]
-sqlite3 /private/tmp/cairn-quickstart-019f79bb/data/cairn.db <read-only count/dump query>
-```
-
-Scenario commands were `cairn init`, repeated `cairn init --json`, `cairn status --json`,
-`cairn session start/show/stop`, `kill -9 <PID resolved from the isolated socket>`, daemon
-restart, bad and valid `cairn session reattach`, privacy DB dump scanning, detached-HEAD
-status, and an intentionally corrupted temporary DB header followed by `cairn status`.
-Resume tokens were kept in mode-0600 temporary files and removed from displayed JSON.
-
-### Scenario results
-
-1. **Register + inspect — PASS.** Fresh init returned repository
-   `019f79e4-61c4-76a2-b124-039b512d42f4`; repeat init returned `created=false` and
-   `identity_outcome=existing`. Status reported branch `main`, staged added `b.txt`,
-   unstaged modified `a.txt`, and no untracked files. Init from the isolated non-Git
-   directory returned exit 3 with `NOT_A_REPOSITORY`.
-2. **Snapshot-bound session — PASS.** First start returned `created`, session
-   `019f79e5-0644-7992-be4b-5ec006464032`, state `active`, with identical start/current
-   fingerprint `fa41ca78…f5f09`. Repeated start returned `existing`, the same session ID,
-   and a null token. Stop returned `stopped`.
-3. **Live tracking — PASS.** An edit immediately after successful start changed the
-   current fingerprint from `fa41ca78…f5f09` to `e6da9dab…5a625`. Branch switch reported
-   `feature`; event counts at that point were `repository.state_changed=2` and
-   `branch.changed=1`.
-4. **Forced-kill recovery — PASS for the manual scenario.** Events before SIGKILL: 11;
-   events immediately after restart: 11 (zero loss). The session was `recovering`; bad
-   token returned exit 1 `LEASE_MISMATCH` and left it recovering; valid reattach returned
-   `active`; explicit stop returned `stopped`. Events after recovery/stop: 14, including
-   one `session.reattach_rejected`, one `session.recovered`, and two total
-   `session.stopped` events across Scenarios 2 and 4.
-5. **Privacy audit — PASS.** `.env` was reported only in ignored metadata with
-   `total_count=1`; scanning the SQLite dump for `abc123` returned `0` matches. The
-   automated privacy suite also passed in the full workspace run.
-6. **Offline/failure spot checks — PARTIAL.** Detached HEAD returned `detached=true`,
-   `branch=null`; the repository had no remote. After backing up and corrupting only the
-   isolated temporary DB header, daemon recovery logged corrupted state and CLI status
-   returned exit 6 with `STATE_CORRUPTED` and no fabricated success data. The required
-   Linux no-external-network namespace execution has not run; the CI job uses Linux
-   `unshare(1) --net` after dependency fetch/build, but configuration is not evidence.
-
-### Fresh automated evidence
-
-```text
-cargo test -p cairn-daemon --test us2_agent_sim --test us3_tracking --test us3_events
-  us2_agent_sim: 1 passed
-  us3_tracking: 10 passed
-  us3_events: 2 passed
-
-CAIRN_CRASH_ITERS=100 cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture
-  SC-005 acceptance: completed_forced_kills=100 committed_event_loss=0 invalid_session_outcomes=0
-  result: 1 passed, 0 failed
-
-cargo test --workspace --all-targets
-  result: 96 passed, 0 failed, 1 ignored (explicit nightly perf test)
-
+```powershell
 cargo fmt --check
-  clean
-
 cargo clippy --workspace --all-targets -- -D warnings
-  clean, 0 warnings
+cargo test --workspace --all-targets
+
+cargo test -p cairn-daemon --test us1_register_inspect -- --nocapture
+cargo test -p cairn-daemon --test us2_agent_sim --test us2_sessions -- --nocapture
+cargo test -p cairn-daemon --test us3_tracking --test us3_events -- --nocapture
+$env:CAIRN_CRASH_ITERS = "1"
+$env:CAIRN_CRASH_EXPECTED_ITERS = "1"
+cargo test -p cairn-daemon --test us4_recovery --test us4_crash_restart -- --nocapture
+cargo test -p cairn-daemon --test privacy_audit -- --nocapture
+cargo test -p cairn-cli --test us1_cli_contract --test us2_cli_contract --test us4_cli_contract -- --nocapture
 ```
 
-The dedicated Linux job fetches dependencies and builds all targets before entering a
-network namespace, verifies external HTTPS is unreachable, and then runs CLI/daemon,
-repository inspection, session, and live-tracking suites with filesystem and Unix IPC
-available. Its completed output is still required before T069/T072 can close.
+### Scenarios 1–6 and quality results
 
-## Scenario results (verbatim output, trimmed)
-
-### S1 — Register + inspect (US1) ✅
-
-```text
-=== S1: cairn init (fresh) ===
-Registered repository at C:/Users/andre/AppData/Local/Temp/tmp.TGSYtI646f/demo (id 019f6a99-40cf-73f3-83e7-9cba3ff0a1f0, identity created)
-
-=== S1: cairn init (idempotent) ===
-Already registered (id 019f6a99-40cf-73f3-83e7-9cba3ff0a1f0, identity existing)
-
-=== S1: identity marker exists ===
-repository-id marker: present
-
-=== S1: dirty state inspection ===
-branch:    main
-staged:    1
-  added b.txt
-unstaged:    1
-  modified a.txt
-
-=== S1: non-git rejection ===
-error [NOT_A_REPOSITORY]: not a git repository: ...
-exit=3
-```
-
-### S2 — Session bound to exact start snapshot (US2) ✅
-
-```text
-outcome: created
-outcome: existing | token is null: True     ← idempotent start, no new token (FR-034)
-state: active
-start==current fp: True                     ← unchanged repo anchors identically (SC-002)
-```
-
-### S3 — Live tracking (US3) ⚠️ historical run; current acceptance invalidated
-
-```text
-fingerprint changed after edit: yes         ← within 4 s of quiescence (SC-003)
-branch now: feature                         ← branch switch tracked
-```
-
-### S4 — Kill daemon, recover (US4) ✅
-
-```text
-state after restart: recovering
-error [LEASE_MISMATCH]: resume token or agent instance mismatch   (exit=1)
-state after bad reattach: recovering        ← reject-only, session untouched (I3)
-state after good reattach: active
-events before kill: 9, after recovery: 11 (no loss: yes)          ← SC-005
-```
-
-### S5 — Privacy audit (SC-006) ✅
-
-```text
-ignored:   1 files
-secret bytes in DB: 0
-raw resume token in DB: 0
-```
-
-### S6 — Detached HEAD + event history ✅
-
-```text
-branch:    (detached)
-
-  1  repository.registered
-  2  worktree.registered
-  3  snapshot.created
-  4  session.started
-  5  snapshot.created
-  6  repository.state_changed
-  7  snapshot.created
-  8  repository.state_changed
-  9  branch.changed
- 10  session.reattach_rejected
- 11  session.recovered
- 12  snapshot.created
- 13  repository.state_changed
- 14  session.stopped
-```
-
-## Automated evidence (same date, same machine)
-
-The results in this section describe the 2026-07-16 Windows run only. They are superseded
-for completion decisions by the 2026-07-19 failing watcher suites and must not be treated
-as current feature-level acceptance.
-
-- `cargo test --workspace`: **90 passed, 0 failed, 1 ignored** (perf suite).
-- Perf suite (`--ignored`): inspect **206 ms**, snapshot **382 ms** at 10,000
-  tracked files — SC-007 bound is 2 s each.
-- Crash harness: 8 randomized `TerminateProcess` kills (historical diagnostic only), zero
-  committed-event loss, all pre-kill sessions recovering. This does **not** satisfy SC-005;
-  acceptance requires exactly 100 completed forced kills.
-- `cargo clippy --workspace --all-targets`: 0 warnings. `cargo fmt --check`: clean.
-
-## Traceability
-
-| Criteria | Evidence |
+| Scenario | Captured exact-SHA Windows result |
 |---|---|
-| SC-001 offline local answers | S2/S4 outputs; no network APIs in workspace |
-| SC-002 determinism | S2 (`start==current fp: True`) + 100× loops in tests |
-| SC-003 ≤5 s tracking | S3 + us3_tracking bound asserts |
-| SC-004 idempotent init / zero partial writes | S1 |
-| SC-005 zero event loss + recovery | S4 + us4_crash_restart |
-| SC-006 zero secrets persisted | S5 + privacy_audit test |
-| SC-007 <2 s @10k files | Historical Windows perf suite (206/382 ms); final exact-commit execution still required |
-| SC-008 machine-output stability | json_stability test (8 commands × success/failure × 3 rounds) |
+| 1 | **PASS**, 8 passed, 0 failed. |
+| 2 | **PASS**, 1 + 7 passed; `event_total=7 repository_state_changed=1 session_started=1 session_stopped=1`. |
+| 3 | **PASS**, 2 + 10 passed; `repository_state_changed=1 branch_changed=1`. |
+| 4 | **PASS**, 1 + 7 passed; `configured_iterations=1 completed_forced_kills=1 committed_event_loss=0 invalid_session_outcomes=0`. |
+| 5 | **PASS**, 1 passed, 0 failed. |
+| 6 | **PASS**, 6 + 5 + 5 passed, 0 failed. |
 
-## Outstanding evidence required for convergence
+The job's final markers explicitly report `feature001_scenario_1=pass` through
+`feature001_scenario_6=pass`. `cargo fmt --check` and Clippy passed; the complete
+workspace run passed with 101 passed, 0 failed, and 1 explicitly ignored performance
+test.
 
-### Watcher readiness and US3
+## Linux network-isolated execution
 
-- [ ] T061's typed `WATCHER_START_FAILED` schema and contract tests pass, including IPC
-  request/response and CLI JSON-envelope goldens for `install` and `reconcile`, both CLI
-  exit-code-1 assertions, schema-breaking-change tripwire coverage, and non-leakage of raw
-  errors, paths, repository contents, environment values, or tokens.
-- [ ] `us2_agent_sim` passes on the frozen implementation commit after watcher readiness
-  acknowledgement and post-install reconciliation are implemented.
-- [ ] Every `us3_tracking` test passes on the frozen implementation commit, including an
-  initially tracked file deleted while watcher installation is barrier-paused; the
-  returned/current snapshot and change event reflect the deletion without a duplicate.
-  Coverage also includes immediate post-return edit, create/modify/rename during install,
-  coalesced bursts, dropped notification reconciliation, installation failure, and daemon
-  restart watcher reinstallation.
-- [ ] `us3_events` passes on the frozen implementation commit; `us3_tracking`
-  demonstrates no duplicate repository-change event when notification and reconciliation
-  observe the same change.
-- [ ] The complete `cargo test --workspace --all-targets` run passes on the frozen
-  implementation commit.
+The completed
+[Linux network-isolated Feature 001 validation job](https://github.com/Vellixia/Cairn/actions/runs/29690938663/job/88203425632)
+checked out the same frozen SHA and concluded `success`.
 
-### SC-005 exactly-100-kill acceptance
+```text
+implementation_sha=4a06c4125715bb4b78b54e49c81eccd82100a7b7
+os=Ubuntu 24.04.4 LTS
+architecture=x86_64
+rustc 1.97.1 (8bab26f4f 2026-07-14)
+cargo 1.97.1 (c980f4866 2026-06-30)
+```
 
-- [ ] Record the dedicated CI workflow run/job and exact frozen implementation SHA.
-- [ ] Record configured iterations `100`, completed forced kills `100`, committed-event
-  loss `0`, invalid session outcomes `0`, and final job result.
-- [ ] Record that every session active at termination entered recovery and was recovered
-  or explicitly interrupted according to SC-005.
+Dependencies, binaries, tests, and the isolation image were fetched/built before
+networking was disabled:
 
-An 8- or 20-iteration result and the local dirty-tree 100-kill result above are diagnostic
-only and cannot check this final section.
+```sh
+cargo fetch --locked
+cargo test --workspace --all-targets --no-run --locked
+docker pull rust:1-bookworm
+```
 
-### Linux network-isolated validation
+The captured isolation command was:
 
-- [ ] Record the completed workflow run/job, same frozen implementation SHA, Ubuntu
-  version, and architecture.
-- [ ] Name the OS-level network namespace or container isolation mechanism.
-- [ ] Record dependency fetch and binary/test build before isolation.
-- [ ] Inside isolation, record the CLI, daemon, repository registration/inspection,
-  session, live-change, and quickstart commands and results while local IPC/filesystem
-  access remain available.
-- [ ] Demonstrate external networking is unavailable, filesystem access works, and local
-  IPC works. If namespaces are unavailable, fail explicitly or use a container launched
-  with networking disabled; do not silently skip. `cargo --offline` alone is not proof.
+```sh
+docker info >/dev/null
+echo "isolation_mechanism=docker --network none"
+docker run --rm --network none \
+  --volume "/home/runner/work/Cairn/Cairn:/workspace" \
+  --volume "/home/runner/.cargo/registry:/usr/local/cargo/registry" \
+  --volume "/home/runner/.cargo/git:/usr/local/cargo/git" \
+  --workdir /workspace \
+  --env CARGO_NET_OFFLINE=true \
+  rust:1-bookworm \
+  bash -euxo pipefail -c '
+    test -f /workspace/Cargo.toml
+    printf "filesystem-ok\n" > /workspace/target/network-isolation-filesystem-proof
+    grep -F "filesystem-ok" /workspace/target/network-isolation-filesystem-proof
+    echo "local_filesystem=available"
+    if curl --silent --show-error --connect-timeout 2 https://example.com >/dev/null; then
+      echo "external network unexpectedly reachable" >&2
+      exit 1
+    fi
+    echo "external_network=unreachable"
+    cargo test --offline --locked -p cairn-daemon \
+      --test us1_register_inspect \
+      --test us2_agent_sim \
+      --test us3_tracking \
+      --test us4_recovery \
+      --test privacy_audit -- --nocapture
+    echo "local_ipc=available"
+    cargo test --offline --locked -p cairn-cli \
+      --test us1_cli_contract \
+      --test us2_cli_contract \
+      --test us4_cli_contract -- --nocapture
+    echo "feature001_network_isolated_scenarios=pass"
+  '
+```
 
-### Windows and macOS same-commit Scenarios 1–6 (T059/T071/T073)
+The live container output proves:
 
-- [ ] Freeze one exact Feature 001 implementation SHA and record the separate evidence
-  commit that documents the results.
-- [ ] From a clean checkout of that SHA on macOS, record OS version/architecture, Rust and
-  Cargo versions, exact commands, Scenarios 1–6 results, required event counts, workspace
-  tests, formatting, and Clippy.
-- [ ] On Windows, check out and test that same exact SHA and record the equivalent
-  environment, commands, scenario, event-count, and quality results. A completed GitHub
-  Actions job is acceptable when it explicitly tests that SHA.
+- `isolation_mechanism=docker --network none`.
+- The filesystem write/read check printed `filesystem-ok` and
+  `local_filesystem=available`.
+- The external HTTPS probe failed with `curl: (6) Could not resolve host: example.com`,
+  followed by `external_network=unreachable`.
+- Daemon/repository/session/live-tracking/recovery/privacy suites passed 27 tests; their
+  event markers were Scenario 2 `event_total=7 repository_state_changed=1
+  session_started=1 session_stopped=1` and Scenario 3
+  `repository_state_changed=1 branch_changed=1`.
+- Real CLI/daemon local IPC remained available; the job printed `local_ipc=available`,
+  and all 16 CLI contract tests passed.
+- The terminal marker was `feature001_network_isolated_scenarios=pass`.
 
-The historical Windows run predates watcher remediation and the macOS run above used a
-dirty tree, so neither currently satisfies this section. A configured matrix is not
-evidence.
+This is completed OS-level isolation evidence, not `cargo --offline` or configured-only
+workflow text.
 
-### SC-007 explicit performance execution
+## SC-005 exactly 100 forced kills
 
-- [ ] Run `cargo test -p cairn-daemon --test perf -- --ignored` on the same frozen
-  implementation SHA.
-- [ ] Record exact implementation SHA, OS/architecture, tracked-file fixture size
-  (10,000), measured inspect duration, measured snapshot duration, SC-007 limits
-  (each under 2 seconds), and pass/fail result.
+The completed
+[SC-005 exactly 100 forced daemon kills job](https://github.com/Vellixia/Cairn/actions/runs/29690938663/job/88203425605)
+checked out the frozen SHA and concluded `success`.
 
-A workspace test result that reports the performance test as ignored does not satisfy
-SC-007.
+```sh
+# GitHub Actions step environment:
+CAIRN_CRASH_ITERS=100
+CAIRN_CRASH_EXPECTED_ITERS=100
 
-### Final convergence
+# Shell body:
+set -o pipefail
+cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture 2>&1 | tee sc005-output.txt
+grep -F "configured_iterations=100 completed_forced_kills=100 committed_event_loss=0 invalid_session_outcomes=0" sc005-output.txt
+echo "configured_iterations=100"
+echo "completed_forced_kills=100"
+echo "committed_event_loss=0"
+echo "invalid_session_outcomes=0"
+```
 
-- [ ] All 76 authoritative tasks are complete (76/76).
-- [ ] Windows, clean-checkout macOS, Linux network isolation, exactly-100-kill CI, and
-  SC-007 evidence all reference the same frozen implementation SHA.
-- [ ] Real completed execution evidence and its evidence-document commit are recorded.
-- [ ] Feature 002 remains untouched.
+The harness and the explicit postcondition both reported:
+
+```text
+configured_iterations=100
+completed_forced_kills=100
+committed_event_loss=0
+invalid_session_outcomes=0
+test result: ok. 1 passed; 0 failed
+```
+
+The passing test is
+`randomized_kills_lose_no_committed_events_and_sessions_recover`; thus every affected
+active session satisfied the harness's recovery/outcome assertions across exactly 100
+completed forced kills.
+
+## SC-007 10,000-file performance evidence
+
+| Execution | SHA binding | Environment | Inspect | Snapshot | Limits | Result |
+|---|---|---|---:|---:|---:|---|
+| Clean detached macOS exact-commit run | `4a06c4125715bb4b78b54e49c81eccd82100a7b7` | macOS 26.5.2 arm64 | 110 ms | 228 ms | 2,000 ms each | **PASS** |
+| [GitHub Actions SC-007 job](https://github.com/Vellixia/Cairn/actions/runs/29690938663/job/88203425606) | exact-SHA checkout | Ubuntu 24.04.4 x86_64 | 34 ms | 108 ms | 2,000 ms each | **PASS** |
+| Pre-freeze corroboration | implementation tree immediately before freeze | macOS arm64 | 82 ms | 212 ms | 2,000 ms each | **PASS** |
+
+Each row used `tracked_files=10000`. The authoritative clean macOS and GitHub Actions
+commands were both `cargo test -p cairn-daemon --test perf -- --ignored` with
+`RUST_TEST_NOCAPTURE=1`; both tests passed.
+
+## Pre-final verification and task traceability
+
+The exact-commit macOS/Windows workspace runs also passed the T061 typed watcher schemas,
+IPC and CLI goldens, install/reconcile exit mappings, replay, and non-leakage coverage;
+the T065 authoritative installation-window test; `us2_agent_sim`; all 10
+`us3_tracking` tests; and both `us3_events` tests. Before freezing, the same implementation
+tree passed formatting, Clippy, 101 workspace tests with 0 failures and 1 ignored perf
+test, and SC-007 at 82/212 ms. These completed results, the cross-platform runs above,
+Linux isolation, and the 100-kill job satisfy the pre-final T072 gate.
+
+| Task/criterion | Completed evidence |
+|---|---|
+| T059 / T071 / T073 | Same frozen SHA on clean detached macOS and exact-SHA Windows; commands, environments, scenario results, event counts, workspace, fmt, and Clippy recorded above. |
+| T069 / T074 | Completed successful Docker `--network none` job with exact SHA, pre-build/fetch, external-network failure, local filesystem/IPC proofs, and passing behavior. |
+| T072 | Complete pre-final verification across watcher contracts/races, scenario suites, workspace/fmt/Clippy, Linux isolation, 100 kills, and explicit SC-007. |
+| T075 / SC-005 | Dedicated exact-SHA job completed exactly 100/100 kills with zero committed-event loss and zero invalid session outcomes. |
+| SC-001 | Linux no-network container preserved local filesystem and IPC while external HTTPS was unreachable. |
+| SC-002 | Scenario 2 deterministic snapshot/session tests passed on both required operating systems and in Linux isolation. |
+| SC-003 | All 10 live-tracking tests passed; Scenario 3 emitted one state-change and one branch-change event. |
+| SC-004 | Scenario 1 registration/idempotence and zero-write rejection tests passed. |
+| SC-005 | Dedicated 100-kill acceptance result above. |
+| SC-006 | Privacy audit passed on macOS, Windows, and isolated Linux. |
+| SC-007 | Explicit 10,000-file exact-commit results and 2-second limits above. |
+| SC-008 | Workspace `json_stability` coverage passed on macOS and Windows. |
+
+T076 remains deliberately incomplete. The final 76/76 declaration and the evidence
+payload commit must be produced by the separate final convergence workflow step, not by
+this pre-final evidence update.
+
+## Historical disclosures retained
+
+These earlier results remain useful diagnostics but are superseded for completion by the
+frozen exact-commit evidence above:
+
+- **2026-07-19 dirty macOS remediation run**: macOS 26.5.2 arm64, nightly Rust/Cargo
+  1.90.0, recorded HEAD `d3491b0ebc7d8574b7af8cb50ff0b7f8a4e705f0`, and an
+  uncommitted watcher-readiness implementation. Its isolated root was
+  `/private/tmp/cairn-quickstart-019f79bb`; repository/session IDs were
+  `019f79e4-61c4-76a2-b124-039b512d42f4` and
+  `019f79e5-0644-7992-be4b-5ec006464032`. Scenarios 1–5 passed; Scenario 6 had detached
+  HEAD and corruption checks but Linux isolation was only configured. Manual recovery
+  retained 11/11 pre-kill events and ended at 14 events, including one rejected reattach,
+  one recovery, and two cumulative stops. Its local 100-kill diagnostic reported zero
+  loss/invalid outcomes, and its workspace run reported 96 passed, 0 failed, 1 ignored.
+  Because the tree was dirty, none of those results was used to close exact-commit tasks.
+- **2026-07-16 Windows manual run**: Windows 11 Pro 10.0.26200 with real debug binaries
+  and isolated data/pipe. Scenarios covered idempotent registration, exact dirty status,
+  snapshot equality, live edit/branch tracking, rejected/valid recovery, zero persisted
+  secret/token bytes, detached HEAD, and a 14-event history. Its workspace result was 90
+  passed, 0 failed, 1 ignored; the performance diagnostic was 206 ms inspect / 382 ms
+  snapshot at 10,000 files; and its crash diagnostic used only 8 kills. It predates the
+  watcher remediation and does not replace the exact-SHA Windows job above.
+- **Earlier Linux disclosure**: the previously described `unshare(1) --net` workflow was
+  configured-only and therefore not evidence. It is superseded by the completed Docker
+  `--network none` job above.
