@@ -1,38 +1,40 @@
 <!--
 Sync Impact Report
 ==================
-Version change: (template, unversioned) → 1.0.0
-Rationale: Initial ratification of the Cairn constitution. MAJOR set to 1
-because this establishes the first complete, binding governance baseline.
+Version change: 1.0.0 → 1.1.0
+Rationale: MINOR amendment materially expands Principle II with a narrowly
+defined local-bootstrap sequencing exception, explicit classification and
+binding rules, and a future migration gate. The project/task invariant is
+preserved for project-aware and task-aware sessions.
 
-Modified principles: n/a (all placeholders replaced on first fill)
+Modified principles:
+- II. Exact Execution Scope → clarified project-aware, task-aware, and
+  `local_unbound` bootstrap session invariants.
 
 Added sections:
-- Core Principles (10 principles: I. Observable Reality Is Authoritative,
-  II. Exact Execution Scope, III. Append-Only Execution History,
-  IV. Evidence Before Confidence, V. Automatic Operation with Exceptional
-  Human Intervention, VI. Goal Stability and Controlled Adaptation,
-  VII. Local Repository Truth, VIII. Deterministic Analysis Before AI
-  Interpretation, IX. Minimal Reliable Infrastructure, X. Privacy and
-  Secret Containment)
-- Additional Technical Constraints
-- Development Workflow and Quality Gates
-- Governance
+- Governance amendment record for version 1.1.0.
 
-Removed sections: none (template example comments removed after replacement)
+Removed sections: none.
 
 Templates requiring updates:
-- ✅ .specify/templates/plan-template.md — "Constitution Check" gate and
-  "Complexity Tracking" table already align (gates derived from this file;
-  complexity justification satisfies Principle IX and Governance).
-- ✅ .specify/templates/spec-template.md — prioritized, independently
-  testable user stories + measurable success criteria satisfy the
-  vertical-slice and observable-evidence gates. No change needed.
-- ✅ .specify/templates/tasks-template.md — story-scoped, independently
-  testable phases align. Note: constitution requires migration/rollback
-  tasks for state-changing features and contract tests for protocol
-  changes; /speckit-tasks must include them when applicable.
+- ✅ .specify/templates/plan-template.md — existing Constitution Check gate
+  requires each feature to declare its applicable session class; no template
+  wording change needed.
+- ✅ .specify/templates/spec-template.md — existing scope and assumptions
+  sections can declare bootstrap classification; no change needed.
+- ✅ .specify/templates/tasks-template.md — existing migration and contract
+  task structure covers future binding work; no change needed.
 - ✅ .specify/templates/checklist-template.md — generic, no conflict.
+- ✅ Spec Kit command definitions — reviewed; they defer to the constitution
+  and require no wording change.
+
+Feature artifacts aligned:
+- ✅ specs/001-local-session-foundation/spec.md
+- ✅ specs/001-local-session-foundation/plan.md
+- ✅ specs/001-local-session-foundation/data-model.md
+- ✅ specs/001-local-session-foundation/contracts/ipc-contract.md
+- ✅ specs/001-local-session-foundation/tasks.md
+- ✅ specs/001-local-session-foundation/evidence/quickstart-run.md
 
 Follow-up TODOs: none. No deferred placeholders.
 -->
@@ -55,14 +57,38 @@ execution; an untraceable claim is indistinguishable from a hallucination.
 
 ### II. Exact Execution Scope
 
-Every agent session MUST be associated with exactly one user, project,
-repository, task revision, branch, commit, and working-tree snapshot.
-Project, branch, task, and session knowledge MUST remain separately scoped.
-Information from one scope MUST NOT silently become truth in another; any
-cross-scope promotion MUST be an explicit, recorded operation.
+A project-aware execution session MUST reference exactly one project. A
+task-aware execution session MUST reference exactly one immutable task
+revision. Every execution session MUST remain scoped to exactly one local
+user, repository, worktree, and agent instance. Each recorded session state
+MUST reference an explicit branch state (including detached HEAD), commit,
+and working-tree snapshot. Project, branch, task, and session knowledge MUST
+remain separately scoped.
+
+A local bootstrap session MAY temporarily be unbound from a project and task
+revision only when project and task-revision capabilities are not yet
+available. It MUST be explicitly represented as `local_unbound`, remain
+scoped to repository, worktree, agent instance, and local execution, and MUST
+NOT be synchronized, promoted to project truth, or used as authoritative
+project memory while unbound. When a bootstrap-only feature contract exposes
+no project-aware synchronization surface and no mixed bound/unbound modes,
+that contract MAY explicitly classify every session it defines as
+`local_unbound`; a record-level discriminator is REQUIRED before mixed modes
+or project-aware synchronization are introduced.
+
+Binding a local bootstrap session later MUST be explicit, reference exactly
+one project and one immutable task revision, append a binding event, preserve
+the original execution history, and MUST NOT retroactively rewrite prior
+events. The feature that introduces projects and task revisions MUST define
+migration and binding behavior before project-aware synchronization is
+allowed. Information from one scope MUST NOT silently become truth in
+another; any cross-scope promotion MUST be an explicit, recorded operation.
 
 Rationale: Knowledge that leaks across scopes silently corrupts every
-consumer of that scope; explicit promotion keeps provenance intact.
+consumer of that scope; explicit promotion keeps provenance intact. The
+`local_unbound` rule is a sequencing clarification for a local foundation,
+not removal of the long-term project/task invariant and not permission to
+invent placeholder project or task records without lifecycle semantics.
 
 ### III. Append-Only Execution History
 
@@ -213,4 +239,11 @@ after design completes. Complexity that violates Principle IX (Minimal
 Reliable Infrastructure) MUST be justified in the plan's Complexity Tracking
 table with measured evidence; unjustified violations block the plan.
 
-**Version**: 1.0.0 | **Ratified**: 2026-07-16 | **Last Amended**: 2026-07-16
+Amendment record:
+
+- **2026-07-19 — v1.1.0**: Clarified Principle II with the explicit
+  `local_unbound` bootstrap-session exception, append-only future binding,
+  and a migration gate. This resolves feature sequencing without removing
+  the project/task-revision invariant.
+
+**Version**: 1.1.0 | **Ratified**: 2026-07-16 | **Last Amended**: 2026-07-19

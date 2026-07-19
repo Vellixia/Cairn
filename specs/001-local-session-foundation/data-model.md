@@ -76,6 +76,14 @@ storage dedupe). No UPDATE/DELETE ever issued; enforced by triggers.
 
 Projection (rebuildable from events, arch rule 4) with uniqueness enforcement.
 
+Every session defined by this bootstrap-only v1 data model is explicitly classified by
+the feature contract as `local_unbound`. Because project and task-revision capabilities,
+project-aware synchronization, and mixed bound/unbound modes do not exist in Feature 001,
+the classification is not duplicated as a per-row discriminator. Before mixed modes or
+project synchronization are introduced, the responsible future feature must add explicit
+project/task binding, an append-only binding event, and migration behavior that preserves
+all original events.
+
 | Field | Type | Constraints | Notes |
 |---|---|---|---|
 | id | TEXT | PK | UUIDv7 = stable session identifier (FR-014) |

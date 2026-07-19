@@ -40,11 +40,11 @@ filesystem events treated only as invalidation hints reconciled against Git trut
 | Principle | Gate | Status |
 |---|---|---|
 | I. Observable reality authoritative | Git reconciliation produces authoritative state; fs notifications advisory only (arch rules 7–8) | PASS |
-| II. Exact execution scope | Session bound to user, repository, worktree, agent instance, start/current snapshot; no cross-scope leakage | PASS |
+| II. Exact execution scope | The bootstrap-only v1 contract explicitly classifies every session as `local_unbound`; sessions remain scoped to user, repository, worktree, agent instance, branch/commit through start/current snapshots, expose no project-aware synchronization, and cannot become project truth | PASS |
 | III. Append-only history | Events immutable, append-only, idempotent; SQLite triggers forbid UPDATE/DELETE; projections rebuildable | PASS |
 | IV. Evidence before confidence | Session states explicit (active/recovering/stopped/interrupted); snapshots are evidence records | PASS |
 | V. Automatic operation | Auto snapshot refresh, coalescing, recovery, staleness handling — no routine human input | PASS |
-| VI. Goal stability | Task revisions out of scope for this feature; no drift machinery needed yet | N/A |
+| VI. Goal stability | Task revisioning and later project/task binding are out of scope; the future capability must define migration and append-only binding before synchronization | N/A |
 | VII. Local repository truth | Daemon owns all local truth; no central server in scope (arch rule 13) | PASS |
 | VIII. Deterministic before AI | Zero AI; Git CLI + hashes only | PASS |
 | IX. Minimal infrastructure | SQLite + filesystem only; no pgvector/Valkey/brokers/embeddings (arch rule 13) | PASS |
@@ -55,11 +55,14 @@ filesystem events treated only as invalidation hints reconciled against Git trut
 **Post-Phase-1 re-check (2026-07-16)**: design artifacts introduce no new infrastructure,
 no server, no AI; events remain append-only with transactional projections. PASS.
 
-**Convergence re-check (2026-07-19)**: BLOCKED. Current `us2_agent_sim`,
-`us3_tracking`, and `us3_events` results invalidate the completed status previously
-claimed for T040/T045/T046. Per Constitution IV, checked boxes are not evidence when
-their required tests fail. Feature completion remains blocked until the completion gate
-below is satisfied.
+**Pre-final convergence re-check (2026-07-19)**: Runtime and exact-SHA evidence PASS.
+`us2_agent_sim`, `us3_tracking`, `us3_events`, the full workspace suite, formatting,
+Clippy, exactly-100-kill acceptance, Linux network isolation, Windows/macOS scenarios,
+and explicit SC-007 performance execution all pass against frozen implementation SHA
+`4a06c4125715bb4b78b54e49c81eccd82100a7b7`. Constitution v1.1.0 classifies this
+bootstrap-only contract as `local_unbound`; project/task binding and migration remain
+out of scope. Feature completion remains at 75/76 until the fresh analysis, convergence,
+and T076 declaration gate succeed.
 
 ## Project Structure
 

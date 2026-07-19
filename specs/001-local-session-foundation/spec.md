@@ -23,6 +23,7 @@
 
 - Q: When may `session start` report success relative to filesystem-watcher startup? → A: Only after the operating-system watcher is installed, its event-processing path has acknowledged readiness, and an authoritative Git reconciliation has completed after installation. The required order is session creation → watcher installation request → watcher-ready acknowledgement → post-install Git reconciliation → session-start response. The reconciliation closes the installation window by detecting changes made after the initial snapshot but before watcher readiness.
 - Q: What happens if watcher installation or the post-install reconciliation fails? → A: The start request returns a stable machine-readable `WATCHER_START_FAILED` error, never a success result. Its typed, schema-constrained payload discriminates watcher failure with `kind=watcher_start_failure` and identifies `stage=install|reconcile`; it is not arbitrary JSON and never exposes raw internal errors, paths, environment values, tokens, repository contents, or secrets. A newly created session must not remain falsely healthy: it transitions to `interrupted` and the failure is recorded through the append-only `session.interrupted` event model. Filesystem notifications remain advisory; Git reconciliation remains authoritative.
+- Q: How are Feature 001 sessions scoped before project lifecycle and task revisioning exist? → A: Every session in this bootstrap-only v1 feature contract is explicitly classified as `local_unbound`. It remains bound to the local user, repository, worktree, agent instance, and exact repository snapshots, and cannot be synchronized, promoted to project truth, or used as authoritative project memory. Project/task binding and migration are reserved for the feature that introduces those capabilities; binding must be explicit and append-only.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -194,6 +195,11 @@ against the actual current repository state.
 
 **Session lifecycle**
 
+Feature 001 defines only local bootstrap sessions. The complete v1 feature
+contract classifies every session as `local_unbound`; it exposes neither a
+project-aware synchronization surface nor mixed bound/unbound modes. This is
+an explicit contract-level classification, not an implicit project binding.
+
 - **FR-013**: Users MUST be able to start a local session for a named agent type in a registered repository.
 - **FR-014**: A session MUST be associated with: local user identity, repository, agent type, start snapshot, current snapshot, start time, session state, and a stable session identifier.
 - **FR-015**: Users MUST be able to inspect the active session and see all attributes in FR-014.
@@ -243,7 +249,7 @@ against the actual current repository state.
 - **Repository**: A registered local Git repository; carries a stable local identity (generated identifier in Git-private metadata under the Git common directory), a per-worktree identity for linked worktrees, the current canonical root path (mutable metadata), and default remote (when present). Identity is independent of branch, working-tree state, and directory location.
 - **Repository State (inspection result)**: A point-in-time, non-persisted view: root, branch or detached HEAD, HEAD commit, remote, staged/unstaged/untracked/ignored file sets, worktree information.
 - **Snapshot**: A persisted, deterministic fingerprint of one exact repository state: branch, HEAD commit, staged/unstaged/untracked fingerprints, and final combined fingerprint. Metadata and hashes only.
-- **Session**: A unit of agent work bound to a repository: stable identifier, local user identity, repository, agent type, agent instance identifier (per-instance UUID; optional `agent_pid` kept only as supporting liveness metadata), resume-token lease (stored internally only as `resume_token_hash`, with a lease-expiry timestamp), `recovering_since` (persisted when the session enters recovery), start snapshot, current snapshot, start time, state (active, recovering, stopped, interrupted).
+- **Session**: A `local_unbound` bootstrap unit of agent work bound to local repository truth: stable identifier, local user identity, repository, worktree, agent type, agent instance identifier (per-instance UUID; optional `agent_pid` kept only as supporting liveness metadata), resume-token lease (stored internally only as `resume_token_hash`, with a lease-expiry timestamp), `recovering_since` (persisted when the session enters recovery), start snapshot, current snapshot, start time, state (active, recovering, stopped, interrupted). It has no project or task-revision association and cannot become project truth within this feature.
 - **Event**: An append-only, timestamped record of one occurrence (registration, snapshot creation, session start/stop, repository-state change, branch change) with references to the entities involved.
 - **Local User Identity**: The operating-system-level identity of the developer on this machine; used to attribute sessions without any account system.
 - **Cairn Ignore File**: A repository-local exclusion list, layered on top of Git ignore rules, controlling what Cairn may observe and fingerprint.
@@ -268,7 +274,8 @@ Feature 001 is converged only when all 76 authoritative tasks are complete (76/7
 ## Out of Scope
 
 - Central-server synchronization
-- Project accounts and memberships
+- Project lifecycle, accounts, and memberships
+- Task revision creation, project/task binding, and migration of `local_unbound` sessions
 - AI memory extraction
 - Context compilation
 - Drift detection
@@ -282,6 +289,7 @@ Feature 001 is converged only when all 76 authoritative tasks are complete (76/7
 ## Assumptions
 
 - Local user identity is derived from the operating-system user; no login, accounts, or central identity are involved in this feature.
+- All Feature 001 sessions are explicitly `local_unbound` at the v1 feature-contract level because project and task-revision capabilities do not yet exist. They cannot synchronize or become authoritative project memory. A future project/task feature must add explicit binding, an append-only binding event, and migration behavior without rewriting original events before project-aware synchronization is permitted.
 - "Ignored files" in inspection output means summary metadata and paths as permitted by exclusion rules (per FR-035) — never their contents.
 - Fingerprints are derived from content hashes and Git metadata; the exact hashing scheme is an implementation choice, constrained only by determinism (FR-009) and sensitivity (FR-010).
 - The coalescing window for filesystem events is an implementation choice, constrained by the 5-second quiescence bound in SC-003 and the no-lost-final-state rule (FR-023).

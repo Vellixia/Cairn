@@ -4,7 +4,7 @@
 > CONVERGED (75/76).** Completed macOS, Windows, Linux network-isolated,
 > exactly-100-kill, and SC-007 executions all test the same frozen Feature 001
 > implementation SHA. T059, T069, and T071–T075 are complete. T076 remains open until
-> the separate final convergence gate runs and records the evidence payload commit.
+> the constitution-aligned analysis and separate final convergence declaration pass.
 
 **Feature**: 001-local-session-foundation
 
@@ -15,6 +15,11 @@
 **Evidence payload commit**: 808fdc257a9f42b0a3370448f624618bfb95e2bc
 
 **Evidence document state**: exact-SHA evidence was committed before final convergence.
+
+**Governance sequencing clarification**: Constitution v1.1.0 explicitly classifies this
+bootstrap-only v1 contract as `local_unbound`. The amendment changes no executable
+Feature 001 requirement and therefore does not invalidate or require rerunning the frozen
+implementation evidence below.
 
 The authoritative artifacts are the completed run under
 `.specify/workflows/runs/a10779ac/evidence/`: `github-run.json`, `github-run.log`, every
@@ -295,9 +300,9 @@ Linux isolation, and the 100-kill job satisfy the pre-final T072 gate.
 | SC-007 | Explicit 10,000-file exact-commit results and 2-second limits above. |
 | SC-008 | Workspace `json_stability` coverage passed on macOS and Windows. |
 
-T076 remains deliberately incomplete. The final 76/76 declaration and the evidence
-payload commit must be produced by the separate final convergence workflow step, not by
-this pre-final evidence update.
+T076 remains deliberately incomplete. The exact-SHA evidence payload is already committed
+as `808fdc257a9f42b0a3370448f624618bfb95e2bc`; the separate final workflow step must still
+record the successful constitution-aligned analysis/convergence and the 76/76 declaration.
 
 ## Historical disclosures retained
 

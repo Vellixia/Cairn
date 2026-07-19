@@ -31,6 +31,13 @@ authenticated local IPC channel and are never logged or persisted raw.
 
 ## Common objects
 
+All Session objects in this bootstrap-only v1 contract are explicitly classified as
+`local_unbound`. The contract has no project-aware synchronization surface and no mixed
+bound/unbound mode, so it does not add a redundant per-object discriminator or fabricate
+project/task identifiers. A future contract that introduces project or task awareness
+must add explicit immutable task-revision binding, append a binding event, define
+migration, and preserve all earlier events before synchronization is allowed.
+
 ```jsonc
 // Session
 {
