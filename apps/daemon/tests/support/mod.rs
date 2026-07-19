@@ -15,7 +15,7 @@ pub struct TestDaemon {
     pub dir: tempfile::TempDir,
     pub config: DaemonConfig,
     shutdown: tokio::sync::watch::Sender<bool>,
-    handle: tokio::task::JoinHandle<()>,
+    handle: Option<tokio::task::JoinHandle<Result<(), String>>>,
 }
 
 pub fn test_config(dir: &tempfile::TempDir) -> DaemonConfig {
@@ -51,35 +51,52 @@ impl TestDaemon {
         let (tx, rx) = tokio::sync::watch::channel(false);
         let cfg = config.clone();
         let handle = tokio::spawn(async move {
-            if let Err(e) = cairn_daemon::run(cfg, rx).await {
-                eprintln!("daemon exited with error: {e}");
-            }
+            cairn_daemon::run(cfg, rx)
+                .await
+                .map_err(|error| format!("{error:#}"))
         });
-        let daemon = Self {
+        let mut daemon = Self {
             dir,
             config,
             shutdown: tx,
-            handle,
+            handle: Some(handle),
         };
         daemon.wait_ready().await;
         daemon
     }
 
-    async fn wait_ready(&self) {
-        for _ in 0..100 {
+    async fn wait_ready(&mut self) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        loop {
+            if self
+                .handle
+                .as_ref()
+                .is_some_and(|handle| handle.is_finished())
+            {
+                let result = self.handle.take().expect("finished daemon handle").await;
+                match result {
+                    Ok(Ok(())) => panic!("daemon exited before becoming ready"),
+                    Ok(Err(error)) => panic!("daemon failed before becoming ready: {error}"),
+                    Err(error) => panic!("daemon task failed before becoming ready: {error}"),
+                }
+            }
             if self.try_client().await.is_some() {
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            if tokio::time::Instant::now() >= deadline {
+                panic!("daemon did not become ready within 15s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        panic!("daemon did not become ready");
     }
 
-    pub async fn stop(self) -> (tempfile::TempDir, DaemonConfig) {
+    pub async fn stop(mut self) -> (tempfile::TempDir, DaemonConfig) {
         let _ = self.shutdown.send(true);
         // Nudge the accept loop (it wakes on connect) then wait for exit.
         let _ = self.try_client().await;
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), self.handle).await;
+        if let Some(handle) = self.handle.take() {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        }
         (self.dir, self.config)
     }
 
