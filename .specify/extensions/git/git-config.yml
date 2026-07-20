@@ -1,0 +1,39 @@
+# Git Branching Workflow Extension Configuration
+
+# The next feature number is derived sequentially from branches and specs.
+branch_numbering: sequential
+
+# Keep the default final segment: "{number}-{slug}".
+branch_template: ""
+
+# Generated branches use "feature/{number}-{slug}".
+branch_prefix: feature
+
+# Retained for the explicit initialize command; no initialize hook is enabled.
+init_commit_message: "chore(spec-kit): initialize repository"
+
+# Only reviewed post-command checkpoints are enabled. The command stages with
+# `git add .`, so every corresponding hook remains optional in extensions.yml.
+auto_commit:
+  default: false
+  after_specify:
+    enabled: true
+    message: "chore(spec-kit): checkpoint after specify"
+  after_clarify:
+    enabled: true
+    message: "chore(spec-kit): checkpoint after clarify"
+  after_plan:
+    enabled: true
+    message: "chore(spec-kit): checkpoint after plan"
+  after_tasks:
+    enabled: true
+    message: "chore(spec-kit): checkpoint after tasks"
+  after_checklist:
+    enabled: true
+    message: "chore(spec-kit): checkpoint after checklist"
+  after_implement:
+    enabled: true
+    message: "chore(spec-kit): checkpoint after implement"
+  after_converge:
+    enabled: true
+    message: "chore(spec-kit): checkpoint after converge"

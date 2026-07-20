@@ -1,34 +1,156 @@
 installed:
-- verify
-- verify-tasks
+  - git
+  - verify
+  - verify-tasks
+
 settings:
   # Hook-aware Spec Kit skills still must dispatch and await mandatory hooks.
-  # This setting alone is not execution.
+  # This setting alone does not execute hooks.
   auto_execute_hooks: true
+
 hooks:
+  before_specify:
+    - extension: git
+      command: speckit.git.feature
+      enabled: true
+      optional: false
+      prompt: >-
+        Create a branch for the active feature only after the reusable Git
+        preflight has passed; otherwise stop.
+      description: Mandatory active-feature branch creation
+
+  after_specify:
+    - extension: git
+      command: speckit.git.commit
+      enabled: true
+      optional: true
+      prompt: Create a checkpoint commit for the active feature specification?
+      description: Optional post-specification checkpoint
+
+  before_clarify:
+    - extension: git
+      command: speckit.git.validate
+      enabled: true
+      optional: false
+      prompt: Validate the active feature branch before clarification.
+      description: Mandatory pre-clarification branch validation
+
+  after_clarify:
+    - extension: git
+      command: speckit.git.commit
+      enabled: true
+      optional: true
+      prompt: Create a checkpoint commit for the active feature clarification?
+      description: Optional post-clarification checkpoint
+
+  before_plan:
+    - extension: git
+      command: speckit.git.validate
+      enabled: true
+      optional: false
+      prompt: Validate the active feature branch before planning.
+      description: Mandatory pre-plan branch validation
+
+  after_plan:
+    - extension: git
+      command: speckit.git.commit
+      enabled: true
+      optional: true
+      prompt: Create a checkpoint commit for the active feature plan?
+      description: Optional post-plan checkpoint
+
+  before_tasks:
+    - extension: git
+      command: speckit.git.validate
+      enabled: true
+      optional: false
+      prompt: Validate the active feature branch before task generation.
+      description: Mandatory pre-tasks branch validation
+
+  after_tasks:
+    - extension: git
+      command: speckit.git.commit
+      enabled: true
+      optional: true
+      prompt: Create a checkpoint commit for the active feature tasks?
+      description: Optional post-tasks checkpoint
+
+  before_checklist:
+    - extension: git
+      command: speckit.git.validate
+      enabled: true
+      optional: false
+      prompt: Validate the active feature branch before checklist generation.
+      description: Mandatory pre-checklist branch validation
+
+  after_checklist:
+    - extension: git
+      command: speckit.git.commit
+      enabled: true
+      optional: true
+      prompt: Create a checkpoint commit for the active feature checklist?
+      description: Optional post-checklist checkpoint
+
   before_implement:
-  - extension: speckit-core
-    command: speckit.analyze
-    enabled: true
-    optional: false
-    priority: 5
-    prompt: Verify Feature 001 specification, plan, and task consistency before implementation.
-    description: Mandatory pre-implementation artifact and task verification
-    condition: null
+    - extension: git
+      command: speckit.git.validate
+      enabled: true
+      optional: false
+      prompt: Validate the active feature branch before implementation.
+      description: Mandatory pre-implementation branch validation
+    - extension: speckit-core
+      command: speckit.analyze
+      enabled: true
+      optional: false
+      prompt: >-
+        Analyze the active feature specification, plan, and tasks before
+        implementation.
+      description: Mandatory pre-implementation artifact and task verification
+
   after_implement:
-  - extension: verify
-    command: speckit.verify.run
-    enabled: true
-    optional: false
-    priority: 10
-    prompt: Validate the completed Feature 001 implementation against its specification artifacts.
-    description: Mandatory post-implementation specification verification
-    condition: null
-  - extension: verify-tasks
-    command: speckit.verify-tasks.run
-    enabled: true
-    optional: false
-    priority: 20
-    prompt: Run verify-tasks in a fresh session and stop on unresolved phantom completions.
-    description: Mandatory post-implementation phantom-task verification
-    condition: null
+    - extension: verify
+      command: speckit.verify.run
+      enabled: true
+      optional: false
+      prompt: >-
+        Validate the completed active feature implementation against its
+        specification artifacts.
+      description: Mandatory post-implementation specification verification
+    - extension: verify-tasks
+      command: speckit.verify-tasks.run
+      enabled: true
+      optional: false
+      prompt: >-
+        Verify that completed tasks for the active feature are backed by live
+        implementation and stop on unresolved phantom completions.
+      description: Mandatory post-implementation phantom-task verification
+    - extension: git
+      command: speckit.git.commit
+      enabled: true
+      optional: true
+      prompt: Create a checkpoint commit for the active feature implementation?
+      description: Optional post-implementation checkpoint
+
+  before_converge:
+    - extension: git
+      command: speckit.git.validate
+      enabled: true
+      optional: false
+      prompt: Validate the active feature branch before convergence.
+      description: Mandatory pre-convergence branch validation
+
+  after_converge:
+    - extension: git
+      command: speckit.git.commit
+      enabled: true
+      optional: true
+      prompt: Create a checkpoint commit for the active feature convergence result?
+      description: Optional post-convergence checkpoint
+
+  before_analyze:
+    - extension: git
+      command: speckit.git.validate
+      enabled: true
+      optional: false
+      prompt: Validate the active feature branch before analysis.
+      description: Mandatory pre-analysis branch validation

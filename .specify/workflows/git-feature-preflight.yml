@@ -1,0 +1,156 @@
+schema_version: "1.0"
+
+workflow:
+  id: "git-feature-preflight"
+  name: "Git Feature Preflight"
+  version: "1.0.0"
+  author: "Cairn"
+  description: >-
+    Starts an active feature only after explicit-base, clean-tree, and
+    fast-forward Git guards pass, then permits a reviewed normal push.
+  integration: "codex"
+
+requires:
+  speckit_version: ">=0.13.0"
+  integrations:
+    any: ["codex"]
+
+inputs:
+  base_branch:
+    type: string
+    required: true
+    prompt: "Explicit base branch to update before feature creation"
+  remote:
+    type: string
+    default: "origin"
+    prompt: "Git remote used for fast-forward pull and normal push"
+  feature_description:
+    type: string
+    required: true
+    prompt: "Description of the active feature"
+  integration:
+    type: string
+    default: "codex"
+    prompt: "Integration used to run speckit.specify"
+
+steps:
+  - id: review-git-policy
+    type: gate
+    message: >-
+      Confirm the explicit base branch and feature description. This workflow
+      may update the base with --ff-only, create one feature branch through the
+      mandatory before_specify hook, and perform one reviewed normal push. It
+      never force-pushes, merges, or deletes branches.
+    options: [approve, reject]
+    on_reject: abort
+
+  - id: repository-clean-base-preflight
+    type: shell
+    timeout: 60
+    output_format: json
+    run: |
+      set -eu
+      base_branch="{{ inputs.base_branch }}"
+      remote="{{ inputs.remote }}"
+
+      test -n "$base_branch"
+      test -n "$remote"
+      case "$base_branch" in *[!A-Za-z0-9._/-]*) exit 1 ;; esac
+      case "$remote" in *[!A-Za-z0-9._-]*) exit 1 ;; esac
+
+      test "$(git rev-parse --is-inside-work-tree)" = "true"
+      repo_root="$(git rev-parse --show-toplevel)"
+      test "$repo_root" = "$PWD"
+
+      current_branch="$(git symbolic-ref --quiet --short HEAD)"
+      test -n "$current_branch"
+      test "$current_branch" = "$base_branch"
+      git check-ref-format --branch "$base_branch" >/dev/null
+      git show-ref --verify --quiet "refs/heads/$base_branch"
+      git remote get-url "$remote" >/dev/null
+
+      git diff --check
+      git diff --quiet --ignore-submodules --
+      git diff --cached --quiet --ignore-submodules --
+      test -z "$(git ls-files --others --exclude-standard)"
+
+      printf '{"repository":"%s","base_branch":"%s","remote":"%s"}\n' \
+        "$repo_root" "$base_branch" "$remote"
+
+  - id: update-explicit-base-ff-only
+    type: shell
+    timeout: 300
+    run: |
+      set -eu
+      base_branch="{{ inputs.base_branch }}"
+      remote="{{ inputs.remote }}"
+      test "$(git symbolic-ref --quiet --short HEAD)" = "$base_branch"
+      git pull --ff-only "$remote" "$base_branch"
+
+  - id: clean-tree-after-base-update
+    type: shell
+    timeout: 60
+    run: |
+      set -eu
+      git diff --check
+      git diff --quiet --ignore-submodules --
+      git diff --cached --quiet --ignore-submodules --
+      test -z "$(git ls-files --others --exclude-standard)"
+
+  # speckit.specify dispatches mandatory before_specify first. Because this
+  # command is listed after both clean-tree gates, branch creation cannot occur
+  # earlier in this workflow.
+  - id: create-active-feature
+    command: speckit.specify
+    integration: "{{ inputs.integration }}"
+    input:
+      args: "{{ inputs.feature_description }}"
+
+  - id: validate-created-feature-branch
+    command: speckit.git.validate
+    integration: "{{ inputs.integration }}"
+
+  - id: clean-fast-forward-push-guard
+    type: shell
+    timeout: 60
+    output_format: json
+    run: |
+      set -eu
+      base_branch="{{ inputs.base_branch }}"
+      remote="{{ inputs.remote }}"
+      branch="$(git symbolic-ref --quiet --short HEAD)"
+
+      test -n "$branch"
+      test "$branch" != "$base_branch"
+      printf '%s\n' "$branch" | \
+        grep -Eq '^feature/[0-9]{3,}-[a-z0-9]([a-z0-9-]*[a-z0-9])?$'
+
+      git diff --check
+      git diff --quiet --ignore-submodules --
+      git diff --cached --quiet --ignore-submodules --
+      test -z "$(git ls-files --others --exclude-standard)"
+
+      remote_ref="refs/remotes/$remote/$branch"
+      if git show-ref --verify --quiet "$remote_ref"; then
+        git merge-base --is-ancestor "$remote_ref" HEAD
+      fi
+
+      printf '{"branch":"%s","push_mode":"normal-fast-forward"}\n' "$branch"
+
+  - id: review-normal-push
+    type: gate
+    message: >-
+      Approve only after reviewing the active-feature checkpoint. The next
+      step uses a normal push; a remote race or non-fast-forward update stops
+      the workflow.
+    options: [approve, reject]
+    on_reject: abort
+
+  - id: push-active-feature-normal
+    type: shell
+    timeout: 300
+    run: |
+      set -eu
+      remote="{{ inputs.remote }}"
+      branch="$(git symbolic-ref --quiet --short HEAD)"
+      git push "$remote" "HEAD:refs/heads/$branch"
