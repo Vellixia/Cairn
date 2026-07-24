@@ -19,10 +19,12 @@ Feature 002 adds migration `0002_project_task_binding.sql` to the exact Feature 
 schema. Existing event rows are never updated: legacy rows keep their current nullable
 repository/worktree/session columns, while every event appended after migration carries
 an explicit aggregate type, aggregate ID, and per-aggregate sequence. The existing
-`events.seq INTEGER PRIMARY KEY AUTOINCREMENT` remains the global replay order. New
-project/task/binding projections and their events commit in one SQLite
-`BEGIN IMMEDIATE` transaction, with unique constraints as the cross-process concurrency
-backstop and process-local aggregate mutexes only as an optimization.
+`events.seq INTEGER PRIMARY KEY AUTOINCREMENT` remains the global replay order. A
+new immutable `operation_idempotency` registry owns raw request keys across methods.
+Registry reservation, project/task/binding projections, aggregate heads, and their events
+commit in one SQLite `BEGIN IMMEDIATE` transaction; unique constraints are the
+cross-process correctness backstop and process-local aggregate mutexes are only an
+optimization.
 
 ## Technical Context
 
@@ -34,9 +36,12 @@ Existing Feature 001 dependencies for Git inspection, notify watchers, local IPC
 hashing, and platform security remain unchanged.
 
 **Storage**: One per-user SQLite database in WAL mode with foreign keys enabled,
-`synchronous=FULL`, five-second busy timeout, SQLx versioned migrations, append-only
-event triggers, immutable snapshots, and transactional projections. No PostgreSQL or
-network datastore is introduced.
+`synchronous=FULL`, a five-second connection busy timeout, zero application-level busy
+retries, and a five-second maximum contention wait. Exhaustion returns typed
+`STORAGE_BUSY`; cancellation rolls back before a connection returns to the pool. Tests
+may override the timeout deterministically. SQLx versioned migrations, append-only event
+triggers, immutable snapshots, and transactional projections remain local; no PostgreSQL
+or network datastore is introduced.
 
 **Testing**: `cargo test --workspace --all-targets`; focused crate/unit suites;
 multi-connection SQLite concurrency tests; real Feature 001 database migration fixture;
@@ -76,7 +81,7 @@ remain paginated at bounded limits.
 | Principle / gate | Design response | Pre-design |
 |---|---|---|
 | I. Observable reality authoritative | Repository/worktree ownership uses Feature 001 IDs; events and transaction results, not names/paths, are authoritative. | PASS |
-| II. Exact execution scope | `local_unbound` and `project_bound` are explicit record modes. A bound session references exactly one project and immutable task revision; binding is append-only. | PASS |
+| II. Exact execution scope | `local_unbound` and `project_bound` are explicit record modes. Historical migrated unbound sessions remain valid; new unbound creation is allowed only while valid project/task scope is unavailable, otherwise `PROJECT_SCOPE_REQUIRED`. A bound session references exactly one project and immutable revision through an append-only binding. | PASS |
 | III. Append-only history | No Feature 001 event is updated. New events use existing append-only triggers and rebuildable projections. | PASS |
 | IV. Evidence before confidence | Migration, replay, contract, concurrency, restart, privacy, and offline claims require executable evidence. | PASS |
 | V. Automatic operation | Migration, scope validation, idempotency, replay, and recovery are automatic; no routine human repair path is introduced. | PASS |
@@ -202,19 +207,28 @@ dependency map.
 ### Transaction boundary
 
 All Feature 002 mutations use one database write transaction that begins with
-`BEGIN IMMEDIATE`. The first database write, unique constraints, and conditional
-updates serialize correctness across connections and daemon processes; an in-memory
-aggregate mutex only reduces busy retries. The transaction performs:
+`BEGIN IMMEDIATE`. The database write lock, global raw-key registry, unique constraints,
+and conditional updates serialize correctness across connections and daemon processes;
+an in-memory aggregate mutex only reduces contention. The transaction performs:
 
-1. idempotency lookup;
-2. current projection and status validation;
-3. aggregate-sequence allocation;
-4. event append(s);
-5. projection insert/update;
-6. commit.
+1. lookup the raw idempotency key;
+2. return the committed result for the same method/fingerprint or reject reuse with
+   `IDEMPOTENCY_CONFLICT`;
+3. validate current projections, scope availability, and project status;
+4. preallocate result identities and reserve the immutable operation record;
+5. allocate aggregate sequence(s);
+6. append event(s);
+7. insert/update projection(s);
+8. commit once.
 
-Any error rolls back event rows, sequence-head changes, and projections together.
-Detailed SQL and restart behavior are in [migration-design.md](migration-design.md).
+
+The operation record points to an immutable result event whenever an event was appended, so exact retries reproduce the original post-state and original `created/updated` flag after later projection changes. A distinct-key request that finds the same immutable association/binding already present stores that projection locator and first returns `created:false`; retries of that key remain false.
+
+The connection busy timeout is five seconds with zero application retries. Timeout
+exhaustion returns `STORAGE_BUSY`; cancellation and every error roll back the operation
+record, event rows, sequence heads, counters, and projections before the connection can
+be reused. Tests inject a deterministic shorter timeout. Detailed SQL and restart
+behavior are in [migration-design.md](migration-design.md).
 
 ### Goal contract
 
@@ -226,6 +240,9 @@ unchanged. Empty lists are valid; the goal and any supplied list entry must be n
 after normalization. Compact UTF-8 JSON from the typed struct is canonical. The
 fingerprint is lowercase `BLAKE3(canonical_bytes)` hex, and schema version 1 is inside
 the hashed bytes.
+Deserialization and validation map missing required fields, malformed structure, empty
+goals, empty supplied entries, and unsupported versions to the closed bounded
+`INVALID_GOAL_CONTRACT` violation union; errors never echo submitted content.
 
 ### Session binding and start
 
@@ -254,11 +271,15 @@ An identical triple returns the existing binding without another event. Any othe
 maps the typed domain error `SessionAlreadyBound` to the spec wire code
 `SESSION_BINDING_CONFLICT`; there is no unbind/rebind path.
 
-Bound start extends `SessionService::start`. Omitted binding remains
-`local_unbound` for Feature 001 wire compatibility, while new CLI calls send an
-explicit tagged scope. A newly bound session commits `session.started`,
-`session.bound`, the session row, and binding projection atomically before the existing
-watcher request. The handler then uses the unchanged readiness order:
+Bound start extends `SessionService::start`. A new explicit or omitted unbound request
+succeeds only while the repository has no active project association or its active
+project has no selectable active task revision; otherwise it returns
+`PROJECT_SCOPE_REQUIRED` without creating a session. Historical migrated unbound sessions
+remain valid. A newly bound session commits the existing `session.started` event first,
+then `session.bound`, the session row, and binding projection atomically before the
+watcher request. `session.started` always initializes replay scope as `local_unbound`;
+`session.bound` is the sole event establishing `project_bound`, and neither event is
+externally visible before commit. The handler then uses the unchanged readiness order:
 
 ```text
 session transaction
@@ -282,9 +303,13 @@ unchanged in their original columns. All post-migration builders populate the ne
 `event_aggregate_heads` allocates positive per-aggregate sequences transactionally with
 a unique `(aggregate_type, aggregate_id, aggregate_seq)` index.
 
-Project/task/binding replay consumes `ORDER BY seq`. Legacy Feature 001 scope is derived
-in memory from its existing real session/worktree/repository foreign keys and is never
-written back. See [event-catalog.md](event-catalog.md) and
+The replay dispatcher and unchanged Feature 001 handlers are established before US1.
+Each story adds its handler alongside its event implementation. `task.revision_created`
+carries the complete immutable revision plus complete resulting `Task` post-state,
+including `latest_revision_number` and `updated_at`. Later mixed-ledger verification
+consumes `ORDER BY seq`, derives legacy scope in memory from real foreign keys, validates
+that `session.started` initializes unbound and `session.bound` alone binds, and compares
+every stable projection field. See [event-catalog.md](event-catalog.md) and
 [data-model.md](data-model.md).
 
 ## Implementation Phase Ordering
@@ -294,29 +319,31 @@ written back. See [event-catalog.md](event-catalog.md) and
    and add regression test scaffolding.
 2. **Pure domain foundation**: add UUIDv7 identity types, statuses, binding mode,
    goal-contract validation/canonicalization/fingerprint, and unit tests.
-3. **Migration and storage primitives**: add migration 0002, rows/DAOs/indexes,
-   `BEGIN IMMEDIATE` mutation primitive, aggregate sequence allocation, immutable
-   constraints, and migration/retry tests.
-4. **Events and replay**: add typed payloads and idempotency derivation for all six
-   events; extend existing builders to explicit aggregate scope after migration; add
-   complete ordered replay and live-projection comparison.
-5. **US1 project slice**: project create/list/show/update/archive/restore and repository
-   association, including duplicate names, inherited worktree membership, idempotency,
-   conflicts, contracts, CLI, and tests.
+3. **Migration and storage primitives**: add migration 0002, projection rows,
+   global operation-idempotency registry, `BEGIN IMMEDIATE` primitive, explicit bounded
+   busy/cancellation behavior, aggregate allocation, immutable constraints, and actual-
+   runner migration/retry tests.
+4. **Replay foundation**: establish the compatibility dispatcher and unchanged Feature
+   001 handlers before US1; story-specific handlers arrive with their event types.
+5. **US1 project slice**: project create/list/show/update/archive/restore, repository
+   association, project event construction and replay, duplicate names, inherited
+   membership, global idempotency, contracts, CLI, and tests.
 6. **US2 task slice**: task creation plus revision 1, serialized concurrent revise,
-   parent validation, canonical fingerprints, immutable retrieval, contracts, CLI, and
-   tests.
+   parent validation, canonical fingerprints, replay-complete task post-state events,
+   immutable retrieval, contracts, CLI, and tests.
 7. **US3 explicit binding slice**: bind existing sessions atomically, identical retry,
-   conflicting bind rejection, restart persistence, event replay, contracts, CLI, and
-   tests.
-8. **US4 bound-start slice**: extend the current start collision logic and DTOs, preserve
-   watcher-ready reconciliation, recovery, leases, resume-token safety, and all Feature
-   001 lifecycle regression suites.
-9. **US5 migration/replay slice**: real fixture upgrade, interruption/retry,
-   zero-history-loss comparison, strict replay equality, and legacy-event compatibility.
-10. **Acceptance and evidence**: schema/golden tripwires, privacy audit, performance
-    fixture, OS-level offline run, platform-specific Windows/macOS/Linux runs, formatting,
-    Clippy, and full workspace tests.
+   conflicting bind rejection, deterministic watcher/recovery-transition races, session
+   binding replay, restart persistence, contracts, CLI, and tests.
+8. **US4 bound-start slice**: extend the current start collision logic and DTOs, enforce
+   constitutional unbound availability, apply `session.started` then `session.bound`
+   semantics, and preserve watcher readiness, recovery, leases, tokens, and lifecycle.
+9. **US5 mixed replay/migration slice**: real fixture upgrade, interruption/retry,
+   checksum/future-version rejection, strict corruption handling, and field-for-field
+   mixed-ledger equality.
+10. **Acceptance and evidence**: schema/golden tripwires, privacy, performance, offline
+    isolation, platform runs, Feature 001 exactly-100-kill and ignored performance
+    acceptances, preliminary evidence commit, analysis/verification/convergence, final
+    gate report, and separate final evidence/declaration commit.
 
 Later phases may depend on earlier phases; no phase may begin Feature 003, synchronization,
 PostgreSQL, MCP, web UI, or AI features.
@@ -325,31 +352,47 @@ PostgreSQL, MCP, web UI, or AI features.
 
 The authoritative matrix is [testing-evidence.md](testing-evidence.md). Required gates:
 
-- unit tests for every domain invariant and canonicalization vector;
-- storage tests using independent SQLite pools/connections to prove revision and aggregate
-  serialization without relying on process-local locks;
-- migration against the committed Feature 001 database fixture, with table/row/event
-  manifests before and after and a second open proving version-gated idempotence;
+- unit tests for every domain invariant and canonicalization vector, including every
+  closed goal-contract violation without content leakage;
+- independent SQLite pools/connections proving the global operation registry, revision
+  allocation, aggregate serialization, first-committer outcomes, and same-key conflicts;
+- deterministic busy exhaustion, cancellation rollback, starvation-boundary, and
+  counter-allocation rollback tests with a test-only timeout override;
+- migration against the committed Feature 001 fixture, plus checksum-mismatch and
+  unsupported-newer-version actual-runner failures, restart, and second-open behavior;
 - append-only and immutable-row trigger tests;
-- project/task/session mutation rollback tests with injected failures between event and
-  projection writes;
-- replay equality for projects, tasks, revisions, associations, and bindings;
+- failure injection proving operation registry + event + projection all-or-none;
+- story-specific replay tests and later mixed-ledger field-for-field equality;
+- barrier-controlled binding during paused reconciliation and recovery/reattach;
 - Feature 001 session/watch/recovery suites unchanged and passing;
-- IPC request/response and CLI-envelope goldens for every success/error path;
+- IPC request/response and CLI-envelope goldens for every success/error path, including
+  `PROJECT_SCOPE_REQUIRED`, `STORAGE_BUSY`, and every goal violation;
 - checked-in schema equality and compatibility tripwires;
 - log/error/DB audits for goal contracts, secrets, ignored contents, environment values,
   and raw resume tokens;
 - OS-level Linux no-network execution with local filesystem and IPC proof;
-- Windows/macOS/Linux runs where local IPC, migration, or filesystem behavior differs.
+- Windows/macOS/Linux runs where local IPC, migration, or filesystem behavior differs;
+- exactly 100 Feature 001 forced daemon kills and explicit Feature 001 ignored performance
+  execution on the frozen Feature 002 implementation SHA.
+
+Evidence ordering is normative: freeze one implementation commit; complete exact-SHA
+platform, isolation, performance, and Feature 001 compatibility executions; commit
+preliminary evidence; run analyze, verify, verify-tasks, and converge; resolve every
+appended task; then create the final-gate report and final evidence/declaration commit.
+No committed document is required to contain its own commit SHA. The final evidence
+commit SHA is recorded by workflow metadata, an annotated tag, or a later external
+manifest.
 
 ## Compatibility and Rollout
 
 [compatibility-matrix.md](compatibility-matrix.md) records every Feature 001 table,
-event, API, lifecycle guarantee, and test suite. The rollout is additive within
-`v1.*`: old session-start requests that omit scope remain explicit
-`local_unbound` after decoding, responses add a tagged scope object, existing event
-filters continue to work, and new aggregate fields are optional only for legacy stored
-events. Breaking field removal or reinterpretation requires `v2` and is not planned.
+event, API, lifecycle guarantee, and test suite. The rollout remains additive within
+`v1.*`: old session-start requests that omit scope decode as requests for
+`local_unbound`, but after valid repository project/task scope exists they receive the
+explicit additive `PROJECT_SCOPE_REQUIRED` policy error rather than silently creating
+unbound work. Responses add a tagged scope object, existing event filters remain valid,
+and new aggregate fields are optional only for legacy stored events. Breaking field
+removal or reinterpretation requires `v2` and is not planned.
 
 ## Complexity Tracking
 

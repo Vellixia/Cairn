@@ -20,9 +20,7 @@ Migration 0001 currently creates:
 - append-only event triggers and immutable snapshot triggers;
 - `meta` with fingerprint schema version.
 
-The runtime opens SQLite in WAL mode, enables foreign keys, uses
-`synchronous=FULL`, sets a five-second busy timeout, performs
-`PRAGMA quick_check(1)`, then runs embedded SQLx migrations.
+The runtime opens SQLite in WAL mode, enables foreign keys, uses `synchronous=FULL`, configures a 5,000 ms connection busy timeout, performs zero application-level busy retries (therefore a 5,000 ms maximum wait), executes `PRAGMA quick_check(1)`, then runs embedded SQLx migrations. Tests may use an injectable shorter timeout through test-only configuration.
 
 ## Upgrade contents
 
@@ -34,10 +32,10 @@ Migration 0002 performs only additive DDL:
 1. add `sessions.binding_mode NOT NULL DEFAULT 'local_unbound'`;
 2. add nullable event aggregate columns and partial indexes;
 3. create `event_aggregate_heads`;
-4. create project, repository-association, task, task-revision, and session-binding
-   projections;
-5. create integrity/immutability triggers;
-6. insert `meta.local_schema_version=2`.
+4. create project, repository-association, task, task-revision, and session-binding projections;
+5. create immutable global `operation_idempotency`;
+6. create integrity/immutability triggers;
+7. insert `meta.local_schema_version=2`.
 
 The triggers backstop active-project mutation rules, permanent task ownership/title,
 sequential revision counters, parent validity, repository/project membership,
@@ -49,9 +47,8 @@ It does not:
 
 - update or delete an event;
 - rebuild the events table;
-- update Feature 001 IDs, timestamps, states, snapshot references, leases, or token
-  hashes;
-- create any project, task, revision, association, binding, or Feature 002 event;
+- update Feature 001 IDs, timestamps, states, snapshot references, leases, or token hashes;
+- create any project, task, revision, association, binding, operation-idempotency record, or Feature 002 event;
 - infer scope from paths or remotes.
 
 ## Existing-session classification
@@ -89,21 +86,18 @@ Derived scope is never persisted.
 The migration remains a normal SQLx transactional migration. There is no
 `-- no-transaction` directive. SQLite DDL in this migration is transactional.
 
-On successful commit, SQLx records version/checksum in `_sqlx_migrations`. Reopening
-the database verifies the checksum and skips version 2. Raw re-execution is not the
-supported idempotency mechanism; safe version gating is.
+On successful commit, SQLx records version/checksum in `_sqlx_migrations`. Reopening verifies the checksum and skips version 2. Raw re-execution is not the supported idempotency mechanism; safe version gating is.
 
-On failure:
+Startup compares every recorded migration checksum with the embedded migration and rejects any mismatch. It also rejects a database whose recorded/local schema version is newer than the maximum supported application version. Both cases fail closed as bounded `MIGRATION_FAILED`; the daemon exposes no partially healthy normal IPC surface.
+
+On any migration failure:
 
 - the migration transaction rolls back;
 - SQLx does not record version 2 as applied;
 - no partial table/index/trigger is treated as healthy;
 - storage returns a typed migration failure separated from corruption;
-- daemon startup keeps serving its safe error channel and maps requests to
-  `MIGRATION_FAILED` with bounded
-  `{kind:"migration_failure",target_version:2}` data;
-- raw SQLx errors, database paths, environment values, and user content remain in
-  internal diagnostic causes only and are not returned.
+- daemon startup returns `MIGRATION_FAILED` with bounded `{kind:"migration_failure",target_version:2}` data;
+- raw SQLx errors, checksums, database paths, environment values, and user content remain internal and are not returned.
 
 On the next start after the underlying failure is corrected, SQLx retries the complete
 migration from the Feature 001 schema boundary.
@@ -116,19 +110,20 @@ worktree mutex. Feature 002 requires a database-backed correctness boundary.
 The storage layer adds an immediate mutation primitive:
 
 ```text
-acquire connection
+acquire connection (busy_timeout=5,000 ms; no application retry)
 → BEGIN IMMEDIATE
-→ idempotency lookup
+→ lookup raw operation idempotency key
+→ identical method + request fingerprint: reread and return result
+→ different method or request fingerprint: IDEMPOTENCY_CONFLICT
 → validate projection/status/ownership
+→ reserve operation result locator
 → allocate aggregate sequence with UPSERT ... RETURNING
-→ append event(s)
+→ append derived-idempotency event(s)
 → update projection(s)
 → COMMIT
 ```
 
-Rollback occurs on any error. Aggregate mutexes keyed as
-`<aggregate_type>:<aggregate_id>` may remain as contention optimization, but tests
-bypass/share-nothing those locks and use independent pools to prove the SQLite boundary.
+The registry reservation, aggregate heads, events, and projections share this transaction. The first committed concurrent caller wins; competitors acquire the write boundary and reread the committed registry row. Lock exhaustion after at most 5,000 ms returns `STORAGE_BUSY`. Any validation error, write error, or cancellation rolls the transaction back before the connection returns to the pool. A rolled-back task revision allocation does not consume a number; the next successful write remains gap-free. Aggregate mutexes may remain only as an optimization; independent pools/connections prove database correctness.
 
 ## Real Feature 001 database fixture
 
@@ -161,19 +156,19 @@ through the Feature 002 runtime, and compare before/after.
 
 1. Empty database migrates through 0001 then 0002.
 2. Real Feature 001 fixture migrates with zero historical data loss.
-3. Every existing session becomes local-unbound and no binding/project/task row/event is
-   fabricated.
-4. Existing events retain identical seq, ID, idempotency key, FKs, payload bytes, and
-   timestamp; new aggregate columns remain null.
+3. Every existing session becomes local-unbound and no binding/project/task/operation row or event is fabricated.
+4. Existing events retain identical seq, ID, idempotency key, FKs, payload bytes, and timestamp; new aggregate columns remain null.
 5. A second normal open applies no migration and changes no row/hash.
 6. Injected failure during a transaction leaves the database at the 0001 boundary.
 7. Restart after injected failure completes 0002 once.
-8. Migration error maps to `MIGRATION_FAILED` without raw path/SQL/internal leakage.
-9. Foreign-key and quick-check pass after upgrade.
-10. New post-migration events without an explicit aggregate are rejected.
-11. Feature 001 DAO queries continue to return the same rows after the additive columns.
-12. Windows, macOS, and Linux open/migration tests pass wherever SQLite file/locking
-    behavior differs.
+8. An actual-runner recorded-checksum mismatch fails closed as `MIGRATION_FAILED` with no normal healthy daemon.
+9. An actual-runner database version newer than the application maximum fails identically and does not mutate the database.
+10. Migration errors expose no raw checksum/path/SQL/internal detail.
+11. Foreign-key and quick-check pass after upgrade.
+12. New post-migration events without an explicit aggregate are rejected.
+13. Feature 001 DAO queries continue to return the same rows after additive columns.
+14. Deterministic independent-connection tests cover busy exhaustion, cancellation, starvation bound, rollback after revision counter allocation, and the next gap-free revision.
+15. Windows, macOS, and Linux open/migration tests pass wherever SQLite file/locking behavior differs.
 
 ## Rollback and compatibility policy
 
@@ -181,6 +176,4 @@ Feature 002 does not provide a destructive down migration. Downgrading a databas
 version 2 is unsupported because old binaries do not understand the new schema checksum
 or binding semantics. Recovery is restore-from-backup/copy, not table deletion.
 
-Forward compatibility is additive: Feature 001 columns and indexes remain; v1 clients
-may continue local-unbound session operations through the upgraded daemon. This policy
-is recorded in [compatibility-matrix.md](compatibility-matrix.md).
+Forward compatibility is additive: Feature 001 columns and indexes remain. A v1 client omitting scope may start unbound only when bootstrap eligibility holds; otherwise the upgraded daemon returns `PROJECT_SCOPE_REQUIRED`. Historical migrated unbound sessions remain valid. This policy is recorded in [compatibility-matrix.md](compatibility-matrix.md).

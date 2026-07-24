@@ -1,9 +1,11 @@
 //! T036/T049: session IPC handlers wiring the lifecycle service; watcher
 //! start/stop rides on session lifecycle (US3).
 
+use std::str::FromStr;
+
 use cairn_protocol::*;
 use cairn_session::{SessionError, StartOutcome as SvcOutcome};
-use cairn_storage_local::{sessions as sdao, snapshots, worktrees, SessionRow};
+use cairn_storage_local::{session_bindings, sessions as sdao, snapshots, worktrees, SessionRow};
 
 use super::{convert, HandlerError, HandlerResult};
 use crate::state::AppState;
@@ -16,7 +18,51 @@ async fn dto_for(state: &AppState, row: &SessionRow) -> HandlerResult<SessionDto
     let current = snapshots::get_by_id(state.pool(), &row.current_snapshot_id)
         .await?
         .ok_or_else(|| HandlerError::new(ErrorCode::Internal, "missing current snapshot"))?;
-    convert::session_dto(row, &start, &current)
+    convert::session_dto(row, &start, &current, scope_for(state, row).await?)
+}
+
+async fn scope_for(state: &AppState, row: &SessionRow) -> HandlerResult<SessionScopeDto> {
+    match row.binding_mode.as_str() {
+        "local_unbound" => {
+            if session_bindings::get(state.pool(), &row.id)
+                .await?
+                .is_some()
+            {
+                return Err(HandlerError::new(
+                    ErrorCode::StateCorrupted,
+                    "local-unbound session has binding state",
+                ));
+            }
+            Ok(SessionScopeDto::LocalUnbound)
+        }
+        "project_bound" => {
+            let binding = session_bindings::get(state.pool(), &row.id)
+                .await?
+                .ok_or_else(|| {
+                    HandlerError::new(
+                        ErrorCode::StateCorrupted,
+                        "project-bound session is missing binding state",
+                    )
+                })?;
+            Ok(SessionScopeDto::ProjectBound {
+                project_id: cairn_domain::ProjectId::from_str(&binding.project_id).map_err(
+                    |_| HandlerError::new(ErrorCode::StateCorrupted, "invalid binding project"),
+                )?,
+                task_revision_id: cairn_domain::TaskRevisionId::from_str(&binding.task_revision_id)
+                    .map_err(|_| {
+                        HandlerError::new(ErrorCode::StateCorrupted, "invalid binding revision")
+                    })?,
+            })
+        }
+        _ => Err(HandlerError::new(
+            ErrorCode::StateCorrupted,
+            "invalid session binding mode",
+        )),
+    }
+}
+
+async fn summary_for(state: &AppState, row: &SessionRow) -> HandlerResult<SessionSummaryDto> {
+    convert::session_summary_dto(row, scope_for(state, row).await?)
 }
 
 async fn watch_ready(
@@ -53,6 +99,7 @@ pub async fn start(
     state: &AppState,
     params: SessionStartParams,
 ) -> HandlerResult<SessionStartResult> {
+    let requested_scope = params.scope.unwrap_or(SessionScopeDto::LocalUnbound);
     let (repo, worktree, layout) = super::repository::resolve_registered(
         state,
         params.path.as_deref(),
@@ -75,6 +122,7 @@ pub async fn start(
             &params.agent_instance_id.to_string(),
             params.agent_pid.map(i64::from),
             &snapshot,
+            requested_scope.into(),
         )
         .await?;
 
@@ -140,11 +188,13 @@ pub async fn get(state: &AppState, params: SessionGetParams) -> HandlerResult<Se
         Err(rows) => Ok(SessionGetResult {
             resolution: GetResolution::Ambiguous,
             session: None,
-            candidates: Some(
-                rows.iter()
-                    .map(convert::session_summary_dto)
-                    .collect::<HandlerResult<Vec<_>>>()?,
-            ),
+            candidates: Some({
+                let mut candidates = Vec::with_capacity(rows.len());
+                for row in &rows {
+                    candidates.push(summary_for(state, row).await?);
+                }
+                candidates
+            }),
         }),
     }
 }
@@ -152,12 +202,31 @@ pub async fn get(state: &AppState, params: SessionGetParams) -> HandlerResult<Se
 pub async fn list(state: &AppState, params: SessionListParams) -> HandlerResult<SessionListResult> {
     let states = params.state.as_deref();
     let rows = sdao::list(state.pool(), params.repository_id.as_deref(), states).await?;
-    Ok(SessionListResult {
-        sessions: rows
-            .iter()
-            .map(convert::session_summary_dto)
-            .collect::<HandlerResult<Vec<_>>>()?,
-    })
+    let mut result = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let scope = scope_for(state, row).await?;
+        let matches_project = match (params.project_id, scope) {
+            (None, _) => true,
+            (Some(expected), SessionScopeDto::ProjectBound { project_id, .. }) => {
+                expected == project_id
+            }
+            (Some(_), SessionScopeDto::LocalUnbound) => false,
+        };
+        let matches_revision = match (params.task_revision_id, scope) {
+            (None, _) => true,
+            (
+                Some(expected),
+                SessionScopeDto::ProjectBound {
+                    task_revision_id, ..
+                },
+            ) => expected == task_revision_id,
+            (Some(_), SessionScopeDto::LocalUnbound) => false,
+        };
+        if matches_project && matches_revision {
+            result.push(convert::session_summary_dto(row, scope)?);
+        }
+    }
+    Ok(SessionListResult { sessions: result })
 }
 
 pub async fn heartbeat(
@@ -295,5 +364,27 @@ pub async fn stop(state: &AppState, params: SessionStopParams) -> HandlerResult<
     maybe_unwatch(state, &row.worktree_id).await;
     Ok(SessionStopResult {
         session: dto_for(state, &stopped).await?,
+    })
+}
+
+pub async fn bind(state: &AppState, params: SessionBindParams) -> HandlerResult<SessionBindResult> {
+    let result = state
+        .inner
+        .sessions
+        .bind(cairn_session::BindSession {
+            idempotency_key: params.idempotency_key,
+            session_id: params.session_id,
+            project_id: params.project_id,
+            task_revision_id: params.task_revision_id,
+        })
+        .await?;
+    Ok(SessionBindResult {
+        session_id: result.binding.session_id,
+        scope: SessionScopeDto::ProjectBound {
+            project_id: result.binding.project_id,
+            task_revision_id: result.binding.task_revision_id,
+        },
+        bound_at: result.binding.bound_at,
+        created: result.created,
     })
 }

@@ -38,6 +38,7 @@ impl CliHarness {
             watcher_test_controls: Some(std::sync::Arc::new(
                 cairn_daemon::watch::WatcherTestControls::default(),
             )),
+            session_test_hooks: None,
         };
         std::fs::create_dir_all(&config.data_dir).expect("data dir");
         let (tx, rx) = tokio::sync::watch::channel(false);

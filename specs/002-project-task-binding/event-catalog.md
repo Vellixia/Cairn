@@ -38,19 +38,9 @@ an aggregate with only legacy rows receives `aggregate_seq:1`. Replay validates 
 numbered suffix as contiguous and keeps the unnumbered legacy prefix in global `seq`
 order.
 
-A transaction reserves the next aggregate sequence by updating
-`event_aggregate_heads` under `BEGIN IMMEDIATE`, inserts the event, and updates its
-projection before commit. Unique constraints on
-`(aggregate_type, aggregate_id, aggregate_seq)` and `idempotency_key` make database
-state—not a process-local mutex—the concurrency boundary.
+A mutation transaction first resolves or reserves the raw caller key in the global `operation_idempotency` registry, then reserves aggregate sequence(s), inserts event(s), and updates projection(s) under one `BEGIN IMMEDIATE` commit. Unique constraints on `(aggregate_type, aggregate_id, aggregate_seq)`, derived event `idempotency_key`, and raw registry key make database state—not a process-local mutex—the concurrency boundary.
 
-Single-event Feature 002 methods may use the caller's operation UUID directly.
-Multi-event methods derive distinct lowercase BLAKE3 keys from a fixed domain
-separator, the operation UUID, and the zero-based event position. Bound session start
-uses the existing Feature 001 stable start/session identity and derives the
-`session.bound` key from the created session ID; old clients need no new field. The
-operation identity is persisted where a retry must resolve multiple events. This keeps
-the existing globally unique event-key constraint while making retries deterministic.
+Every event key is derived as lowercase BLAKE3 over a fixed domain separator, the raw operation key (or the existing stable Feature 001 start identity), method, and zero-based event position. Raw operation keys are never used directly as event keys. The registry stores method, canonical request fingerprint, result kind/locator, and creation timestamp. The same key/method/request returns that result; any other reuse returns `IDEMPOTENCY_CONFLICT`. The first committed concurrent operation wins; waiters reread the committed record. Bound session start derives `session.bound` from the existing stable start/session identity, so old clients need no new caller field.
 
 ## Catalog
 
@@ -142,11 +132,10 @@ fails.
 ### `task.revision_created`
 
 - Aggregate: `task/{task_id}`
-- Projection: inserts an immutable revision and advances
-  `tasks.latest_revision_number`
+- Projection: inserts the complete immutable revision and replaces the Task projection with the complete resulting post-state
 - Revision number is positive and sequential for the task
-- An idempotency retry returns the original revision
-- Revision content is sufficient for replay and is never diagnostic-log content
+- An identical global operation retry returns the original revision
+- Revision and Task post-state are sufficient for exact field-for-field replay and are never diagnostic-log content
 
 Payload:
 
@@ -169,6 +158,14 @@ Payload:
     },
     "goal_contract_fingerprint": "blake3-lowercase-hex",
     "created_at": "2026-07-20T00:00:00Z"
+  },
+  "task": {
+    "task_id": "019...",
+    "project_id": "019...",
+    "title": "Bind local sessions",
+    "latest_revision_number": 1,
+    "created_at": "2026-07-20T00:00:00Z",
+    "updated_at": "2026-07-20T00:00:00Z"
   }
 }
 ```
@@ -207,43 +204,36 @@ projection key remains the original session ID. No earlier event is changed.
 
 ## Bound session start
 
-A bound start uses the existing Feature 001 session-start transaction and appends the
-existing `session.started` event followed by `session.bound` in one commit. The
-session row and binding projection become visible together. The existing watcher
-installation, readiness acknowledgement, authoritative post-install Git
-reconciliation, and interruption behavior then proceed unchanged.
+`session.started` always initializes replay scope as `local_unbound`; it never encodes project/task scope. `session.bound` is the sole event that establishes `project_bound`. A bound start uses the existing Feature 001 session-start path and appends `session.started` followed by `session.bound`, plus the session/binding projections, in one database transaction. Neither event nor projection is externally visible unless that transaction commits. The watcher installation/readiness acknowledgement and authoritative post-install Git reconciliation then proceed unchanged.
 
-A watcher or reconciliation failure may append the existing interruption/failure
-events, but it never removes the committed binding or reports a successful start.
+A watcher or reconciliation failure may append the existing interruption/failure events, but it never removes the committed binding or reports a successful start. Binding mode remains independent of lifecycle state.
 
 ## Idempotency ownership
 
-| Operation | Idempotency scope | Retry result |
+| Operation | Registry method | Result kind / locator |
 |---|---|---|
-| Create project | `project.created` event key | Original project |
-| Update project | `project.updated` event key | Original post-state |
-| Associate repository | Association request key plus repository uniqueness | Original association |
-| Create task | One request key; two position-derived event keys; request key on revision 1 | Original task and revision 1 |
-| Create revision | Revision request key | Original revision |
-| Bind session | Binding request key plus unique session projection | Original binding |
+| Create project | `project.create` | `event` / `project.created` event ID |
+| Update project | `project.update` | `event` / `project.updated` event ID |
+| Associate repository | `project.repository_associate` | `event` / association event ID when created; immutable association ID when a distinct key finds it already present |
+| Create task | `task.create` | `event` / `task.revision_created` event ID |
+| Create revision | `task.revise` | `event` / `task.revision_created` event ID |
+| Bind session | `session.bind` | `event` / `session.bound` event ID when created; immutable session-binding ID when a distinct key finds it already present |
 
-Reusing an idempotency key for a different operation body is a typed conflict and
-never reinterprets the original event.
+The raw key is globally unique. Same key/method/fingerprint returns the exact first result, including its original `created`/`updated` flag, by rereading immutable event payload or immutable projection. A distinct new key for an identical association/binding may first return `created:false`; retries of that key return the same false result. Another method/request returns `IDEMPOTENCY_CONFLICT`. Registry, derived events, heads, and projections commit or roll back together.
 
 ## Replay algorithm
 
-1. Read all events by ascending global `seq`.
-2. Interpret unchanged Feature 001 events with the Feature 001 replay handlers.
-3. Validate each Feature 002 event's type, payload schema version, aggregate scope,
-   and contiguous per-aggregate sequence.
-4. Apply the typed event to an empty in-memory projection.
-5. Compare rebuilt projects, associations, tasks, revisions, and bindings with the
-   transactional SQLite projections.
-6. Report corruption without mutating the ledger when an unknown version, sequence
-   gap, invalid relationship, or projection mismatch appears.
+1. Establish the typed dispatcher before US1 can append a Feature 002 event.
+2. Read all events by ascending global `seq`.
+3. Interpret unchanged Feature 001 events with Feature 001 handlers.
+4. Apply project handlers delivered with US1, task/revision handlers with US2, session-binding handlers with US3, and bound-start mixed handlers with US4.
+5. Validate type, payload version, aggregate scope, and contiguous per-aggregate sequence.
+6. Treat every `session.started` as local-unbound and only `session.bound` as project-bound.
+7. For `task.revision_created`, apply both the complete immutable revision and complete Task post-state, including `latest_revision_number` and `updated_at`.
+8. Compare every stable field of rebuilt projects, associations, tasks, revisions, and bindings with live projections.
+9. Report corruption without mutating the ledger for unknown versions, gaps, invalid relationships, or any field mismatch.
 
-Replay must reproduce duplicate names, list ordering in goal contracts, immutable
-revision references, and local-unbound/project-bound classifications exactly.
+The later replay phase tests mixed Feature 001/002 ledgers, corruption, and equality; it does not introduce the first story handlers. Replay must reproduce duplicate names, goal-contract list ordering, immutable references, timestamps, and binding classifications exactly.
 
 ## Compatibility rules
 

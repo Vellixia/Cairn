@@ -10,13 +10,11 @@
    identity.
 2. Feature 001 rows and events are preserved. No migration-generated project, task,
    revision, association, binding, or binding event is allowed.
-3. Every Feature 002 mutation appends event(s) and updates projections in one
-   `BEGIN IMMEDIATE` transaction.
-4. `events.seq` is the global total order. Post-migration events also have explicit
-   aggregate type, aggregate ID, and positive per-aggregate sequence.
-5. Task revisions, repository associations, and session bindings have no user-facing
-   update/delete transition in this feature.
+3. Every Feature 002 mutation reserves or resolves one global operation-idempotency record, appends event(s), updates aggregate heads, and updates projections in one `BEGIN IMMEDIATE` transaction.
+4. `events.seq` is the global total order. Post-migration events also have explicit aggregate type, aggregate ID, and positive per-aggregate sequence.
+5. Task revisions, repository associations, session bindings, and operation-idempotency records have no user-facing update/delete transition in this feature.
 6. Session binding mode and Feature 001 lifecycle state are independent dimensions.
+7. Every write uses a 5,000 ms connection busy timeout, zero application retries, and rollback on error or cancellation; exhaustion is `STORAGE_BUSY`. Tests may override the timeout only through test-only configuration.
 
 ## Identity newtypes
 
@@ -104,7 +102,6 @@ Immutable task intent.
 | `goal_contract_json` | UTF-8 JSON string | Exact canonical GoalContractV1 bytes |
 | `goal_contract_schema_version` | integer | 1 for Feature 002 |
 | `goal_contract_fingerprint` | 64-char lowercase hex | BLAKE3 of canonical bytes |
-| `idempotency_key` | IdempotencyKey | Globally unique persisted retry identity |
 | `created_at` | Timestamp | Immutable |
 
 Creation rules:
@@ -113,14 +110,11 @@ Creation rules:
 2. Revision 1 has number 1 and no parent.
 3. A later revision defaults to the immediately previous revision as parent.
 4. An explicit parent must belong to the same task and have a lower number.
-5. A `BEGIN IMMEDIATE` transaction conditionally increments the task counter and inserts
-   under `UNIQUE(task_id, revision_number)`.
-6. A matching idempotency retry returns the existing revision.
-7. Reuse of an idempotency key with a different operation kind, project/task identity,
-   task-create title, parent revision, or canonical contract fails with
-   `TASK_REVISION_CONFLICT` for revision operations or the operation's typed
-   idempotency conflict for other mutations.
+5. A `BEGIN IMMEDIATE` transaction conditionally increments the task counter and inserts under `UNIQUE(task_id, revision_number)`.
+6. The global operation-idempotency registry resolves matching retries before allocation.
+7. Reuse of a raw key for another method or canonical request fails with `IDEMPOTENCY_CONFLICT`.
 8. Existing revision rows are never updated or deleted.
+9. If allocation is followed by error or cancellation, the entire transaction rolls back; the next successful revision receives the gap-free next number.
 
 ## GoalContractV1
 
@@ -157,9 +151,8 @@ supplied list element must be non-empty after normalization.
 - Include `schema_version` in the serialized and hashed bytes.
 - Fingerprint is lowercase hexadecimal `BLAKE3(canonical_utf8_bytes)`.
 - Deserialization validates the schema version and recomputed fingerprint.
-- Errors expose stable violation enums such as `missing_goal`,
-  `empty_goal`, `empty_list_item`, `unsupported_schema_version`, or
-  `fingerprint_mismatch`; they never echo user content.
+- `INVALID_GOAL_CONTRACT` uses exactly `missing_required_field`, `malformed_structure`, `empty_goal`, `empty_list_entry`, or `unsupported_version`; bounded data may identify a field, list index, or supplied version but never echoes contract content.
+- A stored-fingerprint mismatch is projection/event corruption, not caller validation; it fails replay/verification closed.
 
 ## Session binding dimensions
 
@@ -176,8 +169,7 @@ local_unbound
 project_bound(project_id, task_revision_id)
 ```
 
-Migration sets every existing session row to `local_unbound`. Lifecycle state,
-timestamps, snapshots, leases, token hashes, and all events remain unchanged.
+Migration sets every existing session row to `local_unbound`. Those historical sessions remain valid and lifecycle state, timestamps, snapshots, leases, token hashes, and events remain unchanged. A new unbound session is permitted only when its repository has no active project association or the associated active project has no selectable active task revision; otherwise `PROJECT_SCOPE_REQUIRED` is returned before creation.
 
 ## SessionBinding
 
@@ -204,6 +196,22 @@ Binding validation:
 Success appends `session.bound`, inserts this row, and updates only
 `sessions.binding_mode`. Identical retry returns the same row. Any changed project or
 revision returns `SESSION_BINDING_CONFLICT`. No unbind/rebind row transition exists.
+
+
+## OperationIdempotencyRecord
+
+Immutable global registry entry owning one raw caller key across all mutating methods.
+
+| Field | Type | Rules |
+|---|---|---|
+| `idempotency_key` | IdempotencyKey | Primary key; globally unique raw caller key |
+| `method` | enum text | `project.create|project.update|project.repository_associate|task.create|task.revise|session.bind` |
+| `request_fingerprint` | 64-char lowercase hex | BLAKE3 of the method's deterministic canonical request bytes |
+| `result_kind` | enum text | `event|project_repository_association|session_binding` |
+| `result_locator` | UUID | Event ID for an operation that appended an event; immutable association/session ID only for a distinct-key request that found the same logical association/binding already present |
+| `created_at` | Timestamp | Immutable commit timestamp |
+
+The same key, method, and request fingerprint returns the exact original result, including its original `created`/`updated` flag. Event locators reread immutable typed event payloads, which preserve mutable project/Task post-state. A distinct new key for an already-existing identical repository association or binding may record the immutable projection locator and returns `created:false`; retrying that new key returns the same false result. Any method/fingerprint mismatch returns `IDEMPOTENCY_CONFLICT`. Independent connections race under `BEGIN IMMEDIATE`; the first commit wins and competitors reread the registry row. Reservation, aggregate allocation, all events, and all projections share the transaction.
 
 ## EventAggregateHead
 
@@ -236,7 +244,7 @@ Constraints:
 - the post-migration event trigger rejects missing aggregate fields for every new event;
 - existing update/delete denial triggers remain;
 - global `seq` remains the authoritative complete replay order;
-- `idempotency_key` remains globally unique.
+- `idempotency_key` remains globally unique for derived per-event keys; raw operation keys live only in `operation_idempotency`.
 
 Aggregate assignment:
 
@@ -270,14 +278,18 @@ Primary key `id`. Indexes `(project_id, id)`, `(project_id, title, id)`.
 
 ### `task_revisions`
 
-Primary key `id`. Unique `(task_id, revision_number)`; unique
-`idempotency_key`; indexes `(task_id, revision_number DESC)`,
-`parent_revision_id`.
+Primary key `id`. Unique `(task_id, revision_number)`; indexes
+`(task_id, revision_number DESC)`, `parent_revision_id`.
 
 ### `session_bindings`
 
 Primary key `session_id`. Unique `binding_event_seq`; indexes `project_id`,
 `task_revision_id`.
+
+
+### `operation_idempotency`
+
+Primary key `idempotency_key`. Closed checks on `method` and `result_kind`; fingerprint length/lowercase-hex checks; immutable update/delete-denial triggers; indexes `(result_kind, result_locator)` and `created_at`.
 
 ### Existing `sessions`
 
@@ -296,19 +308,16 @@ The design DDL is in
 
 ## Replay projections
 
-Replay processes the complete ledger in ascending global `seq` and builds:
+Replay processes the complete ledger in ascending global `seq`. A typed dispatcher exists before any Feature 002 story event can be written; project, task/revision, binding, and bound-start handlers are added with US1, US2, US3, and US4 respectively. It builds:
 
 - `projects`: create then full-state updates;
 - `project_repository_associations`: one immutable insert;
-- `tasks`: create then advance latest revision;
-- `task_revisions`: immutable inserts;
-- `session_bindings`: initialize every `session.started` as local-unbound, then apply
-  at most one `session.bound`;
+- `tasks`: `task.created`, then complete resulting Task post-state from each `task.revision_created`;
+- `task_revisions`: complete immutable inserts from `task.revision_created`;
+- `session_bindings`: every `session.started` initializes `local_unbound`; only `session.bound` establishes `project_bound`;
 - existing Feature 001 session lifecycle projection through its current replay path.
 
-Replay equality compares stable persisted fields. Resume-token hashes and live lease
-clocks remain authentication/runtime fields rather than event-sourced history, matching
-Feature 001; migration preservation of those fields is verified separately.
+A bound start appends `session.started` then `session.bound` in one database transaction; neither is externally visible unless the transaction commits. Replay equality compares every stable persisted field, including Task `latest_revision_number` and `updated_at`. Resume-token hashes and live lease clocks remain authentication/runtime fields rather than event-sourced history, matching Feature 001; migration preservation of those fields is verified separately.
 
 ## Deletion and foreign keys
 

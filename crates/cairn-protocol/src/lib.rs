@@ -7,14 +7,24 @@
 pub mod dto;
 pub mod errors;
 pub mod methods;
+pub mod project;
+pub mod session;
+pub mod task;
 
 pub use dto::*;
 pub use errors::*;
 pub use methods::*;
+pub use project::*;
+pub use session::*;
+pub use task::*;
 
 // Re-export the identity types used in DTOs so thin clients (CLI, adapters)
 // need not depend on cairn-domain directly.
-pub use cairn_domain::{AgentInstanceId, SessionId, SessionState, Timestamp, WatcherStartStage};
+pub use cairn_domain::{
+    AgentInstanceId, GoalContractField, GoalContractV1, GoalContractViolation, IdempotencyKey,
+    ProjectId, ProjectRepositoryAssociationId, ProjectStatus, SessionId, SessionState, TaskId,
+    TaskRevisionId, Timestamp, WatcherStartStage,
+};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -61,27 +71,6 @@ impl Response {
     }
 }
 
-/// Typed data carried by stable protocol errors. Watcher readiness failures
-/// deliberately expose only their discriminant and stable stage (FR-038).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-#[serde(deny_unknown_fields)]
-pub enum ErrorData {
-    WatcherStartFailure { stage: WatcherStartStage },
-}
-
-impl ErrorData {
-    pub const fn watcher_start_failure(stage: WatcherStartStage) -> Self {
-        Self::WatcherStartFailure { stage }
-    }
-
-    pub const fn watcher_stage(self) -> WatcherStartStage {
-        match self {
-            Self::WatcherStartFailure { stage } => stage,
-        }
-    }
-}
-
 /// Structured error payload. Its custom schema requires typed watcher data
 /// whenever `code` is `WATCHER_START_FAILED`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +95,14 @@ impl ErrorBody {
             code: ErrorCode::WatcherStartFailed,
             message: "session watcher readiness failed".into(),
             data: Some(ErrorData::watcher_start_failure(stage)),
+        }
+    }
+
+    pub fn with_data(code: ErrorCode, message: impl Into<String>, data: ErrorData) -> Self {
+        Self {
+            code,
+            message: message.into(),
+            data: Some(data),
         }
     }
 }

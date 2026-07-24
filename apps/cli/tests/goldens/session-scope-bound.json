@@ -1,0 +1,16 @@
+{
+  "schema": "cairn.cli.v1",
+  "ok": true,
+  "command": "session.start",
+  "data": {
+    "session": {
+      "session_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d08",
+      "scope": {
+        "mode": "project_bound",
+        "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d04",
+        "task_revision_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d05"
+      }
+    },
+    "outcome": "created"
+  }
+}

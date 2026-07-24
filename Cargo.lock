@@ -207,6 +207,7 @@ dependencies = [
  "cairn-domain",
  "cairn-events",
  "cairn-git",
+ "cairn-project",
  "cairn-protocol",
  "cairn-session",
  "cairn-storage-local",
@@ -215,6 +216,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "tokio",
@@ -234,6 +236,7 @@ dependencies = [
  "chrono",
  "schemars",
  "serde",
+ "serde_json",
  "thiserror",
  "uuid",
 ]
@@ -242,8 +245,10 @@ dependencies = [
 name = "cairn-events"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cairn-domain",
  "cairn-storage-local",
+ "schemars",
  "serde",
  "serde_json",
  "sqlx",
@@ -270,6 +275,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-project"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cairn-domain",
+ "cairn-events",
+ "cairn-storage-local",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "cairn-protocol"
 version = "0.1.0"
 dependencies = [
@@ -288,12 +309,15 @@ dependencies = [
  "blake3",
  "cairn-domain",
  "cairn-events",
+ "cairn-project",
  "cairn-storage-local",
  "chrono",
  "libc",
  "rand",
+ "serde",
  "serde_json",
  "sqlx",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
@@ -305,10 +329,12 @@ dependencies = [
 name = "cairn-storage-local"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cairn-domain",
  "chrono",
  "dirs",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",

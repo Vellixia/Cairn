@@ -1,0 +1,55 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProjectUpdateParams",
+  "type": "object",
+  "required": [
+    "idempotency_key",
+    "project_id"
+  ],
+  "properties": {
+    "clear_description": {
+      "default": false,
+      "type": "boolean"
+    },
+    "description": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "idempotency_key": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "name": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "project_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "status": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/ProjectStatus"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ProjectStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "archived"
+      ]
+    }
+  }
+}

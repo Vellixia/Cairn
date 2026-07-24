@@ -1,0 +1,15 @@
+{
+  "schema": "cairn.cli.v1",
+  "ok": true,
+  "command": "session.bind",
+  "data": {
+    "session_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0a",
+    "scope": {
+      "mode": "project_bound",
+      "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0b",
+      "task_revision_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0c"
+    },
+    "bound_at": "2026-07-22T00:00:00Z",
+    "created": true
+  }
+}

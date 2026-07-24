@@ -22,6 +22,8 @@ fn event(key: &str) -> NewEvent {
         worktree_id: None,
         session_id: None,
         snapshot_id: None,
+        aggregate_type: "worktree".into(),
+        aggregate_id: "w1".into(),
         payload: serde_json::json!({"k": key}),
         recorded_at: "2026-07-16T00:00:00.000Z".into(),
     }

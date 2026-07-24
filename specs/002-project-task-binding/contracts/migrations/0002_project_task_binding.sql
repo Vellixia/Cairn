@@ -97,7 +97,6 @@ CREATE TABLE task_revisions (
             length(goal_contract_fingerprint) = 64
             AND goal_contract_fingerprint NOT GLOB '*[^0-9a-f]*'
         ),
-    idempotency_key              TEXT NOT NULL UNIQUE, -- UUID
     created_at                   TEXT NOT NULL,
     UNIQUE (task_id, revision_number)
 );
@@ -107,6 +106,42 @@ CREATE INDEX task_revisions_by_task_number
 
 CREATE INDEX task_revisions_by_parent
     ON task_revisions (parent_revision_id);
+
+
+-- One raw caller key is authoritative across every Feature 002 mutating method.
+-- Registry reservation, events, aggregate heads, and projections are written in the same
+-- BEGIN IMMEDIATE transaction. Polymorphic result_locator validity is checked by the DAO.
+CREATE TABLE operation_idempotency (
+    idempotency_key    TEXT PRIMARY KEY, -- caller UUID
+    method             TEXT NOT NULL
+        CHECK (method IN (
+            'project.create',
+            'project.update',
+            'project.repository_associate',
+            'task.create',
+            'task.revise',
+            'session.bind'
+        )),
+    request_fingerprint TEXT NOT NULL
+        CHECK (
+            length(request_fingerprint) = 64
+            AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+        ),
+    result_kind         TEXT NOT NULL
+        CHECK (result_kind IN (
+            'event',
+            'project_repository_association',
+            'session_binding'
+        )),
+    result_locator      TEXT NOT NULL, -- UUID selected by result_kind
+    created_at          TEXT NOT NULL
+);
+
+CREATE INDEX operation_idempotency_by_result
+    ON operation_idempotency (result_kind, result_locator);
+
+CREATE INDEX operation_idempotency_by_created_at
+    ON operation_idempotency (created_at);
 
 CREATE TABLE session_bindings (
     session_id        TEXT PRIMARY KEY REFERENCES sessions(id),
@@ -313,6 +348,19 @@ CREATE TRIGGER session_bindings_no_delete
 BEFORE DELETE ON session_bindings
 BEGIN
     SELECT RAISE(ABORT, 'session bindings cannot be deleted');
+END;
+
+
+CREATE TRIGGER operation_idempotency_no_update
+BEFORE UPDATE ON operation_idempotency
+BEGIN
+    SELECT RAISE(ABORT, 'operation idempotency records are immutable');
+END;
+
+CREATE TRIGGER operation_idempotency_no_delete
+BEFORE DELETE ON operation_idempotency
+BEGIN
+    SELECT RAISE(ABORT, 'operation idempotency records cannot be deleted');
 END;
 
 CREATE TRIGGER projects_no_delete

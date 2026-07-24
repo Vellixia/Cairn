@@ -1,7 +1,9 @@
 pub mod daemon;
 pub mod init;
+pub mod project;
 pub mod session;
 pub mod status;
+pub mod task;
 
 pub fn cwd() -> String {
     std::env::current_dir()

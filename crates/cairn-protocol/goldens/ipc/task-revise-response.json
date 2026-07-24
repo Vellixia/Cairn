@@ -1,0 +1,30 @@
+{
+  "id": "task-revise-1",
+  "result": {
+    "task": {
+      "task_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0b",
+      "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0a",
+      "title": "Ship immutable tasks",
+      "latest_revision_number": 2,
+      "created_at": "2026-07-20T00:00:00Z",
+      "updated_at": "2026-07-20T00:01:00Z"
+    },
+    "revision": {
+      "revision_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0d",
+      "task_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0b",
+      "revision_number": 2,
+      "parent_revision_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0c",
+      "goal_contract": {
+        "schema_version": 1,
+        "goal": "Implement task revisions safely",
+        "included_scope": ["task model", "replay"],
+        "excluded_scope": ["session binding"],
+        "acceptance_criteria": ["revision one is immutable"],
+        "constraints": ["offline"]
+      },
+      "goal_contract_fingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "created_at": "2026-07-20T00:01:00Z"
+    },
+    "created": true
+  }
+}

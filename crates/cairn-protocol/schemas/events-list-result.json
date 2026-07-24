@@ -21,6 +21,16 @@
     }
   },
   "definitions": {
+    "EventAggregateType": {
+      "type": "string",
+      "enum": [
+        "repository",
+        "worktree",
+        "session",
+        "project",
+        "task"
+      ]
+    },
     "EventDto": {
       "type": "object",
       "required": [
@@ -31,6 +41,29 @@
         "seq"
       ],
       "properties": {
+        "aggregate_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "aggregate_seq": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "aggregate_type": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/EventAggregateType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "event_type": {
           "type": "string"
         },

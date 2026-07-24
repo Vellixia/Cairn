@@ -1,11 +1,13 @@
 //! Request/response DTOs for every v1 method (contracts/ipc-contract.md).
 
 use cairn_domain::{
-    AgentInstanceId, LivenessReason, RepoUuid, SessionId, SessionState, SnapshotId, Timestamp,
-    WorktreeUuid,
+    AgentInstanceId, LivenessReason, ProjectId, RepoUuid, SessionId, SessionState, SnapshotId,
+    TaskRevisionId, Timestamp, WorktreeUuid,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+
+use crate::SessionScopeDto;
 
 // ---------- shared objects ----------
 
@@ -64,6 +66,7 @@ pub struct SessionDto {
     pub last_heartbeat_at: Timestamp,
     pub lease_expires_at: Timestamp,
     pub recovering_since: Option<Timestamp>,
+    pub scope: SessionScopeDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -73,6 +76,7 @@ pub struct SessionSummaryDto {
     pub agent_instance_id: AgentInstanceId,
     pub state: SessionState,
     pub started_at: Timestamp,
+    pub scope: SessionScopeDto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -137,6 +141,9 @@ pub struct EventDto {
     pub worktree_id: Option<String>,
     pub session_id: Option<String>,
     pub snapshot_id: Option<String>,
+    pub aggregate_type: Option<EventAggregateType>,
+    pub aggregate_id: Option<String>,
+    pub aggregate_seq: Option<i64>,
     pub payload: serde_json::Value,
     pub recorded_at: Timestamp,
 }
@@ -234,6 +241,10 @@ pub struct SessionStartParams {
     pub agent_instance_id: AgentInstanceId,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_pid: Option<u32>,
+    /// Omission by a Feature 001 client is the legacy request for
+    /// `local_unbound`, still subject to the constitutional bootstrap gate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<SessionScopeDto>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -288,6 +299,10 @@ pub struct SessionListParams {
     pub repository_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<Vec<SessionState>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<ProjectId>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_revision_id: Option<TaskRevisionId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -345,6 +360,39 @@ pub struct SessionStopResult {
 
 // ---------- events.list ----------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventAggregateType {
+    Repository,
+    Worktree,
+    Session,
+    Project,
+    Task,
+}
+
+impl EventAggregateType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Repository => "repository",
+            Self::Worktree => "worktree",
+            Self::Session => "session",
+            Self::Project => "project",
+            Self::Task => "task",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "repository" => Self::Repository,
+            "worktree" => Self::Worktree,
+            "session" => Self::Session,
+            "project" => Self::Project,
+            "task" => Self::Task,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct EventsListParams {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -353,6 +401,10 @@ pub struct EventsListParams {
     pub worktree_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregate_type: Option<EventAggregateType>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aggregate_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub after_seq: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -4,6 +4,8 @@
 //! Included by many test binaries; not every binary uses every helper.
 #![allow(dead_code)]
 
+pub mod binding;
+
 use std::path::PathBuf;
 
 use cairn_daemon::DaemonConfig;
@@ -36,6 +38,7 @@ pub fn test_config(dir: &tempfile::TempDir) -> DaemonConfig {
         watcher_test_controls: Some(std::sync::Arc::new(
             cairn_daemon::watch::WatcherTestControls::default(),
         )),
+        session_test_hooks: None,
     }
 }
 

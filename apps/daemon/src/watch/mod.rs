@@ -378,11 +378,20 @@ async fn worktree_task(
                 if let Some(c) = &controls {
                     c.before_reconcile().await;
                 }
-                let result = reconciler
-                    .reconcile()
-                    .await
-                    .map(|_| ())
-                    .map_err(|e| WatchStartFailure::reconcile(e.message));
+                let result = if controls
+                    .as_ref()
+                    .is_some_and(|c| c.fail_reconcile.swap(false, Ordering::SeqCst))
+                {
+                    Err(WatchStartFailure::reconcile(
+                        "watcher reconciliation failed by deterministic test injection",
+                    ))
+                } else {
+                    reconciler
+                        .reconcile()
+                        .await
+                        .map(|_| ())
+                        .map_err(|e| WatchStartFailure::reconcile(e.message))
+                };
                 if let Some(c) = &controls {
                     c.note_reconciled();
                 }

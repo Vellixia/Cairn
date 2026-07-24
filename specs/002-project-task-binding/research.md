@@ -76,46 +76,21 @@
 
 ## R6. Revision idempotency and parents
 
-- **Decision**: Store a unique UUID idempotency key on each task revision. A retry with
-  the same key and same task/canonical request returns the existing revision; reuse for a
-  different task or canonical body returns `TASK_REVISION_CONFLICT`. Revision 1 has no
-  parent. Later revisions default to the immediately previous revision; an explicitly
-  selected parent must belong to the same task and have a lower revision number.
-- **Rationale**: Persisted keys survive lost responses and daemon restarts while the
-  parent rule preserves a clear default history without prohibiting deliberate
-  same-task branching.
-- **Alternatives considered**: Content fingerprint as idempotency key (identical content
-  may be an intentional new revision); event ID only (caller cannot safely retry);
-  process memory cache (not restart-safe).
+- **Decision**: Persist one global immutable operation record for every keyed mutation. Appending operations locate their immutable result event so exact retries reproduce the first post-state and original `created/updated` flag even after live projections change. A distinct-key identical association/binding no-op locates that immutable projection and records `created:false`. Same key/method/fingerprint returns that exact result; another method/request returns `IDEMPOTENCY_CONFLICT`. Revision parents remain same-task/earlier and sequential.
+- **Rationale**: Immutable locators make “original result” literal across restarts and later mutable updates while one database authority closes cross-method reuse.
+- **Alternatives considered**: Locate mutable project/Task rows (returns later state); store response blobs (duplicative); per-revision keys (cross-method gap); process memory (not restart-safe).
 
 ## R7. Goal-contract canonicalization and fingerprint
 
-- **Decision**: Define `GoalContractV1` as a typed, fixed-field-order structure:
-  `schema_version=1`, `goal`, `included_scope`, `excluded_scope`,
-  `acceptance_criteria`, `constraints`. Normalize CRLF and CR to LF, then trim
-  surrounding Unicode whitespace on each scalar/list item. Preserve all internal
-  whitespace and exact list order. Empty lists are valid; goal and supplied list entries
-  must be non-empty after normalization. Serialize compact UTF-8 JSON from the typed
-  struct and store lowercase BLAKE3 hex of those exact bytes.
-- **Rationale**: Fixed typed fields avoid map-order ambiguity; including the schema
-  version in hashed bytes makes future formats explicit.
-- **Alternatives considered**: JSON object maps (key ordering risk); sorting lists
-  (changes user meaning); aggressive whitespace collapsing (changes content); hash of
-  user input bytes (line-ending/platform instability).
+- **Decision**: Define `GoalContractV1` as a typed, fixed-field-order structure: `schema_version=1`, `goal`, `included_scope`, `excluded_scope`, `acceptance_criteria`, and `constraints`. Normalize CRLF and CR to LF, then trim surrounding Unicode whitespace on each scalar/list item. Preserve all internal whitespace and exact list order. Empty lists are valid; goal and supplied list entries must be non-empty after normalization. Serialize compact UTF-8 JSON from the typed struct and store lowercase BLAKE3 hex of those exact bytes. Validation uses the closed bounded violation union `missing_required_field | malformed_structure | empty_goal | empty_list_entry | unsupported_version`, with only field/list-index/version metadata and never contract content.
+- **Rationale**: Fixed typed fields avoid map-order ambiguity; including the schema version in hashed bytes makes future formats explicit; bounded violations support safe machine handling.
+- **Alternatives considered**: JSON object maps (key ordering risk); sorting lists (changes user meaning); aggressive whitespace collapsing (changes content); hash of user input bytes (line-ending/platform instability); free-form validation messages (privacy and compatibility risk).
 
 ## R8. Migration strategy
 
-- **Decision**: Add one SQLx migration `0002_project_task_binding.sql`. It adds
-  `sessions.binding_mode NOT NULL DEFAULT 'local_unbound'`, creates new projection
-  and aggregate-head tables, and adds nullable aggregate columns/indexes to `events`.
-  It never updates an existing event or creates project/task/binding rows. SQLx's
-  `_sqlx_migrations` version/checksum gate makes subsequent opens no-ops; SQLite
-  transactional DDL rolls the migration back on failure.
-- **Rationale**: A default column explicitly classifies every existing session without
-  fabricating history. Nullable aggregate columns preserve legacy rows exactly.
-- **Alternatives considered**: Rebuild/backfill the events table (rewrites history);
-  create placeholder projects/tasks (invalid lifecycle semantics); parallel Feature 002
-  database (breaks atomicity and daemon ownership).
+- **Decision**: Add one SQLx migration `0002_project_task_binding.sql`. It adds `sessions.binding_mode NOT NULL DEFAULT 'local_unbound'`, projection/aggregate-head tables, the immutable global `operation_idempotency` registry, and nullable aggregate columns/indexes on `events`. It never updates an existing event or fabricates project/task/binding/operation rows. SQLx version/checksum gating makes subsequent opens no-ops; checksum mismatch or a database version newer than the application fails closed as `MIGRATION_FAILED`; transactional DDL rolls back on failure.
+- **Rationale**: A default column explicitly classifies every existing session without fabricating history. Nullable aggregate columns preserve legacy rows, and the global registry provides one cross-method retry authority.
+- **Alternatives considered**: Rebuild/backfill events (rewrites history); placeholder projects/tasks (invalid lifecycle semantics); per-method idempotency tables (cross-method gap); parallel Feature 002 database (breaks atomicity).
 
 ## R9. Real Feature 001 migration fixture
 
@@ -145,31 +120,15 @@
 
 ## R11. Event idempotency and multi-event operations
 
-- **Decision**: Keep globally unique `events.idempotency_key`. Derive event keys from
-  event type plus operation UUID or immutable entity tuple. For task creation, derive
-  separate `task.created:<operation>` and
-  `task.revision_created:<operation>` keys and append both in one transaction.
-  Check the first key before allocating sequences; a retry returns the committed
-  projection without incrementing aggregate heads.
-- **Rationale**: Existing append semantics remain compatible and multi-event retries
-  cannot produce partial or duplicate histories.
-- **Alternatives considered**: Reuse one key for multiple events (violates unique
-  constraint); random keys generated inside every retry (duplicates events); separate
-  idempotency table for every command (unnecessary).
+- **Decision**: The global `operation_idempotency` registry owns the raw caller key. Event idempotency keys are deterministically derived from that operation key plus event position/type; task creation therefore appends distinct `task.created` and `task.revision_created` keys. Under `BEGIN IMMEDIATE`, lookup or reserve the registry record before sequence allocation, then append every event and update every projection in the same transaction. The first committed concurrent caller wins; waiters reread the committed registry record and either return its result or raise `IDEMPOTENCY_CONFLICT`.
+- **Rationale**: One authoritative registry closes cross-method conflicts while preserving the ledger's unique event keys and atomic multi-event retries.
+- **Alternatives considered**: Reuse one raw key for multiple events (violates event uniqueness); event-only lookup (cannot distinguish another method/request); random retry keys (duplicates); process-local locks (do not serialize independent connections).
 
 ## R12. Replay compatibility
 
-- **Decision**: Replay new projections in ascending `events.seq`. New event payloads
-  contain enough complete state to reconstruct projects, associations, tasks, revisions,
-  and bindings. Legacy Feature 001 rows with null aggregate columns derive scope in
-  memory from their existing most-specific real foreign key (session, then worktree,
-  then repository); the database is not backfilled. Strict verification reports unknown
-  Feature 002 event versions, while normal listing preserves unknown rows.
-- **Rationale**: This keeps one ordered ledger and preserves old event bytes while
-  allowing exact projection equality.
-- **Alternatives considered**: Ignore global order and replay each aggregate separately
-  (loses cross-aggregate causality); rewrite legacy rows (forbidden); silently accept
-  unknown event payload versions in verification (false confidence).
+- **Decision**: Establish a typed replay dispatcher before US1. Add the project handler with US1, the task/revision handler with US2, the session-binding handler with US3, and bound-start mixed-event handling with US4. Replay remains ascending `events.seq`. `task.revision_created` carries the complete immutable revision and complete resulting Task post-state, including `latest_revision_number` and `updated_at`. `session.started` always initializes `local_unbound`; `session.bound` is the sole event establishing `project_bound`. Legacy Feature 001 rows with null aggregate columns derive scope in memory from their existing most-specific real foreign key; the database is not backfilled. The later replay phase owns mixed-ledger integration, corruption handling, unknown-version checks, and exact field-for-field equality.
+- **Rationale**: Story work cannot create unreplayable events, one ordered ledger preserves cross-aggregate causality, and complete post-state permits exact projection equality without rewriting legacy bytes.
+- **Alternatives considered**: Defer all handlers until late integration (temporary unreplayable features); replay aggregates independently (loses causality); rewrite legacy rows (forbidden); infer bound scope from `session.started` (ambiguous).
 
 ## R13. Session binding policy
 
@@ -187,17 +146,9 @@
 
 ## R14. Bound session start
 
-- **Decision**: Extend `SessionService::start` with a tagged requested scope. Omitted
-  scope from old v1 clients decodes as `local_unbound`; new clients send it
-  explicitly. New bound creation validates and commits session, `session.started`,
-  `session.bound`, and binding projection together, then follows the unchanged
-  watcher-ready/reconcile boundary. A live collision returns existing only for identical
-  stored/requested scope; otherwise `SESSION_SCOPE_CONFLICT`.
-- **Rationale**: One path preserves uniqueness, stale takeover, leases, recovery,
-  watcher readiness, snapshots, and token handling.
-- **Alternatives considered**: Start unbound then call bind in a second transaction
-  (exposes an unintended unbound window); duplicate bound-start service (behavior drift);
-  silently convert a colliding session (violates explicit binding).
+- **Decision**: Extend `SessionService::start` with a tagged requested scope. A new `local_unbound` start is allowed only when the repository has no active project association or its associated active project has no selectable active task revision; otherwise return `PROJECT_SCOPE_REQUIRED` without creating a session. Historical migrated unbound sessions remain valid. A bound start validates scope and appends `session.started` followed by `session.bound`, plus both projections, in one transaction; neither event is externally visible before commit. The unchanged watcher-ready/reconcile boundary follows. A live collision returns existing only for identical stored/requested scope; otherwise `SESSION_SCOPE_CONFLICT`.
+- **Rationale**: One path preserves Feature 001 uniqueness, leases, recovery, watcher readiness, snapshots, and token handling while honoring the constitutional bootstrap restriction.
+- **Alternatives considered**: Always allow new unbound sessions (violates project/task invariant); start unbound then bind in a later transaction (externally visible invalid window); duplicate bound-start service (behavior drift); encode binding in `session.started` (breaks sole binding-event semantics).
 
 ## R15. Error-name alignment
 
@@ -230,14 +181,9 @@
 
 ## R17. Contract evolution
 
-- **Decision**: Add `v1.project.*`, `v1.task.*`, and `v1.session.bind` methods;
-  extend `v1.session.start/get/list` DTOs additively with tagged scope. Keep
-  JSON-lines framing, `cairn.cli.v1`, checked-in schemars output, golden examples, and
-  closed errors. Existing clients that omit start scope remain local-unbound.
-- **Rationale**: The changes are additive and preserve the established local transport.
-- **Alternatives considered**: Introduce v2 immediately (unnecessary without removals or
-  reinterpretation); free-form JSON payloads (lose schema tripwires); direct CLI storage
-  writes (split invariants).
+- **Decision**: Add `v1.project.*`, `v1.task.*`, and `v1.session.bind` methods; extend `v1.session.start/get/list` DTOs additively with tagged scope. Keep JSON-lines framing, `cairn.cli.v1`, checked-in schemars output, golden examples, and closed errors. Existing clients that omit start scope receive `local_unbound` only when bootstrap eligibility holds; otherwise they receive `PROJECT_SCOPE_REQUIRED`.
+- **Rationale**: The transport remains additive without silently bypassing the constitutional scope gate.
+- **Alternatives considered**: Introduce v2 immediately (unnecessary without removals); preserve unconditional omitted-scope behavior (invalid once selectable scope exists); free-form JSON payloads (lose schema tripwires); direct CLI storage writes (split invariants).
 
 ## R18. Privacy and observability
 
@@ -254,13 +200,19 @@
 
 ## R19. Offline and platform evidence
 
-- **Decision**: Build/fetch first, then run the success demonstration and focused
-  migration/replay tests inside Linux OS-level network isolation while proving external
-  network denial and local filesystem/IPC success. Run platform-specific IPC,
-  migration, restart, and persistence suites on Windows, macOS, and Linux. Do not demand
-  duplicate platform evidence for pure canonicalization code with no platform branch.
-- **Rationale**: This proves offline behavior rather than merely passing
-  `cargo --offline`, while keeping cross-platform scope tied to actual differences.
-- **Alternatives considered**: Configured-but-unrun matrix (not evidence); dependency
-  offline flag alone (network still available); require every unit test on every OS
-  regardless of platform behavior (cost without additional assurance).
+- **Decision**: Build/fetch first, then run the success demonstration and focused migration/replay tests inside Linux OS-level network isolation while proving external network denial and local filesystem/IPC success. Run platform-specific IPC, migration, restart, and persistence suites on Windows, macOS, and Linux. Because Feature 002 modifies session start, event writes, recovery, and storage, the frozen implementation SHA must also execute exactly 100 forced process kills with zero committed-event/state loss using `CAIRN_CRASH_ITERS=100 CAIRN_CRASH_EXPECTED_ITERS=100 cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture`, and explicitly execute `cargo test -p cairn-daemon --test perf -- --ignored`. Record exact commands, SHA, OS/architecture/toolchain, counters or measurements/fixture size/limits, and pass/fail. Configured workflows are not evidence.
+- **Rationale**: This proves offline and inherited Feature 001 durability/performance behavior on the actual candidate rather than merely configuring jobs or using `cargo --offline`.
+- **Alternatives considered**: Configured-but-unrun matrix (not evidence); dependency offline flag alone (network still available); reuse evidence from another SHA (not compatible); rely on workspace tests where perf is ignored (does not execute SC-007).
+
+
+## R20. SQLite contention, cancellation, and rollback
+
+- **Decision**: Configure every Feature 002 write connection with a 5,000 ms SQLite busy timeout and perform zero application-level transaction retries, so maximum lock wait is 5,000 ms. Exhaustion returns bounded `STORAGE_BUSY`. Cancellation drops and rolls back the transaction before the connection returns to the pool. Tests may inject a shorter deterministic timeout through a test-only configuration that is unavailable in production.
+- **Rationale**: One bounded database wait prevents hidden retry multiplication, starvation, and ambiguous cancellation while retaining SQLite's cross-connection serialization.
+- **Alternatives considered**: Unbounded busy wait (hang risk); layered retries (unbounded elapsed time); process-local mutex (does not coordinate processes); commit after cancellation (partial operation).
+
+## R21. Evidence and declaration ordering
+
+- **Decision**: Freeze one implementation commit, execute every required platform and inherited Feature 001 acceptance job at that exact SHA, commit preliminary evidence, then run analyze, verify, verify-tasks, converge, and any appended remediation before producing the final-gate report and a separate final evidence/declaration commit. A committed document never claims its own commit SHA; record that SHA in workflow metadata, an annotated tag, or a later external manifest.
+- **Rationale**: Preliminary executions and final convergence are different evidence states, and Git objects cannot truthfully contain their own eventual identity.
+- **Alternatives considered**: Treat configured jobs as evidence; declare before convergence; require a document to contain its own SHA; keep 130 as an artificial denominator.

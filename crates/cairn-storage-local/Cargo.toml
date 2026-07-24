@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+blake3 = { workspace = true }
 cairn-domain = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
@@ -16,6 +17,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

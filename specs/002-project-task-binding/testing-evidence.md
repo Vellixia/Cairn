@@ -14,9 +14,9 @@ remain failures.
 - UUIDv7 typed ID parsing and round trips.
 - Duplicate project names and duplicate task titles.
 - Active/archived transitions; only explicit restoration reaches active.
-- Goal contract normalization for LF, CRLF, CR, surrounding Unicode whitespace,
-  preserved internal whitespace, and preserved list order.
-- Empty goal/entry rejection without echoing input.
+- Goal contract normalization for LF, CRLF, CR, surrounding Unicode whitespace, preserved internal whitespace, and preserved list order.
+- Every `INVALID_GOAL_CONTRACT` violation: `missing_required_field` for each of the six required fields, `malformed_structure`, `empty_goal`, `empty_list_entry` for each list field, and `unsupported_version`.
+- Validation data is bounded to field/index/version and never echoes submitted contract content.
 - Canonical compact JSON byte fixtures and BLAKE3 fingerprint goldens.
 - Binding mode remains independent of every Feature 001 lifecycle state.
 
@@ -30,11 +30,10 @@ Use SQLite databases and independent SQLx pools, not mocks:
 - compare repository, worktree, snapshot, session, event, lease, timestamp, state,
   resume-token-hash, and metadata manifests before/after;
 - verify every existing session becomes `local_unbound`;
-- verify no project/task/association/binding or synthetic binding event appears;
+- verify no project/task/association/binding/operation-idempotency row or Feature 002 event appears;
 - interrupt before commit, reopen, and retry safely;
-- verify an unsupported/failed migration returns `MIGRATION_FAILED`, exposes no
-  partial healthy state, and leaks no raw SQL/path;
-- verify immutable/no-delete triggers and uniqueness constraints;
+- use the actual migration runner to prove a recorded checksum mismatch and a database version newer than the supported application both return bounded `MIGRATION_FAILED`, expose no healthy daemon, mutate nothing, and leak no checksum/SQL/path;
+- verify immutable/no-delete triggers, operation-registry constraints, and uniqueness constraints;
 - verify Feature 001 event payload bytes and global sequence values remain unchanged.
 
 The fixture manifest records the producer commit, OS, SQLite/SQLx-compatible schema
@@ -46,18 +45,20 @@ resume tokens and secrets.
 Run with separate connections and service instances so process-local locks cannot make
 a broken design pass:
 
-- concurrent revision requests for one task allocate all positive numbers exactly once
-  with no gaps or duplicates;
-- same idempotency key returns exactly one revision;
-- same key with different content returns a conflict;
-- concurrent repository associations yield one association and typed conflict for a
-  different project;
+- concurrent revision requests for one task allocate all positive numbers exactly once with no gaps or duplicates;
+- same key/method/request returns the exact original result/flag across restart and after later mutable project updates;
+- a distinct key for an identical association/binding records and repeats `created:false`;
+- the same raw key reused for another method or request returns `IDEMPOTENCY_CONFLICT`;
+- first committed competing request wins and other connections reread the registry row;
+- registry reservation, aggregate heads, events, and projections are all-or-none;
+- concurrent repository associations yield one association and typed conflict for another project;
 - concurrent identical bindings yield one event/projection and equivalent responses;
 - concurrent different bindings leave exactly one immutable winner;
-- per-aggregate sequences remain contiguous and the global sequence is total.
+- per-aggregate sequences remain contiguous and the global sequence is total;
+- lock exhaustion honors the deterministic test timeout and returns `STORAGE_BUSY`;
+- cancellation rolls back before connection reuse, starvation remains within the configured bound, and failure after revision-counter allocation leaves the next successful revision gap-free.
 
-Synchronization uses barriers/acknowledgements and database contention controls, not
-correctness sleeps.
+Synchronization uses barriers/acknowledgements and independent pools/connections, not correctness sleeps or process-local mutexes.
 
 ### Service integration tests
 
@@ -67,11 +68,13 @@ correctness sleeps.
 - explicit earlier same-task parent and wrong-task parent rejection;
 - bind an existing `local_unbound` session, identical retry, conflicting bind;
 - reject repository/project mismatch and revision/project mismatch;
-- start bound and unbound sessions through the same Feature 001 start path;
+- allow new unbound starts only while no active association or no selectable active task revision exists; otherwise reject with `PROJECT_SCOPE_REQUIRED`;
+- start bound sessions through the same Feature 001 path and prove `session.started` then `session.bound` atomic visibility;
 - reject start collisions with different scope;
+- pause watcher reconciliation during bind, and pause recovery/reattach during bind, using barriers; assert lifecycle independence, one binding result, deterministic global order, and no duplicate/partial projection;
 - daemon restart/recovery preserves binding and immutable revision;
 - creating revision 2 never moves a session bound to revision 1;
-- event replay rebuilds all projections and matches live state.
+- story handlers already exist when their events are appended; later mixed replay rebuilds every stable field and matches live state.
 
 ### Feature 001 regression tests
 
@@ -82,21 +85,20 @@ notifications and installation-window changes.
 ### Contract and CLI tests
 
 - generated schema and checked-in schema equality;
-- request/response/error IPC goldens for every new method;
-- CLI `cairn.cli.v1` envelope goldens for human-independent machine output;
-- both scope variants, every enum value, and every stable error discriminator;
+- request/response/error IPC and CLI JSON goldens for every new method;
+- both session scope variants, every enum value, and every stable error discriminator;
+- five-field missing-required cases, malformed goal structure, empty goal, each list's empty-entry case, unsupported version, bounded privacy data, and exit code 1 for every `INVALID_GOAL_CONTRACT` variant;
+- conditional omitted/explicit unbound start and `PROJECT_SCOPE_REQUIRED` goldens;
+- same-key exact retry and cross-method/request `IDEMPOTENCY_CONFLICT` goldens;
 - historical-revision selection and bounded pagination;
-- all new stable exit-code mappings;
+- all stable exit-code mappings, including `STORAGE_BUSY` and migration failures;
 - schema compatibility tripwires;
 - daemon round trips over Unix socket or Windows named pipe;
 - exactly one JSON stdout object on success and failure.
 
 ### Replay and failure atomicity
 
-Inject failure after each event insert/projection step. The transaction must expose all
-or none. Replay validates payload versions, explicit scope, contiguous aggregate
-sequence, relationship validity, and deterministic global order. Unknown versions and
-projection mismatches report corruption without modifying the ledger.
+Inject failure or cancellation after registry reservation, revision-counter allocation, each event insert, and each projection step. The transaction exposes all or none. The dispatcher exists before US1; story handlers ship with their events. Later integration validates mixed Feature 001/002 order, payload versions, explicit scope, contiguous aggregate sequence, relationship validity, and every stable field. `task.revision_created` equality includes the immutable revision and complete Task post-state. `session.started` initializes unbound and only `session.bound` binds. Unknown versions and mismatches report corruption without mutation.
 
 ### Privacy tests
 
@@ -150,6 +152,16 @@ cargo test -p cairn-daemon --test us3_tracking
 cargo test -p cairn-daemon --test us3_events
 ```
 
+
+Inherited Feature 001 exact-SHA acceptance (required because Feature 002 changes session start, event writes, recovery, and storage):
+
+```sh
+CAIRN_CRASH_ITERS=100 CAIRN_CRASH_EXPECTED_ITERS=100 cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture
+cargo test -p cairn-daemon --test perf -- --ignored
+```
+
+The kill record must state configured/completed kills = 100 and committed-event/state loss = 0. Performance evidence must state tracked-file fixture size, measured inspect/snapshot durations, the SC-007 limits, and pass/fail. Both execute at the frozen implementation SHA; configured-only jobs and an ignored perf result in the workspace suite do not count.
+
 Feature 002 focused target names are finalized in `tasks.md`; they must be included in
 the full workspace command rather than replacing it.
 
@@ -162,16 +174,17 @@ dependency-cache `--offline` option.
 The recorded demonstration must show, against one implementation commit:
 
 1. Feature 001 repository registration.
-2. Project creation.
-3. Repository association.
-4. Task creation and immutable revision 1.
-5. Existing or new explicit `local_unbound` session.
-6. Binding to the project and revision 1.
-7. Hash/count proof that all earlier Feature 001 events are unchanged.
-8. Daemon restart and `project_bound` inspection.
-9. Revision 2 creation.
-10. Proof the bound session still references revision 1.
-11. Full event replay and projection equality.
+2. Start or select an explicit `local_unbound` bootstrap session while valid project/task scope is unavailable.
+3. Project creation.
+4. Repository association.
+5. Task creation and immutable revision 1.
+6. Verify another unbound start is rejected with `PROJECT_SCOPE_REQUIRED`.
+7. Bind the earlier session to project/revision 1.
+8. Hash/count proof that every earlier Feature 001 event is unchanged.
+9. Daemon restart and `project_bound` inspection.
+10. Revision 2 creation.
+11. Proof the bound session still references revision 1.
+12. Full event replay and field-for-field projection equality.
 
 Minimum Feature 002 event counts for one clean demonstration are:
 
@@ -188,35 +201,33 @@ adds two `project.updated` events.
 
 ## Evidence record template
 
-Each evidence document contains:
+Each execution-evidence document contains:
 
-- implementation commit SHA and evidence commit SHA;
+- implementation commit SHA tested;
 - clean/dirty checkout state;
 - OS version and architecture;
 - `rustc --version` and `cargo --version`;
 - SQLite version where migration evidence is relevant;
-- exact commands and environment variables that affect behavior;
+- exact commands and behavior-affecting environment variables;
 - fixture producer SHA and manifest hash;
 - scenario-by-scenario pass/fail;
-- event and projection counts;
+- event/projection counts and, for inherited gates, kill counters or performance measurements/limits;
 - network-isolation mechanism and connectivity/filesystem/IPC proofs;
 - formatting, Clippy, workspace-test, and focused-suite outcomes;
-- final workflow run/job URL or identifier.
+- completed workflow run/job URL or identifier.
 
-Evidence from another commit, an uncompleted matrix, a skipped test, a dirty local run
-for a frozen acceptance claim, or counters without the producing command does not
-satisfy the gate.
+Evidence from another commit, an uncompleted matrix, a skipped test, a dirty frozen-acceptance run, or counters without the producing command does not satisfy the gate. The preliminary evidence commit records completed executions but is not the final convergence declaration. A committed document never contains its own eventual commit SHA; the final evidence/declaration commit SHA is recorded by workflow metadata, an annotated tag, or a later external manifest.
 
 ## Completion gate
 
-Feature 002 converges only when every generated task is legitimately complete and:
+The required order is:
 
-- migration preserves the real Feature 001 fixture with zero historical loss;
-- projects, associations, immutable revisions, bindings, restart, and replay pass;
-- concurrent revision allocation and idempotency pass using independent connections;
-- typed IPC/CLI schemas, goldens, exit codes, and compatibility tripwires pass;
-- privacy sentinels and genuine network isolation pass;
-- Windows, macOS, and Linux platform-specific behavior passes where applicable;
-- the full quality and Feature 001 regression commands are clean;
-- execution evidence references real completed runs at the exact implementation SHA;
-- no server synchronization or Feature 003 implementation exists.
+1. freeze one implementation commit;
+2. execute exact-SHA macOS, Windows, Linux/isolation, exactly-100-kill, and SC-007 jobs;
+3. create a preliminary evidence commit;
+4. run analyze, verify, verify-tasks, and converge;
+5. resolve and revalidate any appended work;
+6. run the final task-accounting gate;
+7. create the final evidence/declaration commit and record its SHA externally.
+
+Feature 002 converges only when every authoritative task is legitimately complete; the final accounting task runs after all prior tasks and does not require itself as a prerequisite. Migration/replay equality, projects/tasks/bindings, deterministic concurrency/races, typed contracts/privacy, genuine isolation/platform behavior, quality regressions, the 100-kill gate, and explicit SC-007 run must all pass at the exact frozen implementation SHA. No configured-only workflow, server synchronization, or Feature 003 implementation satisfies any gate.

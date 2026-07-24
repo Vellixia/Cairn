@@ -14,7 +14,7 @@
 
 - Q: How are project identity, status, repository membership, and worktrees scoped? → A: IDs are authoritative; duplicate names are allowed; projects are `active` or readable `archived`; restoring is explicit; repository-ID association is exclusive and inherited by all worktrees; removal and transfer are out of scope.
 - Q: How are task identity, revisions, and goal contracts represented? → A: Task IDs are permanent within one project and titles may duplicate; revisions use transactionally serialized positive sequential numbers, immutable content, idempotency keys, normal previous-revision parents, versioned canonical goal contracts, preserved list order, limited whitespace normalization, and fingerprints.
-- Q: What session binding and revision-continuity transitions are allowed? → A: A `local_unbound` session binds exactly once to one project and immutable revision, preserves its ID and prior history, retries identically, rejects rebind or unbind, and requires another session to continue under a newer revision.
+- Q: What session binding and revision-continuity transitions are allowed? → A: Historical migrated `local_unbound` sessions remain valid. A new `local_unbound` session may start only while its repository has no active project association or the associated active project has no selectable active task revision; otherwise start returns `PROJECT_SCOPE_REQUIRED`. An unbound session binds exactly once, preserves its ID and prior history, retries identically, rejects rebind or unbind, and requires another session to continue under a newer revision.
 - Q: How must migration and project/task event history behave? → A: Migration classifies every Feature 001 session as `local_unbound` without fabricated records, preserves IDs, events, snapshots, leases, timestamps, and states, is restart-safe and idempotent, and replay uses one deterministically ordered ledger with explicit aggregate scopes and no fake worktree IDs.
 - Q: What selection, deletion, privacy, and synchronization boundaries apply? → A: Machine interfaces require IDs; human displays include IDs and ambiguous name selection returns a stable error with candidates; hard deletion and task archival are out of scope; goal contracts may persist locally but never appear whole in diagnostics or errors; central synchronization remains out of scope.
 
@@ -87,10 +87,11 @@ recorded as a new append-only fact.
 **Why this priority**: Explicit binding is the constitutional bridge from
 local bootstrap execution to correctly scoped project and task execution.
 
-**Independent Test**: Create a project and task revision for a repository,
-start a `local_unbound` session, record Feature 001 events, bind the session,
-and verify its identifier and earlier event records are unchanged while
-exactly one `session.bound` event and one binding projection are added.
+**Independent Test**: Start or migrate a `local_unbound` session before valid
+project/task scope exists, record Feature 001 events, then create the project,
+repository association, and task revision, bind the session, and verify its identifier
+and earlier event records are unchanged while exactly one `session.bound` event and one
+binding projection are added.
 
 **Acceptance Scenarios**:
 
@@ -107,13 +108,14 @@ exactly one `session.bound` event and one binding projection are added.
 
 ### User Story 4 - Start and recover correctly scoped sessions (Priority: P4)
 
-A caller can start either an explicit `local_unbound` bootstrap session or a
-`project_bound` session that references a valid project and immutable task
-revision. Bound sessions retain all Feature 001 lifecycle, watcher, snapshot,
-lease, uniqueness, and recovery behavior.
+A caller can start a `local_unbound` bootstrap session only while valid project/task
+scope is unavailable for its repository, or start a `project_bound` session that
+references a valid project and immutable task revision. Bound sessions retain all
+Feature 001 lifecycle, watcher, snapshot, lease, uniqueness, and recovery behavior.
 
-**Why this priority**: New work should start with correct scope when project and
-task context already exist, while offline bootstrap use must remain available.
+**Why this priority**: New work must use correct project/task scope as soon as that
+scope exists, while constitutionally limited bootstrap use remains available before it
+exists.
 
 **Independent Test**: Start a bound session for an associated repository and
 valid task revision, restart the daemon, and verify the same session remains
@@ -123,12 +125,13 @@ behavior still succeeds.
 **Acceptance Scenarios**:
 
 1. **Given** a worktree whose repository is associated with an active project and a revision of a task in that project, **When** a bound session is started, **Then** its successful result is explicitly `project_bound` and contains exactly that project and revision.
-2. **Given** no selected project or task revision, **When** bootstrap session creation is explicitly requested, **Then** the result is `local_unbound` and contains no implied project or task scope.
-3. **Given** either session scope, **When** human-readable or machine-readable session output is requested, **Then** the scope classification is unambiguous and bound output includes project and task-revision identifiers.
-4. **Given** a bound session and a newly created revision of its task, **When** the session is inspected, **Then** it still references its original immutable revision and continuing under the newer revision requires another session.
-5. **Given** a bound session that was active before daemon restart, **When** recovery and valid reattachment complete, **Then** the session retains its binding and all Feature 001 recovery guarantees.
-6. **Given** a bound-start request whose worktree, repository, project, task, or revision relationship is invalid, **When** start is attempted, **Then** Cairn returns the corresponding stable error and creates no session.
-7. **Given** a healthy existing session for the same Feature 001 uniqueness key, **When** a start request asks for a different scope or binding, **Then** Cairn never silently returns or converts that session under the requested scope and instead requires an explicit compatible operation.
+2. **Given** a repository with no active project association, or an associated active project with no selectable active task revision, **When** bootstrap session creation is explicitly requested, **Then** the result is `local_unbound` and contains no implied project or task scope.
+3. **Given** an active repository-project association and at least one selectable active task revision, **When** an unbound start is requested or legacy scope is omitted, **Then** Cairn returns `PROJECT_SCOPE_REQUIRED`, creates no session, and identifies the repository and project without selecting a revision silently.
+4. **Given** either session scope, **When** human-readable or machine-readable session output is requested, **Then** the scope classification is unambiguous and bound output includes project and task-revision identifiers.
+5. **Given** a bound session and a newly created revision of its task, **When** the session is inspected, **Then** it still references its original immutable revision and continuing under the newer revision requires another session.
+6. **Given** a bound session that was active before daemon restart, **When** recovery and valid reattachment complete, **Then** the session retains its binding and all Feature 001 recovery guarantees.
+7. **Given** a bound-start request whose worktree, repository, project, task, or revision relationship is invalid, **When** start is attempted, **Then** Cairn returns the corresponding stable error and creates no session.
+8. **Given** a healthy existing session for the same Feature 001 uniqueness key, **When** a start request asks for a different scope or binding, **Then** Cairn never silently returns or converts that session under the requested scope and instead requires an explicit compatible operation.
 
 ---
 
@@ -162,14 +165,14 @@ rebuilt state with live state.
 ### End-to-End Success Demonstration
 
 1. Register a repository using Feature 001.
-2. Create a project.
-3. Associate the registered repository with the project.
-4. Create a task with immutable revision 1.
-5. Start or select an existing `local_unbound` session.
-6. Bind the session to the project and revision 1.
-7. Confirm all earlier Feature 001 events remain unchanged.
-8. Restart the daemon.
-9. Confirm the same session remains `project_bound`.
+2. Start or select an existing `local_unbound` session while no valid project/task scope exists.
+3. Create a project.
+4. Associate the registered repository with the project.
+5. Create a task with immutable revision 1.
+6. Confirm a new unbound start now returns `PROJECT_SCOPE_REQUIRED`.
+7. Bind the original bootstrap session to the project and revision 1.
+8. Confirm all earlier Feature 001 events remain unchanged.
+9. Restart the daemon and confirm the same session remains `project_bound`.
 10. Create task revision 2.
 11. Confirm the existing session still references revision 1.
 12. Replay events and reproduce the same project, task, repository-association, and session-binding state.
@@ -189,6 +192,7 @@ rebuilt state with live state.
 - A goal contract has an empty primary goal, empty optional lists, different line endings, or surrounding whitespace.
 - A bound-start request collides with a healthy `local_unbound` session for the same agent instance and repository.
 - An unbound-start request collides with an existing `project_bound` session.
+- A new unbound start is attempted after an active project association and selectable active task revision exist and must return `PROJECT_SCOPE_REQUIRED`.
 - A session is bound while a watcher reconciliation or recovery transition is in progress.
 - An identical bind retry arrives after the first request committed but before its response reached the caller.
 - A bound session's task gains a new revision while the session remains on its original revision.
@@ -223,7 +227,7 @@ rebuilt state with live state.
 - **FR-014**: A task's default current view MUST identify its latest accepted revision, while explicit revision selection MUST retrieve any retained revision.
 - **FR-015**: A goal contract MUST contain a required non-empty primary goal and ordered lists for included scope, excluded scope, acceptance criteria, and non-negotiable constraints. Empty lists are valid.
 - **FR-016**: Goal contracts MUST use a versioned deterministic machine-readable representation and stored fingerprint. Canonicalization MUST preserve list order and normalize only line endings and insignificant surrounding whitespace.
-- **FR-017**: A missing required field, empty or whitespace-only primary goal, malformed representation, or invalid canonical version MUST return `INVALID_GOAL_CONTRACT` and MUST NOT create a task, revision, event, or projection; empty optional lists alone MUST NOT fail validation.
+- **FR-017**: Missing required fields, malformed structure, an empty or whitespace-only primary goal, an empty supplied list entry, or an unsupported canonical version MUST return `INVALID_GOAL_CONTRACT` with only bounded typed violations `missing_required_field|malformed_structure|empty_goal|empty_list_entry|unsupported_version`; the response MUST NOT echo contract content or create a task, revision, event, projection, or idempotency record. Empty optional lists alone MUST remain valid.
 
 **Session scope and explicit binding**
 
@@ -237,7 +241,7 @@ rebuilt state with live state.
 - **FR-025**: Any request to bind the session to another project or task revision MUST return `SESSION_BINDING_CONFLICT` and preserve the original binding; rebinding and unbinding are prohibited in this feature.
 - **FR-026**: Binding MAY apply to any Feature 001 lifecycle state but MUST NOT itself change that lifecycle state or create a replacement session.
 - **FR-027**: Users MUST be able to start a new session already `project_bound` when its worktree, repository, active project, task, and revision relationships are valid.
-- **FR-028**: Starting a `local_unbound` bootstrap session MUST remain supported through an explicit unbound choice.
+- **FR-028**: Starting a new `local_unbound` bootstrap session MUST remain supported only when its repository has no active project association or its associated active project has no selectable active task revision. Once valid project/task-revision scope exists, explicit unbound and omitted-scope starts MUST return `PROJECT_SCOPE_REQUIRED` and create no session. Historical migrated `local_unbound` sessions remain valid and bindable.
 - **FR-029**: Human-readable and machine-readable session outputs MUST distinguish `local_unbound` from `project_bound`; bound output MUST include the project and immutable task-revision identifiers.
 - **FR-030**: Creating or retrieving a session under Feature 001 uniqueness and idempotency rules MUST NOT silently change or misrepresent its binding; an incompatible scope collision MUST return a stable machine-readable conflict requiring explicit resolution.
 - **FR-031**: A bound session MUST continue referencing its selected immutable revision after newer revisions of the same task are created. Continuing under a newer revision MUST start another session in this feature.
@@ -250,9 +254,9 @@ rebuilt state with live state.
 - **FR-035**: Migration MUST explicitly classify every existing Feature 001 session as `local_unbound` without fabricating project, task, revision, association, or binding records or events. Re-running the migration MUST be safe and idempotent.
 - **FR-036**: Migration MUST be transactional and restart-safe; failure MUST return `MIGRATION_FAILED` and MUST NOT expose partial migrated state as healthy.
 - **FR-037**: Cairn MUST append events for at least `project.created`, `project.updated`, `project.repository_associated`, `task.created`, `task.revision_created`, and `session.bound`.
-- **FR-038**: Every new event MUST use the same append-only local ledger and carry an explicit aggregate scope and identifier. Project- and task-only operations MUST use project or task scope without fabricated worktree identifiers. Accepted events MUST have a deterministic ledger position; operations affecting the same aggregate MUST be serialized; and an idempotency-key retry MUST not append a duplicate logical event.
-- **FR-039**: Project, task, revision, repository-association, and session-binding projections MUST be rebuildable deterministically from the complete ordered event stream, including events that are not worktree-specific.
-- **FR-040**: Operations that require multiple events or projection changes MUST commit atomically; failure MUST leave neither partial event sequences nor partial projections.
+- **FR-038**: Every new event MUST use the same append-only local ledger and explicit aggregate scope/ID with deterministic global/per-aggregate positions. Every keyed Feature 002 mutation MUST use one global raw-key registry. Same key/method/fingerprint MUST return the exact original result—including original `created/updated` flags and post-state—even after later projection changes; appending operations MUST therefore locate immutable result events. A distinct-key request that finds the same immutable association/binding MAY first return and record `created:false`. Another method/request MUST return `IDEMPOTENCY_CONFLICT`; first committed concurrent operation wins and competitors reread it.
+- **FR-039**: Project, task, revision, repository-association, and session-binding projections MUST be rebuildable field-for-field from the complete ordered event stream. `task.revision_created` MUST contain the complete immutable revision and complete resulting task post-state, including `latest_revision_number` and `updated_at`. `session.started` initializes replay as `local_unbound`; only `session.bound` establishes `project_bound`.
+- **FR-040**: Operation-idempotency reservation, all required events, aggregate-head updates, and projection changes MUST commit in one database transaction; failure or cancellation MUST roll back all of them and leave neither partial event sequences nor partial projections.
 - **FR-041**: Daemon restart and valid Feature 001 recovery MUST preserve each session's scope classification and immutable binding.
 
 **Local interfaces and failure contracts**
@@ -262,7 +266,7 @@ rebuilt state with live state.
 - **FR-044**: Users MUST have human-readable and machine-readable local commands equivalent to the extended `session start`, `session bind`, and `session show`, including an explicit scope choice and ID-based machine selection.
 - **FR-045**: All user commands MUST use the daemon's local request interface and MUST NOT modify persistent storage directly.
 - **FR-046**: Every new request, response, error, and machine-readable command envelope MUST have a typed, closed contract with compatibility and golden-example validation.
-- **FR-047**: The stable machine-readable error set MUST include `PROJECT_NOT_FOUND`, `PROJECT_ARCHIVED`, `TASK_NOT_FOUND`, `TASK_REVISION_NOT_FOUND`, `TASK_REVISION_CONFLICT`, `REPOSITORY_NOT_ASSOCIATED`, `REPOSITORY_PROJECT_CONFLICT`, `TASK_REVISION_PROJECT_MISMATCH`, `SESSION_BINDING_CONFLICT`, `SESSION_SCOPE_CONFLICT`, `AMBIGUOUS_NAME`, `INVALID_GOAL_CONTRACT`, and `MIGRATION_FAILED`. If a human name-based selector is supported and matches multiple records, Cairn MUST return `AMBIGUOUS_NAME` with candidate IDs and MUST NOT select silently.
+- **FR-047**: The stable machine-readable error set MUST include `PROJECT_NOT_FOUND`, `PROJECT_ARCHIVED`, `PROJECT_SCOPE_REQUIRED`, `TASK_NOT_FOUND`, `TASK_REVISION_NOT_FOUND`, `TASK_REVISION_CONFLICT`, `REPOSITORY_NOT_ASSOCIATED`, `REPOSITORY_PROJECT_CONFLICT`, `TASK_REVISION_PROJECT_MISMATCH`, `SESSION_BINDING_CONFLICT`, `SESSION_SCOPE_CONFLICT`, `AMBIGUOUS_NAME`, `INVALID_GOAL_CONTRACT`, `IDEMPOTENCY_CONFLICT`, `STORAGE_BUSY`, and `MIGRATION_FAILED`. If a human name-based selector is supported and matches multiple records, Cairn MUST return `AMBIGUOUS_NAME` with at most 20 deterministic candidate IDs and MUST NOT select silently.
 - **FR-048**: Failed requests MUST return one stable error, MUST NOT emit a success envelope, and MUST NOT leak partial projections, partial event sequences, internal paths, ignored content, secrets, environment values, resume tokens, or complete goal-contract content.
 
 **Offline operation, privacy, and compatibility**
@@ -284,16 +288,17 @@ rebuilt state with live state.
 - **Session Scope**: Discriminator identifying a session as `local_unbound` or `project_bound`.
 - **Session Binding**: Immutable one-time association from one session to exactly one project and one task revision; created explicitly and never removed or replaced.
 - **Binding Event**: Append-only `session.bound` record that adds scope without rewriting prior session or execution events.
+- **Operation Idempotency Record**: Immutable global raw-key registry entry containing the idempotency key, method, canonical request fingerprint, result kind/locator, and creation timestamp; committed atomically with the operation it identifies.
 
 ## Success Criteria *(mandatory)*
 
 ### Measurable Outcomes
 
 - **SC-001**: The complete 12-step success demonstration finishes with one project, one associated repository whose worktrees inherit membership, one task with two immutable revisions, and one session still bound to revision 1 after restart and replay.
-- **SC-002**: Across 100 identical repository-association retries, 100 identical task-revision idempotency-key retries, and 100 identical binding retries, 100% return the original result with exactly one logical association event, revision, and binding event.
+- **SC-002**: Across 100 identical association, revision, and binding retries, 100% reproduce their first result and flags with one operation/event sequence/projection. Tests also prove mutable project post-state is reproduced after later updates, distinct-key identical association/binding returns stable `created:false`, one independent-connection winner commits, and cross-method/request reuse returns `IDEMPOTENCY_CONFLICT`.
 - **SC-003**: Migrating at least one real Feature 001 database fixture plus representative edge fixtures preserves 100% of historical repository, worktree, snapshot, session, lease, timestamp, lifecycle-state, projection, and event data; every pre-existing session is classified `local_unbound`; and a second migration run changes nothing.
 - **SC-004**: Across at least 100 repeated reads before and after creating later revisions, 100% of prior task revisions remain byte-for-byte unchanged in their versioned canonical machine-readable form and retain the same fingerprint.
-- **SC-005**: Replaying the complete deterministically ordered event ledger, including project- and task-scoped events without fabricated worktree identifiers, reproduces project, task, revision, repository-association, and session-binding projections with 100% equality to live projections.
+- **SC-005**: Replaying the complete deterministically ordered event ledger, including project- and task-scoped events without fabricated worktree identifiers, reproduces every stable field of project, task, revision, repository-association, and session-binding projections with 100% equality to live projections.
 - **SC-006**: In every tested invalid association, task, revision, start, migration, or binding operation, and under concurrent revision creation, zero partial events, zero partial projections, and zero duplicate revision numbers remain.
 - **SC-007**: After at least 20 daemon restart and recovery cycles, 100% of bound sessions retain the same project, immutable task revision, session identifier, lifecycle history, and Feature 001 recovery behavior.
 - **SC-008**: With external networking disabled at the operating-system level, the complete success demonstration passes using only local filesystem and IPC access.
@@ -334,6 +339,7 @@ rebuilt state with live state.
 - A later task revision normally uses the immediately previous revision as its parent; an explicitly selected parent must still be an earlier revision of the same task.
 - Goal-contract list ordering is semantically meaningful and therefore preserved in canonical output and fingerprinting.
 - Any lifecycle state of a `local_unbound` session may be bound if all repository, worktree, project, task, and revision invariants pass; binding changes scope only, not lifecycle state.
+- New `local_unbound` creation is a bootstrap fallback only while valid project/task-revision scope is unavailable for the repository. Existing migrated unbound sessions are historical bootstrap records and remain valid until explicitly bound.
 - Archiving a project never rewrites or detaches existing repository associations, tasks, revisions, sessions, bindings, or events.
 - This feature introduces local project/task truth only. Even `project_bound` sessions are not synchronized because central synchronization remains out of scope.
 - Existing Feature 001 events remain immutable; new scope is represented only by later events and derived projections.

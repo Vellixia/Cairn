@@ -24,11 +24,14 @@ fn check_schema<T: JsonSchema>(name: &str) -> Result<(), String> {
     let rendered = serde_json::to_string_pretty(&schema).expect("serializable schema");
     let path = schemas_dir().join(format!("{name}.json"));
     if !path.exists() {
-        // Bootstrap: the first generation IS the golden. Committed to git;
-        // any later drift fails below.
-        std::fs::create_dir_all(schemas_dir()).expect("create schemas dir");
-        std::fs::write(&path, &rendered).expect("write golden schema");
-        return Ok(());
+        if std::env::var("UPDATE_SCHEMAS").is_ok() {
+            std::fs::create_dir_all(schemas_dir()).expect("create schemas dir");
+            std::fs::write(&path, &rendered).expect("write golden schema");
+            return Ok(());
+        }
+        return Err(format!(
+            "missing checked-in schema {name}; run the intentional UPDATE_SCHEMAS workflow"
+        ));
     }
     let golden = std::fs::read_to_string(&path).expect("read golden schema");
     if golden.replace("\r\n", "\n") != rendered.replace("\r\n", "\n") {
@@ -58,6 +61,14 @@ fn golden_schemas_are_stable() {
     check!(Response, "response");
     check!(CliEnvelope, "cli-envelope");
     check!(ErrorBody, "error-body");
+    check!(ErrorCode, "error-code");
+    check!(ErrorData, "error-data");
+    check!(SessionScopeDto, "session-scope");
+    check!(ProjectStatus, "project-status");
+    check!(WatcherStartStage, "watcher-start-stage");
+    check!(GoalContractViolation, "goal-contract-violation");
+    check!(CandidateIds, "ambiguous-candidate-ids");
+    check!(EventAggregateType, "event-aggregate-type");
     check!(DaemonStatusResult, "daemon-status-result");
     check!(RegisterParams, "register-params");
     check!(RegisterResult, "register-result");
@@ -79,9 +90,51 @@ fn golden_schemas_are_stable() {
     check!(SessionReattachResult, "session-reattach-result");
     check!(SessionStopParams, "session-stop-params");
     check!(SessionStopResult, "session-stop-result");
+    check!(SessionBindParams, "session-bind-params");
+    check!(SessionBindResult, "session-bind-result");
     check!(EventsListParams, "events-list-params");
     check!(EventsListResult, "events-list-result");
+    check!(ProjectCreateParams, "project-create-params");
+    check!(ProjectCreateResult, "project-create-result");
+    check!(ProjectListParams, "project-list-params");
+    check!(ProjectListResult, "project-list-result");
+    check!(ProjectGetParams, "project-get-params");
+    check!(ProjectGetResult, "project-get-result");
+    check!(ProjectUpdateParams, "project-update-params");
+    check!(ProjectUpdateResult, "project-update-result");
+    check!(
+        ProjectRepositoryAssociateParams,
+        "project-repository-associate-params"
+    );
+    check!(
+        ProjectRepositoryAssociateResult,
+        "project-repository-associate-result"
+    );
+    check!(TaskCreateParams, "task-create-params");
+    check!(TaskCreateResult, "task-create-result");
+    check!(TaskReviseParams, "task-revise-params");
+    check!(TaskReviseResult, "task-revise-result");
+    check!(TaskListParams, "task-list-params");
+    check!(TaskListResult, "task-list-result");
+    check!(TaskGetParams, "task-get-params");
+    check!(TaskGetResult, "task-get-result");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[test]
+fn feature002_method_schema_inventory_is_complete() {
+    for surface in methods::FEATURE002_METHODS {
+        assert!(methods::ALL_METHODS.contains(&surface.method));
+        for schema in [surface.params_schema, surface.result_schema] {
+            let path = schemas_dir().join(format!("{schema}.json"));
+            assert!(
+                path.is_file(),
+                "{} has no checked-in schema at {}",
+                surface.method,
+                path.display()
+            );
+        }
+    }
 }
 
 #[test]
@@ -158,7 +211,10 @@ fn watcher_failure_ipc_goldens_are_typed_and_stable() {
         let error = decoded.error.as_ref().expect("error response");
         assert_eq!(error.code, ErrorCode::WatcherStartFailed);
         assert_eq!(error.code.exit_code(), 1);
-        assert_eq!(error.data.map(ErrorData::watcher_stage), Some(stage));
+        assert_eq!(
+            error.data.as_ref().and_then(ErrorData::watcher_stage_ref),
+            Some(stage)
+        );
         assert_eq!(serde_json::to_value(&decoded).unwrap(), expected);
 
         let constructed = Response {

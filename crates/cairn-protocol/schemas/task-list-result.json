@@ -1,0 +1,65 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TaskListResult",
+  "type": "object",
+  "required": [
+    "tasks"
+  ],
+  "properties": {
+    "next_after_task_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "tasks": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/TaskSummaryDto"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "TaskSummaryDto": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "latest_revision_fingerprint",
+        "latest_revision_number",
+        "project_id",
+        "task_id",
+        "title",
+        "updated_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "latest_revision_fingerprint": {
+          "type": "string"
+        },
+        "latest_revision_number": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0.0
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "task_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

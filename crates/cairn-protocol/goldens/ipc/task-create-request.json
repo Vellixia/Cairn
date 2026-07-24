@@ -1,0 +1,17 @@
+{
+  "id": "task-create-1",
+  "method": "v1.task.create",
+  "params": {
+    "idempotency_key": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0e",
+    "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0a",
+    "title": "Ship immutable tasks",
+    "goal_contract": {
+      "schema_version": 1,
+      "goal": "Implement task revisions",
+      "included_scope": ["task model"],
+      "excluded_scope": ["session binding"],
+      "acceptance_criteria": ["revision one is immutable"],
+      "constraints": ["offline"]
+    }
+  }
+}

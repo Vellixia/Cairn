@@ -1,0 +1,12 @@
+{
+  "id": "binding-contract-1",
+  "error": {
+    "code": "TASK_REVISION_PROJECT_MISMATCH",
+    "message": "task revision does not belong to project",
+    "data": {
+      "kind": "task_revision_project_mismatch",
+      "revision_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0c",
+      "expected_project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0b"
+    }
+  }
+}

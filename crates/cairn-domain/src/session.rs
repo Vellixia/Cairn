@@ -12,6 +12,38 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::{ProjectId, SessionId, TaskRevisionId, Timestamp};
+
+/// Project/task binding is independent from the Feature 001 lifecycle state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
+pub enum SessionBindingMode {
+    LocalUnbound,
+    ProjectBound {
+        project_id: ProjectId,
+        task_revision_id: TaskRevisionId,
+    },
+}
+
+impl SessionBindingMode {
+    pub const fn mode_name(self) -> &'static str {
+        match self {
+            Self::LocalUnbound => "local_unbound",
+            Self::ProjectBound { .. } => "project_bound",
+        }
+    }
+}
+
+/// Immutable projection created by the sole local-unbound → project-bound transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SessionBinding {
+    pub session_id: SessionId,
+    pub project_id: ProjectId,
+    pub task_revision_id: TaskRevisionId,
+    pub bound_at: Timestamp,
+    pub binding_event_seq: i64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {

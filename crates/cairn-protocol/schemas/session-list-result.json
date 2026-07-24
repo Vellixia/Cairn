@@ -14,6 +14,51 @@
     }
   },
   "definitions": {
+    "SessionScopeDto": {
+      "description": "Transport scope discriminator. It intentionally contains no lifecycle state because binding and liveness are independent dimensions.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "local_unbound"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "project_id",
+            "task_revision_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "project_bound"
+              ]
+            },
+            "project_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "task_revision_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
     "SessionState": {
       "type": "string",
       "enum": [
@@ -28,6 +73,7 @@
       "required": [
         "agent_instance_id",
         "agent_type",
+        "scope",
         "session_id",
         "started_at",
         "state"
@@ -39,6 +85,9 @@
         },
         "agent_type": {
           "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/SessionScopeDto"
         },
         "session_id": {
           "type": "string",

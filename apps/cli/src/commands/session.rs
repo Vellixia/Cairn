@@ -34,6 +34,9 @@ pub async fn run(json: bool, cmd: SessionCommand) -> i32 {
             agent,
             agent_instance,
             agent_pid,
+            local_unbound,
+            project_id,
+            task_revision_id,
         } => {
             let instance = match parse_instance(agent_instance) {
                 Ok(v) => v,
@@ -43,12 +46,59 @@ pub async fn run(json: bool, cmd: SessionCommand) -> i32 {
             // reported back in data.session.agent_instance_id.
             let agent_instance_id =
                 instance.unwrap_or_else(|| AgentInstanceId(uuid::Uuid::new_v4()));
+            let scope = match (local_unbound, project_id, task_revision_id) {
+                (true, None, None) => Some(SessionScopeDto::LocalUnbound),
+                (false, Some(project_id), Some(task_revision_id)) => {
+                    let project_id = match ProjectId::from_str(&project_id) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return output::emit(
+                                "session.start",
+                                json,
+                                Err(ErrorBody::new(
+                                    ErrorCode::Usage,
+                                    "--project-id must be a UUID",
+                                )),
+                            )
+                        }
+                    };
+                    let task_revision_id = match TaskRevisionId::from_str(&task_revision_id) {
+                        Ok(id) => id,
+                        Err(_) => {
+                            return output::emit(
+                                "session.start",
+                                json,
+                                Err(ErrorBody::new(
+                                    ErrorCode::Usage,
+                                    "--task-revision-id must be a UUID",
+                                )),
+                            )
+                        }
+                    };
+                    Some(SessionScopeDto::ProjectBound {
+                        project_id,
+                        task_revision_id,
+                    })
+                }
+                (false, None, None) => None,
+                _ => {
+                    return output::emit(
+                        "session.start",
+                        json,
+                        Err(ErrorBody::new(
+                            ErrorCode::Usage,
+                            "project and task revision IDs must be supplied together",
+                        )),
+                    )
+                }
+            };
             let params = SessionStartParams {
                 path: Some(super::cwd()),
                 repository_id: None,
                 agent_type: agent,
                 agent_instance_id,
                 agent_pid,
+                scope,
             };
             let result = ipc::call(methods::SESSION_START, &params).await;
             output::emit("session.start", json, result)
@@ -75,6 +125,53 @@ pub async fn run(json: bool, cmd: SessionCommand) -> i32 {
             };
             let result = ipc::call(methods::SESSION_GET, &params).await;
             output::emit("session.show", json, result)
+        }
+        SessionCommand::List {
+            repository_id,
+            project_id,
+            task_revision_id,
+        } => {
+            let project_id = match project_id.as_deref().map(ProjectId::from_str).transpose() {
+                Ok(id) => id,
+                Err(_) => {
+                    return output::emit(
+                        "session.list",
+                        json,
+                        Err(ErrorBody::new(
+                            ErrorCode::Usage,
+                            "--project-id must be a UUID",
+                        )),
+                    )
+                }
+            };
+            let task_revision_id = match task_revision_id
+                .as_deref()
+                .map(TaskRevisionId::from_str)
+                .transpose()
+            {
+                Ok(id) => id,
+                Err(_) => {
+                    return output::emit(
+                        "session.list",
+                        json,
+                        Err(ErrorBody::new(
+                            ErrorCode::Usage,
+                            "--task-revision-id must be a UUID",
+                        )),
+                    )
+                }
+            };
+            let result = ipc::call(
+                methods::SESSION_LIST,
+                &SessionListParams {
+                    repository_id,
+                    state: None,
+                    project_id,
+                    task_revision_id,
+                },
+            )
+            .await;
+            output::emit("session.list", json, result)
         }
         SessionCommand::Heartbeat {
             session,
@@ -156,6 +253,61 @@ pub async fn run(json: bool, cmd: SessionCommand) -> i32 {
             };
             let result = ipc::call(methods::SESSION_STOP, &params).await;
             output::emit("session.stop", json, result)
+        }
+        SessionCommand::Bind {
+            session,
+            project_id,
+            task_revision_id,
+            idempotency_key,
+        } => {
+            let session_id = match parse_session_id(&session) {
+                Ok(value) => value,
+                Err(error) => return output::emit("session.bind", json, Err(error)),
+            };
+            let project_id = match ProjectId::from_str(&project_id) {
+                Ok(value) => value,
+                Err(error) => {
+                    return output::emit(
+                        "session.bind",
+                        json,
+                        Err(usage(format!("invalid project id: {error}"))),
+                    )
+                }
+            };
+            let task_revision_id = match TaskRevisionId::from_str(&task_revision_id) {
+                Ok(value) => value,
+                Err(error) => {
+                    return output::emit(
+                        "session.bind",
+                        json,
+                        Err(usage(format!("invalid task revision id: {error}"))),
+                    )
+                }
+            };
+            let idempotency_key = match idempotency_key {
+                Some(value) => match IdempotencyKey::from_str(&value) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return output::emit(
+                            "session.bind",
+                            json,
+                            Err(usage(format!("invalid idempotency key: {error}"))),
+                        )
+                    }
+                },
+                None => IdempotencyKey::new_v7(),
+            };
+            let result = ipc::call(
+                methods::SESSION_BIND,
+                &SessionBindParams {
+                    idempotency_key,
+                    session_id,
+                    project_id,
+                    task_revision_id,
+                },
+            )
+            .await;
+            output::emit("session.bind", json, result)
         }
     }
 }

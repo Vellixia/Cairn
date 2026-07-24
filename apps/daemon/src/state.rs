@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Result;
+use cairn_project::{ProjectService, TaskService};
 use cairn_session::{SessionConfig, SessionService};
-use cairn_storage_local::WorktreeWriters;
+use cairn_storage_local::{WorktreeWriters, WriterPolicy};
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
@@ -23,6 +24,8 @@ pub struct Inner {
     pub pool: SqlitePool,
     pub writers: Arc<WorktreeWriters>,
     pub sessions: SessionService,
+    pub projects: ProjectService,
+    pub tasks: TaskService,
     pub started: Instant,
     pub watched: AtomicU64,
     pub watch_tx: mpsc::UnboundedSender<WatchCommand>,
@@ -38,6 +41,9 @@ impl AppState {
         let (pool, corrupted) = match cairn_storage_local::open_pool_at(&config.db_path()).await {
             Ok(pool) => (Some(pool), None),
             Err(e) if e.is_corruption() => (None, Some(e.to_string())),
+            Err(e) if e.is_migration_failure() => {
+                return Err(anyhow::anyhow!(e.to_string()));
+            }
             Err(e) => return Err(e.into()),
         };
         // Even when corrupted we still serve IPC so clients get an honest
@@ -52,13 +58,26 @@ impl AppState {
         };
         let writers = Arc::new(WorktreeWriters::new());
         let session_config: SessionConfig = config.session;
-        let sessions = SessionService::new(pool.clone(), writers.clone(), session_config);
+        let sessions = match config.session_test_hooks.clone() {
+            Some(hooks) => SessionService::with_test_controls(
+                pool.clone(),
+                writers.clone(),
+                session_config,
+                WriterPolicy::default(),
+                hooks,
+            ),
+            None => SessionService::new(pool.clone(), writers.clone(), session_config),
+        };
+        let projects = ProjectService::new(pool.clone());
+        let tasks = TaskService::new(pool.clone());
         Ok(Self {
             inner: Arc::new(Inner {
                 config,
                 pool,
                 writers,
                 sessions,
+                projects,
+                tasks,
                 started: Instant::now(),
                 watched: AtomicU64::new(0),
                 watch_tx,

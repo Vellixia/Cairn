@@ -27,8 +27,8 @@ The actual Cargo dependency graph must remain acyclic. The daemon composes
 | `crates/cairn-domain` | Typed IDs, `ProjectStatus`, binding mode, goal-contract value types and validation primitives | SQL, IPC routing, CLI formatting |
 | `crates/cairn-project` | Project, association, task, immutable-revision, goal canonicalization, archive rules, and command orchestration | Generic framework, daemon transport, direct CLI output |
 | `crates/cairn-session` | Existing lifecycle plus bind command and optional bound-start validation/orchestration | Project metadata mutation, duplicate session-start path |
-| `crates/cairn-storage-local` | Migration, SQL records, `BEGIN IMMEDIATE` writers, uniqueness, idempotency persistence, projection queries | User-facing messages, process-local-only correctness |
-| `crates/cairn-events` | Closed event types, typed payloads, aggregate metadata, replay and projection comparison | Project/task mutation policy |
+| `crates/cairn-storage-local` | Migration, SQL records, bounded `BEGIN IMMEDIATE` writer, global operation-idempotency registry, uniqueness, projection queries | User-facing messages, process-local-only correctness |
+| `crates/cairn-events` | Aggregate envelope/types, story-owned typed payloads, replay dispatcher/handlers, projection comparison | Project/task mutation policy or constructing every story payload in the foundation phase |
 | `crates/cairn-protocol` | Typed IPC DTOs, stable errors, JSON Schemas, golden fixtures, compatibility tripwires | Database access, untyped payload escape hatches |
 | `apps/daemon` | Handler wiring, validation-to-error mapping, existing JSON-lines router | Business invariants duplicated from crates |
 | `apps/cli` | Clap commands, daemon client calls, human/JSON rendering, bounded human-name resolution | SQLite access, silent ambiguous selection |
@@ -56,13 +56,14 @@ crates/cairn-storage-local/
 ├── src/projects.rs
 ├── src/tasks.rs
 ├── src/session_bindings.rs
+├── src/operation_idempotency.rs
 ├── src/aggregate_events.rs
 └── tests/migration_0002.rs
 
 crates/cairn-events/src/
-├── catalog.rs                  # additive typed Feature 002 events
+├── catalog.rs                  # aggregate envelope/types; story payloads added with stories
 ├── aggregate.rs
-└── replay.rs                   # Feature 001 + Feature 002 replay
+└── replay.rs                   # dispatcher before US1; handlers alongside story events
 
 crates/cairn-protocol/src/
 ├── project.rs
@@ -86,18 +87,16 @@ dependency boundaries are normative.
 
 ## Transaction ownership
 
-Storage exposes narrow closure-based `BEGIN IMMEDIATE` transactions capable of:
+Storage exposes a narrow closure-based `BEGIN IMMEDIATE` transaction that:
 
-1. validating persisted relationships and archive state;
-2. resolving or allocating the idempotent result;
-3. reserving aggregate sequences;
-4. inserting typed events;
-5. updating projections;
-6. committing once.
+1. resolves the global raw key or reserves its method/fingerprint/result locator;
+2. validates persisted relationships and archive state;
+3. reserves aggregate sequences;
+4. inserts derived-key typed events;
+5. updates projections;
+6. commits once.
 
-Services supply policy and typed event payloads. They never issue separate
-event/projection commits. Process-local aggregate locks may reduce contention but
-cannot be the only serialization mechanism.
+The writer configures `busy_timeout=5,000 ms`, performs zero application retries, maps exhaustion to `STORAGE_BUSY`, and rolls back on all errors or cancellation before returning the connection. A test-only timeout override supports deterministic lock tests. Services supply policy and their story-specific typed event payloads. Process-local locks may optimize contention but cannot establish correctness.
 
 ## Cross-module workflows
 
@@ -109,21 +108,19 @@ projection. It never uses a path or remote URL for identity.
 
 ### Revision creation
 
-`cairn-project` normalizes and validates the contract before opening a transaction.
-Storage checks idempotency, locks the write boundary, atomically increments the task's
-latest revision number, inserts the immutable revision and event, and commits.
+`cairn-project` normalizes and validates the contract before opening a transaction. Storage resolves the global operation registry, atomically increments the task counter, inserts the immutable revision, appends a payload containing the complete revision plus complete Task post-state, updates the Task projection, and commits. Rollback after allocation leaves the next number gap-free.
 
 ### Existing-session binding
 
-`cairn-session` accepts typed IDs, storage validates the session's worktree repository,
-association, task/project ownership, project status, and existing binding, then
-appends `session.bound` and updates both projections atomically.
+`cairn-session` accepts typed IDs. Storage resolves global idempotency, validates the session's worktree repository, association, task/project ownership, project status, and existing binding, then appends `session.bound` and updates projections atomically. Barrier-driven integration tests pause watcher reconciliation and recovery/reattach to prove lifecycle state remains independent from exactly-one binding.
 
 ### Bound session start
 
-The existing session-start service accepts an optional typed binding scope and invokes
-the same relationship validation and binding write path inside its creation
-transaction. Watcher readiness and Git reconciliation stay in the existing service.
+The existing session-start service accepts typed scope and first enforces bootstrap eligibility: unbound is rejected with `PROJECT_SCOPE_REQUIRED` once valid project/task-revision scope exists. A bound start inserts `session.started` (always replay-unbound), then `session.bound` (sole bind), session row, and binding row in one commit; none is visible before commit. Watcher readiness and authoritative Git reconciliation stay in the existing service.
+
+### Replay ownership
+
+The typed dispatcher and aggregate envelope land before US1. US1 owns project payload construction and replay, US2 task/revision payloads and replay, US3 binding payload/replay, and US4 mixed bound-start handling. The later replay phase owns mixed-ledger equality, corruption, and unknown-version integration only.
 
 ## Review guardrails
 

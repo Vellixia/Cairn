@@ -93,7 +93,7 @@ where
         "INSERT INTO sessions (id, repository_id, worktree_id, local_user, agent_type, \
          agent_instance_id, agent_pid, resume_token_hash, lease_expires_at, state, \
          start_snapshot_id, current_snapshot_id, started_at, ended_at, last_heartbeat_at, \
-         recovering_since) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+         recovering_since, binding_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&row.id)
     .bind(&row.repository_id)
@@ -111,6 +111,7 @@ where
     .bind(&row.ended_at)
     .bind(&row.last_heartbeat_at)
     .bind(&row.recovering_since)
+    .bind(&row.binding_mode)
     .execute(exec)
     .await?;
     Ok(())

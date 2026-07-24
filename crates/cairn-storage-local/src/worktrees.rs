@@ -17,11 +17,14 @@ pub async fn get_by_uuid(
     )
 }
 
-pub async fn get_by_id(pool: &SqlitePool, id: &str) -> Result<Option<WorktreeRow>, StorageError> {
+pub async fn get_by_id<'e, E>(exec: E, id: &str) -> Result<Option<WorktreeRow>, StorageError>
+where
+    E: Executor<'e, Database = Sqlite>,
+{
     Ok(
         sqlx::query_as::<_, WorktreeRow>("SELECT * FROM worktrees WHERE id = ?")
             .bind(id)
-            .fetch_optional(pool)
+            .fetch_optional(exec)
             .await?,
     )
 }

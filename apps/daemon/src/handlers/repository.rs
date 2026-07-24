@@ -98,8 +98,16 @@ pub async fn register(state: &AppState, params: RegisterParams) -> HandlerResult
                 Some(existing) => {
                     // Copy detection (Q1/R4): same uuid live at two paths.
                     let stored_path = Path::new(&existing.canonical_path);
+                    let shared_git_common =
+                        discover::discover(stored_path)
+                            .await
+                            .ok()
+                            .is_some_and(|stored| {
+                                same_path(&stored.git_common_dir, &layout.git_common_dir)
+                            });
                     let is_copy = existing.canonical_path != root
                         && stored_path.exists()
+                        && !shared_git_common
                         && marker_matches(stored_path, uuid).await;
                     if is_copy {
                         let new_uuid = Uuid::now_v7();
@@ -250,6 +258,13 @@ pub async fn register(state: &AppState, params: RegisterParams) -> HandlerResult
         created: created_repo,
         identity_outcome,
     })
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 async fn marker_matches(root: &Path, uuid: Uuid) -> bool {

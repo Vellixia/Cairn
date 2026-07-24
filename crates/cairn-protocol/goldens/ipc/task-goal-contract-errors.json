@@ -1,0 +1,15 @@
+[
+  {"id":"goal-1","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"missing_required_field","field":"schema_version"}]}}},
+  {"id":"goal-2","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"missing_required_field","field":"goal"}]}}},
+  {"id":"goal-3","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"missing_required_field","field":"included_scope"}]}}},
+  {"id":"goal-4","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"missing_required_field","field":"excluded_scope"}]}}},
+  {"id":"goal-5","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"missing_required_field","field":"acceptance_criteria"}]}}},
+  {"id":"goal-6","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"missing_required_field","field":"constraints"}]}}},
+  {"id":"goal-7","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"malformed_structure","field":"goal_contract"}]}}},
+  {"id":"goal-8","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"empty_goal","field":"goal"}]}}},
+  {"id":"goal-9","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"empty_list_entry","field":"included_scope","index":0}]}}},
+  {"id":"goal-10","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"empty_list_entry","field":"excluded_scope","index":0}]}}},
+  {"id":"goal-11","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"empty_list_entry","field":"acceptance_criteria","index":0}]}}},
+  {"id":"goal-12","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"empty_list_entry","field":"constraints","index":0}]}}},
+  {"id":"goal-13","error":{"code":"INVALID_GOAL_CONTRACT","message":"invalid goal contract","data":{"kind":"invalid_goal_contract","violations":[{"violation":"unsupported_version","version":2}]}}}
+]

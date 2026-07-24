@@ -33,7 +33,20 @@ cairn --json init
 Record `repository.repository_id` and `worktree.worktree_id`. Move the directory and
 run `cairn --json status`; the IDs must remain unchanged.
 
-## 2. Create a project
+## 2. Start the local bootstrap session before valid scope exists
+
+At this point the repository has no active project association, so explicit bootstrap is eligible:
+
+```sh
+cairn --json session start \
+  --local-unbound \
+  --agent codex \
+  --agent-instance "$CAIRN_DEMO_AGENT_INSTANCE"
+```
+
+The successful result contains `{"scope":{"mode":"local_unbound"}}`. Success still guarantees watcher installation acknowledgement and authoritative post-install Git reconciliation. Record the session ID and capture the resume token only through the existing secure Feature 001 mechanism.
+
+## 3. Create a project
 
 ```sh
 cairn --json project create \
@@ -41,10 +54,9 @@ cairn --json project create \
   --description "Local Feature 002 acceptance"
 ```
 
-Record `project.project_id`. The project begins `active`. Creating another project with
-the same name must succeed with a different ID; list output must show both IDs.
+Record `project.project_id`. The project begins `active`. Creating another project with the same name succeeds with a different ID; list output displays both IDs.
 
-## 3. Associate the repository
+## 4. Associate the repository
 
 ```sh
 cairn --json project repository add \
@@ -52,12 +64,9 @@ cairn --json project repository add \
   --repository-id "$CAIRN_DEMO_REPOSITORY_ID"
 ```
 
-Repeat the exact request/idempotency key and verify `created:false` with no second
-`project.repository_associated` event. Associating the repository to the duplicate-name
-project must return `REPOSITORY_PROJECT_CONFLICT` and leave the original association
-unchanged.
+Repeat with the same raw key/method/request and verify the exact original `created:true` result with no second event. Then use a distinct key for the same pair and verify `created:false`; retrying that key stays false. Reusing either key for another method/request returns `IDEMPOTENCY_CONFLICT`. Associating to the duplicate-name project returns `REPOSITORY_PROJECT_CONFLICT` and preserves the original association.
 
-## 4. Create task revision 1
+## 5. Create task revision 1 and close bootstrap eligibility
 
 Prepare `goal-v1.json`:
 
@@ -84,8 +93,6 @@ Prepare `goal-v1.json`:
 }
 ```
 
-Create the task:
-
 ```sh
 cairn --json task create \
   --project-id "$CAIRN_DEMO_PROJECT_ID" \
@@ -93,27 +100,7 @@ cairn --json task create \
   --goal-contract goal-v1.json
 ```
 
-Record task ID, revision ID, revision number `1`, canonical fingerprint, parent
-`null`, and the pre-binding ordered Feature 001 event manifest.
-
-## 5. Start a local bootstrap session
-
-```sh
-cairn --json session start \
-  --local-unbound \
-  --agent codex \
-  --agent-instance "$CAIRN_DEMO_AGENT_INSTANCE"
-```
-
-The successful result must show:
-
-```json
-{"scope":{"mode":"local_unbound"}}
-```
-
-Success still guarantees watcher installation acknowledgement and authoritative
-post-install Git reconciliation. Record the session ID and capture the resume token
-only through the existing secure Feature 001 mechanism.
+Record task ID, revision ID, revision number `1`, canonical fingerprint, parent `null`, and the pre-binding ordered Feature 001 event manifest. The repository now has an active association and selectable active revision. A new explicit or omitted-scope unbound start must fail with typed `PROJECT_SCOPE_REQUIRED`, create no session/event/projection, and preserve the earlier historical bootstrap session.
 
 ## 6. Bind the existing session
 
@@ -137,9 +124,7 @@ The result must preserve the session ID and show:
 }
 ```
 
-Repeat the identical binding and expect `created:false`, one binding projection, and
-one `session.bound` event. A different project or revision must return
-`SESSION_BINDING_CONFLICT`.
+Repeat with the same raw key and expect the exact original `created:true`, one projection, and one `session.bound` event. A distinct key for the identical binding first returns `created:false` and remains false on retry. Another project/revision returns `SESSION_BINDING_CONFLICT`.
 
 ## 7. Prove Feature 001 history preservation
 
@@ -196,9 +181,7 @@ recovery behavior.
 
 ## 11. Replay
 
-Run the implementation's replay verifier against the complete ordered ledger. It must
-reconstruct projects, repository associations, tasks, both revisions, and the session
-binding exactly, while continuing to interpret all Feature 001 events.
+Run the implementation's replay verifier against the complete ordered ledger. It must reconstruct projects, associations, complete immutable revisions, complete Task post-state (including `latest_revision_number` and `updated_at`), and binding field-for-field while interpreting all Feature 001 events. It must apply `session.started` as local-unbound and only `session.bound` as project-bound.
 
 Expected minimum Feature 002 event counts:
 
@@ -240,13 +223,12 @@ Generate a populated database by running the frozen Feature 001 implementation
 a copy. Verify:
 
 - migration commits once and reaches local schema version 2;
-- all old table counts, identifiers, event sequences/payload hashes, snapshots,
-  lifecycle fields, timestamps, leases, and resume-token hashes match the manifest;
+- all old table counts, identifiers, event sequences/payload hashes, snapshots, lifecycle fields, timestamps, leases, and resume-token hashes match the manifest;
 - every old session is `local_unbound`;
-- new project/task/association/binding tables are empty;
+- new project/task/association/binding/operation-idempotency tables are empty;
 - no synthetic event was appended;
 - interruption before commit and subsequent restart safely retries;
-- a forced failure reports `MIGRATION_FAILED` without raw SQL/path or partial state.
+- the actual runner rejects a recorded checksum mismatch and a future schema version as `MIGRATION_FAILED`, mutates nothing, leaks no raw detail, and exposes no healthy daemon.
 
 ## Privacy acceptance
 
@@ -258,11 +240,7 @@ locations must remain absent.
 
 ## Genuine offline acceptance
 
-Fetch dependencies and build before isolation. Enter a Linux network namespace or
-container with networking disabled, explicitly prove external networking fails, and
-then run registration, project creation, association, task creation, local session
-start, binding, restart, inspection, revision 2, and replay using filesystem and local
-IPC. Failure to establish isolation is a test failure, not a skip.
+Fetch dependencies and build before isolation. Enter a Linux network namespace or no-network container, prove external networking fails, then run repository registration, eligible bootstrap session start, project creation, association, task creation, `PROJECT_SCOPE_REQUIRED` rejection, binding, restart, inspection, revision 2, and replay using filesystem and local IPC. Failure to establish isolation is a test failure, not a skip.
 
 Record the isolation mechanism, exact implementation SHA, OS/architecture, Rust/Cargo
 versions, exact commands, event counts, and results. `cargo --offline` by itself is not
@@ -277,6 +255,8 @@ cargo test --workspace --all-targets
 cargo test -p cairn-daemon --test us2_agent_sim
 cargo test -p cairn-daemon --test us3_tracking
 cargo test -p cairn-daemon --test us3_events
+CAIRN_CRASH_ITERS=100 CAIRN_CRASH_EXPECTED_ITERS=100 cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture
+cargo test -p cairn-daemon --test perf -- --ignored
 ```
 
 Run platform-specific migration, persistence, restart, and IPC coverage on Linux,

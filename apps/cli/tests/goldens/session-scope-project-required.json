@@ -1,0 +1,14 @@
+{
+  "schema": "cairn.cli.v1",
+  "ok": false,
+  "command": "session.start",
+  "error": {
+    "code": "PROJECT_SCOPE_REQUIRED",
+    "message": "project/task scope is required",
+    "data": {
+      "kind": "project_scope_required",
+      "repository_id": "repo-001",
+      "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d04"
+    }
+  }
+}

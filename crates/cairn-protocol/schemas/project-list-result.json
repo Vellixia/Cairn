@@ -1,0 +1,67 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProjectListResult",
+  "type": "object",
+  "required": [
+    "projects"
+  ],
+  "properties": {
+    "next_after_project_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "projects": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProjectDto"
+      }
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ProjectDto": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "name",
+        "project_id",
+        "status",
+        "updated_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/definitions/ProjectStatus"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      }
+    },
+    "ProjectStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "archived"
+      ]
+    }
+  }
+}

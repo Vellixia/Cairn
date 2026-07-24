@@ -1,7 +1,7 @@
 //! T023: envelope rendering + exit codes. Stdout carries the envelope only;
 //! diagnostics go to stderr. Human mode NEVER prints resume tokens (FR-029).
 
-use cairn_protocol::{CliEnvelope, ErrorBody};
+use cairn_protocol::{CliEnvelope, ErrorBody, ErrorData};
 
 /// Emit the result and return the process exit code.
 pub fn emit(command: &str, json: bool, result: Result<serde_json::Value, ErrorBody>) -> i32 {
@@ -30,6 +30,19 @@ pub fn emit(command: &str, json: bool, result: Result<serde_json::Value, ErrorBo
                 );
             } else {
                 eprintln!("error [{}]: {}", code_str(&err), err.message);
+                if let Some(ErrorData::AmbiguousName {
+                    candidate_ids,
+                    truncated,
+                    ..
+                }) = err.data.as_ref()
+                {
+                    for id in candidate_ids.as_slice() {
+                        eprintln!("  {id}");
+                    }
+                    if *truncated {
+                        eprintln!("  (additional matches omitted)");
+                    }
+                }
             }
             exit
         }
@@ -151,6 +164,52 @@ fn print_human(command: &str, data: &serde_json::Value) {
             println!("watched:   {}", data["watched_repositories"]);
             println!("sessions:  {} active", data["active_sessions"]);
         }
+        "project.create" | "project.update" => print_project(&data["project"]),
+        "project.list" => {
+            if let Some(projects) = data["projects"].as_array() {
+                for project in projects {
+                    print_project(project);
+                }
+            }
+        }
+        "project.show" => {
+            print_project(&data["project"]);
+            println!(
+                "repositories: {}",
+                data["repository_associations"]
+                    .as_array()
+                    .map_or(0, Vec::len)
+            );
+            println!("tasks:        {}", data["task_count"]);
+            println!("sessions:     {} bound", data["bound_session_count"]);
+        }
+        "project.repository.add" => {
+            let association = &data["association"];
+            println!(
+                "association: {}",
+                association["association_id"].as_str().unwrap_or("?")
+            );
+            println!(
+                "project:     {}",
+                association["project_id"].as_str().unwrap_or("?")
+            );
+            println!(
+                "repository:  {}",
+                association["repository_id"].as_str().unwrap_or("?")
+            );
+            println!("created:     {}", data["created"]);
+        }
+        "task.create" | "task.revise" | "task.show" => {
+            print_task(&data["task"]);
+            print_revision(&data["revision"]);
+        }
+        "task.list" => {
+            if let Some(tasks) = data["tasks"].as_array() {
+                for task in tasks {
+                    print_task(task);
+                }
+            }
+        }
         "session.show" => {
             if data["resolution"].as_str() == Some("ambiguous") {
                 println!("Multiple live sessions — specify --session or --agent-instance:");
@@ -163,10 +222,24 @@ fn print_human(command: &str, data: &serde_json::Value) {
                             s["agent_type"].as_str().unwrap_or("?"),
                             s["agent_instance_id"].as_str().unwrap_or("?"),
                         );
+                        print_scope(&s["scope"]);
                     }
                 }
             } else {
                 print_session(&data["session"]);
+            }
+        }
+        "session.list" => {
+            if let Some(sessions) = data["sessions"].as_array() {
+                for session in sessions {
+                    println!(
+                        "session:   {}  {}  {}",
+                        session["session_id"].as_str().unwrap_or("?"),
+                        session["state"].as_str().unwrap_or("?"),
+                        session["agent_type"].as_str().unwrap_or("?"),
+                    );
+                    print_scope(&session["scope"]);
+                }
             }
         }
         "session.start" | "session.stop" | "session.reattach" => {
@@ -187,6 +260,19 @@ fn print_human(command: &str, data: &serde_json::Value) {
                 data["lease_expires_at"].as_str().unwrap_or("?")
             );
         }
+        "session.bind" => {
+            println!("session:   {}", data["session_id"].as_str().unwrap_or("?"));
+            println!("scope:     project_bound");
+            println!(
+                "project:   {}",
+                data["scope"]["project_id"].as_str().unwrap_or("?")
+            );
+            println!(
+                "revision:  {}",
+                data["scope"]["task_revision_id"].as_str().unwrap_or("?")
+            );
+            println!("created:   {}", data["created"]);
+        }
         "status.ignored" => {
             if let Some(paths) = data["paths"].as_array() {
                 for p in paths {
@@ -199,6 +285,38 @@ fn print_human(command: &str, data: &serde_json::Value) {
         }
         _ => println!("{}", serde_json::to_string_pretty(data).unwrap_or_default()),
     }
+}
+
+fn print_project(project: &serde_json::Value) {
+    println!(
+        "project:    {}  {}  [{}]",
+        project["project_id"].as_str().unwrap_or("?"),
+        project["name"].as_str().unwrap_or("?"),
+        project["status"].as_str().unwrap_or("?"),
+    );
+    if let Some(description) = project["description"].as_str() {
+        println!("description:{description}");
+    }
+}
+
+fn print_task(task: &serde_json::Value) {
+    println!(
+        "task:       {}  {}  (revision {})",
+        task["task_id"].as_str().unwrap_or("?"),
+        task["title"].as_str().unwrap_or("?"),
+        task["latest_revision_number"].as_u64().unwrap_or(0),
+    );
+}
+
+fn print_revision(revision: &serde_json::Value) {
+    println!(
+        "revision:   {}  number {}  fingerprint {}",
+        revision["revision_id"].as_str().unwrap_or("?"),
+        revision["revision_number"].as_u64().unwrap_or(0),
+        revision["goal_contract_fingerprint"]
+            .as_str()
+            .unwrap_or("?"),
+    );
 }
 
 fn print_changes(label: &str, arr: &serde_json::Value) {
@@ -231,4 +349,20 @@ fn print_session(s: &serde_json::Value) {
         "current fp:{}",
         s["current_snapshot"]["snapshot_fp"].as_str().unwrap_or("?")
     );
+    print_scope(&s["scope"]);
+}
+
+fn print_scope(scope: &serde_json::Value) {
+    match scope["mode"].as_str() {
+        Some("local_unbound") => println!("scope:     local_unbound"),
+        Some("project_bound") => {
+            println!("scope:     project_bound");
+            println!("project:   {}", scope["project_id"].as_str().unwrap_or("?"));
+            println!(
+                "revision:  {}",
+                scope["task_revision_id"].as_str().unwrap_or("?")
+            );
+        }
+        _ => println!("scope:     ?"),
+    }
 }

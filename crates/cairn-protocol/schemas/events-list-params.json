@@ -10,6 +10,22 @@
       ],
       "format": "int64"
     },
+    "aggregate_id": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "aggregate_type": {
+      "anyOf": [
+        {
+          "$ref": "#/definitions/EventAggregateType"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "limit": {
       "type": [
         "integer",
@@ -34,6 +50,18 @@
       "type": [
         "string",
         "null"
+      ]
+    }
+  },
+  "definitions": {
+    "EventAggregateType": {
+      "type": "string",
+      "enum": [
+        "repository",
+        "worktree",
+        "session",
+        "project",
+        "task"
       ]
     }
   }

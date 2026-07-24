@@ -2,6 +2,15 @@ name: CI
 
 on:
   workflow_dispatch:
+    inputs:
+      implementation_sha:
+        description: >-
+          Exact frozen implementation commit SHA to collect evidence against.
+          Leave empty for ordinary CI. Every evidence job checks this commit out
+          and fails if HEAD does not match it, so no job can silently record
+          evidence for a merge commit.
+        required: false
+        type: string
   push:
     branches: [main]
   pull_request:
@@ -23,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Configure git identity for fixtures
@@ -50,9 +59,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
       - name: Build daemon
         run: cargo build -p cairn-daemon
       - name: Second local user cannot connect
@@ -97,9 +115,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
       - name: Record exact Windows implementation environment
         shell: pwsh
         run: |
@@ -139,13 +166,24 @@ jobs:
       - name: Record scenario results
         shell: pwsh
         run: |
-          Write-Host "feature001_scenario_1=pass"
-          Write-Host "feature001_scenario_2=pass"
-          Write-Host "feature001_scenario_3=pass"
-          Write-Host "feature001_scenario_4=pass"
-          Write-Host "feature001_scenario_5=pass"
-          Write-Host "feature001_scenario_6=pass"
-          Write-Host "event_counts=printed_by_us2_agent_sim_us3_tracking_and_us4_crash_restart"
+          New-Item -ItemType Directory -Force -Path target/windows-feature001-logs | Out-Null
+          $results = @(
+            "feature001_scenario_1=pass",
+            "feature001_scenario_2=pass",
+            "feature001_scenario_3=pass",
+            "feature001_scenario_4=pass",
+            "feature001_scenario_5=pass",
+            "feature001_scenario_6=pass",
+            "event_counts=printed_by_us2_agent_sim_us3_tracking_and_us4_crash_restart"
+          )
+          $results | Tee-Object -FilePath target/windows-feature001-logs/scenarios.txt
+      - name: Upload Windows Feature 001 scenario results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-feature001-evidence-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/windows-feature001-logs/
+          if-no-files-found: error
 
   sc005-acceptance:
     name: SC-005 exactly 100 forced daemon kills
@@ -153,9 +191,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
       - name: Configure git identity for fixtures
         run: |
           git config --global user.name "CI"
@@ -169,12 +216,22 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
-          cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture 2>&1 | tee sc005-output.txt
-          grep -F "configured_iterations=100 completed_forced_kills=100 committed_event_loss=0 invalid_session_outcomes=0" sc005-output.txt
-          echo "configured_iterations=100"
-          echo "completed_forced_kills=100"
-          echo "committed_event_loss=0"
-          echo "invalid_session_outcomes=0"
+          mkdir -p target/sc005-logs
+          cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture 2>&1 | tee target/sc005-logs/sc005-output.txt
+          grep -F "configured_iterations=100 completed_forced_kills=100 committed_event_loss=0 invalid_session_outcomes=0" target/sc005-logs/sc005-output.txt
+          {
+            echo "configured_iterations=100"
+            echo "completed_forced_kills=100"
+            echo "committed_event_loss=0"
+            echo "invalid_session_outcomes=0"
+          } | tee target/sc005-logs/counters.txt
+      - name: Upload exactly-100-kill counters
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sc005-exactly-100-kill-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/sc005-logs/
+          if-no-files-found: error
 
   linux-network-isolated:
     name: Linux network-isolated Feature 001 validation
@@ -182,9 +239,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
       - name: Configure git identity for fixtures
         run: |
           git config --global user.name "CI"
@@ -206,8 +272,10 @@ jobs:
       - name: Validate inside a no-network container
         shell: bash
         run: |
+          set -o pipefail
+          mkdir -p target/feature001-isolation-logs
           docker info >/dev/null
-          echo "isolation_mechanism=docker --network none"
+          echo "isolation_mechanism=docker --network none" | tee target/feature001-isolation-logs/mechanism.txt
           docker run --rm --network none \
             --volume "${{ github.workspace }}:/workspace" \
             --volume "/home/runner/.cargo/registry:/usr/local/cargo/registry" \
@@ -237,7 +305,86 @@ jobs:
                 --test us2_cli_contract \
                 --test us4_cli_contract -- --nocapture
               echo "feature001_network_isolated_scenarios=pass"
-            '
+            ' 2>&1 | tee target/feature001-isolation-logs/run.log
+      - name: Upload Feature 001 isolation proofs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature001-network-isolated-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/feature001-isolation-logs/
+          if-no-files-found: error
+
+  linux-feature002-network-isolated:
+    name: Linux network-isolated Feature 002 acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
+      - name: Configure local Git fixture identity
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Record requested implementation environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "implementation_sha=$(git rev-parse HEAD)"
+          . /etc/os-release
+          echo "os=$PRETTY_NAME"
+          echo "architecture=$(uname -m)"
+          rustc --version
+          cargo --version
+          git --version
+      - name: Fetch dependencies before isolation
+        run: cargo fetch --locked
+      - name: Build only required acceptance executables before isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p cairn-daemon \
+            --test feature002_migration_acceptance \
+            --test feature002_quickstart \
+            --test feature002_privacy \
+            --no-run
+          cargo test --locked -p cairn-events \
+            --test feature002_replay \
+            --no-run
+      - name: Preload fail-closed container fallback
+        run: docker pull rust:1-bookworm
+      - name: Execute Feature 002 without external networking
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/feature002-isolation-logs
+          set -o pipefail
+          scripts/ci/feature002-network-isolated.sh \
+            --binary-dir target/debug/deps \
+            --workspace "$GITHUB_WORKSPACE" \
+            2>&1 | tee target/feature002-isolation-logs/run.log
+          grep -F "external_network=unreachable" target/feature002-isolation-logs/run.log
+          grep -F "local_filesystem=available" target/feature002-isolation-logs/run.log
+          grep -F "local_git=available" target/feature002-isolation-logs/run.log
+          grep -F "local_ipc=available" target/feature002-isolation-logs/run.log
+          grep -F "feature002_network_isolated=pass" target/feature002-isolation-logs/run.log
+      - name: Upload isolation proofs and counters
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature002-network-isolated-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/feature002-isolation-logs/
+          if-no-files-found: error
 
   sc007-performance:
     name: SC-007 explicit performance acceptance
@@ -245,9 +392,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
       - name: Configure git identity for fixtures
         run: |
           git config --global user.name "CI"
@@ -263,4 +419,312 @@ jobs:
       - name: Run perf suite
         env:
           RUST_TEST_NOCAPTURE: "1"
-        run: cargo test -p cairn-daemon --test perf -- --ignored
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          mkdir -p target/sc007-logs
+          cargo test -p cairn-daemon --test perf -- --ignored 2>&1 | tee target/sc007-logs/sc007-perf.log
+      - name: Upload SC-007 measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sc007-performance-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/sc007-logs/
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # T114: exact-SHA Feature 002 evidence jobs.
+  #
+  # Every job below checks out one requested implementation commit and fails if
+  # HEAD does not match it, so a pull-request merge commit can never be recorded
+  # as evidence. Configuration alone completes no execution task: T117-T121
+  # remain incomplete until these jobs have actually run at the frozen SHA.
+  # ---------------------------------------------------------------------------
+
+  macos-feature002-evidence:
+    name: macOS exact-SHA Feature 002 acceptance
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "checkout is dirty" >&2; exit 1; }
+      - name: Configure git identity for fixtures
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Record exact macOS environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/macos-feature002-logs
+          {
+            echo "os=$(sw_vers -productName) $(sw_vers -productVersion)"
+            echo "architecture=$(uname -m)"
+            rustc --version
+            cargo --version
+            git --version
+            echo "sqlite=$(sqlite3 --version 2>/dev/null || echo unavailable)"
+          } | tee target/macos-feature002-logs/environment.txt
+      - name: Quality gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cargo fmt --check 2>&1 | tee target/macos-feature002-logs/fmt.log
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee target/macos-feature002-logs/clippy.log
+          cargo test --workspace --all-targets 2>&1 | tee target/macos-feature002-logs/workspace-tests.log
+      - name: Unix-socket IPC, path, restart, and SQLite behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cargo test -p cairn-daemon --test feature002_ipc -- --nocapture 2>&1 | tee target/macos-feature002-logs/ipc.log
+          cargo test -p cairn-cli --test feature002_ipc_only -- --nocapture 2>&1 | tee -a target/macos-feature002-logs/ipc.log
+          cargo test -p cairn-daemon --test us1_register_inspect -- --nocapture 2>&1 | tee target/macos-feature002-logs/paths.log
+          cargo test -p cairn-daemon --test feature002_binding_restart --test feature002_bound_recovery -- --nocapture 2>&1 | tee target/macos-feature002-logs/restart.log
+          cargo test -p cairn-daemon --test feature002_migration_acceptance -- --nocapture 2>&1 | tee target/macos-feature002-logs/sqlite.log
+          cargo test -p cairn-storage-local --tests 2>&1 | tee -a target/macos-feature002-logs/sqlite.log
+      - name: Quickstart and Feature 002 acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cargo test -p cairn-daemon --test feature002_quickstart -- --nocapture 2>&1 | tee target/macos-feature002-logs/quickstart.log
+          cargo test -p cairn-events --test feature002_replay --test feature002_replay_invalid -- --nocapture 2>&1 | tee target/macos-feature002-logs/replay.log
+          cargo test -p cairn-daemon --test feature002_privacy --test feature002_retry_acceptance --test feature002_atomicity --test feature002_binding_races -- --nocapture 2>&1 | tee target/macos-feature002-logs/acceptance.log
+          cargo test -p cairn-cli --test feature002_privacy_cli -- --nocapture 2>&1 | tee -a target/macos-feature002-logs/acceptance.log
+          grep -F "quickstart_counts=" target/macos-feature002-logs/quickstart.log
+          grep -F "feature002_retries=" target/macos-feature002-logs/acceptance.log
+      - name: Upload macOS logs and counters
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-feature002-evidence-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/macos-feature002-logs/
+          if-no-files-found: error
+
+  linux-feature002-evidence:
+    name: Linux exact-SHA Feature 002 acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "checkout is dirty" >&2; exit 1; }
+      - name: Configure git identity for fixtures
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Record exact Linux environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/linux-feature002-logs
+          {
+            . /etc/os-release
+            echo "os=$PRETTY_NAME"
+            echo "architecture=$(uname -m)"
+            rustc --version
+            cargo --version
+            git --version
+            echo "sqlite=$(sqlite3 --version 2>/dev/null || echo unavailable)"
+          } | tee target/linux-feature002-logs/environment.txt
+      - name: Quality gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cargo fmt --check 2>&1 | tee target/linux-feature002-logs/fmt.log
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | tee target/linux-feature002-logs/clippy.log
+          cargo test --workspace --all-targets 2>&1 | tee target/linux-feature002-logs/workspace-tests.log
+      - name: Unix-socket IPC, path, restart, and SQLite behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cargo test -p cairn-daemon --test feature002_ipc -- --nocapture 2>&1 | tee target/linux-feature002-logs/ipc.log
+          cargo test -p cairn-cli --test feature002_ipc_only -- --nocapture 2>&1 | tee -a target/linux-feature002-logs/ipc.log
+          cargo test -p cairn-daemon --test us1_register_inspect -- --nocapture 2>&1 | tee target/linux-feature002-logs/paths.log
+          cargo test -p cairn-daemon --test feature002_binding_restart --test feature002_bound_recovery -- --nocapture 2>&1 | tee target/linux-feature002-logs/restart.log
+          cargo test -p cairn-daemon --test feature002_migration_acceptance -- --nocapture 2>&1 | tee target/linux-feature002-logs/sqlite.log
+          cargo test -p cairn-storage-local --tests 2>&1 | tee -a target/linux-feature002-logs/sqlite.log
+      - name: Quickstart and Feature 002 acceptance
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          cargo test -p cairn-daemon --test feature002_quickstart -- --nocapture 2>&1 | tee target/linux-feature002-logs/quickstart.log
+          cargo test -p cairn-events --test feature002_replay --test feature002_replay_invalid -- --nocapture 2>&1 | tee target/linux-feature002-logs/replay.log
+          cargo test -p cairn-daemon --test feature002_privacy --test feature002_retry_acceptance --test feature002_atomicity --test feature002_binding_races -- --nocapture 2>&1 | tee target/linux-feature002-logs/acceptance.log
+          cargo test -p cairn-cli --test feature002_privacy_cli -- --nocapture 2>&1 | tee -a target/linux-feature002-logs/acceptance.log
+          grep -F "quickstart_counts=" target/linux-feature002-logs/quickstart.log
+          grep -F "feature002_retries=" target/linux-feature002-logs/acceptance.log
+      - name: Upload Linux logs and counters
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-feature002-evidence-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/linux-feature002-logs/
+          if-no-files-found: error
+
+  windows-feature002-evidence:
+    name: Windows exact-SHA Feature 002 acceptance
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
+      - name: Configure git identity for fixtures
+        shell: pwsh
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+          git config --global core.autocrlf false
+      - name: Record exact Windows environment
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path target/windows-feature002-logs | Out-Null
+          $os = Get-CimInstance Win32_OperatingSystem
+          $lines = @(
+            "os=$($os.Caption) $($os.Version)",
+            "architecture=$env:PROCESSOR_ARCHITECTURE",
+            (rustc --version),
+            (cargo --version),
+            (git --version)
+          )
+          $lines | Tee-Object -FilePath target/windows-feature002-logs/environment.txt
+      - name: Quality gate
+        shell: pwsh
+        run: |
+          cargo fmt --check 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/fmt.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo clippy --workspace --all-targets -- -D warnings 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/clippy.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --workspace --all-targets 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/workspace-tests.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Named-pipe IPC, path, restart, and SQLite behavior
+        shell: pwsh
+        run: |
+          cargo test -p cairn-daemon --test feature002_ipc -- --nocapture 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/named-pipe.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-cli --test feature002_ipc_only -- --nocapture 2>&1 | Tee-Object -Append -FilePath target/windows-feature002-logs/named-pipe.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-daemon --test us1_register_inspect -- --nocapture 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/paths.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-daemon --test feature002_binding_restart --test feature002_bound_recovery -- --nocapture 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/restart.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-daemon --test feature002_migration_acceptance -- --nocapture 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/sqlite.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-storage-local --tests 2>&1 | Tee-Object -Append -FilePath target/windows-feature002-logs/sqlite.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Quickstart and Feature 002 acceptance
+        shell: pwsh
+        run: |
+          cargo test -p cairn-daemon --test feature002_quickstart -- --nocapture 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/quickstart.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-events --test feature002_replay --test feature002_replay_invalid -- --nocapture 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/replay.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-daemon --test feature002_privacy --test feature002_retry_acceptance --test feature002_atomicity --test feature002_binding_races -- --nocapture 2>&1 | Tee-Object -FilePath target/windows-feature002-logs/acceptance.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p cairn-cli --test feature002_privacy_cli -- --nocapture 2>&1 | Tee-Object -Append -FilePath target/windows-feature002-logs/acceptance.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Select-String -Path target/windows-feature002-logs/quickstart.log -SimpleMatch "quickstart_counts=" -Quiet
+          Select-String -Path target/windows-feature002-logs/acceptance.log -SimpleMatch "feature002_retries=" -Quiet
+      - name: Upload Windows logs and counters
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-feature002-evidence-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/windows-feature002-logs/
+          if-no-files-found: error
+
+  feature002-performance:
+    name: SC-010 Feature 002 performance acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify exact implementation SHA
+        shell: bash
+        run: |
+          set -euo pipefail
+          requested="${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          echo "requested_sha=$requested"
+          echo "implementation_sha=$actual"
+          [ "$actual" = "$requested" ] || { echo "HEAD is not the requested implementation SHA" >&2; exit 1; }
+          [ -z "$(git status --porcelain)" ] || { echo "checkout is dirty" >&2; exit 1; }
+      - name: Configure git identity for fixtures
+        run: |
+          git config --global user.name "CI"
+          git config --global user.email "ci@cairn.invalid"
+      - name: Record exact performance environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/feature002-performance-logs
+          {
+            . /etc/os-release
+            echo "os=$PRETTY_NAME"
+            echo "architecture=$(uname -m)"
+            rustc --version
+            cargo --version
+          } | tee target/feature002-performance-logs/environment.txt
+      - name: Run SC-010 acceptance in the release profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          set -o pipefail
+          # The test asserts !cfg!(debug_assertions); a debug run fails by design.
+          cargo test --release -p cairn-daemon --test feature002_perf -- --ignored --nocapture 2>&1 \
+            | tee target/feature002-performance-logs/feature002-perf.log
+          grep -F "feature002_perf_environment" target/feature002-performance-logs/feature002-perf.log
+          measured="$(grep -c "feature002_perf operation=" target/feature002-performance-logs/feature002-perf.log)"
+          echo "measured_operations=$measured"
+          [ "$measured" -eq 10 ] || { echo "incomplete SC-010 measurement set" >&2; exit 1; }
+          grep -F "threshold_ms=2000" target/feature002-performance-logs/feature002-perf.log > /dev/null
+      - name: Upload performance measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature002-performance-${{ inputs.implementation_sha || github.event.pull_request.head.sha || github.sha }}
+          path: target/feature002-performance-logs/
+          if-no-files-found: error

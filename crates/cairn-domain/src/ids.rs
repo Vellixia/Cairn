@@ -65,3 +65,23 @@ uuid_newtype!(
     /// Caller-generated per-agent-instance identity (clarification Q1).
     AgentInstanceId
 );
+uuid_newtype!(
+    /// Stable local project identity.
+    ProjectId
+);
+uuid_newtype!(
+    /// Immutable repository-association identity.
+    ProjectRepositoryAssociationId
+);
+uuid_newtype!(
+    /// Stable logical task identity.
+    TaskId
+);
+uuid_newtype!(
+    /// Immutable task-revision identity.
+    TaskRevisionId
+);
+uuid_newtype!(
+    /// Caller-provided raw operation-idempotency key.
+    IdempotencyKey
+);

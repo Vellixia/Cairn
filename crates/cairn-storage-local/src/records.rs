@@ -55,4 +55,89 @@ pub struct SessionRow {
     pub ended_at: Option<String>,
     pub last_heartbeat_at: String,
     pub recovering_since: Option<String>,
+    pub binding_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct ProjectRow {
+    pub id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub status: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct ProjectRepositoryAssociationRow {
+    pub id: String,
+    pub project_id: String,
+    pub repository_id: String,
+    pub associated_at: String,
+    pub event_seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct TaskRow {
+    pub id: String,
+    pub project_id: String,
+    pub title: String,
+    pub latest_revision_number: i64,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct TaskRevisionRow {
+    pub id: String,
+    pub task_id: String,
+    pub revision_number: i64,
+    pub parent_revision_id: Option<String>,
+    pub goal_contract_json: String,
+    pub goal_contract_schema_version: i64,
+    pub goal_contract_fingerprint: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct SessionBindingRow {
+    pub session_id: String,
+    pub project_id: String,
+    pub task_revision_id: String,
+    pub bound_at: String,
+    pub binding_event_seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct AggregateHeadRow {
+    pub aggregate_type: String,
+    pub aggregate_id: String,
+    pub last_seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct AggregateEventRow {
+    pub seq: i64,
+    pub id: String,
+    pub idempotency_key: String,
+    pub event_type: String,
+    pub repository_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub session_id: Option<String>,
+    pub snapshot_id: Option<String>,
+    pub payload: String,
+    pub recorded_at: String,
+    pub aggregate_type: Option<String>,
+    pub aggregate_id: Option<String>,
+    pub aggregate_seq: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, FromRow)]
+pub struct OperationIdempotencyRow {
+    pub idempotency_key: String,
+    pub method: String,
+    pub request_fingerprint: String,
+    pub result_kind: String,
+    pub result_locator: String,
+    pub created_at: String,
 }

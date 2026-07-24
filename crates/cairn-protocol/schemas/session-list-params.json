@@ -3,6 +3,13 @@
   "title": "SessionListParams",
   "type": "object",
   "properties": {
+    "project_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
     "repository_id": {
       "type": [
         "string",
@@ -17,6 +24,13 @@
       "items": {
         "$ref": "#/definitions/SessionState"
       }
+    },
+    "task_revision_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
     }
   },
   "definitions": {

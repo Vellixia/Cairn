@@ -62,25 +62,19 @@ All command data and error objects reuse the typed IPC DTOs in
 | `cairn session start --project-id ID --task-revision-id ID ...` | both binding IDs | `v1.session.start` | existing start data with typed scope |
 | `cairn session show ...` | existing selectors | `v1.session.get` | existing result with typed scope |
 
-`--local-unbound` conflicts with either project-binding flag. Project and revision
-flags must be supplied together. The CLI generates a UUID idempotency key for a
-mutating command unless a machine caller supplies `--idempotency-key`.
+`--local-unbound` conflicts with project-binding flags; project and revision flags are paired. It succeeds only when the repository has no active project association or its associated active project has no selectable active task revision. Otherwise it returns `PROJECT_SCOPE_REQUIRED` without creating state. The CLI generates a UUID idempotency key for Feature 002 mutating commands unless a machine caller supplies `--idempotency-key`; one raw key is global across methods and another-method/request reuse returns `IDEMPOTENCY_CONFLICT`.
 
-Goal contracts are read from a file or stdin as typed JSON. They are never accepted as
-individual shell arguments, repeated in diagnostics, or copied into error messages.
+Goal contracts are read from a file or stdin as typed JSON. They are never accepted as individual shell arguments, repeated in diagnostics, or copied into error messages.
 
 ## Human name resolution
 
-Human mode may additionally accept `--project NAME` or `--task TITLE --project-id ID`.
-Resolution is exact, case-sensitive after the same surrounding-whitespace
-normalization used at creation:
+Human mode may additionally accept `--project NAME` or `--task TITLE --project-id ID`. It resolves internally through typed ID-list responses using exact, case-sensitive normalized display text:
 
-- zero matches returns the relevant not-found error;
-- one match proceeds using the returned ID;
-- multiple matches return `AMBIGUOUS_NAME`, show candidate IDs, and exit 4.
+- zero matches renders the relevant human not-found error;
+- one match proceeds using its ID;
+- multiple matches render internal typed `AMBIGUOUS_NAME` data with bounded candidate IDs and exit 4.
 
-At most 20 deterministic candidate IDs are printed. JSON mode rejects name selectors
-as usage errors and requires IDs.
+At most 20 deterministic candidate IDs are rendered. JSON mode rejects every name selector as exit-2 usage error before IPC and requires IDs. Therefore `AMBIGUOUS_NAME` is an internal typed human-rendering shape, not a valid JSON-mode name-selection operation or reachable JSON command result.
 
 ## Human output requirements
 
@@ -125,7 +119,7 @@ Task revision:
   "ok": true,
   "command": "task.revise",
   "data": {
-    "task": {"task_id":"019...","project_id":"019...","title":"Binding","latest_revision_number":2},
+    "task": {"task_id":"019...","project_id":"019...","title":"Binding","latest_revision_number":2,"created_at":"2026-07-20T00:00:00Z","updated_at":"2026-07-20T00:00:00Z"},
     "revision": {
       "revision_id":"019...",
       "task_id":"019...",
@@ -140,7 +134,7 @@ Task revision:
 }
 ```
 
-Explicit unbound session:
+Explicit unbound session (only from a bootstrap-eligible repository):
 
 ```json
 {
@@ -181,25 +175,21 @@ Bound session:
 }
 ```
 
-Ambiguous human selection converted to the stable JSON error:
+Internal `AMBIGUOUS_NAME` typed rendering fixture (schema/unit-test reference only; no JSON-mode name selector can produce this):
 
 ```json
 {
-  "schema": "cairn.cli.v1",
-  "ok": false,
-  "command": "project.show",
-  "error": {
-    "code":"AMBIGUOUS_NAME",
-    "message":"project name is ambiguous",
-    "data":{
-      "kind":"ambiguous_name",
-      "entity":"project",
-      "candidate_ids":["019...","019..."],
-      "truncated":false
-    }
+  "code":"AMBIGUOUS_NAME",
+  "data":{
+    "kind":"ambiguous_name",
+    "entity":"project",
+    "candidate_ids":["019...","019..."],
+    "truncated":false
   }
 }
 ```
+
+A JSON-mode invocation containing a name selector instead produces a normal exit-2 usage envelope and sends no IPC request.
 
 ## Exit codes
 
@@ -221,10 +211,9 @@ envelope.
 The CLI preserves daemon error codes and typed data without adding internal context.
 In particular:
 
-- `REPOSITORY_PROJECT_CONFLICT` maps to exit 1;
-- `SESSION_BINDING_CONFLICT` and `SESSION_SCOPE_CONFLICT` map to exit 1;
-- `INVALID_GOAL_CONTRACT` maps to exit 1 and prints field/rule only;
-- `AMBIGUOUS_NAME` maps to exit 4;
+- `PROJECT_SCOPE_REQUIRED`, `REPOSITORY_PROJECT_CONFLICT`, `SESSION_BINDING_CONFLICT`, `SESSION_SCOPE_CONFLICT`, `IDEMPOTENCY_CONFLICT`, and `STORAGE_BUSY` map to exit 1;
+- every `INVALID_GOAL_CONTRACT` violation maps to exit 1 and prints only bounded violation/field/index/version metadata;
+- `AMBIGUOUS_NAME` internal human rendering maps to exit 4; JSON-mode name flags are exit 2;
 - `MIGRATION_FAILED` maps to exit 6;
 - `WATCHER_START_FAILED` retains the Feature 001 install/reconcile payload and exit 1.
 
@@ -237,15 +226,16 @@ resume tokens.
 Checked-in goldens include:
 
 - success and stable-error envelopes for every new command;
-- duplicate project/task names with unambiguous ID-based machine access;
+- duplicate project/task names with ID-only JSON access plus separate internal human ambiguity rendering;
 - archive and explicit restoration;
-- repository association retry/conflict;
-- revision 1 and revision 2 while revision 1 remains unchanged;
-- local-unbound start, bound start, existing-session binding, retry, and conflict;
+- exact same-key original `created/updated` flags (including after later project updates), distinct-key association/binding `created:false`, and cross-method/request conflicts;
+- revision 1 and revision 2 with complete Task post-state while revision 1 remains unchanged;
+- bootstrap-eligible unbound start, `PROJECT_SCOPE_REQUIRED` explicit/omitted cases, bound start, existing-session binding, retry, and conflict;
+- every missing required goal field, malformed structure, empty goal, each list's empty entry, unsupported version, exit 1, and contract-content non-leakage;
 - project/repository and task/project mismatches;
-- bounded ambiguous-name candidates;
-- migration failure without internal detail;
-- all Feature 001 envelopes unchanged except additive session scope.
+- bounded `AMBIGUOUS_NAME` internal rendering plus JSON name-flag usage rejection;
+- checksum-mismatch/future-version `MIGRATION_FAILED` without internal detail;
+- `STORAGE_BUSY` and all Feature 001 envelopes unchanged except additive session scope.
 
 Each golden validates against the generated CLI schema. Integration tests assert exact
 exit codes and exactly one stdout JSON object. Compatibility tripwires reject missing

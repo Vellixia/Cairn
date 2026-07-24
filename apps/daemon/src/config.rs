@@ -22,6 +22,9 @@ pub struct DaemonConfig {
     /// Deterministic watcher coordination used only by integration tests.
     /// Production configuration always leaves this unset.
     pub watcher_test_controls: Option<std::sync::Arc<crate::watch::WatcherTestControls>>,
+    /// Deterministic session transaction checkpoints used only by tests.
+    /// Production configuration always leaves this unset.
+    pub session_test_hooks: Option<cairn_storage_local::WriteTestHooks>,
 }
 
 impl DaemonConfig {
@@ -48,6 +51,7 @@ impl DaemonConfig {
             foreground: std::env::var("CAIRN_FOREGROUND").is_ok(),
             session: cairn_session::SessionConfig::from_env(),
             watcher_test_controls: None,
+            session_test_hooks: None,
         }
     }
 

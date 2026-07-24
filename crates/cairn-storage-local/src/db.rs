@@ -7,6 +7,9 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::SqlitePool;
 use thiserror::Error;
 
+pub const SUPPORTED_SCHEMA_VERSION: i64 = 2;
+const MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
 #[derive(Debug, Error)]
 pub enum StorageError {
     #[error("local state corrupted or unavailable: {0}")]
@@ -17,8 +20,36 @@ pub enum StorageError {
     Conflict(String),
     #[error("illegal state transition: {0}")]
     IllegalTransition(String),
+    #[error("database migration failed for schema version {target_version}")]
+    MigrationFailed { target_version: i64 },
+    #[error("storage remained busy for {max_elapsed_ms}ms")]
+    StorageBusy { max_elapsed_ms: u64 },
+    #[error("idempotency key conflicts with an earlier operation")]
+    IdempotencyConflict {
+        existing_method: String,
+        reason: IdempotencyConflictReason,
+    },
+    #[error("session is already bound differently")]
+    SessionAlreadyBound {
+        existing_project_id: String,
+        existing_revision_id: String,
+    },
+    #[error("project/task scope is required for a new session")]
+    ProjectScopeRequired { project_id: String },
+    #[error("healthy session scope conflicts with the requested scope")]
+    SessionScopeConflict {
+        session_id: String,
+        existing_mode: String,
+        requested_mode: String,
+    },
     #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdempotencyConflictReason {
+    MethodMismatch,
+    RequestMismatch,
 }
 
 impl StorageError {
@@ -32,6 +63,10 @@ impl StorageError {
             }
             _ => false,
         }
+    }
+
+    pub fn is_migration_failure(&self) -> bool {
+        matches!(self, StorageError::MigrationFailed { .. })
     }
 }
 
@@ -86,10 +121,65 @@ pub async fn open_pool_at(path: &std::path::Path) -> Result<SqlitePool, StorageE
         return Err(StorageError::Corrupted(format!("quick_check: {}", check.0)));
     }
 
-    sqlx::migrate!("./migrations")
+    fail_closed_on_future_schema(&pool).await?;
+
+    MIGRATOR
         .run(&pool)
         .await
-        .map_err(|e| StorageError::Corrupted(format!("migration failed: {e}")))?;
+        .map_err(|_| StorageError::MigrationFailed {
+            target_version: SUPPORTED_SCHEMA_VERSION,
+        })?;
 
     Ok(pool)
+}
+
+async fn fail_closed_on_future_schema(pool: &SqlitePool) -> Result<(), StorageError> {
+    let (has_migrations,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await
+    .map_err(|_| StorageError::MigrationFailed {
+        target_version: SUPPORTED_SCHEMA_VERSION,
+    })?;
+    if has_migrations != 0 {
+        let (version,): (Option<i64>,) =
+            sqlx::query_as("SELECT MAX(version) FROM _sqlx_migrations WHERE success = 1")
+                .fetch_one(pool)
+                .await
+                .map_err(|_| StorageError::MigrationFailed {
+                    target_version: SUPPORTED_SCHEMA_VERSION,
+                })?;
+        if version.is_some_and(|v| v > SUPPORTED_SCHEMA_VERSION) {
+            return Err(StorageError::MigrationFailed {
+                target_version: SUPPORTED_SCHEMA_VERSION,
+            });
+        }
+    }
+
+    let (has_meta,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='meta'")
+            .fetch_one(pool)
+            .await
+            .map_err(|_| StorageError::MigrationFailed {
+                target_version: SUPPORTED_SCHEMA_VERSION,
+            })?;
+    if has_meta != 0 {
+        let version: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM meta WHERE key='local_schema_version'")
+                .fetch_optional(pool)
+                .await
+                .map_err(|_| StorageError::MigrationFailed {
+                    target_version: SUPPORTED_SCHEMA_VERSION,
+                })?;
+        if version
+            .and_then(|(value,)| value.parse::<i64>().ok())
+            .is_some_and(|v| v > SUPPORTED_SCHEMA_VERSION)
+        {
+            return Err(StorageError::MigrationFailed {
+                target_version: SUPPORTED_SCHEMA_VERSION,
+            });
+        }
+    }
+    Ok(())
 }

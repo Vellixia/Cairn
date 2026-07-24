@@ -3,15 +3,17 @@
 //! All mutations run inside per-worktree serialized transactions (analysis
 //! I4) so events and projections never interleave out of order.
 
+use std::str::FromStr;
 use std::sync::Arc;
 
 use cairn_domain::{
-    InterruptReason, LivenessReason, SessionId, SessionState, Timestamp, TransitionReason,
-    WatcherStartStage,
+    EventId, InterruptReason, LivenessReason, ProjectId, SessionBindingMode, SessionId,
+    SessionState, TaskId, TaskRevisionId, Timestamp, TransitionReason, WatcherStartStage,
 };
-use cairn_events::EventBuilder;
+use cairn_events::{EventBuilder, SessionBindingEvent, SessionBoundPayload};
 use cairn_storage_local::{
-    events as ev, sessions as sdao, SessionRow, SnapshotRow, StorageError, WorktreeWriters,
+    events as ev, session_bindings, sessions as sdao, SessionBindingRow, SessionRow, SnapshotRow,
+    StorageError, WorktreeWriters, WriteCheckpoint, WriteTestHooks, WriterPolicy,
 };
 use sqlx::SqlitePool;
 use thiserror::Error;
@@ -36,6 +38,33 @@ pub enum SessionError {
     LeaseExpired,
     #[error("reattachment grace deadline has passed")]
     GraceExpired,
+    #[error("project/task scope is required for this repository")]
+    ProjectScopeRequired {
+        repository_id: String,
+        project_id: ProjectId,
+    },
+    #[error("project not found")]
+    ProjectNotFound { project_id: ProjectId },
+    #[error("project is archived")]
+    ProjectArchived { project_id: ProjectId },
+    #[error("repository is not associated with project")]
+    RepositoryNotAssociated {
+        repository_id: String,
+        project_id: ProjectId,
+    },
+    #[error("task revision not found")]
+    TaskRevisionNotFound { revision_id: TaskRevisionId },
+    #[error("task revision does not belong to project")]
+    TaskRevisionProjectMismatch {
+        revision_id: TaskRevisionId,
+        expected_project_id: ProjectId,
+    },
+    #[error("healthy session scope conflicts with requested scope")]
+    ScopeConflict {
+        session_id: String,
+        existing_mode: SessionScopeName,
+        requested_mode: SessionScopeName,
+    },
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
@@ -74,6 +103,22 @@ pub enum StartOutcome {
     Takeover,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionScopeName {
+    LocalUnbound,
+    ProjectBound,
+}
+
+impl From<SessionBindingMode> for SessionScopeName {
+    fn from(scope: SessionBindingMode) -> Self {
+        match scope {
+            SessionBindingMode::LocalUnbound => Self::LocalUnbound,
+            SessionBindingMode::ProjectBound { .. } => Self::ProjectBound,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct StartResult {
     pub session: SessionRow,
     /// Some on created/takeover; None on idempotent existing (FR-034).
@@ -82,9 +127,13 @@ pub struct StartResult {
 }
 
 pub struct SessionService {
-    pool: SqlitePool,
-    writers: Arc<WorktreeWriters>,
+    pub(crate) pool: SqlitePool,
+    pub(crate) writers: Arc<WorktreeWriters>,
     pub config: SessionConfig,
+    pub(crate) binding_writer_policy: WriterPolicy,
+    /// Deterministic mutation checkpoints used only by tests. Production
+    /// construction leaves this unset.
+    pub(crate) test_hooks: Option<WriteTestHooks>,
 }
 
 fn parse_ts(s: &str) -> Timestamp {
@@ -97,6 +146,34 @@ impl SessionService {
             pool,
             writers,
             config,
+            binding_writer_policy: WriterPolicy::default(),
+            test_hooks: None,
+        }
+    }
+
+    pub fn with_binding_test_controls(
+        pool: SqlitePool,
+        writers: Arc<WorktreeWriters>,
+        config: SessionConfig,
+        binding_writer_policy: WriterPolicy,
+        binding_hooks: WriteTestHooks,
+    ) -> Self {
+        Self::with_test_controls(pool, writers, config, binding_writer_policy, binding_hooks)
+    }
+
+    pub fn with_test_controls(
+        pool: SqlitePool,
+        writers: Arc<WorktreeWriters>,
+        config: SessionConfig,
+        binding_writer_policy: WriterPolicy,
+        test_hooks: WriteTestHooks,
+    ) -> Self {
+        Self {
+            pool,
+            writers,
+            config,
+            binding_writer_policy,
+            test_hooks: Some(test_hooks),
         }
     }
 
@@ -121,6 +198,7 @@ impl SessionService {
         agent_instance_id: &str,
         agent_pid: Option<i64>,
         snapshot: &SnapshotRow,
+        requested_scope: SessionBindingMode,
     ) -> Result<StartResult, SessionError> {
         let now = Timestamp::now();
         let cfg = self.config;
@@ -130,6 +208,8 @@ impl SessionService {
         let agent_type = agent_type.to_string();
         let agent_instance_id = agent_instance_id.to_string();
         let snapshot = snapshot.clone();
+        let error_repository_id = repository_id.clone();
+        let test_hooks = self.test_hooks.clone();
 
         ev::serialized_txn(
             &self.pool,
@@ -142,6 +222,14 @@ impl SessionService {
                             .await?;
 
                     if let Some(existing) = existing {
+                        let existing_scope = scope_for_session(conn, &existing).await?;
+                        if existing_scope != requested_scope {
+                            return Err(StorageError::SessionScopeConflict {
+                                session_id: existing.id.clone(),
+                                existing_mode: existing_scope.mode_name().into(),
+                                requested_mode: requested_scope.mode_name().into(),
+                            });
+                        }
                         let state = SessionState::parse(&existing.state)
                             .ok_or_else(|| StorageError::Corrupted("bad state".into()))?;
                         match state {
@@ -179,6 +267,8 @@ impl SessionService {
                                             &snapshot,
                                             &now,
                                             cfg.initial_lease_secs,
+                                            requested_scope,
+                                            test_hooks.as_ref(),
                                         )
                                         .await?;
                                         return Ok(StartResult {
@@ -219,6 +309,8 @@ impl SessionService {
                                     &snapshot,
                                     &now,
                                     cfg.initial_lease_secs,
+                                    requested_scope,
+                                    test_hooks.as_ref(),
                                 )
                                 .await?;
                                 return Ok(StartResult {
@@ -242,6 +334,8 @@ impl SessionService {
                         &snapshot,
                         &now,
                         cfg.initial_lease_secs,
+                        requested_scope,
+                        test_hooks.as_ref(),
                     )
                     .await?;
                     Ok(StartResult {
@@ -253,7 +347,7 @@ impl SessionService {
             }),
         )
         .await
-        .map_err(SessionError::from)
+        .map_err(|error| map_start_storage(error, &error_repository_id, requested_scope))
     }
 
     /// FR-036 adaptive resolution: instance context → that session; exactly
@@ -391,6 +485,7 @@ impl SessionService {
         let row_c = row.clone();
         let snapshot = fresh_snapshot.clone();
         let wk = row.worktree_id.clone();
+        let test_hooks = self.test_hooks.clone();
         ev::serialized_txn(
             &self.pool,
             &self.writers,
@@ -421,6 +516,9 @@ impl SessionService {
                         &snapshot.id,
                     );
                     ev::append_event(conn, &event).await?;
+                    if let Some(hooks) = test_hooks.as_ref() {
+                        hooks.checkpoint(WriteCheckpoint::PreCommit).await?;
+                    }
                     Ok(())
                 })
             }),
@@ -546,6 +644,7 @@ impl SessionService {
         let now = Timestamp::now();
         let mut n = 0;
         for row in rows {
+            let test_hooks = self.test_hooks.clone();
             let wk = row.worktree_id.clone();
             let id = row.id.clone();
             let now_s = now.to_rfc3339();
@@ -563,7 +662,11 @@ impl SessionService {
                             TransitionReason::DaemonRestart,
                             &now_s,
                         )
-                        .await
+                        .await?;
+                        if let Some(hooks) = test_hooks.as_ref() {
+                            hooks.checkpoint(WriteCheckpoint::PreCommit).await?;
+                        }
+                        Ok(())
                     })
                 }),
             )
@@ -646,10 +749,43 @@ async fn insert_new_session(
     snapshot: &SnapshotRow,
     now: &Timestamp,
     initial_lease_secs: i64,
+    requested_scope: SessionBindingMode,
+    test_hooks: Option<&WriteTestHooks>,
 ) -> Result<(SessionRow, String), StorageError> {
+    let prepared_binding = match requested_scope {
+        SessionBindingMode::LocalUnbound => {
+            if let Some(project_id) =
+                session_bindings::project_requiring_scope(conn, repository_id).await?
+            {
+                return Err(StorageError::ProjectScopeRequired { project_id });
+            }
+            None
+        }
+        SessionBindingMode::ProjectBound {
+            project_id,
+            task_revision_id,
+        } => {
+            let validated = session_bindings::validate_scope_for_worktree(
+                conn,
+                repository_id,
+                worktree_id,
+                &project_id.to_string(),
+                &task_revision_id.to_string(),
+            )
+            .await?;
+            Some(PreparedStartBinding {
+                project_id,
+                task_id: TaskId::from_str(&validated.task_id).map_err(|_| {
+                    StorageError::Corrupted("validated task ID is malformed".into())
+                })?,
+                task_revision_id,
+            })
+        }
+    };
     let (token, hash) = generate_resume_token();
-    let row = SessionRow {
-        id: SessionId::new_v7().to_string(),
+    let session_id = SessionId::new_v7();
+    let mut row = SessionRow {
+        id: session_id.to_string(),
         repository_id: repository_id.to_string(),
         worktree_id: worktree_id.to_string(),
         local_user: local_user.to_string(),
@@ -665,8 +801,16 @@ async fn insert_new_session(
         ended_at: None,
         last_heartbeat_at: now.to_rfc3339(),
         recovering_since: None,
+        binding_mode: "local_unbound".to_string(),
     };
+    if let Some(hooks) = test_hooks {
+        hooks.checkpoint(WriteCheckpoint::PreProjection).await?;
+    }
     sdao::insert(&mut *conn, &row).await?;
+    if let Some(hooks) = test_hooks {
+        hooks.checkpoint(WriteCheckpoint::PostProjection).await?;
+        hooks.checkpoint(WriteCheckpoint::PreEvent).await?;
+    }
     let event = cairn_events::EventBuilder::session_started(
         repository_id,
         worktree_id,
@@ -679,7 +823,189 @@ async fn insert_new_session(
         },
     );
     ev::append_event(&mut *conn, &event).await?;
+    if let Some(hooks) = test_hooks {
+        hooks.checkpoint(WriteCheckpoint::PostEvent).await?;
+    }
+    if let Some(binding) = prepared_binding {
+        let payload = SessionBoundPayload {
+            schema_version: 1,
+            binding: SessionBindingEvent {
+                session_id,
+                repository_id: repository_id.to_string(),
+                worktree_id: worktree_id.to_string(),
+                project_id: binding.project_id,
+                task_id: binding.task_id,
+                task_revision_id: binding.task_revision_id,
+                bound_at: *now,
+            },
+        };
+        if let Some(hooks) = test_hooks {
+            hooks.checkpoint(WriteCheckpoint::BetweenEvents).await?;
+        }
+        let bound = EventBuilder::session_bound_for_start(EventId::new_v7(), &row.id, &payload);
+        let appended = ev::append_event(&mut *conn, &bound).await?;
+        if appended.deduplicated {
+            return Err(StorageError::Corrupted(
+                "new bound-start event was unexpectedly deduplicated".into(),
+            ));
+        }
+        session_bindings::insert(
+            conn,
+            &SessionBindingRow {
+                session_id: row.id.clone(),
+                project_id: binding.project_id.to_string(),
+                task_revision_id: binding.task_revision_id.to_string(),
+                bound_at: now.to_rfc3339(),
+                binding_event_seq: appended.seq,
+            },
+        )
+        .await?;
+        if let Some(hooks) = test_hooks {
+            hooks.checkpoint(WriteCheckpoint::PostProjection).await?;
+        }
+        row.binding_mode = "project_bound".into();
+    }
+    if let Some(hooks) = test_hooks {
+        hooks.checkpoint(WriteCheckpoint::PreResultLocator).await?;
+        hooks.checkpoint(WriteCheckpoint::PreCommit).await?;
+    }
     Ok((row, token))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PreparedStartBinding {
+    project_id: ProjectId,
+    task_id: TaskId,
+    task_revision_id: TaskRevisionId,
+}
+
+async fn scope_for_session(
+    conn: &mut sqlx::SqliteConnection,
+    row: &SessionRow,
+) -> Result<SessionBindingMode, StorageError> {
+    match row.binding_mode.as_str() {
+        "local_unbound" => {
+            if session_bindings::get_in_tx(conn, &row.id).await?.is_some() {
+                return Err(StorageError::Corrupted(
+                    "local-unbound session has a binding projection".into(),
+                ));
+            }
+            Ok(SessionBindingMode::LocalUnbound)
+        }
+        "project_bound" => {
+            let binding = session_bindings::get_in_tx(conn, &row.id)
+                .await?
+                .ok_or_else(|| {
+                    StorageError::Corrupted(
+                        "project-bound session is missing its binding projection".into(),
+                    )
+                })?;
+            Ok(SessionBindingMode::ProjectBound {
+                project_id: ProjectId::from_str(&binding.project_id)
+                    .map_err(|_| StorageError::Corrupted("malformed binding project ID".into()))?,
+                task_revision_id: TaskRevisionId::from_str(&binding.task_revision_id)
+                    .map_err(|_| StorageError::Corrupted("malformed binding revision ID".into()))?,
+            })
+        }
+        _ => Err(StorageError::Corrupted(
+            "session has an invalid binding mode".into(),
+        )),
+    }
+}
+
+fn map_start_storage(
+    error: StorageError,
+    repository_id: &str,
+    requested_scope: SessionBindingMode,
+) -> SessionError {
+    let requested_project = match requested_scope {
+        SessionBindingMode::ProjectBound { project_id, .. } => Some(project_id),
+        SessionBindingMode::LocalUnbound => None,
+    };
+    let requested_revision = match requested_scope {
+        SessionBindingMode::ProjectBound {
+            task_revision_id, ..
+        } => Some(task_revision_id),
+        SessionBindingMode::LocalUnbound => None,
+    };
+    match error {
+        StorageError::ProjectScopeRequired { project_id } => {
+            match ProjectId::from_str(&project_id) {
+                Ok(project_id) => SessionError::ProjectScopeRequired {
+                    repository_id: repository_id.to_string(),
+                    project_id,
+                },
+                Err(_) => SessionError::Storage(StorageError::Corrupted(
+                    "scope-required project ID is malformed".into(),
+                )),
+            }
+        }
+        StorageError::SessionScopeConflict {
+            session_id,
+            existing_mode,
+            requested_mode,
+        } => {
+            let existing_mode = match existing_mode.as_str() {
+                "local_unbound" => SessionScopeName::LocalUnbound,
+                "project_bound" => SessionScopeName::ProjectBound,
+                _ => {
+                    return SessionError::Storage(StorageError::Corrupted(
+                        "scope-conflict mode is malformed".into(),
+                    ))
+                }
+            };
+            let requested_mode = match requested_mode.as_str() {
+                "local_unbound" => SessionScopeName::LocalUnbound,
+                "project_bound" => SessionScopeName::ProjectBound,
+                _ => {
+                    return SessionError::Storage(StorageError::Corrupted(
+                        "scope-conflict requested mode is malformed".into(),
+                    ))
+                }
+            };
+            SessionError::ScopeConflict {
+                session_id,
+                existing_mode,
+                requested_mode,
+            }
+        }
+        StorageError::Conflict(reason) if reason == "project_not_found" => requested_project
+            .map_or_else(
+                || SessionError::Storage(StorageError::Corrupted(reason)),
+                |project_id| SessionError::ProjectNotFound { project_id },
+            ),
+        StorageError::Conflict(reason) if reason == "project_archived" => requested_project
+            .map_or_else(
+                || SessionError::Storage(StorageError::Corrupted(reason)),
+                |project_id| SessionError::ProjectArchived { project_id },
+            ),
+        StorageError::Conflict(reason) if reason == "repository_not_associated" => {
+            requested_project.map_or_else(
+                || SessionError::Storage(StorageError::Corrupted(reason)),
+                |project_id| SessionError::RepositoryNotAssociated {
+                    repository_id: repository_id.to_string(),
+                    project_id,
+                },
+            )
+        }
+        StorageError::Conflict(reason) if reason == "revision_not_found" => requested_revision
+            .map_or_else(
+                || SessionError::Storage(StorageError::Corrupted(reason)),
+                |revision_id| SessionError::TaskRevisionNotFound { revision_id },
+            ),
+        StorageError::Conflict(reason) if reason == "task_revision_project_mismatch" => {
+            match (requested_project, requested_revision) {
+                (Some(expected_project_id), Some(revision_id)) => {
+                    SessionError::TaskRevisionProjectMismatch {
+                        revision_id,
+                        expected_project_id,
+                    }
+                }
+                _ => SessionError::Storage(StorageError::Corrupted(reason)),
+            }
+        }
+        other => SessionError::Storage(other),
+    }
 }
 
 async fn interrupt_in_txn(

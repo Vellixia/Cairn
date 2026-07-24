@@ -33,6 +33,64 @@
         "string",
         "null"
       ]
+    },
+    "scope": {
+      "description": "Omission by a Feature 001 client is the legacy request for `local_unbound`, still subject to the constitutional bootstrap gate.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/SessionScopeDto"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "definitions": {
+    "SessionScopeDto": {
+      "description": "Transport scope discriminator. It intentionally contains no lifecycle state because binding and liveness are independent dimensions.",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "mode"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "local_unbound"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "mode",
+            "project_id",
+            "task_revision_id"
+          ],
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "project_bound"
+              ]
+            },
+            "project_id": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "task_revision_id": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
     }
   }
 }

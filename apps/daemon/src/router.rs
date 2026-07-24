@@ -83,8 +83,68 @@ pub async fn dispatch(state: &AppState, req: Request) -> Response {
                 .map(|r| serde_json::to_value(r).expect("serializable")),
             Err(e) => Err(e),
         },
+        methods::SESSION_BIND => match parse(&req.params) {
+            Ok(p) => handlers::session::bind(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
         methods::EVENTS_LIST => match parse(&req.params) {
             Ok(p) => handlers::events::list(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::PROJECT_CREATE => match parse(&req.params) {
+            Ok(p) => handlers::projects::create(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::PROJECT_LIST => match parse(&req.params) {
+            Ok(p) => handlers::projects::list(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::PROJECT_GET => match parse(&req.params) {
+            Ok(p) => handlers::projects::get(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::PROJECT_UPDATE => match parse(&req.params) {
+            Ok(p) => handlers::projects::update(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::PROJECT_REPOSITORY_ASSOCIATE => match parse(&req.params) {
+            Ok(p) => handlers::projects::associate_repository(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::TASK_CREATE => match handlers::tasks::parse_create(&req.params) {
+            Ok(p) => handlers::tasks::create(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::TASK_REVISE => match handlers::tasks::parse_revise(&req.params) {
+            Ok(p) => handlers::tasks::revise(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::TASK_LIST => match parse(&req.params) {
+            Ok(p) => handlers::tasks::list(state, p)
+                .await
+                .map(|r| serde_json::to_value(r).expect("serializable")),
+            Err(e) => Err(e),
+        },
+        methods::TASK_GET => match parse(&req.params) {
+            Ok(p) => handlers::tasks::get(state, p)
                 .await
                 .map(|r| serde_json::to_value(r).expect("serializable")),
             Err(e) => Err(e),

@@ -4,7 +4,8 @@ use std::str::FromStr;
 
 use cairn_domain::{AgentInstanceId, SessionId, SessionState, SnapshotId, Timestamp};
 use cairn_protocol::{
-    RemoteDto, RepositoryDto, SessionDto, SessionSummaryDto, SnapshotDto, WorktreeDto,
+    RemoteDto, RepositoryDto, SessionDto, SessionScopeDto, SessionSummaryDto, SnapshotDto,
+    WorktreeDto,
 };
 use cairn_storage_local::{RepositoryRow, SessionRow, SnapshotRow, WorktreeRow};
 
@@ -63,6 +64,7 @@ pub fn session_dto(
     row: &SessionRow,
     start_snapshot: &SnapshotRow,
     current_snapshot: &SnapshotRow,
+    scope: SessionScopeDto,
 ) -> HandlerResult<SessionDto> {
     Ok(SessionDto {
         session_id: SessionId::from_str(&row.id)
@@ -82,10 +84,14 @@ pub fn session_dto(
         last_heartbeat_at: ts(&row.last_heartbeat_at)?,
         lease_expires_at: ts(&row.lease_expires_at)?,
         recovering_since: row.recovering_since.as_deref().map(ts).transpose()?,
+        scope,
     })
 }
 
-pub fn session_summary_dto(row: &SessionRow) -> HandlerResult<SessionSummaryDto> {
+pub fn session_summary_dto(
+    row: &SessionRow,
+    scope: SessionScopeDto,
+) -> HandlerResult<SessionSummaryDto> {
     Ok(SessionSummaryDto {
         session_id: SessionId::from_str(&row.id)
             .map_err(|e| HandlerError::new(ErrorCode::Internal, e.to_string()))?,
@@ -95,5 +101,6 @@ pub fn session_summary_dto(row: &SessionRow) -> HandlerResult<SessionSummaryDto>
         state: SessionState::parse(&row.state)
             .ok_or_else(|| HandlerError::new(ErrorCode::Internal, "bad state"))?,
         started_at: ts(&row.started_at)?,
+        scope,
     })
 }
