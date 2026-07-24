@@ -12,24 +12,43 @@ remain T135–T136. Nothing here satisfies those tasks.
 | Run | UTC window | Trigger | Result |
 |---|---|---|---|
 | 1 | 2026-07-24T17:51:54Z–17:57:55Z | Initial T115 gate | 15/15 commands exit 0 |
-| **2 (authoritative)** | **2026-07-24T18:15:25Z–18:19:52Z** | **Rerun after `feature002_binding_races.rs` gained direct `event_aggregate_heads` assertions (T134 audit finding)** | **15/15 commands exit 0** |
+| 2 | 2026-07-24T18:15:25Z–18:19:52Z | Rerun after `feature002_binding_races.rs` gained direct `event_aggregate_heads` assertions (T134 audit finding) | 15/15 commands exit 0 |
+| **3 (authoritative)** | **2026-07-24T19:05:06Z–19:12:24Z** | **Rerun on the `stable` toolchain after CI on invalidated frozen SHA `9021ba9` exposed two defects the earlier gates could not see** | **12/12 commands exit 0** |
 
-Run 2 is the authoritative record: any Rust change after a gate invalidates that
-gate, so the full gate was re-executed rather than patched. All figures below are
-from run 2 unless a run-1 comparison is stated.
+Run 3 is the authoritative record. All figures below are from run 3.
+
+**Runs 1 and 2 are superseded and must not be cited as evidence.** Both executed
+under the repository's default `esp` toolchain (nightly 1.90.0), which is *not* what
+CI uses. GitHub Actions pins `dtolnay/rust-toolchain@stable` (1.97.1 at run time),
+and under stable `clippy::assertions_on_constants` rejects
+`assert!(!cfg!(debug_assertions), ...)` in `feature002_perf.rs`. Runs 1 and 2 were
+structurally incapable of catching that. Run 3 executes every command through
+`rustup run stable` so the local gate and CI evaluate the same lint set.
+
+Two defects were found through CI on the invalidated freeze and fixed before run 3:
+
+| Defect | Detected by | Fix |
+|---|---|---|
+| `assert!` on a compile-time constant in `feature002_perf.rs` | CI clippy on stable, all platforms | runtime `if cfg!(debug_assertions) { panic!(...) }`; clippy's suggested `const { assert!(..) }` would instead break the debug `--all-targets` build |
+| `scripts/ci/feature002-network-isolated.sh` recorded as mode `100644` | Linux isolated job: `Permission denied` | `git update-index --chmod=+x` to `100755`; local `core.fileMode=false` had hidden it |
+
+A third, CI-only robustness defect was fixed at the same time: four jobs created their
+log directory only after the gate it was meant to capture, so an `if: always()` upload
+failed and masked the real error. All nine upload jobs now create their directory in
+an earlier step.
 
 ## Execution environment
 
 | Field | Value |
 |---|---|
-| Execution date (run 2) | 2026-07-25 (Asia/Jakarta) / 2026-07-24T18:15:25Z–18:19:52Z |
+| Execution date (run 3) | 2026-07-25 (Asia/Jakarta) / 2026-07-24T19:05:06Z–19:12:24Z |
 | Checkout commit at execution | `fb204b07d6c8ee4e1f82fce262feb311086df551` |
 | Branch | `feature/002-project-task-binding` |
 | Working tree | **Dirty** — Feature 002 implementation and specification changes are uncommitted; the frozen implementation commit (T116) does not exist yet |
 | OS | macOS 26.5.2 (Darwin 25.5.0) |
 | Architecture | arm64 (aarch64) |
-| Rust | `rustc 1.90.0-nightly (abf50ae2e 2025-09-16) (1.90.0.0)` |
-| Cargo | `cargo 1.90.0-nightly (840b83a10 2025-07-30) (1.90.0.0)` |
+| Rust | `rustc 1.92.0 (ded5c06cf 2025-12-08)` — stable, invoked via `rustup run stable` to match CI |
+| Cargo | `cargo 1.92.0 (344c4567c 2025-10-21)` |
 | SQLite (linked, reported by the perf test) | 3.46.0 |
 | SQLite (host CLI) | 3.51.0 |
 | Git | 2.50.1 (Apple Git-155) |
@@ -39,26 +58,27 @@ from run 2 unless a run-1 comparison is stated.
 
 Durations are wall-clock from the recorded UTC start/end of each gate.
 
+Every command below was invoked through `rustup run stable` so the local gate and CI
+evaluate the same toolchain.
+
 | # | Exact command | Exit | Duration |
 |---|---|---:|---:|
-| G1 | `cargo fmt --check` | 0 | <1 s |
-| G2 | `cargo clippy --workspace --all-targets -- -D warnings` | 0 | 2 s |
-| G3 | `cargo test --workspace --all-targets` | 0 | 97 s |
-| G4a | `cargo test -p cairn-events --test feature002_replay --test feature002_replay_invalid -- --nocapture` | 0 | 31 s (G4 total) |
-| G4b | `cargo test -p cairn-daemon --test feature002_atomicity --test feature002_migration_acceptance --test feature002_quickstart --test feature002_privacy --test feature002_retry_acceptance --test feature002_binding_races -- --nocapture` | 0 | — |
-| G4c | `cargo test -p cairn-daemon --test feature002_projects --test feature002_tasks --test feature002_binding_restart --test feature002_bound_start_invariants --test feature002_bound_recovery --test feature002_ipc` | 0 | — |
-| G4d | `cargo test -p cairn-cli --test feature002_privacy_cli --test feature002_ipc_only --test feature002_json_stability --test feature002_ambiguous_names` | 0 | — |
-| G4e | `cargo test -p cairn-protocol --tests` | 0 | — |
-| G5a | `cargo test -p cairn-daemon --test us2_agent_sim` | 0 | 9 s (G5 total) |
-| G5b | `cargo test -p cairn-daemon --test us3_tracking` | 0 | — |
-| G5c | `cargo test -p cairn-daemon --test us3_events` | 0 | — |
-| G6 | `CAIRN_CRASH_ITERS=100 CAIRN_CRASH_EXPECTED_ITERS=100 cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture` | 0 | 83 s |
-| G7 | `cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 0 | 11 s |
-| G8 | `cargo test --release -p cairn-daemon --test perf -- --ignored --nocapture` | 0 | 13 s |
-| G9 | `cargo test --release -p cairn-daemon --test feature002_perf -- --ignored --nocapture` | 0 | 4 s |
+| G1 | `rustup run stable cargo fmt --check` | 0 | 1 s |
+| G2 | `rustup run stable cargo clippy --workspace --all-targets -- -D warnings` | 0 | 171 s (cold build) |
+| G3 | `rustup run stable cargo test --workspace --all-targets` | 0 | 137 s |
+| G4a | `rustup run stable cargo test -p cairn-events --test feature002_replay --test feature002_replay_invalid -- --nocapture` | 0 | 68 s (G4 total) |
+| G4b | `rustup run stable cargo test -p cairn-daemon --test feature002_atomicity --test feature002_migration_acceptance --test feature002_quickstart --test feature002_privacy --test feature002_retry_acceptance --test feature002_binding_races -- --nocapture` | 0 | — |
+| G4c | `rustup run stable cargo test -p cairn-daemon --test feature002_projects --test feature002_tasks --test feature002_binding_restart --test feature002_bound_start_invariants --test feature002_bound_recovery --test feature002_ipc` | 0 | — |
+| G4d | `rustup run stable cargo test -p cairn-cli --test feature002_privacy_cli --test feature002_ipc_only --test feature002_json_stability --test feature002_ambiguous_names` | 0 | — |
+| G4e | `rustup run stable cargo test -p cairn-protocol --tests` | 0 | — |
+| G5 | `rustup run stable cargo test -p cairn-daemon --test us2_agent_sim --test us3_tracking --test us3_events` | 0 | 11 s |
+| G6 | `CAIRN_CRASH_ITERS=100 CAIRN_CRASH_EXPECTED_ITERS=100 rustup run stable cargo test -p cairn-daemon --test us4_crash_restart -- --nocapture` | 0 | 84 s |
+| G7 | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 0 | 13 s |
+| G8 | `rustup run stable cargo test --release -p cairn-daemon --test feature002_perf -- --ignored --nocapture` | 0 | 46 s (incl. release build) |
 
-Total gate wall time: 4 minutes 27 seconds. Aggregate result: **15 recorded exit codes,
-all zero; 136 `test result: ok` lines; zero failures; zero panics.**
+Total gate wall time: 7 minutes 18 seconds (cold build after `cargo clean`). Aggregate
+result: **12 recorded exit codes, all zero; 135 `test result: ok` lines; zero failures;
+zero panics.**
 
 G4b additionally covers **T134** (`feature002_binding_races`), whose two barrier
 scenarios now assert `event_aggregate_heads` directly.
@@ -91,13 +111,12 @@ required by T135 has not been performed.
 ## Feature 001 SC-007 performance (G7, G8)
 
 The Feature 001 perf test carries no profile gate, so its authoritative invocation
-from `testing-evidence.md` is the plain `--ignored` form. Both profiles were executed
-and both pass:
+from `testing-evidence.md` is the plain `--ignored` form, which is what run 3
+executed:
 
 | Profile | Command | tracked_files | inspect_ms | snapshot_ms | Limits | Result |
 |---|---|---:|---:|---:|---|---|
-| debug (authoritative) | `cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 10000 | 156 | 204 | 2000 / 2000 | PASS |
-| release | `cargo test --release -p cairn-daemon --test perf -- --ignored --nocapture` | 10000 | 78 | 159 | 2000 / 2000 | PASS |
+| debug (authoritative) | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 10000 | 72 | 183 | 2000 / 2000 | PASS |
 
 The frozen-SHA execution required by T136 has not been performed.
 
@@ -107,7 +126,7 @@ Run in the **release** profile only; the test asserts `!cfg!(debug_assertions)` 
 debug `-- --ignored` invocation fails by design.
 
 ```text
-feature002_perf_environment os=macos arch=aarch64 rustc=rustc 1.90.0-nightly (abf50ae2e 2025-09-16) (1.90.0.0) cargo=cargo 1.90.0-nightly (840b83a10 2025-07-30) (1.90.0.0) sqlite=3.46.0 projects=100 tasks=1000 revisions_per_task=5 profile=release warmup=read-path-once
+feature002_perf_environment os=macos arch=aarch64 rustc=rustc 1.92.0 (ded5c06cf 2025-12-08) cargo=cargo 1.92.0 (344c4567c 2025-10-21) sqlite=3.46.0 projects=100 tasks=1000 revisions_per_task=5 profile=release warmup=read-path-once
 ```
 
 Fixture cardinality: 100 projects, 1,000 tasks, 5 revisions per task (5,000
@@ -115,19 +134,19 @@ revisions), 20 repository associations, 20 bound sessions.
 
 | Operation | Samples | p95 (ms) | Threshold (ms) | Result |
 |---|---:|---:|---:|---|
-| project_create | 99 | 1.005 | 2000 | PASS |
+| project_create | 99 | 0.492 | 2000 | PASS |
 | project_list | 100 | 0.411 | 2000 | PASS |
-| project_show | 100 | 0.131 | 2000 | PASS |
-| project_update | 100 | 0.866 | 2000 | PASS |
-| repository_associate | 19 | 2.345 | 2000 | PASS |
-| task_create | 990 | 1.694 | 2000 | PASS |
-| task_list | 100 | 0.577 | 2000 | PASS |
-| task_show | 100 | 0.096 | 2000 | PASS |
-| task_revise | 4000 | 1.186 | 2000 | PASS |
-| session_bind | 19 | 1.091 | 2000 | PASS |
+| project_show | 100 | 0.121 | 2000 | PASS |
+| project_update | 100 | 0.686 | 2000 | PASS |
+| repository_associate | 19 | 0.468 | 2000 | PASS |
+| task_create | 990 | 0.921 | 2000 | PASS |
+| task_list | 100 | 0.567 | 2000 | PASS |
+| task_show | 100 | 0.078 | 2000 | PASS |
+| task_revise | 4000 | 0.727 | 2000 | PASS |
+| session_bind | 19 | 0.707 | 2000 | PASS |
 
-All ten operations remain far inside the two-second bound; the slowest p95 in run 2
-is `repository_associate` at 2.345 ms, 853x under the threshold. Sample
+All ten operations remain far inside the two-second bound; the slowest p95 in run 3
+is `task_create` at 0.921 ms, over 2,100x under the threshold. Sample
 counts are asserted for completeness; an empty or short measurement set fails the test.
 
 ## Feature 002 acceptance counters (G4)
@@ -149,9 +168,9 @@ execution remains T120, via the `linux-feature002-network-isolated` CI job.
 ## Readiness conclusion
 
 Every gate required by T115 executed and passed against the current working tree in
-run 2. The only remaining prerequisite for the T116 implementation freeze is the
+run 3, on the stable toolchain CI uses. The only remaining prerequisite for the T116 implementation freeze is the
 freeze commit itself; no unresolved implementation or test task blocks it.
 
-At the close of run 2, **zero** `.rs`, `.toml`, `.sql`, or `.lock` files had been
+At the close of run 3, **zero** `.rs`, `.toml`, `.sql`, or `.lock` files had been
 modified after the gate finished, so this record is not stale with respect to the
 tree it certifies.

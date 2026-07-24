@@ -151,10 +151,13 @@ async fn seed_repository_and_session(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "SC-010 acceptance; execute explicitly in release profile"]
 async fn feature002_operations_meet_two_second_p95_at_authoritative_fixture_size() {
-    assert!(
-        !cfg!(debug_assertions),
-        "SC-010 must execute with --release"
-    );
+    // Reject the debug profile at run time rather than through `assert!`, whose
+    // argument is a compile-time constant here. A `const` assertion would break the
+    // debug `--all-targets` build instead of failing only this acceptance run, and
+    // clippy's `assertions_on_constants` rejects the constant `assert!` form.
+    if cfg!(debug_assertions) {
+        panic!("SC-010 must execute with --release");
+    }
     let dir = tempfile::tempdir().unwrap();
     let pool = cairn_storage_local::open_pool_at(&dir.path().join("performance.sqlite3"))
         .await

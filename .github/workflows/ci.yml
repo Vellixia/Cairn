@@ -130,6 +130,9 @@ jobs:
       - name: Record exact Windows implementation environment
         shell: pwsh
         run: |
+          # Created before any gate so the always() upload cannot fail on a
+          # missing directory and mask the real failure.
+          New-Item -ItemType Directory -Force -Path target/windows-feature001-logs | Out-Null
           Write-Host "implementation_sha=$(git rev-parse HEAD)"
           $os = Get-CimInstance Win32_OperatingSystem
           Write-Host "os=$($os.Caption) $($os.Version)"
@@ -208,7 +211,11 @@ jobs:
           git config --global user.name "CI"
           git config --global user.email "ci@cairn.invalid"
       - name: Record exact implementation SHA
-        run: echo "implementation_sha=$(git rev-parse HEAD)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/sc005-logs
+          echo "implementation_sha=$(git rev-parse HEAD)" | tee target/sc005-logs/environment.txt
       - name: Run exactly-100-kill acceptance
         env:
           CAIRN_CRASH_ITERS: "100"
@@ -256,7 +263,10 @@ jobs:
           git config --global user.name "CI"
           git config --global user.email "ci@cairn.invalid"
       - name: Record exact Linux implementation environment
+        shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p target/feature001-isolation-logs
           echo "implementation_sha=$(git rev-parse HEAD)"
           . /etc/os-release
           echo "os=$PRETTY_NAME"
@@ -409,13 +419,18 @@ jobs:
           git config --global user.name "CI"
           git config --global user.email "ci@cairn.invalid"
       - name: Record exact performance environment
+        shell: bash
         run: |
-          echo "implementation_sha=$(git rev-parse HEAD)"
-          . /etc/os-release
-          echo "os=$PRETTY_NAME"
-          echo "architecture=$(uname -m)"
-          rustc --version
-          cargo --version
+          set -euo pipefail
+          mkdir -p target/sc007-logs
+          {
+            echo "implementation_sha=$(git rev-parse HEAD)"
+            . /etc/os-release
+            echo "os=$PRETTY_NAME"
+            echo "architecture=$(uname -m)"
+            rustc --version
+            cargo --version
+          } | tee target/sc007-logs/environment.txt
       - name: Run perf suite
         env:
           RUST_TEST_NOCAPTURE: "1"
