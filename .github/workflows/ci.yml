@@ -372,7 +372,10 @@ jobs:
             --test feature002_replay \
             --no-run
       - name: Preload fail-closed container fallback
-        run: docker pull rust:1-bookworm
+        # Ubuntu 24.04 base so the container glibc matches the ubuntu-latest
+        # runner that builds the prebuilt acceptance binaries. A Debian bookworm
+        # image ships glibc 2.36 and cannot load binaries linked against 2.39.
+        run: docker pull rust:1-noble
       - name: Execute Feature 002 without external networking
         shell: bash
         run: |

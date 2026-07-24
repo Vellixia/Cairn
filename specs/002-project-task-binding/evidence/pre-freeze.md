@@ -13,9 +13,10 @@ remain T135–T136. Nothing here satisfies those tasks.
 |---|---|---|---|
 | 1 | 2026-07-24T17:51:54Z–17:57:55Z | Initial T115 gate | 15/15 commands exit 0 |
 | 2 | 2026-07-24T18:15:25Z–18:19:52Z | Rerun after `feature002_binding_races.rs` gained direct `event_aggregate_heads` assertions (T134 audit finding) | 15/15 commands exit 0 |
-| **3 (authoritative)** | **2026-07-24T19:05:06Z–19:12:24Z** | **Rerun on the `stable` toolchain after CI on invalidated frozen SHA `9021ba9` exposed two defects the earlier gates could not see** | **12/12 commands exit 0** |
+| 3 | 2026-07-24T19:05:06Z–19:12:24Z | Rerun on the `stable` toolchain after CI on invalidated frozen SHA `9021ba9` exposed two defects the earlier gates could not see | 12/12 commands exit 0 |
+| **4 (authoritative)** | **2026-07-24T19:30:36Z–19:34:17Z** | **Rerun after CI on invalidated frozen SHA `964eb3a` exposed a container/glibc defect in the isolation harness** | **12/12 commands exit 0** |
 
-Run 3 is the authoritative record. All figures below are from run 3.
+Run 4 is the authoritative record. All figures below are from run 4.
 
 **Runs 1 and 2 are superseded and must not be cited as evidence.** Both executed
 under the repository's default `esp` toolchain (nightly 1.90.0), which is *not* what
@@ -25,7 +26,7 @@ and under stable `clippy::assertions_on_constants` rejects
 structurally incapable of catching that. Run 3 executes every command through
 `rustup run stable` so the local gate and CI evaluate the same lint set.
 
-Two defects were found through CI on the invalidated freeze and fixed before run 3:
+Two defects were found through CI on invalidated freeze `9021ba9` and fixed before run 3:
 
 | Defect | Detected by | Fix |
 |---|---|---|
@@ -37,11 +38,23 @@ log directory only after the gate it was meant to capture, so an `if: always()` 
 failed and masked the real error. All nine upload jobs now create their directory in
 an earlier step.
 
+Exact-SHA CI on freeze `964eb3a` then passed **12 of 13 jobs** and exposed one further
+defect, fixed before run 4:
+
+| Defect | Detected by | Fix |
+|---|---|---|
+| Prebuilt acceptance binaries are built on `ubuntu-latest` (glibc 2.39) but the isolation fallback ran them in `rust:1-bookworm` (Debian 12, glibc 2.36), so every binary failed to load with `GLIBC_2.39 not found` | Linux isolated Feature 002 job | default container image changed to `rust:1-noble` (Ubuntu 24.04, glibc 2.39); the harness now also preflights every prebuilt binary with `--list` inside isolation and fails with a precise `prebuilt_binary_incompatible_with_isolation_environment` error instead of a confusing test failure |
+| Container-created files were root-owned, so the cleanup trap failed and changed the harness exit status | same job | `docker run --user "$(id -u):$(id -g)"` plus a cleanup trap that can never alter the exit status |
+
+That run did prove, inside genuine `docker --network none` isolation:
+`external_network=unreachable`, `local_filesystem=available`, and
+`local_git=available`. It failed only when loading the prebuilt binaries.
+
 ## Execution environment
 
 | Field | Value |
 |---|---|
-| Execution date (run 3) | 2026-07-25 (Asia/Jakarta) / 2026-07-24T19:05:06Z–19:12:24Z |
+| Execution date (run 4) | 2026-07-25 (Asia/Jakarta) / 2026-07-24T19:30:36Z–19:34:17Z |
 | Checkout commit at execution | `fb204b07d6c8ee4e1f82fce262feb311086df551` |
 | Branch | `feature/002-project-task-binding` |
 | Working tree | **Dirty** — Feature 002 implementation and specification changes are uncommitted; the frozen implementation commit (T116) does not exist yet |
@@ -64,8 +77,8 @@ evaluate the same toolchain.
 | # | Exact command | Exit | Duration |
 |---|---|---:|---:|
 | G1 | `rustup run stable cargo fmt --check` | 0 | 1 s |
-| G2 | `rustup run stable cargo clippy --workspace --all-targets -- -D warnings` | 0 | 171 s (cold build) |
-| G3 | `rustup run stable cargo test --workspace --all-targets` | 0 | 137 s |
+| G2 | `rustup run stable cargo clippy --workspace --all-targets -- -D warnings` | 0 | 27 s |
+| G3 | `rustup run stable cargo test --workspace --all-targets` | 0 | 96 s |
 | G4a | `rustup run stable cargo test -p cairn-events --test feature002_replay --test feature002_replay_invalid -- --nocapture` | 0 | 68 s (G4 total) |
 | G4b | `rustup run stable cargo test -p cairn-daemon --test feature002_atomicity --test feature002_migration_acceptance --test feature002_quickstart --test feature002_privacy --test feature002_retry_acceptance --test feature002_binding_races -- --nocapture` | 0 | — |
 | G4c | `rustup run stable cargo test -p cairn-daemon --test feature002_projects --test feature002_tasks --test feature002_binding_restart --test feature002_bound_start_invariants --test feature002_bound_recovery --test feature002_ipc` | 0 | — |
@@ -76,9 +89,8 @@ evaluate the same toolchain.
 | G7 | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 0 | 13 s |
 | G8 | `rustup run stable cargo test --release -p cairn-daemon --test feature002_perf -- --ignored --nocapture` | 0 | 46 s (incl. release build) |
 
-Total gate wall time: 7 minutes 18 seconds (cold build after `cargo clean`). Aggregate
-result: **12 recorded exit codes, all zero; 135 `test result: ok` lines; zero failures;
-zero panics.**
+Total gate wall time: 3 minutes 41 seconds. Aggregate result: **12 recorded exit codes,
+all zero; 135 `test result: ok` lines; zero failures; zero panics.**
 
 G4b additionally covers **T134** (`feature002_binding_races`), whose two barrier
 scenarios now assert `event_aggregate_heads` directly.
@@ -116,7 +128,7 @@ executed:
 
 | Profile | Command | tracked_files | inspect_ms | snapshot_ms | Limits | Result |
 |---|---|---:|---:|---:|---|---|
-| debug (authoritative) | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 10000 | 72 | 183 | 2000 / 2000 | PASS |
+| debug (authoritative) | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 10000 | 76 | 192 | 2000 / 2000 | PASS |
 
 The frozen-SHA execution required by T136 has not been performed.
 
@@ -134,19 +146,19 @@ revisions), 20 repository associations, 20 bound sessions.
 
 | Operation | Samples | p95 (ms) | Threshold (ms) | Result |
 |---|---:|---:|---:|---|
-| project_create | 99 | 0.492 | 2000 | PASS |
-| project_list | 100 | 0.411 | 2000 | PASS |
-| project_show | 100 | 0.121 | 2000 | PASS |
-| project_update | 100 | 0.686 | 2000 | PASS |
-| repository_associate | 19 | 0.468 | 2000 | PASS |
-| task_create | 990 | 0.921 | 2000 | PASS |
-| task_list | 100 | 0.567 | 2000 | PASS |
-| task_show | 100 | 0.078 | 2000 | PASS |
-| task_revise | 4000 | 0.727 | 2000 | PASS |
-| session_bind | 19 | 0.707 | 2000 | PASS |
+| project_create | 99 | 0.777 | 2000 | PASS |
+| project_list | 100 | 0.392 | 2000 | PASS |
+| project_show | 100 | 0.110 | 2000 | PASS |
+| project_update | 100 | 0.637 | 2000 | PASS |
+| repository_associate | 19 | 0.740 | 2000 | PASS |
+| task_create | 990 | 0.931 | 2000 | PASS |
+| task_list | 100 | 0.578 | 2000 | PASS |
+| task_show | 100 | 0.079 | 2000 | PASS |
+| task_revise | 4000 | 0.753 | 2000 | PASS |
+| session_bind | 19 | 0.855 | 2000 | PASS |
 
 All ten operations remain far inside the two-second bound; the slowest p95 in run 3
-is `task_create` at 0.921 ms, over 2,100x under the threshold. Sample
+is `task_create` at 0.931 ms, over 2,100x under the threshold. Sample
 counts are asserted for completeness; an empty or short measurement set fails the test.
 
 ## Feature 002 acceptance counters (G4)
@@ -168,9 +180,9 @@ execution remains T120, via the `linux-feature002-network-isolated` CI job.
 ## Readiness conclusion
 
 Every gate required by T115 executed and passed against the current working tree in
-run 3, on the stable toolchain CI uses. The only remaining prerequisite for the T116 implementation freeze is the
+run 4, on the stable toolchain CI uses. The only remaining prerequisite for the T116 implementation freeze is the
 freeze commit itself; no unresolved implementation or test task blocks it.
 
-At the close of run 3, **zero** `.rs`, `.toml`, `.sql`, or `.lock` files had been
+At the close of run 4, **zero** `.rs`, `.toml`, `.sql`, or `.lock` files had been
 modified after the gate finished, so this record is not stale with respect to the
 tree it certifies.

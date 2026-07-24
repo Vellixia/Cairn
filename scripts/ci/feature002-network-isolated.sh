@@ -60,6 +60,20 @@ run_inside() {
   fi
   echo "external_network=unreachable"
 
+  # The binaries are built on the host and executed here. If the isolation
+  # environment has an older glibc than the builder they will not load at all,
+  # which must surface as a precise harness error rather than a confusing test
+  # failure. `--list` runs the libtest harness without executing any test.
+  local prebuilt
+  for prebuilt in "$bundle"/bin/*; do
+    if ! "$prebuilt" --list >/dev/null 2>"$proof_dir/loader-error.txt"; then
+      echo "loader_error_for=$(basename "$prebuilt")" >&2
+      sed -n '1,3p' "$proof_dir/loader-error.txt" >&2 || true
+      die "prebuilt_binary_incompatible_with_isolation_environment"
+    fi
+  done
+  echo "prebuilt_binaries_loadable=yes"
+
   export CAIRN_FEATURE001_FIXTURE_DIR="$bundle/fixtures/databases"
   export RUST_BACKTRACE=0
   "$bundle/bin/feature002_migration_acceptance" --nocapture
@@ -116,7 +130,9 @@ fi
 [[ -f "$workspace/fixtures/databases/feature-001-v1.manifest.json" ]] || die "feature001_manifest_not_found"
 
 bundle="$(mktemp -d "${TMPDIR:-/tmp}/cairn-feature002-isolated.XXXXXX")"
-trap 'rm -rf "$bundle"' EXIT
+# Cleanup must never change the exit status: a container can leave files the
+# runner user cannot remove, and that is not a test signal.
+trap 'rm -rf "$bundle" 2>/dev/null || true' EXIT
 mkdir -p "$bundle/bin" "$bundle/fixtures/databases"
 cp "$0" "$bundle/harness.sh"
 chmod +x "$bundle/harness.sh"
@@ -148,12 +164,18 @@ fi
 
 command -v docker >/dev/null 2>&1 || die "no_network_namespace_or_container_runtime"
 docker info >/dev/null 2>&1 || die "container_runtime_unavailable"
-container_image="${CAIRN_ISOLATION_CONTAINER_IMAGE:-rust:1-bookworm}"
+# Default to an Ubuntu 24.04 base so the container glibc matches the
+# ubuntu-latest runner that builds the binaries. A Debian bookworm image ships
+# glibc 2.36 and cannot load binaries linked against 2.39.
+container_image="${CAIRN_ISOLATION_CONTAINER_IMAGE:-rust:1-noble}"
 docker image inspect "$container_image" >/dev/null 2>&1 || die "isolation_container_image_not_preloaded"
 echo "selected_isolation=docker_network_none"
+# Run as the invoking user so bundle artifacts stay removable by the runner.
 docker run --rm --network none \
+  --user "$(id -u):$(id -g)" \
   --volume "$bundle:/bundle" \
   --workdir /bundle \
+  --env HOME=/bundle \
   --env CAIRN_ISOLATION_MECHANISM="docker --network none" \
   "$container_image" \
   bash /bundle/harness.sh --inside /bundle
