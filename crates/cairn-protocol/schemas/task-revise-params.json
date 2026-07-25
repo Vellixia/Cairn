@@ -1,0 +1,79 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TaskReviseParams",
+  "type": "object",
+  "required": [
+    "goal_contract",
+    "idempotency_key",
+    "task_id"
+  ],
+  "properties": {
+    "goal_contract": {
+      "$ref": "#/definitions/GoalContractV1"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "parent_revision_id": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "uuid"
+    },
+    "task_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "GoalContractV1": {
+      "description": "Validated, normalized, immutable version-one goal contract. Field order is declaration order and therefore canonical JSON order.",
+      "type": "object",
+      "required": [
+        "acceptance_criteria",
+        "constraints",
+        "excluded_scope",
+        "goal",
+        "included_scope",
+        "schema_version"
+      ],
+      "properties": {
+        "acceptance_criteria": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "excluded_scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "goal": {
+          "type": "string"
+        },
+        "included_scope": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "schema_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{"id":"error-session-scope-conflict","error":{"code":"SESSION_SCOPE_CONFLICT","message":"healthy session has another scope","data":{"kind":"session_scope_conflict","session_id":"018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0e","existing_mode":"project_bound","requested_mode":"local_unbound"}}}

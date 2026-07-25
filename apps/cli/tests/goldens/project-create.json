@@ -1,0 +1,16 @@
+{
+  "command": "project.create",
+  "data": {
+    "created": true,
+    "project": {
+      "created_at": "2026-07-20T00:00:00Z",
+      "description": null,
+      "name": "Cairn",
+      "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0a",
+      "status": "active",
+      "updated_at": "2026-07-20T00:00:00Z"
+    }
+  },
+  "ok": true,
+  "schema": "cairn.cli.v1"
+}

@@ -1,0 +1,22 @@
+{
+  "id": "events-legacy-1",
+  "result": {
+    "events": [
+      {
+        "seq": 1,
+        "id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0c",
+        "event_type": "repository.registered",
+        "repository_id": "repository-1",
+        "worktree_id": "worktree-1",
+        "session_id": null,
+        "snapshot_id": null,
+        "aggregate_type": null,
+        "aggregate_id": null,
+        "aggregate_seq": null,
+        "payload": {"schema_version": 1},
+        "recorded_at": "2026-07-19T00:00:00.000Z"
+      }
+    ],
+    "next_after_seq": null
+  }
+}

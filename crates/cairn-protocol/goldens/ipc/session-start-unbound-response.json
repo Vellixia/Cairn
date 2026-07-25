@@ -1,0 +1,46 @@
+{
+  "id": "scope-contract-1",
+  "result": {
+    "session": {
+      "session_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d06",
+      "repository_id": "repo-001",
+      "worktree_id": "worktree-001",
+      "local_user": "contract-user",
+      "agent_type": "contract-agent",
+      "agent_instance_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d01",
+      "state": "active",
+      "start_snapshot": {
+        "snapshot_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d07",
+        "branch": "main",
+        "detached": false,
+        "head_commit": "0000000000000000000000000000000000000000",
+        "staged_fp": "1111111111111111111111111111111111111111111111111111111111111111",
+        "unstaged_fp": "2222222222222222222222222222222222222222222222222222222222222222",
+        "untracked_fp": "3333333333333333333333333333333333333333333333333333333333333333",
+        "snapshot_fp": "4444444444444444444444444444444444444444444444444444444444444444",
+        "created_at": "2026-07-22T00:00:00Z"
+      },
+      "current_snapshot": {
+        "snapshot_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d07",
+        "branch": "main",
+        "detached": false,
+        "head_commit": "0000000000000000000000000000000000000000",
+        "staged_fp": "1111111111111111111111111111111111111111111111111111111111111111",
+        "unstaged_fp": "2222222222222222222222222222222222222222222222222222222222222222",
+        "untracked_fp": "3333333333333333333333333333333333333333333333333333333333333333",
+        "snapshot_fp": "4444444444444444444444444444444444444444444444444444444444444444",
+        "created_at": "2026-07-22T00:00:00Z"
+      },
+      "started_at": "2026-07-22T00:00:00Z",
+      "ended_at": null,
+      "last_heartbeat_at": "2026-07-22T00:00:00Z",
+      "lease_expires_at": "2026-07-22T00:15:00Z",
+      "recovering_since": null,
+      "scope": {
+        "mode": "local_unbound"
+      }
+    },
+    "resume_token": "one-time-contract-token",
+    "outcome": "created"
+  }
+}

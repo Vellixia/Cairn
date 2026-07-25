@@ -1,0 +1,16 @@
+{
+  "schema": "cairn.cli.v1",
+  "ok": false,
+  "command": "task.create",
+  "error": {
+    "code": "IDEMPOTENCY_CONFLICT",
+    "message": "idempotency key conflicts with an existing operation",
+    "data": {
+      "kind": "idempotency_conflict",
+      "idempotency_key": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0e",
+      "existing_method": "task.create",
+      "requested_method": "task.create",
+      "reason": "request_mismatch"
+    }
+  }
+}

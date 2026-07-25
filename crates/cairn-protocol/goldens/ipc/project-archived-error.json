@@ -1,0 +1,11 @@
+{
+  "error": {
+    "code": "PROJECT_ARCHIVED",
+    "data": {
+      "kind": "project_archived",
+      "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0a"
+    },
+    "message": "project is archived"
+  },
+  "id": "project-error-1"
+}

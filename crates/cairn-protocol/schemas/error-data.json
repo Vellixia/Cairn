@@ -1,0 +1,653 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ErrorData",
+  "description": "Typed data for the closed Feature 001+002 error-code set.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "stage"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "watcher_start_failure"
+          ]
+        },
+        "stage": {
+          "$ref": "#/definitions/WatcherStartStage"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "project_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project_not_found"
+          ]
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "project_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project_archived"
+          ]
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "project_id",
+        "repository_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "project_scope_required"
+          ]
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "repository_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "field",
+        "kind",
+        "rule"
+      ],
+      "properties": {
+        "field": {
+          "$ref": "#/definitions/InvalidProjectField"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "invalid_project"
+          ]
+        },
+        "rule": {
+          "$ref": "#/definitions/ValidationRule"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "task_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "task_not_found"
+          ]
+        },
+        "task_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "field",
+        "kind",
+        "rule"
+      ],
+      "properties": {
+        "field": {
+          "$ref": "#/definitions/InvalidTaskField"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "invalid_task"
+          ]
+        },
+        "rule": {
+          "$ref": "#/definitions/ValidationRule"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "revision_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "task_revision_not_found"
+          ]
+        },
+        "revision_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "reason",
+        "task_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "task_revision_conflict"
+          ]
+        },
+        "reason": {
+          "$ref": "#/definitions/TaskRevisionConflictReason"
+        },
+        "task_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "project_id",
+        "repository_id"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "repository_not_associated"
+          ]
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "repository_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "existing_project_id",
+        "kind",
+        "repository_id",
+        "requested_project_id"
+      ],
+      "properties": {
+        "existing_project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "repository_already_associated"
+          ]
+        },
+        "repository_id": {
+          "type": "string"
+        },
+        "requested_project_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "expected_project_id",
+        "kind",
+        "revision_id"
+      ],
+      "properties": {
+        "expected_project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "task_revision_project_mismatch"
+          ]
+        },
+        "revision_id": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "existing_project_id",
+        "existing_revision_id",
+        "kind",
+        "session_id"
+      ],
+      "properties": {
+        "existing_project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "existing_revision_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "session_already_bound"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "existing_mode",
+        "kind",
+        "requested_mode",
+        "session_id"
+      ],
+      "properties": {
+        "existing_mode": {
+          "$ref": "#/definitions/BindingModeName"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "session_scope_conflict"
+          ]
+        },
+        "requested_mode": {
+          "$ref": "#/definitions/BindingModeName"
+        },
+        "session_id": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "candidate_ids",
+        "entity",
+        "kind",
+        "truncated"
+      ],
+      "properties": {
+        "candidate_ids": {
+          "$ref": "#/definitions/CandidateIds"
+        },
+        "entity": {
+          "$ref": "#/definitions/AmbiguousEntity"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "ambiguous_name"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "violations"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "invalid_goal_contract"
+          ]
+        },
+        "violations": {
+          "$ref": "#/definitions/GoalContractViolations"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "target_version"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "migration_failure"
+          ]
+        },
+        "target_version": {
+          "type": "integer",
+          "format": "uint16",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "existing_method",
+        "idempotency_key",
+        "kind",
+        "reason",
+        "requested_method"
+      ],
+      "properties": {
+        "existing_method": {
+          "$ref": "#/definitions/OperationMethod"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "idempotency_conflict"
+          ]
+        },
+        "reason": {
+          "$ref": "#/definitions/IdempotencyConflictReason"
+        },
+        "requested_method": {
+          "$ref": "#/definitions/OperationMethod"
+        }
+      },
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "kind",
+        "max_elapsed_ms"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "storage_busy"
+          ]
+        },
+        "max_elapsed_ms": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0.0
+        }
+      },
+      "additionalProperties": false
+    }
+  ],
+  "definitions": {
+    "AmbiguousEntity": {
+      "type": "string",
+      "enum": [
+        "project",
+        "task"
+      ]
+    },
+    "BindingModeName": {
+      "type": "string",
+      "enum": [
+        "local_unbound",
+        "project_bound"
+      ]
+    },
+    "CandidateIds": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 20
+    },
+    "GoalContractField": {
+      "type": "string",
+      "enum": [
+        "schema_version",
+        "goal",
+        "included_scope",
+        "excluded_scope",
+        "acceptance_criteria",
+        "constraints",
+        "goal_contract"
+      ]
+    },
+    "GoalContractViolation": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "field",
+            "violation"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/definitions/GoalContractField"
+            },
+            "violation": {
+              "type": "string",
+              "enum": [
+                "missing_required_field"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "field",
+            "violation"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/definitions/GoalContractField"
+            },
+            "violation": {
+              "type": "string",
+              "enum": [
+                "malformed_structure"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "field",
+            "violation"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/definitions/GoalContractField"
+            },
+            "violation": {
+              "type": "string",
+              "enum": [
+                "empty_goal"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "field",
+            "index",
+            "violation"
+          ],
+          "properties": {
+            "field": {
+              "$ref": "#/definitions/GoalContractField"
+            },
+            "index": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "violation": {
+              "type": "string",
+              "enum": [
+                "empty_list_entry"
+              ]
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "version",
+            "violation"
+          ],
+          "properties": {
+            "version": {
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0.0
+            },
+            "violation": {
+              "type": "string",
+              "enum": [
+                "unsupported_version"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "GoalContractViolations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/GoalContractViolation"
+      },
+      "maxItems": 32,
+      "minItems": 1
+    },
+    "IdempotencyConflictReason": {
+      "type": "string",
+      "enum": [
+        "method_mismatch",
+        "request_mismatch"
+      ]
+    },
+    "InvalidProjectField": {
+      "type": "string",
+      "enum": [
+        "name",
+        "description",
+        "status"
+      ]
+    },
+    "InvalidTaskField": {
+      "type": "string",
+      "enum": [
+        "title"
+      ]
+    },
+    "OperationMethod": {
+      "type": "string",
+      "enum": [
+        "project.create",
+        "project.update",
+        "project.repository_associate",
+        "task.create",
+        "task.revise",
+        "session.bind"
+      ]
+    },
+    "TaskRevisionConflictReason": {
+      "type": "string",
+      "enum": [
+        "parent_mismatch"
+      ]
+    },
+    "ValidationRule": {
+      "type": "string",
+      "enum": [
+        "required",
+        "empty",
+        "conflicting_fields"
+      ]
+    },
+    "WatcherStartStage": {
+      "description": "Stage of the watcher-readiness protocol that failed (FR-038).",
+      "type": "string",
+      "enum": [
+        "install",
+        "reconcile"
+      ]
+    }
+  }
+}

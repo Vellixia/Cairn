@@ -1,0 +1,16 @@
+{
+  "command": "project.create",
+  "error": {
+    "code": "IDEMPOTENCY_CONFLICT",
+    "data": {
+      "existing_method": "project.create",
+      "idempotency_key": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0c",
+      "kind": "idempotency_conflict",
+      "reason": "request_mismatch",
+      "requested_method": "project.create"
+    },
+    "message": "idempotency key conflicts with an earlier operation"
+  },
+  "ok": false,
+  "schema": "cairn.cli.v1"
+}

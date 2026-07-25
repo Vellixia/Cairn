@@ -1,0 +1,9 @@
+{
+  "id": "project-contract-2",
+  "method": "v1.project.list",
+  "params": {
+    "after_project_id": null,
+    "limit": 50,
+    "status": "active"
+  }
+}

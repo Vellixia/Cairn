@@ -1,0 +1,12 @@
+{
+  "id": "binding-contract-1",
+  "error": {
+    "code": "REPOSITORY_NOT_ASSOCIATED",
+    "message": "repository is not associated with project",
+    "data": {
+      "kind": "repository_not_associated",
+      "repository_id": "repository-1",
+      "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0b"
+    }
+  }
+}

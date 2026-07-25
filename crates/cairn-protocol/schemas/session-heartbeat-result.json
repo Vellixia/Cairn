@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionHeartbeatResult",
+  "type": "object",
+  "required": [
+    "last_heartbeat_at",
+    "lease_expires_at",
+    "state"
+  ],
+  "properties": {
+    "last_heartbeat_at": {
+      "type": "string"
+    },
+    "lease_expires_at": {
+      "type": "string"
+    },
+    "state": {
+      "$ref": "#/definitions/SessionState"
+    }
+  },
+  "definitions": {
+    "SessionState": {
+      "type": "string",
+      "enum": [
+        "active",
+        "recovering",
+        "stopped",
+        "interrupted"
+      ]
+    }
+  }
+}

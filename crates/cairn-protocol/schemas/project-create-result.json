@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProjectCreateResult",
+  "type": "object",
+  "required": [
+    "created",
+    "project"
+  ],
+  "properties": {
+    "created": {
+      "type": "boolean"
+    },
+    "project": {
+      "$ref": "#/definitions/ProjectDto"
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ProjectDto": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "name",
+        "project_id",
+        "status",
+        "updated_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/definitions/ProjectStatus"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      }
+    },
+    "ProjectStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "archived"
+      ]
+    }
+  }
+}

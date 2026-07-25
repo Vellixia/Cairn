@@ -1,0 +1,116 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RegisterResult",
+  "type": "object",
+  "required": [
+    "created",
+    "identity_outcome",
+    "repository",
+    "worktree"
+  ],
+  "properties": {
+    "created": {
+      "type": "boolean"
+    },
+    "identity_outcome": {
+      "$ref": "#/definitions/IdentityOutcome"
+    },
+    "repository": {
+      "$ref": "#/definitions/RepositoryDto"
+    },
+    "worktree": {
+      "$ref": "#/definitions/WorktreeDto"
+    }
+  },
+  "definitions": {
+    "IdentityOutcome": {
+      "type": "string",
+      "enum": [
+        "created",
+        "existing",
+        "restored",
+        "new_after_marker_loss",
+        "new_after_copy"
+      ]
+    },
+    "RemoteDto": {
+      "type": "object",
+      "required": [
+        "name",
+        "url"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "url": {
+          "type": "string"
+        }
+      }
+    },
+    "RepositoryDto": {
+      "type": "object",
+      "required": [
+        "canonical_path",
+        "registered_at",
+        "repo_uuid",
+        "repository_id"
+      ],
+      "properties": {
+        "canonical_path": {
+          "type": "string"
+        },
+        "copied_from_repository_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "default_remote": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/RemoteDto"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "registered_at": {
+          "type": "string"
+        },
+        "repo_uuid": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "repository_id": {
+          "type": "string"
+        }
+      }
+    },
+    "WorktreeDto": {
+      "type": "object",
+      "required": [
+        "is_main",
+        "path",
+        "worktree_id",
+        "worktree_uuid"
+      ],
+      "properties": {
+        "is_main": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string"
+        },
+        "worktree_id": {
+          "type": "string"
+        },
+        "worktree_uuid": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    }
+  }
+}

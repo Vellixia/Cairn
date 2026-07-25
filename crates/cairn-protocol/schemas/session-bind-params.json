@@ -1,0 +1,30 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SessionBindParams",
+  "type": "object",
+  "required": [
+    "idempotency_key",
+    "project_id",
+    "session_id",
+    "task_revision_id"
+  ],
+  "properties": {
+    "idempotency_key": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "project_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "session_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "task_revision_id": {
+      "type": "string",
+      "format": "uuid"
+    }
+  },
+  "additionalProperties": false
+}

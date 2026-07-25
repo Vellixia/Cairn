@@ -1,0 +1,101 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProjectGetResult",
+  "type": "object",
+  "required": [
+    "bound_session_count",
+    "project",
+    "repository_associations",
+    "task_count"
+  ],
+  "properties": {
+    "bound_session_count": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    },
+    "project": {
+      "$ref": "#/definitions/ProjectDto"
+    },
+    "repository_associations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/ProjectRepositoryAssociationDto"
+      }
+    },
+    "task_count": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0.0
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "ProjectDto": {
+      "type": "object",
+      "required": [
+        "created_at",
+        "name",
+        "project_id",
+        "status",
+        "updated_at"
+      ],
+      "properties": {
+        "created_at": {
+          "type": "string"
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "status": {
+          "$ref": "#/definitions/ProjectStatus"
+        },
+        "updated_at": {
+          "type": "string"
+        }
+      }
+    },
+    "ProjectRepositoryAssociationDto": {
+      "type": "object",
+      "required": [
+        "associated_at",
+        "association_id",
+        "project_id",
+        "repository_id"
+      ],
+      "properties": {
+        "associated_at": {
+          "type": "string"
+        },
+        "association_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "repository_id": {
+          "type": "string"
+        }
+      }
+    },
+    "ProjectStatus": {
+      "type": "string",
+      "enum": [
+        "active",
+        "archived"
+      ]
+    }
+  }
+}

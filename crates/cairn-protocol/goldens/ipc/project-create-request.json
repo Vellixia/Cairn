@@ -1,0 +1,9 @@
+{
+  "id": "project-contract-1",
+  "method": "v1.project.create",
+  "params": {
+    "description": null,
+    "idempotency_key": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0c",
+    "name": "Cairn"
+  }
+}

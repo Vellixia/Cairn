@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ProjectRepositoryAssociateParams",
+  "type": "object",
+  "required": [
+    "idempotency_key",
+    "project_id",
+    "repository_id"
+  ],
+  "properties": {
+    "idempotency_key": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "project_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "repository_id": {
+      "type": "string"
+    }
+  },
+  "additionalProperties": false
+}

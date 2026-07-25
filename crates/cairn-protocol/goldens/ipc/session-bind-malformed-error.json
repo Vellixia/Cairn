@@ -1,0 +1,7 @@
+{
+  "id": "binding-contract-1",
+  "error": {
+    "code": "USAGE",
+    "message": "invalid session bind parameters"
+  }
+}
