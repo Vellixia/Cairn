@@ -1,0 +1,11 @@
+# Single source of truth for the Rust toolchain used by local development and CI.
+#
+# Pinning the exact version keeps local and CI lint sets identical. Toolchain drift
+# between a floating `stable` in CI and a different local stable contributed to
+# several invalidated Feature 002 freeze attempts (e.g. a clippy lint that only the
+# newer stable emitted). rustup reads this file automatically for every cargo/rustc
+# invocation in this repository, and CI installs from it via `rustup show`.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
