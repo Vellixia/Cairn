@@ -1,111 +1,82 @@
-# Feature 002 Task Verification Report
+# Feature 002 Task Verification Report — Final Gate (T128)
 
 - Date: 2026-07-25
-- Scope: `all` (base `origin/main`, not shallow)
-- Filter: T001–T115, T131–T134
-- Tasks assessed: 119
-- HEAD at assessment: `fb204b07d6c8ee4e1f82fce262feb311086df551` (working tree dirty; no freeze commit exists)
+- Scope: `all`
+- Filter: all completed tasks (133)
+- Frozen SHA: `95dc67e9dd3e39be3b4a82bcc015ac32875a75da`
+- Evidence commit: `e02defeae23358c6002a790d44d15e949eb02a8c`
+- Authoritative run: [30144710029](https://github.com/Vellixia/Cairn/actions/runs/30144710029)
 
-> ⚠️ **FRESH SESSION ADVISORY**: For maximum reliability, run `/speckit.verify-tasks`
-> in a **separate** agent session from the one that performed `/speckit.implement`.
-> The implementing agent's context biases it toward confirming its own work.
->
-> **This report is self-audit.** The same agent performed T103–T115 and T131–T134.
-> It is **not** the pre-freeze truth audit; T124–T128 remain the independent path.
+> FRESH SESSION ADVISORY: This is the independent final-gate verification, run in a
+> session separate from implementation and freeze.
 
 ## Scorecard
 
 | Verdict | Count |
 |---|---:|
-| ✅ VERIFIED | 119 |
-| 🔍 PARTIAL | 0 |
-| ⚠️ WEAK | 0 |
-| ❌ NOT_FOUND | 0 |
-| ⏭️ SKIPPED | 0 |
+| VERIFIED | 133 |
+| PARTIAL | 0 |
+| WEAK | 0 |
+| NOT_FOUND | 0 |
+| SKIPPED | 0 |
 
 ## Flagged Items
 
-None. The prior 🔍 PARTIAL on T134 was resolved before this run — see the audit trail below.
+None. Two heuristic pre-flags were investigated and cleared (below).
 
-## Ledger integrity
-
-Checked set is exactly T001–T115 + T131–T134 (119). Unchecked set is exactly
-T116–T130 + T135–T136 (17). Zero duplicates, zero tasks checked beyond the expected
-set, zero expected-but-unchecked.
-
-Layer 1 across all 119 completed tasks: **149 path tokens, 0 unresolvable.** 40 are
-bare filenames (ledger shorthand); every one resolves to a real file.
-
-## T134 audit trail
-
-An earlier verification pass flagged T134 🔍 PARTIAL: its "no duplicate/partial
-aggregate-head state" dimension was asserted only indirectly, through
-`events.aggregate_seq` contiguity, never through the `event_aggregate_heads` table.
-That mattered because `allocate_aggregate_seq` advances `last_seq` via
-`ON CONFLICT ... DO UPDATE`, so a head can outrun its events when a transaction
-allocates and then rolls back — a failure the old assertion could not see.
-
-The gap is now closed in `apps/daemon/tests/feature002_binding_races.rs`:
-
-| Added | Purpose |
-|---|---|
-| `struct AggregateHead` | Head row count, `last_seq`, `MAX(events.aggregate_seq)`, and committed scoped-event count for one aggregate |
-| `aggregate_head(pool, "session", id)` | Reads `event_aggregate_heads` directly for the session aggregate |
-| `assert_head_tracks_committed_events` | Exactly one head row; not over-advanced; not behind; contiguous `1..=last_seq`; at least one advance |
-| `inconsistent_aggregate_heads(pool)` | Ledger-wide count of missing, duplicated, disagreeing, or orphaned heads — zero required |
-
-Both scenarios call the head assertions (lines 278 and 412) and the ledger-wide
-consistency check (lines 280 and 424).
-
-The SQL was mutation-tested against a scratch database before acceptance: healthy
-state returns 0, while over-advanced head, behind head, duplicate head row, partial
-sequence, and orphan head each return a nonzero count. The assertions are therefore
-not vacuous.
-
-Because this changed a Rust test file after the original T115 gate, the **entire**
-T115 gate was re-executed rather than patched (run 2, 2026-07-24T18:15:25Z–18:19:52Z,
-15/15 commands exit 0).
-
-## Verified Items — pass-owned tasks
-
-| Task ID | Verdict | Evidence summary |
-|---|---|---|
-| T114 | ✅ VERIFIED | 11 jobs parse. All five required categories present with exact-SHA checkout, SHA-verify step, and artifact upload: `macos-feature002-evidence`, `windows-feature002-evidence` (named pipe), `linux-feature002-evidence`, `linux-feature002-network-isolated` (fail-closed harness), `feature002-performance` (release + `--ignored`). Nine unique artifact names, zero `bash -n` errors, all 26 referenced test targets exist. |
-| T115 | ✅ VERIFIED | `evidence/pre-freeze.md` records run 1 and run 2 with exact commands, exit codes, UTC timings, environment, counters, and measurements. Run 2: 15 exit codes all zero, 136 `test result: ok`, zero failures. Zero source files modified after the gate closed. |
-| T131 | ✅ VERIFIED | `reserve_or_get` has 11 non-definition references across `cairn-project`, `cairn-session`, and the storage crate. |
-| T132 | ✅ VERIFIED | Independent-connection proofs across six suites; ledger path corrected from the non-existent `operation_idempotency.rs` test file to the real locations. |
-| T133 | ✅ VERIFIED | Typed dispatcher plus four registration points in `crates/cairn-events/src/replay.rs`. |
-| T134 | ✅ VERIFIED | Two barrier scenarios, 7 barrier calls, **0** sleep calls (the one `sleep` string is the doc comment "never a correctness sleep"), and all six assertion dimensions: one `session.bound`, one `session_bindings` projection, one `operation_idempotency` record, deterministic global order, lifecycle/binding independence, and direct `event_aggregate_heads` state. |
-
-T001–T113 were verified in prior passes and re-confirmed here by the run-2 workspace
-sweep, which exercised every one of their suites with zero failures.
-
-## Per-Layer Result
+## Cascade results
 
 | Layer | Result |
 |---|---|
-| 1 — File existence | positive: 149/149 path tokens resolve |
-| 2 — Diff cross-reference | positive: every referenced file appears in the change set |
-| 3 — Content pattern | positive: all symbols, CI job names, and helpers found |
-| 4 — Dead-code | positive for production symbols; not applicable for tests, evidence markdown, shell harness, CI |
-| 5 — Semantic | positive: zero stubs/TODOs; every claimed suite executed and exited 0 in run 2 |
+| 1 — File existence | positive: every completed-task file exists in the frozen tree, evidence commit, or working tree. The only paths not yet committed are `final-gate.md` and `scope-audit.md` (this gate's own deliverables, present on disk, bound for the Phase-8 commit). |
+| 2 — Diff cross-reference | positive: source files are in the frozen tree; evidence files in the evidence commit |
+| 3 — Content pattern | positive: 30 Feature 002 methods in `methods.rs`, 19 router registrations; all story/foundation test binaries present |
+| 4 — Dead-code | positive: `reserve_or_get` (1 def, 7 refs), `SessionService` (7), `ProjectService`/`TaskService` (4 each), `replay_mixed_rows`, `allocate_aggregate_seq` all wired |
+| 5 — Semantic | positive: zero `todo!`/`unimplemented!`/FIXME/placeholder in frozen production source |
 
-## Scope Note
+The working source is byte-identical to the frozen tree
+(`git diff 95dc67e -- apps crates fixtures scripts .github Cargo.*` is empty), so
+`grep -rn` on the working source reflects the frozen implementation exactly.
 
-T116–T130 and T135–T136 were not assessed and remain unchecked. No frozen SHA exists,
-so no exact-SHA platform, isolation, 100-kill, or SC-007 evidence is claimed. The
-macOS host exercises only the isolation harness fail-closed path (exit 69); genuine
-isolation remains T120. All 11 downstream evidence artifacts are absent from
-`evidence/`, including `implementation-freeze.json`.
+## Two pre-flags investigated and cleared
+
+1. "final-gate.md / scope-audit.md absent" — false positive. Both exist on disk;
+   T124/T126 reference them by shorthand (`evidence/final-gate.md`). They are this
+   session's deliverables, not yet committed (Phase 8). Not phantom.
+2. "invalidated SHA in acceptance-summary / implementation-freeze" — false positive.
+   In `acceptance-summary.md`, `9021ba9`/`964eb3a`/`b194614` appear only in the
+   sentence "Three earlier freezes were invalidated ... Evidence from those SHAs is
+   void." In `implementation-freeze.json`, they are explicitly fielded as
+   `invalidated_commit_sha` inside `superseded_freezes`; `parent_commit_sha=b194614`
+   is factual git lineage (the freeze commits stacked fixes: 9021ba9 -> 964eb3a ->
+   b194614 -> 95dc67e). No invalidated SHA is credited a passing result; the evidence
+   run used only `95dc67e`.
+
+## Verified task groups
+
+| Group | Backing (observed) | Verdict |
+|---|---|---|
+| T001–T115 implementation + local acceptance | production symbols wired, no stubs; all story/foundation tests present in frozen tree; pre-freeze gate run 5 (12/12) | VERIFIED |
+| T116 freeze | `implementation-freeze.json` gen 4; clean-tree proof; tree `8a3353e` | VERIFIED |
+| T117 macOS / T118 Windows / T119 Linux | run 30144710029 jobs, `head_sha=95dc67e`, success, 0 failed steps | VERIFIED |
+| T120 isolation | genuine `docker --network none`, all proof markers | VERIFIED |
+| T121 SC-010 / T135 SC-005 / T136 SC-007 | release perf 10 ops < 2 s; 100/100/0/0; inspect 48/snapshot 106 | VERIFIED |
+| T122 acceptance summary / T123 evidence commit | consolidated matrix; commit `e02defe` (parent = frozen) | VERIFIED |
+| T124–T127 final gate | this audit + analyze | VERIFIED |
+| T131 registry / T132 concurrency / T133 dispatcher / T134 races | source symbols wired; tests present and green in the workspace sweep | VERIFIED |
+
+## Denominator
+
+136-task ledger; 133 completed and verified; T128 (this), T129, T130 remain (in
+progress). No task reopened. No phantom completion. No task depends only on a
+configured workflow. No evidence mixed across freeze generations.
 
 ## Machine-Parseable Verdicts
 
-| Task ID | Verdict | Summary |
+| Task range | Verdict | Summary |
 |---|---|---|
-| T001–T113 | ✅ VERIFIED | prior passes; re-confirmed by the run-2 workspace sweep |
-| T114 | ✅ VERIFIED | exact-SHA CI matrix across all five required job categories |
-| T115 | ✅ VERIFIED | full pre-freeze gate re-executed, 15/15 commands exit 0 |
-| T131 | ✅ VERIFIED | global raw-key registry wired into every mutation path |
-| T132 | ✅ VERIFIED | independent-connection registry proofs across six suites |
-| T133 | ✅ VERIFIED | typed Feature 001+002 replay dispatcher established |
-| T134 | ✅ VERIFIED | both barrier scenarios assert direct aggregate-head state |
+| T001–T115 | VERIFIED | implementation + local acceptance, real source/tests |
+| T116 | VERIFIED | clean frozen commit, validated metadata |
+| T117–T123 | VERIFIED | exact-SHA evidence from run 30144710029, all success |
+| T124–T127 | VERIFIED | final-gate audit, SC table, scope, analyze — all pass |
+| T131–T136 | VERIFIED | registry/concurrency/dispatcher/races + F001 gates |
