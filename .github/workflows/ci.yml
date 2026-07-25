@@ -346,6 +346,14 @@ jobs:
                 exit 1
               fi
               echo "external_network=unreachable"
+              # rust-toolchain.toml pins a version this container does not ship and
+              # cannot download while offline. RUSTUP_TOOLCHAIN outranks the override
+              # file, so the in-container offline build uses the toolchain already
+              # installed in this image. The host-side pre-isolation build above still
+              # used the pinned toolchain. (No apostrophes here: this whole block runs
+              # inside a single-quoted docker -c argument.)
+              export RUSTUP_TOOLCHAIN="$(rustup toolchain list | head -1 | cut -d" " -f1)"
+              echo "container_toolchain=$RUSTUP_TOOLCHAIN"
               cargo test --offline --locked -p cairn-daemon \
                 --test us1_register_inspect \
                 --test us2_agent_sim \
