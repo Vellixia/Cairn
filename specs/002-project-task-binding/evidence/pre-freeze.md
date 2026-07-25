@@ -14,9 +14,10 @@ remain T135–T136. Nothing here satisfies those tasks.
 | 1 | 2026-07-24T17:51:54Z–17:57:55Z | Initial T115 gate | 15/15 commands exit 0 |
 | 2 | 2026-07-24T18:15:25Z–18:19:52Z | Rerun after `feature002_binding_races.rs` gained direct `event_aggregate_heads` assertions (T134 audit finding) | 15/15 commands exit 0 |
 | 3 | 2026-07-24T19:05:06Z–19:12:24Z | Rerun on the `stable` toolchain after CI on invalidated frozen SHA `9021ba9` exposed two defects the earlier gates could not see | 12/12 commands exit 0 |
-| **4 (authoritative)** | **2026-07-24T19:30:36Z–19:34:17Z** | **Rerun after CI on invalidated frozen SHA `964eb3a` exposed a container/glibc defect in the isolation harness** | **12/12 commands exit 0** |
+| 4 | 2026-07-24T19:30:36Z–19:34:17Z | Rerun after CI on invalidated frozen SHA `964eb3a` exposed a container/glibc defect in the isolation harness | 12/12 commands exit 0 |
+| **5 (authoritative)** | **2026-07-25T04:45:35Z–04:48:32Z** | **Rerun after CI on invalidated frozen SHA `b194614` failed to pull the non-existent `rust:1-noble` image; corrected to `rust:1-trixie`** | **12/12 commands exit 0** |
 
-Run 4 is the authoritative record. All figures below are from run 4.
+Run 5 is the authoritative record. All figures below are from run 5.
 
 **Runs 1 and 2 are superseded and must not be cited as evidence.** Both executed
 under the repository's default `esp` toolchain (nightly 1.90.0), which is *not* what
@@ -50,11 +51,19 @@ That run did prove, inside genuine `docker --network none` isolation:
 `external_network=unreachable`, `local_filesystem=available`, and
 `local_git=available`. It failed only when loading the prebuilt binaries.
 
+Exact-SHA CI on freeze `b194614` then failed one job before starting, because the
+official Rust images are Debian-based and there is no `rust:1-noble` tag
+(`manifest unknown`). Fixed before run 5:
+
+| Defect | Detected by | Fix |
+|---|---|---|
+| `docker pull rust:1-noble` — the tag does not exist; Rust images track Debian, not Ubuntu | Linux isolated Feature 002 job, preload step | image set to `rust:1-trixie` (Debian 13, glibc 2.41 ≥ the runner's 2.39, ships git). Tag existence was verified against the Docker Hub registry API before committing. |
+
 ## Execution environment
 
 | Field | Value |
 |---|---|
-| Execution date (run 4) | 2026-07-25 (Asia/Jakarta) / 2026-07-24T19:30:36Z–19:34:17Z |
+| Execution date (run 5) | 2026-07-25 (Asia/Jakarta) / 2026-07-25T04:45:35Z–04:48:32Z |
 | Checkout commit at execution | `fb204b07d6c8ee4e1f82fce262feb311086df551` |
 | Branch | `feature/002-project-task-binding` |
 | Working tree | **Dirty** — Feature 002 implementation and specification changes are uncommitted; the frozen implementation commit (T116) does not exist yet |
@@ -77,8 +86,8 @@ evaluate the same toolchain.
 | # | Exact command | Exit | Duration |
 |---|---|---:|---:|
 | G1 | `rustup run stable cargo fmt --check` | 0 | 1 s |
-| G2 | `rustup run stable cargo clippy --workspace --all-targets -- -D warnings` | 0 | 27 s |
-| G3 | `rustup run stable cargo test --workspace --all-targets` | 0 | 96 s |
+| G2 | `rustup run stable cargo clippy --workspace --all-targets -- -D warnings` | 0 | 24 s |
+| G3 | `rustup run stable cargo test --workspace --all-targets` | 0 | 94 s |
 | G4a | `rustup run stable cargo test -p cairn-events --test feature002_replay --test feature002_replay_invalid -- --nocapture` | 0 | 68 s (G4 total) |
 | G4b | `rustup run stable cargo test -p cairn-daemon --test feature002_atomicity --test feature002_migration_acceptance --test feature002_quickstart --test feature002_privacy --test feature002_retry_acceptance --test feature002_binding_races -- --nocapture` | 0 | — |
 | G4c | `rustup run stable cargo test -p cairn-daemon --test feature002_projects --test feature002_tasks --test feature002_binding_restart --test feature002_bound_start_invariants --test feature002_bound_recovery --test feature002_ipc` | 0 | — |
@@ -89,7 +98,7 @@ evaluate the same toolchain.
 | G7 | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 0 | 13 s |
 | G8 | `rustup run stable cargo test --release -p cairn-daemon --test feature002_perf -- --ignored --nocapture` | 0 | 46 s (incl. release build) |
 
-Total gate wall time: 3 minutes 41 seconds. Aggregate result: **12 recorded exit codes,
+Total gate wall time: 2 minutes 57 seconds. Aggregate result: **12 recorded exit codes,
 all zero; 135 `test result: ok` lines; zero failures; zero panics.**
 
 G4b additionally covers **T134** (`feature002_binding_races`), whose two barrier
@@ -128,7 +137,7 @@ executed:
 
 | Profile | Command | tracked_files | inspect_ms | snapshot_ms | Limits | Result |
 |---|---|---:|---:|---:|---|---|
-| debug (authoritative) | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 10000 | 76 | 192 | 2000 / 2000 | PASS |
+| debug (authoritative) | `rustup run stable cargo test -p cairn-daemon --test perf -- --ignored --nocapture` | 10000 | 80 | 188 | 2000 / 2000 | PASS |
 
 The frozen-SHA execution required by T136 has not been performed.
 
@@ -146,19 +155,19 @@ revisions), 20 repository associations, 20 bound sessions.
 
 | Operation | Samples | p95 (ms) | Threshold (ms) | Result |
 |---|---:|---:|---:|---|
-| project_create | 99 | 0.777 | 2000 | PASS |
-| project_list | 100 | 0.392 | 2000 | PASS |
-| project_show | 100 | 0.110 | 2000 | PASS |
-| project_update | 100 | 0.637 | 2000 | PASS |
-| repository_associate | 19 | 0.740 | 2000 | PASS |
-| task_create | 990 | 0.931 | 2000 | PASS |
-| task_list | 100 | 0.578 | 2000 | PASS |
-| task_show | 100 | 0.079 | 2000 | PASS |
-| task_revise | 4000 | 0.753 | 2000 | PASS |
-| session_bind | 19 | 0.855 | 2000 | PASS |
+| project_create | 99 | 1.011 | 2000 | PASS |
+| project_list | 100 | 0.435 | 2000 | PASS |
+| project_show | 100 | 0.174 | 2000 | PASS |
+| project_update | 100 | 0.696 | 2000 | PASS |
+| repository_associate | 19 | 0.808 | 2000 | PASS |
+| task_create | 990 | 1.485 | 2000 | PASS |
+| task_list | 100 | 0.711 | 2000 | PASS |
+| task_show | 100 | 0.097 | 2000 | PASS |
+| task_revise | 4000 | 0.877 | 2000 | PASS |
+| session_bind | 19 | 0.721 | 2000 | PASS |
 
 All ten operations remain far inside the two-second bound; the slowest p95 in run 3
-is `task_create` at 0.931 ms, over 2,100x under the threshold. Sample
+is `task_create` at 1.485 ms, over 1,300x under the threshold. Sample
 counts are asserted for completeness; an empty or short measurement set fails the test.
 
 ## Feature 002 acceptance counters (G4)
@@ -180,9 +189,9 @@ execution remains T120, via the `linux-feature002-network-isolated` CI job.
 ## Readiness conclusion
 
 Every gate required by T115 executed and passed against the current working tree in
-run 4, on the stable toolchain CI uses. The only remaining prerequisite for the T116 implementation freeze is the
+run 5, on the stable toolchain CI uses. The only remaining prerequisite for the T116 implementation freeze is the
 freeze commit itself; no unresolved implementation or test task blocks it.
 
-At the close of run 4, **zero** `.rs`, `.toml`, `.sql`, or `.lock` files had been
+At the close of run 5, **zero** `.rs`, `.toml`, `.sql`, or `.lock` files had been
 modified after the gate finished, so this record is not stale with respect to the
 tree it certifies.

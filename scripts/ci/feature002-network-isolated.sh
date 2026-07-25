@@ -164,10 +164,11 @@ fi
 
 command -v docker >/dev/null 2>&1 || die "no_network_namespace_or_container_runtime"
 docker info >/dev/null 2>&1 || die "container_runtime_unavailable"
-# Default to an Ubuntu 24.04 base so the container glibc matches the
-# ubuntu-latest runner that builds the binaries. A Debian bookworm image ships
-# glibc 2.36 and cannot load binaries linked against 2.39.
-container_image="${CAIRN_ISOLATION_CONTAINER_IMAGE:-rust:1-noble}"
+# Default to an Debian 13 (trixie) base so the container glibc (2.41) is >= the ubuntu-latest
+# runner glibc (2.39) that builds the binaries. The official rust images are
+# Debian-based and ship git; there is no rust:1-noble tag. A bookworm image
+# (glibc 2.36) cannot load binaries linked against 2.39.
+container_image="${CAIRN_ISOLATION_CONTAINER_IMAGE:-rust:1-trixie}"
 docker image inspect "$container_image" >/dev/null 2>&1 || die "isolation_container_image_not_preloaded"
 echo "selected_isolation=docker_network_none"
 # Run as the invoking user so bundle artifacts stay removable by the runner.
