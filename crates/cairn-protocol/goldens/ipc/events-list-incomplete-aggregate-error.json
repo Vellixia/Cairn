@@ -1,7 +1,0 @@
-{
-  "id": "events-aggregate-invalid-1",
-  "error": {
-    "code": "USAGE",
-    "message": "aggregate_type and aggregate_id must be supplied together"
-  }
-}

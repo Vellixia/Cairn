@@ -2,21 +2,12 @@
 name = "cairn-git"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-cairn-domain = { workspace = true }
-blake3 = { workspace = true }
-ignore = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
-walkdir = { workspace = true }
+thiserror.workspace = true
+serde.workspace = true
 
 [dev-dependencies]
-fixtures-repositories = { workspace = true }
-tempfile = { workspace = true }
-
-[lints]
-workspace = true
+tempfile.workspace = true

@@ -1,1 +1,0 @@
-{"id":"error-invalid-goal-malformed","error":{"code":"INVALID_GOAL_CONTRACT","message":"goal contract is invalid","data":{"kind":"invalid_goal_contract","violations":[{"violation":"malformed_structure","field":"goal_contract"}]}}}

@@ -1,0 +1,190 @@
+//! Human-readable rendering of briefings and handoffs.
+//!
+//! The briefing text is what a `SessionStart` hook injects as context, so it is
+//! shaped for an agent to read at a glance rather than for a terminal.
+
+use cairn_core::domain::Handoff;
+use cairn_core::wire::{ContextPayload, StatusPayload};
+
+pub fn briefing(payload: &ContextPayload) -> String {
+    let b = &payload.briefing;
+    let mut out = String::new();
+    out.push_str("# Cairn context\n\n");
+
+    if b.no_prior_history {
+        out.push_str("Cairn has no prior history for this project yet.\n\n");
+    }
+    if payload.degraded {
+        out.push_str("_Reduced context: Cairn could not assemble the full briefing in time._\n\n");
+    }
+
+    out.push_str(&format!("**Project**: {}\n", b.project.name));
+    let r = &b.repository;
+    out.push_str(&format!(
+        "**Repository**: branch `{}`, commit `{}`, working tree {}\n",
+        r.branch,
+        r.commit_sha.as_deref().unwrap_or("(none)"),
+        if r.is_clean() {
+            "clean".to_string()
+        } else {
+            format!(
+                "{} staged, {} unstaged, {} untracked",
+                r.staged, r.unstaged, r.untracked
+            )
+        }
+    ));
+
+    if let Some(t) = &b.task {
+        out.push_str(&format!(
+            "\n## Task: {} ({})\n{}\n",
+            t.title, t.status, t.goal
+        ));
+        if !t.acceptance_criteria.is_empty() {
+            out.push_str("\nAcceptance criteria:\n");
+            for c in &t.acceptance_criteria {
+                out.push_str(&format!("- {c}\n"));
+            }
+        }
+    }
+
+    if let Some(h) = &b.previous_handoff {
+        out.push_str("\n## Previous session\n");
+        out.push_str(&format!("Next step: {}\n", h.next_step));
+        if !h.remaining_work.is_empty() {
+            out.push_str("\nRemaining work:\n");
+            for w in &h.remaining_work {
+                out.push_str(&format!("- {w}\n"));
+            }
+        }
+        if !h.changed_files.is_empty() {
+            out.push_str(&format!(
+                "\nChanged files: {}\n",
+                h.changed_files.join(", ")
+            ));
+        }
+    }
+
+    section(&mut out, "Known failures", &b.known_failures);
+    section(&mut out, "Decisions", &b.decisions);
+    section(&mut out, "Task memory", &b.memory.task);
+    section(&mut out, "Branch memory", &b.memory.branch);
+    section(&mut out, "Project memory", &b.memory.project);
+
+    out.push_str(&format!(
+        "\n---\n{} of {} estimated tokens",
+        payload.estimated_tokens, payload.budget
+    ));
+    if payload.truncated {
+        out.push_str(&format!(
+            "; omitted: {}",
+            payload.omitted_sections.join(", ")
+        ));
+    }
+    out.push('\n');
+    out
+}
+
+fn section(out: &mut String, title: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    out.push_str(&format!("\n## {title}\n"));
+    for i in items {
+        out.push_str(&format!("- {i}\n"));
+    }
+}
+
+pub fn handoff(h: &Handoff) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("# Handoff ({})\n\n", h.trigger));
+    out.push_str(&format!("**Goal**: {}\n", h.goal));
+    out.push_str(&format!("**Progress**: {}\n", h.progress));
+    out.push_str(&format!("**Next step**: {}\n", h.next_step));
+
+    list(&mut out, "Completed", &h.completed_work);
+    list(&mut out, "Remaining", &h.remaining_work);
+    list(&mut out, "Changed files", &h.changed_files);
+    list(&mut out, "Decisions", &h.decisions);
+    list(&mut out, "Failures", &h.failures);
+
+    if !h.tests_executed.is_empty() {
+        out.push_str("\n## Tests executed\n");
+        for t in &h.tests_executed {
+            out.push_str(&format!("- {} — {}\n", t.command, t.outcome));
+        }
+    }
+
+    let r = &h.repository_state;
+    out.push_str(&format!(
+        "\n## Repository\nbranch `{}`, commit `{}`, {} staged / {} unstaged / {} untracked\n",
+        r.branch,
+        r.commit_sha.as_deref().unwrap_or("(none)"),
+        r.staged,
+        r.unstaged,
+        r.untracked
+    ));
+
+    if let Some(note) = &h.agent_note {
+        out.push_str(&format!("\n## Agent note (unverified)\n{note}\n"));
+    }
+    out.push_str(&format!(
+        "\n_{} supporting observation(s)_\n",
+        h.evidence.len()
+    ));
+    out
+}
+
+fn list(out: &mut String, title: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+    out.push_str(&format!("\n## {title}\n"));
+    for i in items {
+        out.push_str(&format!("- {i}\n"));
+    }
+}
+
+pub fn status(s: &StatusPayload) -> String {
+    let mut out = String::new();
+    out.push_str(&format!(
+        "Project      {} ({})\n",
+        s.project.name, s.project.id
+    ));
+    out.push_str(&format!(
+        "Sharing      {}\n",
+        if s.project.linked {
+            "linked"
+        } else {
+            "local only"
+        }
+    ));
+    out.push_str(&format!("Worktree     {}\n", s.worktree_path));
+    out.push_str(&format!(
+        "Branch       {} @ {}\n",
+        s.repository.branch,
+        s.repository.commit_sha.as_deref().unwrap_or("(no commits)")
+    ));
+    out.push_str(&format!(
+        "Working tree {} staged, {} unstaged, {} untracked\n",
+        s.repository.staged, s.repository.unstaged, s.repository.untracked
+    ));
+    out.push_str(&format!("Integration  {}\n", s.integration_mode));
+    out.push_str(&format!("Daemon       {}\n", s.daemon));
+    out.push_str(&format!(
+        "Recorded     {} observations, {} memories\n",
+        s.observation_count, s.memory_count
+    ));
+
+    if s.sessions.is_empty() {
+        out.push_str("Sessions     none active\n");
+    } else {
+        out.push_str(&format!("Sessions     {} active\n", s.sessions.len()));
+        for session in &s.sessions {
+            out.push_str(&format!(
+                "  {}  {}  idle {}s\n",
+                session.id, session.agent, session.idle_seconds
+            ));
+        }
+    }
+    out
+}

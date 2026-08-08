@@ -1,9 +1,0 @@
-{
-  "id": "task-list-1",
-  "method": "v1.task.list",
-  "params": {
-    "project_id": "018f4e6e-5f2b-7c3e-9a4d-2f6e8b1c9d0a",
-    "after_task_id": null,
-    "limit": 50
-  }
-}

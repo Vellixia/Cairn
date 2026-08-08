@@ -1,58 +1,133 @@
 # Cairn
 
-Project-intelligence and reliability system for AI coding agents. This
-repository currently implements the **local session foundation**
-([spec](specs/001-local-session-foundation/spec.md)): register a Git
-repository under a stable Git-private identity, inspect exact repository
-state, take deterministic BLAKE3 snapshots, and run agent sessions bound to
-those snapshots — fully offline, with an append-only local event history.
+Persistent, project-aware memory for AI coding agents.
 
-## Quick usage
+An AI coding session starts blind. Everything the last session learned — the goal, what was
+tried, what failed, which decisions were already made, which conventions this repository
+follows — disappears when the context window ends. You re-explain, the agent re-discovers,
+and the same dead ends get walked twice.
 
-```console
-$ cargo build --workspace          # binaries: cairn (CLI), cairnd (daemon)
-$ cd your-git-repo
-$ cairn init                       # register (idempotent; auto-starts cairnd)
-$ cairn status                     # exact state: branch, HEAD, staged/unstaged/untracked, ignored summary
-$ cairn session start --agent claude-code
-$ cairn session show               # start snapshot vs current snapshot
-$ cairn session stop
-$ cairn daemon status
+Cairn sits beside the agent and fixes that. It knows which repository, branch, and commit you
+are on. It captures what a session actually does as structured facts. It turns the important
+ones into scoped, durable memory. And it hands the next session a bounded briefing so work
+resumes instead of restarting.
+
+## Install and connect
+
+```bash
+cargo build --workspace --release          # cairn, cairnd, cairn-server
+export PATH="$PWD/target/release:$PATH"
+
+cd your-git-repo
+cairn init                                 # register this repository
+cairn connect claude-code                  # install hooks + the MCP server
 ```
 
-Every command supports `--json` for a stable machine-readable envelope
-(`cairn.cli.v1` — [contract](specs/001-local-session-foundation/contracts/cli-json-contract.md)).
-Resume tokens are issued in `--json` mode only and are accepted via
-`--resume-token-stdin`, `CAIRN_RESUME_TOKEN`, or `--resume-token-file` —
-never as ordinary arguments, never printed in human output or logs.
+Start a Claude Code session in that repository. Cairn starts its daemon on its own, opens a
+session, and begins capturing. When the session ends:
 
-## Workspace layout
+```bash
+cairn handoff show          # what happened, what changed, what remains, what's next
+cairn context               # the briefing the next session will receive
+```
 
-| Crate | Owns |
+Nothing leaves your machine unless you link the project to a server.
+
+## How it works
+
+```text
+install → connect Claude Code → open a Git repository
+        → Cairn detects repository, branch, commit
+        → select or create a task
+        → session starts automatically
+        → agent receives relevant context
+        → agent works normally
+        → Cairn captures structured observations
+        → important facts and decisions become scoped memory
+        → session stops or compacts
+        → Cairn writes a structured handoff
+        → next session starts with the previous context restored
+```
+
+Memory carries explicit scope — **project**, **branch**, **task**, or **session** — and
+provenance back to the session and observations that produced it. Recall ranks by scope
+first: a fact about *this task* beats an unrelated one, however well it matches.
+
+## Everyday commands
+
+| Command | What it does |
 |---|---|
-| `crates/cairn-domain` | Pure types: identities, fingerprint canonicalization, session state machine. No IO. |
-| `crates/cairn-protocol` | IPC + CLI DTOs, error codes, JSON Schemas (golden-diffed in CI). |
-| `crates/cairn-git` | Git CLI adapter: porcelain v2 parsing, identity markers, ignored-summary walker, fingerprint pipeline. |
-| `crates/cairn-events` | 11-type append-only event catalog, idempotency keys, replay. |
-| `crates/cairn-session` | Lifecycle policy: idempotent start, resume-token leases, recovery, staleness. |
-| `crates/cairn-storage-local` | SQLite (WAL): migrations, DAOs, serialized transactional event append. |
-| `apps/daemon` (`cairnd`) | IPC server (UDS / DACL-restricted named pipe), filesystem watcher, recovery sweeper. |
-| `apps/cli` (`cairn`) | Thin IPC client with daemon auto-spawn. |
-| `fixtures/repositories` | Deterministic Git fixtures for tests. |
+| `cairn status` | Project, branch, commit, working tree, active sessions, integration mode |
+| `cairn session list` | Every session, newest first |
+| `cairn task new --title T --goal G --criterion C` | Create a task |
+| `cairn memory add --type convention --scope project "…"` | Remember something |
+| `cairn memory search "tests"` | Recall, ranked task → branch → project |
+| `cairn handoff show` | Read the latest handoff |
+| `cairn privacy exclude --path "secrets/**"` | Never capture that path |
+| `cairn delete session <id>` | Remove a session; its memories survive |
+| `cairn link --create` | Opt this project into server sharing |
+| `cairn sync status` | Pending, failed, last successful sync |
 
-Architecture rules (from the [plan](specs/001-local-session-foundation/plan.md)):
-events are append-only and immutable (enforced by SQLite triggers); event
-append + projection update share one transaction serialized per worktree;
-filesystem notifications are advisory hints only — `git` reconciliation
-produces every authoritative snapshot.
+Every command takes `--json` and prints a stable envelope.
+
+## Sharing with a team (optional)
+
+```bash
+docker compose up -d postgres
+cargo run --release --bin cairn-server -- --web-origin http://127.0.0.1:3100
+cd web && npm install && npm run build && npm run start
+```
+
+Register in the web UI, create a personal API token, then on each machine:
+
+```bash
+cairn auth token set <token> --server http://127.0.0.1:8080
+cairn link --create            # or: cairn link --project <shared-project-id>
+```
+
+Two clones of one repository at different paths link to the *same* shared project by
+identifier — path is never identity.
+
+## Principles
+
+- **Local-first.** Everything works offline. Capture, recall, briefing, handoff, and search
+  never need a network. Cairn never blocks the agent it is attached to: capture hooks have a
+  250 ms deadline, always exit 0, and drop work rather than wait.
+- **Private by default.** No conversation transcripts. No unbounded command output. Secrets
+  redacted before anything is written. **Raw observations never leave your machine** — a
+  shared memory carries evidence identifiers and a count, never the observation rows behind
+  them. A shared *handoff* does carry its own derived fields, including changed file paths
+  and short statements like "test failed: cargo test", because that is what a handoff is
+  for; nothing leaves at all until you link the project.
+- **Simple.** A local daemon with SQLite, a small Axum server with PostgreSQL, a Next.js UI.
+  No brokers, no vector databases, no knowledge graphs, no embeddings.
+- **Honest about what it knows.** Cairn cannot tell whether an agent is still alive — nothing
+  in the integration says so — so it does not guess. Sessions end at deterministic boundaries.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `crates/cairn-core` | Domain types, redaction, budgeting, context and handoff synthesis |
+| `crates/cairn-git` | Git CLI adapter |
+| `crates/cairn-store` | SQLite schema, repositories, FTS5 search, outbox |
+| `crates/cairnd` | The local daemon |
+| `crates/cairn` | The CLI, the hook runtime, and the MCP server |
+| `crates/cairn-server` | Axum + PostgreSQL shared server |
+| `web/` | Next.js web UI |
+| `tests/` | End-to-end suite against real repositories, SQLite and PostgreSQL |
+
+Six MCP tools, no more: `cairn_context`, `cairn_search`, `cairn_remember`, `cairn_session`,
+`cairn_task`, `cairn_handoff`.
 
 ## Development
 
-```console
-$ cargo test --workspace                       # full suite
-$ cargo test -p cairn-daemon --test perf -- --ignored   # SC-007 perf bounds
-$ cargo clippy --workspace --all-targets -- -D warnings
+```bash
+cargo test --workspace                                   # local suite
+docker compose up -d postgres
+CAIRN_TEST_DATABASE_URL=postgres://cairn:cairn@localhost:5433/cairn cargo test --workspace
+cd web && npx playwright test                            # UI acceptance
 ```
 
-Validation scenarios: [quickstart.md](specs/001-local-session-foundation/quickstart.md).
-Governance: [constitution](.specify/memory/constitution.md).
+Specification, plan and task ledger live in [`specs/001-cairn-mvp/`](specs/001-cairn-mvp/);
+project principles in [the constitution](.specify/memory/constitution.md).

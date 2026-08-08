@@ -1,9 +1,0 @@
-{
-  "schema": "cairn.cli.v1",
-  "ok": false,
-  "command": "session.start",
-  "error": {
-    "code": "USAGE",
-    "message": "invalid command arguments"
-  }
-}

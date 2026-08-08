@@ -1,7 +1,0 @@
-{
-  "id": "scope-contract-9",
-  "error": {
-    "code": "USAGE",
-    "message": "invalid params: missing field `task_revision_id`"
-  }
-}

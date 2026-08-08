@@ -1,64 +1,71 @@
 [workspace]
 resolver = "2"
 members = [
-    "apps/daemon",
-    "apps/cli",
-    "crates/cairn-domain",
-    "crates/cairn-protocol",
+    "crates/cairn-core",
     "crates/cairn-git",
-    "crates/cairn-events",
-    "crates/cairn-project",
-    "crates/cairn-session",
-    "crates/cairn-storage-local",
-    "fixtures/repositories",
+    "crates/cairn-store",
+    "crates/cairnd",
+    "crates/cairn",
+    "crates/cairn-server",
+    "tests",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
-license = "Apache-2.0"
+rust-version = "1.97"
+license = "MIT"
+repository = "https://github.com/Vellixia/Cairn"
 
 [workspace.dependencies]
-tokio = { version = "1", features = ["full"] }
-clap = { version = "4", features = ["derive", "env"] }
+cairn-core = { path = "crates/cairn-core" }
+cairn-git = { path = "crates/cairn-git" }
+cairn-store = { path = "crates/cairn-store" }
+
+anyhow = "1"
+thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+uuid = { version = "1", features = ["v7", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
 sha2 = "0.10"
-schemars = { version = "0.8", features = ["uuid1"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
-blake3 = "1"
-uuid = { version = "1", features = ["v7", "v4", "serde"] }
-notify = "8"
-ignore = "0.4"
+hex = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json", "env-filter", "fmt"] }
-tracing-appender = "0.2"
-thiserror = "2"
-anyhow = "1"
-chrono = { version = "0.4", features = ["serde", "clock"] }
-dirs = "6"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "io-util",
+    "io-std",
+    "time",
+    "signal",
+    "process",
+    "fs",
+    "sync",
+] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "postgres",
+    "chrono",
+    "uuid",
+    "json",
+] }
+clap = { version = "4", features = ["derive", "env"] }
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+argon2 = "0.5"
 rand = "0.8"
-base64 = "0.22"
-whoami = "1"
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+dirs = "5"
 tempfile = "3"
-walkdir = "2"
 
-cairn-domain = { path = "crates/cairn-domain" }
-cairn-protocol = { path = "crates/cairn-protocol" }
-cairn-git = { path = "crates/cairn-git" }
-cairn-events = { path = "crates/cairn-events" }
-cairn-project = { path = "crates/cairn-project" }
-cairn-session = { path = "crates/cairn-session" }
-cairn-storage-local = { path = "crates/cairn-storage-local" }
-fixtures-repositories = { path = "fixtures/repositories" }
-
-[workspace.lints.clippy]
-all = { level = "warn", priority = -1 }
-unwrap_used = "allow"
-
-[workspace.lints.rust]
-unused_must_use = "deny"
-
-[profile.dev]
-debug = 1
+[profile.release]
+lto = "thin"
+strip = true

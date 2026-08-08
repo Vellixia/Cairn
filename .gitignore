@@ -1,14 +1,37 @@
+# Rust
 target/
 debug/
 release/
 *.rs.bk
 *.rlib
 *.prof*
-*.log
+
+# Node / web
+node_modules/
+.next/
+out/
+*.tsbuildinfo
+playwright-report/
+test-results/
+
+# Local Cairn state (never commit a developer's memory)
+.cairn/
+cairn.sqlite3*
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Environment and logs
 .env*
+*.log
+
+# Crash dumps (a container test process left a 12 MB ELF core here once)
+core
+core.*
+*.core
+
+# Editors and OS
 .idea/
 .vscode/
-.specify/workflows/runs/
 .DS_Store
 Thumbs.db
 *.tmp

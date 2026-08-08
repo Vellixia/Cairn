@@ -1,1 +1,0 @@
-{"id":"error-invalid-goal-empty","error":{"code":"INVALID_GOAL_CONTRACT","message":"goal contract is invalid","data":{"kind":"invalid_goal_contract","violations":[{"violation":"empty_goal","field":"goal"}]}}}

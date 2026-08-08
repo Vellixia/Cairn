@@ -1,0 +1,25 @@
+[package]
+name = "cairn-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cairn-core.workspace = true
+cairn-store.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+uuid.workspace = true
+tokio.workspace = true
+sqlx.workspace = true
+tiktoken-rs = "0.12"
