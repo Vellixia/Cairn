@@ -1,0 +1,23 @@
+# Build output and dependencies are produced inside the image, never copied in.
+target/
+web/node_modules/
+web/.next/
+web/out/
+web/test-results/
+web/playwright-report/
+
+# Local state and history have no place in a build context.
+.git/
+.github/
+.cairn/
+*.sqlite3
+*.sqlite3-*
+*.log
+.env
+.env.*
+!.env.example
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

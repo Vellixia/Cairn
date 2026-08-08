@@ -22,7 +22,7 @@ pub struct AppState {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "cairn-server", about = "Cairn shared memory server")]
+#[command(name = "cairn-server", about = "Cairn shared memory server", version)]
 struct Args {
     /// PostgreSQL connection string.
     #[arg(

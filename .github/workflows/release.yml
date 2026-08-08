@@ -1,0 +1,299 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+# Least privilege by default; jobs widen only what they need.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # --------------------------------------------------------------------------
+  # The tag must agree with the workspace version, and the tree must pass the
+  # same gates CI enforces. Everything downstream builds from this exact commit.
+  # --------------------------------------------------------------------------
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: cairn
+          POSTGRES_DB: cairn
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag version matches the workspace version
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "tag=$tag crate=$crate"
+          if [ "$tag" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match workspace version $crate"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Test
+        env:
+          CAIRN_TEST_DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
+        run: cargo test --workspace --all-targets
+
+  # --------------------------------------------------------------------------
+  # Native archives. Each target builds on a runner of its own architecture, so
+  # nothing is cross-compiled and nothing needs a cross toolchain.
+  #
+  # Windows is absent deliberately: the daemon and CLI speak over a Unix domain
+  # socket, so Cairn does not run there yet.
+  # --------------------------------------------------------------------------
+  binaries:
+    name: ${{ matrix.target }}
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - run: rustup show active-toolchain || rustup toolchain install
+      - run: rustup target add ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binaries
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} \
+            -p cairn -p cairnd -p cairn-server
+
+      - name: Package
+        id: package
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="cairn-v${VERSION}-${{ matrix.target }}"
+          stage="dist/$name"
+          mkdir -p "$stage"
+          cp target/${{ matrix.target }}/release/cairn "$stage/"
+          cp target/${{ matrix.target }}/release/cairnd "$stage/"
+          cp target/${{ matrix.target }}/release/cairn-server "$stage/"
+          cp LICENSE "$stage/"
+          cp CHANGELOG.md "$stage/"
+          cat > "$stage/INSTALL.md" <<EOF
+          # Cairn v${VERSION} — ${{ matrix.target }}
+
+          Put \`cairn\` and \`cairnd\` on your PATH; they must sit in the same
+          directory, because \`cairn\` starts the daemon on its own.
+
+              sudo install -m 0755 cairn cairnd /usr/local/bin/
+
+          Then, inside a Git repository:
+
+              cairn init
+              cairn connect claude-code
+
+          \`cairn-server\` is only needed if you host shared project memory
+          yourself. Most people do not need it.
+          EOF
+          tar -C dist -czf "$name.tar.gz" "$name"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test the packaged binaries
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          name="cairn-v${VERSION}-${{ matrix.target }}"
+          # Only a native archive can be executed on this runner.
+          case "${{ matrix.target }}" in
+            x86_64-apple-darwin)
+              echo "cross-built for Intel macOS; skipping execution on arm64"
+              exit 0 ;;
+          esac
+          tmp=$(mktemp -d)
+          tar -C "$tmp" -xzf "$name.tar.gz"
+          bin="$tmp/$name"
+          "$bin/cairn" --version
+          "$bin/cairnd" --version
+          "$bin/cairn-server" --version
+          "$bin/cairn" --help > /dev/null
+          "$bin/cairn" --version | grep -q "${VERSION}"
+          "$bin/cairnd" --version | grep -q "${VERSION}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          retention-days: 7
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Checksums and an SBOM over the archives that will actually be published.
+  # --------------------------------------------------------------------------
+  assets:
+    name: checksums and SBOM
+    needs: [verify, binaries]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+
+      - name: SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum *.tar.gz | tee SHA256SUMS
+          sha256sum -c SHA256SUMS
+
+      - name: SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/SBOM.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest the release archives
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*.tar.gz
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-assets
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  # --------------------------------------------------------------------------
+  # Server and web images, multi-platform, pushed to GHCR with the release
+  # version and an immutable sha- tag. No `latest` for a pre-release.
+  # --------------------------------------------------------------------------
+  images:
+    name: image (${{ matrix.component }})
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - component: server
+            dockerfile: docker/server.Dockerfile
+          - component: web
+            dockerfile: docker/web.Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: mode=max
+          sbom: true
+          tags: |
+            ghcr.io/vellixia/cairn-${{ matrix.component }}:${{ needs.verify.outputs.version }}
+            ghcr.io/vellixia/cairn-${{ matrix.component }}:sha-${{ needs.verify.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.title=cairn-${{ matrix.component }}
+            org.opencontainers.image.version=${{ needs.verify.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/Vellixia/Cairn
+            org.opencontainers.image.licenses=MIT
+          cache-from: type=gha,scope=${{ matrix.component }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.component }}
+
+      - name: Attest the image
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/vellixia/cairn-${{ matrix.component }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  # --------------------------------------------------------------------------
+  # Publish. Pre-release for anything carrying a pre-release suffix.
+  # --------------------------------------------------------------------------
+  release:
+    name: publish
+    needs: [verify, assets, images]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-assets
+          path: dist
+
+      - name: Publish the GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          prerelease=""
+          case "$VERSION" in *-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Cairn v$VERSION" \
+            --notes-file .github/release-notes/v${VERSION}.md \
+            $prerelease \
+            dist/*

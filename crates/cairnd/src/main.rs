@@ -25,7 +25,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::RwLock;
 
 #[derive(Parser, Debug)]
-#[command(name = "cairnd", about = "Cairn local daemon")]
+#[command(name = "cairnd", about = "Cairn local daemon", version)]
 struct Args {
     /// Socket to listen on. Defaults to `CAIRN_HOME/cairnd.sock`.
     #[arg(long)]

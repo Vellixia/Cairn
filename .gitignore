@@ -22,6 +22,7 @@ cairn.sqlite3*
 
 # Environment and logs
 .env*
+!.env.example
 *.log
 
 # Crash dumps (a container test process left a 12 MB ELF core here once)

@@ -2,6 +2,10 @@
 
 Persistent, project-aware memory for AI coding agents.
 
+> **Alpha.** Cairn was rebuilt around this architecture; `v0.1.0-alpha.1` starts a new
+> release line, and the earlier v0.x releases have been retired. Pre-1.0, so APIs,
+> storage schemas, and the wire protocol can change without a deprecation period.
+
 An AI coding session starts blind. Everything the last session learned — the goal, what was
 tried, what failed, which decisions were already made, which conventions this repository
 follows — disappears when the context window ends. You re-explain, the agent re-discovers,
@@ -14,14 +18,38 @@ resumes instead of restarting.
 
 ## Install and connect
 
+Download a release archive, verify it, and put the binaries on your PATH. `cairn` and
+`cairnd` must live in the same directory — `cairn` starts the daemon itself.
+
+```bash
+VERSION=0.1.0-alpha.1
+TARGET=aarch64-apple-darwin   # x86_64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu
+
+curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/cairn-v${VERSION}-${TARGET}.tar.gz
+curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/SHA256SUMS
+sha256sum --ignore-missing -c SHA256SUMS
+
+tar -xzf cairn-v${VERSION}-${TARGET}.tar.gz
+sudo install -m 0755 cairn-v${VERSION}-${TARGET}/{cairn,cairnd} /usr/local/bin/
+```
+
+Or build from source — nothing is needed beyond the pinned toolchain:
+
 ```bash
 cargo build --workspace --release          # cairn, cairnd, cairn-server
 export PATH="$PWD/target/release:$PATH"
+```
 
+Then, in a repository:
+
+```bash
 cd your-git-repo
 cairn init                                 # register this repository
 cairn connect claude-code                  # install hooks + the MCP server
 ```
+
+**Supported platforms:** macOS on Apple silicon and Intel, Linux on x86_64 and arm64.
+Windows is not supported — the CLI and daemon talk over a Unix domain socket.
 
 Start a Claude Code session in that repository. Cairn starts its daemon on its own, opens a
 session, and begins capturing. When the session ends:
@@ -71,6 +99,26 @@ first: a fact about *this task* beats an unrelated one, however well it matches.
 Every command takes `--json` and prints a stable envelope.
 
 ## Sharing with a team (optional)
+
+The quickest route is the example stack — PostgreSQL, the server, and the web UI:
+
+```bash
+cp deploy/.env.example deploy/.env        # then edit the password
+docker compose -f deploy/docker-compose.yml up -d
+curl -fsS http://127.0.0.1:8080/api/health   # {"ok":true}
+open http://127.0.0.1:3100
+```
+
+Images are published per release, for `linux/amd64` and `linux/arm64`:
+
+```
+ghcr.io/vellixia/cairn-server:0.1.0-alpha.1
+ghcr.io/vellixia/cairn-web:0.1.0-alpha.1
+```
+
+Only the shared components ship as containers. The local agent stays native.
+
+To run the same thing from source instead:
 
 ```bash
 docker compose up -d postgres
