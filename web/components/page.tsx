@@ -14,11 +14,14 @@ export function PageHeader({
   return (
     <header className="mb-6 flex flex-wrap items-end justify-between gap-3">
       <div className="min-w-0">
+        {/* The title truncates because a project name can be arbitrarily long
+            and belongs on one line. The subtitle wraps instead: on a phone it
+            is the only place some of this context appears. */}
         <h1 className="truncate text-2xl font-semibold tracking-tight">
           {title}
         </h1>
         {subtitle && (
-          <p className="text-muted-foreground mt-1 truncate text-sm">
+          <p className="text-muted-foreground mt-1 text-sm text-pretty">
             {subtitle}
           </p>
         )}
@@ -43,7 +46,7 @@ export function EmptyState({
       <Inbox className="text-muted-foreground mb-3 size-8" strokeWidth={1.5} />
       <p className="font-medium">{title}</p>
       {description && (
-        <div className="text-muted-foreground mt-1 max-w-sm text-sm">
+        <div className="text-muted-foreground mt-1 max-w-sm text-sm text-pretty">
           {description}
         </div>
       )}

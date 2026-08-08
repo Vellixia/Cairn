@@ -77,8 +77,14 @@ export default function MemoryPage({
           />
         </div>
         <Select value={scope} onValueChange={(v) => setScope(v ?? ANY)}>
-          <SelectTrigger className="w-36" data-testid="scope-filter">
-            <SelectValue />
+          <SelectTrigger
+            className="w-36"
+            data-testid="scope-filter"
+            aria-label="Filter by scope"
+          >
+            {/* Base UI renders the raw value, which would leave both filters
+                reading "any" with no way to tell them apart. */}
+            <SelectValue>{(v: string) => (v === ANY ? "any scope" : v)}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ANY}>any scope</SelectItem>
@@ -90,8 +96,12 @@ export default function MemoryPage({
           </SelectContent>
         </Select>
         <Select value={type} onValueChange={(v) => setType(v ?? ANY)}>
-          <SelectTrigger className="w-36" data-testid="type-filter">
-            <SelectValue />
+          <SelectTrigger
+            className="w-36"
+            data-testid="type-filter"
+            aria-label="Filter by type"
+          >
+            <SelectValue>{(v: string) => (v === ANY ? "any type" : v)}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ANY}>any type</SelectItem>
