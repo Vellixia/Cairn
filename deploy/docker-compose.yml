@@ -41,6 +41,12 @@ services:
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       CAIRN_SERVER_ADDR: 0.0.0.0:8080
       CAIRN_WEB_ORIGIN: ${CAIRN_WEB_ORIGIN:-http://127.0.0.1:3100}
+      # The operator's account, defined here rather than registered through the
+      # UI. Blank means seed nothing; the server re-applies the password on
+      # every start, so rotating it is an edit and a restart.
+      CAIRN_ADMIN_EMAIL: ${CAIRN_ADMIN_EMAIL:-}
+      CAIRN_ADMIN_PASSWORD: ${CAIRN_ADMIN_PASSWORD:-}
+      CAIRN_ADMIN_DISPLAY_NAME: ${CAIRN_ADMIN_DISPLAY_NAME:-Admin}
     ports:
       - "${CAIRN_SERVER_PORT:-8080}:8080"
 

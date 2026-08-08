@@ -44,6 +44,22 @@ struct Args {
     /// asks each for a small share, so they do not exhaust it between them.
     #[arg(long, env = "CAIRN_SERVER_MAX_CONNECTIONS", default_value_t = db::DEFAULT_MAX_CONNECTIONS)]
     max_connections: u32,
+    /// Email of the account defined by the environment.
+    ///
+    /// Set it with `--admin-password` and the server creates that account on
+    /// start, so a fresh deployment has someone able to sign in. Leave both
+    /// unset and the server seeds nothing.
+    #[arg(long, env = "CAIRN_ADMIN_EMAIL")]
+    admin_email: Option<String>,
+    /// Password for the environment-defined account. At least 8 characters.
+    ///
+    /// Re-applied on every start: this variable is the account's password, not
+    /// merely its initial one.
+    #[arg(long, env = "CAIRN_ADMIN_PASSWORD")]
+    admin_password: Option<String>,
+    /// Display name for the environment-defined account.
+    #[arg(long, env = "CAIRN_ADMIN_DISPLAY_NAME", default_value = "Admin")]
+    admin_display_name: String,
 }
 
 #[tokio::main]
@@ -53,6 +69,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Migrations run on start, so a fresh deployment needs no separate step.
     let pool = db::connect(&args.database_url, args.max_connections).await?;
+    seed_admin(&pool, &args).await?;
+
     let state = AppState { pool };
 
     // A credentialed browser request cannot be paired with wildcard headers or
@@ -78,6 +96,45 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %args.addr, "cairn-server listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Apply the environment-defined account, before the listener binds.
+///
+/// A deployment whose operator credentials are malformed has nobody able to
+/// sign in, so it fails to start rather than serving traffic that turns anyone
+/// away. Half a pair is a mistake worth the same treatment: it reads as
+/// configured but seeds nothing.
+async fn seed_admin(pool: &PgPool, args: &Args) -> anyhow::Result<()> {
+    match (
+        configured(args.admin_email.as_deref()),
+        configured(args.admin_password.as_deref()),
+    ) {
+        (Some(email), Some(password)) => {
+            let (id, outcome) =
+                auth::ensure_admin(pool, email, args.admin_display_name.trim(), password).await?;
+            tracing::info!(
+                user = %id,
+                email = %email.trim().to_lowercase(),
+                outcome = outcome.as_str(),
+                "admin account defined by the environment"
+            );
+            Ok(())
+        }
+        (None, None) => Ok(()),
+        (Some(_), None) => {
+            anyhow::bail!("CAIRN_ADMIN_EMAIL is set but CAIRN_ADMIN_PASSWORD is not")
+        }
+        (None, Some(_)) => {
+            anyhow::bail!("CAIRN_ADMIN_PASSWORD is set but CAIRN_ADMIN_EMAIL is not")
+        }
+    }
+}
+
+/// An empty variable is how a `.env` file and a Compose `environment:` block
+/// spell "unset" — the process still receives the name, just with nothing in
+/// it. Treating that as configured would fail every default deployment.
+fn configured(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.trim().is_empty())
 }
 
 fn init_tracing() {

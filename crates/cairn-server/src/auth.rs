@@ -19,6 +19,10 @@ use uuid::Uuid;
 pub const COOKIE_NAME: &str = "cairn_session";
 const SESSION_DAYS: i64 = 30;
 
+/// The shortest password the environment-defined admin may carry. Registration
+/// applies the same floor to accounts created over HTTP.
+pub const MIN_PASSWORD_LEN: usize = 8;
+
 /// The authenticated caller.
 #[derive(Debug, Clone, Copy)]
 pub struct CurrentUser {
@@ -96,6 +100,79 @@ pub fn verify_password(password: &str, hash: &str) -> bool {
             .is_ok(),
         Err(_) => false,
     }
+}
+
+/// Whether [`ensure_admin`] created the account or found it already there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminOutcome {
+    Created,
+    Updated,
+}
+
+impl AdminOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AdminOutcome::Created => "created",
+            AdminOutcome::Updated => "updated",
+        }
+    }
+}
+
+/// Define the operator's account from the environment.
+///
+/// A fresh deployment has no users, and `/api/auth/register` is the only route
+/// that makes one — which leaves nobody able to sign in and open registration
+/// to whoever reaches the server first. Naming the account in the environment
+/// closes both gaps.
+///
+/// The environment is the source of truth, so this re-applies the password on
+/// every start: rotating it means editing the variable and restarting. Running
+/// twice with an unchanged password is still a write, but not a change.
+pub async fn ensure_admin(
+    pool: &PgPool,
+    email: &str,
+    display_name: &str,
+    password: &str,
+) -> anyhow::Result<(Uuid, AdminOutcome)> {
+    let email = email.trim().to_lowercase();
+    if email.is_empty() {
+        anyhow::bail!("CAIRN_ADMIN_EMAIL is empty");
+    }
+    if !email.contains('@') {
+        anyhow::bail!("CAIRN_ADMIN_EMAIL is not an email address");
+    }
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        anyhow::bail!("CAIRN_ADMIN_PASSWORD must be at least {MIN_PASSWORD_LEN} characters");
+    }
+
+    let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
+
+    // `xmax = 0` distinguishes the inserted row from the updated one: an INSERT
+    // leaves no deleting transaction behind, an UPDATE does. It is the only way
+    // to tell the two apart from a single upsert.
+    let (id, inserted): (Uuid, bool) = sqlx::query_as(
+        "INSERT INTO users (id, email, display_name, password_hash)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (email) DO UPDATE
+             SET password_hash = EXCLUDED.password_hash,
+                 display_name  = EXCLUDED.display_name
+         RETURNING id, (xmax = 0) AS inserted",
+    )
+    .bind(Uuid::now_v7())
+    .bind(&email)
+    .bind(display_name)
+    .bind(&hash)
+    .fetch_one(pool)
+    .await?;
+
+    Ok((
+        id,
+        if inserted {
+            AdminOutcome::Created
+        } else {
+            AdminOutcome::Updated
+        },
+    ))
 }
 
 async fn user_for_api_token(pool: &PgPool, token: &str) -> ApiResult<Option<Uuid>> {
