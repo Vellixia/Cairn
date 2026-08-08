@@ -18,6 +18,11 @@ export class ApiError extends Error {
   }
 }
 
+/** Whether an error is the server saying "you are not signed in". */
+export function isUnauthorized(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 401;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...init,
@@ -48,6 +53,17 @@ export const api = {
       body: JSON.stringify({ email, display_name: displayName, password }),
     }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+
+  /** Personal API tokens: the credential `cairnd` carries (D10). */
+  tokens: () => request<{ tokens: ApiToken[] }>("/api/tokens"),
+  /** The plaintext comes back exactly once and is never stored server-side. */
+  createToken: (name: string) =>
+    request<CreatedToken>("/api/tokens", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  revokeToken: (id: string) =>
+    request<{ revoked: string }>(`/api/tokens/${id}`, { method: "DELETE" }),
 
   projects: () => request<{ projects: Project[] }>("/api/projects"),
   project: (id: string) => request<ProjectOverview>(`/api/projects/${id}`),
@@ -82,6 +98,21 @@ export interface User {
   id: string;
   email: string;
   display_name: string;
+}
+
+export interface ApiToken {
+  id: string;
+  name: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface CreatedToken {
+  id: string;
+  name: string;
+  /** Shown once, then unrecoverable. */
+  token: string;
 }
 
 export interface Project {

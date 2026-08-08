@@ -44,7 +44,9 @@ test("memory is searchable by scope and shows its provenance", async ({ page }) 
     "never logged and swallowed",
   );
 
-  await page.getByTestId("scope-filter").selectOption("project");
+  // The scope filter is a listbox, not a native <select>: open it, then pick.
+  await page.getByTestId("scope-filter").click();
+  await page.getByRole("option", { name: "project", exact: true }).click();
   await expect(page.getByTestId("memory-content").first()).toBeVisible();
 
   // Provenance is a session and a count; evidence content lives locally.

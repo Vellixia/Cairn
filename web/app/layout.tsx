@@ -1,7 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
+import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "@/components/providers";
+
+const sans = Geist({ subsets: ["latin"], variable: "--font-geist-sans" });
+const mono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
 
 export const metadata: Metadata = {
   title: "Cairn",
@@ -14,19 +17,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
-      <body>
-        <Providers>
-          <div className="mx-auto max-w-5xl px-6 py-8">
-            <Link
-              href="/"
-              className="mb-8 inline-block text-sm font-semibold tracking-tight"
-            >
-              Cairn
-            </Link>
-            {children}
-          </div>
-        </Providers>
+    // `suppressHydrationWarning` because next-themes writes the theme class on
+    // the client before React hydrates, which is the whole point of it.
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${sans.variable} ${mono.variable}`}>
+        <Providers>{children}</Providers>
       </body>
     </html>
   );
