@@ -60,6 +60,11 @@ jobs:
           CAIRN_TEST_DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
         run: cargo test --workspace --all-targets
 
+      # The end-to-end suite drives the real binaries, and `cargo test` does not
+      # build another package's binaries. Without this the release-profile run
+      # finds nothing to drive.
+      - run: cargo build --workspace --release
+
       - name: Capture-hook latency (SC-007 is a release-build claim)
         env:
           CAIRN_TEST_DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn

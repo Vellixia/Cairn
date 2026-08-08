@@ -345,7 +345,19 @@ impl Sandbox {
 
 impl Drop for Sandbox {
     fn drop(&mut self) {
-        self.cairn(&["daemon", "stop"]);
+        // Never panic while unwinding. A panic in a destructor is not
+        // recoverable: it aborts the whole test binary, replacing whichever
+        // assertion actually failed with a SIGABRT and a core dump. Shutting
+        // the daemon down is best effort, so it is guarded rather than
+        // asserted.
+        if let Some(exe) = try_binary("cairn") {
+            let _ = Command::new(exe)
+                .args(["daemon", "stop"])
+                .current_dir(self.repo.path())
+                .env("CAIRN_HOME", self.home.path())
+                .env("CAIRN_SOCKET", &self.socket)
+                .output();
+        }
         let _ = std::fs::remove_file(&self.socket);
     }
 }
@@ -366,6 +378,19 @@ impl CliResult {
     pub fn ok(&self) -> bool {
         self.code == 0
     }
+}
+
+/// Locate a workspace binary next to the test executable, or `None`.
+///
+/// For callers that must not panic — notably `Drop`.
+pub fn try_binary(name: &str) -> Option<PathBuf> {
+    let mut dir = std::env::current_exe().ok()?;
+    dir.pop(); // deps/
+    if dir.ends_with("deps") {
+        dir.pop();
+    }
+    let candidate = dir.join(name);
+    candidate.exists().then_some(candidate)
 }
 
 /// Locate a workspace binary next to the test executable.
