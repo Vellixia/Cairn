@@ -150,14 +150,19 @@ pub fn status(s: &StatusPayload) -> String {
         "Project      {} ({})\n",
         s.project.name, s.project.id
     ));
+    // "linked" alone never said *to what*, so learning where work goes took
+    // three commands.
     out.push_str(&format!(
         "Sharing      {}\n",
-        if s.project.linked {
-            "linked"
-        } else {
-            "local only"
+        match (s.project.linked, s.server_url.as_deref()) {
+            (true, Some(url)) => format!("linked to {url}"),
+            (true, None) => "linked, but no server is configured".to_string(),
+            (false, _) => "local only".to_string(),
         }
     ));
+    if s.project.linked && !s.authenticated {
+        out.push_str("             no API token stored — run `cairn auth token set`\n");
+    }
     out.push_str(&format!("Worktree     {}\n", s.worktree_path));
     out.push_str(&format!(
         "Branch       {} @ {}\n",

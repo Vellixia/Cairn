@@ -41,6 +41,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  /** Unauthenticated: the version of a service is not a secret. */
+  version: () => request<VersionInfo>("/api/version"),
   me: () => request<User>("/api/auth/me"),
   login: (email: string, password: string) =>
     request<{ id: string }>("/api/auth/login", {
@@ -93,6 +95,20 @@ export const api = {
   syncStatus: (id: string) =>
     request<SyncStatus>(`/api/projects/${id}/sync-status`),
 };
+
+export interface Release {
+  tag: string;
+  version: string;
+  url: string;
+}
+
+export interface VersionInfo {
+  current: string;
+  latest: Release | null;
+  update_available: boolean;
+  /** Null when the lookup has never succeeded — not the same as up to date. */
+  checked_at: string | null;
+}
 
 export interface User {
   id: string;

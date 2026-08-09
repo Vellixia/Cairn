@@ -47,6 +47,14 @@ pub fn log_path() -> PathBuf {
     home().join("cairn.log")
 }
 
+/// The daemon's log.
+///
+/// Separate from `cairn.log`, which the hook writes to from the agent's
+/// process: the two have different writers and different lifetimes.
+pub fn daemon_log_path() -> PathBuf {
+    home().join("cairnd.log")
+}
+
 /// Create the state directory if it does not exist.
 pub fn ensure_home() -> std::io::Result<PathBuf> {
     let h = home();

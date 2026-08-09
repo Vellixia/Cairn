@@ -8,6 +8,7 @@ mod auth;
 mod db;
 mod error;
 mod sync;
+mod version;
 
 use axum::http::{header, Method};
 use axum::Router;
@@ -19,6 +20,8 @@ use tower_http::trace::TraceLayer;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    /// Shared knowledge of the newest published release.
+    pub releases: version::ReleaseCache,
     /// Whether the session cookie may only travel over HTTPS.
     pub secure_cookies: bool,
 }
@@ -103,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         pool,
         secure_cookies,
+        releases: version::ReleaseCache::new(),
     };
 
     // A credentialed browser request cannot be paired with wildcard headers or

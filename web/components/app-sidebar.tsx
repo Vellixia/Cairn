@@ -21,6 +21,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { CairnMark } from "@/components/logo";
+import { VersionLine } from "@/components/version";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -190,6 +191,11 @@ export function AppSidebar() {
       </SidebarContent>
 
       <SidebarFooter>
+        {/* Hidden when collapsed to icons: a version string in a 3rem rail is
+            noise, and the tooltip cannot be reached from a collapsed item. */}
+        <div className="group-data-[collapsible=icon]:hidden">
+          <VersionLine />
+        </div>
         <UserMenu />
       </SidebarFooter>
       <SidebarRail />

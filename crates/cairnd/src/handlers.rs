@@ -337,6 +337,9 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         memory_count: repo::count_memories(&d.store, r.project.id)
             .await
             .map_err(storage_err)?,
+        server_url: d.server.read().await.url.clone(),
+        authenticated: d.server.read().await.token.is_some(),
+        version: Some(env!("CARGO_PKG_VERSION").to_string()),
     };
     Ok(serde_json::to_value(payload).unwrap_or(json!({})))
 }

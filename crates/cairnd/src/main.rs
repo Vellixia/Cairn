@@ -248,11 +248,37 @@ async fn serve(
     Ok(())
 }
 
+/// Send the daemon's log somewhere a person can read it.
+///
+/// `cairn` starts the daemon detached with stderr on /dev/null, so for as long
+/// as tracing only went to stderr the daemon effectively had no log at all —
+/// diagnosing it meant running `cairnd` by hand. It writes to a file now, and
+/// still to stderr when someone runs it in the foreground.
 fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_env("CAIRN_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .try_init();
+
+    let _ = cairn_core::paths::ensure_home();
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cairn_core::paths::daemon_log_path());
+
+    match file {
+        Ok(file) => {
+            let _ = fmt()
+                .with_env_filter(filter)
+                // A log read with `cat` should not be full of escape codes.
+                .with_ansi(false)
+                .with_writer(move || file.try_clone().expect("log handle"))
+                .try_init();
+        }
+        // A daemon that cannot open its log still has work to do.
+        Err(_) => {
+            let _ = fmt()
+                .with_env_filter(filter)
+                .with_writer(std::io::stderr)
+                .try_init();
+        }
+    }
 }

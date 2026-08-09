@@ -5,6 +5,7 @@ mod connect;
 mod hook;
 mod mcp;
 mod render;
+mod update;
 
 use cairn_core::domain::*;
 use cairn_core::wire::*;
@@ -104,6 +105,12 @@ enum Command {
     Daemon {
         #[command(subcommand)]
         action: DaemonAction,
+    },
+    /// Check for a newer release, and install it.
+    Update {
+        /// Report what is available without installing anything.
+        #[arg(long)]
+        check: bool,
     },
     /// Run the MCP server over stdio.
     Mcp,
@@ -279,6 +286,12 @@ enum SyncAction {
 
 #[derive(Subcommand)]
 enum DaemonAction {
+    /// Show the daemon's recent log.
+    Logs {
+        /// How many lines from the end.
+        #[arg(long, default_value_t = 50)]
+        tail: usize,
+    },
     Start,
     Stop,
     Status,
@@ -477,6 +490,7 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         }
 
         Command::Auth { action } => auth(action).await,
+        Command::Update { check } => update_command(*check).await,
         Command::Sync { action } => sync(action).await,
         Command::Daemon { action } => daemon(action).await,
     }
@@ -862,6 +876,27 @@ async fn sync(action: &SyncAction) -> Result<Output, WireError> {
 
 async fn daemon(action: &DaemonAction) -> Result<Output, WireError> {
     match action {
+        DaemonAction::Logs { tail } => {
+            let path = cairn_core::paths::daemon_log_path();
+            let text = std::fs::read_to_string(&path).unwrap_or_default();
+            let lines: Vec<&str> = text.lines().collect();
+            let shown: Vec<&str> = lines.iter().rev().take(*tail).rev().copied().collect();
+            let body = if shown.is_empty() {
+                format!(
+                    "No daemon log yet at {}.\nIt fills once the daemon starts.\n",
+                    path.display()
+                )
+            } else {
+                format!("{}\n", shown.join("\n"))
+            };
+            Ok(Output::with(
+                serde_json::json!({
+                    "path": path.display().to_string(),
+                    "lines": shown,
+                }),
+                body,
+            ))
+        }
         DaemonAction::Start => {
             if client::daemon_running().await {
                 return Ok(Output::with(
@@ -894,4 +929,44 @@ async fn daemon(action: &DaemonAction) -> Result<Output, WireError> {
             ))
         }
     }
+}
+
+/// `cairn update` — report, and install when asked.
+async fn update_command(check_only: bool) -> Result<Output, WireError> {
+    let outcome = if check_only {
+        update::check().await?
+    } else {
+        update::apply().await?
+    };
+
+    let mut text = format!("Installed  {}\n", outcome.current);
+    match &outcome.latest {
+        Some(latest) => {
+            text.push_str(&format!("Latest     {}\n", latest.version));
+            if outcome.installed {
+                text.push_str("\nUpdated. Restart the daemon so it runs the new build:\n");
+                text.push_str("  cairn daemon stop && cairn daemon start\n");
+            } else if outcome.update_available {
+                text.push_str(&format!("\n{} is available.\n", latest.version));
+                text.push_str("Run `cairn update` to install it, or read about it first:\n");
+                text.push_str(&format!("  {}\n", latest.url));
+            } else {
+                text.push_str("\nAlready up to date.\n");
+            }
+        }
+        None => text.push_str("Latest     could not be determined\n"),
+    }
+
+    let value = serde_json::json!({
+        "current": outcome.current,
+        "latest": outcome.latest,
+        "update_available": outcome.update_available,
+        "installed": outcome.installed,
+        "installed_to": outcome
+            .installed_to
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>(),
+    });
+    Ok(Output::with(value, text))
 }

@@ -64,6 +64,9 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 dirs = "5"
+semver = "1"
+flate2 = "1"
+tar = "0.4"
 tempfile = "3"
 
 [profile.release]

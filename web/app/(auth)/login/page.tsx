@@ -6,6 +6,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { CairnMark } from "@/components/logo";
+import { VersionFooter } from "@/components/version";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -124,6 +125,7 @@ export default function LoginPage() {
           Accounts come from the server&apos;s environment. Ask whoever runs
           this deployment for access.
         </p>
+        <VersionFooter />
       </div>
     </div>
   );

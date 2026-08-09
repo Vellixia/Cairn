@@ -388,6 +388,15 @@ pub struct StatusPayload {
     pub daemon: String,
     pub observation_count: i64,
     pub memory_count: i64,
+    /// The server a linked project syncs to, when one is configured.
+    #[serde(default)]
+    pub server_url: Option<String>,
+    /// Whether a credential is stored for it.
+    #[serde(default)]
+    pub authenticated: bool,
+    /// The build answering this, so a bug report can name it.
+    #[serde(default)]
+    pub version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

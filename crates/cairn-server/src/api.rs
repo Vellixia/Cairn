@@ -16,6 +16,7 @@ use uuid::Uuid;
 pub fn routes() -> Router<AppState> {
     Router::new()
         .route("/api/health", get(health))
+        .route("/api/version", get(version))
         // Authentication
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
@@ -46,6 +47,15 @@ pub fn routes() -> Router<AppState> {
 
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
+}
+
+/// What this deployment runs, and whether a newer release exists.
+///
+/// Unauthenticated on purpose: the version of a service is not a secret, and
+/// the sign-in page is a reasonable place to show it.
+async fn version(State(state): State<AppState>) -> Json<Value> {
+    let payload = state.releases.payload().await;
+    Json(serde_json::to_value(payload).unwrap_or_else(|_| json!({})))
 }
 
 // ---------------------------------------------------------------------------

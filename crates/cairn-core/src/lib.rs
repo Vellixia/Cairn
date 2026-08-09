@@ -11,6 +11,7 @@ pub mod domain;
 pub mod handoff;
 pub mod paths;
 pub mod redact;
+pub mod release;
 pub mod tools;
 pub mod wire;
 
