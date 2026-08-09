@@ -183,6 +183,7 @@ async fn handle(d: &Daemon, request: Request) -> Reply {
         Request::MemoryCreate {
             cwd,
             agent_session_key,
+            session_id,
             kind,
             scope,
             scope_key,
@@ -194,6 +195,7 @@ async fn handle(d: &Daemon, request: Request) -> Reply {
                 d,
                 &cwd,
                 agent_session_key,
+                session_id,
                 kind,
                 scope,
                 scope_key,
@@ -219,6 +221,7 @@ async fn handle(d: &Daemon, request: Request) -> Reply {
                 d,
                 &cwd,
                 agent_session_key,
+                None,
                 kind,
                 scope,
                 scope_key,
@@ -284,6 +287,7 @@ async fn handle(d: &Daemon, request: Request) -> Reply {
             crate::sync::set_token(d, &token, server_url).await
         }
         Request::AuthLogout => crate::sync::logout(d).await,
+        Request::AuthStatus => crate::sync::auth_status(d).await,
         Request::SyncStatus { cwd } => crate::sync::status(d, &cwd).await,
         Request::SyncNow { cwd } => crate::sync::sync_now(d, &cwd).await,
     }
@@ -686,6 +690,7 @@ async fn memory_create(
     d: &Daemon,
     cwd: &str,
     agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
     kind: MemoryType,
     scope: Option<MemoryScope>,
     scope_key: Option<String>,
@@ -697,7 +702,7 @@ async fn memory_create(
     let r = d.resolve(cwd).await?;
     // A memory needs an origin session, and only that. Evidence is optional and
     // is never fabricated (FR-019).
-    let session = ensure_session_for_memory(d, &r, agent_session_key).await?;
+    let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
     let git = git_status(r.repo.worktree_path.clone()).await?;
 
     let (scope, key) = resolve_scope(&r, &session, &git.branch, scope, scope_key)?;
@@ -732,13 +737,22 @@ async fn memory_create(
 
 /// Recording memory should not require the caller to have started a session
 /// first; one is opened on demand so provenance is always real.
+///
+/// Only genuine absence opens one. Swallowing every error here also swallowed
+/// `ambiguous_session`, which meant a second agent in the same worktree quietly
+/// got a throwaway session — worsening the ambiguity for everyone else and
+/// stamping the memory with an origin that never did the work. Ambiguity is the
+/// caller's to resolve, exactly as it is for `cairn context`.
 async fn ensure_session_for_memory(
     d: &Daemon,
     r: &Resolved,
+    session_id: Option<Uuid>,
     key: Option<String>,
 ) -> Result<Session, WireError> {
-    if let Ok(s) = resolve_session(d, r, None, key.as_deref()).await {
-        return Ok(s);
+    match resolve_session(d, r, session_id, key.as_deref()).await {
+        Ok(s) => return Ok(s),
+        Err(e) if e.code != codes::NO_ACTIVE_SESSION => return Err(e),
+        Err(_) => {}
     }
     let git = git_status(r.repo.worktree_path.clone()).await?;
     let key = key.unwrap_or_else(|| format!("cairn-cli-{}", new_id()));

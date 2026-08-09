@@ -157,7 +157,9 @@ fn tool_definitions() -> Vec<Value> {
                     "content": { "type": "string" },
                     "evidence_observation_ids": { "type": "array", "items": { "type": "string" } },
                     "local_only": { "type": "boolean" },
-                    "memory_id": { "type": "string" }
+                    "memory_id": { "type": "string" },
+                    "agent_session_key": { "type": "string", "description": "Your own session identifier. Required when more than one session is open in this worktree." },
+                    "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -303,6 +305,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                         client::send(&Request::MemoryCreate {
                             cwd,
                             agent_session_key: key,
+                            session_id: uuid_opt(args, "session_id"),
                             kind,
                             scope: enum_arg(args, "scope"),
                             scope_key: str_arg(args, "scope_key"),
@@ -496,6 +499,13 @@ fn uuid_arg(args: &Value, key: &str) -> Result<uuid::Uuid, WireError> {
         .and_then(|v| v.as_str())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
         .ok_or_else(|| WireError::invalid(format!("{key} must be a uuid")))
+}
+
+/// A uuid argument that is allowed to be absent.
+fn uuid_opt(args: &Value, key: &str) -> Option<uuid::Uuid> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
 }
 
 fn uuid_list(args: &Value, key: &str) -> Vec<uuid::Uuid> {

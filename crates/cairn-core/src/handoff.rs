@@ -163,8 +163,26 @@ fn derive_completed(
             tests.len()
         ));
     }
-    out.extend(discoveries.iter().cloned());
+    out.extend(discoveries.iter().filter(|d| carries_meaning(d)).cloned());
     out
+}
+
+/// Whether a discovery says anything a reader could act on.
+///
+/// Tool calls without a command arrive summarised as the bare tool name —
+/// `ToolSearch`, `mcp__cairn__cairn_remember` — and listing those as completed
+/// work told the next session nothing except which buttons were pressed. A
+/// summary earns its place by being prose: more than one word, and not just an
+/// identifier.
+fn carries_meaning(summary: &str) -> bool {
+    let trimmed = summary.trim();
+    if trimmed.split_whitespace().count() > 1 {
+        return true;
+    }
+    // A single token is only informative if it is not a bare identifier.
+    !trimmed
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
 }
 
 fn derive_remaining(
@@ -225,6 +243,17 @@ fn derive_next_step(failures: &[String], remaining: &[String], changed_files: &[
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bare_tool_names_are_not_completed_work() {
+        let discoveries = vec![
+            "ToolSearch".to_string(),
+            "mcp__cairn__cairn_remember".to_string(),
+            "Found the socket path is per-user".to_string(),
+        ];
+        let out = super::derive_completed(&[], &[], &discoveries);
+        assert_eq!(out, vec!["Found the socket path is per-user".to_string()]);
+    }
+
     use super::*;
     use chrono::Utc;
 

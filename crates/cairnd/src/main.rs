@@ -98,6 +98,26 @@ async fn main() -> anyhow::Result<()> {
     // `cairn sync now` (FR-056, C1).
     tokio::spawn(sync::run_worker(Arc::clone(&daemon)));
 
+    // Sessions nobody is driving any more. Start-time reconciliation only sees
+    // previous runs, so a long-lived daemon needs this to notice one that went
+    // quiet under its own run.
+    {
+        let daemon = Arc::clone(&daemon);
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+            // The first tick fires immediately; that is wanted, since a daemon
+            // may be starting after a long absence.
+            loop {
+                ticks.tick().await;
+                let reaped =
+                    recover::reap_idle_sessions(&daemon, recover::IDLE_SESSION_TIMEOUT).await;
+                if reaped > 0 {
+                    tracing::info!(reaped, "closed idle sessions");
+                }
+            }
+        });
+    }
+
     let listener = UnixListener::bind(&staging)?;
     std::fs::rename(&staging, &socket_path)?;
     let owned = socket_identity(&socket_path);

@@ -202,6 +202,19 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
     Ok(json!({ "token_stored": true, "server_url": creds.url }))
 }
 
+/// Whether this machine holds a credential, and for which server.
+///
+/// The token itself is never returned — only whether one exists and where it
+/// points, which is what someone asking "am I signed in?" actually needs.
+pub async fn auth_status(d: &Daemon) -> Reply {
+    let creds = d.server.read().await;
+    Ok(json!({
+        "authenticated": creds.token.is_some(),
+        "server_url": creds.url,
+        "token_path": cairn_core::paths::token_path().display().to_string(),
+    }))
+}
+
 pub async fn logout(d: &Daemon) -> Reply {
     let _ = std::fs::remove_file(cairn_core::paths::token_path());
     d.server.write().await.token = None;

@@ -177,6 +177,9 @@ enum MemoryAction {
         /// Supporting observation ids. Optional, and never invented.
         #[arg(long = "evidence")]
         evidence: Vec<Uuid>,
+        /// Which session recorded this, when more than one is open here.
+        #[arg(long)]
+        session: Option<Uuid>,
     },
     Search {
         query: Option<String>,
@@ -254,6 +257,8 @@ enum AuthAction {
         action: TokenAction,
     },
     Logout,
+    /// Whether a credential is stored, and for which server.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -619,6 +624,7 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             scope_key,
             local_only,
             evidence,
+            session,
         } => {
             let kind: MemoryType = parse_enum("type", kind)?;
             let scope = match scope {
@@ -628,6 +634,7 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             let v = client::send(&Request::MemoryCreate {
                 cwd: cwd(),
                 agent_session_key: None,
+                session_id: *session,
                 kind,
                 scope,
                 scope_key: scope_key.clone(),
@@ -797,6 +804,22 @@ async fn auth(action: &AuthAction) -> Result<Output, WireError> {
         AuthAction::Logout => {
             let v = client::send(&Request::AuthLogout).await?;
             Ok(Output::with(v, "Token removed.\n".into()))
+        }
+        AuthAction::Status => {
+            let v = client::send(&Request::AuthStatus).await?;
+            let authenticated = v
+                .get("authenticated")
+                .and_then(|b| b.as_bool())
+                .unwrap_or(false);
+            let server = v
+                .get("server_url")
+                .and_then(|u| u.as_str())
+                .unwrap_or("not set");
+            let text = format!(
+                "Token   {}\nServer  {server}\n",
+                if authenticated { "stored" } else { "none" },
+            );
+            Ok(Output::with(v, text))
         }
     }
 }

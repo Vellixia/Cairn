@@ -277,6 +277,9 @@ pub enum Request {
         cwd: String,
         #[serde(default)]
         agent_session_key: Option<String>,
+        /// The session to attribute this to, when the key is not to hand.
+        #[serde(default)]
+        session_id: Option<Uuid>,
         kind: MemoryType,
         #[serde(default)]
         scope: Option<MemoryScope>,
@@ -365,6 +368,7 @@ pub enum Request {
         server_url: Option<String>,
     },
     AuthLogout,
+    AuthStatus,
     SyncStatus {
         cwd: String,
     },

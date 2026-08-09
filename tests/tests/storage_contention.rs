@@ -150,6 +150,14 @@ fn every_entity_type_survives_concurrent_writing() {
 
     const ROUNDS: usize = 25;
 
+    // A session of this thread's own, so memory writes are attributable while
+    // the session thread churns.
+    let writer_session = s.json(&["session", "start", "--key", "contention-writer"])["session"]
+        ["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
     std::thread::scope(|scope| {
         let capture = scope.spawn(|| {
             for i in 0..(ROUNDS * 3) {
@@ -161,6 +169,9 @@ fn every_entity_type_survives_concurrent_writing() {
             }
         });
 
+        // Pinned to its own session: the thread below opens and closes
+        // sessions constantly, and a memory that cannot say which session it
+        // came from is now refused rather than attributed to a guess.
         let memories = scope.spawn(|| {
             for i in 0..ROUNDS {
                 s.must(&[
@@ -170,6 +181,8 @@ fn every_entity_type_survives_concurrent_writing() {
                     "fact",
                     "--scope",
                     "project",
+                    "--session",
+                    &writer_session,
                     &format!("mixed memory {i}"),
                 ]);
             }

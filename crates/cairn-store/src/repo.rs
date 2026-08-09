@@ -538,6 +538,26 @@ pub async fn resume_session(store: &Store, id: Uuid, daemon_run_id: Uuid) -> Res
 ///
 /// Cairn has no liveness signal, so daemon start — not a heartbeat — is the
 /// deterministic boundary that reconciles them (FR-009, D16).
+/// Active sessions whose last event predates `cutoff`.
+///
+/// A session only ends when something tells it to. When that signal is lost —
+/// an agent killed, a `SessionEnd` hook arriving for a key the daemon never
+/// saw — the row stays `active` forever and makes every later session
+/// ambiguous. Going quiet is the evidence that nobody is driving it.
+pub async fn sessions_idle_since(
+    store: &Store,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<Session>> {
+    let rs = sqlx::query(
+        "SELECT * FROM sessions
+         WHERE status = 'active' AND deleted_at IS NULL AND last_event_at < ?1",
+    )
+    .bind(cutoff.to_rfc3339())
+    .fetch_all(store.pool())
+    .await?;
+    rs.iter().map(rows::session).collect()
+}
+
 pub async fn sessions_from_previous_runs(store: &Store, current_run: Uuid) -> Result<Vec<Session>> {
     let rs = sqlx::query(
         "SELECT * FROM sessions
@@ -1227,4 +1247,108 @@ pub async fn set_pull_cursor(store: &Store, project_id: Uuid, cursor: &str) -> R
     .execute(store.pool())
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+    use crate::Store;
+
+    /// A project for the sessions to hang off.
+    async fn seed_project(store: &Store) -> Uuid {
+        let id = Uuid::now_v7();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO projects
+               (id, name, git_common_dir, repository_remote, linked,
+                server_project_id, created_at, updated_at, deleted_at)
+             VALUES (?1, 'test', ?2, NULL, 0, NULL, ?3, ?3, NULL)",
+        )
+        .bind(id.to_string())
+        .bind(format!("/tmp/git-{id}"))
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Insert a session directly so its clock can be set to the past.
+    async fn seed(store: &Store, project: Uuid, id: Uuid, status: &str, last_event: &str) {
+        sqlx::query(
+            "INSERT INTO sessions
+               (id, project_id, task_id, user_id, agent, branch, commit_sha,
+                worktree_path, agent_session_key, previous_session_id, status,
+                started_at, ended_at, last_event_at, last_turn_ended_at,
+                daemon_run_id, end_reason, deleted_at)
+             VALUES (?1, ?2, NULL, ?3, 'claude-code', 'main', NULL,
+                     '/tmp/wt', ?4, NULL, ?5,
+                     ?6, NULL, ?6, NULL, ?7, NULL, NULL)",
+        )
+        .bind(id.to_string())
+        .bind(project.to_string())
+        .bind(Uuid::now_v7().to_string())
+        .bind(format!("key-{id}"))
+        .bind(status)
+        .bind(last_event)
+        .bind(Uuid::now_v7().to_string())
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn only_quiet_active_sessions_are_offered_for_reaping() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("cairn.sqlite3"))
+            .await
+            .unwrap();
+
+        let quiet = Uuid::now_v7();
+        let busy = Uuid::now_v7();
+        let already_done = Uuid::now_v7();
+
+        let project = seed_project(&store).await;
+        seed(
+            &store,
+            project,
+            quiet,
+            "active",
+            "2020-01-01T00:00:00+00:00",
+        )
+        .await;
+        seed(
+            &store,
+            project,
+            busy,
+            "active",
+            &chrono::Utc::now().to_rfc3339(),
+        )
+        .await;
+        seed(
+            &store,
+            project,
+            already_done,
+            "completed",
+            "2020-01-01T00:00:00+00:00",
+        )
+        .await;
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(2);
+        let found = sessions_idle_since(&store, cutoff).await.unwrap();
+        let ids: Vec<Uuid> = found.iter().map(|s| s.id).collect();
+
+        assert!(
+            ids.contains(&quiet),
+            "a session that went quiet must be offered"
+        );
+        assert!(
+            !ids.contains(&busy),
+            "a session still receiving events must be left alone"
+        );
+        assert!(
+            !ids.contains(&already_done),
+            "a session that already ended must not be reaped twice"
+        );
+    }
 }
