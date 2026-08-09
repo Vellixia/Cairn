@@ -84,15 +84,27 @@ pub async fn send_with_deadline(
     }
 }
 
+/// Backoff between attempts when the daemon is mid-handover.
+///
+/// One retry was not enough: a losing daemon serves until its supervisor
+/// notices, up to a tick later, so a single 120 ms wait could land on another
+/// daemon about to exit. Bounded, and the caller's deadline still caps the
+/// whole exchange.
+const RETRY_BACKOFF_MS: [u64; 3] = [120, 350, 800];
+
 async fn exchange(request: &Request) -> Result<serde_json::Value, WireError> {
-    match attempt(request).await {
-        Err(e) if e.code == codes::DAEMON_UNAVAILABLE => {
+    let mut last = attempt(request).await;
+    for wait in RETRY_BACKOFF_MS {
+        match last {
             // The daemon may have been restarting underneath us (FR-046).
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            attempt(request).await
+            Err(ref e) if e.code == codes::DAEMON_UNAVAILABLE => {
+                tokio::time::sleep(Duration::from_millis(wait)).await;
+                last = attempt(request).await;
+            }
+            other => return other,
         }
-        other => other,
     }
+    last
 }
 
 async fn attempt(request: &Request) -> Result<serde_json::Value, WireError> {

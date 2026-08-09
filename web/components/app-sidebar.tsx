@@ -43,6 +43,7 @@ import {
   SidebarMenuItem,
   SidebarMenuSkeleton,
   SidebarRail,
+  useSidebar,
 } from "@/components/ui/sidebar";
 
 /**
@@ -59,6 +60,14 @@ function useActiveProjectId(pathname: string): string | null {
 export function AppSidebar() {
   const pathname = usePathname();
   const activeId = useActiveProjectId(pathname);
+  const { isMobile, setOpenMobile } = useSidebar();
+
+  // On a phone the sidebar is a sheet over the page. Navigating without
+  // dismissing it leaves the reader looking at the menu they just used, with
+  // the page they asked for hidden behind it.
+  const closeOnMobile = () => {
+    if (isMobile) setOpenMobile(false);
+  };
 
   const projects = useQuery({
     queryKey: ["projects"],
@@ -91,7 +100,11 @@ export function AppSidebar() {
       <SidebarHeader>
         <SidebarMenu>
           <SidebarMenuItem>
-            <SidebarMenuButton size="lg" render={<Link href="/" />}>
+            <SidebarMenuButton
+              size="lg"
+              onClick={closeOnMobile}
+              render={<Link href="/" />}
+            >
               <div className="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
                 <CairnMark className="size-4" />
               </div>
@@ -114,6 +127,7 @@ export function AppSidebar() {
               <SidebarMenuButton
                 isActive={pathname === "/"}
                 tooltip="Projects"
+                onClick={closeOnMobile}
                 render={<Link href="/" data-testid="nav-projects" />}
               >
                 <FolderGit2 />
@@ -124,6 +138,7 @@ export function AppSidebar() {
               <SidebarMenuButton
                 isActive={pathname === "/tokens"}
                 tooltip="API tokens"
+                onClick={closeOnMobile}
                 render={<Link href="/tokens" data-testid="nav-tokens" />}
               >
                 <KeyRound />
@@ -148,6 +163,7 @@ export function AppSidebar() {
                     <SidebarMenuButton
                       isActive={isActive}
                       tooltip={item.label}
+                      onClick={closeOnMobile}
                       render={
                         <Link
                           href={item.href}
@@ -179,6 +195,7 @@ export function AppSidebar() {
                 <SidebarMenuButton
                   isActive={p.id === activeId}
                   tooltip={p.name}
+                  onClick={closeOnMobile}
                   render={<Link href={`/projects/${p.id}`} />}
                 >
                   <FolderGit2 />

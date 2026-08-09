@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openNav } from "./nav";
 import { seed, type Seeded } from "./seed";
 
 /**
@@ -19,10 +20,11 @@ test.beforeEach(async ({ page }) => {
   await expect(page.getByTestId("project-list")).toBeVisible();
 });
 
-test("a teammate finds the project and reads its handoff", async ({ page }) => {
+test("a teammate finds the project and reads its handoff", async ({ page }, testInfo) => {
   await page.getByText("UI Fixture").first().click();
 
   await expect(page.getByText("Recent sessions")).toBeVisible();
+  await openNav(page, testInfo);
   await page.getByTestId("nav-sessions").click();
   await expect(page.getByTestId("session-list")).toBeVisible();
 
@@ -59,17 +61,33 @@ test("a memory can be deleted from the browser", async ({ page }) => {
   const rows = page.getByTestId("memory-list").getByRole("listitem");
   await expect(rows).toHaveCount(1);
 
-  await page.getByRole("button", { name: "Delete" }).first().click();
-  await expect(page.getByText("No memory matches that search.")).toBeVisible();
+  // Deleting is irreversible, so it asks first — and cancelling must keep it.
+  // Both paths are asserted here rather than in two tests, because the fixture
+  // holds one memory and a separate test would depend on running first.
+  await page.getByRole("button", { name: "Delete memory" }).first().click();
+  await page.getByRole("button", { name: "Cancel" }).click();
+  await expect(rows).toHaveCount(1);
+
+  await page.getByRole("button", { name: "Delete memory" }).first().click();
+  const confirm = page.getByRole("alertdialog");
+  await expect(confirm).toContainText("Delete this memory?");
+  await confirm.getByTestId("confirm").click();
+
+  await expect(rows).toHaveCount(0);
+  await expect(page.getByText("No memory yet")).toBeVisible();
 });
 
-test("tasks and sync status are reachable without a terminal", async ({ page }) => {
+test("tasks and sync status are reachable without a terminal", async ({
+  page,
+}, testInfo) => {
   await page.goto(`/projects/${fixture.projectId}`);
+  await openNav(page, testInfo);
   await page.getByTestId("nav-tasks").click();
   await expect(page.getByTestId("task-list")).toContainText("Add rate limiting");
   await page.getByTestId("filter-in_progress").click();
   await expect(page.getByTestId("task-list")).toContainText("Add rate limiting");
 
+  await openNav(page, testInfo);
   await page.getByTestId("nav-sync").click();
   await expect(page.getByTestId("sync-status")).toContainText("items applied");
 });

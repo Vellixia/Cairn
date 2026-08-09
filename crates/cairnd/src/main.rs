@@ -119,6 +119,24 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let listener = UnixListener::bind(&staging)?;
+
+    // Do not clobber a daemon that is already serving.
+    //
+    // `rename` publishes atomically, but atomically *replacing* a healthy
+    // incumbent is the race: its clients keep a live connection to a daemon
+    // whose supervisor will notice the theft up to a tick later and exit
+    // underneath them, which the client sees as `cairnd closed the connection`.
+    // When several daemons start at once — a cold socket and a burst of hooks —
+    // the herd steals the socket from each other in turn. Standing down when
+    // someone is already answering collapses that to one publisher.
+    if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+        tracing::info!(
+            socket = %socket_path.display(),
+            "a daemon is already serving this socket; standing down"
+        );
+        let _ = std::fs::remove_file(&staging);
+        return Ok(());
+    }
     std::fs::rename(&staging, &socket_path)?;
     let owned = socket_identity(&socket_path);
     tracing::info!(socket = %socket_path.display(), run_id = %daemon.run_id, "cairnd listening");
