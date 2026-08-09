@@ -3,8 +3,9 @@
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, Loader2, Mountain } from "lucide-react";
+import { AlertCircle, Loader2 } from "lucide-react";
 import { api } from "@/lib/api";
+import { CairnMark } from "@/components/logo";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -55,7 +56,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="mb-6 flex flex-col items-center gap-2 text-center">
           <div className="bg-primary text-primary-foreground flex size-10 items-center justify-center rounded-lg">
-            <Mountain className="size-5" />
+            <CairnMark className="size-5" />
           </div>
           <h1 className="text-xl font-semibold tracking-tight">
             Sign in to Cairn

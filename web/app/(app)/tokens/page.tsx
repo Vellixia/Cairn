@@ -1,11 +1,12 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api, type CreatedToken } from "@/lib/api";
 import { ConfirmButton } from "@/components/confirm-button";
+import { copyText, selectElementText } from "@/lib/clipboard";
 import {
   EmptyState,
   ErrorState,
@@ -234,16 +235,18 @@ function RevealedToken({
   onDismiss: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const codeRef = useRef<HTMLElement>(null);
 
   async function copy() {
-    try {
-      await navigator.clipboard.writeText(token.token);
+    if (await copyText(token.token)) {
       setCopied(true);
       toast.success("Token copied to clipboard");
       setTimeout(() => setCopied(false), 2000);
-    } catch {
-      toast.error("Could not copy — select the text and copy it manually");
+      return;
     }
+    // Last resort: select it so one keystroke finishes the job.
+    if (codeRef.current) selectElementText(codeRef.current);
+    toast.error("Could not reach the clipboard — the token is selected, press copy");
   }
 
   return (
@@ -257,6 +260,8 @@ function RevealedToken({
         </p>
         <div className="flex flex-wrap items-center gap-2">
           <code
+            ref={codeRef}
+            onClick={(e) => selectElementText(e.currentTarget)}
             data-testid="token-plaintext"
             className="bg-muted min-w-0 flex-1 overflow-x-auto rounded px-2 py-1.5 font-mono text-xs break-all"
           >

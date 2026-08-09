@@ -15,12 +15,12 @@ import {
   LogOut,
   Monitor,
   Moon,
-  Mountain,
   RefreshCw,
   Sun,
   Terminal,
 } from "lucide-react";
 import { api } from "@/lib/api";
+import { CairnMark } from "@/components/logo";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -92,7 +92,7 @@ export function AppSidebar() {
           <SidebarMenuItem>
             <SidebarMenuButton size="lg" render={<Link href="/" />}>
               <div className="bg-sidebar-primary text-sidebar-primary-foreground flex aspect-square size-8 items-center justify-center rounded-lg">
-                <Mountain className="size-4" />
+                <CairnMark className="size-4" />
               </div>
               <div className="grid flex-1 text-left leading-tight">
                 <span className="truncate font-semibold">Cairn</span>
@@ -242,10 +242,10 @@ function UserMenu() {
             <ChevronsUpDown className="ml-auto size-4" />
           </DropdownMenuTrigger>
           <DropdownMenuContent side="top" align="start" className="min-w-56">
-            <DropdownMenuLabel className="text-muted-foreground text-xs">
-              Theme
-            </DropdownMenuLabel>
             <DropdownMenuGroup>
+              <DropdownMenuLabel className="text-muted-foreground text-xs">
+                Theme
+              </DropdownMenuLabel>
               {(
                 [
                   ["light", "Light", Sun],
