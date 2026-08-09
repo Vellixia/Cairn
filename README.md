@@ -2,7 +2,7 @@
 
 Persistent, project-aware memory for AI coding agents.
 
-> **Alpha.** Cairn was rebuilt around this architecture; `v0.1.0-alpha.1` starts a new
+> **Alpha.** Cairn was rebuilt around this architecture; `v0.1.0-alpha.1` started a new
 > release line, and the earlier v0.x releases have been retired. Pre-1.0, so APIs,
 > storage schemas, and the wire protocol can change without a deprecation period.
 
@@ -22,7 +22,7 @@ Download a release archive, verify it, and put the binaries on your PATH. `cairn
 `cairnd` must live in the same directory — `cairn` starts the daemon itself.
 
 ```bash
-VERSION=0.1.0-alpha.1
+VERSION=0.1.0-alpha.2
 TARGET=aarch64-apple-darwin   # x86_64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu
 
 curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/cairn-v${VERSION}-${TARGET}.tar.gz
@@ -112,8 +112,8 @@ open http://127.0.0.1:3100
 Images are published per release, for `linux/amd64` and `linux/arm64`:
 
 ```
-ghcr.io/vellixia/cairn-server:0.1.0-alpha.1
-ghcr.io/vellixia/cairn-web:0.1.0-alpha.1
+ghcr.io/vellixia/cairn-server:0.1.0-alpha.2
+ghcr.io/vellixia/cairn-web:0.1.0-alpha.2
 ```
 
 Only the shared components ship as containers. The local agent stays native.
