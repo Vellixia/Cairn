@@ -1,8 +1,8 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertCircle, Loader2, Mountain } from "lucide-react";
 import { api } from "@/lib/api";
 import { Alert, AlertDescription } from "@/components/ui/alert";
@@ -24,6 +24,13 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<unknown>(null);
   const [busy, setBusy] = useState(false);
+
+  // Someone already signed in has no business on this form; a stale bookmark
+  // should land them where they were going.
+  const me = useQuery({ queryKey: ["me"], queryFn: () => api.me(), retry: false });
+  useEffect(() => {
+    if (me.data) router.replace("/");
+  }, [me.data, router]);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -72,6 +79,7 @@ export default function LoginPage() {
                   data-testid="email"
                   type="email"
                   autoComplete="username"
+                  autoFocus
                   placeholder="you@example.com"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}

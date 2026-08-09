@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
+import { toast } from "sonner";
 import {
   Brain,
   ChevronsUpDown,
@@ -210,6 +211,7 @@ function UserMenu() {
       queryClient.clear();
       router.push("/login");
     },
+    onError: (err: Error) => toast.error(err.message),
   });
 
   const initials = (me.data?.display_name ?? "?")

@@ -1,10 +1,11 @@
 "use client";
 
-import { use, useState } from "react";
+import { use, useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Search, Trash2 } from "lucide-react";
+import { Search, Trash2, X } from "lucide-react";
 import { toast } from "sonner";
 import { api, type Memory } from "@/lib/api";
+import { ConfirmButton } from "@/components/confirm-button";
 import {
   EmptyState,
   ErrorState,
@@ -25,7 +26,7 @@ import {
 
 const SCOPES = ["project", "branch", "task", "session"];
 const TYPES = ["fact", "decision", "convention", "failure", "procedure"];
-/** Radix Select has no empty-string value, so "any" is a real option. */
+/** Base UI's Select has no empty-string value, so "any" is a real option. */
 const ANY = "any";
 
 export default function MemoryPage({
@@ -39,11 +40,19 @@ export default function MemoryPage({
   const [scope, setScope] = useState(ANY);
   const [type, setType] = useState(ANY);
 
+  // Typing used to fire one request per keystroke. The input stays instant;
+  // only the query waits for a pause.
+  const [debouncedQ, setDebouncedQ] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedQ(q), 250);
+    return () => clearTimeout(timer);
+  }, [q]);
+
   const memories = useQuery({
-    queryKey: ["memories", id, q, scope, type],
+    queryKey: ["memories", id, debouncedQ, scope, type],
     queryFn: () =>
       api.memories(id, {
-        q: q || undefined,
+        q: debouncedQ || undefined,
         scope: scope === ANY ? undefined : scope,
         type: type === ANY ? undefined : type,
       }),
@@ -58,6 +67,9 @@ export default function MemoryPage({
     onError: (err: Error) => toast.error(err.message),
   });
 
+  const filtered = scope !== ANY || type !== ANY || debouncedQ !== "";
+  const count = memories.data?.memories.length ?? 0;
+
   return (
     <div>
       <PageHeader
@@ -65,7 +77,7 @@ export default function MemoryPage({
         subtitle="Ranked scope-first: task, then branch, then project"
       />
 
-      <div className="mb-4 flex flex-wrap gap-2">
+      <div className="mb-3 flex flex-wrap gap-2">
         <div className="relative min-w-56 flex-1">
           <Search className="text-muted-foreground pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2" />
           <Input
@@ -73,8 +85,18 @@ export default function MemoryPage({
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search memory…"
-            className="pl-9"
+            className="px-9"
           />
+          {q && (
+            <button
+              type="button"
+              aria-label="Clear search"
+              onClick={() => setQ("")}
+              className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2 rounded p-1"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
         </div>
         <Select value={scope} onValueChange={(v) => setScope(v ?? ANY)}>
           <SelectTrigger
@@ -84,7 +106,9 @@ export default function MemoryPage({
           >
             {/* Base UI renders the raw value, which would leave both filters
                 reading "any" with no way to tell them apart. */}
-            <SelectValue>{(v: string) => (v === ANY ? "any scope" : v)}</SelectValue>
+            <SelectValue>
+              {(v: string) => (v === ANY ? "any scope" : v)}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ANY}>any scope</SelectItem>
@@ -101,7 +125,9 @@ export default function MemoryPage({
             data-testid="type-filter"
             aria-label="Filter by type"
           >
-            <SelectValue>{(v: string) => (v === ANY ? "any type" : v)}</SelectValue>
+            <SelectValue>
+              {(v: string) => (v === ANY ? "any type" : v)}
+            </SelectValue>
           </SelectTrigger>
           <SelectContent>
             <SelectItem value={ANY}>any type</SelectItem>
@@ -114,12 +140,42 @@ export default function MemoryPage({
         </Select>
       </div>
 
+      <div
+        className="text-muted-foreground mb-4 flex min-h-6 items-center gap-3 text-xs"
+        aria-live="polite"
+      >
+        {memories.data && (
+          <span>
+            {count} {count === 1 ? "memory" : "memories"}
+            {filtered && " matching"}
+          </span>
+        )}
+        {filtered && (
+          <Button
+            variant="link"
+            size="xs"
+            className="h-auto p-0"
+            onClick={() => {
+              setQ("");
+              setScope(ANY);
+              setType(ANY);
+            }}
+          >
+            Clear filters
+          </Button>
+        )}
+      </div>
+
       {memories.isLoading && <ListSkeleton />}
       {memories.error != null && <ErrorState error={memories.error} />}
-      {memories.data?.memories.length === 0 && (
+      {memories.data && count === 0 && (
         <EmptyState
-          title="No memory matches"
-          description="Try a broader search, or clear the scope and type filters."
+          title={filtered ? "No memory matches" : "No memory yet"}
+          description={
+            filtered
+              ? "Try a broader search, or clear the scope and type filters."
+              : "Memories appear here once an agent records one and syncs."
+          }
         />
       )}
 
@@ -177,16 +233,17 @@ function MemoryRow({
                 </p>
               )}
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Delete memory"
-              data-testid={`delete-${memory.id}`}
-              onClick={onDelete}
+            <ConfirmButton
+              ariaLabel="Delete memory"
+              testId={`delete-${memory.id}`}
               disabled={deleting}
+              title="Delete this memory?"
+              description="It stops being shared with everyone on this project. Agents that already recalled it keep their local copy."
+              confirmLabel="Delete"
+              onConfirm={onDelete}
             >
               <Trash2 className="text-destructive size-4" />
-            </Button>
+            </ConfirmButton>
           </div>
         </CardContent>
       </Card>

@@ -120,8 +120,9 @@ async fn login(
     headers.insert(
         header::SET_COOKIE,
         format!(
-            "{}={token}; HttpOnly; SameSite=Lax; Path=/",
-            auth::COOKIE_NAME
+            "{}={token}; HttpOnly; SameSite=Lax; Path=/{}",
+            auth::COOKIE_NAME,
+            state.cookie_secure_attr()
         )
         .parse()
         .map_err(|_| ApiError::internal("bad cookie"))?,
@@ -144,8 +145,9 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
     out.insert(
         header::SET_COOKIE,
         format!(
-            "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-            auth::COOKIE_NAME
+            "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0{}",
+            auth::COOKIE_NAME,
+            state.cookie_secure_attr()
         )
         .parse()
         .map_err(|_| ApiError::internal("bad cookie"))?,

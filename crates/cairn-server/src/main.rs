@@ -19,6 +19,23 @@ use tower_http::trace::TraceLayer;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: PgPool,
+    /// Whether the session cookie may only travel over HTTPS.
+    pub secure_cookies: bool,
+}
+
+impl AppState {
+    /// The `Secure` attribute, or nothing.
+    ///
+    /// Marking the cookie `Secure` on a plain-HTTP deployment would make the
+    /// browser drop it and nobody could sign in, so this follows the origin the
+    /// site is actually served from rather than being hardcoded.
+    pub fn cookie_secure_attr(&self) -> &'static str {
+        if self.secure_cookies {
+            "; Secure"
+        } else {
+            ""
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -35,6 +52,9 @@ struct Args {
     #[arg(long, env = "CAIRN_SERVER_ADDR", default_value = "127.0.0.1:8080")]
     addr: String,
     /// Origin allowed to call the API from a browser (the web UI).
+    ///
+    /// Also decides whether the session cookie is marked `Secure`: an `https`
+    /// origin means the cookie must never travel in clear.
     #[arg(long, env = "CAIRN_WEB_ORIGIN")]
     web_origin: Option<String>,
     /// Size of the PostgreSQL connection pool.
@@ -71,7 +91,19 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&args.database_url, args.max_connections).await?;
     seed_admin(&pool, &args).await?;
 
-    let state = AppState { pool };
+    let secure_cookies = args
+        .web_origin
+        .as_deref()
+        .is_some_and(|origin| origin.starts_with("https://"));
+    if !secure_cookies {
+        tracing::warn!(
+            "session cookies are not marked Secure; set CAIRN_WEB_ORIGIN to an https origin"
+        );
+    }
+    let state = AppState {
+        pool,
+        secure_cookies,
+    };
 
     // A credentialed browser request cannot be paired with wildcard headers or
     // methods, so the web-origin branch names both explicitly.

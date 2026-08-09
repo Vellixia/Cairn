@@ -11,7 +11,7 @@ import {
 } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 
 const STATUSES = ["all", "todo", "in_progress", "done", "blocked"] as const;
 
@@ -44,15 +44,20 @@ export default function TasksPage({
     <div>
       <PageHeader title="Tasks" subtitle="What agents are working towards" />
 
-      <Tabs value={status} onValueChange={setStatus} className="mb-4">
-        <TabsList>
-          {STATUSES.map((s) => (
-            <TabsTrigger key={s} value={s} data-testid={`filter-${s}`}>
-              {s.replace("_", " ")}
-            </TabsTrigger>
-          ))}
-        </TabsList>
-      </Tabs>
+      {/* Toggle buttons rather than tabs: these filter a list in place, and a
+          tablist whose tabs control no panel misleads a screen reader. */}
+      <ToggleGroup
+        value={[status]}
+        onValueChange={(value) => setStatus(value[0] ?? "all")}
+        aria-label="Filter tasks by status"
+        className="mb-4"
+      >
+        {STATUSES.map((s) => (
+          <ToggleGroupItem key={s} value={s} data-testid={`filter-${s}`}>
+            {s.replace("_", " ")}
+          </ToggleGroupItem>
+        ))}
+      </ToggleGroup>
 
       {tasks.isLoading && <ListSkeleton />}
       {tasks.error != null && <ErrorState error={tasks.error} />}

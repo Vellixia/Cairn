@@ -5,6 +5,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, Copy, KeyRound, Loader2, Plus, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import { api, type CreatedToken } from "@/lib/api";
+import { ConfirmButton } from "@/components/confirm-button";
 import {
   EmptyState,
   ErrorState,
@@ -195,16 +196,17 @@ export default function TokensPage() {
                     </TableCell>
                     <TableCell>
                       {!t.revoked_at && (
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          aria-label={`Revoke ${t.name}`}
-                          data-testid="revoke-token"
+                        <ConfirmButton
+                          ariaLabel={`Revoke ${t.name}`}
+                          testId="revoke-token"
                           disabled={revoke.isPending}
-                          onClick={() => revoke.mutate(t.id)}
+                          title={`Revoke ${t.name}?`}
+                          description="Any machine still using this token stops syncing immediately. This cannot be undone — issue a new token instead."
+                          confirmLabel="Revoke token"
+                          onConfirm={() => revoke.mutate(t.id)}
                         >
                           <Trash2 className="text-destructive size-4" />
-                        </Button>
+                        </ConfirmButton>
                       )}
                     </TableCell>
                   </TableRow>

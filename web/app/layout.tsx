@@ -7,7 +7,8 @@ const sans = Geist({ subsets: ["latin"], variable: "--font-geist-sans" });
 const mono = Geist_Mono({ subsets: ["latin"], variable: "--font-geist-mono" });
 
 export const metadata: Metadata = {
-  title: "Cairn",
+  // Every tab used to read "Cairn"; sections fill the template.
+  title: { default: "Cairn", template: "%s · Cairn" },
   description: "Persistent, project-aware memory for AI coding agents",
 };
 
