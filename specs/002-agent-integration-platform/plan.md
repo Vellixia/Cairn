@@ -101,6 +101,12 @@ produce FULL; and the CC Switch Skill ref plan assumed a generic Git ref that it
 does not accept. The resolutions added one small local table (`CapabilityEvidence`) and changed
 a ref-naming convention. Still no new component, service, datastore, or tool.
 
+**Re-check after the publication reconciliation (2026-08-11)**: PASS. The `skill-release` branch
+needed a producer, so `release.yml` gains one job that computes the revision, creates the
+write-once branch, and verifies it through the same `refs/heads` fetch CC Switch performs. It
+adds no runtime component and no dependency — it is release plumbing that makes an existing
+planning invariant real, and it fails the release rather than moving a branch.
+
 ## Project Structure
 
 ### Documentation (this feature)
@@ -108,8 +114,8 @@ a ref-naming convention. Still no new component, service, datastore, or tool.
 ```text
 specs/002-agent-integration-platform/
 ├── plan.md                      # This file
-├── spec.md                      # Feature specification (144 FR, 37 SC)
-├── research.md                  # Decisions D18–D42 (incl. D19a, D22a, D28a)
+├── spec.md                      # Feature specification (145 FR, 38 SC)
+├── research.md                  # Decisions D18–D42 (incl. D19a, D22a, D28a, D29a)
 ├── data-model.md                # Integration entities, invariants, transitions
 ├── quickstart.md                # Acceptance walkthrough per user story
 ├── checklists/requirements.md   # Specification quality gate
@@ -168,7 +174,12 @@ tests/                   # + us4_opencode, us6_cross_agent, us10_concurrency,
                          #   perf_capture, perf_session_close, recovery_injected,
                          #   privacy_integration, privacy_payloads
 tests/integrations/      # NEW — recorded vendor payload fixtures per adapter
-.github/workflows/ci.yml # + web-e2e job (release server, desktop + mobile)
+.github/workflows/
+├── ci.yml               # + web-e2e job (release server, desktop + mobile)
+└── release.yml          # + publish-skill job: compute the Skill revision, create the
+                         #   write-once skill-release/<schema>-<revision> branch, verify it
+                         #   through CC Switch's own refs/heads fetch, and only then let the
+                         #   release complete (D29a)
 ```
 
 **Structure Decision**: one new crate, `cairn-integrate`, sitting between `cairn-core` and
@@ -237,9 +248,9 @@ Each phase ends runnable. Checkpoints are demoable states; the feature is the wh
 | **E. Codex** | Codex adapter, TOML editing, failure classification, trust states, `installed_not_activated` | Codex connects; SC-128 measured; level FULL only after trust |
 | **F. OpenCode** | OpenCode plugin, event-bus translation, quiescence, compaction, shared-resource detection | OpenCode connects; the idle-reaper negative test passes |
 | **G. Repair & migrate** | `repair`, `--force`, recovery artifacts, `MigrationState` machine, resume/abort | Eight seeded defects detected and repaired; SC-114–SC-117 pass |
-| **H. CC Switch** | Manager detection, deep-link import, binding verification, `manager_action_required` | Distribution verified with zero writes to the manager's storage |
+| **H. CC Switch** | Manager detection, deep-link import, binding verification, `manager_action_required`, the `publish-skill` release job and the `unpublished_skill_ref` refusal | Distribution verified with zero writes to the manager's storage; a development build refuses the Skill import; the release job creates and verifies the branch, and fails rather than moving an existing one |
 | **I. Generic MCP & instructions** | MCP `instructions`, `integration export mcp`, generic profile | A plain MCP client initializes, sees six tools, and is reported MCP_ONLY |
-| **J. Evidence** | Cross-agent continuity, concurrency, capture performance per adapter, privacy suites, Playwright CI | The quickstart runs end to end; `web-e2e` is a required check |
+| **J. Evidence** | Cross-agent continuity, concurrency, capture performance per adapter, privacy suites, Playwright CI, and the live Skill-distribution proof | The quickstart runs end to end; `web-e2e` is a required check; a published Skill revision imports through CC Switch and doctor reports the installed revision equal to the embedded one |
 
 Dependencies: B needs A; C needs B; D is independent of C but must precede E; E and F need C
 (the legacy bridge and the shared `AGENTS.md` block are proved there); G needs C–F; H needs G
@@ -255,7 +266,8 @@ Dependencies: B needs A; C needs B; D is independent of C but must precede E; E 
 | A shared resource — the `AGENTS.md` block, the per-user Skill — is deleted while another agent still needs it | **MEDIUM** | Resolved structurally: resources and bindings are separate records, and a resource is deleted only when its last binding goes (D28, FR-243). Doctor prints the full `serves` list before anyone disconnects. Fixtures cover disconnecting the first and the last consumer. Chosen over symlinks, whose behavior is unverified on two of the three agents. |
 | A pending handoff never lands because the daemon keeps running and never restarts | **MEDIUM** | Resolved structurally: bounded retry plus a sweep on the maintenance tick that already runs, with permanent failure reported in `cairn status` and doctor (D22, FR-240). SC-136 measures that the handoff lands without a restart. |
 | An agent upgrade drops the level to MCP_PLUS until a session has run, and reads as a regression | **MEDIUM** | It is the honest state: observation evidence from the previous build proves nothing about this one (FR-245). Doctor names exactly what is awaited rather than showing a bare level, and one ordinary session restores FULL. Accepted deliberately over silently carrying stale evidence, which is the failure H2 identified. |
-| CC Switch silently installs `main` when handed a ref it cannot resolve | **MEDIUM** | Verified in its downloader: any miss falls back to `main`, then `master`. Cairn therefore emits only a published `skill-release/<schema>-<revision>` branch and refuses otherwise (D29); doctor's revision comparison is the backstop. |
+| CC Switch silently installs `main` when handed a ref it cannot resolve | **MEDIUM** | Verified in its downloader: any miss falls back to `main`, then `master`. Cairn therefore emits only a published `skill-release/<schema>-<revision>` branch and refuses otherwise (D29); the release job verifies the branch through that same fetch before the release completes (D29a); doctor's revision comparison is the backstop. |
+| The `skill-release` branch and the released binary disagree about the Skill | **MEDIUM** | The branch is write-once and created at the release commit; a revision that resolves to a different commit fails the release rather than moving the branch. The branch name reaches a binary only after the verification fetch passed, so a build can never claim a ref that does not exist (D29a). |
 | `toml_edit` or a vendor schema change breaks Codex config editing | **MEDIUM** | Malformed or unexpected input fails closed and writes nothing (FR-137). The fixture corpus includes comment-heavy, nested, and truncated TOML. `toml_edit` is the crate Cargo itself uses for this problem. |
 | Adding `jsonc-parser`, `toml_edit`, and `include_dir` to the `cairn` binary slows hook startup | **MEDIUM** | The hook path calls only `cairn-integrate::normalize` — a pure function with no I/O — and never the editors, planner, or embedded assets. The cost is binary size, not work. SC-122 measures capture latency per adapter against Feature 001's baseline; if it regresses, the hook entry point moves to a thin binary linking only the normalize path. |
 | A vendor renames or removes an event Cairn maps | **MEDIUM** | Adapters degrade by capability detection, not version matching (FR-188). A missing event lowers the level and the integration keeps working; fixtures record the payloads Cairn was built against so a change is visible in a diff. |

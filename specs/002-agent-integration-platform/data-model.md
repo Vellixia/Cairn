@@ -376,6 +376,7 @@ What Cairn has established about one capability on this installation. The record
 | `evidence` | text | `introspection` \| `observation` |
 | `established_at` | text | |
 | `agent_version` | text or null | The detected agent version when it was established |
+| `degraded` | bool or null | `context_at_session_open` only: whether the establishing delivery carried a degraded briefing |
 
 **Invariants**
 
@@ -388,6 +389,15 @@ What Cairn has established about one capability on this installation. The record
 - Rows are created as a byproduct of work that already happens — writing a resource, or
   receiving a canonical event. Cairn never synthesizes an event or calls an undocumented
   interface to create one.
+- **Triggers for the two runtime capabilities that are not themselves canonical events** (D19a):
+  - `context_at_session_open` is established when the adapter emitted a context payload on the
+    agent's supported context surface without error. A `session_opened` that emitted nothing
+    does not establish it. A **degraded** delivery does, and sets `degraded = true` — the
+    channel carried the payload; Cairn's assembly was what fell short (FR-046, FR-195).
+  - `stable_session_identifier` is established when two or more canonical events, of at least
+    two different kinds, carried a **vendor-supplied** identifier and routed to the same Cairn
+    session. Feature 001's synthesized `cairn-local-<uuid>` fallback never establishes it, and a
+    single event carrying a non-empty string is not sufficient.
 - Deleted with the agent's last binding.
 
 **Privacy class**: `local`.

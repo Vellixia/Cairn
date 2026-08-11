@@ -112,9 +112,38 @@ small local table, and it gates **every** capability FULL requires — not only 
 | Kind | Applies to | How it is established | Version-independent? |
 |---|---|---|---|
 | `introspection` | Configuration capabilities — `mcp_*`, `instructions_*`, `skill_*` | Reading back the resource Cairn wrote and confirming it is present, owned, and effective under the agent's own precedence rules. Local, no credentials, no network | **Yes** — it proves a fact about a file Cairn controls, not about the agent's behavior |
-| `observation` | Runtime capabilities — `lifecycle_*`, `context_at_session_open`, `stable_session_identifier` | That capability produced its canonical event on this installation at least once | **No** — it proves what *that build* of the agent did |
+| `observation` | Runtime capabilities — `lifecycle_*`, `context_at_session_open`, `stable_session_identifier` | The trigger for that capability fired on this installation at least once (see below) | **No** — it proves what *that build* of the agent did |
 
 Anything with no evidence row is `expected`.
+
+**Observation triggers.** Most runtime capabilities are established by their own canonical
+event arriving: `lifecycle_session_open` by `session_opened`, `lifecycle_tool_success` by
+`tool_succeeded`, and so on. Two are not canonical events and need their trigger stated
+exactly, because "a `session_opened` happened" proves neither of them:
+
+- **`context_at_session_open`** — established when the adapter **emitted a context payload on
+  the agent's own supported context surface and the emission did not error**. The surface is
+  adapter-specific (Claude Code and Codex: `hookSpecificOutput.additionalContext`; OpenCode: the
+  first `chat.message` of the session), but the rule is not: what is being proved is that the
+  channel carries Cairn's context on this installation.
+  - A `session_opened` where **nothing was emitted** — the channel errored, or the context
+    deadline passed before anything could be written — does **not** establish it.
+  - A **degraded** delivery **does** establish it, because the channel demonstrably carried the
+    payload; what failed was Cairn's own assembly, not the agent's surface. This keeps Feature
+    001's semantics intact: `degraded: true` is a statement about the briefing, not about
+    delivery (FR-046, FR-195). The evidence row records whether the establishing delivery was
+    degraded, so doctor can distinguish "proved with a full briefing" from "proved with a
+    reduced one".
+- **`stable_session_identifier`** — established when **two or more canonical events, of at least
+  two different kinds, carried a vendor-supplied identifier and routed to the same Cairn
+  session**. Both halves matter:
+  - *Vendor-supplied*: an identifier Cairn synthesized because the agent supplied none — Feature
+    001's `cairn-local-<uuid>` fallback — never establishes it. That would be Cairn proving
+    something about itself.
+  - *Two events, two kinds*: one event carrying a non-empty string proves the field exists, not
+    that it is stable. Requiring a second event of a different kind to route to the same session
+    is the smallest observation that actually demonstrates routing stability, which is what the
+    capability claims and what FR-118 depends on.
 
 **Persistence**: one table, `CapabilityEvidence`, keyed `(agent, capability)`, holding the
 evidence kind, when it was established, and the **detected agent version at the time**. It is
@@ -555,10 +584,11 @@ the managed instruction block and the MCP `instructions` string — are generate
 contract asset by one function, and a test asserts the two renderings state the same rules
 (FR-123).
 
-CC Switch distributes Skills by cloning a public Git repository at
+CC Switch distributes Skills by fetching a public Git repository at
 `owner/name` + `directory` + `branch` (D33). Pointing it at `Vellixia/Cairn`, directory
-`skills/cairn`, at a released tag makes the repository path *the* source — there is no second
-copy to drift.
+`skills/cairn`, on the published branch for that Skill revision, makes the repository path
+*the* source — there is no second copy to drift. Which branch, and only ever a branch, is
+settled below.
 
 **Why**: FR-123 and FR-141 both demand one canonical source; the CC Switch requirement adds
 that the Skill must be fetchable from a public Git path. Putting the canonical files at a
@@ -625,9 +655,72 @@ mismatch).
 
 **Rejected**: a separate `Vellixia/cairn-skills` repository (a second release process and a
 second thing to keep in step); generating the Skill at install time from Rust string literals
-(nothing for CC Switch to clone, and the Skill becomes unreviewable in diffs); publishing a
-release purely to give the deep link a tag (the commit SHA already works, and a release is a
-product decision, not a planning workaround).
+(nothing for CC Switch to clone, and the Skill becomes unreviewable in diffs).
+
+---
+
+## D29a — Who publishes `skill-release/*`, and in what order
+
+**Decision**: the release workflow publishes and verifies the Skill branch, and a build may
+claim a published ref only for a revision that was already verified — never for one a future
+step is expected to create.
+
+**The rule**
+
+```
+expected_branch = skill-release/<skill_schema>-<skill_revision>
+```
+
+Both components are computed from `skills/cairn/` by the same function the binary embeds, so
+the workflow and the binary cannot disagree about what a revision is.
+
+**Publication steps**, as a job in `.github/workflows/release.yml` that runs after `verify` and
+**before** the release is considered complete:
+
+1. Compute `<skill_schema>` and `<skill_revision>` from `skills/cairn/` at the release commit,
+   using the embedded algorithm.
+2. Look up `expected_branch`.
+3. **Absent** → create it, pointing at the exact release commit whose `skills/cairn/` produced
+   that revision. Never at a rewritten or synthesized commit.
+4. **Present at that same commit** → unchanged; success. Re-releasing an unchanged Skill is a
+   no-op, which is the normal case for a patch release (D26).
+5. **Present at a different commit** → **fail the release.** The branch is write-once. It is
+   never moved, never force-updated, and the workflow has no path that does so — a revision
+   digest that resolves to two different trees means the digest is wrong, and moving the branch
+   would silently change what every existing deep link fetches.
+6. **Verify by fetching the way CC Switch does**: download
+   `https://github.com/Vellixia/Cairn/archive/refs/heads/<expected_branch>.zip`, confirm it
+   contains `skills/cairn/SKILL.md`, and confirm that file's `metadata.cairn_skill_revision`
+   equals the computed revision. This exercises the exact `refs/heads` path CC Switch hardcodes,
+   so a ref that would silently fall back to `main` fails here instead of on a user's machine.
+7. Only after step 6 passes may the release's artifacts be published.
+
+**The ordering problem, resolved**: a binary must not claim "published" on the strength of a
+step that has not run. Two rules settle it.
+
+- The **claim is a build input, not a runtime guess**: the release build is given the verified
+  branch name, and it is given it only after step 6 succeeded. The binary stores that name and
+  emits it; it never derives one optimistically.
+- Every **other build** — development, a dirty tree, a branch build, a re-run before step 6 —
+  has no such input and therefore has no published ref. It refuses the Skill import with
+  `unpublished_skill_ref` (D29). Refusing is safe; guessing is not, because CC Switch's
+  fallback would install `main` without an error.
+
+Consequence: the very first release carrying a new Skill revision publishes the branch during
+that release, and the binaries from that release carry the name. A binary can never point at a
+branch that does not exist yet, because the name only reaches a binary after the branch has been
+fetched and checked.
+
+**Why the release workflow rather than a separate publish step**: the branch must point at the
+commit the released binary was built from. Anything decoupled from the release reintroduces the
+possibility of a branch and a binary disagreeing, which is the whole problem.
+
+**Rejected**: creating the branch lazily at distribution time from the user's machine (Cairn
+would need write access to its own repository from a developer's laptop — absurd and unsafe);
+moving a single `skill-release` branch forward per release (reintroduces drift, and silently
+changes what existing links fetch); letting the build assume the branch will exist (the claim
+would be a prediction, and a wrong prediction installs `main`); tagging instead (verified in
+D29 not to work through CC Switch's downloader).
 
 ---
 

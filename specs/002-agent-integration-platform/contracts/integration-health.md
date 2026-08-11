@@ -70,6 +70,14 @@ Each capability carries two dimensions (FR-241, FR-242):
   version-independent — and `observation` for runtime capabilities, which is discarded when the
   detected agent version changes (FR-245, D19a).
 
+Most runtime capabilities are established by their own canonical event arriving. Two are not
+canonical events and have explicit triggers:
+
+| Capability | Established when | Not established by |
+|---|---|---|
+| `context_at_session_open` | The adapter emitted a context payload on the agent's supported context surface without error. A degraded briefing counts and records `degraded: true` | A `session_opened` where nothing was emitted — channel error, or the context deadline passed first |
+| `stable_session_identifier` | Two or more canonical events, of at least two different kinds, carried a vendor-supplied identifier and routed to the same Cairn session | A single event; or any identifier Cairn synthesized because the agent supplied none |
+
 **FULL requires every FULL-required capability to be established** — `guaranteed` *and*
 `verified` (FR-245). A capability that is merely `expected` withholds FULL and appears in
 `awaited_behaviors`; it never makes the agent `unsupported`.
@@ -113,7 +121,7 @@ capability is `expected`, so an unknown agent version never reads as more certai
           "lifecycle_tool_success":    { "kind": "observation",   "agent_version": "2.1.220" },
           "lifecycle_quiesce":         { "kind": "observation",   "agent_version": "2.1.220" },
           "lifecycle_session_close":   { "kind": "observation",   "agent_version": "2.1.220" },
-          "context_at_session_open":   { "kind": "observation",   "agent_version": "2.1.220" },
+          "context_at_session_open":   { "kind": "observation",   "agent_version": "2.1.220", "degraded": false },
           "stable_session_identifier": { "kind": "observation",   "agent_version": "2.1.220" }
         },
         "lifecycle_coverage": {

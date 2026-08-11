@@ -189,6 +189,41 @@ Must fail with `unpublished_skill_ref` and exit `1`. CC Switch's downloader only
 `refs/heads` and silently falls back to `main` on a miss, so emitting an unpublished ref would
 install the wrong Skill with no error. The MCP resource still distributes from the same build.
 
+**Skill distribution from a released build** *(live, release evidence — D29a)*:
+
+```bash
+# 1. the release published the branch, and it points at the release commit
+git ls-remote https://github.com/Vellixia/Cairn "refs/heads/skill-release/*"
+
+# 2. it fetches the way CC Switch fetches
+curl -fsSL -o /tmp/s.zip \
+  "https://github.com/Vellixia/Cairn/archive/refs/heads/skill-release/1-c07d4419b2ae.zip"
+unzip -p /tmp/s.zip '*/skills/cairn/SKILL.md' | grep cairn_skill_revision
+
+# 3. Cairn emits that branch, not a SHA or a tag
+cairn integration distribute --via cc-switch --resource skill --apps claude --dry-run
+```
+
+**Must be true**
+
+- The branch exists, points at the release commit, and `git ls-remote` shows it unchanged from
+  the previous release when the Skill revision did not change.
+- The archive contains `skills/cairn/SKILL.md` whose `metadata.cairn_skill_revision` equals the
+  revision in the branch name **and** the revision embedded in the running binary.
+- The emitted deep link's `branch=` is that branch — never a commit SHA, never a tag, never
+  `main`.
+
+Then complete the import in CC Switch and verify:
+
+```bash
+grep cairn_skill_revision ~/.claude/skills/cairn/SKILL.md
+cairn doctor claude-code --json | jq '.data.agents[0].resources[]
+  | select(.kind=="skill") | .condition'          # → "healthy"
+```
+
+The installed revision equals the embedded revision, and doctor reports the Skill `healthy`
+rather than `outdated` — which is the check that would have caught a silent `main` fallback.
+
 ---
 
 ## US6 — Work continues in a different agent *(hermetic + live)*
@@ -365,7 +400,8 @@ writes.
 | Injected-failure recovery | `cargo test -p cairn-e2e --test recovery_injected` | Handler timeout, handler crash, daemon unavailable — every session ends with a durable handoff, zero agent sessions disrupted (SC-129) |
 | Sealed close actually lands | `cargo test -p cairn-e2e --test handoff_lands_without_restart` | ≥100 sealed closes, 100% with a durable handoff inside the bound and **no daemon restart**; forced permanent failure is reported, not silent (SC-136) |
 | Shared resource survives one disconnect | `cargo test -p cairn-integrate --test fixtures shared_binding` | Disconnecting one of two bound agents keeps the resource; the last one removes it; manager-owned state survives (SC-137) |
-| Capability evidence gates FULL | `cargo test -p cairn-e2e --test capability_evidence` | An unobserved FULL-required runtime capability blocks FULL and is named as awaited; a detected version change discards observation evidence but keeps introspection evidence; observing everything restores FULL (SC-138) |
+| Capability evidence gates FULL | `cargo test -p cairn-e2e --test capability_evidence` | An unobserved FULL-required runtime capability blocks FULL and is named as awaited; a detected version change discards observation evidence but keeps introspection evidence; observing everything restores FULL; a session start that delivered no context does not establish context delivery while a degraded one does; a synthesized or single-event identifier does not establish stability (SC-138) |
+| Skill branch is write-once | `.github/workflows/release.yml` `publish-skill` job | Absent → created at the release commit; present at that commit → unchanged; present elsewhere → the release **fails**; the branch is verified through CC Switch's own `refs/heads` fetch before the release completes (D29a) |
 | Configuration preservation | `cargo test -p cairn-integrate --test fixtures` | ≥20 fixtures, connect→disconnect returns 100% of non-Cairn bytes (SC-104) |
 | Preview writes nothing | `cargo test -p cairn-integrate --test dry_run_is_inert` | Checksums of every candidate file identical before and after (SC-118) |
 | Secrets stay out | `cargo test -p cairn-e2e --test privacy_integration` | Seeded credentials appear in zero artifacts, logs, diagnostics, or sync payloads (SC-133, SC-120) |

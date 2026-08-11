@@ -175,3 +175,17 @@ reconciled plan. One required a spec addition; the rest were artifact or design 
 
 Result: 145 requirements (FR-101–FR-245), 38 success criteria (SC-101–SC-138), no duplicates,
 no gaps, zero dangling cross-references, zero clarification markers. All checklist items pass.
+
+### Iteration 6 — 2026-08-11 (publication and evidence-trigger reconciliation)
+
+Three findings, none requiring a new requirement — the spec already demanded these behaviors;
+the plan had not said who produced them or exactly what established them.
+
+| Finding | Resolution |
+|---|---|
+| **H1** two statements in D29 still described a released tag as the distribution source and claimed "the commit SHA already works", contradicting the same decision's own analysis | Both rewritten. D29 now contains exactly one ref strategy; the only remaining tag/SHA mentions are the proof that they do not work and the rejected list |
+| **H2** `skill-release/<schema>-<revision>` was depended on but had no producer | New **D29a**: a `publish-skill` job in `release.yml` computes the revision with the embedded algorithm, creates the branch at the release commit when absent, treats an identical branch as unchanged, **fails the release** if it exists elsewhere, and verifies it through CC Switch's own `refs/heads` fetch before the release completes. The branch name reaches a binary only after that verification, so no build ever claims a ref that does not exist |
+| **M1** `context_at_session_open` and `stable_session_identifier` are not canonical events and had no stated trigger | Both defined in D19a and propagated: context delivery is established by a payload actually emitted on the agent's supported surface (degraded counts and is recorded; nothing emitted does not); identifier stability requires two events of different kinds carrying a vendor-supplied key routed to one session (Cairn's synthesized fallback never counts). SC-138's test design extended |
+
+Result: 145 requirements (FR-101–FR-245), 38 success criteria (SC-101–SC-138), no duplicates,
+no gaps, zero dangling cross-references, zero clarification markers. All checklist items pass.

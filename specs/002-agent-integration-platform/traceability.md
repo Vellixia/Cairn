@@ -22,7 +22,7 @@ Test tiers are from [research.md](./research.md) D40:
 | FR-123–FR-127 | Usage contract | `cairn-integrate::render` from one embedded asset | [agent-contract.md](./contracts/agent-contract.md), D29 |
 | FR-128–FR-131 | MCP surface | `cairn/src/mcp.rs` — `instructions` added, six tools unchanged, revision held | D34 |
 | FR-132–FR-139 | Managed instructions | `cairn-integrate::markers`, `::edit::markdown` | [agent-contract.md](./contracts/agent-contract.md), D25 |
-| FR-140–FR-144 | Skill | `skills/cairn/` embedded; shared by binding; manager distribution only from a published `skill-release/<schema>-<revision>` branch, else refused | D28, D29 |
+| FR-140–FR-144 | Skill | `skills/cairn/` embedded; shared by binding; manager distribution only from a published, write-once `skill-release/<schema>-<revision>` branch produced and verified by the `publish-skill` release job, else refused | D28, D29, D29a |
 | FR-145–FR-150, FR-228, FR-232–FR-235, FR-243, FR-244 | Ownership and sharing | `InstalledResource` + `ResourceBinding` (reference counting), `MigrationState`, manager boundary | [data-model.md](./data-model.md), [cc-switch.md](./contracts/cc-switch.md), D28, D28a |
 | FR-210–FR-220 | Installation scope | `cairn-integrate::scope` — the matrix as data | [scope-matrix.md](./contracts/scope-matrix.md), D27 |
 | FR-151–FR-158, FR-238, FR-239 | Safe mutation | `::plan`, `::apply`, `::edit/*`, `RecoveryArtifact` | D37, D39 |
@@ -57,7 +57,7 @@ agent-keyed scope anywhere — and that absence is asserted by test (SC-108).
 | SC-109 two agents, two sessions, correct provenance | T4 | `us10_concurrency` |
 | SC-110 guaranteed proved, absent silent, conditional both ways | T3 | `tests/integrations/*` — three-way per capability |
 | SC-111 no idle→close mapping, any adapter | T3 | `lifecycle::idle_never_closes` |
-| SC-112 manager distribution, one entry per app | T2 + T5 | binding fixtures; live confirmation |
+| SC-112 manager distribution, one entry per app | T2 + T5 | binding fixtures; live confirmation; live Skill proof — published branch fetches through CC Switch's `refs/heads` path and the installed revision equals the embedded one (D29a) |
 | SC-113 provider switch leaves Cairn healthy | T2 | post-switch fixture |
 | SC-114 eight seeded defects detected exactly | T2 | `fixtures::defects` |
 | SC-115 repair fixes owned defects only, idempotent | T2 | `fixtures::repair` |
@@ -83,7 +83,7 @@ agent-keyed scope anywhere — and that absence is asserted by test (SC-108).
 | SC-135 desired state deterministic, secret-free, single source | T1 | `desired::determinism`, `desired::single_consumer` |
 | SC-136 sealed close lands without a restart; permanent failure reported | T4 | `handoff_lands_without_restart` |
 | SC-137 shared resource survives one disconnect; manager state survives | T2 + T4 | `fixtures::shared_binding`, `fixtures::manager_state_survives` |
-| SC-138 evidence gates FULL; version change re-opens it; establishing restores FULL | T1 + T4 | `capability::evidence_gates_full`, `capability::version_change_invalidates`, `capability_evidence` (T4) |
+| SC-138 evidence gates FULL; version change re-opens it; establishing restores FULL; context-delivery and identifier-stability triggers behave exactly | T1 + T4 | `capability::evidence_gates_full`, `capability::version_change_invalidates`, `capability::context_delivery_trigger`, `capability::identifier_stability_trigger`, `capability_evidence` (T4) |
 
 Coverage: **38 of 38**, with 34 in required CI and 4 (SC-101, and the live halves of SC-108,
 SC-112, SC-122's end-to-end context) additionally carried as release evidence.

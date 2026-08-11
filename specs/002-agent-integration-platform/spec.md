@@ -1341,11 +1341,13 @@ criteria stay unambiguous.
   condition — handler timeout, handler crash, and daemon unavailable at the boundary — the session
   is subsequently reconciled with a durable handoff, zero sessions are left permanently without
   one, and zero agent sessions are aborted or visibly disrupted by the failure.
-- **SC-138**: Capability evidence behaves correctly in all three cases: a FULL-required runtime
+- **SC-138**: Capability evidence behaves correctly in every case: a FULL-required runtime
   capability that has never been observed keeps the level below FULL and is named as awaited; a
   detected agent-version change re-opens every piece of evidence whose proof is not
-  version-independent, and only those; and once every FULL-required capability is established on
-  the current installation, FULL is granted.
+  version-independent, and only those; once every FULL-required capability is established on the
+  current installation, FULL is granted; a session start that delivered no context does not
+  establish context delivery while a degraded delivery does; and an identifier Cairn synthesized,
+  or a single event carrying one, does not establish identifier stability.
 - **SC-136**: Across at least 100 sealed session closes with the daemon running throughout,
   100% have a durable handoff present within the documented bound without any daemon restart;
   with synthesis forced to fail permanently, 100% are reported as a named condition rather than

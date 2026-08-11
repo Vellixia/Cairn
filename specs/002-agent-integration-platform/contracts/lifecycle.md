@@ -32,6 +32,19 @@ event and not a failure).
 Where an agent imposes a shorter deadline than Cairn's default, the agent's limit wins and is
 never exceeded (FR-194).
 
+## Context delivery at `session_opened`
+
+`session_opened` is the one canonical event whose handling produces something the agent
+consumes, so the adapter reports the delivery outcome back to the daemon: whether it emitted a
+context payload on the agent's own supported surface, and whether that payload was degraded.
+
+That outcome is what establishes the `context_at_session_open` capability (D19a). A
+`session_opened` that emitted nothing — the channel errored, or the context deadline passed
+before anything could be written — leaves the capability `expected`, which is the honest state:
+the session started, and Cairn's context did not reach it. A degraded briefing does establish
+the capability and is recorded as degraded, because the surface demonstrably carried the
+payload; Feature 001's fail-soft behavior (FR-046, FR-195) is unchanged either way.
+
 ## `agent_quiesced`
 
 The agent has stopped working and is waiting. That is all it asserts.
@@ -184,6 +197,12 @@ FR-118).
 An adapter that cannot supply a stable identifier reports
 `stable_session_identifier: absent` rather than sharing one session (US10 #6). None of the
 three native adapters is in that position.
+
+The capability is *established* on an installation only when two or more canonical events, of at
+least two different kinds, carried a **vendor-supplied** key and routed to the same Cairn
+session (D19a). Feature 001's synthesized `cairn-local-<uuid>` fallback — used when an agent
+supplies no key of its own — never establishes it, because it would be Cairn proving something
+about itself.
 
 ## Tool normalization
 
