@@ -272,6 +272,11 @@ fn replace(new: &Path, target: &Path) -> Result<(), WireError> {
             target.file_name().and_then(|n| n.to_str()).unwrap_or("bin"),
             std::process::id()
         ));
+        // A PID is not unique over time. If an earlier update left a leftover
+        // behind at this exact path — its own cleanup lost the race against
+        // the binary it was replacing still executing — a reused PID would
+        // otherwise collide with it here.
+        let _ = std::fs::remove_file(&leftover);
         if target.exists() {
             if let Err(e) = std::fs::rename(target, &leftover) {
                 let _ = std::fs::remove_file(&staged);

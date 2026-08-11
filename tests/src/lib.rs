@@ -420,15 +420,16 @@ fn binary_file_name(name: &str) -> String {
     }
 }
 
-/// A fresh socket path (Unix) or pipe name (Windows) for one sandbox.
+/// A fresh socket path (Unix) or pipe name (Windows). Usable both for a
+/// `Sandbox` and for a test that drives `cairnd` directly.
 #[cfg(unix)]
-fn sandbox_socket() -> PathBuf {
+pub fn sandbox_socket() -> PathBuf {
     // Unix socket paths are length-limited; keep this one short.
     std::env::temp_dir().join(format!("cairn-t-{}-{}.sock", std::process::id(), unique()))
 }
 
 #[cfg(windows)]
-fn sandbox_socket() -> PathBuf {
+pub fn sandbox_socket() -> PathBuf {
     PathBuf::from(format!(
         r"\\.\pipe\cairn-t-{}-{}",
         std::process::id(),
@@ -437,15 +438,15 @@ fn sandbox_socket() -> PathBuf {
 }
 
 /// Whether something is currently listening on `socket` — used to poll for a
-/// daemon having actually stopped rather than assuming a fixed delay was
-/// enough.
+/// daemon having actually bound (or stopped) rather than assuming a fixed
+/// delay was enough.
 #[cfg(unix)]
-fn daemon_listening(socket: &Path) -> bool {
+pub fn daemon_listening(socket: &Path) -> bool {
     std::os::unix::net::UnixStream::connect(socket).is_ok()
 }
 
 #[cfg(windows)]
-fn daemon_listening(socket: &Path) -> bool {
+pub fn daemon_listening(socket: &Path) -> bool {
     match std::fs::OpenOptions::new()
         .read(true)
         .write(true)

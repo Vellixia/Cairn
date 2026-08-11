@@ -53,9 +53,14 @@ async fn main() -> anyhow::Result<()> {
 /// Open the store, build the daemon state, and run the start-of-day recovery
 /// that reconciles whatever a previous run left behind (FR-009, D16).
 ///
-/// Shared by both transports: this must not run until the current process is
-/// sure it owns the socket or pipe, so each platform's `run` calls it only
-/// after establishing that.
+/// Shared by both transports, but each gives it a different guarantee. On
+/// Windows the exclusive pipe create *is* the ownership check, so by the time
+/// `run` calls this, ownership is real. On Unix `run` only calls it after a
+/// cheap pre-check — not proof, since two daemons starting at once can both
+/// pass it — and the actual race is settled later, at the rename. A losing
+/// Unix daemon can therefore still run this once before standing down; that
+/// is wasted work, not a correctness problem, since the loser's process (and
+/// everything this spawned) exits immediately after.
 async fn setup() -> anyhow::Result<Arc<Daemon>> {
     let store = Store::open(&cairn_core::paths::db_path()).await?;
     let user_id = repo::ensure_local_user(&store).await?;
