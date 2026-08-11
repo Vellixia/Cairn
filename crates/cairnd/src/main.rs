@@ -292,7 +292,16 @@ async fn run(pipe_name: PathBuf, idle_timeout: std::time::Duration) -> anyhow::R
         Err(e) => return Err(e.into()),
     };
 
-    let daemon = setup().await?;
+    // The pipe instance exists the moment `create` returns, so a client can
+    // open a handle to it immediately — before anyone has called `connect`.
+    // `setup` (opening the store, running recovery) can take real time, and
+    // leaving that first connection unserviced for all of it is exactly the
+    // kind of gap a client should never have to wait out. Run both
+    // concurrently instead of one after the other, so the accept is already
+    // in flight for as much of `setup` as possible.
+    let (daemon, first_connect) = tokio::join!(setup(), server.connect());
+    let daemon = daemon?;
+    first_connect?;
     tracing::info!(pipe = %name, run_id = %daemon.run_id, "cairnd listening");
 
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
@@ -301,6 +310,22 @@ async fn run(pipe_name: PathBuf, idle_timeout: std::time::Duration) -> anyhow::R
         idle_timeout,
         shutdown_tx.clone(),
     ));
+
+    // The join above already delivered this first connection; hand it off
+    // and open the next instance before entering the steady-state loop.
+    {
+        let handled = server;
+        server = ServerOptions::new()
+            .pipe_mode(PipeMode::Byte)
+            .create(name.as_str())?;
+        let daemon = Arc::clone(&daemon);
+        let shutdown = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve(daemon, handled, shutdown).await {
+                tracing::debug!(error = %e, "connection ended");
+            }
+        });
+    }
 
     loop {
         tokio::select! {

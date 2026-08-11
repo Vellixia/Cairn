@@ -105,6 +105,9 @@ jobs:
   rust-windows:
     name: rust (windows-latest)
     runs-on: windows-latest
+    # The named-pipe transport is new; a hang here should fail loudly rather
+    # than run until someone notices and cancels it by hand.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
