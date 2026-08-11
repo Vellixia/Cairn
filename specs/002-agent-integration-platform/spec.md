@@ -606,6 +606,12 @@ changed, and no requirement was weakened.
 - **Disconnect could destroy the record needed to finish a manager withdrawal.** **FR-244**
   keeps manager-owned ownership state and its pending action alive until the withdrawal is
   verified. **SC-137** covers both this and the shared-resource case.
+- **Confidence was defined but never gated anything except session close.** A vendor could have
+  removed tool capture while FULL still computed, because only the completion guarantee
+  consulted confidence. **FR-245** requires every FULL-required capability to be established on
+  the current installation and defines when a version change re-opens that evidence. **SC-138**
+  measures all three cases. FR-240 was also tightened so its recoverable and unrecoverable paths
+  are separately precise, and the completion guarantee is not claimed while a handoff is owed.
 
 ## Requirements *(mandatory)*
 
@@ -657,6 +663,15 @@ an ordering.
   **expected** otherwise. An agent version Cairn has not verified MUST still integrate
   (FR-186), but MUST NOT be reported with stronger capability certainty than Cairn can
   establish, and diagnostics MUST name which capabilities are expected rather than verified.
+- **FR-245**: FULL MUST NOT be granted while any capability FULL requires is only *expected*.
+  Every such capability MUST be established on the current installation — by local
+  unauthenticated introspection where the capability is a configuration fact Cairn itself wrote,
+  and by observing that capability produce its canonical event where it is a runtime behavior.
+  Evidence MUST record what established it and against which detected agent version. When the
+  detected version changes, evidence whose proof is **not** version-independent MUST be
+  re-established before it counts again; version-independent evidence MAY persist. An agent
+  whose evidence has lapsed integrates normally and is reported below FULL with the awaited
+  behavior named — lapsed evidence is never `unsupported`.
 - **FR-109**: Cairn MUST derive an integration level from the capability profile and the
   verified state of installed resources, using these levels:
   **FULL** — Cairn's MCP server, the Cairn usage contract as persistent instructions, the Cairn
@@ -737,13 +752,20 @@ an ordering.
   it, so that concurrent sessions are routed correctly (FR-010).
 - **FR-240**: Where an adapter's session-close handler runs under a deadline too short for
   handoff synthesis, Cairn MAY acknowledge the boundary after durably recording that the
-  session terminated, provided all of the following hold. The terminal state and the fact that
-  a handoff is owed MUST be committed before the acknowledgment. The handoff MUST then be
-  produced within a bounded interval, and progress MUST be guaranteed while the daemon keeps
-  running — a restart MUST NOT be required for it to appear. A synthesis that fails MUST be
-  retried, and a synthesis that cannot succeed MUST be surfaced as a reported condition rather
-  than left silently owed. This is how FR-114's "produces its final handoff" is satisfied at a
-  budgeted boundary: not within the request, but durably and boundedly after it.
+  session terminated, provided all of the following hold.
+  1. The terminal state and the fact that a handoff is owed MUST be committed before the
+     acknowledgment.
+  2. **In the recoverable case**, the durable handoff MUST exist within the documented bounded
+     interval, and progress MUST be guaranteed while the daemon keeps running — a restart MUST
+     NOT be required for it to appear.
+  3. **In the case where synthesis cannot currently succeed**, a named failure condition MUST
+     surface within the same bounded interval rather than silence, MUST remain retryable and
+     actionable, and MUST NOT be treated as a terminal outcome that closes the matter.
+  4. Until the required durable handoff exists, Cairn MUST NOT report the completion guarantee
+     (FR-207) as satisfied for that boundary. A boundary that acknowledged but has not yet
+     produced its handoff is reported as owed, not as complete.
+  This is how FR-114's "produces its final handoff" is satisfied at a budgeted boundary: not
+  within the request, but durably and boundedly after it.
 - **FR-119**: Post-compaction is an extension to Feature 001's boundary set. It MUST leave the
   session `active`, MUST NOT produce a second durable handoff for the same compaction, and MAY
   re-deliver context where the agent accepts it.
@@ -864,7 +886,7 @@ an ordering.
   manager-owned resource MUST be withdrawn through an interface that manager documents for that
   purpose; where no such interface exists, Cairn MUST NOT remove it by any other means and MUST
   report what it did not remove, why, and the supported path for the developer to do it
-  (FR-229).
+  (FR-233).
 - **FR-150**: Cairn MUST detect a Cairn resource that exists under an owner other than the one
   recorded, and MUST report it rather than adopting or deleting it.
 - **FR-232**: Cairn MUST interact with an integration manager only through interfaces that manager
@@ -1319,6 +1341,11 @@ criteria stay unambiguous.
   condition — handler timeout, handler crash, and daemon unavailable at the boundary — the session
   is subsequently reconciled with a durable handoff, zero sessions are left permanently without
   one, and zero agent sessions are aborted or visibly disrupted by the failure.
+- **SC-138**: Capability evidence behaves correctly in all three cases: a FULL-required runtime
+  capability that has never been observed keeps the level below FULL and is named as awaited; a
+  detected agent-version change re-opens every piece of evidence whose proof is not
+  version-independent, and only those; and once every FULL-required capability is established on
+  the current installation, FULL is granted.
 - **SC-136**: Across at least 100 sealed session closes with the daemon running throughout,
   100% have a durable handoff present within the documented bound without any daemon restart;
   with synthesis forced to fail permanently, 100% are reported as a named condition rather than

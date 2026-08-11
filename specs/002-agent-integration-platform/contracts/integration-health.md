@@ -42,6 +42,9 @@ plus a plan that is then applied and re-inspected (FR-151).
         "unverified_behaviors": [
           "lifecycle events are expected from Codex's documentation but have not been observed on this installation"
         ],
+        "awaited_behaviors": [
+          "a first observed session open, tool call, quiescence and close on Codex 0.58.0"
+        ],
         "completion_guarantee": "pending_activation"
       }
     ],
@@ -61,9 +64,15 @@ Each capability carries two dimensions (FR-241, FR-242):
 
 - **`availability`** — `guaranteed` | `conditional` | `absent` | `pending_activation`.
   `conditional` never counts towards FULL and is always reported with what it depends on.
-- **`confidence`** — `verified` (Cairn established it on this installation, by local
-  unauthenticated introspection or by having observed the capability produce a canonical event)
-  or `expected` (the vendor documents it; Cairn has not seen it here).
+- **`confidence`** — `verified` (Cairn holds an evidence row for it on this installation) or
+  `expected` (the vendor documents it; Cairn has not established it here). Evidence is
+  `introspection` for configuration capabilities — reading back a resource Cairn wrote, which is
+  version-independent — and `observation` for runtime capabilities, which is discarded when the
+  detected agent version changes (FR-245, D19a).
+
+**FULL requires every FULL-required capability to be established** — `guaranteed` *and*
+`verified` (FR-245). A capability that is merely `expected` withholds FULL and appears in
+`awaited_behaviors`; it never makes the agent `unsupported`.
 
 `missing_behaviors` is mandatory whenever `level` is below `full`, and it names behaviors in
 plain language — never a score (FR-111). `unverified_behaviors` is mandatory whenever any
@@ -95,6 +104,18 @@ capability is `expected`, so an unknown agent version never reads as more certai
         "level": "full",
         "completion_guarantee": "demonstrated",
         "missing_behaviors": [],
+        "awaited_behaviors": [],
+        "evidence": {
+          "mcp":                       { "kind": "introspection", "agent_version": "2.1.220" },
+          "instructions_project":      { "kind": "introspection", "agent_version": "2.1.220" },
+          "skill_user":                { "kind": "introspection", "agent_version": "2.1.220" },
+          "lifecycle_session_open":    { "kind": "observation",   "agent_version": "2.1.220" },
+          "lifecycle_tool_success":    { "kind": "observation",   "agent_version": "2.1.220" },
+          "lifecycle_quiesce":         { "kind": "observation",   "agent_version": "2.1.220" },
+          "lifecycle_session_close":   { "kind": "observation",   "agent_version": "2.1.220" },
+          "context_at_session_open":   { "kind": "observation",   "agent_version": "2.1.220" },
+          "stable_session_identifier": { "kind": "observation",   "agent_version": "2.1.220" }
+        },
         "lifecycle_coverage": {
           "guaranteed": ["session_opened", "tool_succeeded", "tool_failed",
                          "agent_quiesced", "context_compacting", "context_compacted",
@@ -183,6 +204,12 @@ capability is `expected`, so an unknown agent version never reads as more certai
   accompanied by a `conditional_behaviors` line explaining the condition.
 - `serves` is mandatory on any resource with more than one binding, so a shared resource's
   consumers are visible before someone disconnects one of them (FR-243).
+- `awaited_behaviors` is mandatory whenever a FULL-required capability is `expected`. After an
+  agent upgrade it will normally be non-empty for a while, because observation evidence from the
+  previous version was discarded — doctor says so rather than silently dropping the level
+  (FR-245).
+- `evidence` reports what established each capability and against which agent version, so a
+  developer can see why a level changed after an upgrade.
 - `detail` names the problem; it never quotes user configuration beyond what identifies it,
   and never contains a credential (FR-171, SC-133).
 - `remedy` is a command the developer can run, or the manual sequence where no command

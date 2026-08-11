@@ -125,6 +125,7 @@ codex        MCP_PLUS  — automatic session completion pending activation
 
 opencode     MCP_PLUS  — no automatic session completion (OpenCode signals no session end)
               tool failures captured only when OpenCode's output establishes them
+              awaiting: first observed session open, tool call and quiescence
   skill         shared     ~/.claude/skills/cairn/  serves claude-code, opencode
   instructions  shared     ./AGENTS.md              serves codex, opencode
 
@@ -301,7 +302,7 @@ not ad-hoc strings (FR-167).
 | `manager_action_required` | Needs a step in the manager that Cairn cannot perform | 1 |
 | `verification_failed` | The change was applied but not observed to be effective | 1 |
 | `confirmation_required` | Non-interactive run without `--yes` | 1 |
-| `unpublished_skill_ref` | A manager Skill import was requested from a build whose Skill source is not resolvable to a public Git ref | 1 |
+| `unpublished_skill_ref` | A manager Skill import was requested from a build whose embedded Skill revision has no published `skill-release` branch. Emitting an unpublished ref would make CC Switch silently install `main` | 1 |
 | `partial_apply` | A multi-file change partly landed; the report names both halves | 1 |
 
 `daemon_unavailable` and `storage_unavailable` keep exit `2`.

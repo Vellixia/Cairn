@@ -10,7 +10,8 @@ crates/cairn-integrate/assets/agent-contract.md   ─┬─▶  managed instruct
                                                    └─▶  MCP `instructions` string (FR-129)
 
 skills/cairn/                                       ─┬─▶  installed Skill, embedded (FR-140)
-                                                    └─▶  CC Switch import at a pinned Git ref
+                                                    └─▶  CC Switch import from a published
+                                                         skill-release/<schema>-<revision> branch
 ```
 
 Both sources are embedded into the binary at build time, so an installed Cairn always

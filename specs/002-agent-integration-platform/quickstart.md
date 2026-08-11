@@ -98,11 +98,15 @@ cairn connect codex --yes
   command, and `cairn doctor codex` reports `installed_not_activated` with level below FULL
   (FR-209).
 
-**Live**, after trusting the hooks in Codex:
+**Live**, after trusting the hooks in Codex and running one ordinary session:
 
 ```bash
-cairn doctor codex --json | jq '.data.agents[0].level'   # → "full" once SC-128 passes
+cairn doctor codex --json | jq '{level: .data.agents[0].level,
+                                awaited: .data.agents[0].awaited_behaviors}'
 ```
+
+Before that session the level is `mcp_plus` with `awaited_behaviors` naming the observations
+still needed; after it — and once SC-128 passes — it is `full` (FR-245).
 
 Run a short Codex session that edits a file and runs a failing command, then:
 
@@ -174,6 +178,16 @@ Exactly one Cairn MCP entry per selected application, ownership recorded as `man
 
 Then switch provider inside CC Switch and re-run `cairn doctor`: every Cairn resource still
 healthy, zero duplicates (SC-113).
+
+**Skill distribution from a development build** (hermetic):
+
+```bash
+cairn integration distribute --via cc-switch --resource skill --apps claude
+```
+
+Must fail with `unpublished_skill_ref` and exit `1`. CC Switch's downloader only accepts
+`refs/heads` and silently falls back to `main` on a miss, so emitting an unpublished ref would
+install the wrong Skill with no error. The MCP resource still distributes from the same build.
 
 ---
 
@@ -351,6 +365,7 @@ writes.
 | Injected-failure recovery | `cargo test -p cairn-e2e --test recovery_injected` | Handler timeout, handler crash, daemon unavailable — every session ends with a durable handoff, zero agent sessions disrupted (SC-129) |
 | Sealed close actually lands | `cargo test -p cairn-e2e --test handoff_lands_without_restart` | ≥100 sealed closes, 100% with a durable handoff inside the bound and **no daemon restart**; forced permanent failure is reported, not silent (SC-136) |
 | Shared resource survives one disconnect | `cargo test -p cairn-integrate --test fixtures shared_binding` | Disconnecting one of two bound agents keeps the resource; the last one removes it; manager-owned state survives (SC-137) |
+| Capability evidence gates FULL | `cargo test -p cairn-e2e --test capability_evidence` | An unobserved FULL-required runtime capability blocks FULL and is named as awaited; a detected version change discards observation evidence but keeps introspection evidence; observing everything restores FULL (SC-138) |
 | Configuration preservation | `cargo test -p cairn-integrate --test fixtures` | ≥20 fixtures, connect→disconnect returns 100% of non-Cairn bytes (SC-104) |
 | Preview writes nothing | `cargo test -p cairn-integrate --test dry_run_is_inert` | Checksums of every candidate file identical before and after (SC-118) |
 | Secrets stay out | `cargo test -p cairn-e2e --test privacy_integration` | Seeded credentials appear in zero artifacts, logs, diagnostics, or sync payloads (SC-133, SC-120) |

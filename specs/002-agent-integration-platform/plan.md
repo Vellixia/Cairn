@@ -3,8 +3,17 @@
 **Feature directory**: `specs/002-agent-integration-platform` | **Git branch**:
 `claude/agent-integration-spec-r05mg4` | **Date**: 2026-08-11 | **Spec**: [spec.md](./spec.md)
 
-**Input**: Feature specification from `/specs/002-agent-integration-platform/spec.md` at
-`c992c63`
+**Input**: Feature specification from `/specs/002-agent-integration-platform/spec.md`.
+
+| Provenance | Commit | What it carried |
+|---|---|---|
+| Initial clarified specification | `c992c63` | 139 FR / 35 SC — the spec this plan was first written against |
+| Planning-reconciled specification | `bcf9032` | +FR-240–FR-244, +SC-136–SC-137, SC-110 restated |
+| Final planning reconciliation | this artifact set | +FR-245, +SC-138 — capability evidence gates FULL |
+
+The plan depends on all three; the requirements added at each step exist because planning found
+the previous set unsatisfiable or contradictory, and the constitution requires such conflicts to
+be resolved in the spec.
 
 ## Summary
 
@@ -85,6 +94,13 @@ resolved; the resolutions added one dependency (`jsonc-parser`, replacing an unw
 than adding one), and one sweep on an existing maintenance tick. No new component, no new
 service, no new tool.
 
+**Re-check after the final reconciliation (2026-08-11)**: PASS. Three findings closed: research
+D20 was still carrying the pre-conditional OpenCode failure model; capability confidence was
+defined but gated only the completion guarantee, so a vendor removing tool capture could still
+produce FULL; and the CC Switch Skill ref plan assumed a generic Git ref that its downloader
+does not accept. The resolutions added one small local table (`CapabilityEvidence`) and changed
+a ref-naming convention. Still no new component, service, datastore, or tool.
+
 ## Project Structure
 
 ### Documentation (this feature)
@@ -117,14 +133,14 @@ crates/
 ├── cairn-git/           # unchanged
 ├── cairn-store/         # + migrations/0004_integrations.sql
 │                        # + integrations.rs (AgentIntegration, ManagerIntegration,
-│                        #   InstalledResource, ResourceBinding, MigrationState,
-│                        #   RecoveryArtifact)
+│                        #   InstalledResource, ResourceBinding, CapabilityEvidence,
+│                        #   MigrationState, RecoveryArtifact)
 │                        # + sessions.handoff_pending/attempts/error,
 │                        #   observations.vendor_tool
 ├── cairn-integrate/     # NEW — the whole integration layer
 │   ├── src/
 │   │   ├── adapter.rs       # the trait: detect, capabilities, plan, inspect, normalize
-│   │   ├── capability.rs    # availability × confidence; level and completion-guarantee
+│   │   ├── capability.rs    # availability × confidence; evidence rules; level derivation
 │   │   ├── desired.rs       # DesiredIntegrationState, deterministic serialization
 │   │   ├── plan.rs          # change-plan engine, shared by connect/repair/migrate
 │   │   ├── apply.rs         # atomic write, verify, partial-failure reporting
@@ -238,6 +254,8 @@ Dependencies: B needs A; C needs B; D is independent of C but must precede E; E 
 | Codex hook trust invalidation on every Cairn upgrade makes the integration feel broken | **MEDIUM** | Artifact versions are decoupled from the package version (D26), so a patch release that changes neither the contract nor the hook shape rewrites nothing and invalidates nothing. When it does happen, `installed_not_activated` names the exact command. |
 | A shared resource — the `AGENTS.md` block, the per-user Skill — is deleted while another agent still needs it | **MEDIUM** | Resolved structurally: resources and bindings are separate records, and a resource is deleted only when its last binding goes (D28, FR-243). Doctor prints the full `serves` list before anyone disconnects. Fixtures cover disconnecting the first and the last consumer. Chosen over symlinks, whose behavior is unverified on two of the three agents. |
 | A pending handoff never lands because the daemon keeps running and never restarts | **MEDIUM** | Resolved structurally: bounded retry plus a sweep on the maintenance tick that already runs, with permanent failure reported in `cairn status` and doctor (D22, FR-240). SC-136 measures that the handoff lands without a restart. |
+| An agent upgrade drops the level to MCP_PLUS until a session has run, and reads as a regression | **MEDIUM** | It is the honest state: observation evidence from the previous build proves nothing about this one (FR-245). Doctor names exactly what is awaited rather than showing a bare level, and one ordinary session restores FULL. Accepted deliberately over silently carrying stale evidence, which is the failure H2 identified. |
+| CC Switch silently installs `main` when handed a ref it cannot resolve | **MEDIUM** | Verified in its downloader: any miss falls back to `main`, then `master`. Cairn therefore emits only a published `skill-release/<schema>-<revision>` branch and refuses otherwise (D29); doctor's revision comparison is the backstop. |
 | `toml_edit` or a vendor schema change breaks Codex config editing | **MEDIUM** | Malformed or unexpected input fails closed and writes nothing (FR-137). The fixture corpus includes comment-heavy, nested, and truncated TOML. `toml_edit` is the crate Cargo itself uses for this problem. |
 | Adding `jsonc-parser`, `toml_edit`, and `include_dir` to the `cairn` binary slows hook startup | **MEDIUM** | The hook path calls only `cairn-integrate::normalize` — a pure function with no I/O — and never the editors, planner, or embedded assets. The cost is binary size, not work. SC-122 measures capture latency per adapter against Feature 001's baseline; if it regresses, the hook entry point moves to a thin binary linking only the normalize path. |
 | A vendor renames or removes an event Cairn maps | **MEDIUM** | Adapters degrade by capability detection, not version matching (FR-188). A missing event lowers the level and the integration keeps working; fixtures record the payloads Cairn was built against so a change is visible in a diff. |

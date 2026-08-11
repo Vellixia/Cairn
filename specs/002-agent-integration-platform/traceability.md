@@ -3,7 +3,7 @@
 **Feature**: `002-agent-integration-platform` | **Date**: 2026-08-11
 
 The planning gate. Every requirement maps to a planning component; every success criterion
-maps to a verification strategy at a named tier. Written because Feature 002 carries 144
+maps to a verification strategy at a named tier. Written because Feature 002 carries 145
 requirements across four adapters and a manager — a scale where "it is all covered" is not a
 claim anyone can check by reading.
 
@@ -16,13 +16,13 @@ Test tiers are from [research.md](./research.md) D40:
 | Requirements | Section | Primary component | Artifact |
 |---|---|---|---|
 | FR-101–FR-106 | Adapters, managers, detection | `cairn-integrate::adapter`, `::agents/*`, `::managers/cc_switch` | plan §Adapter shape, [cc-switch.md](./contracts/cc-switch.md) |
-| FR-107–FR-111, FR-207–FR-209, FR-229, FR-241, FR-242 | Capability model and level | `cairn-integrate::capability` — availability × confidence, level and completion-guarantee derivation; the idle reaper never sets it (D22a); confidence gates the completion guarantee (D19a) | [data-model.md](./data-model.md) §CapabilityProfile, [integration-health.md](./contracts/integration-health.md) |
+| FR-107–FR-111, FR-207–FR-209, FR-229, FR-241, FR-242, FR-245 | Capability model, evidence, and level | `cairn-integrate::capability` — availability × confidence; `CapabilityEvidence` persists what established each capability and against which version; every FULL-required capability must be established; the idle reaper never counts (D22a, D19a) | [data-model.md](./data-model.md) §CapabilityProfile and §CapabilityEvidence, [integration-health.md](./contracts/integration-health.md) |
 | FR-112–FR-119, FR-230, FR-231, FR-240 | Canonical lifecycle and sealed close | `AgentAdapter::normalize`, `cairn-core` event type, daemon handlers, pending-handoff sweep on the existing maintenance tick | [lifecycle.md](./contracts/lifecycle.md), D20–D22a |
 | FR-120–FR-122 | Tool categories | Feature 001 `classify_tool` reused; `vendor_tool` column | [lifecycle.md](./contracts/lifecycle.md) §Tool normalization, D36 |
 | FR-123–FR-127 | Usage contract | `cairn-integrate::render` from one embedded asset | [agent-contract.md](./contracts/agent-contract.md), D29 |
 | FR-128–FR-131 | MCP surface | `cairn/src/mcp.rs` — `instructions` added, six tools unchanged, revision held | D34 |
 | FR-132–FR-139 | Managed instructions | `cairn-integrate::markers`, `::edit::markdown` | [agent-contract.md](./contracts/agent-contract.md), D25 |
-| FR-140–FR-144 | Skill | `skills/cairn/` embedded; shared by binding; pinned Git ref for manager distribution | D28, D29 |
+| FR-140–FR-144 | Skill | `skills/cairn/` embedded; shared by binding; manager distribution only from a published `skill-release/<schema>-<revision>` branch, else refused | D28, D29 |
 | FR-145–FR-150, FR-228, FR-232–FR-235, FR-243, FR-244 | Ownership and sharing | `InstalledResource` + `ResourceBinding` (reference counting), `MigrationState`, manager boundary | [data-model.md](./data-model.md), [cc-switch.md](./contracts/cc-switch.md), D28, D28a |
 | FR-210–FR-220 | Installation scope | `cairn-integrate::scope` — the matrix as data | [scope-matrix.md](./contracts/scope-matrix.md), D27 |
 | FR-151–FR-158, FR-238, FR-239 | Safe mutation | `::plan`, `::apply`, `::edit/*`, `RecoveryArtifact` | D37, D39 |
@@ -39,7 +39,7 @@ Test tiers are from [research.md](./research.md) D40:
 | FR-201, FR-202, FR-226, FR-227 | Desired state | `cairn-integrate::desired`, single model, no file written | [integration-health.md](./contracts/integration-health.md) §Desired state |
 | FR-203–FR-206 | Verification | Five tiers; Playwright job | D40, D42 |
 
-Coverage: **144 of 144**. FR-189–FR-192 are satisfied by an absence — the design adds no
+Coverage: **145 of 145**. FR-189–FR-192 are satisfied by an absence — the design adds no
 agent-keyed scope anywhere — and that absence is asserted by test (SC-108).
 
 ## Criteria → verification
@@ -83,8 +83,9 @@ agent-keyed scope anywhere — and that absence is asserted by test (SC-108).
 | SC-135 desired state deterministic, secret-free, single source | T1 | `desired::determinism`, `desired::single_consumer` |
 | SC-136 sealed close lands without a restart; permanent failure reported | T4 | `handoff_lands_without_restart` |
 | SC-137 shared resource survives one disconnect; manager state survives | T2 + T4 | `fixtures::shared_binding`, `fixtures::manager_state_survives` |
+| SC-138 evidence gates FULL; version change re-opens it; establishing restores FULL | T1 + T4 | `capability::evidence_gates_full`, `capability::version_change_invalidates`, `capability_evidence` (T4) |
 
-Coverage: **37 of 37**, with 33 in required CI and 4 (SC-101, and the live halves of SC-108,
+Coverage: **38 of 38**, with 34 in required CI and 4 (SC-101, and the live halves of SC-108,
 SC-112, SC-122's end-to-end context) additionally carried as release evidence.
 
 ## Privacy verification map

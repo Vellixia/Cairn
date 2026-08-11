@@ -158,3 +158,20 @@ Session 2026-08-11 (planning reconciliation).
 
 Result: 144 requirements (FR-101–FR-244), 37 success criteria (SC-101–SC-137), no duplicates,
 no gaps, zero dangling cross-references, zero clarification markers. All checklist items pass.
+
+### Iteration 5 — 2026-08-11 (final planning reconciliation)
+
+Three cross-artifact contradictions and three reference errors, found while re-reading the
+reconciled plan. One required a spec addition; the rest were artifact or design corrections.
+
+| Finding | Resolution |
+|---|---|
+| **H1** research D20 still said OpenCode's tool failure was "not emitted" / `absent`, contradicting the conditional model everywhere else | D20 rewritten: no *guaranteed* failure signal is a different claim from no failure event ever. Only `session_closed` is genuinely absent |
+| **H2** confidence gated only the completion guarantee, so a vendor removing tool capture could still produce FULL | **FR-245** and **SC-138** added; `CapabilityEvidence` persists evidence kind and the agent version it was established against; observation evidence dies on a version change, introspection evidence is re-derived; FULL now requires every FULL-required capability to be established (D19a) |
+| **H3** the Skill ref plan assumed CC Switch resolves a commit SHA or tag | Verified in its source that the downloader hardcodes `archive/refs/heads/{branch}.zip` and silently falls back to `main`. D29 rewritten around a published, never-moved `skill-release/<schema>-<revision>` branch, with refusal rather than a broken link |
+| **M1** FR-240 conflated the recoverable and unrecoverable paths | Split into four numbered clauses; the completion guarantee is not claimed while a handoff is owed |
+| **M2** FR-149 cited FR-229 (recovery-from-silence) for the manager fallback | Corrected to FR-233; nearby manager references verified by meaning, not by existence |
+| **M3** plan provenance named only `c992c63` | Now records all three spec states and what each added |
+
+Result: 145 requirements (FR-101–FR-245), 38 success criteria (SC-101–SC-138), no duplicates,
+no gaps, zero dangling cross-references, zero clarification markers. All checklist items pass.

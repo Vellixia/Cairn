@@ -68,10 +68,19 @@ Two phases inside the daemon (D22):
 - Daemon-start reconciliation remains the backstop for the process dying between the phases —
   not the only retry path.
 
-The handoff must be durably present within a bounded interval (target: under 5 seconds at p99
-on a running daemon). **SC-128** measures the acknowledgment against the vendor's budget;
-**SC-136** separately measures that the handoff actually lands without a restart, and that a
-permanently failing synthesis becomes a reported condition.
+Two outcomes, both bounded (FR-240):
+
+- **Recoverable**: the durable handoff exists within the documented interval — target under
+  5 seconds at p99 on a running daemon.
+- **Not currently recoverable**: a *named* failure condition surfaces within that same interval
+  rather than silence. It stays retryable and actionable; it is not a terminal outcome.
+
+Until the handoff exists, the completion guarantee is **not** reported as satisfied for that
+boundary (FR-240 clause 4) — an acknowledged-but-owed boundary reads as owed, not complete.
+
+**SC-128** measures the acknowledgment against the vendor's budget; **SC-136** separately
+measures that the handoff lands without a restart and that a permanently failing synthesis
+becomes a reported condition.
 
 `cairn session end` from the command line keeps the Feature 001 behavior and waits for the
 handoff — nothing holds a deadline over it. The request carries `wait_for_handoff`, true for
@@ -144,7 +153,7 @@ lifecycle on plugin hooks.
 | `session.idle` | `agent_quiesced` | **Never** `session_closed` |
 | `experimental.session.compacting` | `context_compacting` | Experimental hook; if absent, the capability is reported absent |
 | `session.compacted` | `context_compacted` | |
-| — | `session_closed` | **Not emitted. OpenCode signals no session end.** |
+| — | `session_closed` | **Not emitted — the one genuine absence.** OpenCode signals no session end at all, which is different from the conditional failure row above |
 
 Not mapped: `session.deleted` (deleting a record is not completing work), `session.updated`,
 `session.status`, `session.error`, `session.diff`, `message.*`, `file.*`, `permission.*`,

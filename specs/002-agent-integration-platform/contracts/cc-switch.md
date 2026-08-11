@@ -69,28 +69,45 @@ artifact (D29): CC Switch fetches Skills from a public Git repository, so the re
 ### Skill Git ref
 
 Direct installation always uses the Skill embedded in the running binary — the binary is the
-source of truth, and no network is involved. Only the manager path needs a Git ref, and it
-must be one that exists and that matches the binary (D29):
+source of truth, and no network is involved. Only the manager path needs a Git ref, and CC
+Switch accepts a narrower ref space than Git does.
+
+**What CC Switch actually does** — `src-tauri/src/services/skill.rs`, `main`, verified
+2026-08-11:
+
+- `download_repo` builds `https://github.com/{owner}/{name}/archive/refs/heads/{branch}.zip`.
+- `assert_github_archive_url` rejects any URL whose path does not begin
+  `/{owner}/{name}/archive/refs/heads/` — a deliberate guard against a `branch` value that
+  redirects the download to a release asset.
+- If that download fails it **silently retries `main`, then `master`**.
+
+So a commit SHA or a tag in `branch=` does not resolve to that commit: it becomes a request for
+a *branch of that name*, 404s, and CC Switch then installs `main`. That is worse than an error,
+because the developer ends up with a Skill revision the binary never expected and no signal
+that it happened.
+
+**Therefore the ref is always a real branch, and always one Cairn controls and never rewrites**
+(D29):
 
 | Build | `<pinned-ref>` |
 |---|---|
-| A release build whose version matches a published tag | that tag |
-| Any other build with a pushed commit | the commit SHA the embedded assets were built from |
-| A dirty tree, or a commit not pushed | **none** — the import is refused |
+| The embedded Skill revision has a published `skill-release/<schema>-<revision>` branch | that branch |
+| It does not — every development build, and any build from a dirty tree | **none** — the Skill import is refused |
 
-A commit SHA is immutable and fetchable as soon as it is pushed, so the Skill CC Switch
-installs is by construction the revision the binary embeds. A floating branch is never used:
-it would let CC Switch install a Skill revision the binary does not expect, and doctor would
-then oscillate between healthy and outdated as the branch moved.
+The branch name encodes the Skill's own schema and revision, for example
+`skill-release/1-c07d4419b2ae`. It is created once when that revision is published and never
+moved, so it behaves like a pinned ref while still being a `refs/heads` ref CC Switch accepts.
 
-Where no ref is publicly resolvable, `cairn integration distribute --resource skill` fails with
-`unpublished_skill_ref`, states why, and gives the manual path. It never emits a ref it knows
-does not exist. A development build can still distribute the **MCP** resource, which carries no
-Git ref at all.
+Where the embedded revision has no published branch, `cairn integration distribute --resource
+skill` fails with `unpublished_skill_ref`, states why, and gives the manual path. It never emits
+a branch name it has not established exists, precisely because the failure mode is a silent
+fallback rather than an error. **A development build can still distribute the MCP resource**,
+which carries no Git ref at all.
 
 After distribution, `cairn doctor` reads the installed `SKILL.md`'s
 `metadata.cairn_skill_revision` and compares it with the embedded digest. A mismatch is
-`outdated`, with the remedy naming the correct ref.
+`outdated`, with the remedy naming the correct ref — and it is also the backstop that would
+catch a `main` fallback arriving by any other route.
 
 ## Removal
 

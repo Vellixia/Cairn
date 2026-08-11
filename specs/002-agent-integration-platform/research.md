@@ -104,23 +104,58 @@ lying in one direction or the other).
 
 ## D19a — Capability confidence, and how drift lowers it
 
-**Decision**: Confidence is established from three sources, in this order:
+**Decision**: Confidence is established from exactly two kinds of evidence, persisted in one
+small local table, and it gates **every** capability FULL requires — not only session close.
 
-1. **Local introspection the agent documents**, run without credentials or network — reading
-   back the configuration Cairn wrote and confirming the agent's own listing accepts it, where
-   the agent offers such a listing.
-2. **Observation**: the first time a capability produces a canonical event on this
-   installation, its confidence becomes `verified` and the timestamp is recorded.
-3. Otherwise **`expected`** — the adapter declares it because the vendor documents it, and
-   Cairn has not yet seen it here.
+**Evidence kinds**
 
-Drift lowers confidence rather than being ignored: a capability still `expected` on an
-installation where its sibling capabilities have been observed is reported with a drift note,
-and doctor names every `expected` capability on an unverified agent version.
+| Kind | Applies to | How it is established | Version-independent? |
+|---|---|---|---|
+| `introspection` | Configuration capabilities — `mcp_*`, `instructions_*`, `skill_*` | Reading back the resource Cairn wrote and confirming it is present, owned, and effective under the agent's own precedence rules. Local, no credentials, no network | **Yes** — it proves a fact about a file Cairn controls, not about the agent's behavior |
+| `observation` | Runtime capabilities — `lifecycle_*`, `context_at_session_open`, `stable_session_identifier` | That capability produced its canonical event on this installation at least once | **No** — it proves what *that build* of the agent did |
 
-The **completion guarantee** is the one place confidence gates the outcome: an agent is FULL
-only once its session-close capability is `verified` on this installation. Until then doctor
-says so — "awaiting first observed session close" — and the level is MCP_PLUS.
+Anything with no evidence row is `expected`.
+
+**Persistence**: one table, `CapabilityEvidence`, keyed `(agent, capability)`, holding the
+evidence kind, when it was established, and the **detected agent version at the time**. It is
+local-only and never syncs, like every other integration record.
+
+**Invalidation on version change**: when detection reports a different version from the one an
+evidence row records, the row is re-evaluated rather than trusted:
+
+- `introspection` evidence is re-derived immediately — it is a local read of a file Cairn wrote,
+  so it either still holds or the resource is genuinely broken and doctor says so. The row's
+  version is updated in place.
+- `observation` evidence is **discarded**. What a previous build did is not evidence about this
+  one, and quietly carrying it forward is exactly how a removed lifecycle surface would keep
+  reporting itself present.
+
+**How this gates FULL**: FULL requires every capability in its list to be both `guaranteed` and
+established on the current installation (FR-245):
+
+```
+FULL_REQUIRED_CONFIG   = { mcp, instructions, skill (where the agent has skills) }
+                         → evidence kind `introspection`
+FULL_REQUIRED_RUNTIME  = { lifecycle_session_open, lifecycle_tool_success, lifecycle_quiesce,
+                           lifecycle_session_close, context_at_session_open,
+                           stable_session_identifier }
+                         → evidence kind `observation`
+```
+
+Consequence, and the hole this closes: if a vendor update removes tool capture, that
+capability's observation evidence is discarded on the version change, its confidence drops to
+`expected`, and **FULL is withheld** — even though its static availability is still
+`guaranteed` and session close may still be verified. Under the previous model, confidence
+gated only the completion guarantee, so that state produced FULL.
+
+A freshly connected agent is therefore MCP_PLUS until one ordinary session has opened, used a
+tool, gone quiet, and closed. Doctor names exactly what is awaited rather than reporting a bare
+level.
+
+**What this is not**: it is not probing. Cairn never synthesizes a fake vendor event, never
+calls an undocumented interface, and never runs a capability check for its own sake. Both
+evidence kinds are byproducts of work that already happens — writing a resource, or receiving
+an event.
 
 **Why**: FR-188 asks for capability-driven degradation rather than version-string matching,
 and FR-242 forbids claiming more certainty than Cairn can establish. A purely static profile
@@ -129,10 +164,11 @@ forever. Observation is the cheapest honest signal available, it costs nothing t
 because the events already flow through the daemon, and it makes the strongest claim Cairn
 makes — FULL — contingent on having actually seen the thing work here.
 
-**Why not gate every capability on observation**: it would mean a freshly connected agent is
-reported as having nothing, which is both useless and false — the vendor does document these
-surfaces. Reporting them `expected` is the accurate statement, and only the FULL claim needs
-more than that.
+**Why not gate every capability on observation**: configuration capabilities do not need it —
+Cairn wrote those files and can read them back, which is stronger evidence than an event and
+costs nothing. Only runtime behavior genuinely requires having seen it work. And a capability
+that is merely `expected` still integrates and is still reported; it withholds the FULL claim,
+not the feature.
 
 **Rejected**: version ranges as the source of capability truth (FR-188 rules it out, and a
 minor release would silently break an integration); probing by synthesizing fake vendor events
@@ -150,7 +186,7 @@ row is a recorded fact, not a gap to fill.
 |---|---|---|---|
 | session opened | `SessionStart` (`source`: startup/resume/clear/compact/fork) | `SessionStart` (`source`: startup/resume/clear/compact) | `session.created`, or first plugin activity for an unseen `sessionID` |
 | tool succeeded | `PostToolUse` | `PostToolUse`, classified success from `tool_response` | `tool.execute.after` |
-| tool failed | `PostToolUseFailure` (carries `error`) | `PostToolUse`, classified failure from `tool_response` (D23) | **not emitted** — see below |
+| tool failed | `PostToolUseFailure` (carries `error`) | `PostToolUse`, classified failure from `tool_response` (D23) | `tool.execute.after` **when the output establishes failure** — conditional, see below |
 | agent quiesced | `Stop` | `Stop` | `session.idle` |
 | context compacting | `PreCompact` (`trigger`) | `PreCompact` (`trigger`) | `experimental.session.compacting` hook |
 | context compacted | `PostCompact` | `PostCompact` | `session.compacted` |
@@ -159,6 +195,8 @@ row is a recorded fact, not a gap to fill.
 Deliberately **not** mapped:
 
 - OpenCode `session.idle` → session closed. It means the session went quiet. (FR-116)
+- OpenCode `session_closed` from anything. There is no signal for it at all, which is the one
+  genuine "not emitted" in this table — distinct from the conditional failure case above.
 - OpenCode `session.deleted` → session closed. Deleting a session is not completing it, and
   a `completed` Cairn session with a durable handoff is a claim about work, not about a
   record's existence.
@@ -169,16 +207,29 @@ Deliberately **not** mapped:
   `PostToolBatch`, `StopFailure`, and the file/config/workspace events. Cairn registers only
   the events its canonical lifecycle needs (FR-102 story scenario, US2 #6).
 
-**OpenCode tool failure**: `tool.execute.after` receives `{title, output, metadata}` with no
-outcome flag, and a tool that throws may not reach the hook at all. The adapter therefore
-does not claim a distinguishable tool-failure capability for OpenCode. Where the output
-carries an unambiguous failure marker the adapter may record a failure; where it does not,
-it records the call without asserting one (FR-117). The capability profile says
-`tool_failure: absent`.
+**OpenCode tool failure is `conditional`, not absent**: `tool.execute.after` receives
+`{title, output, metadata}` with no outcome flag, and a tool that throws may not reach the hook
+at all. So OpenCode offers **no guaranteed distinguishable failure signal** — which is a
+different statement from "no failure event can ever be emitted".
 
-**Why**: the mapping is derived from each vendor's own event vocabulary and payload, not
-from name similarity. Every "not emitted" above is a capability the profile reports as
-absent, which is what makes the integration level computed rather than asserted.
+- Where the tool output unambiguously establishes a failure, the adapter emits `tool_failed`.
+  Discarding a provable failure would be as dishonest as inventing one.
+- Where the output is ambiguous, the adapter emits nothing and records the call without
+  asserting an outcome (FR-117).
+- The capability profile therefore says `lifecycle_tool_failure: conditional` (FR-241). A
+  conditional capability never counts towards FULL, and doctor states the condition in
+  `conditional_behaviors`.
+- SC-110 tests both halves: a payload that establishes failure produces the event; an ambiguous
+  payload produces nothing.
+
+The same reasoning applies to OpenCode's pre-compaction hook, which is experimental: it is
+`conditional` where the installed build exposes it and `absent` where it does not.
+
+**Why**: the mapping is derived from each vendor's own event vocabulary and payload, not from
+name similarity. Every row resolves to one of three profile states — `guaranteed`,
+`conditional`, or `absent` — and the level is computed from those rather than asserted. Only
+OpenCode's `session_closed` is `absent`; its failure signal is `conditional`, which is why the
+adapter still emits provable failures.
 
 ---
 
@@ -513,28 +564,64 @@ copy to drift.
 that the Skill must be fetchable from a public Git path. Putting the canonical files at a
 repository path that is both embedded and fetchable satisfies all three without duplication.
 
-**Which Git ref the deep link uses** — resolved here rather than left to release day, because
-the wrong answer installs a Skill that does not match the binary:
+**Which Git ref the deep link uses** — constrained by what CC Switch's downloader actually
+accepts, which is narrower than Git's ref space.
 
-1. The build records two things: the embedded Skill's `skill_revision` digest, and the commit
-   the assets were built from (`git rev-parse HEAD` at build time, or the release tag when the
-   build is a tagged release).
-2. A **release build** whose version matches a published tag emits that tag as `branch=` — the
-   ref that corresponds exactly to the binary.
-3. Any **other build** emits the recorded **commit SHA**, which is a valid, immutable,
-   fetchable ref as soon as the commit is pushed. A SHA is always pinned, so the fetched Skill
-   is by construction the one the binary embeds.
-4. If neither is publicly resolvable — a dirty working tree, or a commit not pushed — Cairn
-   **refuses to emit a Skill deep link** and returns `manager_action_required` with the reason
-   and the manual path. It never emits a ref it knows does not exist, and never falls back to
-   a floating branch.
+Verified in `farion1231/cc-switch`, `src-tauri/src/services/skill.rs` (main, 2026-08-11):
+
+- `download_repo` builds `https://github.com/{owner}/{name}/archive/refs/heads/{branch}.zip`.
+- `assert_github_archive_url` rejects any URL whose path does not start with
+  `/{owner}/{name}/archive/refs/heads/`, as a deliberate defence against a `branch` value that
+  redirects the download to a release asset.
+- On failure it **silently retries `main`, then `master`**:
+  `if !branches.contains(&"main") { branches.push("main") }`, likewise `master`.
+
+Two consequences that invalidate the obvious designs:
+
+- **A commit SHA does not work.** `branch=<sha>` becomes `archive/refs/heads/<sha>.zip`, which
+  means "a branch literally named that SHA". It 404s, and CC Switch then downloads `main` —
+  installing a Skill revision the binary never expected, with no error. That is worse than
+  failing.
+- **A tag does not work either**, for the same reason: a tag is `refs/tags`, and the downloader
+  hardcodes `refs/heads`. Same silent fallback to `main`.
+
+So the only supported surface is a **real branch**, and the only safe branch is one Cairn
+controls and never rewrites:
+
+1. The Skill is published to a dedicated, write-once branch named from the Skill's own version:
+   `skill-release/<skill_schema>-<skill_revision>`, for example
+   `skill-release/1-c07d4419b2ae`. It is created when that Skill revision is published and is
+   never moved, so it is a real `refs/heads` ref that behaves like a pinned one.
+2. The build records the branch name its embedded Skill was published under, and whether the
+   release pipeline actually published it.
+3. A build whose embedded Skill has a published branch emits that branch. Because the branch
+   name encodes the revision, the fetched Skill is by construction the revision the binary
+   embeds.
+4. A build whose Skill revision has **not** been published — every development build, and any
+   build from a dirty tree — **refuses** to emit a Skill deep link and returns
+   `manager_action_required` / `unpublished_skill_ref` with the reason and the manual path.
+   Emitting an unpublished branch name would trigger the silent `main` fallback, which is the
+   one outcome this whole decision exists to prevent. Such a build can still distribute the
+   **MCP** resource, which carries no Git ref at all.
 5. After distribution, doctor reads the installed `SKILL.md`'s `metadata.cairn_skill_revision`
-   and compares it with the embedded digest. A mismatch is `outdated`, with the remedy naming
-   the correct ref.
+   and compares it with the embedded digest. A mismatch is `outdated` and names the correct
+   ref. This is also the backstop that catches a `main` fallback if one ever happens by another
+   route.
 
-**Why not `main`**: a floating branch means the Skill CC Switch installs can silently be a
-different revision from the one the running binary expects, and doctor would then oscillate
-between healthy and outdated as the branch moves. Pinning is what makes step 5 meaningful.
+**Why not just point at `main`**: `main` moves. CC Switch would install whatever the Skill
+looked like at fetch time, doctor would oscillate between healthy and outdated as the branch
+advanced, and the revision comparison in step 5 would be meaningless.
+
+**Why a branch per revision rather than one `skill-release` branch**: a single moving release
+branch reintroduces exactly the drift problem, one step removed. A per-revision branch is cheap
+— it is a ref, not a copy — and it makes the deep link self-describing.
+
+**Rejected**: emitting a commit SHA or tag (silently resolves to `main` through CC Switch's
+fallback — verified above); asking CC Switch to support `refs/tags` (a change to someone else's
+product is not a plan); publishing a release purely to give the link a ref (the per-revision
+branch already works, and a release is a product decision, not a planning workaround);
+disabling the revision check to tolerate `main` (it is the only thing that would catch a
+mismatch).
 
 **Rejected**: a separate `Vellixia/cairn-skills` repository (a second release process and a
 second thing to keep in step); generating the Skill at install time from Rust string literals

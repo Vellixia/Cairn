@@ -183,9 +183,9 @@ Static per adapter along two dimensions, refined by what Cairn can establish (D1
 determinable; it never counts towards FULL and is always reported with what it depends on.
 
 **Confidence** — `verified` | `expected` (FR-242). `verified` means Cairn established it on
-this installation, by local unauthenticated introspection or by having observed the capability
-produce a canonical event. Everything else is `expected`. Confidence never raises a level; it
-gates only the completion guarantee, and doctor names every `expected` capability.
+this installation and holds an evidence row for it (see `CapabilityEvidence`). Everything else
+is `expected`. Confidence never raises a level; it **withholds** FULL while any FULL-required
+capability is only expected (FR-245), and doctor names every expected capability.
 
 | Capability | Claude Code | Codex | OpenCode | Generic MCP |
 |---|---|---|---|---|
@@ -221,13 +221,17 @@ Two entries are `conditional` rather than `guaranteed`, and both are load-bearin
 ### Level derivation
 
 ```
-guaranteed(c) ≡ availability(c) = guaranteed        # conditional does NOT satisfy this
+established(c) ≡ availability(c) = guaranteed ∧ confidence(c) = verified
+                 # conditional never satisfies this; expected never satisfies this
 
-full      ⟸ guaranteed(mcp) ∧ guaranteed(instructions)
-            ∧ (guaranteed(skill) ∨ agent has no skills)
-            ∧ guaranteed(stable_session_identifier)
-            ∧ guaranteed(context_at_session_open)
-            ∧ guaranteed(lifecycle_tool_success) ∧ guaranteed(lifecycle_quiesce)
+FULL_REQUIRED_CONFIG  = { mcp, instructions, skill (unless the agent has no skills) }
+                        evidence kind: introspection
+FULL_REQUIRED_RUNTIME = { lifecycle_session_open, lifecycle_tool_success, lifecycle_quiesce,
+                          lifecycle_session_close, context_at_session_open,
+                          stable_session_identifier }
+                        evidence kind: observation
+
+full      ⟸ ∀c ∈ FULL_REQUIRED_CONFIG  ∪ FULL_REQUIRED_RUNTIME : established(c)
             ∧ completion_guarantee = demonstrated
 mcp_plus  ⟸ mcp ∧ (instructions ∨ skill ∨ any lifecycle capability of any availability)
 mcp_only  ⟸ mcp only
@@ -235,16 +239,21 @@ unsupported ⟸ detected but no safe integration
 ```
 
 `completion_guarantee` is a separate tri-state — `demonstrated` | `not_demonstrated` |
-`pending_activation` — and is `demonstrated` only when **both** hold: the adapter has a
-mechanism that positively establishes that a session terminated (FR-207), and that capability's
-confidence is `verified` on this installation (FR-242). **Cairn's inactivity timeout and
-daemon-start reconciliation never set it** (FR-229).
+`pending_activation` — and is `demonstrated` only when **all** hold: the adapter has a mechanism
+that positively establishes that a session terminated (FR-207); that capability is
+`established` per the rule above; and no boundary is currently owed a handoff (FR-240 clause 4).
+**Cairn's inactivity timeout and daemon-start reconciliation never set it** (FR-229).
 
-Under D31/D32 this yields: Claude Code `full` once one session close has been observed,
-`mcp_plus` before that with "awaiting first observed session close" stated; Codex the same,
-additionally gated on hook trust and SC-128; OpenCode `mcp_plus` permanently under current
-vendor behavior; generic MCP `mcp_only`. No level is hardcoded by agent name — these are the
-outputs of the rule above given the profiles above.
+**The hole this closes**: gating only the completion guarantee on confidence allowed a vendor
+update that removed tool capture to still produce FULL — static availability stayed
+`guaranteed`, the missing capability stayed `expected`, and nothing consulted it. Requiring
+every FULL-required capability to be `established` means the version change discards that
+capability's observation evidence and FULL is withheld (FR-245, SC-138).
+
+Under D31/D32 this yields: Claude Code `full` once one ordinary session has opened, used a tool,
+gone quiet and closed — `mcp_plus` before that, with the awaited behaviors named; Codex the
+same, additionally gated on hook trust and SC-128; OpenCode `mcp_plus` permanently under current
+vendor behavior; generic MCP `mcp_only`. No level is hardcoded by agent name.
 
 ---
 
@@ -354,6 +363,34 @@ resources safe (D28, FR-243).
 disconnect asks "is anyone else still using it", and doctor asks "who does this serve". A
 `satisfied_by` string answered only the third, and only for Skills — and under it,
 disconnecting Codex deleted the `AGENTS.md` block that OpenCode was still relying on.
+
+### CapabilityEvidence
+
+What Cairn has established about one capability on this installation. The record behind
+`confidence` (FR-242, FR-245, D19a).
+
+| Column | Type | Notes |
+|---|---|---|
+| `agent` | text | FK to `AgentIntegration` |
+| `capability` | text | The capability name |
+| `evidence` | text | `introspection` \| `observation` |
+| `established_at` | text | |
+| `agent_version` | text or null | The detected agent version when it was established |
+
+**Invariants**
+
+- Primary key `(agent, capability)`. A capability with no row is `expected`.
+- `introspection` evidence is **version-independent**: it proves a fact about a resource Cairn
+  wrote, so a version change re-derives it in place rather than discarding it.
+- `observation` evidence is **version-bound**: when detection reports a version different from
+  `agent_version`, the row is deleted. What a previous build did is not evidence about this one
+  (FR-245).
+- Rows are created as a byproduct of work that already happens — writing a resource, or
+  receiving a canonical event. Cairn never synthesizes an event or calls an undocumented
+  interface to create one.
+- Deleted with the agent's last binding.
+
+**Privacy class**: `local`.
 
 ### MigrationState
 
@@ -507,7 +544,7 @@ Nothing in this document.
 |---|---|
 | DesiredIntegrationState and everything under it | No — derived, in memory |
 | AgentIntegration, ManagerIntegration | No |
-| InstalledResource, ResourceBinding, MigrationState, RecoveryArtifact | No |
+| InstalledResource, ResourceBinding, CapabilityEvidence, MigrationState, RecoveryArtifact | No |
 | CanonicalLifecycleEvent | No — a transport shape; the observation it carries follows Feature 001's rules |
 | Observation `vendor_tool` | No — observations never sync |
 | Session `handoff_pending`, `handoff_attempts`, `handoff_error` | No — not in the session provenance payload |
@@ -522,6 +559,7 @@ session provenance is the only place agent identity appears off this machine (FR
 ```
 AgentIntegration 1 ──── * ResourceBinding ──── 1 InstalledResource
         │                                                  ▲
+        ├── * CapabilityEvidence   (per capability; observation rows die on version change)
         │                     ┌────────────────────────────┘
         │                     │   several bindings may share one resource
         │                     │   (the AGENTS.md block; the per-user Skill)
