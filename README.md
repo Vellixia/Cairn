@@ -33,6 +33,21 @@ tar -xzf cairn-v${VERSION}-${TARGET}.tar.gz
 sudo install -m 0755 cairn-v${VERSION}-${TARGET}/{cairn,cairnd} /usr/local/bin/
 ```
 
+On Windows (PowerShell):
+
+```powershell
+$VERSION = "0.1.0-alpha.2"
+$TARGET = "x86_64-pc-windows-msvc"
+
+Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/cairn-v$VERSION-$TARGET.zip" -OutFile cairn.zip
+Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/SHA256SUMS" -OutFile SHA256SUMS
+
+Expand-Archive cairn.zip -DestinationPath .
+mkdir "$env:LOCALAPPDATA\Cairn" -Force
+Copy-Item "cairn-v$VERSION-$TARGET\cairn.exe","cairn-v$VERSION-$TARGET\cairnd.exe" "$env:LOCALAPPDATA\Cairn"
+setx PATH "$env:PATH;$env:LOCALAPPDATA\Cairn"
+```
+
 Or build from source — nothing is needed beyond the pinned toolchain:
 
 ```bash
@@ -48,8 +63,9 @@ cairn init                                 # register this repository
 cairn connect claude-code                  # install hooks + the MCP server
 ```
 
-**Supported platforms:** macOS on Apple silicon and Intel, Linux on x86_64 and arm64.
-Windows is not supported — the CLI and daemon talk over a Unix domain socket.
+**Supported platforms:** macOS on Apple silicon and Intel, Linux on x86_64 and arm64,
+Windows on x86_64. The CLI and daemon talk over a Unix domain socket on Unix and a
+named pipe on Windows — either way, nothing is exposed on the network.
 
 Start a Claude Code session in that repository. Cairn starts its daemon on its own, opens a
 session, and begins capturing. When the session ends:

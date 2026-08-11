@@ -98,6 +98,41 @@ jobs:
           git diff --check
           test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
 
+  # Windows is a first-class target too. Service containers are unavailable
+  # here — no Docker, same as macOS — so the server and sync suites skip
+  # themselves and this job proves the local-first product, which is most of
+  # Cairn, on its named-pipe transport rather than a Unix domain socket.
+  rust-windows:
+    name: rust (windows-latest)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Verify the toolchain is the pinned one
+        shell: bash
+        run: |
+          pinned=$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)
+          active=$(rustc --version | awk '{print $2}')
+          echo "pinned=$pinned active=$active"
+          test "$pinned" = "$active"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace
+      - run: cargo test --workspace --all-targets
+
+      - name: Working tree is clean and free of conflict markers
+        shell: bash
+        run: |
+          git diff --check
+          test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
+
   web:
     name: web
     runs-on: ubuntu-latest

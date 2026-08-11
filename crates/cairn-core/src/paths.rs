@@ -24,14 +24,36 @@ pub fn db_path() -> PathBuf {
     home().join("cairn.sqlite3")
 }
 
-/// Daemon control socket. Kept short: Unix socket paths are length-limited.
+/// Daemon control endpoint: a Unix domain socket path on Unix, a named pipe
+/// name on Windows. `CAIRN_SOCKET` always wins, which is what lets tests run
+/// several daemons side by side.
+#[cfg(unix)]
 pub fn socket_path() -> PathBuf {
     if let Ok(p) = std::env::var("CAIRN_SOCKET") {
         if !p.is_empty() {
             return PathBuf::from(p);
         }
     }
+    // Unix socket paths are length-limited, so this is kept short.
     home().join("cairnd.sock")
+}
+
+/// Windows has no filesystem-addressed local socket; named pipes live in
+/// their own `\\.\pipe\` namespace instead. The name is derived from `home()`
+/// (which is already per-user, via `%APPDATA%` or `CAIRN_HOME`) so two users
+/// on the same machine never collide on one pipe.
+#[cfg(windows)]
+pub fn socket_path() -> PathBuf {
+    if let Ok(p) = std::env::var("CAIRN_SOCKET") {
+        if !p.is_empty() {
+            return PathBuf::from(p);
+        }
+    }
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(home().to_string_lossy().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    PathBuf::from(format!(r"\\.\pipe\cairnd-{}", &digest[..16]))
 }
 
 pub fn config_path() -> PathBuf {

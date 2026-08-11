@@ -4,12 +4,19 @@
 use cairn_core::wire::{codes, Envelope, Request, WireError};
 use std::path::PathBuf;
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// How long to wait for a freshly spawned daemon to bind its socket.
 const DAEMON_START_TIMEOUT: Duration = Duration::from_millis(3000);
 const DAEMON_POLL: Duration = Duration::from_millis(25);
+
+/// The stream type of a connection to `cairnd`: a Unix domain socket on
+/// Unix, a named pipe on Windows. Everything below this line only needs
+/// `AsyncRead + AsyncWrite`, so the two platforms share one implementation.
+#[cfg(unix)]
+type IpcStream = tokio::net::UnixStream;
+#[cfg(windows)]
+type IpcStream = tokio::net::windows::named_pipe::NamedPipeClient;
 
 pub fn socket_path() -> PathBuf {
     cairn_core::paths::socket_path()
@@ -52,7 +59,7 @@ async fn write_only(request: &Request) -> Result<(), WireError> {
                 .ok_or_else(|| WireError::new(codes::DAEMON_UNAVAILABLE, "cairnd did not start"))?
         }
     };
-    let (_read_half, mut write_half) = stream.into_split();
+    let (_read_half, mut write_half) = tokio::io::split(stream);
     let mut line = serde_json::to_string(request)
         .map_err(|e| WireError::invalid(format!("unencodable request: {e}")))?;
     line.push('\n');
@@ -120,8 +127,11 @@ async fn attempt(request: &Request) -> Result<serde_json::Value, WireError> {
     converse(stream, request).await
 }
 
-async fn converse(stream: UnixStream, request: &Request) -> Result<serde_json::Value, WireError> {
-    let (read_half, mut write_half) = stream.into_split();
+async fn converse<S>(stream: S, request: &Request) -> Result<serde_json::Value, WireError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut line = serde_json::to_string(request)
         .map_err(|e| WireError::invalid(format!("unencodable request: {e}")))?;
     line.push('\n');
@@ -151,17 +161,49 @@ async fn converse(stream: UnixStream, request: &Request) -> Result<serde_json::V
     envelope.into_result()
 }
 
-async fn connect() -> Option<UnixStream> {
-    UnixStream::connect(socket_path()).await.ok()
+#[cfg(unix)]
+async fn connect() -> Option<IpcStream> {
+    tokio::net::UnixStream::connect(socket_path()).await.ok()
+}
+
+/// Open the client end of the named pipe, retrying briefly on
+/// `ERROR_PIPE_BUSY`: every instance the daemon has standing is momentarily
+/// serving another client. That is a healthy daemon, just a narrow race —
+/// unlike a cold or absent daemon, which fails with a different error and is
+/// treated as "not running" immediately.
+#[cfg(windows)]
+async fn connect() -> Option<IpcStream> {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    let name = socket_path().to_string_lossy().into_owned();
+    for _ in 0..10 {
+        match ClientOptions::new().open(&name) {
+            Ok(client) => return Some(client),
+            Err(e) if e.raw_os_error() == Some(231) => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 /// Spawn `cairnd` detached, so the agent session is never waiting on it.
 pub fn start_daemon() -> Result<(), WireError> {
     let exe = daemon_binary();
-    std::process::Command::new(&exe)
+    #[allow(unused_mut)]
+    let mut command = std::process::Command::new(&exe);
+    command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // No console window for a process that has nothing to print to one.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
         .spawn()
         .map(|mut child| {
             // The daemon outlives this process. Reap it if it exits during
@@ -178,6 +220,11 @@ pub fn start_daemon() -> Result<(), WireError> {
         })
 }
 
+#[cfg(unix)]
+const DAEMON_NAME: &str = "cairnd";
+#[cfg(windows)]
+const DAEMON_NAME: &str = "cairnd.exe";
+
 /// Find `cairnd`: next to this binary first, then `PATH`.
 fn daemon_binary() -> PathBuf {
     if let Ok(explicit) = std::env::var("CAIRND_BIN") {
@@ -187,16 +234,16 @@ fn daemon_binary() -> PathBuf {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let sibling = dir.join("cairnd");
+            let sibling = dir.join(DAEMON_NAME);
             if sibling.exists() {
                 return sibling;
             }
         }
     }
-    PathBuf::from("cairnd")
+    PathBuf::from(DAEMON_NAME)
 }
 
-async fn wait_for_daemon() -> Option<UnixStream> {
+async fn wait_for_daemon() -> Option<IpcStream> {
     let deadline = std::time::Instant::now() + DAEMON_START_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if let Some(stream) = connect().await {
@@ -224,6 +271,7 @@ pub async fn daemon_running() -> bool {
 ///
 /// Delivery stays bounded: the connect and write both carry `deadline`, and
 /// anything slower is dropped rather than waited on.
+#[cfg(unix)]
 pub fn send_oneway_blocking(request: &Request, deadline: Duration) -> Result<(), WireError> {
     use std::io::Write as _;
     use std::os::unix::net::UnixStream as StdUnixStream;
@@ -272,4 +320,24 @@ pub fn send_oneway_blocking(request: &Request, deadline: Duration) -> Result<(),
         .flush()
         .map_err(|e| WireError::new(codes::DAEMON_UNAVAILABLE, e.to_string()))?;
     Ok(())
+}
+
+/// Write one request, bounded by `deadline` (SC-007).
+///
+/// `std` has no named pipe support, so there is no equivalent of the Unix
+/// blocking fast path here: this builds a single-threaded Tokio runtime —
+/// far cheaper than the multi-threaded one `#[tokio::main]` builds elsewhere
+/// in this binary — and runs the same bounded `send_oneway` on it.
+#[cfg(windows)]
+pub fn send_oneway_blocking(request: &Request, deadline: Duration) -> Result<(), WireError> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| {
+            WireError::new(
+                codes::DAEMON_UNAVAILABLE,
+                format!("could not start a runtime: {e}"),
+            )
+        })?;
+    runtime.block_on(send_oneway(request, deadline))
 }

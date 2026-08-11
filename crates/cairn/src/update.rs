@@ -14,6 +14,13 @@ use std::path::{Path, PathBuf};
 
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
+/// The binaries an install owns, named as they appear on disk and inside the
+/// release archive.
+#[cfg(windows)]
+const BINARY_NAMES: [&str; 2] = ["cairn.exe", "cairnd.exe"];
+#[cfg(not(windows))]
+const BINARY_NAMES: [&str; 2] = ["cairn", "cairnd"];
+
 /// What an update attempt found, so the caller can render it.
 pub struct Outcome {
     pub current: String,
@@ -131,7 +138,7 @@ fn install_targets() -> Result<Vec<PathBuf>, WireError> {
     let dir = exe
         .parent()
         .ok_or_else(|| WireError::invalid("this binary has no parent directory"))?;
-    Ok(vec![dir.join("cairn"), dir.join("cairnd")])
+    Ok(BINARY_NAMES.iter().map(|name| dir.join(name)).collect())
 }
 
 /// Whether this process may replace `path`.
@@ -197,10 +204,11 @@ fn unpack(archive: &[u8], version: &str, target: &str) -> Result<tempfile::TempD
             .map_err(|e| WireError::invalid(format!("could not read the archive: {e}")))?
             .into_owned();
 
-        let wanted = matches!(
-            path.strip_prefix(&root).ok().and_then(|p| p.to_str()),
-            Some("cairn") | Some("cairnd")
-        );
+        let wanted = path
+            .strip_prefix(&root)
+            .ok()
+            .and_then(|p| p.to_str())
+            .is_some_and(|name| BINARY_NAMES.contains(&name));
         if !wanted {
             continue;
         }
@@ -235,6 +243,13 @@ fn unpack(archive: &[u8], version: &str, target: &str) -> Result<tempfile::TempD
 /// its open inode — and is atomic, so a reader never sees a half-written file.
 /// The staging copy is made in the destination directory because `rename` does
 /// not cross filesystems.
+///
+/// Windows will not let `rename` overwrite a file that is currently mapped
+/// for execution, so there `target` is first renamed *aside* — that only
+/// changes the directory entry, which Windows does allow even while the file
+/// is running, and the process underneath keeps working off its open handle
+/// regardless of what its path is now called. The now-vacant path can then
+/// take the staged binary the same way Unix does.
 fn replace(new: &Path, target: &Path) -> Result<(), WireError> {
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     let staged = dir.join(format!(
@@ -249,8 +264,48 @@ fn replace(new: &Path, target: &Path) -> Result<(), WireError> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755));
     }
-    std::fs::rename(&staged, target).map_err(|e| {
+
+    #[cfg(windows)]
+    let leftover = {
+        let leftover = dir.join(format!(
+            "{}.cairn-old-{}",
+            target.file_name().and_then(|n| n.to_str()).unwrap_or("bin"),
+            std::process::id()
+        ));
+        if target.exists() {
+            if let Err(e) = std::fs::rename(target, &leftover) {
+                let _ = std::fs::remove_file(&staged);
+                return Err(WireError::invalid(format!(
+                    "could not move the running {} aside: {e}",
+                    target.display()
+                )));
+            }
+            Some(leftover)
+        } else {
+            None
+        }
+    };
+
+    if let Err(e) = std::fs::rename(&staged, target) {
         let _ = std::fs::remove_file(&staged);
-        WireError::invalid(format!("could not replace {}: {e}", target.display()))
-    })
+        #[cfg(windows)]
+        if let Some(leftover) = leftover {
+            // Put the old binary back rather than leave the install broken.
+            let _ = std::fs::rename(&leftover, target);
+        }
+        return Err(WireError::invalid(format!(
+            "could not replace {}: {e}",
+            target.display()
+        )));
+    }
+
+    #[cfg(windows)]
+    if let Some(leftover) = leftover {
+        // Best-effort: this fails while the old binary is still executing
+        // (replacing this very `cairn.exe`, say), which is harmless — it is
+        // orphaned, not broken, and the next successful update cleans it up.
+        let _ = std::fs::remove_file(&leftover);
+    }
+
+    Ok(())
 }
