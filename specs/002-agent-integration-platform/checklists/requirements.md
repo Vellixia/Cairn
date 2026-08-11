@@ -138,3 +138,23 @@ Result: all checklist items pass. 139 requirements (FR-101–FR-239), 35 success
   is bounded to Cairn's own.
 - M1: no "turn completed" or "turn checkpoint" phrasing remains; the Feature 001 `Stop` semantics
   are preserved by FR-230 rather than by the old name.
+
+### Iteration 4 — 2026-08-11 (planning reconciliation)
+
+Planning surfaced six contradictions that design alone could not resolve, because the
+requirements were either unsatisfiable or mutually inconsistent. Per the constitution's
+governance rule, each was resolved **in the spec** — five requirements and two criteria added,
+`SC-110` restated, and no existing identifier changed or weakened. See `## Clarifications`,
+Session 2026-08-11 (planning reconciliation).
+
+| Finding | Spec change | Design change |
+|---|---|---|
+| A budgeted session close could leave a terminal session owing a handoff forever | **FR-240**, **SC-136** | Bounded retry plus a sweep on the daemon's existing maintenance tick; permanent failure reported (D22) |
+| A capability could be neither present nor absent (OpenCode tool failure) | **FR-241**, SC-110 restated | Availability becomes `guaranteed`/`conditional`/`absent`/`pending_activation`; conditional never counts towards FULL (D19) |
+| Static capability data could not degrade when a vendor changes | **FR-242** | Confidence `verified`/`expected`, sourced from local introspection or observed events; gates the completion guarantee (D19a) |
+| Disconnecting one agent deleted a resource another still needed | **FR-243** | `InstalledResource` + `ResourceBinding` reference counting replaces `satisfied_by` (D28) |
+| Disconnect destroyed the record needed to verify a manager withdrawal | **FR-244**, **SC-137** | The agent record survives while any binding remains, including manager-owned ones (D28a) |
+| JSON editing could not preserve non-Cairn bytes | none — the requirement was right and the design was wrong | `jsonc-parser` CST replaces the `serde_json` round-trip (D37) |
+
+Result: 144 requirements (FR-101–FR-244), 37 success criteria (SC-101–SC-137), no duplicates,
+no gaps, zero dangling cross-references, zero clarification markers. All checklist items pass.

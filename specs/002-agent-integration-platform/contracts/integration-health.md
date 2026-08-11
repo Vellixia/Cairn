@@ -24,21 +24,24 @@ plus a plan that is then applied and re-inspected (FR-151).
         "level": "mcp_plus",
         "missing_behaviors": ["automatic session completion (hooks awaiting trust)"],
         "capabilities": {
-          "mcp_user_scope": "present",
-          "mcp_project_scope": "present",
-          "instructions_project": "present",
-          "skill_user": "present",
-          "lifecycle_session_open": "present_pending_activation",
-          "lifecycle_tool_success": "present_pending_activation",
-          "lifecycle_tool_failure": "present_pending_activation",
-          "lifecycle_quiesce": "present_pending_activation",
-          "lifecycle_pre_compaction": "present_pending_activation",
-          "lifecycle_post_compaction": "present_pending_activation",
-          "lifecycle_session_close": "present_pending_activation",
-          "context_at_session_open": "present",
-          "stable_session_identifier": "present",
-          "handlers_require_trust": "yes"
+          "mcp_user_scope":            { "availability": "guaranteed", "confidence": "verified" },
+          "mcp_project_scope":         { "availability": "guaranteed", "confidence": "expected" },
+          "instructions_project":      { "availability": "guaranteed", "confidence": "verified" },
+          "skill_user":                { "availability": "guaranteed", "confidence": "verified" },
+          "lifecycle_session_open":    { "availability": "pending_activation", "confidence": "expected" },
+          "lifecycle_tool_success":    { "availability": "pending_activation", "confidence": "expected" },
+          "lifecycle_tool_failure":    { "availability": "pending_activation", "confidence": "expected" },
+          "lifecycle_quiesce":         { "availability": "pending_activation", "confidence": "expected" },
+          "lifecycle_pre_compaction":  { "availability": "pending_activation", "confidence": "expected" },
+          "lifecycle_post_compaction": { "availability": "pending_activation", "confidence": "expected" },
+          "lifecycle_session_close":   { "availability": "pending_activation", "confidence": "expected" },
+          "context_at_session_open":   { "availability": "guaranteed", "confidence": "expected" },
+          "stable_session_identifier": { "availability": "guaranteed", "confidence": "expected" },
+          "handlers_require_trust":    "yes"
         },
+        "unverified_behaviors": [
+          "lifecycle events are expected from Codex's documentation but have not been observed on this installation"
+        ],
         "completion_guarantee": "pending_activation"
       }
     ],
@@ -54,9 +57,18 @@ plus a plan that is then applied and re-inspected (FR-151).
 }
 ```
 
+Each capability carries two dimensions (FR-241, FR-242):
+
+- **`availability`** — `guaranteed` | `conditional` | `absent` | `pending_activation`.
+  `conditional` never counts towards FULL and is always reported with what it depends on.
+- **`confidence`** — `verified` (Cairn established it on this installation, by local
+  unauthenticated introspection or by having observed the capability produce a canonical event)
+  or `expected` (the vendor documents it; Cairn has not seen it here).
+
 `missing_behaviors` is mandatory whenever `level` is below `full`, and it names behaviors in
-plain language — never a score (FR-111). Detection performs no mutation and needs no network
-(FR-105).
+plain language — never a score (FR-111). `unverified_behaviors` is mandatory whenever any
+capability is `expected`, so an unknown agent version never reads as more certain than it is
+(FR-188). Detection performs no mutation and needs no network (FR-105).
 
 ## Health report — `cairn doctor --json`
 
@@ -70,7 +82,9 @@ plain language — never a score (FR-111). Detection performs no mutation and ne
       "versions_aligned": true,
       "daemon_reachable": true,
       "local_schema_version": 4,
-      "project_registered": true
+      "project_registered": true,
+      "sessions_awaiting_handoff": 0,
+      "handoff_synthesis_failures": []
     },
     "agents": [
       {
@@ -82,9 +96,10 @@ plain language — never a score (FR-111). Detection performs no mutation and ne
         "completion_guarantee": "demonstrated",
         "missing_behaviors": [],
         "lifecycle_coverage": {
-          "present": ["session_opened", "tool_succeeded", "tool_failed",
-                      "agent_quiesced", "context_compacting", "context_compacted",
-                      "session_closed"],
+          "guaranteed": ["session_opened", "tool_succeeded", "tool_failed",
+                         "agent_quiesced", "context_compacting", "context_compacted",
+                         "session_closed"],
+          "conditional": [],
           "absent": []
         },
         "resources": [
@@ -109,17 +124,30 @@ plain language — never a score (FR-111). Detection performs no mutation and ne
           "automatic session completion — OpenCode signals no session end; Cairn closes idle sessions by inactivity, which is recovery, not completion"
         ],
         "lifecycle_coverage": {
-          "present": ["session_opened", "tool_succeeded", "agent_quiesced",
-                      "context_compacting", "context_compacted"],
-          "absent": ["tool_failed", "session_closed"]
+          "guaranteed": ["session_opened", "tool_succeeded", "agent_quiesced",
+                         "context_compacted"],
+          "conditional": ["tool_failed", "context_compacting"],
+          "absent": ["session_closed"]
         },
+        "conditional_behaviors": [
+          "tool failures are captured only when OpenCode's tool output establishes the failure; an ambiguous output records the call without asserting one"
+        ],
         "resources": [
           {
             "kind": "skill",
             "condition": "shared",
             "owner": "direct",
-            "satisfied_by": "claude-code",
-            "detail": "OpenCode reads ~/.claude/skills; a second copy would collide on skill name"
+            "location": "~/.claude/skills/cairn/",
+            "serves": ["claude-code", "opencode"],
+            "detail": "one installed Skill, two bindings; OpenCode reads ~/.claude/skills, and a second copy would collide on skill name"
+          },
+          {
+            "kind": "instructions",
+            "condition": "shared",
+            "owner": "direct",
+            "location": "./AGENTS.md",
+            "serves": ["codex", "opencode"],
+            "detail": "one managed block, two bindings; disconnecting either agent keeps the block"
           }
         ]
       }
@@ -150,8 +178,11 @@ plain language — never a score (FR-111). Detection performs no mutation and ne
 
 - `condition` is drawn from the closed `HealthCondition` set (see
   [data-model.md](../data-model.md)); it is never free text (FR-167).
-- `lifecycle_coverage.absent` is mandatory and is what makes an honest level auditable
-  (FR-168).
+- `lifecycle_coverage` splits `guaranteed` / `conditional` / `absent`. All three are mandatory
+  and are what make an honest level auditable (FR-168). A conditional entry is always
+  accompanied by a `conditional_behaviors` line explaining the condition.
+- `serves` is mandatory on any resource with more than one binding, so a shared resource's
+  consumers are visible before someone disconnects one of them (FR-243).
 - `detail` names the problem; it never quotes user configuration beyond what identifies it,
   and never contains a credential (FR-171, SC-133).
 - `remedy` is a command the developer can run, or the manual sequence where no command
@@ -162,7 +193,8 @@ plain language — never a score (FR-111). Detection performs no mutation and ne
 
 | Condition | Cairn's action in `repair` | In `repair --force` |
 |---|---|---|
-| `healthy`, `shared` | none | none |
+| `healthy` | none | none |
+| `shared` | none — healthy, and serving more than one agent | none |
 | `missing` | reinstall | reinstall |
 | `outdated` | upgrade in place | upgrade in place |
 | `duplicated` | remove the extra Cairn-owned copy | same |
@@ -294,7 +326,7 @@ could expose, and the shape the determinism test asserts (SC-135).
   are emitted in a fixed order; lists are sorted by a stable key.
 - Secret-free by construction: no field can hold a token, credential, or key.
 - Path-free: no machine-specific absolute path. Locations are named by scope and resolved
-  from the scope matrix at apply time; concrete paths live only in `ResourceState.location`,
+  from the scope matrix at apply time; concrete paths live only in `InstalledResource.location`,
   which is local and never serialized here.
 - Exactly one entry per `(agent, kind)`.
 - Every integration operation reads from this one model; none derives its own view of intent.

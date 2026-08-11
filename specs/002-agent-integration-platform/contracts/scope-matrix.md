@@ -60,8 +60,8 @@ states this at connect time rather than falling back silently (FR-218).
 inside Codex. Editing a trusted hook resets it to `Modified`. Both are reported as
 `installed_not_activated` with the exact step (D24).
 
-**Editing**: TOML is edited with `toml_edit`, preserving comments, ordering, and formatting
-(FR-153, D37). `hooks.json` is plain JSON.
+**Editing**: TOML is edited with `toml_edit` and JSON with the `jsonc-parser` CST — both
+retain source spans, so every byte Cairn does not own survives exactly (FR-152, FR-153, D37).
 
 ## OpenCode
 
@@ -70,7 +70,7 @@ inside Codex. Editing a trusted hook resets it to `Modified`. Both are reported 
 | `mcp` | global, project | **user** | `~/.config/opencode/opencode.json` `mcp.cairn` | no | **yes** — CC Switch writes this file | project files merge after global; `.jsonc` merges after `.json` |
 | `lifecycle` | any config directory | **user** | `~/.config/opencode/plugin/cairn.js` | no | no | all discovered plugins load |
 | `instructions` | project, global | **project_shared** | `./AGENTS.md` — **the same block Codex reads** | **yes** | no | first project match wins |
-| `skill` | config dirs, `~/.claude/skills`, `~/.agents/skills`, configured paths | **user**, or `shared` | `~/.config/opencode/skills/cairn/`, unless satisfied by Claude Code's copy | no | **yes** | duplicate skill *names* conflict |
+| `skill` | config dirs, `~/.claude/skills`, `~/.agents/skills`, configured paths | **user**, usually a binding to Claude Code's copy | `~/.claude/skills/cairn/` when Claude Code is connected, else `~/.config/opencode/skills/cairn/` | no | **yes** | duplicate skill *names* conflict |
 
 `--shared` moves `mcp` → `./opencode.json` and `lifecycle` → `.opencode/plugin/cairn.js`.
 
@@ -79,20 +79,26 @@ inside Codex. Editing a trusted hook resets it to `Modified`. Both are reported 
 mutation of `opencode.json` at all (D32). This is why the JSONC-editing problem does not
 touch the lifecycle path.
 
-**`opencode.jsonc` is never written** (D37). Cairn writes `opencode.json`, which OpenCode
-merges alongside it. If a `.jsonc` already declares `mcp.cairn`, it merges *after* the
-`.json` and would shadow Cairn's entry — reported as `conflicting_owner`, not edited (D38).
+**`opencode.jsonc` is parsed but not written** (D37). The same `jsonc-parser` CST that edits
+JSON reads JSONC, so a Cairn entry inside a `.jsonc` is *detected*. Cairn still writes
+`opencode.json`, which OpenCode merges alongside it. If a `.jsonc` already declares
+`mcp.cairn`, it merges *after* the `.json` and would shadow Cairn's entry — reported as
+`conflicting_owner`, not edited (D38).
 
-**Shared instruction block**: `AGENTS.md` is read by both Codex and OpenCode. Cairn installs
-**one** managed block there and records it for both agents, reporting the sharing rather than
-writing it twice (FR-144).
+**Shared resources are reference counted** (D28, FR-243). One physical resource, one binding
+per agent that depends on it. Disconnecting an agent drops its binding; the resource is deleted
+only when the last binding goes.
 
-**Shared Skill**: OpenCode scans `~/.claude/skills/**/SKILL.md`. When Claude Code's Cairn
-Skill is installed and current, OpenCode's `skill` resource is recorded `shared`, with
-`satisfied_by = claude-code`, and no second copy is written — two copies with one skill name
-would make OpenCode log a conflict and pick non-deterministically (D28). If Claude Code is
-later disconnected, doctor reports OpenCode's Skill `missing` and repair installs its own
-copy.
+- **`AGENTS.md`** is read by both Codex and OpenCode. Cairn installs **one** managed block and
+  binds both agents to it. Disconnecting Codex drops one binding and **leaves the block**, so
+  OpenCode stays healthy — the failure the old `satisfied_by` design would have caused.
+- **The Skill**: OpenCode scans `~/.claude/skills/**/SKILL.md`. When Claude Code's Cairn Skill
+  is installed, OpenCode binds to *that* resource rather than writing a second copy — two
+  copies with one skill name make OpenCode log a conflict and pick non-deterministically.
+  Disconnecting Claude Code drops its binding; OpenCode's binding keeps the file alive, and
+  doctor reports the resource as Cairn-owned and serving `opencode`.
+- Doctor reports every multi-binding resource with its full `serves` list, so a developer can
+  see who depends on it before disconnecting anything.
 
 ## Generic MCP
 

@@ -42,11 +42,19 @@ core's no-I/O rule breaks); giving each adapter its own crate (three crates that
 change-plan engine and differ only in a parser — abstraction for its own sake, and the
 constitution's Principle II says no).
 
-**Consequence for the hook path**: `cairn` gains `toml_edit` and `include_dir` in its
-dependency tree. Hooks never call into `cairn-integrate`, but binary size affects process
-start. SC-122 measures it; if capture latency regresses against the Feature 001 baseline,
-the fallback is to move the hook entry point into its own thin binary. Recorded as a risk,
-not pre-emptively solved.
+**Consequence for the hook path**: the hook **does** call into `cairn-integrate` — that is
+where `AgentAdapter::normalize` lives, and normalizing the vendor payload is the hook's whole
+job. What it does not touch is everything else in the crate: no configuration editor, no
+change planner, no atomic writer, no embedded asset. `normalize` is a pure function over a
+parsed payload with no I/O and no allocation beyond the observation it builds, so the hot path
+cost is unchanged in kind from Feature 001.
+
+The measurable cost is binary size: `cairn` gains `jsonc-parser`, `toml_edit`, and
+`include_dir` in its dependency tree, and a larger binary takes marginally longer to start —
+which the hook pays once per tool call. SC-122 measures capture latency per adapter against
+Feature 001's baseline. If it regresses, the fallback is to move the hook entry point into its
+own thin binary that links only the normalize path. Recorded as a risk, not pre-emptively
+solved.
 
 ---
 
@@ -59,9 +67,23 @@ canonical lifecycle event). Everything else — the scope matrix, the resource k
 health conditions, the change-plan classification, the atomic write, the marker handling —
 is shared code the adapters call, not code they reimplement.
 
-Capability profiles are **static data per adapter**, refined at runtime only by what
-detection actually observes (installed version, whether handlers are activated). They are
-not discovered by probing.
+Capability profiles are **static data per adapter** along two dimensions, refined at runtime
+by what Cairn can actually establish. They are not discovered by probing a vendor's internals.
+
+- **Availability**: `guaranteed` | `conditional` | `absent` | `pending_activation` (FR-241).
+  `conditional` exists because OpenCode establishes a tool failure only when its tool output
+  happens to say so — neither "present" nor "absent" is true, and forcing the choice would
+  either fabricate failures or discard provable ones. A conditional capability never counts
+  towards FULL.
+- **Confidence**: `verified` | `expected` (FR-242). `verified` means Cairn established it on
+  *this* installation, by either local unauthenticated introspection the agent itself offers
+  or by having observed that capability produce a canonical event at least once. Everything
+  else is `expected`. Confidence is recorded per capability in the local integration record
+  and reported by doctor.
+
+**Why two dimensions** (D19a below expands the confidence half): one axis answers "does the
+vendor provide this at all", the other answers "have we seen it here". Collapsing them is what
+made the earlier model unable to degrade when a vendor changes.
 
 **Why**: there are exactly four adapters and one manager, and three of the four share the
 same shape of work. Behavior that differs — where a file lives, how a payload is parsed,
@@ -73,8 +95,49 @@ succeed.
 
 **Rejected**: a registry/plugin framework with dynamic adapter discovery (Principle II —
 building an extension mechanism for vendors that do not exist yet); giving each adapter its
-own file-writing code (five chances to get atomicity wrong); probing for capabilities (a
-probe that fails for an unrelated reason silently downgrades an integration).
+own file-writing code (five chances to get atomicity wrong); speculative probing of vendor
+internals (a probe that fails for an unrelated reason silently downgrades an integration);
+a single present/absent flag (it cannot express OpenCode's conditional failure signal without
+lying in one direction or the other).
+
+---
+
+## D19a — Capability confidence, and how drift lowers it
+
+**Decision**: Confidence is established from three sources, in this order:
+
+1. **Local introspection the agent documents**, run without credentials or network — reading
+   back the configuration Cairn wrote and confirming the agent's own listing accepts it, where
+   the agent offers such a listing.
+2. **Observation**: the first time a capability produces a canonical event on this
+   installation, its confidence becomes `verified` and the timestamp is recorded.
+3. Otherwise **`expected`** — the adapter declares it because the vendor documents it, and
+   Cairn has not yet seen it here.
+
+Drift lowers confidence rather than being ignored: a capability still `expected` on an
+installation where its sibling capabilities have been observed is reported with a drift note,
+and doctor names every `expected` capability on an unverified agent version.
+
+The **completion guarantee** is the one place confidence gates the outcome: an agent is FULL
+only once its session-close capability is `verified` on this installation. Until then doctor
+says so — "awaiting first observed session close" — and the level is MCP_PLUS.
+
+**Why**: FR-188 asks for capability-driven degradation rather than version-string matching,
+and FR-242 forbids claiming more certainty than Cairn can establish. A purely static profile
+cannot do either: if a vendor removes an event, a static table keeps reporting it present
+forever. Observation is the cheapest honest signal available, it costs nothing to collect
+because the events already flow through the daemon, and it makes the strongest claim Cairn
+makes — FULL — contingent on having actually seen the thing work here.
+
+**Why not gate every capability on observation**: it would mean a freshly connected agent is
+reported as having nothing, which is both useless and false — the vendor does document these
+surfaces. Reporting them `expected` is the accurate statement, and only the FULL claim needs
+more than that.
+
+**Rejected**: version ranges as the source of capability truth (FR-188 rules it out, and a
+minor release would silently break an integration); probing by synthesizing fake vendor events
+(indistinguishable from real ones downstream, and a fabrication in its own right); refusing to
+integrate unverified versions (FR-186 forbids it).
 
 ---
 
@@ -151,9 +214,20 @@ it is cheap and frequent, and it never needed the stronger claim in the first pl
 2. **Synthesize** (asynchronous, immediately after): quiesce in-flight captures, build the
    handoff, write it, clear `handoff_pending`.
 
-Daemon-start reconciliation gains one rule: any session with `handoff_pending` set gets its
-handoff synthesized from what was recorded. `cairn session end` from the command line keeps
-the old behavior and waits for the handoff, because nothing is holding a deadline over it.
+Progress is guaranteed **while the daemon is alive**, not only across a restart:
+
+- The synthesis task retries on failure with a bounded backoff (immediate, 1 s, 5 s).
+- The daemon's existing maintenance tick — the one that already reaps idle sessions — also
+  sweeps for any session whose `handoff_pending` is older than a few seconds and synthesizes
+  it. No new scheduler, no new thread: one more thing on a loop that already runs.
+- After a bounded number of sweep attempts the handoff is marked `synthesis_failed` with a
+  redacted reason, surfaced by `cairn status` and in `cairn doctor`'s core section, and retried
+  at a slow cadence. A terminal session never sits silently owing a handoff.
+- Daemon-start reconciliation stays as the backstop for the case the sweep cannot cover: the
+  process died between the seal and the synthesis.
+
+`cairn session end` from the command line keeps the old behavior and waits for the handoff,
+because nothing is holding a deadline over it.
 
 **Why**: Codex's session-end handler has a **1-second default and 3-second maximum** budget
 (D31). Today's path does `quiesce_captures` (up to 500 ms) plus a `git status` plus several
@@ -164,10 +238,20 @@ recoverable if the process dies between phases. FR-032's promise that a session 
 without a handoff becomes *durably, eventually*, with `handoff_pending` as the proof
 obligation rather than an assumption.
 
-**Rejected**: keeping the synchronous path and hoping it fits (SC-128 would be a coin flip
-on a busy machine); making the handoff optional at session end (it is the product); a
-background timer that sweeps pending handoffs on an interval (the daemon already has a
-deterministic boundary at start, and one more scheduled job earns nothing).
+**What "durably, eventually" means precisely** (FR-240): the terminal state and the fact that
+a handoff is owed are committed before the acknowledgment; the handoff itself must appear
+within a bounded interval — the target is under 5 seconds at p99 on a running daemon — and a
+restart must never be required for it to appear. SC-128 measures the acknowledgment against
+the vendor's budget; **SC-136** separately measures that the handoff actually lands, and that
+a permanently failing synthesis becomes a reported condition rather than silence. Splitting
+the two is deliberate: a benchmark that only proved the fast half would have made the fast
+half the requirement.
+
+**Rejected**: keeping the synchronous path and hoping it fits (SC-128 would be a coin flip on a
+busy machine); making the handoff optional at session end (it is the product); relying on
+daemon-start reconciliation as the only retry (a developer's daemon can run for weeks, so
+"eventually" would have meant "possibly never"); a dedicated retry scheduler (the maintenance
+tick already exists and running a second one earns nothing).
 
 ---
 
@@ -339,25 +423,75 @@ collaborator of every repository a single developer connects).
 
 ---
 
-## D28 — One Skill copy per machine, with sharing detected
+## D28 — Installed resources are shared by reference counting, not by special cases
 
-**Decision**: The Cairn Skill is installed at each agent's own canonical per-user Skill
-directory, **except** where one agent already reads another's directory. OpenCode scans
-`~/.claude/skills/**/SKILL.md` (D32), so when Claude Code's Skill is installed and current,
-OpenCode's Skill resource is recorded as `satisfied_by: claude-code` and no second copy is
-written. If Claude Code is later disconnected, doctor reports OpenCode's Skill `missing` and
-repair installs OpenCode's own copy.
+**Decision**: An installed resource and an agent's dependency on it are two different records.
 
-**Why**: OpenCode's skill loader keys on the skill's `name` and logs a conflict when two
-locations declare the same one. Two physical copies would therefore produce a warning and a
-non-deterministic winner — worse than either one copy or none. Detecting the sharing keeps a
-single effective Skill, and making the post-disconnect gap a *reported, repairable*
-condition is better than a symlink whose behavior across the three agents is unverified.
+- A **resource** is physical: one file, one managed block, one configuration entry, identified
+  by `(kind, location)`. It has one owner and one scope.
+- A **binding** is an agent's dependency on a resource: `(agent, kind) → resource`.
 
-**Rejected**: symlinking one canonical copy into each agent's directory (Claude Code
-documents symlink support; Codex and OpenCode do not, and Windows makes it worse — an
-unverified mechanism at the centre of the design); installing per-project copies (the Skill
-teaches generic Cairn workflows, FR-217); a copy per agent regardless (name conflict).
+Connect creates the resource if it is not already there, then binds the agent to it. Disconnect
+removes that agent's binding and removes the resource **only when no binding remains**. Doctor
+reports, for every resource, which agents it serves.
+
+This replaces the earlier `satisfied_by` field, which special-cased Skills and could not
+express the case that actually breaks:
+
+- `AGENTS.md` carries one Cairn managed block read by **both** Codex and OpenCode (D32).
+  Under the old model, disconnecting Codex deleted the block and OpenCode silently lost its
+  instructions. Under this one, disconnecting Codex drops one binding, the block stays, and
+  OpenCode is still healthy.
+- OpenCode scans `~/.claude/skills/**/SKILL.md`, so Claude Code's installed Skill can satisfy
+  OpenCode's Skill binding — the same mechanism, not a second one. A second physical copy is
+  never written, which matters because OpenCode keys skills by `name` and logs a conflict when
+  two locations declare the same one.
+- Disconnecting Claude Code drops its Skill binding; OpenCode's binding keeps the resource
+  alive at `~/.claude/skills/cairn/`, and doctor reports the resource as owned by Cairn and
+  serving `opencode`. Nothing silently breaks, and nothing is orphaned.
+
+**Why a binding table rather than a flag**: reference counting is the smallest model that
+answers the question each operation actually asks. Connect asks "does this resource exist
+already"; disconnect asks "is anyone else still using it"; doctor asks "who does this serve".
+A `satisfied_by` string answered only the third, and only for Skills. The same table also
+resolves the manager case (D28a) without a second mechanism.
+
+**Invariants**: unique on `(agent, kind)` for bindings and on `(kind, location)` for
+resources; connect and disconnect stay idempotent because both are "ensure this binding
+exists/does not"; a resource with zero bindings is deleted in the same transaction that
+removes the last one.
+
+**Rejected**: symlinking one canonical copy into each agent's directory (Claude Code documents
+symlink support; Codex and OpenCode do not, and Windows makes it worse — an unverified
+mechanism at the centre of the design); installing per-project copies (the Skill teaches
+generic Cairn workflows, FR-217); a copy per agent regardless (name conflict); keeping
+`satisfied_by` and adding a second flag for instructions (two mechanisms for one idea).
+
+---
+
+## D28a — Manager-owned resources outlive a native disconnect
+
+**Decision**: A manager-owned resource is an ordinary resource with `owner = manager`, and the
+agent's dependency on it is an ordinary binding. `cairn disconnect <agent>` removes the
+bindings and resources Cairn owns **directly**; it leaves the manager-owned resource, its
+binding, and the pending `manager_action_required` in place. The `AgentIntegration` row
+survives while any binding remains, and is removed only when the last one goes.
+
+**Why**: the earlier design removed the local integration record at disconnect while
+simultaneously returning `manager_action_required` and promising to verify the withdrawal
+later — with nothing left to verify against. Ownership state for a manager-owned resource has
+to outlive the native disconnect, because the withdrawal it tracks has not happened yet
+(FR-244).
+
+**What the developer sees**: disconnect reports what it removed, what remains under manager
+ownership, and the supported withdrawal path. `cairn doctor <agent>` afterwards still reports
+that agent — as having no direct integration and one manager-owned resource awaiting
+withdrawal. Once verification observes the resource gone, the last binding, the resource, and
+the `AgentIntegration` row are removed together.
+
+**Rejected**: removing the record and re-detecting the manager resource from scratch on the
+next doctor run (loses which agent it was for, and which action was pending); a separate
+"pending manager actions" table (the binding already is that state, with an owner field).
 
 ---
 
@@ -379,9 +513,34 @@ copy to drift.
 that the Skill must be fetchable from a public Git path. Putting the canonical files at a
 repository path that is both embedded and fetchable satisfies all three without duplication.
 
+**Which Git ref the deep link uses** — resolved here rather than left to release day, because
+the wrong answer installs a Skill that does not match the binary:
+
+1. The build records two things: the embedded Skill's `skill_revision` digest, and the commit
+   the assets were built from (`git rev-parse HEAD` at build time, or the release tag when the
+   build is a tagged release).
+2. A **release build** whose version matches a published tag emits that tag as `branch=` — the
+   ref that corresponds exactly to the binary.
+3. Any **other build** emits the recorded **commit SHA**, which is a valid, immutable,
+   fetchable ref as soon as the commit is pushed. A SHA is always pinned, so the fetched Skill
+   is by construction the one the binary embeds.
+4. If neither is publicly resolvable — a dirty working tree, or a commit not pushed — Cairn
+   **refuses to emit a Skill deep link** and returns `manager_action_required` with the reason
+   and the manual path. It never emits a ref it knows does not exist, and never falls back to
+   a floating branch.
+5. After distribution, doctor reads the installed `SKILL.md`'s `metadata.cairn_skill_revision`
+   and compares it with the embedded digest. A mismatch is `outdated`, with the remedy naming
+   the correct ref.
+
+**Why not `main`**: a floating branch means the Skill CC Switch installs can silently be a
+different revision from the one the running binary expects, and doctor would then oscillate
+between healthy and outdated as the branch moves. Pinning is what makes step 5 meaningful.
+
 **Rejected**: a separate `Vellixia/cairn-skills` repository (a second release process and a
-second thing to keep in step); generating the Skill at install time from Rust string
-literals (nothing for CC Switch to clone, and the Skill becomes unreviewable in diffs).
+second thing to keep in step); generating the Skill at install time from Rust string literals
+(nothing for CC Switch to clone, and the Skill becomes unreviewable in diffs); publishing a
+release purely to give the deep link a tag (the commit SHA already works, and a release is a
+product decision, not a planning workaround).
 
 ---
 
@@ -588,9 +747,9 @@ gap).
 
 | Format | Where | Mechanism |
 |---|---|---|
-| JSON | `.claude/settings*.json`, `.mcp.json`, `~/.claude.json`, `opencode.json` | `serde_json` with `preserve_order`, read → mutate the owned node → write pretty, atomic replace |
+| JSON | `.claude/settings*.json`, `.mcp.json`, `~/.claude.json`, `opencode.json` | **`jsonc-parser` with the `cst` feature** — a concrete syntax tree that retains every source span and all trivia; only the owned node is inserted, replaced, or removed, and the document is rendered back with untouched spans byte-identical |
 | TOML | `~/.codex/config.toml`, `.codex/config.toml` | **`toml_edit`** — document-preserving, keeps comments, ordering, and formatting |
-| JSON with comments | `opencode.jsonc` | **not written.** Cairn writes `opencode.json`, which OpenCode merges alongside it. If a `.jsonc` already declares a Cairn resource, that is reported as a conflicting owner rather than edited (D38) |
+| JSON with comments | `opencode.jsonc` | parsed by the same CST, so a Cairn entry inside it is *detected*. Not written by default: Cairn writes `opencode.json`, which OpenCode merges alongside it (D38) |
 | Markdown | `CLAUDE.md`, `AGENTS.md` | marker-delimited block splice (D25); everything outside the markers is copied byte-for-byte |
 | Generated files | `~/.config/opencode/plugin/cairn.js`, `SKILL.md` trees | written whole; Cairn owns the entire file |
 
@@ -598,16 +757,41 @@ Every write is atomic: write to a temporary file in the same directory, `fsync`,
 the target (FR-154). The original is untouched until the rename succeeds, which is what makes
 the whole-file backup unnecessary (FR-156, D39).
 
-**Why**: `toml_edit` is the crate Cargo itself uses for exactly this problem and is the only
-mature option for preserving a TOML document's comments and layout. JSON has no comments to
-preserve and `serde_json`'s `preserve_order` feature keeps key order stable, which is what
-FR-152 actually needs there. JSONC is the one format where a faithful round-trip is not
-available from a maintained crate, and OpenCode's own merge semantics give us a way to avoid
-needing one.
+**Why the JSON choice changed**: `serde_json` with `preserve_order` preserves *key order* and
+nothing else. Re-serializing discards the original indentation, spacing, string escaping, line
+layout, and any trailing-comma or comment extension — so a file Cairn touched would differ
+from the original in bytes it does not own. FR-152 promises preservation "where the format
+carries it", and SC-103/SC-104 assert byte identity for non-Cairn content. A parse-and-
+reserialize design cannot satisfy either, so it was wrong.
 
-**Rejected**: `toml` (rewrites the document and drops comments — FR-152 violation);
-hand-written string splicing into structured formats (FR-153 forbids it); adopting a
-low-maturity JSONC editor at the centre of a safety-critical path.
+`jsonc-parser`'s CST is the mechanism that can: it is a concrete syntax tree that keeps every
+token and every piece of trivia with its source range, and exposes `object_value_or_set`,
+`append`, `insert`, `remove`, and `set_value` for mutation. Rendering the tree back reproduces
+untouched regions exactly, because those regions are the original tokens rather than a
+re-serialization. It is maintained by the dprint project, which uses it to edit developer
+configuration files for exactly this reason.
+
+**How insertion picks its formatting**: inserting a new member into an existing object needs
+text that looks like its neighbours. The editor infers the indent unit, the line ending, and
+whether the object is single- or multi-line from that object's existing members, and falls
+back to two-space, `\n`, multi-line only when the object has no members to learn from. The
+inference is a pure function with its own unit tests, and the fixture corpus deliberately
+includes tab-indented, four-space, minified, and CRLF files so the inference is proved rather
+than assumed.
+
+**Why `toml_edit` for TOML**: the same argument. It is the crate Cargo itself uses to edit
+manifests while preserving comments and layout.
+
+**Rejected**: `serde_json` round-trip (the reason for this decision's revision); `toml`
+(rewrites the document and drops comments); hand-written string splicing into structured
+formats (FR-153 forbids it, and the CST removes any temptation); a bespoke span-patch layer
+over `serde_json` (we would be writing the CST that already exists, with fewer eyes on it).
+
+**Consequence for fixtures**: SC-104's corpus is no longer "20 realistic files" but "20
+realistic files spanning the formatting dimensions that a re-serializer would destroy" —
+indent width and character, line endings, minified single-line objects, unusual key order,
+unicode escapes, and duplicate-adjacent whitespace. Byte identity of non-Cairn spans is the
+assertion (D40 tier T2).
 
 ---
 
@@ -662,7 +846,10 @@ against FR-222).
    equivalence, capability computation, level derivation, change-plan classification.
 2. **Configuration fixtures** — the ≥20-file corpus in
    `crates/cairn-integrate/tests/fixtures/`, each with a declared ownership expectation.
-   Connect → disconnect must return every non-Cairn byte unchanged (SC-104).
+   Connect → disconnect must return every non-Cairn byte unchanged (SC-104). The corpus spans
+   the formatting dimensions a re-serializer would destroy — tab and four-space indentation,
+   CRLF, minified single-line objects, unusual key order, unicode escapes, comment-bearing
+   TOML and JSONC — so the CST's preservation is proved rather than assumed (D37).
 3. **Lifecycle fixtures** — recorded vendor payloads in
    `tests/integrations/{claude-code,codex,opencode,cc-switch,generic-mcp}/`, asserting the
    canonical event produced and, for every capability the profile does not claim, that

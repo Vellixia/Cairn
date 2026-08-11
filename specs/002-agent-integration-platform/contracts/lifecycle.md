@@ -56,8 +56,22 @@ Two phases inside the daemon (D22):
 2. **Synthesize**, immediately after: quiesce in-flight captures, build the handoff, write it,
    clear `handoff_pending`.
 
-Daemon-start reconciliation synthesizes a handoff for any session still carrying
-`handoff_pending`, so a crash between the phases loses nothing that was acknowledged.
+**Progress is guaranteed while the daemon runs** (FR-240), not only across a restart:
+
+- The synthesis task retries on failure with a bounded backoff.
+- The daemon's existing maintenance tick — the one that already reaps idle sessions — sweeps
+  any session whose `handoff_pending` is older than a few seconds and synthesizes it. No new
+  scheduler.
+- After a bounded number of attempts the session is reported as `handoff synthesis failed`
+  with a redacted reason in `cairn status` and doctor's core section, and retried slowly. A
+  terminal session never sits silently owing a handoff.
+- Daemon-start reconciliation remains the backstop for the process dying between the phases —
+  not the only retry path.
+
+The handoff must be durably present within a bounded interval (target: under 5 seconds at p99
+on a running daemon). **SC-128** measures the acknowledgment against the vendor's budget;
+**SC-136** separately measures that the handoff actually lands without a restart, and that a
+permanently failing synthesis becomes a reported condition.
 
 `cairn session end` from the command line keeps the Feature 001 behavior and waits for the
 handoff — nothing holds a deadline over it. The request carries `wait_for_handoff`, true for
@@ -126,7 +140,7 @@ lifecycle on plugin hooks.
 |---|---|---|
 | `session.created`, or first activity for an unseen `sessionID` | `session_opened` | Context is delivered at the earliest supported point — the first `chat.message` of the session — and the report says so |
 | `tool.execute.after` | `tool_succeeded` | Output carries no outcome flag |
-| `tool.execute.after` with an unambiguous failure marker | `tool_failed` | Only where the output establishes it; otherwise nothing is asserted |
+| `tool.execute.after` whose output unambiguously establishes failure | `tool_failed` | **Conditional capability.** Emitted only where the output establishes it; an ambiguous output emits nothing rather than a fabricated failure (FR-117, FR-241) |
 | `session.idle` | `agent_quiesced` | **Never** `session_closed` |
 | `experimental.session.compacting` | `context_compacting` | Experimental hook; if absent, the capability is reported absent |
 | `session.compacted` | `context_compacted` | |
@@ -139,6 +153,11 @@ Not mapped: `session.deleted` (deleting a record is not completing work), `sessi
 Consequence: OpenCode sessions leave `active` only through Cairn's deterministic boundaries —
 an explicit end, daemon-start reconciliation, or the inactivity timeout — which are recovery,
 not completion. OpenCode is therefore below FULL (FR-210, SC-131).
+
+**Conditional, not absent**: OpenCode's `lifecycle_tool_failure` is reported `conditional`
+rather than `absent`, because provable failures do exist and discarding them would be as
+dishonest as inventing them. SC-110 tests both halves: a payload that establishes failure
+produces `tool_failed`; an ambiguous payload produces nothing.
 
 ### Generic MCP
 

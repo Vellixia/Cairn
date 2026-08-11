@@ -142,7 +142,7 @@ Default for any version Cairn has not pinned as broken is `compatible_unverified
 | `installed_not_activated` | Installed, but the agent will not run it until the user trusts or enables it |
 | `migrating` | A recorded ownership migration is in progress (FR-228) |
 | `manager_action_required` | Completing the operation needs a manager step Cairn cannot perform (FR-233) |
-| `shared` | Satisfied by another agent's copy of the same resource (D28) |
+| `shared` | Healthy, and the resource this agent is bound to also serves other agents. Reported with the full consumer list (FR-243) |
 | `unknown` | Detection could not determine the state |
 
 ### CanonicalLifecycleEvent
@@ -176,49 +176,75 @@ pipeline (FR-198).
 
 ## CapabilityProfile (`derived`)
 
-Static per adapter, refined by detection. Every field is a tri-state:
-`present` | `absent` | `present_pending_activation`.
+Static per adapter along two dimensions, refined by what Cairn can establish (D19, D19a).
+
+**Availability** — `guaranteed` | `conditional` | `absent` | `pending_activation` (FR-241).
+`conditional` means the agent provides it only when a particular payload makes it
+determinable; it never counts towards FULL and is always reported with what it depends on.
+
+**Confidence** — `verified` | `expected` (FR-242). `verified` means Cairn established it on
+this installation, by local unauthenticated introspection or by having observed the capability
+produce a canonical event. Everything else is `expected`. Confidence never raises a level; it
+gates only the completion guarantee, and doctor names every `expected` capability.
 
 | Capability | Claude Code | Codex | OpenCode | Generic MCP |
 |---|---|---|---|---|
-| `mcp_user_scope` | present | present | present | present |
-| `mcp_project_scope` | present | present | present | absent |
-| `instructions_project` | present | present | present | absent |
-| `skill_user` | present | present | present | absent |
-| `skill_project` | present | present | present | absent |
-| `lifecycle_session_open` | present | present | present | absent |
-| `lifecycle_tool_success` | present | present | present | absent |
-| `lifecycle_tool_failure` | present | present | **absent** | absent |
-| `lifecycle_quiesce` | present | present | present | absent |
-| `lifecycle_pre_compaction` | present | present | present | absent |
-| `lifecycle_post_compaction` | present | present | present | absent |
-| `lifecycle_session_close` | present | present | **absent** | absent |
-| `context_at_session_open` | present | present | present | absent |
-| `stable_session_identifier` | present | present | present | absent |
+| `mcp_user_scope` | guaranteed | guaranteed | guaranteed | guaranteed |
+| `mcp_project_scope` | guaranteed | guaranteed | guaranteed | absent |
+| `instructions_project` | guaranteed | guaranteed | guaranteed | absent |
+| `skill_user` | guaranteed | guaranteed | guaranteed | absent |
+| `skill_project` | guaranteed | guaranteed | guaranteed | absent |
+| `lifecycle_session_open` | guaranteed | guaranteed | guaranteed | absent |
+| `lifecycle_tool_success` | guaranteed | guaranteed | guaranteed | absent |
+| `lifecycle_tool_failure` | guaranteed | guaranteed | **conditional** | absent |
+| `lifecycle_quiesce` | guaranteed | guaranteed | guaranteed | absent |
+| `lifecycle_pre_compaction` | guaranteed | guaranteed | conditional | absent |
+| `lifecycle_post_compaction` | guaranteed | guaranteed | guaranteed | absent |
+| `lifecycle_session_close` | guaranteed | guaranteed | **absent** | absent |
+| `context_at_session_open` | guaranteed | guaranteed | guaranteed | absent |
+| `stable_session_identifier` | guaranteed | guaranteed | guaranteed | absent |
 | `handlers_require_trust` | no | **yes** | no | n/a |
 
-`present_pending_activation` applies to Codex's lifecycle capabilities until the user trusts
-the hooks.
+`pending_activation` applies to Codex's lifecycle capabilities until the user trusts the hooks.
+
+Two entries are `conditional` rather than `guaranteed`, and both are load-bearing:
+
+- **OpenCode `lifecycle_tool_failure`** — `tool.execute.after` carries no outcome flag, and a
+  tool that throws may not reach the hook at all. The adapter emits `tool_failed` where the
+  output unambiguously establishes a failure and emits nothing where it does not (FR-117). It
+  is neither present nor absent, and SC-110 tests exactly that: one payload that establishes
+  failure produces the event, one ambiguous payload produces nothing.
+- **OpenCode `lifecycle_pre_compaction`** — delivered by `experimental.session.compacting`. If
+  the installed OpenCode does not expose it, the adapter reports it absent rather than assuming
+  it.
 
 ### Level derivation
 
 ```
-full      ⟸ mcp ∧ instructions ∧ (skill ∨ agent has no skills)
-            ∧ stable_session_identifier ∧ context_at_session_open
-            ∧ lifecycle_tool_success ∧ lifecycle_quiesce
+guaranteed(c) ≡ availability(c) = guaranteed        # conditional does NOT satisfy this
+
+full      ⟸ guaranteed(mcp) ∧ guaranteed(instructions)
+            ∧ (guaranteed(skill) ∨ agent has no skills)
+            ∧ guaranteed(stable_session_identifier)
+            ∧ guaranteed(context_at_session_open)
+            ∧ guaranteed(lifecycle_tool_success) ∧ guaranteed(lifecycle_quiesce)
             ∧ completion_guarantee = demonstrated
-mcp_plus  ⟸ mcp ∧ (instructions ∨ skill ∨ any lifecycle capability)
+mcp_plus  ⟸ mcp ∧ (instructions ∨ skill ∨ any lifecycle capability of any availability)
 mcp_only  ⟸ mcp only
 unsupported ⟸ detected but no safe integration
 ```
 
 `completion_guarantee` is a separate tri-state — `demonstrated` | `not_demonstrated` |
-`pending_activation` — and is `demonstrated` only when the adapter has a mechanism that
-positively establishes that a session terminated (FR-207). **Cairn's inactivity timeout and
-daemon-start reconciliation never set it** (FR-229). Under D31/D32 this yields: Claude Code
-`full`; Codex `full` once its hooks are trusted and SC-128 passes, `mcp_plus` before that;
-OpenCode `mcp_plus`; generic MCP `mcp_only`. No level is hardcoded by agent name — these are
-the outputs of the rule above given the profiles above.
+`pending_activation` — and is `demonstrated` only when **both** hold: the adapter has a
+mechanism that positively establishes that a session terminated (FR-207), and that capability's
+confidence is `verified` on this installation (FR-242). **Cairn's inactivity timeout and
+daemon-start reconciliation never set it** (FR-229).
+
+Under D31/D32 this yields: Claude Code `full` once one session close has been observed,
+`mcp_plus` before that with "awaiting first observed session close" stated; Codex the same,
+additionally gated on hook trust and SC-128; OpenCode `mcp_plus` permanently under current
+vendor behavior; generic MCP `mcp_only`. No level is hardcoded by agent name — these are the
+outputs of the rule above given the profiles above.
 
 ---
 
@@ -230,7 +256,8 @@ enqueue path is never called for them** (FR-183).
 
 ### AgentIntegration
 
-One row per connected agent on this machine.
+One row per connected agent on this machine. Survives while the agent holds any binding,
+including a binding to a manager-owned resource awaiting withdrawal (FR-244).
 
 | Column | Type | Notes |
 |---|---|---|
@@ -243,8 +270,10 @@ One row per connected agent on this machine.
 | `connected_at` | text | |
 | `last_verified_at` | text or null | Set by every doctor run |
 
-**Privacy class**: `local`. **Invariant**: a row exists only while at least one resource for
-that agent is Cairn-owned; disconnect removes the row last, after its resources (FR-178).
+**Privacy class**: `local`. **Invariant**: a row exists while the agent holds at least one
+binding. Disconnect removes the row only after its last binding is gone — so an agent whose
+only remaining resource is manager-owned keeps its record until the withdrawal is verified
+(FR-244).
 
 ### ManagerIntegration
 
@@ -260,39 +289,71 @@ that agent is Cairn-owned; disconnect removes the row last, after its resources 
 **Privacy class**: `local`. Holds no path into the manager's own storage and no manager
 credential.
 
-### ResourceState
+### InstalledResource
 
-The authority on what Cairn installed, where, and as what. This is the record that makes
-ownership exact rather than fuzzy (D25).
+One **physical** thing Cairn installed: a file, a managed block, or a configuration entry.
+Identified by where it is, not by who uses it. This is the record that makes ownership exact
+rather than fuzzy (D25).
 
 | Column | Type | Notes |
 |---|---|---|
 | `id` | uuid, PK | |
-| `agent` | text | FK to `AgentIntegration` |
 | `kind` | text | `ResourceKind` |
 | `owner` | text | `ResourceOwner` |
 | `scope` | text | `InstallationScope` |
-| `location` | text | Absolute path, or the manager's application identifier when `owner = manager`. **Machine-local; never serialized into desired state** |
+| `location` | text | Absolute path, or `<manager>:<app>` when `owner = manager`. **Machine-local; never serialized into desired state** |
 | `content_hash` | text or null | Canonical hash of exactly what Cairn wrote |
 | `artifact_schema` | integer or null | `contract_schema` / `skill_schema` where applicable |
 | `artifact_revision` | text or null | 12-hex content digest where applicable |
 | `activation` | text | `ActivationState` |
-| `satisfied_by` | text or null | Another agent whose copy serves this one (D28) |
 | `installed_at` | text | |
 | `last_verified_at` | text or null | |
 
 **Invariants**
 
-- Unique on `(agent, kind)` — one row per logical resource per agent (FR-146 steady state).
+- Unique on `(kind, location)` — one row per physical resource (FR-146 steady state).
 - `owner = manager` implies `content_hash` is null: Cairn did not write it and does not own
   its bytes; verification compares presence and effective configuration instead.
-- `satisfied_by` non-null implies `location` is null and `owner` is the *other* agent's
-  owner. Only `kind = skill` may use it.
 - A row with `owner = external` is never created by Cairn; external resources are reported
   from inspection and never recorded as owned.
+- A row with zero bindings is deleted in the same transaction that removes its last binding.
 
 **Privacy class**: `local`. `location` is a machine path and is one of the reasons this table
 must never sync (FR-183).
+
+### ResourceBinding
+
+One agent's **dependency** on an installed resource. The reference count that makes shared
+resources safe (D28, FR-243).
+
+| Column | Type | Notes |
+|---|---|---|
+| `agent` | text | FK to `AgentIntegration` |
+| `kind` | text | `ResourceKind` |
+| `resource_id` | uuid | FK to `InstalledResource` |
+| `bound_at` | text | |
+
+**Invariants**
+
+- Unique on `(agent, kind)` — an agent depends on exactly one resource per kind.
+- Several bindings may point at one resource. Two do so in practice: the `AGENTS.md` managed
+  block serves Codex and OpenCode, and Claude Code's per-user Skill can serve OpenCode, which
+  scans `~/.claude/skills` (D32).
+- Connect is "ensure this binding exists"; disconnect is "ensure it does not". Both are
+  idempotent (FR-157).
+- Disconnecting an agent removes its bindings. Each freed resource is removed **only if no
+  binding remains** (FR-243). The last consumer's disconnect is what deletes the file, the
+  block, or the entry.
+- The `AgentIntegration` row survives while any binding for that agent remains — which is how
+  a manager-owned resource keeps its ownership record alive after a native disconnect
+  (FR-244, D28a).
+
+**Privacy class**: `local`.
+
+**Why two tables rather than a flag**: connect asks "does this resource already exist",
+disconnect asks "is anyone else still using it", and doctor asks "who does this serve". A
+`satisfied_by` string answered only the third, and only for Skills — and under it,
+disconnecting Codex deleted the `AGENTS.md` block that OpenCode was still relying on.
 
 ### MigrationState
 
@@ -414,13 +475,27 @@ The raw vendor tool name kept as bounded provenance (FR-122, D36). Normalized to
 field. **Not** part of the outbox payload — Feature 001's session/memory/handoff payloads are
 unchanged, and observations never sync at all (FR-055).
 
-### Session — `handoff_pending` (new, default 0)
+### Session — `handoff_pending`, `handoff_attempts`, `handoff_error` (new)
 
 Set inside the seal transaction at session close and cleared when the handoff is written
-(D22). Daemon-start reconciliation synthesizes a handoff for any session with this flag set.
+(D22). `handoff_attempts` counts synthesis attempts; `handoff_error` holds the last redacted
+failure reason.
 
-**Why it is not a new entity**: it is one bit about a session's own boundary, read only by
-the daemon's reconciliation path. A separate table would be a join for a boolean.
+**Progress is guaranteed while the daemon runs** (FR-240):
+
+1. The synthesis task retries on failure with a bounded backoff.
+2. The daemon's existing maintenance tick — already used for the idle reaper — sweeps any
+   session whose `handoff_pending` has been set for more than a few seconds and synthesizes
+   it. No new scheduler.
+3. After a bounded number of attempts the session is reported as `handoff synthesis failed`
+   with its redacted reason in `cairn status` and in doctor's core section, and retried at a
+   slow cadence. A terminal session never sits silently owing a handoff.
+4. Daemon-start reconciliation remains the backstop for the process dying between the seal
+   and the synthesis — not the only retry path.
+
+**Why these are not a new entity**: they are three facts about one session's own boundary,
+read only by the daemon's synthesis and reconciliation paths. A separate table would be a join
+for a boolean and a counter.
 
 ---
 
@@ -432,10 +507,10 @@ Nothing in this document.
 |---|---|
 | DesiredIntegrationState and everything under it | No — derived, in memory |
 | AgentIntegration, ManagerIntegration | No |
-| ResourceState, MigrationState, RecoveryArtifact | No |
+| InstalledResource, ResourceBinding, MigrationState, RecoveryArtifact | No |
 | CanonicalLifecycleEvent | No — a transport shape; the observation it carries follows Feature 001's rules |
 | Observation `vendor_tool` | No — observations never sync |
-| Session `handoff_pending` | No — not in the session provenance payload |
+| Session `handoff_pending`, `handoff_attempts`, `handoff_error` | No — not in the session provenance payload |
 
 The server's allow-list (FR-055) is unchanged, and the agent identity it already holds on
 session provenance is the only place agent identity appears off this machine (FR-184).
@@ -445,14 +520,17 @@ session provenance is the only place agent identity appears off this machine (FR
 ## Relationships
 
 ```
-AgentIntegration 1 ──── * ResourceState
-        │                     │
-        │                     └── 0..1 MigrationState   (per agent+kind, transient)
+AgentIntegration 1 ──── * ResourceBinding ──── 1 InstalledResource
+        │                                                  ▲
+        │                     ┌────────────────────────────┘
+        │                     │   several bindings may share one resource
+        │                     │   (the AGENTS.md block; the per-user Skill)
+        │                     ├── 0..1 MigrationState   (per agent+kind, transient)
         │                     └── 0..* RecoveryArtifact (per agent+kind, capped at 10)
         │
         └── 0..1 CapabilityProfile   (derived, not stored)
 
-ManagerIntegration 1 ──── * ResourceState  (those whose owner = manager)
+ManagerIntegration 1 ──── * InstalledResource  (those whose owner = manager)
 
 CanonicalLifecycleEvent ──▶ Session (by agent_session_key)  ──▶ Observation | Handoff
                                     └── existing Feature 001 entities, unchanged

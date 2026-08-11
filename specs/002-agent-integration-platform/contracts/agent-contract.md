@@ -9,7 +9,8 @@ deeper material lives in a Skill that loads only when it is useful.
 crates/cairn-integrate/assets/agent-contract.md   ─┬─▶  managed instruction block (FR-132)
                                                    └─▶  MCP `instructions` string (FR-129)
 
-skills/cairn/                                       ──▶  installed Skill (FR-140)
+skills/cairn/                                       ─┬─▶  installed Skill, embedded (FR-140)
+                                                    └─▶  CC Switch import at a pinned Git ref
 ```
 
 Both sources are embedded into the binary at build time, so an installed Cairn always
@@ -67,7 +68,9 @@ Claude Code strips block-level HTML comments before instructions reach the model
 the markers cost zero context there. In `AGENTS.md` they are ordinary Markdown comments.
 
 **Shared file**: `AGENTS.md` is read by both Codex and OpenCode. Cairn installs **one** block
-and records it for both agents, reporting the sharing rather than writing it twice (FR-144).
+and binds both agents to it (FR-144, FR-243). Disconnecting one agent drops its binding and
+leaves the block in place for the other; the block is removed only when the last bound agent
+disconnects. Doctor reports the block with its full `serves` list.
 
 ## MCP instructions
 
@@ -135,9 +138,10 @@ always-on contract.
 - One physical copy per machine per agent, at that agent's per-user Skill directory.
 - Never overwrites a Skill named `cairn` that Cairn does not own — that is
   `conflicting_owner`.
-- Where one agent reads another's Skill directory, the second agent's resource is recorded
-  `shared` with `satisfied_by`, and no duplicate is written.
-- Removal deletes the Cairn-owned directory and nothing else.
+- Where one agent reads another's Skill directory, the second agent **binds to the existing
+  resource** and no duplicate is written (D28).
+- Removal drops the disconnecting agent's binding; the directory is deleted only when no
+  binding remains, and nothing else is touched.
 
 ## Version summary
 

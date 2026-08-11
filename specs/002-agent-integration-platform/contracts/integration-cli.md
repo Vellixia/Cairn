@@ -85,7 +85,7 @@ $ cairn connect codex --dry-run
 Plan for codex (dry run — nothing written)
 
 ADD       mcp           user            ~/.codex/config.toml            [mcp_servers.cairn]
-ADD       lifecycle     user            ~/.codex/hooks.json             7 events
+ADD       lifecycle     user            ~/.codex/hooks.json             6 hook registrations
 UPDATE    instructions  project_shared  ./AGENTS.md                     cairn:managed block v1
 INSTALL   skill         user            ~/.codex/skills/cairn/          schema 1
 UNCHANGED all other MCP servers, all other hooks, all other instructions
@@ -93,6 +93,10 @@ UNCHANGED all other MCP servers, all other hooks, all other instructions
 Codex will not run these hooks until you trust them:
   codex hooks trust        (then re-run `cairn doctor codex`)
 ```
+
+Six registrations, seven canonical events: Codex has no separate tool-failure hook, so its one
+`PostToolUse` registration normalizes into either `tool_succeeded` or `tool_failed` depending
+on the payload (D23). Claude Code registers seven, because it has both.
 
 `--json` emits an `IntegrationChangePlan` (see [data-model.md](../data-model.md)). Preview
 output never prints a credential found while inspecting (FR-162, SC-133).
@@ -120,7 +124,9 @@ codex        MCP_PLUS  — automatic session completion pending activation
                 run `codex hooks trust`, then re-run doctor
 
 opencode     MCP_PLUS  — no automatic session completion (OpenCode signals no session end)
-  skill         shared     satisfied by claude-code
+              tool failures captured only when OpenCode's output establishes them
+  skill         shared     ~/.claude/skills/cairn/  serves claude-code, opencode
+  instructions  shared     ./AGENTS.md              serves codex, opencode
 
 cc-switch    detected 3.9.1
   mcp  manager  → claude ✓  codex ✓  opencode ✗ (binding not found)
@@ -163,12 +169,28 @@ SC-115).
 ## `cairn disconnect`
 
 ```
-cairn disconnect <agent> [--dry-run]
+cairn disconnect <agent> [--only <kind>]... [--dry-run]
 ```
 
-Removes that agent's Cairn-owned lifecycle, managed instruction block, Cairn-owned Skill,
-directly-owned MCP entry, and its local integration record — in that order, record last
-(FR-178).
+Removes that agent's dependency on its Cairn-owned lifecycle, managed instruction block,
+Cairn-owned Skill, and directly-owned MCP entry. `--only <kind>` restricts removal to the named
+resource kinds — repeatable, and the option the ownership-migration sequence uses.
+
+**Removal is by binding, not by file** (FR-243). Disconnect drops this agent's binding to each
+resource; the resource itself is deleted only when no other agent is still bound to it. So
+disconnecting Codex while OpenCode remains connected leaves the shared `AGENTS.md` block in
+place, and OpenCode stays healthy:
+
+```
+$ cairn disconnect codex
+removed   lifecycle     ~/.codex/hooks.json
+removed   skill         ~/.codex/skills/cairn/
+unbound   instructions  ./AGENTS.md  (block kept — still serving opencode)
+```
+
+The agent's local record is removed last, and **only when its last binding is gone** — an agent
+whose remaining resource is manager-owned keeps its record so the withdrawal stays verifiable
+(FR-244).
 
 Never removes a manager-owned resource. Where one exists, disconnect completes for everything
 Cairn owns and additionally returns a `ManagerActionRequired` for the rest (FR-149, FR-233):
@@ -176,13 +198,16 @@ Cairn owns and additionally returns a `ManagerActionRequired` for the rest (FR-1
 ```
 $ cairn disconnect codex
 removed   lifecycle     ~/.codex/hooks.json
-removed   instructions  ./AGENTS.md  (block only; your content is untouched)
+removed   instructions  ./AGENTS.md  (block only; your content is untouched — no other agent bound)
 removed   skill         ~/.codex/skills/cairn/
 
 manager action required — CC Switch owns the Cairn MCP entry for codex
   Cairn does not modify CC Switch's own storage.
   In CC Switch: MCP → cairn → turn off "Codex", or remove the server.
   Then run: cairn doctor codex
+
+Codex's local record is kept so this withdrawal stays verifiable; it is removed once
+`cairn doctor` observes the entry gone.
 
 Memory, tasks, sessions and handoffs are untouched.
 ```
@@ -234,7 +259,7 @@ cannot migrate automatically
 
   Safe sequence:
     1. cairn integration migrate claude-code mcp --to cc-switch --dry-run
-    2. cairn disconnect claude-code --only mcp
+    2. cairn disconnect claude-code --only mcp        # drops just the MCP binding
     3. cairn integration distribute --via cc-switch --resource mcp --apps claude
     4. cairn doctor claude-code
 ```
@@ -276,6 +301,7 @@ not ad-hoc strings (FR-167).
 | `manager_action_required` | Needs a step in the manager that Cairn cannot perform | 1 |
 | `verification_failed` | The change was applied but not observed to be effective | 1 |
 | `confirmation_required` | Non-interactive run without `--yes` | 1 |
+| `unpublished_skill_ref` | A manager Skill import was requested from a build whose Skill source is not resolvable to a public Git ref | 1 |
 | `partial_apply` | A multi-file change partly landed; the report names both halves | 1 |
 
 `daemon_unavailable` and `storage_unavailable` keep exit `2`.

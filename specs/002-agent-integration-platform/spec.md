@@ -581,6 +581,32 @@ rather than discovered later in planning.
   handling, manifest merge semantics, and automatic application on clone are out of scope here.
   (FR-201, FR-202, FR-226, FR-227, SC-135, Out of Scope)
 
+### Session 2026-08-11 (planning reconciliation)
+
+Planning surfaced six contradictions that could not be resolved in design alone, because the
+requirements as written were either unsatisfiable or mutually inconsistent. The constitution
+requires such a conflict to be resolved in the spec rather than silently in the
+implementation, so five requirements and two criteria were **added** — no existing identifier
+changed, and no requirement was weakened.
+
+- **A budgeted session close could leave a terminal session without a handoff.** FR-114 says
+  `session_closed` produces the final handoff; the only way to fit Codex's one-second budget is
+  to acknowledge before synthesis. **FR-240** states exactly what must be durable before the
+  acknowledgment, requires bounded completion with guaranteed progress while the daemon lives,
+  and requires a permanent failure to be surfaced. **SC-136** measures it.
+- **A capability could be neither present nor absent.** OpenCode establishes a tool failure
+  only when its payload happens to say so. **FR-241** adds the *conditional* state, which never
+  counts towards FULL, and **SC-110** is restated to test all three states rather than two.
+- **Static capability data could not degrade when a vendor changes.** FR-188 requires
+  capability-driven degradation. **FR-242** separates *verified* from *expected* confidence and
+  forbids claiming more certainty than Cairn can locally establish.
+- **Disconnecting one agent could silently break another.** One managed instruction block can
+  serve two agents. **FR-243** scopes FR-178's removal to the agent's dependency, keeping the
+  resource until its last consumer leaves.
+- **Disconnect could destroy the record needed to finish a manager withdrawal.** **FR-244**
+  keeps manager-owned ownership state and its pending action alive until the withdrawal is
+  verified. **SC-137** covers both this and the shared-resource case.
+
 ## Requirements *(mandatory)*
 
 Feature 002 requirements are numbered from **FR-101** so that references to Feature 001
@@ -619,6 +645,18 @@ an ordering.
 - **FR-108**: A capability MUST be recorded as present only when the agent's own documented
   behavior provides it. Cairn MUST NOT infer a capability from the presence of a similarly named
   one.
+- **FR-241**: A capability's availability MUST distinguish at least three states:
+  **guaranteed** (the agent's documented behavior always provides it), **conditional** (the
+  agent provides it only when a particular payload or configuration makes it determinable),
+  and **absent**. A conditional capability MUST NOT count towards FULL, MUST be reported as
+  conditional rather than as present, and MUST name what it depends on.
+- **FR-242**: Cairn MUST distinguish what it has locally established from what it expects.
+  A capability's confidence MUST be **verified** only where Cairn has confirmed it on this
+  installation — by local, unauthenticated, network-free introspection the agent itself
+  provides, or by having observed that capability produce a canonical event — and
+  **expected** otherwise. An agent version Cairn has not verified MUST still integrate
+  (FR-186), but MUST NOT be reported with stronger capability certainty than Cairn can
+  establish, and diagnostics MUST name which capabilities are expected rather than verified.
 - **FR-109**: Cairn MUST derive an integration level from the capability profile and the
   verified state of installed resources, using these levels:
   **FULL** — Cairn's MCP server, the Cairn usage contract as persistent instructions, the Cairn
@@ -697,6 +735,15 @@ an ordering.
   observations come only from tool events (FR-117).
 - **FR-118**: Every canonical event MUST carry the identity of the agent session that produced
   it, so that concurrent sessions are routed correctly (FR-010).
+- **FR-240**: Where an adapter's session-close handler runs under a deadline too short for
+  handoff synthesis, Cairn MAY acknowledge the boundary after durably recording that the
+  session terminated, provided all of the following hold. The terminal state and the fact that
+  a handoff is owed MUST be committed before the acknowledgment. The handoff MUST then be
+  produced within a bounded interval, and progress MUST be guaranteed while the daemon keeps
+  running — a restart MUST NOT be required for it to appear. A synthesis that fails MUST be
+  retried, and a synthesis that cannot succeed MUST be surfaced as a reported condition rather
+  than left silently owed. This is how FR-114's "produces its final handoff" is satisfied at a
+  budgeted boundary: not within the request, but durably and boundedly after it.
 - **FR-119**: Post-compaction is an extension to Feature 001's boundary set. It MUST leave the
   session `active`, MUST NOT produce a second durable handoff for the same compaction, and MAY
   re-deliver context where the agent accepts it.
@@ -989,6 +1036,16 @@ an ordering.
 - **FR-178**: Disconnecting one agent MUST remove that agent's Cairn lifecycle integration, its
   Cairn-owned managed instruction block, its Cairn-owned Skill, its directly-owned Cairn MCP
   entry, and its local integration record.
+- **FR-243**: Where one installed resource satisfies more than one connected agent, FR-178's
+  removal applies to that agent's dependency on the resource, not to the resource itself. The
+  resource MUST survive until the last agent depending on it is disconnected, and MUST then be
+  removed. Diagnostics MUST report which agents a shared resource serves, and disconnect MUST
+  remain idempotent.
+- **FR-244**: FR-178's removal of the local integration record MUST NOT discard state Cairn
+  still needs to track a manager-owned resource. Where a manager-owned resource remains after a
+  native disconnect, its ownership record and the pending manager action MUST survive so the
+  withdrawal stays verifiable (FR-234), and the record MUST be removed only once no resource
+  for that agent remains.
 - **FR-179**: Disconnect MUST NOT delete any project, task, session, observation, memory, or
   handoff.
 - **FR-180**: Disconnect MUST NOT modify any unrelated MCP server, lifecycle handler, plugin,
@@ -1196,10 +1253,11 @@ criteria stay unambiguous.
   two active sessions, 100% of observations and memories carry the provenance of the session that
   produced them, zero events are routed to the wrong session, and every unattributable request
   returns an ambiguous-session error rather than a guess.
-- **SC-110**: For each supported agent, every canonical lifecycle event the capability profile
-  claims is demonstrated by a fixture test that drives a realistic vendor payload through the
-  adapter and asserts the canonical result; and for every capability the profile does not claim,
-  a test asserts the adapter emits nothing.
+- **SC-110**: For each supported agent and each capability, a fixture test asserts exactly the
+  semantics the profile states: a **guaranteed** capability produces the canonical event from a
+  realistic vendor payload; an **absent** capability produces nothing from any payload; and a
+  **conditional** capability produces the event from a payload that establishes it and produces
+  nothing from a payload that does not.
 - **SC-111**: No adapter maps an idle, quiet, or inactive vendor signal to session closed,
   asserted by test for every adapter.
 - **SC-112**: Distributing Cairn's MCP server through the integration manager to a chosen set of
@@ -1261,6 +1319,14 @@ criteria stay unambiguous.
   condition — handler timeout, handler crash, and daemon unavailable at the boundary — the session
   is subsequently reconciled with a durable handoff, zero sessions are left permanently without
   one, and zero agent sessions are aborted or visibly disrupted by the failure.
+- **SC-136**: Across at least 100 sealed session closes with the daemon running throughout,
+  100% have a durable handoff present within the documented bound without any daemon restart;
+  with synthesis forced to fail permanently, 100% are reported as a named condition rather than
+  left silently owed.
+- **SC-137**: Disconnecting one of two agents that share an installed resource leaves that
+  resource in place and the remaining agent healthy in 100% of cases; disconnecting the last
+  one removes it; and a manager-owned resource plus its pending manager action survive a native
+  disconnect and remain verifiable afterwards.
 - **SC-130**: A Cairn-managed resource that differs from the canonical version only in formatting,
   whitespace, or the ordering of order-insensitive entries is reported healthy in 100% of seeded
   cases, and a resource with a semantic edit is reported modified in 100% of seeded cases, with

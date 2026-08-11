@@ -59,12 +59,38 @@ cairn integration distribute --via cc-switch --resource mcp --apps claude,codex,
 The Skill import is the same flow with `resource=skill`:
 
 ```
-ccswitch://v1/import?resource=skill&name=cairn&repo=Vellixia/Cairn&directory=skills/cairn&branch=v0.1.0-alpha.3
+ccswitch://v1/import?resource=skill&name=cairn&repo=Vellixia/Cairn&directory=skills/cairn&branch=<pinned-ref>
 ```
 
 This is why the Skill's canonical source is a repository path rather than a generated
 artifact (D29): CC Switch fetches Skills from a public Git repository, so the repository
 *is* the distribution channel, and there is no second copy to drift.
+
+### Skill Git ref
+
+Direct installation always uses the Skill embedded in the running binary — the binary is the
+source of truth, and no network is involved. Only the manager path needs a Git ref, and it
+must be one that exists and that matches the binary (D29):
+
+| Build | `<pinned-ref>` |
+|---|---|
+| A release build whose version matches a published tag | that tag |
+| Any other build with a pushed commit | the commit SHA the embedded assets were built from |
+| A dirty tree, or a commit not pushed | **none** — the import is refused |
+
+A commit SHA is immutable and fetchable as soon as it is pushed, so the Skill CC Switch
+installs is by construction the revision the binary embeds. A floating branch is never used:
+it would let CC Switch install a Skill revision the binary does not expect, and doctor would
+then oscillate between healthy and outdated as the branch moved.
+
+Where no ref is publicly resolvable, `cairn integration distribute --resource skill` fails with
+`unpublished_skill_ref`, states why, and gives the manual path. It never emits a ref it knows
+does not exist. A development build can still distribute the **MCP** resource, which carries no
+Git ref at all.
+
+After distribution, `cairn doctor` reads the installed `SKILL.md`'s
+`metadata.cairn_skill_revision` and compares it with the embedded digest. A mismatch is
+`outdated`, with the remedy naming the correct ref.
 
 ## Removal
 
@@ -98,6 +124,12 @@ Rules for this outcome:
 - The enclosing operation **fails** with `manager_action_required` (exit 1). Cairn never
   reports success on the strength of having asked (FR-233).
 - The local record keeps `owner = manager` until verification says otherwise (FR-234).
+- **The record survives a native disconnect** (FR-244, D28a). `cairn disconnect codex` removes
+  the resources Cairn owns directly and drops their bindings, but the manager-owned resource,
+  its binding, and this pending action stay — otherwise there would be nothing left to verify
+  the withdrawal against. The agent's `AgentIntegration` row is removed only once its last
+  binding is gone, which happens when verification observes the manager-owned entry actually
+  removed.
 
 If CC Switch later publishes a documented removal interface, the adapter may use it, and the
 same verification still gates the record update (FR-235).

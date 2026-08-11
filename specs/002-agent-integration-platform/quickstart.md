@@ -126,12 +126,16 @@ cairn connect opencode --yes
 - Plugin file at `~/.config/opencode/plugin/cairn.js` — a file drop, no config edit
   (D32).
 - `mcp.cairn` added to `~/.config/opencode/opencode.json`; unrelated servers untouched.
-- `AGENTS.md` block recorded as already satisfied by the Codex installation, not written
-  twice.
-- Skill reported `shared`, `satisfied_by: claude-code`, with no second copy (D28).
+- `AGENTS.md` block **bound** to the existing Codex block, not written twice; doctor reports
+  it `shared` serving `codex, opencode`.
+- Skill reported `shared` at `~/.claude/skills/cairn/` serving `claude-code, opencode`, with no
+  second copy (D28).
 - `cairn doctor opencode` reports `MCP_PLUS`, `lifecycle_coverage.absent` containing
-  `session_closed` and `tool_failed`, and a `missing_behaviors` entry naming automatic
-  session completion (SC-131).
+  `session_closed`, `lifecycle_coverage.conditional` containing `tool_failed`, a
+  `missing_behaviors` entry naming automatic session completion (SC-131), and a
+  `conditional_behaviors` entry explaining when failures are captured.
+- A fixture payload whose OpenCode tool output establishes a failure produces `tool_failed`;
+  an ambiguous one produces nothing (SC-110, conditional half).
 
 **The release-blocking negative check** (hermetic):
 
@@ -276,13 +280,30 @@ cairn disconnect codex
 
 **Must be true**
 
-- Cairn's lifecycle, block, Skill, and directly-owned MCP entry are gone; the local record is
-  removed last.
+- Cairn's Codex lifecycle, Skill, and directly-owned MCP entry are gone.
+- **The `AGENTS.md` block is still there**, because OpenCode is still bound to it — and
+  `cairn doctor opencode` still reports its instructions `healthy` (SC-137). Only Codex's
+  binding was removed.
 - Every unrelated entry in every touched file is byte-identical to `/tmp/before` (SC-116).
-- `AGENTS.md` survives with the developer's content, and OpenCode's record now reports the
-  block `missing` rather than silently losing it.
 - Every project, task, session, observation, memory, and handoff still exists.
 - Claude Code and OpenCode are unaffected.
+
+Then disconnect the last consumer and confirm the resource is finally removed:
+
+```bash
+cairn disconnect opencode
+grep -c 'cairn:managed:begin' AGENTS.md    # → 0, and the developer's content remains
+```
+
+Manager-owned state survives a native disconnect:
+
+```bash
+cairn disconnect codex --only mcp   # with the MCP entry owned by CC Switch
+cairn doctor codex --json | jq '.data.agents[] | select(.agent=="codex") | .resources'
+```
+
+Codex's record is still present with the manager-owned resource and its pending action, so the
+withdrawal stays verifiable (SC-137, FR-244).
 
 Ownership migration:
 
@@ -328,6 +349,8 @@ writes.
 | Capture latency per adapter | `cargo test --release -p cairn-e2e --test perf_capture` | Feature 001's SC-007 bounds hold for all three adapters, ≥200 invocations each (SC-122) |
 | Codex session-close budget | `cargo test --release -p cairn-e2e --test perf_session_close` | ≥100 boundaries, 100% inside Codex's own budget, zero overruns (SC-128) |
 | Injected-failure recovery | `cargo test -p cairn-e2e --test recovery_injected` | Handler timeout, handler crash, daemon unavailable — every session ends with a durable handoff, zero agent sessions disrupted (SC-129) |
+| Sealed close actually lands | `cargo test -p cairn-e2e --test handoff_lands_without_restart` | ≥100 sealed closes, 100% with a durable handoff inside the bound and **no daemon restart**; forced permanent failure is reported, not silent (SC-136) |
+| Shared resource survives one disconnect | `cargo test -p cairn-integrate --test fixtures shared_binding` | Disconnecting one of two bound agents keeps the resource; the last one removes it; manager-owned state survives (SC-137) |
 | Configuration preservation | `cargo test -p cairn-integrate --test fixtures` | ≥20 fixtures, connect→disconnect returns 100% of non-Cairn bytes (SC-104) |
 | Preview writes nothing | `cargo test -p cairn-integrate --test dry_run_is_inert` | Checksums of every candidate file identical before and after (SC-118) |
 | Secrets stay out | `cargo test -p cairn-e2e --test privacy_integration` | Seeded credentials appear in zero artifacts, logs, diagnostics, or sync payloads (SC-133, SC-120) |
@@ -344,5 +367,6 @@ Filled in during implementation, as Feature 001 did:
 | Capture latency, Codex adapter (median / p95) | — |
 | Capture latency, OpenCode adapter (median / p95) | — |
 | Codex seal phase duration (median / p95 / max) | — |
+| Handoff-after-seal latency (p50 / p99) | — |
 | Rendered contract size (characters) | — |
 | Per-user hook cost in an unmanaged repository | — |
