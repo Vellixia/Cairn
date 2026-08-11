@@ -128,9 +128,38 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo build --workspace
-      - run: cargo test --workspace --all-targets
+
+      # A tight timeout here, not just the job-level one: a hang should fail
+      # fast enough to leave time for the diagnostics step below to actually
+      # run, rather than eating the whole job budget before anything gets a
+      # chance to look at what was going on.
+      - name: Test
+        timeout-minutes: 5
+        env:
+          CAIRN_LOG: debug
+        run: cargo test --workspace --all-targets
+
+      # Only runs if the step above failed or was killed by its timeout.
+      # cargo test's own process tree gets torn down by then, but anything it
+      # wrote to disk survives — the daemon logs in particular, since a
+      # killed process skips Drop and never gets to clean up its temp dir.
+      - name: Dump daemon logs and process state on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host "--- cairnd / cairn processes still running? ---"
+          Get-Process -Name cairnd, cairn -ErrorAction SilentlyContinue | Format-Table -AutoSize
+
+          Write-Host "--- daemon logs found under $env:TEMP ---"
+          Get-ChildItem -Path $env:TEMP -Recurse -Include cairnd.log, cairn.log -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Write-Host "=== $($_.FullName) ==="
+              Get-Content $_.FullName -ErrorAction SilentlyContinue
+              Write-Host ""
+            }
 
       - name: Working tree is clean and free of conflict markers
+        if: success()
         shell: bash
         run: |
           git diff --check
