@@ -192,7 +192,8 @@ install the wrong Skill with no error. The MCP resource still distributes from t
 **Skill distribution from a released build** *(live, release evidence — D29a)*:
 
 ```bash
-# 1. the release published the branch, and it points at the release commit
+# 1. the release published the branch (it may point at an earlier release's commit —
+#    the branch names content, not a release)
 git ls-remote https://github.com/Vellixia/Cairn "refs/heads/skill-release/*"
 
 # 2. it fetches the way CC Switch fetches
@@ -200,14 +201,17 @@ curl -fsSL -o /tmp/s.zip \
   "https://github.com/Vellixia/Cairn/archive/refs/heads/skill-release/1-c07d4419b2ae.zip"
 unzip -p /tmp/s.zip '*/skills/cairn/SKILL.md' | grep cairn_skill_revision
 
-# 3. Cairn emits that branch, not a SHA or a tag
+# 3. the same algorithm, from the workspace, agrees with both
+cargo run -q -p cairn-integrate --bin skillref -- --json
+
+# 4. Cairn emits that branch, not a SHA or a tag
 cairn integration distribute --via cc-switch --resource skill --apps claude --dry-run
 ```
 
 **Must be true**
 
-- The branch exists, points at the release commit, and `git ls-remote` shows it unchanged from
-  the previous release when the Skill revision did not change.
+- The branch exists. When the Skill revision did not change since the previous release,
+  `git ls-remote` shows the **same commit as before** — it was reused, not moved.
 - The archive contains `skills/cairn/SKILL.md` whose `metadata.cairn_skill_revision` equals the
   revision in the branch name **and** the revision embedded in the running binary.
 - The emitted deep link's `branch=` is that branch — never a commit SHA, never a tag, never
@@ -401,7 +405,8 @@ writes.
 | Sealed close actually lands | `cargo test -p cairn-e2e --test handoff_lands_without_restart` | ≥100 sealed closes, 100% with a durable handoff inside the bound and **no daemon restart**; forced permanent failure is reported, not silent (SC-136) |
 | Shared resource survives one disconnect | `cargo test -p cairn-integrate --test fixtures shared_binding` | Disconnecting one of two bound agents keeps the resource; the last one removes it; manager-owned state survives (SC-137) |
 | Capability evidence gates FULL | `cargo test -p cairn-e2e --test capability_evidence` | An unobserved FULL-required runtime capability blocks FULL and is named as awaited; a detected version change discards observation evidence but keeps introspection evidence; observing everything restores FULL; a session start that delivered no context does not establish context delivery while a degraded one does; a synthesized or single-event identifier does not establish stability (SC-138) |
-| Skill branch is write-once | `.github/workflows/release.yml` `publish-skill` job | Absent → created at the release commit; present at that commit → unchanged; present elsewhere → the release **fails**; the branch is verified through CC Switch's own `refs/heads` fetch before the release completes (D29a) |
+| Skill branch identifies content, and is never moved | `.github/workflows/release.yml` `publish-skill` job, plus `cargo test -p cairn-integrate revision` | Release **A** introduces revision `R` → branch created at A. Release **B** changes no Skill file → same `R`, branch still at A, **not moved**, content re-verified, release succeeds. Release **C** introduces `S` → a new branch, `…-R` untouched. A branch whose fetched content does not match its name → the release **fails**. No force update in any case (D29a) |
+| Skill revision is not circular | `cargo test -p cairn-integrate revision` | The checked-in `metadata.cairn_skill_revision` equals the value computed by the canonical algorithm; the self-field is normalized to `<REVISION>` before hashing; the same function is what `skillref`, doctor, and the release job call (D29b) |
 | Configuration preservation | `cargo test -p cairn-integrate --test fixtures` | ≥20 fixtures, connect→disconnect returns 100% of non-Cairn bytes (SC-104) |
 | Preview writes nothing | `cargo test -p cairn-integrate --test dry_run_is_inert` | Checksums of every candidate file identical before and after (SC-118) |
 | Secrets stay out | `cargo test -p cairn-e2e --test privacy_integration` | Seeded credentials appear in zero artifacts, logs, diagnostics, or sync payloads (SC-133, SC-120) |

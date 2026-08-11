@@ -189,3 +189,17 @@ the plan had not said who produced them or exactly what established them.
 
 Result: 145 requirements (FR-101–FR-245), 38 success criteria (SC-101–SC-138), no duplicates,
 no gaps, zero dangling cross-references, zero clarification markers. All checklist items pass.
+
+### Iteration 7 — 2026-08-11 (branch semantics and revision algorithm)
+
+Three corrections to the publication design added in iteration 6. No new requirement — the
+spec's Skill-versioning demands were already right; the plan had encoded them wrongly.
+
+| Finding | Resolution |
+|---|---|
+| **H1** the write-once rule failed every later release carrying an unchanged Skill, because the branch naturally still pointed at the first release's commit | D29a rewritten around content identity: absent → create; present → **never move**, fetch it the way CC Switch does and recompute the revision from what it contains; match → success whatever commit it is on; mismatch → fail the release. The three release scenarios (A introduces R, B unchanged, C introduces S) are stated as the release-evidence tests |
+| **H2** `metadata.cairn_skill_revision` lives inside `SKILL.md`, so hashing the file hashed the value being computed | New **D29b**: one canonical algorithm in `cairn-integrate::revision`. Sorted relative paths, normalized line endings, length-prefixed path/content framing, the self-field's *value* replaced with `<REVISION>` on the parsed frontmatter before hashing, `cairn_skill_schema` hashed normally, 12-hex output. The checked-in value must equal the computed one, asserted by a unit test, by the release job, and again against the fetched tree |
+| **M1** the release graph left the build-input ordering implicit | Stated explicitly: `publish-skill` needs `verify` and outputs `skill_schema` / `skill_revision` / `skill_branch`; `binaries` needs `publish-skill` and embeds `skill_branch`; `images` does not; `assets` and `release` depend transitively, so a failed verification stops the pipeline before any user-facing artifact. Ordinary CI passes no branch and keeps `unpublished_skill_ref`. The workflow calls the canonical function through a `skillref` developer binary rather than reimplementing the hash |
+
+Result: 145 requirements (FR-101–FR-245), 38 success criteria (SC-101–SC-138), no duplicates,
+no gaps, zero dangling cross-references, zero clarification markers. All checklist items pass.

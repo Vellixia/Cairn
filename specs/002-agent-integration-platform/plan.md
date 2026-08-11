@@ -103,9 +103,17 @@ a ref-naming convention. Still no new component, service, datastore, or tool.
 
 **Re-check after the publication reconciliation (2026-08-11)**: PASS. The `skill-release` branch
 needed a producer, so `release.yml` gains one job that computes the revision, creates the
-write-once branch, and verifies it through the same `refs/heads` fetch CC Switch performs. It
+branch when absent, and verifies it through the same `refs/heads` fetch CC Switch performs. It
 adds no runtime component and no dependency — it is release plumbing that makes an existing
 planning invariant real, and it fails the release rather than moving a branch.
+
+**Re-check after the branch-semantics reconciliation (2026-08-11)**: PASS. Three corrections,
+none structural: the branch identifies Skill *content* rather than a release, so an unchanged
+patch release reuses it instead of failing; the revision digest was circular and now has one
+canonical algorithm with the self-field normalized before hashing (D29b); and the release job
+graph is stated explicitly so the branch name is a build input rather than a prediction. One
+developer-only binary (`skillref`) was added so the workflow calls the same function the
+released binary embeds instead of reimplementing the hash in shell.
 
 ## Project Structure
 
@@ -115,7 +123,7 @@ planning invariant real, and it fails the release rather than moving a branch.
 specs/002-agent-integration-platform/
 ├── plan.md                      # This file
 ├── spec.md                      # Feature specification (145 FR, 38 SC)
-├── research.md                  # Decisions D18–D42 (incl. D19a, D22a, D28a, D29a)
+├── research.md                  # Decisions D18–D42 (incl. D19a, D22a, D28a, D29a, D29b)
 ├── data-model.md                # Integration entities, invariants, transitions
 ├── quickstart.md                # Acceptance walkthrough per user story
 ├── checklists/requirements.md   # Specification quality gate
@@ -155,6 +163,8 @@ crates/
 │   │   │                                        # the owned node
 │   │   ├── scope.rs         # the scope matrix as data
 │   │   ├── render.rs        # contract → block, contract → MCP instructions; Skill tree
+│   │   ├── revision.rs      # the one canonical skill_revision algorithm (D29b)
+│   │   └── bin/skillref.rs  # prints schema/revision/branch for the release job
 │   │   ├── agents/{claude_code.rs,codex.rs,opencode.rs,generic_mcp.rs}
 │   │   ├── managers/cc_switch.rs
 │   │   └── assets/agent-contract.md
@@ -176,10 +186,11 @@ tests/                   # + us4_opencode, us6_cross_agent, us10_concurrency,
 tests/integrations/      # NEW — recorded vendor payload fixtures per adapter
 .github/workflows/
 ├── ci.yml               # + web-e2e job (release server, desktop + mobile)
-└── release.yml          # + publish-skill job: compute the Skill revision, create the
-                         #   write-once skill-release/<schema>-<revision> branch, verify it
-                         #   through CC Switch's own refs/heads fetch, and only then let the
-                         #   release complete (D29a)
+└── release.yml          # + publish-skill job (needs: verify; outputs skill_schema,
+                         #   skill_revision, skill_branch). Creates the branch when absent,
+                         #   never moves an existing one, verifies content through CC Switch's
+                         #   own refs/heads fetch. `binaries` needs it and embeds skill_branch;
+                         #   `images` does not (D29a)
 ```
 
 **Structure Decision**: one new crate, `cairn-integrate`, sitting between `cairn-core` and
@@ -267,7 +278,8 @@ Dependencies: B needs A; C needs B; D is independent of C but must precede E; E 
 | A pending handoff never lands because the daemon keeps running and never restarts | **MEDIUM** | Resolved structurally: bounded retry plus a sweep on the maintenance tick that already runs, with permanent failure reported in `cairn status` and doctor (D22, FR-240). SC-136 measures that the handoff lands without a restart. |
 | An agent upgrade drops the level to MCP_PLUS until a session has run, and reads as a regression | **MEDIUM** | It is the honest state: observation evidence from the previous build proves nothing about this one (FR-245). Doctor names exactly what is awaited rather than showing a bare level, and one ordinary session restores FULL. Accepted deliberately over silently carrying stale evidence, which is the failure H2 identified. |
 | CC Switch silently installs `main` when handed a ref it cannot resolve | **MEDIUM** | Verified in its downloader: any miss falls back to `main`, then `master`. Cairn therefore emits only a published `skill-release/<schema>-<revision>` branch and refuses otherwise (D29); the release job verifies the branch through that same fetch before the release completes (D29a); doctor's revision comparison is the backstop. |
-| The `skill-release` branch and the released binary disagree about the Skill | **MEDIUM** | The branch is write-once and created at the release commit; a revision that resolves to a different commit fails the release rather than moving the branch. The branch name reaches a binary only after the verification fetch passed, so a build can never claim a ref that does not exist (D29a). |
+| The `skill-release` branch and the released binary disagree about the Skill | **MEDIUM** | The branch names content, not a release: it is created when absent, never moved, and every release re-verifies it by fetching it and recomputing the revision from what it contains. A content/name mismatch fails the release. The branch name reaches a binary only after that fetch passed, so a build can never claim a ref that does not exist (D29a, D29b). |
+| The Skill revision digest drifts between the workflow and the binary | **LOW** | One function in `cairn-integrate` computes it, and the workflow calls that function through the `skillref` binary rather than reimplementing the hash. A unit test asserts the checked-in frontmatter equals the computed value, so an ordinary `cargo test` catches a stale field (D29b). |
 | `toml_edit` or a vendor schema change breaks Codex config editing | **MEDIUM** | Malformed or unexpected input fails closed and writes nothing (FR-137). The fixture corpus includes comment-heavy, nested, and truncated TOML. `toml_edit` is the crate Cargo itself uses for this problem. |
 | Adding `jsonc-parser`, `toml_edit`, and `include_dir` to the `cairn` binary slows hook startup | **MEDIUM** | The hook path calls only `cairn-integrate::normalize` — a pure function with no I/O — and never the editors, planner, or embedded assets. The cost is binary size, not work. SC-122 measures capture latency per adapter against Feature 001's baseline; if it regresses, the hook entry point moves to a thin binary linking only the normalize path. |
 | A vendor renames or removes an event Cairn maps | **MEDIUM** | Adapters degrade by capability detection, not version matching (FR-188). A missing event lowers the level and the integration keeps working; fixtures record the payloads Cairn was built against so a change is visible in a diff. |

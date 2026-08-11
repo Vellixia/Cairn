@@ -130,6 +130,26 @@ No standard `version` frontmatter field exists across these agents, which is why
 lives in `metadata` — accepted and ignored by the agents, and read by `cairn doctor` to
 detect an outdated Skill (FR-141).
 
+**How `cairn_skill_revision` is computed** (D29b). One function in `cairn-integrate` is the only
+implementation; the embedded metadata, direct installation, doctor, the `publish-skill` release
+job, and the release verification tests all call it, and it is never reimplemented in shell.
+
+1. Every file under `skills/cairn/`, sorted by relative path as raw bytes.
+2. Content normalized: CRLF → LF, exactly one trailing newline.
+3. **The self-referential field is normalized before hashing**: the *value* of
+   `metadata.cairn_skill_revision` is replaced with the literal `<REVISION>`. The replacement is
+   made on the parsed frontmatter field, not by text search, so a body mention is untouched.
+   Without this the file would hash the value being computed. `cairn_skill_schema` is hashed
+   normally — a schema change must change the revision.
+4. Each entry enters the hash as `path`, `0x00`, the content length as eight big-endian bytes,
+   then the content — length-prefixed so no two different trees can collide by concatenation.
+5. The revision is the first 12 hex characters of the SHA-256 of that stream.
+
+**Validation**: the checked-in `metadata.cairn_skill_revision` must equal the computed value.
+A `cairn-integrate` unit test asserts it, so an ordinary `cargo test` catches a Skill edit that
+forgot to update the field; the release job asserts it again before touching any branch, and a
+third time against the tree it fetches back.
+
 **Progressive disclosure** (FR-142): `SKILL.md` states when to use Cairn and links the
 reference files; the references carry the detail. Nothing in the Skill duplicates the
 always-on contract.
@@ -151,7 +171,7 @@ always-on contract.
 | `contract_schema` | marker `schema=` | The block format or contract structure changes |
 | `contract_revision` | marker `content=` | The rendered contract text changes |
 | `skill_schema` | `metadata.cairn_skill_schema` | The Skill's layout or frontmatter shape changes |
-| `skill_revision` | `metadata.cairn_skill_revision` | Any Skill file changes |
+| `skill_revision` | `metadata.cairn_skill_revision` | Any Skill file changes — computed by the canonical algorithm below |
 
 None is tied to Cairn's package version (D26). A patch release that changes neither the
 contract nor the Skill rewrites nothing — which on Codex also means it does not invalidate

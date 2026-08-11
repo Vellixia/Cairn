@@ -95,8 +95,14 @@ that it happened.
 | It does not — every development build, and any build from a dirty tree | **none** — the Skill import is refused |
 
 The branch name encodes the Skill's own schema and revision, for example
-`skill-release/1-c07d4419b2ae`. It is created once when that revision is published and never
-moved, so it behaves like a pinned ref while still being a `refs/heads` ref CC Switch accepts.
+`skill-release/1-c07d4419b2ae`. It is created once for that revision and **never moved**, so it
+behaves like a pinned ref while still being a `refs/heads` ref CC Switch accepts.
+
+Because the name identifies **content**, not a Cairn release, later Cairn releases that ship the
+same Skill reuse the same branch and leave it pointing at the commit that first introduced that
+content. A release verifies the branch by fetching it and recomputing the revision from what it
+actually contains; a mismatch between a branch's content and its name fails the release, and no
+release ever force-updates a branch (D29a).
 
 Where the embedded revision has no published branch, `cairn integration distribute --resource
 skill` fails with `unpublished_skill_ref`, states why, and gives the manual path. It never emits

@@ -455,7 +455,7 @@ searching for the word `cairn`.
 | `contract_schema` | integer | The contract's structure or marker format changes |
 | `contract_revision` | 12-hex content digest | The rendered contract text changes at all |
 | `skill_schema` | integer | The Skill's file layout or frontmatter shape changes |
-| `skill_revision` | 12-hex content digest | Any Skill file's content changes |
+| `skill_revision` | 12-hex content digest, computed by the canonical algorithm (D29b) | Any Skill file's content changes |
 | `desired_state_schema` | integer | The desired-state model's fields change |
 | `adapter_version` | integer per adapter | The artifacts that adapter writes change shape |
 
@@ -618,10 +618,11 @@ Two consequences that invalidate the obvious designs:
 So the only supported surface is a **real branch**, and the only safe branch is one Cairn
 controls and never rewrites:
 
-1. The Skill is published to a dedicated, write-once branch named from the Skill's own version:
+1. The Skill is published to a dedicated branch named from the Skill's own version:
    `skill-release/<skill_schema>-<skill_revision>`, for example
-   `skill-release/1-c07d4419b2ae`. It is created when that Skill revision is published and is
-   never moved, so it is a real `refs/heads` ref that behaves like a pinned one.
+   `skill-release/1-c07d4419b2ae`. It is created once for that revision and **never moved**, so
+   it is a real `refs/heads` ref that behaves like a pinned one. The name identifies Skill
+   *content*, so later Cairn releases carrying the same Skill reuse it (D29a).
 2. The build records the branch name its embedded Skill was published under, and whether the
    release pipeline actually published it.
 3. A build whose embedded Skill has a published branch emits that branch. Because the branch
@@ -674,26 +675,77 @@ expected_branch = skill-release/<skill_schema>-<skill_revision>
 Both components are computed from `skills/cairn/` by the same function the binary embeds, so
 the workflow and the binary cannot disagree about what a revision is.
 
-**Publication steps**, as a job in `.github/workflows/release.yml` that runs after `verify` and
-**before** the release is considered complete:
+**The branch names immutable Skill *content*, not a Cairn release.** That distinction decides
+every rule below. Two Cairn releases that ship the same Skill share one branch, and the branch
+keeps pointing at whichever commit first introduced that content.
+
+**Publication steps**, as the `publish-skill` job in `.github/workflows/release.yml`, running
+after `verify` and **before** any artifact that claims the branch:
 
 1. Compute `<skill_schema>` and `<skill_revision>` from `skills/cairn/` at the release commit,
-   using the embedded algorithm.
+   using the canonical algorithm (D29b) — the same code the binary embeds.
 2. Look up `expected_branch`.
-3. **Absent** → create it, pointing at the exact release commit whose `skills/cairn/` produced
-   that revision. Never at a rewritten or synthesized commit.
-4. **Present at that same commit** → unchanged; success. Re-releasing an unchanged Skill is a
-   no-op, which is the normal case for a patch release (D26).
-5. **Present at a different commit** → **fail the release.** The branch is write-once. It is
-   never moved, never force-updated, and the workflow has no path that does so — a revision
-   digest that resolves to two different trees means the digest is wrong, and moving the branch
-   would silently change what every existing deep link fetches.
-6. **Verify by fetching the way CC Switch does**: download
+3. **Absent** → create it at the current release commit. Never at a rewritten or synthesized
+   commit.
+4. **Present** → **never move it.** Instead, fetch it the way CC Switch does and check what it
+   actually contains (step 5). Which historical Cairn commit it points at is irrelevant: the
+   branch is an identity for content, and content is what gets verified.
+5. **Verify by fetching the way CC Switch does**, for both the newly created and the
+   pre-existing case: download
    `https://github.com/Vellixia/Cairn/archive/refs/heads/<expected_branch>.zip`, confirm it
-   contains `skills/cairn/SKILL.md`, and confirm that file's `metadata.cairn_skill_revision`
-   equals the computed revision. This exercises the exact `refs/heads` path CC Switch hardcodes,
-   so a ref that would silently fall back to `main` fails here instead of on a user's machine.
-7. Only after step 6 passes may the release's artifacts be published.
+   contains `skills/cairn/`, and recompute schema and revision from that fetched tree with the
+   same canonical algorithm.
+   - **Matches the revision encoded in the branch name** → success, whatever commit the branch
+     is on.
+   - **Does not match** → **fail the release.** The branch's content and its name disagree,
+     which means either the digest is wrong or the branch was tampered with. The workflow has no
+     path that force-updates a branch to resolve this; a human resolves it.
+6. Only after step 5 passes may any artifact that claims the branch be published.
+
+**The three cases this produces**, which are exactly the release-evidence tests:
+
+| Scenario | Branch action | Outcome |
+|---|---|---|
+| Release **A** introduces Skill revision `R` | `skill-release/1-R` absent → created at A | success |
+| Release **B** changes no Skill file — still `R` | branch exists, still pointing at **A** → not moved, content re-verified | **success**, and B ships pointing at the same branch |
+| Release **C** introduces Skill revision `S` | `skill-release/1-S` absent → created at C; `…-R` untouched | success |
+| A branch whose fetched content does not match its name | none | release fails |
+
+Case B is the common one — a patch release that touches no Skill file — and the earlier
+"present at a different commit → fail" rule would have failed every one of them. It was wrong
+because it treated the branch as a marker of *which release published it* rather than *what it
+contains*. No force update in any row.
+
+**The release job graph** — the ordering is the mechanism, so it is stated explicitly rather
+than left to convention. `release.yml` today runs
+`verify → binaries → assets → release`, with `images` alongside. `publish-skill` inserts one
+node:
+
+```
+verify
+  │
+  ├──▶ publish-skill ──▶ binaries ──▶ assets ──┐
+  │      (outputs:        (consumes             ├──▶ release
+  │       skill_schema,    skill_branch)        │
+  │       skill_revision,                       │
+  │       skill_branch)                         │
+  │                                             │
+  └──▶ images ─────────────────────────────────┘
+```
+
+- **`publish-skill`** `needs: verify`. Outputs `skill_schema`, `skill_revision`, and
+  `skill_branch`. It is the only job with write access to refs, and its permission is scoped to
+  that.
+- **`binaries`** `needs: [verify, publish-skill]`, and receives `skill_branch` as a build input
+  that is embedded in the binary. This is what makes the claim a fact rather than a prediction:
+  the name reaches the compiler only after the verification fetch passed.
+- **`assets`** and **`release`** already depend transitively on `binaries`, so a failed
+  `publish-skill` stops the pipeline before any user-facing artifact exists. Nothing is
+  published on a failed Skill verification.
+- **`images`** keeps `needs: verify` only. `cairn-server` and the web image do not embed a Skill
+  branch and must not be coupled to the Skill's publication.
+- **Ordinary CI** (`ci.yml`) has no `publish-skill` and passes no branch, so every development
+  build keeps `unpublished_skill_ref` behavior (D29).
 
 **The ordering problem, resolved**: a binary must not claim "published" on the strength of a
 step that has not run. Two rules settle it.
@@ -711,16 +763,89 @@ that release, and the binaries from that release carry the name. A binary can ne
 branch that does not exist yet, because the name only reaches a binary after the branch has been
 fetched and checked.
 
-**Why the release workflow rather than a separate publish step**: the branch must point at the
-commit the released binary was built from. Anything decoupled from the release reintroduces the
-possibility of a branch and a binary disagreeing, which is the whole problem.
+**Why the release workflow rather than a separate publish step**: the branch must be created
+and verified from the same commit that produced the binaries claiming it, and the release must
+not publish artifacts if that verification failed. A decoupled publish step reintroduces exactly
+the disagreement this decision exists to prevent.
 
 **Rejected**: creating the branch lazily at distribution time from the user's machine (Cairn
 would need write access to its own repository from a developer's laptop — absurd and unsafe);
 moving a single `skill-release` branch forward per release (reintroduces drift, and silently
-changes what existing links fetch); letting the build assume the branch will exist (the claim
-would be a prediction, and a wrong prediction installs `main`); tagging instead (verified in
-D29 not to work through CC Switch's downloader).
+changes what existing links fetch); failing a release because an existing branch points at an
+older commit (the bug this decision was revised to fix — it would fail every unchanged patch
+release); letting the build assume the branch will exist (the claim would be a prediction, and a
+wrong prediction installs `main`); tagging instead (verified in D29 not to work through CC
+Switch's downloader).
+
+---
+
+## D29b — The canonical Skill revision algorithm
+
+**Decision**: one function, in `cairn-integrate`, is the only implementation of
+`skill_revision`. Everything that needs the number calls it: the embedded binary metadata,
+direct installation, `cairn doctor`, the `publish-skill` release job, and the release
+verification tests. It is never reimplemented in shell, YAML, or a script.
+
+**Canonical input**: every file under `skills/cairn/`, as a sorted stream of
+`(relative path, normalized content)` pairs:
+
+1. Enumerate every file under `skills/cairn/` recursively. Nothing is excluded — a new
+   reference file changes the revision, which is the point.
+2. Sort by relative path as raw bytes, so the order does not depend on locale or filesystem.
+3. Normalize each file's content: CRLF → LF, and exactly one trailing newline. Cross-platform
+   determinism is required because the number is computed on a developer's machine, in CI, and
+   on a user's machine, and all three must agree.
+4. **Normalize the self-referential field** (below).
+5. Feed each pair into the hash as `path bytes`, a `0x00` separator, the content length as
+   eight big-endian bytes, then the content bytes. Length-prefixing removes any possibility of
+   two different trees hashing alike by concatenation — `a/b` + `c` and `a` + `/bc` cannot
+   collide.
+6. `skill_revision` is the first 12 hex characters of the SHA-256 of that stream.
+
+**Self-field normalization** — the circularity, and its fix. `SKILL.md` carries
+`metadata.cairn_skill_revision`, so hashing the file as-is would hash the value being computed.
+Before hashing, the canonicalizer replaces the *value* of that one field with the literal
+placeholder `<REVISION>`:
+
+```yaml
+metadata:
+  cairn_skill_schema: 1
+  cairn_skill_revision: <REVISION>     # only the value is replaced, and only for hashing
+```
+
+The replacement is on the parsed frontmatter field, not a text search, so a body line that
+happens to mention the field name is untouched. `cairn_skill_schema` is **not** normalized — it
+is hashed normally, because a schema change is a real change that must produce a new revision.
+
+**Output**: 12 lowercase hex characters, matching the format used by `contract_revision` and by
+the managed-block `content=` marker (D25, D26).
+
+**Validation**: the checked-in `metadata.cairn_skill_revision` MUST equal the computed value.
+This is asserted in three places, all calling the same function:
+
+- a unit test in `cairn-integrate` — the repository is inconsistent if it fails, so an ordinary
+  `cargo test` catches a Skill edit that forgot to update the field;
+- the `publish-skill` job, before it touches any branch;
+- the release verification fetch, recomputed from the fetched archive (D29a step 5).
+
+**How the workflow calls it**: `cairn-integrate` ships a small developer binary,
+`skillref`, whose only job is to print the canonical values:
+
+```console
+$ cargo run -q -p cairn-integrate --bin skillref -- --json
+{"skill_schema":1,"skill_revision":"c07d4419b2ae","skill_branch":"skill-release/1-c07d4419b2ae"}
+```
+
+The workflow runs that and reads its output. It is a thin wrapper over the library function —
+so the workflow, the released binary, and doctor cannot disagree — and it is the only mechanism
+by which CI learns a revision.
+
+**Rejected**: hashing `SKILL.md` as-is (circular by construction — the finding that produced
+this decision); excluding `SKILL.md` from the hash entirely (its body is most of the Skill, and
+a change to it must change the revision); storing the revision in a sidecar file instead of
+frontmatter (agents read frontmatter, so doctor could not detect an outdated installed Skill
+without a second file that could go missing); computing the digest in shell in the workflow
+(two implementations of one number, guaranteed to drift).
 
 ---
 
