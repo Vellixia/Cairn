@@ -1,10 +1,12 @@
 # Feature Specification: Agent Integration Platform
 
-**Feature Branch**: `002-agent-integration-platform`
+**Feature Directory**: `specs/002-agent-integration-platform` (recorded in `.specify/feature.json`)
+
+**Git Branch**: `claude/agent-integration-spec-r05mg4`
 
 **Created**: 2026-08-11
 
-**Status**: Draft
+**Status**: Clarified — ready for planning
 
 **Input**: User description: "Cairn connects safely and consistently to multiple AI coding agents, teaches them how to use persistent project memory, normalizes their lifecycle into one Cairn session model, preserves shared project knowledge across agents, supports CC Switch-managed distribution, and can detect, repair, migrate, and remove its integrations without damaging user configuration."
 
@@ -115,8 +117,9 @@ identical to before.
    scope is offered as an explicit migration and never performed silently.
 5. **Given** a Claude Code session started after migration, **When** the agent reads files,
    edits files, runs a test that fails, finishes a turn, hits compaction, and ends, **Then**
-   the observations, the turn checkpoint, the compaction handoff, and the session-end handoff
-   are the same records Feature 001 produced for the same actions.
+   the observations, the quiescence checkpoint, the compaction handoff, and the session-end
+   handoff are the same records Feature 001 produced for the same actions — the canonical rename
+   changes no stored behavior.
 6. **Given** the installed Claude Code version exposes lifecycle events Feature 001 did not
    use, **When** Cairn connects, **Then** it registers only the events its canonical lifecycle
    needs and reports the rest as unused rather than claiming them.
@@ -180,8 +183,8 @@ does not line up with Claude Code's, and the tempting shortcuts are wrong. Getti
 is what makes the capability model trustworthy.
 
 **Independent Test**: In a scratch repository with OpenCode installed, connect it, run a short
-session, and assert that observations are captured, that going idle produces a turn checkpoint
-and leaves the Cairn session active, and that the capability report does not claim a
+session, and assert that observations are captured, that going idle produces a quiescence
+checkpoint and leaves the Cairn session active, and that the capability report does not claim a
 session-completion signal OpenCode does not send.
 
 **Acceptance Scenarios**:
@@ -193,20 +196,28 @@ session-completion signal OpenCode does not send.
 2. **Given** an OpenCode session doing work, **When** tools complete, **Then** Cairn records
    canonical observations for them.
 3. **Given** an OpenCode session that goes idle, **When** the idle signal arrives, **Then**
-   Cairn records a turn checkpoint, the Cairn session remains `active`, and no durable handoff
-   is produced — idleness is not the end of a session.
-4. **Given** an OpenCode session that compacts, **When** the compaction boundary is signalled,
+   Cairn records a quiescence checkpoint, the Cairn session remains `active`, and no durable
+   handoff is produced — idleness means the agent stopped working, not that a turn succeeded and
+   not that the session ended.
+4. **Given** an OpenCode session that goes idle immediately after an error, **When** the idle
+   signal arrives, **Then** Cairn records the same quiescence checkpoint and no success or
+   failure observation is synthesized from it; the error observation comes from the tool event
+   that produced it.
+5. **Given** an OpenCode session that compacts, **When** the compaction boundary is signalled,
    **Then** Cairn produces a durable handoff for that boundary and the session remains usable.
-5. **Given** OpenCode provides no signal that a session has ended, **When** the capability
+6. **Given** OpenCode provides no signal that a session has ended, **When** the capability
    report is produced, **Then** OpenCode is not reported as FULL, the report states that
    automatic session completion is unavailable, and OpenCode sessions leave `active` only
-   through Cairn's existing deterministic boundaries — an explicit end, or reconciliation at
-   daemon start.
-6. **Given** a future OpenCode adapter mechanism that finalizes or recovers every session
-   deterministically and within a bounded contract, **When** that mechanism is demonstrated by
-   test, **Then** OpenCode may be reported FULL on that basis — the requirement is the
-   completion guarantee, not a vendor event of any particular name.
-7. **Given** Cairn's plugin registration is already present, **When** connect runs again,
+   through Cairn's existing deterministic boundaries — an explicit end, reconciliation at daemon
+   start, or the inactivity timeout — which are recovery from silence, not completion.
+7. **Given** only those safety nets, **When** the integration level is computed, **Then** they
+   contribute nothing towards FULL, and the report says OpenCode sessions are closed by
+   inactivity rather than completed.
+8. **Given** a future OpenCode mechanism that establishes that a session actually terminated —
+   not merely that it went quiet — **When** that mechanism is demonstrated by test, **Then**
+   OpenCode may be reported FULL on that basis; the requirement is evidence of termination, not
+   a vendor event of any particular name.
+9. **Given** Cairn's plugin registration is already present, **When** connect runs again,
    **Then** it is updated in place, never appended a second time, and unrelated plugin
    registrations are untouched.
 
@@ -234,8 +245,9 @@ the owner of those resources, and that no unrelated CC Switch configuration chan
    reports CC Switch as an integration manager — explicitly not as an agent — with its version
    where obtainable and the applications it can distribute to.
 2. **Given** CC Switch is present and preferred, **When** the developer distributes Cairn's
-   MCP server through it, **Then** Cairn uses CC Switch's officially supported import surface
-   and never writes to CC Switch's private storage.
+   MCP server through it, **Then** Cairn uses CC Switch's officially supported import surface,
+   the developer confirms the import inside CC Switch, and Cairn never writes to CC Switch's
+   private storage.
 3. **Given** the distribution has been performed, **When** diagnostics run, **Then** Cairn
    verifies the resulting bindings in each selected application and reports exactly one Cairn
    MCP entry per application.
@@ -246,9 +258,16 @@ the owner of those resources, and that no unrelated CC Switch configuration chan
    diagnostics run afterwards, **Then** the Cairn integration is still reported healthy and no
    Cairn-owned resource was removed or duplicated by the switch.
 6. **Given** resources distributed through CC Switch, **When** the developer removes Cairn's
-   CC Switch management, **Then** only Cairn's own resources are withdrawn, every other CC
-   Switch-managed provider, MCP server, prompt, and Skill is untouched, and native lifecycle
-   adapters installed directly by Cairn are unaffected.
+   CC Switch management and CC Switch documents no automated removal interface, **Then** Cairn
+   reports manager action required — naming the resource, the target applications, and the
+   supported CC Switch removal path — writes nothing to CC Switch's own storage, and does not
+   report the resource as removed.
+7. **Given** the developer has performed that removal inside CC Switch, **When** they re-run
+   diagnostics, **Then** Cairn verifies the target applications' real configuration, updates its
+   ownership record from what it finds, and reports the resource gone only if it actually is.
+8. **Given** any of the above, **When** it completes, **Then** every other CC Switch-managed
+   provider, MCP server, prompt, and Skill is untouched, and native lifecycle adapters installed
+   directly by Cairn are unaffected.
 
 ---
 
@@ -378,16 +397,26 @@ in which the resource is absent or doubled.
 2. **Given** the same disconnect, **When** it completes, **Then** no project, task, session,
    observation, memory, or handoff is deleted, and no unrelated MCP server, hook, plugin,
    instruction, or credential is modified.
-3. **Given** a resource whose recorded owner is CC Switch, **When** the developer disconnects
-   the agent, **Then** Cairn does not delete that resource on CC Switch's behalf; it reports
-   what remains and how to withdraw it through the manager.
+3. **Given** a resource whose recorded owner is an integration manager, **When** the developer
+   disconnects the agent, **Then** Cairn does not delete that resource on the manager's behalf
+   and does not touch the manager's own storage; it reports manager action required with the
+   supported withdrawal path, and verifies the result only after the developer has acted.
 4. **Given** other agents are connected, **When** one is disconnected, **Then** the others
    continue working with no change to their configuration.
 5. **Given** a Cairn resource owned directly, **When** the developer migrates it to
-   manager-owned, **Then** Cairn installs the new one, verifies it, then removes the old one,
-   and records the ownership change — and if verification fails, it stops with both the old
-   resource intact and the problem reported.
-6. **Given** an instruction file with only Cairn's block in it, **When** Cairn's block is
+   manager-owned, **Then** Cairn records the resource as migrating, installs the target through
+   the manager's supported interface, verifies the result in the agent's real configuration, and
+   only then removes the source — leaving exactly one owner; and if verification fails at any
+   step, the previously working resource is intact and the failure is reported.
+6. **Given** a migration whose two owners write physically distinct locations, **When** the
+   overlap window exists, **Then** exactly one resource is effective throughout according to the
+   agent's own precedence rules, and diagnostics report the state as migrating rather than as
+   duplicated or conflicting ownership; where overlap would make the effective configuration
+   ambiguous, Cairn refuses to migrate automatically and states the manual sequence.
+7. **Given** a migration interrupted part-way, **When** diagnostics run, **Then** the migrating
+   state is reported with its source and target, and the developer can either resume or reverse
+   it without first disconnecting the agent.
+8. **Given** an instruction file with only Cairn's block in it, **When** Cairn's block is
    removed, **Then** any content the developer added remains and the file is not deleted merely
    because Cairn's part is gone.
 
@@ -463,6 +492,15 @@ error instead of resolving to an arbitrary session.
   conflicting ownership, never silently adopted or deleted.
 - **The configuration manager is uninstalled while it still owns Cairn resources**: reported as
   orphaned resources, with the option to take direct ownership.
+- **The configuration manager offers no documented way to remove what it distributed**: Cairn
+  reports manager action required with the supported path, writes nothing to the manager's own
+  state, and verifies the outcome after the developer acts.
+- **A migration is interrupted with both resources present**: reported as migrating with its source
+  and target, not as accidental duplication, and resumable or reversible without disconnecting.
+- **A session's agent goes quiet after an error rather than after answering**: a quiescence
+  checkpoint is recorded; no outcome is inferred from the quiescence itself.
+- **A session is closed by the inactivity timeout**: it is reported as closed by inactivity, the
+  handoff is marked as recovered, and this contributes nothing to the agent's capability level.
 - **A dry run is executed against a broken configuration**: it reports the conflict and still
   writes nothing.
 - **A connect touches several files and one write fails**: the command fails, reports exactly
@@ -490,15 +528,19 @@ rather than discovered later in planning.
   a vendor session-end signal is the preferred mechanism for it, not the requirement itself.**
   FULL means Cairn's MCP server, the usage contract as persistent instructions, the Cairn Skill
   where the agent supports Skills, a stable session identity, automatic context at session start,
-  automatic tool capture, turn/checkpoint boundaries, **and** a reliable way for Cairn to finalize
-  or recover a session without user intervention, inside a defined bounded lifecycle contract. An
-  adapter may satisfy the last clause through a different deterministic, testable mechanism, so
-  long as the resulting Cairn semantics are equivalent and demonstrated rather than asserted.
-  Against current verified capability: Claude Code is FULL; Codex is eligible for FULL if Cairn's
-  session-end handoff reliably fits inside Codex's 1-second default and 3-second maximum handler
-  budget and its failure and recovery tests pass; OpenCode is not FULL, because `session.idle`
-  must never be treated as termination and no equivalent finalization mechanism exists for it yet.
-  (FR-109, FR-110, FR-207, FR-208, FR-209, SC-127, SC-128)
+  automatic tool capture, quiescence checkpoints, **and** a mechanism that positively establishes
+  that a session terminated and finalizes it without user intervention, inside a defined bounded
+  contract. An adapter may satisfy the last clause through a different deterministic, testable
+  mechanism only where that mechanism establishes termination with equivalent fidelity. Cairn's
+  generic safety nets — the inactivity timeout that closes a session nothing has driven for hours,
+  and daemon-start reconciliation — are recovery from silence, not evidence that a session ended;
+  they remain in place, they may backstop a missed or failed completion boundary, and they never
+  count towards FULL. Against current verified capability: Claude Code is FULL; Codex is eligible
+  for FULL if Cairn's session-end handoff reliably fits inside Codex's 1-second default and
+  3-second maximum handler budget and its injected-failure recovery tests pass; OpenCode is not
+  FULL, because `session.idle` must never be treated as termination, and a timeout is not a
+  substitute for one.
+  (FR-109, FR-110, FR-207, FR-208, FR-209, FR-229, SC-127, SC-128, SC-129, SC-131)
 
 - **Q: At which scope does Cairn install the resources it owns, by default?** → **A: Per resource
   kind, not one universal default — separating portable project intent from machine-local
@@ -525,7 +567,7 @@ rather than discovered later in planning.
   that differs only in formatting or ordering is semantically equivalent and is reported healthy,
   not modified. No recovery path may require disconnecting and reconnecting. Adopting a developer's
   customization as Cairn-managed content is a separate, explicit future operation; repair itself
-  never adopts an edit silently. (FR-177, FR-221 – FR-225, SC-129)
+  never adopts an edit silently. (FR-177, FR-221 – FR-225, SC-130)
 
 - **Q: Does Feature 002 include a committed project-local desired-state manifest?** → **A: The
   committed file is deferred; the model behind it is not.** Feature 002 has one canonical internal
@@ -537,7 +579,7 @@ rather than discovered later in planning.
   deterministic, secret-free, and serializable so that a later feature can expose it as a committed
   manifest without changing adapter or reconciliation semantics. Manifest-versus-reality drift
   handling, manifest merge semantics, and automatic application on clone are out of scope here.
-  (FR-201, FR-202, FR-226, FR-227, SC-130, Out of Scope)
+  (FR-201, FR-202, FR-226, FR-227, SC-135, Out of Scope)
 
 ## Requirements *(mandatory)*
 
@@ -570,7 +612,7 @@ an ordering.
   integration surfaces that agent actually supports. The profile MUST cover at least: MCP
   configuration and the scopes at which it can be written; persistent instructions and their
   scopes; Skills and their scopes; a session-open signal; a tool-success signal; a
-  distinguishable tool-failure signal; a turn boundary; a pre-compaction boundary; a
+  distinguishable tool-failure signal; a quiescence boundary; a pre-compaction boundary; a
   post-compaction boundary; a session-close signal; delivery of context at or near session open;
   availability of a stable agent-supplied session identifier; and whether lifecycle handlers
   require a user trust or activation step inside the agent before they run.
@@ -581,7 +623,7 @@ an ordering.
   verified state of installed resources, using these levels:
   **FULL** — Cairn's MCP server, the Cairn usage contract as persistent instructions, the Cairn
   Skill where the agent supports Skills, a stable session identity, context delivered
-  automatically at session start, automatic tool capture, turn and checkpoint boundaries, and a
+  automatically at session start, automatic tool capture, quiescence checkpoints, and a
   **reliable lifecycle-completion guarantee** as defined in FR-207;
   **MCP_PLUS** — Cairn's MCP server plus at least one of persistent instructions, the Skill, or
   partial lifecycle capture, but not everything FULL requires;
@@ -592,14 +634,21 @@ an ordering.
 - **FR-111**: When a capability is absent, Cairn MUST name the specific behavior the developer
   will not get, rather than reporting a numeric or unlabeled score.
 - **FR-207**: A **reliable lifecycle-completion guarantee** means that, without user intervention
-  and within a bounded, documented lifecycle contract, Cairn finalizes or recovers every session
-  the agent opens — producing the session's durable handoff and leaving the session in a terminal
-  state. A signal from the agent whose documented meaning is that the session has ended is the
-  preferred mechanism. It is not the only permitted one: an adapter MAY satisfy this requirement
-  through another deterministic mechanism, provided that mechanism is bounded, produces equivalent
-  Cairn semantics, and is demonstrated by test rather than asserted. An adapter that has no such
-  mechanism MUST NOT be reported as FULL, and its report MUST name automatic session completion as
-  the missing behavior.
+  and within a bounded documented contract, Cairn positively establishes that a session has
+  terminated and finalizes it — producing that session's durable handoff and leaving it in a
+  terminal state. A signal from the agent whose documented meaning is that the session has ended
+  is the preferred mechanism. An adapter MAY satisfy this requirement through a different
+  deterministic mechanism only where that mechanism **establishes termination with equivalent
+  fidelity** — it observes that the session actually ended — and is demonstrated by test rather
+  than asserted. An adapter with no such mechanism MUST NOT be reported as FULL, and its report
+  MUST name automatic session completion as the missing behavior.
+- **FR-229**: Cairn's generic safety nets — the inactivity timeout that closes a session nothing
+  has driven for hours, and daemon-start reconciliation of sessions left `active` by a previous
+  run (FR-009) — are **recovery from silence, not evidence of termination**. They MUST continue to
+  exist, they MAY backstop a normal completion boundary that was missed or that failed, and they
+  MUST NOT, alone or in combination, satisfy FR-207 or contribute to a FULL classification for any
+  agent. An agent whose only route to a terminal session state is a timeout is below FULL, and its
+  report MUST say that sessions are closed by inactivity rather than completed.
 - **FR-208**: Where an agent's session-boundary handler runs under a deadline shorter than the
   work Cairn would do at that boundary, the adapter MUST be shown by measurement to complete its
   session-end work reliably inside the agent's own budget, or Cairn MUST NOT claim the completion
@@ -615,25 +664,37 @@ an ordering.
   No vendor event name, payload shape, or ordering assumption may reach Cairn's core semantics.
 - **FR-113**: The canonical vocabulary MUST be the minimum set that expresses Feature 001's
   established behavior across the supported agents: session opened; tool succeeded; tool failed;
-  turn completed; context compacting; context compacted; session closed. Feature 002 MUST NOT
+  **agent quiesced**; context compacting; context compacted; session closed. Feature 002 MUST NOT
   add canonical events that no supported agent signals.
 - **FR-114**: Canonical events MUST preserve Feature 001's meanings exactly: session opened
   starts or resumes a session and is the context-delivery point; tool succeeded and tool failed
-  produce the corresponding typed observations; turn completed is a checkpoint that leaves the
-  session `active` and produces no durable handoff; context compacting produces a durable handoff
-  and leaves the session usable; session closed completes the session and produces its final
-  handoff.
+  produce the corresponding typed observations; **agent quiesced** means the agent has stopped
+  working and is waiting — it is a checkpoint that leaves the session `active` and produces no
+  durable handoff; context compacting produces a durable handoff and leaves the session usable;
+  session closed completes the session and produces its final handoff.
 - **FR-115**: An adapter MUST NOT emit a canonical event the agent has not actually signalled.
   Where an agent provides no signal for a canonical event, that event simply does not occur for
   that agent, the gap is reflected in the capability profile, and Cairn's existing deterministic
   session boundaries (FR-009) govern the outcome.
 - **FR-116**: An adapter MUST NOT map an agent's idle, quiet, or inactive signal to session
-  closed. Session completion requires a signal whose documented meaning is that the session has
-  ended.
+  closed. Emitting session closed requires evidence that the session actually terminated: a signal
+  whose documented meaning is that it ended, or another mechanism meeting FR-207's
+  equivalent-fidelity bar. Absence of activity is never such evidence (FR-229).
 - **FR-117**: An adapter MUST NOT report a tool failure that the agent's payload does not
   establish. Where an agent reports success and failure on one event, the adapter MUST classify
   from the payload's own outcome data; where the payload is ambiguous, the observation MUST record
   the call without asserting failure.
+- **FR-230**: **Agent quiesced** is deliberately weaker than "the agent finished answering". It
+  asserts only that the agent has stopped working and is waiting, which is the strongest claim all
+  supported agents actually establish: one signals that it finished responding, another signals
+  that its turn stopped, and a third signals only that the session became idle — and that third
+  signal can follow an error as readily as a completed answer. Cairn MUST NOT infer from this event
+  that the preceding work succeeded, that a turn produced an answer, or that the session is
+  finished. It preserves Feature 001's `Stop` behavior exactly: flush pending capture, record the
+  checkpoint, leave the session `active`, write no handoff (FR-032).
+- **FR-231**: Where an agent's quiescence signal can follow a failure, the adapter MUST NOT
+  synthesize a success or failure observation from the quiescence event itself. Outcome
+  observations come only from tool events (FR-117).
 - **FR-118**: Every canonical event MUST carry the identity of the agent session that produced
   it, so that concurrent sessions are routed correctly (FR-010).
 - **FR-119**: Post-compaction is an extension to Feature 001's boundary set. It MUST leave the
@@ -728,19 +789,51 @@ an ordering.
   integration, managed instructions, Skill — exactly one intended owner: Cairn directly, an
   integration manager, or external (installed by the user or another tool and not managed by
   Cairn).
-- **FR-146**: Cairn MUST NOT create the same logical resource under two owners. An operation that
-  would do so MUST fail with a conflicting-ownership error naming both.
+- **FR-146**: In **steady state**, Cairn MUST NOT hold the same logical resource under two owners.
+  An operation that would leave two owners standing MUST fail with a conflicting-ownership error
+  naming both. This requirement governs stable state and accidental duplication; it does not
+  govern the controlled transition defined in FR-148, which is the only sanctioned way two
+  physical resources for one logical resource may coexist.
 - **FR-147**: Mixed ownership across resource kinds for one agent MUST be valid — for example
   lifecycle and instructions owned directly while the MCP entry and Skill are manager-owned.
-- **FR-148**: Cairn MUST support migrating a resource between owners without a window in which
-  the resource is absent or duplicated: install the new owner's resource, verify it, then remove
-  the previous one. If verification fails, the previous resource MUST remain and the migration
-  MUST report failure.
+- **FR-148**: Cairn MUST support migrating a resource between owners without ever leaving the
+  developer with **no effective resource**. The migration MUST be an explicit, recorded state:
+  - Where both owners write the same effective slot and the format permits it, the change MUST be
+    a single atomic replacement, and no overlap occurs.
+  - Where the owners write physically distinct locations, bounded temporary overlap is permitted
+    **only** for the duration of the migration, and only where the agent's own precedence rules
+    make the effective configuration during that window unambiguous. Where overlap would make the
+    effective configuration ambiguous or unsafe, Cairn MUST NOT proceed automatically; it reports
+    the conflict and the manual sequence instead.
+  - The target MUST be verified before the source is removed.
+  - On success, exactly one owner and one resource remain, and the record names it.
+  - On failure at any step, the previously working configuration MUST be preserved or restored,
+    and the migration MUST report failure.
+- **FR-228**: While a migration is in progress, Cairn MUST record the resource as migrating,
+  naming the source owner and the target owner. Diagnostics MUST report that state distinctly from
+  `duplicated` and from `conflicting owner`, and a migration that was interrupted MUST be
+  resumable or reversible rather than left indistinguishable from accidental duplication.
 - **FR-149**: Cairn MUST only remove resources whose recorded owner is Cairn directly. A
-  manager-owned resource MUST be withdrawn through that manager's own interface, and Cairn MUST
-  report what it did not remove and why.
+  manager-owned resource MUST be withdrawn through an interface that manager documents for that
+  purpose; where no such interface exists, Cairn MUST NOT remove it by any other means and MUST
+  report what it did not remove, why, and the supported path for the developer to do it
+  (FR-229).
 - **FR-150**: Cairn MUST detect a Cairn resource that exists under an owner other than the one
   recorded, and MUST report it rather than adopting or deleting it.
+- **FR-232**: Cairn MUST interact with an integration manager only through interfaces that manager
+  documents for third-party use. Writing to a manager's private storage, database, or internal
+  state is prohibited in every operation — connect, migrate, repair, and disconnect alike — and no
+  requirement in this feature may be satisfied by doing so.
+- **FR-233**: Where a manager documents an import or distribution interface but no automated
+  removal interface, Cairn MUST NOT claim to have removed a manager-owned resource. It MUST report
+  a distinct **manager action required** outcome that names the resource, the target applications,
+  and the supported path for the developer to withdraw it inside that manager, and it MUST leave
+  Cairn's record showing the resource as still manager-owned until verification says otherwise.
+- **FR-234**: After a developer completes a manager-side action, Cairn MUST be able to verify the
+  real outcome by inspecting the target applications' own configuration, and MUST update its
+  ownership record from what it finds rather than from what was requested.
+- **FR-235**: Where a manager does expose a documented automated removal interface, the adapter
+  MAY use it, and the same verification in FR-234 still applies before the record is updated.
 
 ### Installation scope
 
@@ -795,8 +888,21 @@ an ordering.
 - **FR-155**: Where an operation spans several files, Cairn MUST verify the outcome and, on
   partial failure, MUST report failure naming exactly which changes were applied and which were
   not. Cairn MUST NOT report success for an incomplete integration.
-- **FR-156**: Cairn MUST create a recoverable copy of any pre-existing file it modifies, and MUST
-  state where it is, so a developer can restore the prior state.
+- **FR-156**: Recoverability comes from atomic replacement, not from copying the developer's
+  files. The original file MUST remain intact and readable until its replacement is complete
+  (FR-154), so an interrupted operation leaves the prior state in place. Cairn MUST NOT, as normal
+  behavior, persist an additional copy of a pre-existing configuration file, because those files
+  routinely carry tokens, provider credentials, and environment secrets that Cairn is forbidden to
+  hold (FR-197, FR-200).
+- **FR-238**: Where recovery content is needed, Cairn MUST preserve only the Cairn-owned content
+  that is about to change — the managed block, the specific owned entry, or a file Cairn generated
+  in its entirety — never the surrounding file. If the Cairn-owned content cannot be isolated from
+  the rest of the file, Cairn MUST NOT proceed by copying the whole file; it reports the condition
+  and changes nothing (FR-137).
+- **FR-239**: Recovery artifacts are local machine state. They MUST NOT be synchronized, MUST NOT
+  have their content written to logs or diagnostics, and MUST be subject to the same redaction as
+  any other stored content. A recovery artifact MUST NOT contain a credential belonging to
+  configuration Cairn does not own.
 - **FR-157**: All connect, repair, migrate, and disconnect operations MUST be idempotent:
   repeating one changes nothing and reports `unchanged`.
 - **FR-158**: Deduplication of Cairn-owned entries MUST be deterministic: given the same input
@@ -834,7 +940,8 @@ an ordering.
 - **FR-167**: The health check MUST report per-resource state using a defined, machine-readable
   set of conditions that at minimum distinguishes: healthy; missing; modified; outdated;
   duplicated; conflicting owner; malformed configuration; installed but not yet activated by the
-  user; and unknown.
+  user; migrating, with its source and target owner (FR-228); manager action required, with the
+  supported path (FR-233); and unknown.
 - **FR-168**: The health check MUST report, per agent, its detection state, its version where
   obtainable, its version compatibility classification, its capability level, and which expected
   lifecycle coverage is present and which is absent.
@@ -866,7 +973,9 @@ an ordering.
   entry, or only a file Cairn generated in full. Content outside Cairn's ownership markers MUST
   never be overwritten, under any option.
 - **FR-222**: Before a forced repair replaces modified Cairn-managed content, Cairn MUST preserve
-  the previous content somewhere the developer can recover it, and MUST say where.
+  the previous content somewhere the developer can recover it, and MUST say where. What is
+  preserved is the Cairn-owned block, entry, or wholly Cairn-generated file only — never the
+  enclosing configuration file and never any setting Cairn does not own (FR-238, FR-239).
 - **FR-223**: Cairn MUST compare managed resources by meaning, not by bytes. A resource that
   differs from the canonical version only in formatting, whitespace, or the ordering of
   order-insensitive entries MUST be reported healthy, not modified.
@@ -886,7 +995,18 @@ an ordering.
   instruction, credential, or setting, and MUST NOT affect any other connected agent.
 - **FR-181**: Withdrawing an integration manager's distribution of Cairn resources MUST be a
   separate operation from disconnecting a native agent adapter, and either MUST be possible
-  without the other.
+  without the other. Where the manager exposes no documented automated removal interface, that
+  withdrawal completes as the manager-action-required outcome of FR-233 followed by the
+  verification of FR-234 — never by Cairn editing the manager's own state.
+- **FR-236**: Migration from direct ownership to manager ownership MAY be automated up to the
+  manager's supported import and user-confirmation boundary; Cairn drives the import request,
+  the developer confirms it inside the manager, and Cairn verifies the resulting application
+  configuration before removing the resource it owns directly (FR-148).
+- **FR-237**: Migration from manager ownership to direct ownership MUST NOT delete the
+  manager-owned resource behind the manager's back. Cairn installs and verifies the direct
+  resource, then reports the manager-side withdrawal as manager action required (FR-233), and
+  the resource remains recorded as migrating until verification confirms exactly one owner
+  (FR-228).
 
 ### Local integration state
 
@@ -994,10 +1114,13 @@ an ordering.
 - **Integration Level**: The honest summary of a connected agent — FULL, MCP_PLUS, MCP_ONLY, or
   UNSUPPORTED — derived from the capability profile, the verified state of installed resources, and
   whether a lifecycle-completion guarantee has been demonstrated.
-- **Lifecycle Completion Guarantee**: The demonstrated property that every session an agent opens
-  is finalized or recovered without user intervention, within a bounded documented contract,
-  producing that session's durable handoff. A vendor session-end signal is the preferred mechanism;
-  any deterministic, bounded, tested mechanism with equivalent Cairn semantics qualifies.
+- **Lifecycle Completion Guarantee**: The demonstrated property that Cairn positively establishes
+  that a session terminated and finalizes it, without user intervention and within a bounded
+  documented contract, producing that session's durable handoff. A vendor session-end signal is the
+  preferred mechanism; another deterministic, bounded, tested mechanism qualifies only where it
+  establishes termination with equivalent fidelity. Recovery from silence — the inactivity timeout
+  and daemon-start reconciliation — is a safety net that backstops this property and never
+  constitutes it.
 - **Installation Scope**: Where a Cairn-owned resource lives for one agent — committed project,
   developer-local project, or per-user — recorded alongside its owner and never changed implicitly.
 - **Desired Integration State**: The single canonical, versioned, deterministic, secret-free model
@@ -1005,8 +1128,19 @@ an ordering.
   the developer's choices, the local integration record, and detected configuration. Every
   integration operation reads from it.
 - **Canonical Lifecycle Event**: One of Cairn's own lifecycle boundaries — session opened, tool
-  succeeded, tool failed, turn completed, context compacting, context compacted, session closed —
-  carrying the producing agent session's identity.
+  succeeded, tool failed, agent quiesced, context compacting, context compacted, session closed —
+  carrying the producing agent session's identity. *Agent quiesced* asserts only that the agent
+  stopped working and is waiting: it is the strongest claim every supported agent establishes, and
+  it implies nothing about success or about the session being over.
+- **Resource Migration State**: The recorded, transient condition of a resource moving between
+  owners, naming its source and target. Distinct from duplication and from conflicting ownership,
+  and either resumable or reversible.
+- **Manager Action Required**: The outcome Cairn reports when completing an operation would need a
+  manager interface that manager does not document for third parties. Names the resource, the
+  target applications, and the supported path the developer follows inside that manager.
+- **Recovery Artifact**: The Cairn-owned content preserved before a forced change — a managed
+  block, an owned entry, or a wholly Cairn-generated file. Never an enclosing configuration file,
+  never a setting Cairn does not own, and never synchronized or logged.
 - **Canonical Tool Category**: The Feature 001 observation type a vendor tool call normalizes to,
   optionally with the raw vendor tool name retained as bounded provenance.
 - **Cairn Agent Usage Contract**: The single versioned source that teaches an agent how to use
@@ -1083,8 +1217,12 @@ criteria stay unambiguous.
 - **SC-116**: Disconnecting one agent leaves 100% of projects, tasks, sessions, observations,
   memories, and handoffs intact, leaves every other connected agent's configuration unchanged, and
   leaves every unrelated setting in the touched files byte-identical.
-- **SC-117**: Migrating a resource between owners never produces an intermediate state in which
-  the resource is absent or present twice, verified by inspecting configuration at each step.
+- **SC-117**: Migrating a resource between owners never produces a state in which the developer has
+  no effective resource, verified by inspecting configuration after every step: where both owners
+  write one effective slot, zero intermediate states exist at all; where they write distinct
+  locations, every intermediate state has exactly one unambiguous effective resource and is
+  recorded as migrating. On completion exactly one owner remains, and on induced failure at each
+  step the previously working configuration is intact.
 - **SC-118**: Preview mode produces zero filesystem modifications, verified by comparing a
   checksum of every candidate file before and after, across every supported operation.
 - **SC-119**: Zero credential, token, or key values appear in preview output, diagnostic output,
@@ -1111,19 +1249,41 @@ criteria stay unambiguous.
   resource kind allows: with default scopes, connecting produces zero committed-file changes for
   lifecycle handlers, and choosing the shared option produces exactly the committed changes it
   described in preview and no others.
-- **SC-127**: No agent is reported FULL unless a test demonstrates that every session it opens is
-  finalized or recovered without user intervention inside its bounded lifecycle contract; an agent
-  lacking that demonstration is reported below FULL with automatic session completion named as the
-  missing behavior.
-- **SC-128**: Across at least 100 measured session-end boundaries per agent that imposes a handler
-  deadline, Cairn's session-end work completes inside that agent's own budget in 100% of cases and
-  exceeds it in none; every boundary that could not complete is recovered at the next
-  deterministic boundary, with zero sessions left without a durable handoff.
-- **SC-129**: A Cairn-managed resource that differs from the canonical version only in formatting,
+- **SC-127**: No agent is reported FULL unless a test demonstrates a mechanism that positively
+  establishes that its sessions terminated and finalizes them inside a bounded contract. Recovery
+  from silence never counts towards this (SC-131). An agent lacking that demonstration is reported
+  below FULL with automatic session completion named as the missing behavior.
+- **SC-128**: **Nominal performance.** Across at least 100 session-end boundaries per agent that
+  imposes a handler deadline, measured with release builds and a healthy daemon, Cairn's
+  session-end work completes inside that agent's own budget in 100% of runs, and the adapter
+  exceeds the agent's deadline in none.
+- **SC-129**: **Injected-failure recovery**, tested separately from SC-128. For each induced
+  condition — handler timeout, handler crash, and daemon unavailable at the boundary — the session
+  is subsequently reconciled with a durable handoff, zero sessions are left permanently without
+  one, and zero agent sessions are aborted or visibly disrupted by the failure.
+- **SC-130**: A Cairn-managed resource that differs from the canonical version only in formatting,
   whitespace, or the ordering of order-insensitive entries is reported healthy in 100% of seeded
   cases, and a resource with a semantic edit is reported modified in 100% of seeded cases, with
   default repair changing neither.
-- **SC-130**: The desired-state model serializes deterministically — identical inputs produce
+- **SC-131**: No agent reaches FULL on the strength of recovery-from-silence. With the inactivity
+  timeout and daemon-start reconciliation as the only routes to a terminal session state, the
+  computed level is below FULL in 100% of cases, and the report states that sessions are closed by
+  inactivity rather than completed — asserted for OpenCode specifically under currently verified
+  capabilities.
+- **SC-132**: Withdrawing a manager-owned resource where the manager documents no automated
+  removal interface produces zero writes to the manager's own storage, verified by checksumming
+  that storage before and after; the outcome is reported as manager action required with the
+  supported path; and after the developer acts, verification against the target applications'
+  real configuration updates the ownership record in 100% of cases.
+- **SC-133**: Across every connect, repair, migrate, and disconnect operation on configuration
+  files seeded with recognizable credentials, zero credentials belonging to configuration Cairn
+  does not own appear anywhere in Cairn's recovery artifacts, local state, logs, diagnostics, or
+  sync payloads; and zero whole-file copies of pre-existing configuration are created as normal
+  behavior.
+- **SC-134**: An agent quiescence signal that follows an error produces exactly one checkpoint and
+  zero synthesized success or failure observations, asserted by fixture for every adapter whose
+  quiescence signal can follow a failure.
+- **SC-135**: The desired-state model serializes deterministically — identical inputs produce
   byte-identical output across runs and machines — contains zero secrets when serialized from
   configurations seeded with recognizable secrets, and is the single input consumed by onboarding,
   preview, diagnostics, repair, and manager migration, asserted by test.

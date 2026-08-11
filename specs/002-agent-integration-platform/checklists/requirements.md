@@ -38,7 +38,9 @@
       source, and is confined to Assumptions and adapter-facing requirements
 - [x] No canonical lifecycle event is defined that no supported agent signals
 - [x] No vendor signal is mapped to a Cairn boundary on name similarity alone
-- [x] Configuration ownership is unambiguous: exactly one owner per agent per resource kind
+- [x] Configuration ownership is unambiguous in steady state, with the migration transition
+      defined explicitly rather than forbidden by accident
+- [x] No requirement depends on an undocumented third-party interface
 - [x] Installation scope is defined per resource kind and recorded alongside ownership
 - [x] Privacy boundary is explicit for every newly exposed vendor payload field
 - [x] Idempotency, migration, concurrency, and failure behavior are each stated as requirements
@@ -70,8 +72,8 @@ item passes.
 | Written for non-technical stakeholders | Pass | Vendor terminology is unavoidable for an integration feature and is explained in place |
 | All mandatory sections completed | Pass | Scenarios, clarifications, requirements, entities, success criteria, assumptions, out of scope |
 | No [NEEDS CLARIFICATION] markers | Pass | 0 remaining (was 3) |
-| Requirements testable and unambiguous | Pass | 127 requirements, FR-101–FR-227, no duplicates, no gaps |
-| Success criteria measurable | Pass | 30 criteria, SC-101–SC-130, each with a count, percentage, byte-identity, or demonstrated-by-test assertion |
+| Requirements testable and unambiguous | Pass | 127 requirements at this iteration, FR-101–FR-227, no duplicates, no gaps |
+| Success criteria measurable | Pass | 30 criteria at this iteration, SC-101–SC-130, each with a count, percentage, byte-identity, or demonstrated-by-test assertion |
 | Success criteria technology-agnostic | Pass | No product, language, or file-format names in the criteria |
 | Acceptance scenarios defined | Pass | Every story has Given/When/Then scenarios; numbering is contiguous per story |
 | Edge cases identified | Pass | 23 edge cases |
@@ -101,3 +103,38 @@ item passes.
 - Which specific configuration file each adapter writes for each resource kind and scope.
 - Whether Cairn's MCP server advertises a newer protocol revision than Feature 001 negotiates.
 - Fixture corpus contents for the 20-configuration preservation criterion (SC-104).
+- Where the migrating state is persisted and how an interrupted migration is resumed or reversed.
+- The exact wire name and shape of the `manager action required` outcome.
+- Where recovery artifacts live on disk and how long they are retained.
+
+### Iteration 3 — 2026-08-11 (reconciliation pass)
+
+Seven findings were raised against iteration 2 and resolved without broadening the feature: no new
+user stories, no new vendor research beyond confirming Cairn's own idle reaper in
+`crates/cairnd/src/recover.rs`.
+
+| Finding | Resolution |
+|---|---|
+| **H1** ownership migration was impossible as written | FR-146 now governs steady state only; FR-148 defines the transition (atomic where one effective slot exists, bounded overlap only where vendor precedence keeps the effective configuration unambiguous, target verified before source removal, failure preserves the working state); new FR-228 makes `migrating` an explicit, resumable, separately-reported condition; SC-117 restated as "never zero effective resources" rather than "never two" |
+| **H2** the existing ~2 h idle reaper could have bought OpenCode a FULL rating | FR-207 now requires a mechanism that *positively establishes termination*; new FR-229 classifies the inactivity timeout and daemon-start reconciliation as recovery-from-silence that may backstop a boundary but never counts towards FULL; FR-116 aligned; SC-127 restated; new SC-131 asserts it for OpenCode specifically |
+| **H3** removal assumed a CC Switch API that is not documented | New FR-232 (documented interfaces only, never private storage), FR-233 (`manager action required` outcome), FR-234 (verify against the applications' real configuration), FR-235 (use an official removal interface if one exists); FR-149/FR-181 aligned; FR-236/FR-237 split the two migration directions; new SC-132 |
+| **H4** whole-file backups would have duplicated unrelated credentials | FR-156 rewritten around atomic replacement rather than copying; new FR-238 limits preserved content to the Cairn-owned block/entry/generated file and refuses rather than copying a whole file it cannot isolate; new FR-239 keeps artifacts local, unsynced, unlogged; FR-222 aligned; new SC-133 |
+| **M1** `session.idle` → "turn completed" over-claimed | The canonical boundary is renamed **agent quiesced** — the strongest claim all three agents actually establish. New FR-230 states what it does *not* imply and preserves Feature 001 `Stop` behavior exactly; FR-231 forbids synthesizing an outcome from it; new SC-134 |
+| **M2** SC-128 mixed nominal and failure logic | Split: SC-128 is nominal deadline evidence over ≥100 boundaries with a healthy daemon; SC-129 is independent injected timeout / crash / daemon-unavailable recovery |
+| **M3** spec metadata was internally dishonest | Header now records the feature directory and the real git branch separately; status moved to *Clarified — ready for planning* |
+
+Result: all checklist items pass. 139 requirements (FR-101–FR-239), 35 success criteria
+(SC-101–SC-135), 10 user stories, 23 edge cases, 0 clarification markers.
+
+**Contradiction tests run against this iteration**
+
+- H1: no requirement forbids the sanctioned transient overlap; FR-146 is scoped to steady state and
+  FR-228 gives the transition its own reported condition. SC-117 no longer asserts the impossible.
+- H2: no requirement or entity definition lets recovery-from-silence satisfy FULL. Searched for and
+  removed the last "finalized or recovered" phrasing in the Key Entities definition.
+- H3: no requirement assumes an undocumented manager interface. The only deletion language left is
+  the prohibition itself.
+- H4: no requirement copies a pre-existing configuration file as normal behavior; preserved content
+  is bounded to Cairn's own.
+- M1: no "turn completed" or "turn checkpoint" phrasing remains; the Feature 001 `Stop` semantics
+  are preserved by FR-230 rather than by the old name.
