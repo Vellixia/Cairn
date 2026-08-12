@@ -343,6 +343,21 @@ pub async fn record_evidence(
     agent_version: Option<String>,
     degraded: Option<bool>,
 ) -> Reply {
+    // Observation evidence is version-bound, and the version it is bound to is
+    // the one recorded for the agent — not whatever the caller happened to
+    // know. A hook reporting a delivery has no idea what version the agent is;
+    // leaving the row versionless would make the next upgrade discard it as
+    // belonging to some other build, which is how a capability that is working
+    // perfectly well disappears from the report (FR-245).
+    let agent_version = match agent_version {
+        Some(v) => Some(v),
+        None if evidence == "observation" => rec::agent(&d.store, &agent)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|a| a.detected_version),
+        None => None,
+    };
     rec::record_evidence(
         &d.store,
         &rec::CapabilityEvidence {

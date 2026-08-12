@@ -174,7 +174,13 @@ pub async fn run(event: &str) {
 
 /// Emit the briefing on the agent's own context surface.
 ///
-/// Returns whether what was delivered was degraded.
+/// Returns whether what was delivered was degraded. The distinction that
+/// matters for evidence is between *reduced* and *absent*: an empty or
+/// unassemblable briefing still demonstrates that the agent's context surface
+/// carries what Cairn puts on it, and is recorded with `degraded: true`. A
+/// start where nothing was emitted at all demonstrates nothing, and that case
+/// never reaches this function — it is the caller's error branch, which
+/// records no evidence (D19a).
 fn deliver_context(agent: cairn_integrate::AgentId, value: &serde_json::Value) -> bool {
     match serde_json::from_value::<ContextPayload>(value.clone()) {
         Ok(payload) => {

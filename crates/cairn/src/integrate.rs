@@ -923,9 +923,31 @@ fn render_plan(plan: &IntegrationChangePlan, dry_run: bool) -> String {
 /// `cairn doctor` — read-only integration health (FR-166–FR-171).
 pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
     let env = env();
-    let snap = snapshot().await?;
+    let mut snap = snapshot().await?;
     let owed = boundary_owed().await;
     let status = client::send(&Request::Status { cwd: cwd() }).await.ok();
+
+    // Doctor is where an agent upgrade is noticed. Re-recording each connected
+    // agent's detected version discards observation evidence that belonged to
+    // the build it replaced, and keeps introspection evidence, which is a fact
+    // about Cairn's own artifact and does not age with the vendor (FR-245,
+    // SC-138). Without this a developer could upgrade past a removed vendor
+    // event and keep being told the integration is FULL.
+    let connected: Vec<AgentId> = snap.installs.iter().map(|r| r.agent).collect();
+    let mut refreshed = false;
+    for a in AgentId::ALL {
+        if !connected.contains(&a) {
+            continue;
+        }
+        let state = assess(&env, &snap, owed, a).await?;
+        if state.detection.detected {
+            record_agent(&state).await?;
+            refreshed = true;
+        }
+    }
+    if refreshed {
+        snap = snapshot().await?;
+    }
 
     let mut agents = Vec::new();
     let mut text = String::new();
