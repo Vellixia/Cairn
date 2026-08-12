@@ -135,7 +135,12 @@ fn env_contains(pid: i64, key: &str, value: &str) -> bool {
         .args(["eww", "-p", &pid.to_string()])
         .output();
     match out {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).contains(value),
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            stdout
+                .split_whitespace()
+                .any(|entry| entry == format!("{key}={value}"))
+        }
         Err(_) => false,
     }
 }
