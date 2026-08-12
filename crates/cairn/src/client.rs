@@ -443,9 +443,10 @@ mod tests {
         let prev = std::env::var("CAIRND_BIN").ok();
         std::env::set_var("CAIRND_BIN", "/explicit/cairnd");
         assert_eq!(daemon_binary(), PathBuf::from("/explicit/cairnd"));
-        match prev {
-            Some(v) => std::env::set_var("CAIRND_BIN", v),
-            None => std::env::remove_var("CAIRND_BIN"),
+        if let Some(v) = prev {
+            std::env::set_var("CAIRND_BIN", v);
+        } else {
+            std::env::remove_var("CAIRND_BIN");
         }
     }
 
@@ -460,9 +461,8 @@ mod tests {
             "empty env must not yield empty path"
         );
         std::env::remove_var("CAIRND_BIN");
-        match prev {
-            Some(v) => std::env::set_var("CAIRND_BIN", v),
-            None => {}
+        if let Some(v) = prev {
+            std::env::set_var("CAIRND_BIN", v);
         }
     }
 

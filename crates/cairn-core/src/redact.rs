@@ -173,7 +173,7 @@ mod tests {
     fn redacts_gitlab_token() {
         // GitLab tokens (glpat-) are not in the current pattern set.
         // This test documents that — if the pattern is added later, update it.
-        let out = redact("glpat-abcdefghijklmnopqrstuv");
+        let _out = redact("glpat-abcdefghijklmnopqrstuv");
         // Not redacted by whole-match patterns; but the keyed pattern
         // catches it if it appears as TOKEN=glpat-...
         let out2 = redact("PRIVATE_TOKEN=glpat-abcdefghijklmnopqrstuv");
