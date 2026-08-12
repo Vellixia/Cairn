@@ -433,3 +433,47 @@ pub fn send_oneway_blocking(request: &Request, deadline: Duration) -> Result<(),
         })?;
     runtime.block_on(send_oneway(request, deadline))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cairnd_bin_env_var_wins_over_everything() {
+        let prev = std::env::var("CAIRND_BIN").ok();
+        std::env::set_var("CAIRND_BIN", "/explicit/cairnd");
+        assert_eq!(daemon_binary(), PathBuf::from("/explicit/cairnd"));
+        match prev {
+            Some(v) => std::env::set_var("CAIRND_BIN", v),
+            None => std::env::remove_var("CAIRND_BIN"),
+        }
+    }
+
+    #[test]
+    fn empty_cairnd_bin_is_ignored() {
+        let prev = std::env::var("CAIRND_BIN").ok();
+        std::env::set_var("CAIRND_BIN", "");
+        let got = daemon_binary();
+        assert_ne!(
+            got,
+            PathBuf::from(""),
+            "empty env must not yield empty path"
+        );
+        std::env::remove_var("CAIRND_BIN");
+        match prev {
+            Some(v) => std::env::set_var("CAIRND_BIN", v),
+            None => {}
+        }
+    }
+
+    #[test]
+    fn socket_path_honours_cairn_socket() {
+        let prev = std::env::var("CAIRN_SOCKET").ok();
+        std::env::set_var("CAIRN_SOCKET", "/tmp/cairn-test-sock");
+        assert_eq!(socket_path(), PathBuf::from("/tmp/cairn-test-sock"));
+        match prev {
+            Some(v) => std::env::set_var("CAIRN_SOCKET", v),
+            None => std::env::remove_var("CAIRN_SOCKET"),
+        }
+    }
+}

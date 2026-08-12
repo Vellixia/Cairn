@@ -198,3 +198,55 @@ pub fn handoff(row: &SqliteRow) -> Result<Handoff> {
         deleted_at: opt_ts(row, "deleted_at")?,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::TimeZone;
+
+    #[test]
+    fn ts_text_roundtrips_through_parse_ts() {
+        let t = Utc.with_ymd_and_hms(2024, 6, 1, 12, 30, 45).unwrap();
+        let text = ts_text(t);
+        let back = parse_ts(&text).expect("parse");
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn parse_ts_rejects_garbage() {
+        assert!(parse_ts("not-a-timestamp").is_none());
+        assert!(parse_ts("").is_none());
+    }
+
+    #[test]
+    fn now_text_is_rfc3339_utc() {
+        let text = now_text();
+        assert!(parse_ts(&text).is_some(), "now_text must round-trip");
+        assert!(text.ends_with("+00:00"), "expected UTC offset, got {text}");
+    }
+
+    #[tokio::test]
+    async fn opt_uuid_column_treats_empty_string_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(&dir.path().join("r.sqlite3"))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE probe (v TEXT)")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO probe VALUES ('')")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let row: SqliteRow = sqlx::query("SELECT v AS v FROM probe")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            opt_uuid(&row, "v").unwrap().is_none(),
+            "empty string is not a uuid"
+        );
+        store.close().await;
+    }
+}

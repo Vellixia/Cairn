@@ -123,3 +123,59 @@ fn store_frames() -> String {
     }
     seen.join(" <- ")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_stage_has_a_stable_string_form() {
+        assert_eq!(Stage::Begin.as_str(), "begin_immediate");
+        assert_eq!(Stage::Body.as_str(), "statement");
+        assert_eq!(Stage::Commit.as_str(), "commit");
+        assert_eq!(Stage::Rollback.as_str(), "rollback");
+        assert_eq!(Stage::Autocommit.as_str(), "autocommit");
+        assert_eq!(Stage::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn enabled_is_off_by_default() {
+        let prev = std::env::var("CAIRN_CONTENTION_LOG").ok();
+        std::env::remove_var("CAIRN_CONTENTION_LOG");
+        assert!(!enabled(), "contention reporting should default to off");
+        if let Some(v) = prev {
+            std::env::set_var("CAIRN_CONTENTION_LOG", v);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_constraint_violation_is_not_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(&dir.path().join("d.sqlite3"))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (a INTEGER PRIMARY KEY)")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let err = sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(store.pool())
+            .await
+            .expect_err("duplicate");
+        assert!(!is_contention(&err), "a constraint violation is not a lock");
+        let (_, primary) = codes(&err).expect("a database error");
+        assert_eq!(primary, 19, "SQLITE_CONSTRAINT's primary code");
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_non_database_error_has_no_codes() {
+        let err = sqlx::Error::RowNotFound;
+        assert!(codes(&err).is_none());
+        assert!(!is_contention(&err));
+    }
+}

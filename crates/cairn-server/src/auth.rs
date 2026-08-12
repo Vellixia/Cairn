@@ -262,4 +262,30 @@ mod tests {
         assert_ne!(hash, token);
         assert_eq!(hash, hash_token(&token), "hashing is stable");
     }
+
+    #[test]
+    fn a_malformed_hash_does_not_verify_any_password() {
+        // Garbage must not panic, just return false.
+        assert!(!verify_password("anything", "not-a-valid-hash"));
+        assert!(!verify_password("anything", ""));
+        assert!(!verify_password("", "$argon2id$garbage"));
+    }
+
+    #[test]
+    fn random_tokens_are_unique() {
+        let a = random_token();
+        let b = random_token();
+        assert_ne!(a, b, "two tokens must not collide");
+    }
+
+    #[test]
+    fn hash_token_is_deterministic_and_distinct() {
+        let t = "test-token-value";
+        assert_eq!(hash_token(t), hash_token(t), "same token → same hash");
+        assert_ne!(
+            hash_token("a"),
+            hash_token("b"),
+            "different tokens → different hashes"
+        );
+    }
 }

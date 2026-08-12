@@ -315,6 +315,7 @@ version = "0.1.0-alpha.3"
 dependencies = [
  "cairn-core",
  "cairn-store",
+ "cairn-sys",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -372,6 +373,14 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "cairn-sys"
+version = "0.1.0-alpha.3"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

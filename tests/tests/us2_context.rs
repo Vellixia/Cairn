@@ -229,3 +229,71 @@ fn session_start_reports_reduced_context_when_the_deadline_cannot_be_met() {
         "a missed deadline must not surface as an agent-visible error"
     );
 }
+
+#[test]
+fn decisions_and_known_failures_appear_in_the_briefing() {
+    let s = Sandbox::new();
+    seed_a_finished_session(&s);
+
+    s.must(&[
+        "memory",
+        "add",
+        "--type",
+        "decision",
+        "--scope",
+        "project",
+        "chose a token bucket for rate limiting",
+    ]);
+    s.must(&[
+        "memory",
+        "add",
+        "--type",
+        "failure",
+        "--scope",
+        "project",
+        "cargo test failed on first attempt",
+    ]);
+
+    let ctx = s.json(&["context"]);
+    let briefing = &ctx["briefing"];
+    let project_memory = briefing["memory"]["project"].as_array().unwrap();
+    let text = serde_json::to_string(project_memory).unwrap();
+    assert!(
+        text.contains("token bucket"),
+        "decisions should appear: {text}"
+    );
+    assert!(
+        text.contains("cargo test failed"),
+        "failures should appear: {text}"
+    );
+}
+
+#[test]
+fn a_task_with_no_acceptance_criteria_still_produces_a_briefing() {
+    let s = Sandbox::new();
+    let created = s.json(&[
+        "task",
+        "new",
+        "--title",
+        "No criteria",
+        "--goal",
+        "Just a goal",
+    ]);
+    let id = created["task"]["id"].as_str().unwrap().to_string();
+
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "nc-ctx", "source": "startup" }),
+    );
+    s.must(&["session", "start", "--key", "nc-ctx", "--task", &id]);
+
+    let ctx = s.json(&["context"]);
+    let task = &ctx["briefing"]["task"];
+    assert_eq!(task["goal"], "Just a goal");
+    assert!(
+        task["acceptance_criteria"]
+            .as_array()
+            .is_some_and(|c| c.is_empty()),
+        "empty criteria should not break the briefing"
+    );
+}

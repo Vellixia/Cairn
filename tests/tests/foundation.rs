@@ -154,3 +154,126 @@ fn concurrent_first_use_of_one_fresh_repository_never_races() {
         "one repository must map to one project"
     );
 }
+
+#[test]
+fn a_corrupt_database_is_detected_and_reported() {
+    let s = Sandbox::new();
+    s.must(&["daemon", "stop"]);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    // Overwrite the database with garbage.
+    std::fs::write(s.db_path(), b"not a valid sqlite database").expect("write");
+
+    let out = s.cairn(&["status"]);
+    assert!(
+        !out.ok(),
+        "a corrupt database must not report success: {}",
+        out.stderr
+    );
+}
+
+#[test]
+fn an_unwritable_cairn_home_is_reported_cleanly() {
+    let repo = tempfile::TempDir::new().expect("repo");
+    let socket = cairn_e2e::sandbox_socket();
+
+    // Initialize a git repo.
+    Command::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git init");
+    Command::new("git")
+        .args(["config", "user.email", "test@example.com"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git config");
+    Command::new("git")
+        .args(["config", "user.name", "Cairn Test"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git config");
+    std::fs::write(repo.path().join("README.md"), "# fixture\n").expect("write");
+    Command::new("git")
+        .args(["add", "."])
+        .current_dir(repo.path())
+        .output()
+        .expect("git add");
+    Command::new("git")
+        .args(["commit", "-m", "init", "--no-gpg-sign"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git commit");
+
+    // Use a file as CAIRN_HOME — writing inside it must fail on every platform.
+    let home_file = tempfile::NamedTempFile::new().expect("file");
+    let invalid_home = home_file.path().to_path_buf();
+
+    let out = Command::new(binary("cairn"))
+        .args(["--json", "init"])
+        .current_dir(repo.path())
+        .env("CAIRN_HOME", &invalid_home)
+        .env("CAIRN_SOCKET", &socket)
+        .env("CAIRND_BIN", binary("cairnd"))
+        .output()
+        .expect("cairn runs");
+
+    // The command should fail, not panic or hang.
+    let envelope: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        !out.status.success() || envelope["ok"] == serde_json::Value::Bool(false),
+        "an unwritable home must fail: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn a_repository_with_a_gitdir_file_is_discovered() {
+    // Some setups (submodules, worktrees with older git) use a `.git` file
+    // containing `gitdir: /path/to/actual/.git` rather than a directory.
+    let s = Sandbox::new();
+    let git_dir = s.repo_path().join(".git");
+
+    // Move .git to .real-git and replace with a gitdir file.
+    let moved = s.repo_path().join(".real-git");
+    std::fs::rename(&git_dir, &moved).expect("rename");
+    std::fs::write(&git_dir, format!("gitdir: {}\n", moved.display())).expect("write gitdir");
+
+    let status = s.json(&["status"]);
+    assert_eq!(status["repository"]["branch"], "main");
+    assert!(status["repository"]["commit_sha"].is_string());
+}
+
+#[test]
+fn git_not_on_path_is_reported_cleanly() {
+    let home = tempfile::TempDir::new().expect("home");
+    let repo = tempfile::TempDir::new().expect("repo");
+    let socket = cairn_e2e::sandbox_socket();
+
+    // Initialize a git repo so the directory is valid.
+    Command::new("git")
+        .args(["init", "--initial-branch=main"])
+        .current_dir(repo.path())
+        .output()
+        .expect("git init");
+
+    // Run cairn with a PATH that does not include git.
+    let out = Command::new(binary("cairn"))
+        .args(["--json", "init"])
+        .current_dir(repo.path())
+        .env("CAIRN_HOME", home.path())
+        .env("CAIRN_SOCKET", &socket)
+        .env("CAIRND_BIN", binary("cairnd"))
+        .env("PATH", "") // Empty PATH — git won't be found.
+        .output()
+        .expect("cairn runs");
+
+    let envelope: serde_json::Value = serde_json::from_str(&String::from_utf8_lossy(&out.stdout))
+        .unwrap_or(serde_json::Value::Null);
+    assert!(
+        !out.status.success() || envelope["ok"] == serde_json::Value::Bool(false),
+        "missing git must fail: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

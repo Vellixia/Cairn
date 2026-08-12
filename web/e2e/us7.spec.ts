@@ -91,3 +91,79 @@ test("tasks and sync status are reachable without a terminal", async ({
   await page.getByTestId("nav-sync").click();
   await expect(page.getByTestId("sync-status")).toContainText("items applied");
 });
+
+test("a non-member is refused rather than shown an empty page", async ({
+  page,
+}) => {
+  // Register a second user who is NOT a member of the fixture project.
+  const stranger = `stranger-${Date.now()}@example.test`;
+  const password = "hunter2hunter2";
+  await fetch(`${API}/api/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: stranger, display_name: "Stranger", password }),
+  });
+  const login = await fetch(`${API}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: stranger, password }),
+  });
+  const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
+
+  // Set the stranger's cookie and try to access the fixture project.
+  await page.context().addCookies([
+    { name: "session", value: cookie.split("=")[1] ?? "", domain: "127.0.0.1", path: "/" },
+  ]);
+  await page.goto(`/projects/${fixture.projectId}`);
+  // The UI should show a refusal, not an empty project page.
+  await expect(page.getByText(/forbidden|not found|access denied/i).first()).toBeVisible();
+});
+
+test("the projects list shows an empty state when there are none", async ({
+  page,
+}) => {
+  // Register a fresh user with no projects.
+  const empty = `empty-${Date.now()}@example.test`;
+  const password = "hunter2hunter2";
+  await fetch(`${API}/api/auth/register`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: empty, display_name: "Empty", password }),
+  });
+  const login = await fetch(`${API}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email: empty, password }),
+  });
+  const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
+
+  await page.context().addCookies([
+    { name: "session", value: cookie.split("=")[1] ?? "", domain: "127.0.0.1", path: "/" },
+  ]);
+  await page.goto("/");
+  await expect(page.getByTestId("project-list")).toBeVisible();
+  await expect(page.getByText(/no projects|create a project/i).first()).toBeVisible();
+});
+
+test("the sessions list shows an empty state when there are none", async ({
+  page,
+}, testInfo) => {
+  // Create a project with no sessions.
+  const tokenBody = await fetch(`${API}/api/tokens`, {
+    method: "POST",
+    headers: { cookie: `session=${fixture.email}` },
+    body: JSON.stringify({ name: "empty-sessions-test" }),
+  }).then(r => r.json());
+  const token = tokenBody.token as string;
+  const auth = { authorization: `Bearer ${token}` };
+
+  const project = await fetch(`${API}/api/projects`, {
+    method: "POST",
+    headers: { ...auth, "content-type": "application/json" },
+    body: JSON.stringify({ name: `Empty Sessions ${Date.now()}`, repository_remote: "github.com/example/empty" }),
+  }).then(r => r.json());
+
+  await page.goto(`/projects/${project.id}/sessions`);
+  await expect(page.getByTestId("session-list")).toBeVisible();
+  await expect(page.getByText(/no sessions|no handoffs/i).first()).toBeVisible();
+});

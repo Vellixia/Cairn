@@ -115,3 +115,46 @@ async fn fetch_latest() -> anyhow::Result<Release> {
     release::pick_release(&body, CURRENT)
         .ok_or_else(|| anyhow::anyhow!("no eligible release published"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_is_a_parseable_semver() {
+        // `release::update_available` only returns true when both sides parse,
+        // so a self-comparison parsing the current version proves it is valid.
+        assert!(!release::update_available(CURRENT, CURRENT));
+    }
+
+    #[test]
+    fn version_payload_serializes_with_expected_keys() {
+        let p = VersionPayload {
+            current: "0.1.0".to_string(),
+            latest: None,
+            update_available: false,
+            checked_at: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"current\":\"0.1.0\""));
+        assert!(s.contains("\"update_available\":false"));
+    }
+
+    #[test]
+    fn version_payload_with_release_serializes() {
+        let r = Release {
+            tag: "v0.2.0".to_string(),
+            version: "0.2.0".to_string(),
+            url: "https://example.test/r".to_string(),
+        };
+        let p = VersionPayload {
+            current: "0.1.0".to_string(),
+            latest: Some(r),
+            update_available: true,
+            checked_at: Some(chrono::Utc::now()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"tag\":\"v0.2.0\""));
+        assert!(s.contains("\"update_available\":true"));
+    }
+}

@@ -370,3 +370,63 @@ fn memory_scoped_to_a_deleted_branch_becomes_stale_and_leaves_default_recall() {
     let project = s.json(&["memory", "search", "durable"]);
     assert_eq!(project["results"][0]["state"], "active");
 }
+
+#[test]
+fn forgetting_an_already_forgotten_memory_is_idempotent() {
+    let s = Sandbox::new();
+    let created = s.json(&[
+        "memory",
+        "add",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+        "to be forgotten",
+    ]);
+    let id = created["memory"]["id"].as_str().unwrap().to_string();
+
+    // First forget succeeds.
+    s.must(&["memory", "forget", &id]);
+    // Second forget should also succeed (idempotent).
+    s.must(&["memory", "forget", &id]);
+
+    // The memory is still gone from default recall.
+    assert!(s.json(&["memory", "search", "forgotten"])["results"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn a_memory_with_evidence_shows_it_in_recall() {
+    let s = Sandbox::new();
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "ev", "source": "startup" }),
+    );
+    s.hook(
+        "PostToolUse",
+        json!({ "session_id": "ev", "tool_name": "Edit", "tool_input": { "file_path": "evidenced.rs" } }),
+    );
+    s.settle_observations(1);
+
+    let obs_id = s.observation_ids()[0].clone();
+    let created = s.json(&[
+        "memory",
+        "add",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+        "--evidence",
+        &obs_id,
+        "supported by an observation",
+    ]);
+    let mem_id = created["memory"]["id"].as_str().unwrap().to_string();
+
+    let shown = s.json(&["memory", "show", &mem_id])["memory"].clone();
+    let evidence = shown["evidence"].as_array().unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0]["observation_id"], obs_id);
+    assert_eq!(evidence[0]["deleted"], false);
+}

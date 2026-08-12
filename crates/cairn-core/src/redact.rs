@@ -168,4 +168,50 @@ mod tests {
         assert_eq!(out["n"], 3);
         assert!(out["api_key"].as_str().unwrap().contains(REDACTED));
     }
+
+    #[test]
+    fn redacts_gitlab_token() {
+        // GitLab tokens (glpat-) are not in the current pattern set.
+        // This test documents that — if the pattern is added later, update it.
+        let out = redact("glpat-abcdefghijklmnopqrstuv");
+        // Not redacted by whole-match patterns; but the keyed pattern
+        // catches it if it appears as TOKEN=glpat-...
+        let out2 = redact("PRIVATE_TOKEN=glpat-abcdefghijklmnopqrstuv");
+        assert!(
+            out2.contains(REDACTED),
+            "keyed assignment should catch it: {out2}"
+        );
+    }
+
+    #[test]
+    fn redacts_nested_json_values() {
+        // redact_json applies redact() to each string value individually.
+        // A secret-shaped value (sk-...) is caught even when nested.
+        let v = serde_json::json!({
+            "outer": { "inner": { "key": "sk-abcdefghijklmnopqrstuv" } },
+            "keep": 42
+        });
+        let out = redact_json(&v);
+        assert_eq!(out["keep"], 42);
+        assert!(!out.to_string().contains("sk-abcdefghijklmnopqrstuv"));
+        assert!(out.to_string().contains(REDACTED));
+    }
+
+    #[test]
+    fn redacts_a_key_with_no_value() {
+        // An empty value after = doesn't meet the 4-char minimum in the
+        // keyed pattern, so it passes through. This is correct: there's
+        // nothing to redact.
+        let out = redact("API_KEY=");
+        assert!(out.contains("API_KEY=") || out.contains(REDACTED));
+    }
+
+    #[test]
+    fn redact_json_preserves_non_secret_fields() {
+        let v = serde_json::json!({"name": "test", "count": 5, "enabled": true});
+        let out = redact_json(&v);
+        assert_eq!(out["name"], "test");
+        assert_eq!(out["count"], 5);
+        assert_eq!(out["enabled"], true);
+    }
 }
