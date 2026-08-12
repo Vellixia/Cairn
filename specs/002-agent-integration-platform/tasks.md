@@ -115,10 +115,10 @@ verify, the local record migration, and the daemon handlers behind it.
 - [x] T028 Test `dry_run_is_inert` in `crates/cairn-integrate/tests/dry_run_is_inert.rs` — computing a plan for every supported operation performs zero filesystem modifications including no temporary files, verified by checksumming every candidate file before and after, and a dry run against a broken configuration reports the conflict and still writes nothing (FR-159, SC-118)
 - [x] T029 Add the additive local-record migration `crates/cairn-store/migrations/0004_integrations.sql` and register it in `crates/cairn-store/src/migrate.rs` — `agent_integrations`, `manager_integrations`, `installed_resources` (unique on `(kind, location)`), `resource_bindings` (unique on `(agent, kind)`), `capability_evidence` (PK `(agent, capability)`), `migration_states` (at most one per `(agent, kind)`), `recovery_artifacts`, plus `sessions.handoff_pending`/`handoff_attempts`/`handoff_error` and `observations.vendor_tool` (FR-182, `data-model.md` §Persisted local entities, §Additive extensions)
 - [x] T030 Implement the local-record repositories in `crates/cairn-store/src/integrations.rs` — reference-counted `InstalledResource` + `ResourceBinding` where connect is "ensure this binding exists", disconnect is "ensure it does not", and a resource row is deleted in the same transaction that removes its last binding; owner is exactly one of `direct`/`manager`/`external`, `external` is never recorded as owned, and `owner = manager` rows carry no content hash (FR-145, FR-146, FR-147, FR-150, FR-220, FR-243, `data-model.md` §InstalledResource, §ResourceBinding, D28)
-- [x] T031 Add the integration wire requests to `crates/cairn-core/src/wire.rs` and their handlers to `crates/cairnd/src/handlers.rs` — record read/write, canonical-event ingestion, and evidence recording, all local; **no outbox entity type is added and the outbox enqueue path is never called for any of them** (FR-182, FR-183, FR-184, `data-model.md` §What syncs)
-- [x] T032 [P] Add Feature 002's error codes to the CLI's existing `codes` module in `crates/cairn/src/` as a closed set — `agent_not_detected`, `agent_unsupported`, `malformed_config`, `permission_denied`, `damaged_markers`, `resource_modified`, `duplicate_resource`, `conflicting_owner`, `installed_not_activated`, `migration_in_progress`, `migration_unsafe`, `manager_action_required`, `verification_failed`, `confirmation_required`, `unpublished_skill_ref`, `partial_apply` — each at exit 1, with `daemon_unavailable`/`storage_unavailable` unchanged at exit 2 (FR-167, `contracts/integration-cli.md` §Error codes)
+- [ ] T031 Add the integration wire requests to `crates/cairn-core/src/wire.rs` and their handlers to `crates/cairnd/src/handlers.rs` — record read/write, canonical-event ingestion, and evidence recording, all local; **no outbox entity type is added and the outbox enqueue path is never called for any of them** (FR-182, FR-183, FR-184, `data-model.md` §What syncs)
+- [ ] T032 [P] Add Feature 002's error codes to the CLI's existing `codes` module in `crates/cairn/src/` as a closed set — `agent_not_detected`, `agent_unsupported`, `malformed_config`, `permission_denied`, `damaged_markers`, `resource_modified`, `duplicate_resource`, `conflicting_owner`, `installed_not_activated`, `migration_in_progress`, `migration_unsafe`, `manager_action_required`, `verification_failed`, `confirmation_required`, `unpublished_skill_ref`, `partial_apply` — each at exit 1, with `daemon_unavailable`/`storage_unavailable` unchanged at exit 2 (FR-167, `contracts/integration-cli.md` §Error codes)
 - [ ] T033 Implement `cairn connect [<agent>] [--dry-run] [--yes] [--shared] [--scope <kind>=<scope>]` in `crates/cairn/src/connect.rs` against the plan engine — printing the change plan and exiting without writing under `--dry-run`, and exiting 1 with `confirmation_required` for a non-interactive run without `--yes` (FR-157, FR-164, FR-196, `contracts/integration-cli.md` §`cairn connect`)
-- [x] T034 Test `privacy::no_integration_outbox` in `tests/tests/privacy_integration.rs` asserting that writing every Feature 002 record type produces zero outbox rows and that no integration table has an outbox entity type at all (FR-183, SC-120)
+- [ ] T034 Test `privacy::no_integration_outbox` in `tests/tests/privacy_integration.rs` asserting that writing every Feature 002 record type produces zero outbox rows and that no integration table has an outbox entity type at all (FR-183, SC-120)
 
 **Checkpoint**: `cairn connect --dry-run` prints a change plan for a fixture repository and
 writes nothing at all.
@@ -178,7 +178,7 @@ all 100 surface as a named, retryable condition rather than silence.
 - [x] T051 [US3] Implement the synthesis phase in `crates/cairnd/src/handlers.rs` — quiesce in-flight captures, build the handoff, write it, clear `handoff_pending`, and retry on failure with bounded backoff incrementing `handoff_attempts` and recording a redacted `handoff_error` (FR-240 clause 2, `data-model.md` §Session)
 - [x] T052 [US3] Add the pending-handoff sweep to the daemon's existing maintenance tick in `crates/cairnd/src/recover.rs` — the same tick that reaps idle sessions also synthesizes any session whose `handoff_pending` has been set for more than a few seconds, so progress is guaranteed without a restart and without a new scheduler (FR-240 clause 2, D22)
 - [x] T053 [US3] Extend daemon-start reconciliation in `crates/cairnd/src/recover.rs` to pick up sessions sealed but not synthesized by a previous run, keeping it a backstop rather than the only retry path, and keep its handoffs marked `recovered` (FR-009 extension, FR-229)
-- [x] T054 [US3] Report the owed and failed states — `sessions_awaiting_handoff` and `handoff_synthesis_failures` in doctor's core section and in `cairn status` — with a redacted reason after a bounded number of attempts, retried at a slow cadence, and never treated as a terminal outcome that closes the matter (FR-240 clause 3, `contracts/integration-health.md` §Health report)
+- [ ] T054 [US3] Report the owed and failed states — `sessions_awaiting_handoff` and `handoff_synthesis_failures` in doctor's core section and in `cairn status` — with a redacted reason after a bounded number of attempts, retried at a slow cadence, and never treated as a terminal outcome that closes the matter (FR-240 clause 3, `contracts/integration-health.md` §Health report)
 - [ ] T055 [US3] Gate the completion guarantee on the owed state in `crates/cairn-integrate/src/capability.rs` — a boundary that acknowledged but has not yet produced its handoff is reported as owed, not complete, and `completion_guarantee` is not `demonstrated` while any boundary is owed (FR-240 clause 4)
 - [x] T056 [US3] Add `wait_for_handoff` to the session-end request in `crates/cairn-core/src/wire.rs` — true for `cairn session end` from the command line, which keeps Feature 001's synchronous behavior, and false for hook-driven boundaries (`contracts/lifecycle.md` §The sealed close)
 - [x] T057 [US3] Test `tests/tests/handoff_lands_without_restart.rs` — ≥100 sealed closes with the daemon running throughout, 100% with a durable handoff inside the documented bound and no daemon restart; with synthesis forced to fail permanently, 100% reported as a named condition rather than left silently owed (SC-136)
@@ -484,3 +484,41 @@ when every user story is delivered; a P2 story is later in sequence, not optiona
   `~/.cc-switch/cc-switch.db` or any other private manager file (FR-232)
 - Out-of-scope items from `spec.md` are not tasks and must not appear as "while we're here"
   work
+
+---
+
+## Implementation status
+
+This ledger is the record of what is actually built, not a plan. A task is
+checked only when its requirement is implemented and its named evidence
+passes; partial work is left unchecked with the gap stated here.
+
+**Complete**: Phases 1–3 in full (the `cairn-integrate` crate, the capability
+model, desired state, ownership markers, the scope matrix, both contract
+renderings, the canonical Skill revision algorithm and `skillref`, the three
+source-preserving editors, the change-plan engine, atomic apply, the 27-file
+fixture corpus and the inertness proof), the four agent adapters and the CC
+Switch manager as pure logic with their negative assertions, migration `0004`
+and the reference-counted local record, the sealed session close end to end,
+and MCP `instructions` with the six-tool assertion.
+
+**Not yet built**: the CLI surface (`cairn agents`, `doctor`, `repair`,
+`disconnect`, `integration *`), the apply-side wiring that installs what the
+adapters plan, the health report, ownership migration, manager distribution,
+the `publish-skill` release job, the `web-e2e` CI job, and the Phase 11
+evidence suites. The adapters' `plan`/`inspect`/`normalize` are implemented
+and tested; what is missing is the command layer that drives them and
+persists the result.
+
+**Partial, and why they are unchecked**:
+
+- **T031** — the wire type and `cairn status` half landed; canonical-event
+  ingestion and the record handlers on the daemon did not.
+- **T032** — the Feature 002 error-code module was not added.
+- **T034** — the outbox assertion exists in `cairn-store`'s own tests;
+  SC-120's PostgreSQL half does not.
+- **T054** — `cairn status` reports the handoff debt; doctor has no core
+  section yet because doctor does not exist.
+- **T055** — the owed-boundary gate is implemented and unit-tested in
+  `capability::completion_guarantee`, but nothing feeds it live state until
+  doctor does.

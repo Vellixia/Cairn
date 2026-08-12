@@ -115,13 +115,13 @@ fn a_sealed_close_lands_its_handoff_without_a_restart() {
 
 #[test]
 fn every_sealed_close_in_a_batch_lands() {
-    // The volume half of SC-136. Kept modest here so the suite stays fast; the
-    // release-evidence run raises it to the criterion's 100 boundaries.
+    // The volume half of SC-136: at least 100 sealed closes, all landing
+    // their handoff inside the bound, with the daemon running throughout.
     let s = Sandbox::new();
     s.must(&["init"]);
     s.write_file("src/lib.rs", "pub fn work() {}\n");
 
-    const BOUNDARIES: usize = 20;
+    const BOUNDARIES: usize = 100;
     let ids: Vec<String> = (0..BOUNDARIES)
         .map(|i| sealed_session(&s, &format!("batch-{i}")))
         .collect();
