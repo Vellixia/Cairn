@@ -1,0 +1,12 @@
+{
+  "event": "SessionEnd",
+  "expect": "session_closed",
+  "capability": "lifecycle_session_close",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "transcript_path": "/home/dev/.claude/projects/-home-dev-app/b7f3a1c2.jsonl",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "SessionEnd",
+    "reason": "clear"
+  }
+}

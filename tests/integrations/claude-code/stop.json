@@ -1,0 +1,17 @@
+{
+  "event": "Stop",
+  "expect": "agent_quiesced",
+  "capability": "lifecycle_quiesce",
+  "note": "last_assistant_message and tool_calls are conversation content; read for nothing and never persisted (D34, D35)",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "transcript_path": "/home/dev/.claude/projects/-home-dev-app/b7f3a1c2.jsonl",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "Stop",
+    "stop_hook_active": false,
+    "last_assistant_message": "I raised the pool size to 8 and the contention test passes now.",
+    "tool_calls": [
+      { "name": "Edit", "input": { "file_path": "/home/dev/app/src/pool.rs" } }
+    ]
+  }
+}

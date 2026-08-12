@@ -1,0 +1,21 @@
+{
+  "event": "PostToolUse",
+  "expect": "tool_succeeded",
+  "capability": "lifecycle_tool_success",
+  "payload": {
+    "session_id": "0199c1e4-5b2a-7d31-8f6c-1a2b3c4d5e6f",
+    "cwd": "/home/dev/app",
+    "transcript_path": "/home/dev/.codex/sessions/0199c1e4.jsonl",
+    "hook_event_name": "PostToolUse",
+    "turn_id": "turn_004",
+    "model": "gpt-5-codex",
+    "permission_mode": "workspace-write",
+    "tool_name": "apply_patch",
+    "tool_use_id": "call_7Kd2",
+    "tool_input": {
+      "file_path": "/home/dev/app/src/pool.rs",
+      "patch": "*** Update File: src/pool.rs"
+    },
+    "tool_response": { "exit_code": 0, "output": "Updated src/pool.rs" }
+  }
+}

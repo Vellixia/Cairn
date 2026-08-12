@@ -1,0 +1,13 @@
+{
+  "event": "SessionStart",
+  "expect": "session_opened",
+  "capability": "lifecycle_session_open",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "transcript_path": "/home/dev/.claude/projects/-home-dev-app/b7f3a1c2.jsonl",
+    "cwd": "/home/dev/app",
+    "permission_mode": "default",
+    "hook_event_name": "SessionStart",
+    "source": "resume"
+  }
+}

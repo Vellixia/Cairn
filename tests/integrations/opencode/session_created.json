@@ -1,0 +1,11 @@
+{
+  "event": "session.created",
+  "expect": "session_opened",
+  "capability": "lifecycle_session_open",
+  "note": "session events reach plugins through the event bus; there is no session-start hook (D32)",
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "title": "fix the connection pool",
+    "time": { "created": 1786579200000 }
+  }
+}

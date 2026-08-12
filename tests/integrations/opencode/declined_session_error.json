@@ -1,0 +1,9 @@
+{
+  "event": "session.error",
+  "expect": null,
+  "note": "an error is not a session end and not a tool outcome",
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "error": { "name": "ProviderAuthError", "data": { "message": "401" } }
+  }
+}

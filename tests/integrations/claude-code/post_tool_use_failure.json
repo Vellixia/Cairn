@@ -1,0 +1,20 @@
+{
+  "event": "PostToolUseFailure",
+  "expect": "tool_failed",
+  "capability": "lifecycle_tool_failure",
+  "note": "PostToolUseFailure exists and carries error rather than tool_response (D30)",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "transcript_path": "/home/dev/.claude/projects/-home-dev-app/b7f3a1c2.jsonl",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "PostToolUseFailure",
+    "tool_name": "Bash",
+    "tool_use_id": "toolu_01MnOpQr",
+    "tool_input": {
+      "command": "cargo test -p cairn-store",
+      "description": "Run the storage tests"
+    },
+    "tool_response": { "exit_code": 101 },
+    "error": { "message": "test contention::two_writers ... FAILED" }
+  }
+}

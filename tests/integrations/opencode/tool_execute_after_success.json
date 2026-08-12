@@ -1,0 +1,19 @@
+{
+  "event": "tool.execute.after",
+  "expect": "tool_succeeded",
+  "capability": "lifecycle_tool_success",
+  "note": "tool.execute.after receives {tool, sessionID, callID, args} and {title, output, metadata} — no outcome flag (D32)",
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "callID": "call_01",
+    "tool": "edit",
+    "args": {
+      "file_path": "/home/dev/app/src/pool.rs",
+      "oldString": "max_connections(1)",
+      "newString": "max_connections(8)"
+    },
+    "title": "src/pool.rs",
+    "output": { "exit_code": 0 },
+    "metadata": { "diff": "@@ -1 +1 @@" }
+  }
+}

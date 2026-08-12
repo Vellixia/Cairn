@@ -1,0 +1,23 @@
+{
+  "event": "PostToolUse",
+  "expect": "tool_succeeded",
+  "capability": "lifecycle_tool_success",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "transcript_path": "/home/dev/.claude/projects/-home-dev-app/b7f3a1c2.jsonl",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Bash",
+    "tool_use_id": "toolu_01GhIjKl",
+    "tool_input": {
+      "command": "cargo test -p cairn-store",
+      "description": "Run the storage tests"
+    },
+    "tool_response": {
+      "stdout": "test result: ok. 63 passed; 0 failed",
+      "stderr": "",
+      "interrupted": false,
+      "exit_code": 0
+    }
+  }
+}

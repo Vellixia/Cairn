@@ -1,0 +1,6 @@
+{
+  "event": "session.status",
+  "expect": null,
+  "note": "a status change is not a lifecycle boundary — including when the status is inactive",
+  "payload": { "sessionID": "ses_7f2a91c4e0", "status": "inactive" }
+}

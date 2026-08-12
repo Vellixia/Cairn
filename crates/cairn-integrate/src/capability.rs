@@ -95,6 +95,24 @@ impl Capability {
         )
     }
 
+    /// The capability one canonical event demonstrates.
+    ///
+    /// Every lifecycle capability corresponds to exactly one canonical event
+    /// and vice versa, which is what lets a fixture assert "the profile claims
+    /// this, and here is the payload that proves it" without a second table.
+    pub fn for_event(event: cairn_core::lifecycle::CanonicalEvent) -> Capability {
+        use cairn_core::lifecycle::CanonicalEvent as E;
+        match event {
+            E::SessionOpened => Capability::LifecycleSessionOpen,
+            E::ToolSucceeded => Capability::LifecycleToolSuccess,
+            E::ToolFailed => Capability::LifecycleToolFailure,
+            E::AgentQuiesced => Capability::LifecycleQuiesce,
+            E::ContextCompacting => Capability::LifecyclePreCompaction,
+            E::ContextCompacted => Capability::LifecyclePostCompaction,
+            E::SessionClosed => Capability::LifecycleSessionClose,
+        }
+    }
+
     /// What Cairn is waiting to see before it will call this established.
     ///
     /// Phrased as the observation rather than the capability, because that is

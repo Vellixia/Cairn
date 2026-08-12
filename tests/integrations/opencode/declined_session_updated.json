@@ -1,0 +1,8 @@
+{
+  "event": "session.updated",
+  "expect": null,
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "title": "fix the connection pool and the migration"
+  }
+}

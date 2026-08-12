@@ -306,10 +306,14 @@ pub(crate) fn tool_observation(
         outcome: if failed {
             Some("error".into())
         } else if kind == cairn_core::domain::ObservationType::TestRun {
-            Some(if exit_code.unwrap_or(0) == 0 {
-                "passed".into()
-            } else {
-                "failed".into()
+            // Read, never inferred. A vendor that reports no exit code has
+            // told Cairn nothing about the run, and recording that as a pass
+            // would put "tests green" in a handoff on no evidence at all
+            // (FR-117, and Feature 001's own `unknown` default).
+            Some(match exit_code {
+                Some(0) => "passed".into(),
+                Some(_) => "failed".into(),
+                None => "unknown".to_string(),
             })
         } else {
             None

@@ -1,0 +1,12 @@
+{
+  "event": "SessionStart",
+  "expect": "session_opened",
+  "capability": "lifecycle_session_open",
+  "note": "the stable thread identifier under its other recorded name",
+  "payload": {
+    "thread_id": "0199c1e4-5b2a-7d31-8f6c-1a2b3c4d5e6f",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "SessionStart",
+    "source": "resume"
+  }
+}

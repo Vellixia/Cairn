@@ -1,0 +1,10 @@
+{
+  "event": "tool.execute.before",
+  "expect": null,
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "callID": "call_04",
+    "tool": "bash",
+    "args": { "command": "rm -rf build" }
+  }
+}

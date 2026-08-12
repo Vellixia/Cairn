@@ -1,0 +1,24 @@
+{
+  "event": "PostToolUse",
+  "expect": "tool_succeeded",
+  "capability": "lifecycle_tool_success",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "transcript_path": "/home/dev/.claude/projects/-home-dev-app/b7f3a1c2.jsonl",
+    "cwd": "/home/dev/app",
+    "permission_mode": "acceptEdits",
+    "hook_event_name": "PostToolUse",
+    "tool_name": "Edit",
+    "tool_use_id": "toolu_01AbCdEf",
+    "tool_input": {
+      "file_path": "/home/dev/app/src/pool.rs",
+      "old_string": "max_connections(1)",
+      "new_string": "max_connections(8)"
+    },
+    "tool_response": {
+      "filePath": "/home/dev/app/src/pool.rs",
+      "structuredPatch": [],
+      "userModified": false
+    }
+  }
+}

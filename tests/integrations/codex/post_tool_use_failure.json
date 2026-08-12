@@ -1,0 +1,19 @@
+{
+  "event": "PostToolUse",
+  "expect": "tool_failed",
+  "capability": "lifecycle_tool_failure",
+  "note": "Codex has no PostToolUseFailure (D31); failure is established from tool_response itself",
+  "payload": {
+    "session_id": "0199c1e4-5b2a-7d31-8f6c-1a2b3c4d5e6f",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "PostToolUse",
+    "turn_id": "turn_005",
+    "tool_name": "shell",
+    "tool_use_id": "call_9Xm4",
+    "tool_input": { "command": ["cargo", "test", "-p", "cairn-store"] },
+    "tool_response": {
+      "exit_code": 101,
+      "output": "test contention::two_writers ... FAILED"
+    }
+  }
+}

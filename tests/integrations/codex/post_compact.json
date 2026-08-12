@@ -1,0 +1,10 @@
+{
+  "event": "PostCompact",
+  "expect": "context_compacted",
+  "capability": "lifecycle_post_compaction",
+  "payload": {
+    "session_id": "0199c1e4-5b2a-7d31-8f6c-1a2b3c4d5e6f",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "PostCompact"
+  }
+}
