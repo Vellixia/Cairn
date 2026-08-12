@@ -166,7 +166,8 @@ jobs:
           fi
 
           if [[ "${{ matrix.target }}" == *-pc-windows-* ]]; then
-            (cd dist && zip -rq "../$name.zip" "$name")
+            # 7-Zip ships with the Windows runner image; `zip` does not.
+            (cd dist && 7z a -tzip -bso0 "../$name.zip" "$name")
             echo "archive=$name.zip" >> "$GITHUB_OUTPUT"
           else
             tar -C dist -czf "$name.tar.gz" "$name"
@@ -192,7 +193,7 @@ jobs:
           esac
           tmp=$(mktemp -d)
           if [[ "${{ matrix.target }}" == *-pc-windows-* ]]; then
-            unzip -q "$name.zip" -d "$tmp"
+            7z x -bso0 -o"$tmp" "$name.zip"
           else
             tar -C "$tmp" -xzf "$name.tar.gz"
           fi

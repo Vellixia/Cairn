@@ -60,7 +60,12 @@ pub fn config_path() -> PathBuf {
     home().join("config.json")
 }
 
-/// Server API token, stored 0600 (D10).
+/// Server API token, stored 0600 on Unix (D10).
+///
+/// Windows has no mode bits, so there the file is only as private as the
+/// directory holding it — which is under the user's own profile, and so is
+/// not readable by other unprivileged users, but carries no explicit ACL of
+/// its own.
 pub fn token_path() -> PathBuf {
     home().join("token")
 }

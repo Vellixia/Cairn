@@ -158,6 +158,31 @@ jobs:
               Write-Host ""
             }
 
+      # The release workflow packages Windows as a .zip, and that path only
+      # ever runs on a tag — so the first time a mistake in it surfaces would
+      # be a release Windows users cannot install. The runner image ships
+      # 7-Zip but not `zip`, which is exactly the kind of assumption worth
+      # holding to a test. This round-trips the archive with the same tooling
+      # the release uses, against binaries this job already built, and stays
+      # entirely under RUNNER_TEMP so the working-tree check below is unaffected.
+      - name: Release packaging round-trip
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/packaging-check"
+          stage="$work/cairn-packaging-check"
+          rm -rf "$work"
+          mkdir -p "$stage"
+          for bin in cairn cairnd cairn-server; do
+            cp "target/debug/$bin.exe" "$stage/"
+          done
+          (cd "$work" && 7z a -tzip -bso0 archive.zip cairn-packaging-check)
+          out="$work/extracted"
+          7z x -bso0 -o"$out" "$work/archive.zip"
+          "$out/cairn-packaging-check/cairn.exe" --version
+          "$out/cairn-packaging-check/cairnd.exe" --version
+          "$out/cairn-packaging-check/cairn-server.exe" --version
+
       - name: Working tree is clean and free of conflict markers
         if: success()
         shell: bash
