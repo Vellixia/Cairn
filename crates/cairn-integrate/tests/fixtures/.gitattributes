@@ -1,0 +1,5 @@
+# The corpus exists to prove that Cairn preserves a file's own formatting, and
+# line endings are part of that (SC-104, D37). Git's own normalization would
+# quietly delete the CRLF dimension on checkout, so every fixture is stored and
+# checked out byte-for-byte.
+* -text

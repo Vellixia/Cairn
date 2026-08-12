@@ -22,7 +22,10 @@ fn corpus() -> Vec<(String, String)> {
         .expect("fixture corpus")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.file_name().unwrap() != "README.md")
+        .filter(|p| {
+            let name = p.file_name().unwrap().to_string_lossy().to_string();
+            p.is_file() && name != "README.md" && !name.starts_with('.')
+        })
         .map(|p| {
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             let body = std::fs::read_to_string(&p).unwrap_or_default();
