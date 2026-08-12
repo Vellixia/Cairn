@@ -102,6 +102,11 @@ impl Sandbox {
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
             .env("CAIRND_BIN", binary("cairnd"))
+            // Feature 002 writes per-user agent configuration. The sandbox
+            // gives it a home of its own so a test can never reach the
+            // developer's real `~/.claude` or `~/.codex`.
+            .env("HOME", self.fake_home())
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"))
             .output()
             .expect("cairn runs");
         CliResult {
@@ -109,6 +114,45 @@ impl Sandbox {
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
             stderr: String::from_utf8_lossy(&out.stderr).to_string(),
         }
+    }
+
+    /// The per-user home the sandbox's agents live in.
+    pub fn fake_home(&self) -> std::path::PathBuf {
+        let p = self.home.path().join("fake-home");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    }
+
+    /// The repository this sandbox works in.
+    pub fn repo_dir(&self) -> std::path::PathBuf {
+        self.repo.path().to_path_buf()
+    }
+
+    /// Pretend an agent is installed, by creating the directory its detection
+    /// looks for. No vendor binary is involved, which is what keeps these
+    /// tests hermetic (FR-204, SC-124).
+    pub fn install_agent(&self, agent: &str) {
+        let home = self.fake_home();
+        let dir = match agent {
+            "claude-code" => home.join(".claude"),
+            "codex" => home.join(".codex"),
+            "opencode" => home.join(".config").join("opencode"),
+            "cc-switch" => home.join(".cc-switch"),
+            other => panic!("unknown agent {other}"),
+        };
+        std::fs::create_dir_all(&dir).expect("agent home");
+    }
+
+    /// A content hash of every file under the repository and the fake home.
+    ///
+    /// Used to prove an operation wrote nothing: comparing the listing as well
+    /// as the contents catches a temporary file that was created and removed.
+    pub fn checksum_tree(&self) -> std::collections::BTreeMap<String, String> {
+        let mut out = std::collections::BTreeMap::new();
+        for root in [self.repo.path().to_path_buf(), self.fake_home()] {
+            collect_tree(&root, &root, &mut out);
+        }
+        out
     }
 
     /// Run `cairn`, requiring it to succeed.
@@ -795,4 +839,40 @@ pub fn post_json_bearer(
 pub fn attach_server(s: &Sandbox, server: &Server, token: &str) {
     let result = s.cairn(&["auth", "token", "set", token, "--server", &server.base]);
     assert!(result.ok(), "auth token set failed: {}", result.stderr);
+}
+
+/// Every file under `dir`, keyed by its path relative to `root`.
+fn collect_tree(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut std::collections::BTreeMap<String, String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_tree(root, &path, out);
+        } else {
+            let key = format!(
+                "{}:{}",
+                root.display(),
+                path.strip_prefix(root).unwrap_or(&path).display()
+            );
+            let body = std::fs::read(&path).unwrap_or_default();
+            out.insert(key, format!("{:x}", md5_like(&body)));
+        }
+    }
+}
+
+/// A cheap content digest. Not cryptographic — this only has to notice that a
+/// file changed.
+fn md5_like(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

@@ -636,6 +636,33 @@ async fn apply_plan(
         }
     }
 
+    // Ensure every agent's binding exists, whether or not this run wrote the
+    // bytes. Connect is "ensure this binding exists" (D28): a resource another
+    // agent already installed is exactly the shared case, and skipping it
+    // because nothing changed is how a shared block loses the consumer that
+    // depends on it (FR-243).
+    for state in states {
+        let Some(want) = desired.agents.iter().find(|a| a.agent == state.agent) else {
+            continue;
+        };
+        for wanted in &want.resources {
+            if wanted.owner == ResourceOwner::Manager {
+                continue;
+            }
+            let present = state
+                .observed
+                .iter()
+                .any(|o| o.kind == wanted.kind && o.condition.is_acceptable());
+            if !present && !applied.iter().any(|a| a["kind"] == wanted.kind.as_str()) {
+                continue;
+            }
+            if let Ok(m) = install::materialize_install(env, state.agent, wanted.kind, wanted.scope)
+            {
+                record_resource(state.agent, &m).await?;
+            }
+        }
+    }
+
     // Re-inspect so the reported level is the one that now holds, and record
     // what that inspection established.
     let snap = snapshot().await?;
