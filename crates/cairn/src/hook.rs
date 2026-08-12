@@ -11,7 +11,7 @@
 use crate::client;
 use crate::render;
 use cairn_core::domain::{HandoffTrigger, ObservationType, SessionStatus};
-use cairn_core::tools::{classify_tool, is_test_command};
+use cairn_core::tools::{classify_tool, is_test_command, normalize_vendor_tool};
 use cairn_core::wire::{ContextPayload, ContextReason, ObservationInput, Request};
 use cairn_core::CairnConfig;
 use serde::Deserialize;
@@ -287,6 +287,7 @@ fn success_observation(payload: &HookPayload) -> ObservationInput {
         outcome,
         summary: success_summary(&tool, path.as_deref(), command.as_deref()),
         details: None,
+        vendor_tool: normalize_vendor_tool(&tool),
     }
 }
 
@@ -318,6 +319,7 @@ fn failure_observation(payload: &HookPayload) -> ObservationInput {
         outcome: Some("error".into()),
         summary: failure_summary(&tool, payload),
         details: payload.error.clone(),
+        vendor_tool: normalize_vendor_tool(&tool),
     }
 }
 

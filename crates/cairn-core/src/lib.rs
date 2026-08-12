@@ -9,6 +9,7 @@ pub mod config;
 pub mod context;
 pub mod domain;
 pub mod handoff;
+pub mod lifecycle;
 pub mod paths;
 pub mod redact;
 pub mod release;
@@ -17,6 +18,7 @@ pub mod wire;
 
 pub use config::CairnConfig;
 pub use domain::*;
+pub use lifecycle::{CanonicalEvent, CanonicalLifecycleEvent};
 pub use wire::{Envelope, Request, WireError};
 
 /// Digest used for evidence references and idempotency keys.

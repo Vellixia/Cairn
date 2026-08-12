@@ -1,0 +1,11 @@
+# Codex configuration
+# managed by hand, thanks
+
+model = "gpt-5"      # inline note
+approval_policy = "on-request"
+
+[mcp_servers.other]
+command = "other-server"   # trailing
+args = ["serve", "--port", "8080"]
+
+# a final word

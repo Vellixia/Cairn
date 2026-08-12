@@ -1,0 +1,7 @@
+{
+  "hooks": [
+    { "event": "SessionStart", "type": "command", "command": "user-warmup" },
+    { "event": "Stop", "type": "command", "command": "user-notify" }
+  ],
+  "trust": "trusted"
+}

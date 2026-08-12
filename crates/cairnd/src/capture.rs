@@ -140,6 +140,7 @@ mod tests {
             outcome: None,
             summary: summary.into(),
             details: None,
+            vendor_tool: None,
         }
     }
 

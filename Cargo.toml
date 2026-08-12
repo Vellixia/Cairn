@@ -4,6 +4,7 @@ members = [
     "crates/cairn-core",
     "crates/cairn-git",
     "crates/cairn-store",
+    "crates/cairn-integrate",
     "crates/cairnd",
     "crates/cairn",
     "crates/cairn-server",
@@ -21,6 +22,7 @@ repository = "https://github.com/Vellixia/Cairn"
 cairn-core = { path = "crates/cairn-core" }
 cairn-git = { path = "crates/cairn-git" }
 cairn-store = { path = "crates/cairn-store" }
+cairn-integrate = { path = "crates/cairn-integrate" }
 
 anyhow = "1"
 thiserror = "2"
@@ -68,6 +70,9 @@ semver = "1"
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+jsonc-parser = { version = "0.33", features = ["cst", "serde"] }
+toml_edit = "0.22"
+include_dir = "0.7"
 
 [profile.release]
 lto = "thin"

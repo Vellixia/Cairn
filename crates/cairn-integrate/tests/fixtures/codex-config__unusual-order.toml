@@ -1,0 +1,7 @@
+[mcp_servers.zeta]
+command = "z"
+
+[mcp_servers.alpha]
+command = "a"
+
+model_reasoning_effort = "high"

@@ -1,0 +1,7 @@
+{
+  "mcpServers": {
+    "alpha": { "command": "a" },
+    "beta":  { "command": "b", "env": { "TOKEN": "sk-not-a-real-secret-000" } },
+    "gamma": { "command": "c" }
+  }
+}

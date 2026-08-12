@@ -115,6 +115,11 @@ pub struct ObservationInput {
     pub summary: String,
     #[serde(default)]
     pub details: Option<serde_json::Value>,
+    /// The raw vendor tool name, kept as bounded provenance only (FR-122,
+    /// D36). Normalized and truncated at construction; never consulted by
+    /// ranking, handoff synthesis or context assembly (FR-121).
+    #[serde(default)]
+    pub vendor_tool: Option<String>,
 }
 
 /// Which entity a delete targets (FR-052).
