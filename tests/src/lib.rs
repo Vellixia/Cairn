@@ -128,6 +128,18 @@ impl Sandbox {
         self.repo.path().to_path_buf()
     }
 
+    /// Add a linked worktree of the sandbox repository, on a branch of the same
+    /// name, and return its path.
+    ///
+    /// Kept inside the sandbox's own home so parallel tests never collide on a
+    /// shared path — and so it is removed with everything else.
+    pub fn add_worktree(&self, name: &str) -> std::path::PathBuf {
+        let path = self.home.path().join("worktrees").join(name);
+        std::fs::create_dir_all(path.parent().expect("worktrees parent")).expect("worktrees dir");
+        self.git(&["worktree", "add", "-b", name, &path.display().to_string()]);
+        path
+    }
+
     /// Pretend an agent is installed, by creating the directory its detection
     /// looks for. No vendor binary is involved, which is what keeps these
     /// tests hermetic (FR-204, SC-124).
@@ -238,15 +250,46 @@ impl Sandbox {
 
     /// Deliver a Claude Code hook event with the given payload.
     pub fn hook(&self, event: &str, payload: serde_json::Value) -> CliResult {
+        self.hook_as("claude-code", event, payload)
+    }
+
+    /// Drive a hook for a named adapter.
+    ///
+    /// Claude Code's entry is `cairn hook <Event>`, unchanged from Feature
+    /// 001; the others name themselves, because the same event word means a
+    /// different payload shape to a different vendor.
+    pub fn hook_as(&self, agent: &str, event: &str, payload: serde_json::Value) -> CliResult {
+        self.hook_in(&self.repo_dir(), agent, event, payload)
+    }
+
+    /// Drive a hook from a specific directory.
+    ///
+    /// A second worktree of the same repository is a different directory, and
+    /// the directory is the only thing that tells the two apart — an agent
+    /// working there reports it as its `cwd` exactly like this (US10 #5).
+    pub fn hook_in(
+        &self,
+        dir: &std::path::Path,
+        agent: &str,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> CliResult {
         use std::io::Write;
         use std::process::Stdio;
 
+        let mut args: Vec<String> = vec!["hook".into(), event.into()];
+        if agent != "claude-code" {
+            args.push("--agent".into());
+            args.push(agent.into());
+        }
         let mut child = Command::new(binary("cairn"))
-            .args(["hook", event])
-            .current_dir(self.repo.path())
+            .args(&args)
+            .current_dir(dir)
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
             .env("CAIRND_BIN", binary("cairnd"))
+            .env("HOME", self.fake_home())
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -254,7 +297,7 @@ impl Sandbox {
             .expect("hook runs");
 
         let mut body = payload;
-        body["cwd"] = serde_json::json!(self.repo.path().display().to_string());
+        body["cwd"] = serde_json::json!(dir.display().to_string());
         child
             .stdin
             .as_mut()

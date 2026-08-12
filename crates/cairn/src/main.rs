@@ -161,7 +161,17 @@ enum Command {
     /// Run the MCP server over stdio.
     Mcp,
     /// Claude Code hook entry point. Always exits 0.
-    Hook { event: String },
+    /// A vendor lifecycle event, translated by the named agent's adapter.
+    ///
+    /// Always exits 0, whatever happened: Cairn is never the reason a session
+    /// breaks (FR-015, FR-193).
+    Hook {
+        event: String,
+        /// Which adapter to translate with. Defaults to Claude Code so a
+        /// Feature 001 hook entry keeps working unchanged.
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 /// The operations a developer runs rarely (`contracts/integration-cli.md`).
@@ -411,7 +421,7 @@ async fn run_async() {
 
     // The hook entry point is the exception to every rule below: it always
     // exits 0, whatever happened (FR-015).
-    if let Command::Hook { event } = &cli.command {
+    if let Command::Hook { event, .. } = &cli.command {
         hook::run(event).await;
         std::process::exit(0);
     }
