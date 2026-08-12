@@ -416,12 +416,15 @@ async fn stop(cwd: &str, payload: &HookPayload, config: &CairnConfig) -> Result<
 
 /// The one hook that completes a session, with its `reason` recorded.
 async fn session_end(cwd: &str, payload: &HookPayload, config: &CairnConfig) -> Result<(), String> {
+    // The hook path never waits: the vendor's own handler budget holds a
+    // deadline over it, and the seal is what is acknowledged (D22, FR-240).
     let request = Request::SessionEnd {
         cwd: cwd.to_string(),
         session_id: None,
         agent_session_key: payload.session_id.clone(),
         status: SessionStatus::Completed,
         reason: payload.reason.clone(),
+        wait_for_handoff: false,
     };
     // Ending writes the final handoff, so it is allowed the context deadline.
     client::send_with_deadline(&request, context_deadline(config))

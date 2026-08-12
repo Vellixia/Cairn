@@ -132,6 +132,9 @@ pub fn session(row: &SqliteRow) -> Result<Session> {
         last_turn_ended_at: opt_ts(row, "last_turn_ended_at")?,
         daemon_run_id: uuid(row, "daemon_run_id")?,
         end_reason: row.try_get("end_reason")?,
+        handoff_pending: row.try_get::<i64, _>("handoff_pending").unwrap_or(0) != 0,
+        handoff_attempts: row.try_get("handoff_attempts").unwrap_or(0),
+        handoff_error: row.try_get("handoff_error").unwrap_or(None),
         deleted_at: opt_ts(row, "deleted_at")?,
     })
 }

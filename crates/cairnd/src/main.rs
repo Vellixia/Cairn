@@ -84,6 +84,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(stale, "memory marked stale");
     }
     // Queued work a previous run claimed but never delivered is ours again.
+    // The backstop for the process dying between the seal and the synthesis —
+    // not the only retry path, which is the point of D22 (FR-240).
+    let owed = recover::sweep_pending_handoffs(&daemon, std::time::Duration::ZERO).await;
+    if owed > 0 {
+        tracing::info!(owed, "produced handoffs owed by a previous run");
+    }
+
     let released = recover::release_abandoned_claims(&daemon).await;
     if released > 0 {
         tracing::info!(released, "released outbox claims from a previous run");
@@ -111,6 +118,13 @@ async fn main() -> anyhow::Result<()> {
                 ticks.tick().await;
                 let reaped =
                     recover::reap_idle_sessions(&daemon, recover::IDLE_SESSION_TIMEOUT).await;
+                // The same tick sweeps any boundary still owing a handoff, so
+                // progress does not depend on a restart (FR-240, D22).
+                let swept =
+                    recover::sweep_pending_handoffs(&daemon, recover::HANDOFF_SWEEP_AFTER).await;
+                if swept > 0 {
+                    tracing::info!(swept, "produced handoffs owed by sealed boundaries");
+                }
                 if reaped > 0 {
                     tracing::info!(reaped, "closed idle sessions");
                 }

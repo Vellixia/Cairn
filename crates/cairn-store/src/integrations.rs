@@ -13,7 +13,7 @@
 //! block alive for OpenCode when Codex disconnects.
 
 use crate::{Result, Store};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use uuid::Uuid;
@@ -133,11 +133,7 @@ pub async fn list_agents(store: &Store) -> Result<Vec<String>> {
 /// the resource already exists — because another agent installed it — this
 /// adds only the binding, which is how one `AGENTS.md` block comes to serve
 /// two agents (FR-144, FR-243).
-pub async fn bind(
-    store: &Store,
-    agent: &str,
-    resource: &InstalledResource,
-) -> Result<Uuid> {
+pub async fn bind(store: &Store, agent: &str, resource: &InstalledResource) -> Result<Uuid> {
     let mut tx = store.pool().begin().await?;
 
     let existing: Option<String> =
@@ -333,11 +329,12 @@ pub async fn bound_resources(store: &Store, agent: &str) -> Result<Vec<BoundReso
 /// the withdrawal stays verifiable (FR-244, D28a).
 pub async fn remove_agent_if_unbound(store: &Store, agent: &str) -> Result<bool> {
     let mut tx = store.pool().begin().await?;
-    let remaining: i64 = sqlx::query("SELECT COUNT(*) AS n FROM resource_bindings WHERE agent = ?1")
-        .bind(agent)
-        .fetch_one(&mut *tx)
-        .await?
-        .get("n");
+    let remaining: i64 =
+        sqlx::query("SELECT COUNT(*) AS n FROM resource_bindings WHERE agent = ?1")
+            .bind(agent)
+            .fetch_one(&mut *tx)
+            .await?
+            .get("n");
     if remaining > 0 {
         tx.commit().await?;
         return Ok(false);
@@ -524,7 +521,10 @@ mod tests {
     async fn unbinding_something_absent_is_not_an_error() {
         let s = store().await;
         upsert_agent(&s, &agent_row("codex")).await.unwrap();
-        assert_eq!(unbind(&s, "codex", "skill").await.unwrap(), Unbound::Nothing);
+        assert_eq!(
+            unbind(&s, "codex", "skill").await.unwrap(),
+            Unbound::Nothing
+        );
     }
 
     #[tokio::test]
@@ -537,9 +537,13 @@ mod tests {
         manager_owned.owner = "manager".into();
         manager_owned.content_hash = None;
         bind(&s, "codex", &manager_owned).await.unwrap();
-        bind(&s, "codex", &resource("lifecycle", "/home/dev/.codex/hooks.json"))
-            .await
-            .unwrap();
+        bind(
+            &s,
+            "codex",
+            &resource("lifecycle", "/home/dev/.codex/hooks.json"),
+        )
+        .await
+        .unwrap();
 
         unbind(&s, "codex", "lifecycle").await.unwrap();
         assert!(
@@ -629,9 +633,13 @@ mod tests {
         // called for any of this.
         let s = store().await;
         upsert_agent(&s, &agent_row("codex")).await.unwrap();
-        bind(&s, "codex", &resource("mcp", "/home/dev/.codex/config.toml"))
-            .await
-            .unwrap();
+        bind(
+            &s,
+            "codex",
+            &resource("mcp", "/home/dev/.codex/config.toml"),
+        )
+        .await
+        .unwrap();
         record_evidence(
             &s,
             &CapabilityEvidence {

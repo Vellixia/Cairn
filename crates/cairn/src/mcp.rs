@@ -386,6 +386,10 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                         status: enum_arg(args, "status")
                             .unwrap_or(cairn_core::domain::SessionStatus::Completed),
                         reason: str_arg(args, "reason"),
+                        // An agent tool call has no vendor handler deadline
+                        // over it, so it keeps Feature 001's behavior and
+                        // waits for the durable handoff (D22).
+                        wait_for_handoff: true,
                     })
                     .await?
                 }

@@ -122,6 +122,12 @@ pub struct ObservationInput {
     pub vendor_tool: Option<String>,
 }
 
+/// A request that does not say defaults to waiting, which is Feature 001's
+/// behavior and the safe answer for anything that is not a budgeted hook.
+fn default_wait_for_handoff() -> bool {
+    true
+}
+
 /// Which entity a delete targets (FR-052).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -198,6 +204,14 @@ pub enum Request {
         status: SessionStatus,
         #[serde(default)]
         reason: Option<String>,
+        /// Whether the caller waits for the durable handoff.
+        ///
+        /// True for `cairn session end` from the command line, which keeps
+        /// Feature 001's behavior — nothing holds a deadline over it. False
+        /// for a hook-driven boundary, where the vendor's own handler budget
+        /// does, and the seal is what is acknowledged (D22, FR-240).
+        #[serde(default = "default_wait_for_handoff")]
+        wait_for_handoff: bool,
     },
     /// `Stop`: a turn boundary. Never ends the session (FR-032, D16).
     TurnCheckpoint {
@@ -402,6 +416,24 @@ pub struct StatusPayload {
     /// The build answering this, so a bug report can name it.
     #[serde(default)]
     pub version: Option<String>,
+    /// Boundaries that acknowledged but have not produced their handoff yet.
+    ///
+    /// A terminal session never sits silently owing one: this is what makes
+    /// the debt visible (FR-240 clause 3).
+    #[serde(default)]
+    pub sessions_awaiting_handoff: i64,
+    /// Boundaries whose synthesis has failed, with the redacted reason. They
+    /// stay retryable and actionable; this is not a terminal outcome.
+    #[serde(default)]
+    pub handoff_synthesis_failures: Vec<HandoffFailure>,
+}
+
+/// One boundary still owing a handoff, and why (FR-240 clause 3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffFailure {
+    pub session_id: Uuid,
+    /// Redacted and bounded; never file or conversation content.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

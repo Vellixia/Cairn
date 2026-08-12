@@ -17,6 +17,7 @@ fn stop_is_a_turn_checkpoint_not_a_session_boundary() {
         json!({ "session_id": "turn", "tool_name": "Read", "tool_input": { "file_path": "README.md" } }),
     );
     s.hook("Stop", json!({ "session_id": "turn" }));
+    s.settle_turn_checkpoint();
 
     let sessions = s.json(&["session", "list"])["sessions"].clone();
     assert_eq!(sessions.as_array().unwrap().len(), 1);
@@ -62,7 +63,7 @@ fn session_end_completes_the_session_and_records_its_reason() {
 
     let sessions = s.json(&["session", "list"])["sessions"].clone();
     assert_eq!(sessions[0]["status"], "completed");
-    assert!(s.json(&["handoff", "show"])["handoff"]["trigger"] == "session_end");
+    assert!(s.handoff_after_close(&[])["trigger"] == "session_end");
 }
 
 #[test]
@@ -84,7 +85,7 @@ fn a_session_active_at_daemon_start_is_reconciled_and_can_resume() {
 
     let sessions = s.json(&["session", "list"])["sessions"].clone();
     assert_eq!(sessions[0]["status"], "interrupted");
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert_eq!(handoff["trigger"], "recovered");
     let recovered_id = handoff["id"].clone();
 
@@ -101,7 +102,7 @@ fn a_session_active_at_daemon_start_is_reconciled_and_can_resume() {
         "a later event resumes the session"
     );
     assert_eq!(
-        s.json(&["handoff", "show"])["handoff"]["id"],
+        s.handoff_after_close(&[])["id"],
         recovered_id,
         "the recovery handoff is retained"
     );
@@ -183,8 +184,7 @@ fn concurrent_sessions_in_one_worktree_stay_distinct() {
         .find(|s| s["status"] == "completed")
         .unwrap()["id"]
         .clone();
-    let handoff =
-        s.json(&["handoff", "show", "--session", a_id.as_str().unwrap()])["handoff"].clone();
+    let handoff = s.handoff_after_close(&["--session", a_id.as_str().unwrap()]);
     let changed = handoff["changed_files"].as_array().unwrap();
     assert!(changed.iter().any(|f| f.as_str() == Some("a.rs")));
     assert!(
@@ -351,10 +351,7 @@ fn a_real_process_kill_loses_nothing_and_reconciles_the_session() {
 
     // Daemon start is the boundary: the session is reconciled with a handoff.
     s.settle_session_status("interrupted");
-    assert_eq!(
-        s.json(&["handoff", "show"])["handoff"]["trigger"],
-        "recovered"
-    );
+    assert_eq!(s.handoff_after_close(&[])["trigger"], "recovered");
 }
 
 /// `kill(2)`, so the test can end a process the way a crash does.

@@ -67,7 +67,19 @@ async fn handle(d: &Daemon, request: Request) -> Reply {
             agent_session_key,
             status,
             reason,
-        } => session_end(d, &cwd, session_id, agent_session_key, status, reason).await,
+            wait_for_handoff,
+        } => {
+            session_end(
+                d,
+                &cwd,
+                session_id,
+                agent_session_key,
+                status,
+                reason,
+                wait_for_handoff,
+            )
+            .await
+        }
         Request::TurnCheckpoint {
             cwd,
             agent_session_key,
@@ -324,6 +336,9 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         .map(|s| SessionSummary::from_session(s, now))
         .collect();
 
+    // What is still owed, so a developer never has to guess whether a
+    // boundary completed (FR-240 clause 3).
+    let debt = repo::handoff_debt(&d.store).await.map_err(storage_err)?;
     let payload = StatusPayload {
         project: ProjectSummary::from(&r.project),
         repository: repo_state(&git),
@@ -340,6 +355,12 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         server_url: d.server.read().await.url.clone(),
         authenticated: d.server.read().await.token.is_some(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        sessions_awaiting_handoff: debt.0,
+        handoff_synthesis_failures: debt
+            .1
+            .into_iter()
+            .map(|(session_id, reason)| cairn_core::wire::HandoffFailure { session_id, reason })
+            .collect(),
     };
     Ok(serde_json::to_value(payload).unwrap_or(json!({})))
 }
@@ -510,6 +531,18 @@ async fn session_list(d: &Daemon, cwd: &str) -> Reply {
     Ok(json!({ "sessions": sessions }))
 }
 
+/// The sealed close (D22, FR-240).
+///
+/// Two phases. **Seal**, synchronously, before the reply: one transaction sets
+/// the terminal status, the end reason, `ended_at` and `handoff_pending`. No
+/// Git, no capture quiesce, no synthesis. **Synthesize**, immediately after:
+/// build the handoff, write it, clear `handoff_pending`.
+///
+/// A caller that waits — `cairn session end` from the command line — gets
+/// Feature 001's behavior unchanged, because nothing holds a deadline over it.
+/// A hook-driven boundary does not wait: Codex's session-end handler has a
+/// one-second default budget, and the Feature 001 path can exceed it, which
+/// would make the completion guarantee unprovable rather than merely slow.
 async fn session_end(
     d: &Daemon,
     cwd: &str,
@@ -517,20 +550,45 @@ async fn session_end(
     agent_session_key: Option<String>,
     status: SessionStatus,
     reason: Option<String>,
+    wait_for_handoff: bool,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let session = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    // The final handoff is written before the status changes, so a session
-    // never ends without one (FR-032).
-    let handoff = handoffs::generate(d, &session, HandoffTrigger::SessionEnd, r.policy).await?;
-    let ended = repo::end_session(&d.store, session.id, status, reason.as_deref(), r.policy)
+    // Phase one: durable termination, before anything is acknowledged.
+    let sealed = repo::seal_session(&d.store, session.id, status, reason.as_deref(), r.policy)
         .await
         .map_err(storage_err)?;
 
+    if wait_for_handoff {
+        // Phase two, inline. The caller asked to wait, so a failure here is
+        // reported to it rather than left owed.
+        let handoff = handoffs::generate(d, &sealed, HandoffTrigger::SessionEnd, r.policy).await?;
+        repo::clear_handoff_pending(&d.store, sealed.id)
+            .await
+            .map_err(storage_err)?;
+        let ended = repo::session(&d.store, sealed.id)
+            .await
+            .map_err(storage_err)?;
+        return Ok(json!({
+            "session": SessionSummary::from_session(&ended, chrono::Utc::now()),
+            "handoff": handoff,
+        }));
+    }
+
+    // Phase two, after the reply. Progress is guaranteed while the daemon runs
+    // (FR-240 clause 2): this task retries with bounded backoff, and the
+    // maintenance tick sweeps anything it gives up on.
+    let daemon = d.clone();
+    let policy = r.policy;
+    let id = sealed.id;
+    tokio::spawn(async move {
+        crate::handoffs::synthesize_pending(&daemon, id, policy).await;
+    });
+
     Ok(json!({
-        "session": SessionSummary::from_session(&ended, chrono::Utc::now()),
-        "handoff": handoff,
+        "session": SessionSummary::from_session(&sealed, chrono::Utc::now()),
+        "handoff_pending": true,
     }))
 }
 

@@ -277,6 +277,9 @@ mod tests {
             daemon_run_id: new_id(),
             end_reason: None,
             deleted_at: None,
+            handoff_pending: false,
+            handoff_attempts: 0,
+            handoff_error: None,
         }
     }
 

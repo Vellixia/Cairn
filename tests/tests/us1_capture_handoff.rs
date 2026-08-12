@@ -49,7 +49,7 @@ fn handoff_names_the_changed_file_the_failing_test_and_a_next_step() {
         json!({ "session_id": "sess-1", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
 
     let changed = handoff["changed_files"].as_array().expect("changed_files");
     assert!(
@@ -168,6 +168,6 @@ fn a_precompact_boundary_writes_a_handoff_and_keeps_the_session_active() {
         "compaction is not a session boundary"
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert_eq!(handoff["trigger"], "pre_compact");
 }

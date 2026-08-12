@@ -127,7 +127,7 @@ fn deleting_a_session_keeps_the_memory_and_handoff_it_produced() {
         json!({ "session_id": "d", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     let handoff_id = handoff["id"].as_str().unwrap().to_string();
     let session_id = handoff["session_id"].as_str().unwrap().to_string();
 

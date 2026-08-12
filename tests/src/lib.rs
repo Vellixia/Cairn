@@ -148,6 +148,40 @@ impl Sandbox {
         envelope["data"].clone()
     }
 
+    /// Read a handoff, waiting for one a sealed boundary still owes.
+    ///
+    /// A hook-driven `SessionEnd` is acknowledged after termination is
+    /// durably recorded, and its handoff is produced immediately afterwards
+    /// rather than inside the request (FR-240, D22) — that is what makes a
+    /// vendor's one-second handler budget survivable without giving up the
+    /// completion guarantee. The handoff's *substance* is unchanged; only the
+    /// moment it becomes readable is, and the documented bound is five
+    /// seconds on a running daemon.
+    ///
+    /// `args` are the arguments after `handoff show`, e.g. `["--session", id]`.
+    pub fn handoff_after_close(&self, args: &[&str]) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut full = vec!["--json", "handoff", "show"];
+        full.extend_from_slice(args);
+        loop {
+            let result = self.cairn(&full);
+            if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&result.stdout) {
+                if envelope["ok"] == true {
+                    let handoff = envelope["data"]["handoff"].clone();
+                    if !handoff.is_null() {
+                        return handoff;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no handoff within the documented bound after a sealed close: `cairn {}`",
+                full.join(" ")
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     /// Run `cairn --json`, expecting failure, and return the error object.
     pub fn json_err(&self, args: &[&str]) -> serde_json::Value {
         let mut full = vec!["--json"];
@@ -237,6 +271,17 @@ impl Sandbox {
                 .as_array()
                 .map(|a| a.len() >= n)
                 .unwrap_or(false)
+        });
+    }
+
+    /// Wait until the newest session has recorded a turn checkpoint.
+    ///
+    /// `Stop` is capture class and fire-and-forget by contract (FR-015,
+    /// FR-193): the hook returns before the write lands, so a test that reads
+    /// immediately is racing Cairn's own deadline rather than testing it.
+    pub fn settle_turn_checkpoint(&self) {
+        self.settle("a turn checkpoint", |s| {
+            s.json(&["session", "list"])["sessions"][0]["last_turn_ended_at"].is_string()
         });
     }
 

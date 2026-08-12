@@ -100,7 +100,7 @@ fn unmet_criteria_appear_as_remaining_work_in_the_handoff() {
         json!({ "session_id": "t3", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert_eq!(handoff["goal"], "429 over the limit");
     let remaining = serde_json::to_string(&handoff["remaining_work"]).unwrap();
     assert!(remaining.contains("429 above threshold"), "{remaining}");
@@ -123,7 +123,7 @@ fn a_session_with_no_task_remains_valid() {
         json!({ "session_id": "free", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert!(
         handoff["goal"].as_str().unwrap().contains("main"),
         "goal falls back to the branch"

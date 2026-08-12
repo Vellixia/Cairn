@@ -13,6 +13,11 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 /// Everything a request handler needs.
+///
+/// Cheap to clone: every field is either `Copy` or already behind an `Arc`.
+/// The sealed close spawns a synthesis task that outlives its request, and it
+/// needs its own handle (D22).
+#[derive(Clone)]
 pub struct Daemon {
     pub store: Store,
     /// Identifies this daemon run. Sessions from a previous run are the ones

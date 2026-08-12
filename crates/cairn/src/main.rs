@@ -554,6 +554,9 @@ async fn session(action: &SessionAction) -> Result<Output, WireError> {
                 agent_session_key: None,
                 status,
                 reason: reason.clone(),
+                // `cairn session end` waits for the durable handoff: nothing
+                // holds a deadline over it (D22).
+                wait_for_handoff: true,
             })
             .await?;
             Ok(Output::with(v, "Session ended; handoff written.\n".into()))
