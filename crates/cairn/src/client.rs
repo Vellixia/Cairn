@@ -166,25 +166,114 @@ async fn connect() -> Option<IpcStream> {
     tokio::net::UnixStream::connect(socket_path()).await.ok()
 }
 
-/// Open the client end of the named pipe, retrying briefly on
-/// `ERROR_PIPE_BUSY`: every instance the daemon has standing is momentarily
-/// serving another client. That is a healthy daemon, just a narrow race —
-/// unlike a cold or absent daemon, which fails with a different error and is
-/// treated as "not running" immediately.
+/// `ERROR_PIPE_BUSY` — every instance the daemon has standing is currently
+/// serving someone else.
+#[cfg(windows)]
+const ERROR_PIPE_BUSY: i32 = 231;
+
+/// How long a busy pipe is still considered a live daemon worth waiting for.
+///
+/// The daemon keeps one instance pending and opens the next as soon as that
+/// one is taken, so a burst of clients — twelve hooks at once, say — queues
+/// against a single instance and each waits its turn. Every exchange is one
+/// line in and one line out, so the queue drains fast; this only has to be
+/// longer than the burst, not generous. The caller's own deadline still caps
+/// the whole attempt, so a capture hook never spends this budget.
+#[cfg(windows)]
+const PIPE_BUSY_BUDGET: Duration = Duration::from_secs(3);
+
+/// Open the client end of the named pipe, waiting out a busy one.
+///
+/// A busy pipe is a healthy daemon with its instances taken, so it is worth
+/// retrying. A cold or absent daemon fails with a different error and is
+/// reported as "not running" at once, so the caller can start one.
 #[cfg(windows)]
 async fn connect() -> Option<IpcStream> {
     use tokio::net::windows::named_pipe::ClientOptions;
     let name = socket_path().to_string_lossy().into_owned();
-    for _ in 0..10 {
+    let deadline = std::time::Instant::now() + PIPE_BUSY_BUDGET;
+    loop {
         match ClientOptions::new().open(&name) {
             Ok(client) => return Some(client),
-            Err(e) if e.raw_os_error() == Some(231) => {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                if std::time::Instant::now() >= deadline {
+                    return None;
+                }
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             Err(_) => return None,
         }
     }
-    None
+}
+
+/// Keep this process's standard handles out of the daemon we are about to
+/// spawn.
+///
+/// Windows `CreateProcess` hands the child *every* handle marked inheritable,
+/// not just the three named in `STARTUPINFO`, and Rust's `Command` always
+/// asks for inheritance. Redirecting the daemon's own stdio to NUL therefore
+/// does not do what it looks like it does: the daemon still receives a
+/// duplicate of whatever pipe this process was given for stdout and stderr,
+/// and — being a daemon — holds it open long after we exit. Whoever is
+/// reading the other end waits for an EOF that never arrives. That is a
+/// deadlock for any caller that captures our output: a shell pipeline, the
+/// end-to-end suite, or the agent running a capture hook.
+///
+/// Clearing the inherit flag across the spawn is what makes `Stdio::null()`
+/// mean what it says. The previous flags go back on when the guard drops,
+/// which is immediately after the spawn.
+#[cfg(windows)]
+struct StdHandlesNotInherited(Vec<(windows_sys::Win32::Foundation::HANDLE, u32)>);
+
+#[cfg(windows)]
+impl StdHandlesNotInherited {
+    fn apply() -> Self {
+        use windows_sys::Win32::Foundation::{
+            GetHandleInformation, SetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+        };
+        use windows_sys::Win32::System::Console::{
+            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+        };
+
+        let mut saved = Vec::new();
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: `GetStdHandle` returns a handle this process already
+            // owns (or a sentinel, which is filtered out below); querying and
+            // setting its flags borrows it without taking ownership, so
+            // nothing here can close a handle still in use.
+            unsafe {
+                let handle = GetStdHandle(id);
+                if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                    continue;
+                }
+                let mut flags = 0u32;
+                if GetHandleInformation(handle, &mut flags) == 0 {
+                    continue;
+                }
+                if flags & HANDLE_FLAG_INHERIT == 0 {
+                    continue;
+                }
+                if SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0) != 0 {
+                    saved.push((handle, flags));
+                }
+            }
+        }
+        Self(saved)
+    }
+}
+
+#[cfg(windows)]
+impl Drop for StdHandlesNotInherited {
+    fn drop(&mut self) {
+        use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+        for (handle, flags) in self.0.drain(..) {
+            // SAFETY: as in `apply` — the handle is this process's own and is
+            // only having a flag restored to what it was.
+            unsafe {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags & HANDLE_FLAG_INHERIT);
+            }
+        }
+    }
 }
 
 /// Spawn `cairnd` detached, so the agent session is never waiting on it.
@@ -203,6 +292,9 @@ pub fn start_daemon() -> Result<(), WireError> {
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
+    // Held across the spawn, and only across the spawn.
+    #[cfg(windows)]
+    let _handles = StdHandlesNotInherited::apply();
     command
         .spawn()
         .map(|mut child| {
