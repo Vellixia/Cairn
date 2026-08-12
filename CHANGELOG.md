@@ -24,6 +24,13 @@ Windows is a supported platform.
 
 ### Fixed
 
+- **`cairn link` no longer denies a link it already has.** With no arguments
+  it reported `linked: false` unconditionally, so an already-linked project
+  was told it was not linked and pointed at `cairn link --create` — which
+  would have created a second shared project for a repository that already
+  had one — while `cairn status`, reading the same row, reported it linked.
+  It now reads the stored state, and does so without needing a server or a
+  token, since whether a project is linked is local (C1).
 - **`cairn` no longer leaks its standard handles into the daemon it starts.**
   Windows `CreateProcess` hands a child every inheritable handle, not only the
   three named in `STARTUPINFO`, so the daemon received a duplicate of whatever

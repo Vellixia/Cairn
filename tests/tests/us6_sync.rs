@@ -65,6 +65,47 @@ fn seed_local_work(s: &Sandbox) {
     );
 }
 
+/// `cairn link` with no arguments asks "am I linked?", and must answer with
+/// what is actually stored.
+///
+/// It used to answer `false` unconditionally, so an already-linked project was
+/// told it was not linked and pointed at `cairn link --create` — which would
+/// have created a *second* shared project for a repository that already had
+/// one. `cairn status`, reading the same row, said the opposite at the same
+/// moment.
+///
+/// Deliberately no `Server`: whether this project is linked is local state,
+/// and reading it must not need a server, a token, or a network round-trip
+/// (C1). That is also what makes this reproducible offline.
+#[test]
+fn bare_link_reports_an_existing_link_instead_of_denying_it() {
+    let s = Sandbox::new();
+    let project = s.json(&["status"])["project"]["id"]
+        .as_str()
+        .expect("project id")
+        .to_string();
+    let shared = "019fe585-148a-7e62-ad93-f0bfff672a52";
+
+    // Exactly the row state a successful `cairn link --project` leaves behind,
+    // without needing a server to join one.
+    s.execute_sql(&format!(
+        "UPDATE projects SET linked = 1, server_project_id = '{shared}' WHERE id = '{project}'"
+    ));
+
+    let v = s.json(&["link"]);
+    assert_eq!(
+        v["linked"], true,
+        "an already-linked project must not report itself unlinked"
+    );
+    assert_eq!(
+        v["server_project_id"], shared,
+        "the reported link must name the shared project actually joined"
+    );
+
+    // And it must agree with `cairn status`, which reads the same row.
+    assert_eq!(s.json(&["status"])["project"]["linked"], true);
+}
+
 #[test]
 fn linking_syncs_history_and_replaying_a_batch_changes_nothing() {
     let Some(server) = server() else { return };

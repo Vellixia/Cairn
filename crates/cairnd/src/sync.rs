@@ -232,6 +232,31 @@ pub async fn logout(d: &Daemon) -> Reply {
 /// never applied silently (FR-064, D14).
 pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create: bool) -> Reply {
     let r = d.resolve(cwd).await?;
+
+    // Bare `cairn link` asks "am I linked?", and the answer is already on
+    // disk. Read it before reaching for a server, for two reasons.
+    //
+    // It has to be *true*: this used to fall through and report `linked:
+    // false` unconditionally, so a linked project was told it was not linked
+    // and pointed at `cairn link --create`, which would have made a second
+    // shared project for a repository that already had one — while `cairn
+    // status`, reading the same row, said it was linked.
+    //
+    // And it has to work offline: link state is local, so asking for it must
+    // not need a server or a token (C1). It used to fail outright with
+    // `no server configured` on a machine that had simply not stored one.
+    if server_project_id.is_none() && !create && r.project.linked {
+        if let Some(target) = r.project.server_project_id {
+            return Ok(json!({
+                "linked": true,
+                "project": ProjectSummary::from(&r.project),
+                "server_project_id": target,
+                "hint": "already linked; run `cairn unlink` to stop sharing, \
+                         or `cairn link --project <id>` to join a different one",
+            }));
+        }
+    }
+
     let c = client(d).await?;
 
     let target = match (server_project_id, create) {
@@ -255,7 +280,8 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
                 })?
         }
         (None, false) => {
-            // Discovery hint only. The user picks (D14).
+            // Not linked — established above, not assumed. Discovery hint
+            // only from here; the user picks (D14).
             let remote = r.project.repository_remote.clone().unwrap_or_default();
             let candidates = c
                 .get(&format!(
