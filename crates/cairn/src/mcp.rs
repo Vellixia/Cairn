@@ -91,10 +91,18 @@ fn initialize(params: &Value) -> Value {
         Some(v) if SUPPORTED_PROTOCOL_VERSIONS.contains(&v) => v,
         _ => PROTOCOL_VERSION,
     };
+    // The compact universal rendering of the usage contract, delivered
+    // through the protocol's own server-instructions mechanism, so a client
+    // with no native adapter still receives correct behavior (FR-129).
+    //
+    // Delivery is best-effort: the specification calls `instructions` a hint
+    // clients *may* add to the system prompt, so Cairn never reports the
+    // contract as *delivered* through this path.
     json!({
         "protocolVersion": negotiated,
         "capabilities": { "tools": {} },
         "serverInfo": { "name": "cairn", "version": env!("CARGO_PKG_VERSION") },
+        "instructions": cairn_integrate::render::Contract::canonical().mcp_instructions(),
     })
 }
 
@@ -583,6 +591,52 @@ mod tests {
         );
         assert!(triggers.contains(&"pre_compact"));
         assert!(triggers.contains(&"session_end"));
+    }
+
+    #[test]
+    fn initialize_carries_the_usage_contract() {
+        // FR-129, SC-107: the same rules the managed block states, in the
+        // tool-facing form.
+        let out = initialize(&json!({}));
+        let instructions = out["instructions"].as_str().expect("instructions");
+        assert!(instructions.contains("Cairn"));
+        assert!(instructions.contains("1. "));
+        assert_eq!(
+            instructions,
+            cairn_integrate::render::Contract::canonical().mcp_instructions()
+        );
+        // A generic client has neither hooks nor Skills, so neither is
+        // mentioned.
+        let lower = instructions.to_lowercase();
+        assert!(!lower.contains("hook"));
+        assert!(!lower.contains("skill"));
+    }
+
+    #[test]
+    fn the_protocol_revision_does_not_change() {
+        // D34, FR-130: `instructions` is a field 2025-06-18 already defines,
+        // so adding it is not a protocol bump.
+        assert_eq!(PROTOCOL_VERSION, "2025-06-18");
+        assert_eq!(initialize(&json!({}))["protocolVersion"], PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn the_surface_is_still_exactly_six_tools() {
+        // FR-128, SC-106: a test fails if a seventh appears.
+        assert_eq!(TOOL_NAMES.len(), 6, "the MCP surface grew a seventh tool");
+        assert_eq!(tool_definitions().len(), 6);
+        for forbidden in [
+            "cairn_doctor",
+            "cairn_repair",
+            "cairn_connect",
+            "cairn_agents",
+            "cairn_integration",
+        ] {
+            assert!(
+                !TOOL_NAMES.contains(&forbidden),
+                "{forbidden} is a developer operation, not an agent tool"
+            );
+        }
     }
 
     #[test]

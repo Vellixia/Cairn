@@ -275,6 +275,7 @@ dependencies = [
  "anyhow",
  "cairn-core",
  "cairn-git",
+ "cairn-integrate",
  "chrono",
  "clap",
  "dirs",

@@ -5,6 +5,7 @@
 //! the network.
 
 pub mod diag;
+pub mod integrations;
 pub mod migrate;
 pub mod outbox;
 pub mod repo;

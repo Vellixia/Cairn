@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 cairn-core.workspace = true
+cairn-integrate.workspace = true
 cairn-git.workspace = true
 tokio.workspace = true
 serde.workspace = true
