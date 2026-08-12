@@ -176,7 +176,11 @@ async fn decode(response: reqwest::Response) -> Result<serde_json::Value, WireEr
     Err(WireError::new(&code, message))
 }
 
-/// Store the API token 0600 and remember the server URL (D10).
+/// Store the API token and remember the server URL (D10).
+///
+/// The file is 0600 on Unix. Windows has no mode bits to set, so there it
+/// inherits the privacy of the user-profile directory it sits in; see
+/// `cairn_core::paths::token_path`.
 pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> Reply {
     cairn_core::paths::ensure_home()
         .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;

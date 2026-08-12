@@ -282,11 +282,24 @@ fn a_daemon_restart_mid_session_loses_no_acknowledged_writes() {
     );
 }
 
+// The two tests below identify and hard-kill `cairnd` processes by PID,
+// which needs two things Windows has no direct equivalent for: matching a
+// process to this sandbox by an environment variable it was started with
+// (Unix has `ps`/`pgrep`; reading another process's environment on Windows
+// means opening it and walking its PEB) and an unstoppable, uncatchable
+// `SIGKILL` (the nearest analogue, `TerminateProcess`, is a real API, but
+// pairing it with the process-matching problem above is not something to
+// improvise without a Windows machine to verify it against). Left as
+// follow-up work rather than shipped unverified; the recovery logic these
+// tests exercise (FR-047, H2) is plain, non-platform-specific code that
+// other tests already drive.
+
 /// PIDs of daemons serving this sandbox's socket.
 ///
 /// Identified by the `CAIRN_SOCKET` they were started with: macOS `lsof` does
 /// not report a renamed Unix socket's path, so the environment is the reliable
 /// signal.
+#[cfg(unix)]
 fn daemons_for(s: &Sandbox) -> Vec<i32> {
     let socket = s.socket.display().to_string();
     let listed = std::process::Command::new("pgrep")
@@ -308,6 +321,7 @@ fn daemons_for(s: &Sandbox) -> Vec<i32> {
 }
 
 #[test]
+#[cfg(unix)]
 fn a_real_process_kill_loses_nothing_and_reconciles_the_session() {
     // M4 / FR-047: SIGKILL, not a graceful stop.
     let s = Sandbox::new();
@@ -358,6 +372,7 @@ fn a_real_process_kill_loses_nothing_and_reconciles_the_session() {
 }
 
 /// `kill(2)`, so the test can end a process the way a crash does.
+#[cfg(unix)]
 unsafe fn libc_kill(pid: i32, sig: i32) {
     extern "C" {
         fn kill(pid: i32, sig: i32) -> i32;
@@ -366,6 +381,7 @@ unsafe fn libc_kill(pid: i32, sig: i32) {
 }
 
 #[test]
+#[cfg(unix)]
 fn repeated_concurrent_starts_leave_exactly_one_daemon() {
     // H2: superseded daemons must notice they no longer own the socket and go.
     let s = Sandbox::new();
@@ -409,14 +425,7 @@ fn an_idle_daemon_exits_when_a_timeout_is_configured() {
     // sandbox's own daemon competing for the same socket would decide the
     // outcome by the ownership path instead of the idle path.
     let home = tempfile::TempDir::new().expect("home");
-    let socket = std::env::temp_dir().join(format!(
-        "cairn-idle-{}-{}.sock",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    ));
+    let socket = cairn_e2e::sandbox_socket();
 
     let mut child = std::process::Command::new(cairn_e2e::binary("cairnd"))
         .args([
@@ -433,10 +442,13 @@ fn an_idle_daemon_exits_when_a_timeout_is_configured() {
 
     // It comes up…
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while std::time::Instant::now() < deadline && !socket.exists() {
+    while std::time::Instant::now() < deadline && !cairn_e2e::daemon_listening(&socket) {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    assert!(socket.exists(), "daemon should have bound its socket");
+    assert!(
+        cairn_e2e::daemon_listening(&socket),
+        "daemon should have bound its socket"
+    );
 
     // …and with no requests and no active session, it goes away on its own.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
@@ -446,11 +458,18 @@ fn an_idle_daemon_exits_when_a_timeout_is_configured() {
             None if std::time::Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = std::fs::remove_file(&socket);
+                #[cfg(unix)]
+                {
+                    let _ = std::fs::remove_file(&socket);
+                }
                 panic!("an idle daemon did not exit within its timeout");
             }
             None => std::thread::sleep(std::time::Duration::from_millis(200)),
         }
     }
-    let _ = std::fs::remove_file(&socket);
+    // Named pipes leave no filesystem entry to clean up; only Unix does.
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(&socket);
+    }
 }

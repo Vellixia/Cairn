@@ -7,6 +7,17 @@ All notable changes to Cairn are recorded here. The format follows
 Cairn is pre-1.0. Until 1.0.0, minor versions may change behaviour, storage
 schemas, and the wire protocol without a deprecation period.
 
+## [Unreleased]
+
+### Added
+
+- **Windows support.** `cairn` and `cairnd` now talk over a named pipe
+  instead of a Unix domain socket when built for Windows, and releases
+  publish an `x86_64-pc-windows-msvc` archive alongside the existing macOS
+  and Linux ones. `cairn update` handles the one real difference from
+  Unix: Windows will not let a running binary be overwritten in place, so
+  it is renamed aside first.
+
 ## [0.1.0-alpha.2] — 2026-08-09
 
 Hardening on top of alpha.1: a deployment can now define its own operator, the

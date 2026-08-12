@@ -33,7 +33,7 @@ fn init_is_idempotent_and_status_reports_real_repository_state() {
 fn a_non_repository_fails_cleanly_and_creates_no_state() {
     let home = tempfile::TempDir::new().unwrap();
     let plain = tempfile::TempDir::new().unwrap();
-    let socket = std::env::temp_dir().join(format!("cairn-nr-{}.sock", std::process::id()));
+    let socket = cairn_e2e::sandbox_socket();
 
     let out = Command::new(binary("cairn"))
         .args(["--json", "status"])
@@ -66,7 +66,10 @@ fn a_non_repository_fails_cleanly_and_creates_no_state() {
         .env("CAIRN_HOME", home.path())
         .env("CAIRN_SOCKET", &socket)
         .output();
-    let _ = std::fs::remove_file(&socket);
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(&socket);
+    }
 }
 
 #[test]
