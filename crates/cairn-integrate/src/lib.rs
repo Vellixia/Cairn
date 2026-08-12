@@ -30,6 +30,7 @@ pub mod apply;
 pub mod capability;
 pub mod desired;
 pub mod edit;
+pub mod install;
 pub mod managers;
 pub mod markers;
 pub mod model;
@@ -90,6 +91,25 @@ pub fn normalize(
     adapter_for(agent).normalize(event, payload)
 }
 
+/// Which deadline class a vendor event belongs to, from its name alone.
+///
+/// The hook has to answer this *before* it reads stdin: the capture fast path
+/// runs without an async runtime, and a boundary event needs a reply, so the
+/// two cannot both consume the payload. Deriving it from the adapter rather
+/// than a second table is what keeps the answer single-sourced — a synthetic
+/// payload carrying only a routing key is enough, because the class is
+/// determined by the event, never by its contents.
+///
+/// `None` means the adapter declines that event entirely (FR-115).
+pub fn event_class(agent: AgentId, event: &str) -> Option<cairn_core::lifecycle::CanonicalEvent> {
+    let probe = serde_json::json!({
+        "session_id": "class-probe",
+        "sessionID": "class-probe",
+        "thread_id": "class-probe",
+    });
+    normalize(agent, event, &RawPayload::new(probe, ".")).map(|e| e.event)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -102,6 +122,34 @@ mod tests {
         for word in ["token", "key", "secret", "password"] {
             assert!(!text.to_lowercase().contains(word));
         }
+    }
+
+    #[test]
+    fn the_deadline_class_is_answerable_without_the_payload() {
+        // The hook depends on this: it must know whether to take the
+        // no-runtime capture path before it reads stdin.
+        use cairn_core::lifecycle::CanonicalEvent;
+        assert_eq!(
+            event_class(AgentId::ClaudeCode, "SessionStart"),
+            Some(CanonicalEvent::SessionOpened)
+        );
+        assert_eq!(
+            event_class(AgentId::ClaudeCode, "Stop"),
+            Some(CanonicalEvent::AgentQuiesced)
+        );
+        assert_eq!(event_class(AgentId::ClaudeCode, "PreToolUse"), None);
+        // Codex's one tool registration is capture class either way, so the
+        // class does not depend on the payload it will later carry.
+        assert!(!event_class(AgentId::Codex, "PostToolUse")
+            .unwrap()
+            .is_boundary_class());
+        assert_eq!(
+            event_class(AgentId::Opencode, "session.idle"),
+            Some(CanonicalEvent::AgentQuiesced)
+        );
+        assert!(event_class(AgentId::Opencode, "session.created")
+            .unwrap()
+            .is_boundary_class());
     }
 
     #[test]

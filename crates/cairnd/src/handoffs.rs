@@ -110,6 +110,7 @@ pub fn quick_attempts_fit_the_bound() -> bool {
 /// section, and retried at a slow cadence. It stays retryable and actionable;
 /// it is never treated as a terminal outcome that closes the matter.
 pub async fn synthesize_pending(daemon: &Daemon, session_id: Uuid, policy: SyncPolicy) {
+    settle_before_synthesis().await;
     let mut backoff = std::time::Duration::from_millis(50);
     for attempt in 0..QUICK_ATTEMPTS {
         let session = match repo::session(&daemon.store, session_id).await {
@@ -150,6 +151,21 @@ pub async fn synthesize_pending(daemon: &Daemon, session_id: Uuid, policy: SyncP
         session = %session_id,
         "handoff synthesis failed after the quick attempts; reported as owed and retried slowly"
     );
+}
+
+/// Give a capture that is still on the socket time to arrive.
+///
+/// `generate` already quiesces captures the daemon has *accepted* (D22 phase
+/// two, Feature 001's own mechanism). This covers the moment before that: a
+/// tool call the agent reported immediately before the boundary may not have
+/// been read off the socket yet, so it would not be counted as in flight and
+/// would miss its own boundary's handoff.
+///
+/// Deliberately short. A boundary is worth a few milliseconds; a handoff that
+/// waits on something which is not coming is worse than one that is one
+/// observation short.
+async fn settle_before_synthesis() {
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
 }
 
 /// Whether this session still owes a durable handoff.

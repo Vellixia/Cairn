@@ -281,10 +281,14 @@ pub(crate) fn tool_observation(
         }
     };
     let summary = if failed {
+        // The reason belongs in the summary, not only in the details: Feature
+        // 001's handoff reads failures from it, and a failure the developer
+        // cannot recognise is not a useful record (FR-033, US2 #5).
+        let reason = failure_detail.as_deref().unwrap_or("tool execution failed");
         match (&path, &command) {
-            (_, Some(c)) => format!("{tool} failed: {c}"),
-            (Some(p), _) => format!("{tool} failed: {p}"),
-            _ => format!("{tool} failed"),
+            (_, Some(c)) => format!("{tool} failed: {c}: {reason}"),
+            (Some(p), _) => format!("{tool} failed: {p}: {reason}"),
+            _ => format!("{tool} failed: {reason}"),
         }
     } else {
         match (&path, &command) {

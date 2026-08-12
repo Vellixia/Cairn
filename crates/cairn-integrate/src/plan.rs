@@ -35,6 +35,13 @@ pub struct RecordedInstall {
     /// Every agent bound to this resource. More than one is the shared case
     /// (FR-243).
     pub serves: Vec<AgentId>,
+    /// Whether the container Cairn wrote into was on a single line before it
+    /// did. One bit about Cairn's own edit, not a copy of the developer's file
+    /// (FR-156, FR-238) — it is what lets removal restore the layout exactly.
+    pub container_single_line: bool,
+    /// Whether Cairn created the enclosing key, so pruning removes only what
+    /// Cairn added and never an empty container the developer wrote.
+    pub created_container: bool,
 }
 
 /// How a planned change is classified (FR-160).

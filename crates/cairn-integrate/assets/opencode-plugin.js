@@ -17,7 +17,7 @@ const { spawn } = require("node:child_process");
 
 function send(event, payload) {
   try {
-    const child = spawn("cairn", ["hook", event], {
+    const child = spawn("cairn", ["hook", event, "--agent", "opencode"], {
       stdio: ["pipe", "ignore", "ignore"],
       detached: false,
     });

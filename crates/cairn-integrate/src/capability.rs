@@ -95,6 +95,24 @@ impl Capability {
         )
     }
 
+    /// What Cairn is waiting to see before it will call this established.
+    ///
+    /// Phrased as the observation rather than the capability, because that is
+    /// what a developer can act on: run an ordinary session (FR-245).
+    pub fn awaited_behavior(self) -> &'static str {
+        match self {
+            Capability::LifecycleSessionOpen => "a first session opened on this installation",
+            Capability::LifecycleToolSuccess => "a first tool call captured here",
+            Capability::LifecycleQuiesce => "a first turn checkpoint here",
+            Capability::LifecycleSessionClose => "a first session closed here",
+            Capability::ContextAtSessionOpen => "context delivered at a session start here",
+            Capability::StableSessionIdentifier => {
+                "two events carrying the agent's own session identifier"
+            }
+            _ => "a first observation of this behavior here",
+        }
+    }
+
     /// The plain-language behavior a developer loses when this is absent.
     /// Never a numeric or unlabeled score (FR-111).
     pub fn missing_behavior(self) -> &'static str {
@@ -430,7 +448,7 @@ impl CapabilityProfile {
             if state.availability == Availability::Guaranteed
                 && state.confidence == Confidence::Expected
             {
-                out.push(format!("a first observed {}", c.missing_behavior()));
+                out.push(c.awaited_behavior().to_string());
             }
         }
         out

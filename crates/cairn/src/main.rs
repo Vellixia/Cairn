@@ -1,8 +1,8 @@
 //! `cairn` — the developer's interface, the hook runtime, and the MCP server.
 
 mod client;
-mod connect;
 mod hook;
+mod integrate;
 mod mcp;
 mod render;
 mod update;
@@ -32,15 +32,61 @@ enum Command {
     Init,
     /// Project, repository, sessions and daemon state.
     Status,
-    /// Install the Claude Code integration for this repository.
+    /// Detected agents and integration managers, with their level.
+    Agents,
+    /// Install or update an integration for this repository.
     Connect {
-        #[arg(default_value = "claude-code")]
-        agent: String,
+        /// `claude-code` | `codex` | `opencode` | `generic-mcp`. Omit for
+        /// guided onboarding across everything detected.
+        agent: Option<String>,
+        /// Detect everything installed and propose a plan covering all of it.
+        #[arg(long)]
+        auto: bool,
+        /// Print the change plan and exit. Writes nothing at all.
+        #[arg(long)]
+        dry_run: bool,
+        /// Apply without confirmation. Required for non-interactive use.
+        #[arg(long)]
+        yes: bool,
+        /// Install lifecycle and MCP into committed project scope.
+        #[arg(long)]
+        shared: bool,
+        /// Override one resource's scope, e.g. `--scope mcp=project_shared`.
+        #[arg(long = "scope")]
+        scopes: Vec<String>,
+        /// Distribute `mcp` and `skill` through a manager instead.
+        #[arg(long)]
+        via: Option<String>,
+        /// Manager target applications.
+        #[arg(long, value_delimiter = ',')]
+        apps: Vec<String>,
     },
-    /// Remove the Claude Code integration.
+    /// Inspect integration health. Makes no change.
+    Doctor { agent: Option<String> },
+    /// Restore Cairn-owned state only.
+    Repair {
+        agent: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        /// Also restore resources edited by hand, strictly inside Cairn's own
+        /// ownership boundary and after preserving the previous content.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Remove Cairn-owned integration for one agent.
     Disconnect {
         #[arg(default_value = "claude-code")]
         agent: String,
+        /// Restrict removal to these resource kinds. Repeatable.
+        #[arg(long = "only")]
+        only: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Operations a developer runs rarely.
+    Integration {
+        #[command(subcommand)]
+        action: IntegrationAction,
     },
     /// Sessions.
     Session {
@@ -116,6 +162,53 @@ enum Command {
     Mcp,
     /// Claude Code hook entry point. Always exits 0.
     Hook { event: String },
+}
+
+/// The operations a developer runs rarely (`contracts/integration-cli.md`).
+#[derive(Subcommand)]
+enum IntegrationAction {
+    /// Emit a deterministic, secret-free MCP configuration. Writes nothing.
+    Export {
+        #[command(subcommand)]
+        what: ExportAction,
+    },
+    /// Move one resource between owners.
+    Migrate {
+        agent: String,
+        kind: String,
+        #[arg(long = "to")]
+        to: String,
+        #[arg(long)]
+        dry_run: bool,
+        /// Continue an interrupted migration.
+        #[arg(long)]
+        resume: bool,
+        /// Reverse one, leaving the previously working configuration intact.
+        #[arg(long)]
+        abort: bool,
+    },
+    /// Distribute Cairn resources through an integration manager.
+    Distribute {
+        #[arg(long)]
+        via: String,
+        #[arg(long)]
+        resource: String,
+        #[arg(long, value_delimiter = ',')]
+        apps: Vec<String>,
+        #[arg(long)]
+        dry_run: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ExportAction {
+    /// The Cairn MCP server block, in the named agent's format.
+    Mcp {
+        #[arg(long)]
+        agent: Option<String>,
+        #[arg(long)]
+        format: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -332,6 +425,7 @@ async fn run_async() {
 
     match run(&cli).await {
         Ok(output) => {
+            let actionable = output.exit_nonzero;
             if cli.json {
                 println!(
                     "{}",
@@ -339,6 +433,11 @@ async fn run_async() {
                 );
             } else if !output.text.is_empty() {
                 print!("{}", output.text);
+            }
+            // Doctor succeeds as a command and still exits 1 when it found
+            // something actionable, so a script can gate on it (FR-170).
+            if actionable {
+                std::process::exit(EXIT_USER_ERROR);
             }
         }
         Err(e) => {
@@ -356,7 +455,7 @@ async fn run_async() {
     }
 }
 
-fn exit_code(e: &WireError) -> i32 {
+pub(crate) fn exit_code(e: &WireError) -> i32 {
     match e.code.as_str() {
         codes::DAEMON_UNAVAILABLE | codes::STORAGE_UNAVAILABLE | codes::SERVER_UNAVAILABLE => {
             EXIT_UNAVAILABLE
@@ -365,9 +464,12 @@ fn exit_code(e: &WireError) -> i32 {
     }
 }
 
-struct Output {
-    value: serde_json::Value,
-    text: String,
+pub(crate) struct Output {
+    pub value: serde_json::Value,
+    pub text: String,
+    /// Doctor exits 1 when any actionable condition is present, while still
+    /// succeeding as a command (FR-170).
+    pub exit_nonzero: bool,
 }
 
 impl Output {
@@ -375,10 +477,15 @@ impl Output {
         Self {
             value,
             text: String::new(),
+            exit_nonzero: false,
         }
     }
-    fn with(value: serde_json::Value, text: String) -> Self {
-        Self { value, text }
+    pub(crate) fn with(value: serde_json::Value, text: String) -> Self {
+        Self {
+            value,
+            text,
+            exit_nonzero: false,
+        }
     }
 }
 
@@ -416,8 +523,58 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             Ok(Output::with(v, render::status(&payload)))
         }
 
-        Command::Connect { agent } => connect::connect(agent).await,
-        Command::Disconnect { agent } => connect::disconnect(agent).await,
+        Command::Agents => integrate::agents().await,
+        Command::Connect {
+            agent,
+            auto,
+            dry_run,
+            yes,
+            shared,
+            scopes,
+            via,
+            apps,
+        } => {
+            let opts = integrate::Options {
+                agent: parse_agent_opt(agent)?,
+                auto: *auto,
+                dry_run: *dry_run,
+                yes: *yes,
+                shared: *shared,
+                scopes: parse_scopes(scopes)?,
+                via: parse_manager(via)?,
+                apps: apps.clone(),
+                only: vec![],
+                force: false,
+            };
+            integrate::connect(&opts).await
+        }
+        Command::Doctor { agent } => integrate::doctor(parse_agent_opt(agent)?).await,
+        Command::Repair {
+            agent,
+            dry_run,
+            force,
+        } => {
+            let opts = integrate::Options {
+                agent: parse_agent_opt(agent)?,
+                dry_run: *dry_run,
+                force: *force,
+                ..Default::default()
+            };
+            integrate::repair(&opts).await
+        }
+        Command::Disconnect {
+            agent,
+            only,
+            dry_run,
+        } => {
+            let opts = integrate::Options {
+                only: parse_kinds(only)?,
+                dry_run: *dry_run,
+                ..Default::default()
+            };
+            integrate::disconnect(parse_agent(agent)?, &opts).await
+        }
+        Command::Integration { action } => integration(action).await,
 
         Command::Session { action } => session(action).await,
         Command::Task { action } => task(action).await,
@@ -561,6 +718,120 @@ async fn session(action: &SessionAction) -> Result<Output, WireError> {
             .await?;
             Ok(Output::with(v, "Session ended; handoff written.\n".into()))
         }
+    }
+}
+
+async fn integration(action: &IntegrationAction) -> Result<Output, WireError> {
+    match action {
+        IntegrationAction::Export { what } => {
+            let ExportAction::Mcp { agent, format } = what;
+            integrate::export_mcp(parse_agent_opt(agent)?, format.as_deref())
+        }
+        IntegrationAction::Migrate {
+            agent,
+            kind,
+            to,
+            dry_run,
+            resume,
+            abort,
+        } => {
+            let opts = integrate::Options {
+                dry_run: *dry_run,
+                ..Default::default()
+            };
+            integrate::migrate(
+                parse_agent(agent)?,
+                parse_kind(kind)?,
+                cairn_integrate::model::ResourceOwner::parse(to).ok_or_else(|| {
+                    WireError::invalid(format!("unknown owner `{to}`; use direct or cc-switch"))
+                })?,
+                &opts,
+                *resume,
+                *abort,
+            )
+            .await
+        }
+        IntegrationAction::Distribute {
+            via,
+            resource,
+            apps,
+            dry_run,
+        } => {
+            let manager = cairn_integrate::model::ManagerId::parse(via)
+                .ok_or_else(|| WireError::invalid(format!("unknown manager `{via}`")))?;
+            let opts = integrate::Options {
+                dry_run: *dry_run,
+                ..Default::default()
+            };
+            integrate::distribute(manager, parse_kind(resource)?, apps.clone(), &opts).await
+        }
+    }
+}
+
+fn parse_agent(name: &str) -> Result<cairn_integrate::model::AgentId, WireError> {
+    cairn_integrate::model::AgentId::parse(name).ok_or_else(|| {
+        WireError::invalid(format!(
+            "unknown agent `{name}`; use claude-code, codex, opencode or generic-mcp"
+        ))
+    })
+}
+
+fn parse_agent_opt(
+    name: &Option<String>,
+) -> Result<Option<cairn_integrate::model::AgentId>, WireError> {
+    match name {
+        None => Ok(None),
+        Some(n) => parse_agent(n).map(Some),
+    }
+}
+
+fn parse_kind(name: &str) -> Result<cairn_integrate::model::ResourceKind, WireError> {
+    cairn_integrate::model::ResourceKind::parse(name).ok_or_else(|| {
+        WireError::invalid(format!(
+            "unknown resource kind `{name}`; use mcp, lifecycle, instructions or skill"
+        ))
+    })
+}
+
+fn parse_kinds(names: &[String]) -> Result<Vec<cairn_integrate::model::ResourceKind>, WireError> {
+    names.iter().map(|n| parse_kind(n)).collect()
+}
+
+/// `--scope <kind>=<scope>`, repeatable.
+fn parse_scopes(
+    raw: &[String],
+) -> Result<
+    Vec<(
+        cairn_integrate::model::ResourceKind,
+        cairn_integrate::model::InstallationScope,
+    )>,
+    WireError,
+> {
+    raw.iter()
+        .map(|s| {
+            let (kind, scope) = s.split_once('=').ok_or_else(|| {
+                WireError::invalid(format!("--scope wants <kind>=<scope>, got `{s}`"))
+            })?;
+            let kind = parse_kind(kind)?;
+            let scope =
+                cairn_integrate::model::InstallationScope::parse(scope).ok_or_else(|| {
+                    WireError::invalid(format!(
+                        "unknown scope `{scope}`; use project_shared, project_local or user"
+                    ))
+                })?;
+            Ok((kind, scope))
+        })
+        .collect()
+}
+
+fn parse_manager(
+    raw: &Option<String>,
+) -> Result<Option<cairn_integrate::model::ManagerId>, WireError> {
+    match raw {
+        None => Ok(None),
+        Some(v) => cairn_integrate::model::ManagerId::parse(v)
+            .map(Some)
+            .ok_or_else(|| WireError::invalid(format!("unknown manager `{v}`"))),
     }
 }
 

@@ -160,10 +160,31 @@ pub fn metadata_field(content: &str, key: &str) -> Option<String> {
 }
 
 /// Collect the canonical file list from the embedded tree.
+///
+/// "Canonical" means normalized for hashing: the self-referential revision
+/// field is replaced with the placeholder. That is right for computing the
+/// digest and wrong for installing, which needs the source exactly as it is —
+/// see `embedded_files_verbatim`.
 pub fn embedded_files() -> Vec<SkillFile> {
     let mut files = Vec::new();
     collect(&SKILL_DIR, &mut files);
     finish(files)
+}
+
+/// The embedded tree exactly as checked in.
+///
+/// What installation writes. The installed `SKILL.md` must carry its real
+/// `metadata.cairn_skill_revision`, both because the agents read the
+/// frontmatter and because doctor compares the installed declaration against
+/// the files it actually finds.
+pub fn embedded_files_verbatim() -> Vec<SkillFile> {
+    let mut files = Vec::new();
+    collect(&SKILL_DIR, &mut files);
+    files.sort_by(|a, b| a.path.as_bytes().cmp(b.path.as_bytes()));
+    for f in &mut files {
+        f.content = normalize_content(&f.content);
+    }
+    files
 }
 
 fn collect(dir: &Dir<'_>, out: &mut Vec<SkillFile>) {

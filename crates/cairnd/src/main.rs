@@ -8,6 +8,7 @@ mod briefing;
 mod capture;
 mod handlers;
 mod handoffs;
+mod integrations;
 mod recover;
 mod state;
 mod sync;
@@ -60,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
 
     let daemon = Arc::new(Daemon {
         store,
+        lifecycle_kinds: Arc::new(RwLock::new(Default::default())),
         run_id: new_id(),
         config: Arc::new(RwLock::new(config)),
         user_id,
@@ -261,8 +263,17 @@ async fn serve(
                 daemon.touch();
                 // Held until this request is answered, so a handoff can wait
                 // for captures that have already arrived (H3).
-                let _capture = matches!(request, Request::Observe { .. })
-                    .then(|| state::CaptureGuard::new(&daemon.in_flight_captures));
+                //
+                // A capture now usually arrives as a canonical event rather
+                // than a bare `Observe`, and one that is not counted is one a
+                // boundary will not wait for (D22 phase two).
+                let is_capture = match &request {
+                    Request::Observe { .. } => true,
+                    Request::CanonicalEvent { event, .. } => !event.event.is_boundary_class(),
+                    _ => false,
+                };
+                let _capture =
+                    is_capture.then(|| state::CaptureGuard::new(&daemon.in_flight_captures));
                 let stop = matches!(request, Request::DaemonShutdown);
                 let reply = handlers::dispatch(&daemon, request).await;
                 if stop {

@@ -10,102 +10,106 @@
 
 use crate::client;
 use crate::render;
-use cairn_core::domain::{HandoffTrigger, ObservationType, SessionStatus};
-use cairn_core::tools::{classify_tool, is_test_command, normalize_vendor_tool};
-use cairn_core::wire::{ContextPayload, ContextReason, ObservationInput, Request};
+use cairn_core::wire::{ContextPayload, Request};
 use cairn_core::CairnConfig;
-use serde::Deserialize;
 use std::time::Duration;
 
-/// The subset of the hook payload Cairn reads (D16).
+/// Which adapter this invocation serves.
 ///
-/// There is no process identity and no liveness signal here, which is why
-/// session boundaries are deterministic rather than inferred.
-#[derive(Debug, Default, Deserialize)]
-#[serde(default)]
-pub struct HookPayload {
-    pub session_id: Option<String>,
-    pub transcript_path: Option<String>,
-    pub cwd: Option<String>,
-    pub hook_event_name: Option<String>,
-    /// `SessionStart`: startup | resume | clear | compact.
-    pub source: Option<String>,
-    /// `SessionEnd`: why the session ended.
-    pub reason: Option<String>,
-    /// `PreCompact`: manual | auto.
-    pub trigger: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_input: Option<serde_json::Value>,
-    pub tool_response: Option<serde_json::Value>,
-    /// Some versions name the result differently; accept both.
-    pub tool_result: Option<serde_json::Value>,
-    pub error: Option<serde_json::Value>,
-    pub message: Option<String>,
+/// Claude Code's entry stays `cairn hook <Event>` so a Feature 001 hook still
+/// works unchanged; the other adapters name themselves, because the same event
+/// word means different payload shapes to different vendors.
+pub fn agent_from_args(argv: &[String]) -> cairn_integrate::AgentId {
+    argv.iter()
+        .position(|a| a == "--agent")
+        .and_then(|i| argv.get(i + 1))
+        .and_then(|name| cairn_integrate::AgentId::parse(name))
+        .unwrap_or(cairn_integrate::AgentId::ClaudeCode)
 }
 
-impl HookPayload {
-    fn result(&self) -> Option<&serde_json::Value> {
-        self.tool_response.as_ref().or(self.tool_result.as_ref())
-    }
+/// Translate a vendor event into the canonical vocabulary.
+///
+/// This is the only part of `cairn-integrate` on the capture path: a pure
+/// function with no I/O, no editors and no embedded assets. The cost of
+/// linking the rest is binary size, not work (plan.md risk table).
+fn to_canonical(
+    agent: cairn_integrate::AgentId,
+    event: &str,
+    raw: &serde_json::Value,
+    cwd: &str,
+) -> Option<cairn_core::lifecycle::CanonicalLifecycleEvent> {
+    cairn_integrate::normalize(
+        agent,
+        event,
+        &cairn_integrate::RawPayload::new(raw.clone(), cwd),
+    )
 }
 
 /// Handle a capture-class event without an async runtime (SC-007).
 ///
-/// Returns `true` when the event was handled here. `PostToolUse`,
-/// `PostToolUseFailure` and `Stop` need no reply, so they never need a
-/// reactor — and building one per tool call is the single largest cost Cairn
-/// adds to a session.
+/// Returns `true` when the event was handled here. A capture-class event needs
+/// no reply, so it never needs a reactor — and building one per tool call is
+/// the single largest cost Cairn adds to a session.
+///
+/// The adapter still runs: `normalize` is a pure function, so the boundary
+/// costs nothing on this path (FR-112).
 pub fn run_blocking(event: &str) -> bool {
-    let kind = normalize(event);
-    if !matches!(
-        kind,
-        Event::PostToolUse | Event::PostToolUseFailure | Event::Stop
-    ) {
-        return false;
+    let argv: Vec<String> = std::env::args().collect();
+    let agent = agent_from_args(&argv);
+
+    // The class is decided from the event name *before* stdin is touched: a
+    // boundary event needs a reply and takes the async path, and both paths
+    // reading the payload would leave the second one with nothing.
+    match cairn_integrate::event_class(agent, event) {
+        // Declined by the adapter: the normal way an event Cairn does not map
+        // is handled (FR-115). Nothing to do, and nothing is wrong.
+        None => return true,
+        Some(class) if class.is_boundary_class() => return false,
+        Some(_) => {}
     }
 
-    let payload = read_payload();
-    let cwd = payload
-        .cwd
-        .clone()
+    let raw = read_raw();
+    let cwd = raw
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
         .or_else(|| {
             std::env::current_dir()
                 .ok()
                 .map(|p| p.display().to_string())
         })
         .unwrap_or_else(|| ".".to_string());
-    let config = CairnConfig::load();
-    let deadline = capture_deadline(&config);
 
-    let request = match kind {
-        Event::Stop => Request::TurnCheckpoint {
-            cwd,
-            agent_session_key: payload.session_id.clone(),
-        },
-        Event::PostToolUseFailure => Request::Observe {
-            cwd,
-            agent_session_key: payload.session_id.clone(),
-            observation: failure_observation(&payload),
-        },
-        _ => Request::Observe {
-            cwd,
-            agent_session_key: payload.session_id.clone(),
-            observation: success_observation(&payload),
-        },
+    let Some(canonical) = to_canonical(agent, event, &raw, &cwd) else {
+        return true;
     };
 
-    if let Err(e) = client::send_oneway_blocking(&request, deadline) {
+    let config = CairnConfig::load();
+    let request = Request::CanonicalEvent {
+        event: canonical,
+        wait_for_handoff: false,
+        token_budget: None,
+    };
+    if let Err(e) = client::send_oneway_blocking(&request, capture_deadline(&config)) {
         log_drop(event, &e.message);
     }
     true
 }
 
 /// Run one hook event. Always returns; the caller always exits 0.
+///
+/// Every event goes through the adapter first: the daemon sees only canonical
+/// events, and this is where the translation happens (FR-112). An event the
+/// adapter declines simply does not occur for that agent — that is the normal
+/// case for everything Cairn does not map (FR-115).
 pub async fn run(event: &str) {
-    let payload = read_payload();
-    let cwd = payload
-        .cwd
-        .clone()
+    let argv: Vec<String> = std::env::args().collect();
+    let agent = agent_from_args(&argv);
+    let raw = read_raw();
+    let cwd = raw
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
         .or_else(|| {
             std::env::current_dir()
                 .ok()
@@ -114,42 +118,99 @@ pub async fn run(event: &str) {
         .unwrap_or_else(|| ".".to_string());
     let config = CairnConfig::load();
 
-    let outcome = match normalize(event) {
-        Event::SessionStart => session_start(&cwd, &payload, &config).await,
-        Event::PostToolUse => post_tool_use(&cwd, &payload, &config, false).await,
-        Event::PostToolUseFailure => post_tool_use(&cwd, &payload, &config, true).await,
-        Event::PreCompact => pre_compact(&cwd, &payload, &config).await,
-        Event::Stop => stop(&cwd, &payload, &config).await,
-        Event::SessionEnd => session_end(&cwd, &payload, &config).await,
-        Event::Unknown => Ok(()),
+    let Some(canonical) = to_canonical(agent, event, &raw, &cwd) else {
+        return;
     };
 
-    if let Err(e) = outcome {
-        // Dropped work is logged for the developer and invisible to the agent.
-        log_drop(event, &e);
+    let boundary = canonical.event.is_boundary_class();
+    let deadline = if boundary {
+        context_deadline(&config)
+    } else {
+        capture_deadline(&config)
+    };
+    let delivers_context = canonical.event == cairn_core::lifecycle::CanonicalEvent::SessionOpened;
+    let key = canonical.agent_session_key.clone();
+
+    let request = Request::CanonicalEvent {
+        event: canonical,
+        // The hook never waits for a boundary's handoff: the vendor's own
+        // handler budget holds a deadline over it, and the seal is what is
+        // acknowledged (D22, FR-240).
+        wait_for_handoff: false,
+        token_budget: None,
+    };
+
+    if !boundary {
+        // Capture class: fire and forget. A missed deadline is a dropped
+        // event, not a failure (FR-015, FR-193).
+        if let Err(e) = client::send_oneway(&request, deadline).await {
+            log_drop(event, &e.message);
+        }
+        return;
+    }
+
+    match client::send_with_deadline(&request, deadline).await {
+        Ok(value) => {
+            if delivers_context {
+                let degraded = deliver_context(agent, &value);
+                // The adapter reports the delivery outcome back, which is what
+                // establishes `context_at_session_open`. A session start that
+                // emitted nothing leaves the capability expected — the session
+                // started, and Cairn's context did not reach it (D19a).
+                report_context_delivery(agent, &cwd, &key, degraded, deadline).await;
+            }
+        }
+        Err(e) => {
+            if delivers_context {
+                // Feature 001's bounded fallback: the session starts with
+                // reduced context rather than waiting (FR-046, FR-195). No
+                // evidence is recorded, because nothing was delivered.
+                emit_context(agent, &reduced_context_notice(&e.message));
+            }
+            log_drop(event, &e.message);
+        }
     }
 }
 
-enum Event {
-    SessionStart,
-    PostToolUse,
-    PostToolUseFailure,
-    PreCompact,
-    Stop,
-    SessionEnd,
-    Unknown,
+/// Emit the briefing on the agent's own context surface.
+///
+/// Returns whether what was delivered was degraded.
+fn deliver_context(agent: cairn_integrate::AgentId, value: &serde_json::Value) -> bool {
+    match serde_json::from_value::<ContextPayload>(value.clone()) {
+        Ok(payload) => {
+            let text = render::briefing(&payload);
+            let degraded = text.trim().is_empty();
+            emit_context(agent, &text);
+            degraded
+        }
+        Err(e) => {
+            emit_context(agent, &reduced_context_notice(&e.to_string()));
+            true
+        }
+    }
 }
 
-fn normalize(event: &str) -> Event {
-    match event.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
-        "sessionstart" => Event::SessionStart,
-        "posttooluse" => Event::PostToolUse,
-        "posttoolusefailure" => Event::PostToolUseFailure,
-        "precompact" => Event::PreCompact,
-        "stop" => Event::Stop,
-        "sessionend" => Event::SessionEnd,
-        _ => Event::Unknown,
-    }
+/// Tell the daemon the context surface actually carried the payload.
+///
+/// A degraded briefing still establishes the capability and records that it
+/// was degraded: the channel demonstrably carried it, and Cairn's assembly is
+/// what fell short (D19a).
+async fn report_context_delivery(
+    agent: cairn_integrate::AgentId,
+    cwd: &str,
+    _key: &str,
+    degraded: bool,
+    deadline: Duration,
+) {
+    let request = Request::IntegrationEvidence {
+        cwd: cwd.to_string(),
+        agent: agent.as_str().to_string(),
+        capability: "context_at_session_open".into(),
+        evidence: "observation".into(),
+        agent_version: None,
+        degraded: Some(degraded),
+    };
+    let _ = client::send_oneway(&request, deadline).await;
 }
 
 fn capture_deadline(config: &CairnConfig) -> Duration {
@@ -160,52 +221,6 @@ fn context_deadline(config: &CairnConfig) -> Duration {
     Duration::from_millis(config.context_deadline_ms)
 }
 
-/// Context class: start or resume the session, then deliver the briefing.
-///
-/// If the deadline passes the session still starts — Cairn reports reduced
-/// context rather than holding the agent (FR-046).
-async fn session_start(
-    cwd: &str,
-    payload: &HookPayload,
-    config: &CairnConfig,
-) -> Result<(), String> {
-    let deadline = context_deadline(config);
-    let key = payload.session_id.clone();
-
-    let start = Request::SessionStart {
-        cwd: cwd.to_string(),
-        agent: "claude-code".into(),
-        agent_session_key: key.clone(),
-        task_id: None,
-    };
-    if let Err(e) = client::send_with_deadline(&start, deadline).await {
-        emit_context(&reduced_context_notice(&e.message));
-        return Err(e.message);
-    }
-
-    let context = Request::Context {
-        cwd: cwd.to_string(),
-        agent_session_key: key,
-        session_id: None,
-        reason: Some(ContextReason::SessionStart),
-        token_budget: None,
-    };
-    match client::send_with_deadline(&context, deadline).await {
-        Ok(value) => {
-            let text = match serde_json::from_value::<ContextPayload>(value) {
-                Ok(payload) => render::briefing(&payload),
-                Err(e) => reduced_context_notice(&e.to_string()),
-            };
-            emit_context(&text);
-            Ok(())
-        }
-        Err(e) => {
-            emit_context(&reduced_context_notice(&e.message));
-            Err(e.message)
-        }
-    }
-}
-
 fn reduced_context_notice(reason: &str) -> String {
     format!(
         "# Cairn context\n\n_Reduced context: Cairn could not deliver a briefing in time \
@@ -213,233 +228,34 @@ fn reduced_context_notice(reason: &str) -> String {
     )
 }
 
-/// Emit context for Claude Code to inject at `SessionStart`.
-fn emit_context(text: &str) {
-    let out = serde_json::json!({
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": text,
-        }
-    });
-    println!("{out}");
-}
-
-/// Capture class. `PostToolUse` carries successes; `PostToolUseFailure` carries
-/// failures and is always an `error` observation — never inferred from a
-/// success payload (D16).
-async fn post_tool_use(
-    cwd: &str,
-    payload: &HookPayload,
-    config: &CairnConfig,
-    failure: bool,
-) -> Result<(), String> {
-    let observation = if failure {
-        failure_observation(payload)
-    } else {
-        success_observation(payload)
-    };
-    let request = Request::Observe {
-        cwd: cwd.to_string(),
-        agent_session_key: payload.session_id.clone(),
-        observation,
-    };
-    // Fire and forget: the agent is never held waiting for a write to SQLite
-    // (contracts/agent-integration.md, H3).
-    client::send_oneway(&request, capture_deadline(config))
-        .await
-        .map_err(|e| e.message)
-}
-
-/// A successful tool call, as a structured observation.
-fn success_observation(payload: &HookPayload) -> ObservationInput {
-    let tool = payload
-        .tool_name
-        .clone()
-        .unwrap_or_else(|| "unknown".into());
-    let input = payload
-        .tool_input
-        .clone()
-        .unwrap_or(serde_json::Value::Null);
-    let path = input
-        .get("file_path")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let command = input
-        .get("command")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-
-    let kind = match &command {
-        Some(c) if is_test_command(c) => ObservationType::TestRun,
-        Some(_) => ObservationType::CommandRun,
-        None => classify_tool(&tool),
-    };
-    let outcome = (kind == ObservationType::TestRun).then(|| test_outcome(payload).to_string());
-
-    ObservationInput {
-        kind,
-        path: path.clone(),
-        command: command.clone(),
-        exit_code: payload
-            .result()
-            .and_then(|r| r.get("exit_code"))
-            .and_then(|v| v.as_i64()),
-        outcome,
-        summary: success_summary(&tool, path.as_deref(), command.as_deref()),
-        details: None,
-        vendor_tool: normalize_vendor_tool(&tool),
-    }
-}
-
-/// A failed tool call. Built from the failure event's own data, never inferred
-/// from a success payload (D16).
-fn failure_observation(payload: &HookPayload) -> ObservationInput {
-    let tool = payload
-        .tool_name
-        .clone()
-        .unwrap_or_else(|| "unknown".into());
-    let input = payload
-        .tool_input
-        .clone()
-        .unwrap_or(serde_json::Value::Null);
-    ObservationInput {
-        kind: ObservationType::Error,
-        path: input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        command: input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(str::to_string),
-        exit_code: payload
-            .result()
-            .and_then(|r| r.get("exit_code"))
-            .and_then(|v| v.as_i64()),
-        outcome: Some("error".into()),
-        summary: failure_summary(&tool, payload),
-        details: payload.error.clone(),
-        vendor_tool: normalize_vendor_tool(&tool),
-    }
-}
-
-fn success_summary(tool: &str, path: Option<&str>, command: Option<&str>) -> String {
-    match (path, command) {
-        (Some(p), _) => format!("{tool} {p}"),
-        (_, Some(c)) => format!("{tool}: {c}"),
-        _ => tool.to_string(),
-    }
-}
-
-fn failure_summary(tool: &str, payload: &HookPayload) -> String {
-    let detail = payload
-        .message
-        .clone()
-        .or_else(|| {
-            payload
-                .error
-                .as_ref()
-                .and_then(|e| e.as_str().map(str::to_string))
-        })
-        .or_else(|| {
-            payload
-                .error
-                .as_ref()
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            payload
-                .result()
-                .and_then(|r| r.get("error"))
-                .and_then(|e| e.as_str())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "tool execution failed".to_string());
-    format!("{tool} failed: {detail}")
-}
-
-/// A test's outcome, read from the tool result rather than guessed.
-fn test_outcome(payload: &HookPayload) -> &'static str {
-    match payload
-        .result()
-        .and_then(|r| r.get("exit_code"))
-        .and_then(|v| v.as_i64())
-    {
-        Some(0) => "passed",
-        Some(_) => "failed",
-        None => {
-            let text = payload
-                .result()
-                .map(|r| r.to_string().to_ascii_lowercase())
-                .unwrap_or_default();
-            if text.contains("failed") || text.contains("failure") || text.contains("error") {
-                "failed"
-            } else if text.contains("passed") || text.contains("ok") {
-                "passed"
-            } else {
-                "unknown"
-            }
+/// Emit context on the agent's own supported context surface.
+///
+/// Claude Code and Codex both read `hookSpecificOutput.additionalContext`;
+/// OpenCode's plugin passes what it reads on stdout straight through.
+fn emit_context(agent: cairn_integrate::AgentId, text: &str) {
+    match agent {
+        cairn_integrate::AgentId::Opencode => println!("{text}"),
+        _ => {
+            let out = serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": text,
+                }
+            });
+            println!("{out}");
         }
     }
 }
 
-/// Compaction boundary: a durable handoff, and the session stays active.
-async fn pre_compact(cwd: &str, payload: &HookPayload, config: &CairnConfig) -> Result<(), String> {
-    let request = Request::HandoffGenerate {
-        cwd: cwd.to_string(),
-        session_id: None,
-        agent_session_key: payload.session_id.clone(),
-        trigger: HandoffTrigger::PreCompact,
-    };
-    // A handoff is a boundary record, not per-call telemetry: it happens once
-    // per compaction, so it is worth waiting for. Dropping it on a 250 ms
-    // deadline would mean no handoff at all at the boundary (FR-032).
-    client::send_with_deadline(&request, context_deadline(config))
-        .await
-        .map(|_| ())
-        .map_err(|e| e.message)
-}
-
-/// `Stop`: the agent finished a turn. A checkpoint, not a session boundary —
-/// the developer can send another prompt and the session continues (D16).
-async fn stop(cwd: &str, payload: &HookPayload, config: &CairnConfig) -> Result<(), String> {
-    let request = Request::TurnCheckpoint {
-        cwd: cwd.to_string(),
-        agent_session_key: payload.session_id.clone(),
-    };
-    client::send_oneway(&request, capture_deadline(config))
-        .await
-        .map_err(|e| e.message)
-}
-
-/// The one hook that completes a session, with its `reason` recorded.
-async fn session_end(cwd: &str, payload: &HookPayload, config: &CairnConfig) -> Result<(), String> {
-    // The hook path never waits: the vendor's own handler budget holds a
-    // deadline over it, and the seal is what is acknowledged (D22, FR-240).
-    let request = Request::SessionEnd {
-        cwd: cwd.to_string(),
-        session_id: None,
-        agent_session_key: payload.session_id.clone(),
-        status: SessionStatus::Completed,
-        reason: payload.reason.clone(),
-        wait_for_handoff: false,
-    };
-    // Ending writes the final handoff, so it is allowed the context deadline.
-    client::send_with_deadline(&request, context_deadline(config))
-        .await
-        .map(|_| ())
-        .map_err(|e| e.message)
-}
-
-fn read_payload() -> HookPayload {
+/// The raw vendor payload, as JSON. Nothing here is interpreted: the adapter
+/// does that, and only allow-listed fields survive it (D35).
+fn read_raw() -> serde_json::Value {
     use std::io::Read;
-    let mut raw = String::new();
-    if std::io::stdin().read_to_string(&mut raw).is_err() || raw.trim().is_empty() {
-        return HookPayload::default();
+    let mut buf = String::new();
+    if std::io::stdin().read_to_string(&mut buf).is_err() {
+        return serde_json::Value::Null;
     }
-    serde_json::from_str(&raw).unwrap_or_default()
+    serde_json::from_str(&buf).unwrap_or(serde_json::Value::Null)
 }
 
 /// Cairn's own log. Never stderr in a way the agent would surface.
@@ -462,48 +278,94 @@ fn log_drop(event: &str, reason: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cairn_integrate::AgentId;
+    use serde_json::json;
+
+    fn raw(v: serde_json::Value) -> serde_json::Value {
+        v
+    }
 
     #[test]
-    fn every_documented_event_is_recognised() {
-        for e in [
-            "SessionStart",
-            "PostToolUse",
-            "PostToolUseFailure",
-            "PreCompact",
-            "Stop",
-            "SessionEnd",
-        ] {
-            assert!(!matches!(normalize(e), Event::Unknown), "{e} unrecognised");
+    fn every_registered_event_reaches_the_canonical_vocabulary() {
+        // The hook's job is translation, and every event Cairn registers must
+        // survive it (FR-112).
+        for e in cairn_integrate::agents::claude_code::EVENTS {
+            let payload = raw(json!({
+                "session_id": "s-1",
+                "tool_name": "Read",
+                "tool_input": { "file_path": "a.rs" }
+            }));
+            assert!(
+                to_canonical(AgentId::ClaudeCode, e, &payload, "/repo").is_some(),
+                "{e} did not normalize"
+            );
         }
     }
 
     #[test]
-    fn failure_summary_uses_the_failure_payload() {
-        let payload = HookPayload {
-            error: Some(serde_json::json!({"message": "file not found"})),
-            ..Default::default()
-        };
-        let s = failure_summary("Read", &payload);
-        assert!(s.contains("file not found"), "{s}");
+    fn an_unregistered_event_is_declined_rather_than_mapped() {
+        // FR-115: it simply does not occur for that agent.
+        for e in ["PreToolUse", "UserPromptSubmit", "Notification"] {
+            assert!(to_canonical(
+                AgentId::ClaudeCode,
+                e,
+                &raw(json!({"session_id": "s-1"})),
+                "/repo"
+            )
+            .is_none());
+        }
     }
 
     #[test]
-    fn test_outcome_is_read_not_guessed() {
-        let failed = HookPayload {
-            tool_response: Some(serde_json::json!({"exit_code": 101})),
-            ..Default::default()
-        };
-        assert_eq!(test_outcome(&failed), "failed");
-        let passed = HookPayload {
-            tool_response: Some(serde_json::json!({"exit_code": 0})),
-            ..Default::default()
-        };
-        assert_eq!(test_outcome(&passed), "passed");
+    fn the_agent_comes_from_the_command_line_and_defaults_to_claude() {
+        // Claude Code's entry stays `cairn hook <Event>` so a Feature 001 hook
+        // keeps working unchanged.
+        let argv = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            agent_from_args(&argv(&["cairn", "hook", "Stop"])),
+            AgentId::ClaudeCode
+        );
+        assert_eq!(
+            agent_from_args(&argv(&["cairn", "hook", "Stop", "--agent", "codex"])),
+            AgentId::Codex
+        );
+        assert_eq!(
+            agent_from_args(&argv(&[
+                "cairn",
+                "hook",
+                "session.idle",
+                "--agent",
+                "opencode"
+            ])),
+            AgentId::Opencode
+        );
+    }
+
+    #[test]
+    fn capture_class_and_boundary_class_are_split_the_documented_way() {
+        // contracts/lifecycle.md: three events are boundary/context class and
+        // the rest are capture class.
+        use cairn_core::lifecycle::CanonicalEvent;
+        for e in CanonicalEvent::ALL {
+            let boundary = matches!(
+                e,
+                CanonicalEvent::SessionOpened
+                    | CanonicalEvent::ContextCompacting
+                    | CanonicalEvent::SessionClosed
+            );
+            assert_eq!(e.is_boundary_class(), boundary, "{e:?}");
+        }
     }
 
     #[test]
     fn an_empty_payload_never_panics() {
-        let p: HookPayload = serde_json::from_str("{}").unwrap();
-        assert!(p.session_id.is_none());
+        assert!(to_canonical(AgentId::ClaudeCode, "Stop", &json!({}), "/repo").is_none());
+        assert!(to_canonical(
+            AgentId::ClaudeCode,
+            "Stop",
+            &serde_json::Value::Null,
+            "/repo"
+        )
+        .is_none());
     }
 }

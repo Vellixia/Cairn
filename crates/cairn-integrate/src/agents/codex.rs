@@ -43,15 +43,24 @@ pub fn hook_entry(event: &str) -> serde_json::Value {
     serde_json::json!({
         "event": event,
         "type": "command",
-        "command": format!("cairn hook {event}"),
+        "command": hook_command(event),
     })
+}
+
+/// The command Cairn registers.
+///
+/// Codex names itself, because the same event word means a different payload
+/// shape to a different vendor and the hook has to pick the right adapter.
+/// Claude Code's entry deliberately does not, so a Feature 001 hook keeps
+/// working unchanged.
+pub fn hook_command(event: &str) -> String {
+    format!("cairn hook {event} --agent codex")
 }
 
 /// Whether a hook entry is Cairn's own, by exact shape (FR-139).
 pub fn is_cairn_hook_entry(entry: &serde_json::Value, event: &str) -> bool {
     entry.get("type").and_then(|t| t.as_str()) == Some("command")
-        && entry.get("command").and_then(|c| c.as_str())
-            == Some(format!("cairn hook {event}").as_str())
+        && entry.get("command").and_then(|c| c.as_str()) == Some(hook_command(event).as_str())
 }
 
 /// Classify a Codex tool response (D23).

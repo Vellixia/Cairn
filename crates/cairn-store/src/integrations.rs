@@ -662,3 +662,169 @@ mod tests {
         assert_eq!(count, 0, "integration state reached the outbox");
     }
 }
+
+/// An ownership migration in flight (FR-228).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationState {
+    pub id: Uuid,
+    pub agent: String,
+    pub kind: String,
+    pub source_owner: String,
+    pub source_scope: String,
+    pub source_location: String,
+    pub target_owner: String,
+    pub target_scope: String,
+    pub target_location: String,
+    pub phase: String,
+    pub overlap_permitted: bool,
+    pub started_at: String,
+    /// Redacted; never carries file content.
+    pub last_error: Option<String>,
+}
+
+/// Metadata for content preserved before a forced repair (FR-222, D39).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryArtifact {
+    pub id: Uuid,
+    pub agent: String,
+    pub kind: String,
+    pub source_path: String,
+    pub artifact_path: String,
+    pub content_hash: String,
+    pub created_at: String,
+}
+
+fn migration_from_row(r: &sqlx::sqlite::SqliteRow) -> MigrationState {
+    MigrationState {
+        id: Uuid::parse_str(&r.get::<String, _>("id")).unwrap_or_else(|_| Uuid::now_v7()),
+        agent: r.get("agent"),
+        kind: r.get("kind"),
+        source_owner: r.get("source_owner"),
+        source_scope: r.get("source_scope"),
+        source_location: r.get("source_location"),
+        target_owner: r.get("target_owner"),
+        target_scope: r.get("target_scope"),
+        target_location: r.get("target_location"),
+        phase: r.get("phase"),
+        overlap_permitted: r.get::<i64, _>("overlap_permitted") != 0,
+        started_at: r.get("started_at"),
+        last_error: r.get("last_error"),
+    }
+}
+
+/// Begin an ownership migration.
+///
+/// At most one per `(agent, kind)`: a second attempt while one is in flight is
+/// `migration_in_progress`, not a second row.
+pub async fn start_migration(store: &Store, m: &MigrationState) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO migration_states
+            (id, agent, kind, source_owner, source_scope, source_location,
+             target_owner, target_scope, target_location, phase, overlap_permitted,
+             started_at, last_error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, NULL)
+         ON CONFLICT (agent, kind) DO NOTHING",
+    )
+    .bind(m.id.to_string())
+    .bind(&m.agent)
+    .bind(&m.kind)
+    .bind(&m.source_owner)
+    .bind(&m.source_scope)
+    .bind(&m.source_location)
+    .bind(&m.target_owner)
+    .bind(&m.target_scope)
+    .bind(&m.target_location)
+    .bind(&m.phase)
+    .bind(m.overlap_permitted as i64)
+    .bind(&m.started_at)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// Move a migration to its next phase, or record its failure.
+///
+/// A failed migration keeps its row so the developer can resume or reverse it
+/// rather than being left with something indistinguishable from accidental
+/// duplication (FR-228).
+pub async fn set_migration_phase(
+    store: &Store,
+    agent: &str,
+    kind: &str,
+    phase: &str,
+    last_error: Option<&str>,
+) -> Result<()> {
+    let redacted = last_error.map(cairn_core::redact::redact);
+    sqlx::query(
+        "UPDATE migration_states SET phase = ?3, last_error = ?4
+         WHERE agent = ?1 AND kind = ?2",
+    )
+    .bind(agent)
+    .bind(kind)
+    .bind(phase)
+    .bind(redacted)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+pub async fn migration(store: &Store, agent: &str, kind: &str) -> Result<Option<MigrationState>> {
+    let row = sqlx::query("SELECT * FROM migration_states WHERE agent = ?1 AND kind = ?2")
+        .bind(agent)
+        .bind(kind)
+        .fetch_optional(store.pool())
+        .await?;
+    Ok(row.as_ref().map(migration_from_row))
+}
+
+pub async fn list_migrations(store: &Store) -> Result<Vec<MigrationState>> {
+    let rows = sqlx::query("SELECT * FROM migration_states ORDER BY agent, kind")
+        .fetch_all(store.pool())
+        .await?;
+    Ok(rows.iter().map(migration_from_row).collect())
+}
+
+/// The migration completed: exactly one owner and one resource remain.
+pub async fn clear_migration(store: &Store, agent: &str, kind: &str) -> Result<()> {
+    sqlx::query("DELETE FROM migration_states WHERE agent = ?1 AND kind = ?2")
+        .bind(agent)
+        .bind(kind)
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Record a preserved recovery artifact, keeping the ten most recent per
+/// `(agent, kind)`.
+///
+/// Metadata only: the artifact's content lives on disk and is never logged,
+/// never entered into diagnostics, and never stored here (FR-239).
+pub async fn record_recovery_artifact(store: &Store, a: &RecoveryArtifact) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO recovery_artifacts
+            (id, agent, kind, source_path, artifact_path, content_hash, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )
+    .bind(a.id.to_string())
+    .bind(&a.agent)
+    .bind(&a.kind)
+    .bind(&a.source_path)
+    .bind(&a.artifact_path)
+    .bind(&a.content_hash)
+    .bind(&a.created_at)
+    .execute(store.pool())
+    .await?;
+    sqlx::query(
+        "DELETE FROM recovery_artifacts
+         WHERE agent = ?1 AND kind = ?2 AND id NOT IN (
+             SELECT id FROM recovery_artifacts
+             WHERE agent = ?1 AND kind = ?2
+             ORDER BY created_at DESC LIMIT 10
+         )",
+    )
+    .bind(&a.agent)
+    .bind(&a.kind)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
