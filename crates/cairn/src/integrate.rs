@@ -230,9 +230,10 @@ async fn assess(
         activation,
         // The demonstration FR-208 requires is the release-evidence benchmark
         // (`perf_session_close`, SC-128), not something a running Cairn can
-        // re-measure. `None` means "no measurement contradicts it"; a build
-        // that fails the benchmark does not ship.
-        close_within_budget: None,
+        // re-measure: one developer's machine does not produce 100 boundaries.
+        // The claim is a constant that benchmark is obliged to keep true, and
+        // an agent that imposes no budget has nothing to demonstrate.
+        close_within_budget: Some(capability::budget_demonstrated(agent)),
     };
     let outcome = capability::derive_level(&profile, &inputs);
     let connected = snap.installs.iter().any(|r| r.agent == agent);
@@ -374,6 +375,11 @@ fn agent_json(state: &AgentState) -> Value {
         "awaited_behaviors": state.outcome.awaited_behaviors,
         "conditional_behaviors": state.profile.conditional_behaviors(),
     });
+    // How sessions here actually reach a terminal state, wherever that is not
+    // "the agent said so" (FR-207, FR-209, FR-229).
+    if let Some(note) = &state.outcome.completion_note {
+        v["session_completion"] = json!(note);
+    }
     if let Some(why) = &state.incompatible_because {
         v["incompatible_because"] = json!(why);
     }
@@ -972,6 +978,12 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             continue;
         }
         text.push_str(&format!("{:<12} {}\n", a.as_str(), level_line(&state)));
+        // How sessions here actually end. A developer who reads nothing else
+        // should still not believe a session is being completed when it is
+        // being timed out (FR-229).
+        if let Some(note) = &state.outcome.completion_note {
+            text.push_str(&format!("             {note}\n"));
+        }
         for b in &state.outcome.awaited_behaviors {
             text.push_str(&format!("             awaiting: {b}\n"));
         }
