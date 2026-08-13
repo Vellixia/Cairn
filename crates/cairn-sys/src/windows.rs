@@ -5,15 +5,15 @@
 //! Windows: uncatchable, immediate, not subject to cooperative shutdown
 //! handlers.
 //!
-//! The FFI surface is the minimum that needs it: `OpenProcess`,
-//! `TerminateProcess`, and `GetExitCodeProcess` for liveness. Everything
-//! else (process enumeration, pipe-to-PID attribution) is delegated to
-//! `tasklist` and a small PowerShell probe, the same way the Unix side of
-//! this crate shells out to `pgrep`/`ps`. Keeps the FFI surface small and
-//! pushes snapshotting quirks onto the OS.
+//! The FFI surface is the minimum that needs it: `GetNamedPipeServerProcessId`
+//! to attribute a pipe to its owner, `OpenProcess` and `TerminateProcess` to
+//! end it, and `GetExitCodeProcess` for liveness.
+//!
+//! Attribution is deliberately never widened to "find processes that look
+//! like ours". The caller hard-kills what this reports, so a guess is a
+//! guess about which process to destroy — see `daemons_for_socket`.
 
 use std::path::Path;
-use std::process::Command;
 
 /// PIDs of `cairnd.exe` processes serving `socket`.
 ///
@@ -26,17 +26,31 @@ pub fn daemons_for_socket(socket: &Path) -> Vec<i64> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
 
-    let file = match std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(socket)
-    {
-        Ok(f) => f,
-        // ERROR_PIPE_BUSY: every instance is taken, which still means alive.
-        // We cannot get the server PID in this state, so fall back to
-        // enumerating cairnd.exe processes and returning any that are alive.
-        Err(e) if e.raw_os_error() == Some(231) => return list_cairnd_pids(),
-        Err(_) => return Vec::new(),
+    // A busy pipe is transient: the daemon opens the next instance as soon as
+    // the pending one is taken, so a client mid-request clears in
+    // milliseconds. Wait it out.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let file = loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(socket)
+        {
+            Ok(f) => break f,
+            // ERROR_PIPE_BUSY. Never widen this into "every cairnd.exe on the
+            // machine": the caller hard-kills whatever this returns, and a
+            // developer running the suite has their own daemon serving their
+            // own repositories. Guessing costs them that daemon. Returning
+            // nothing makes the test fail loudly instead, which is the safe
+            // direction to be wrong in.
+            Err(e) if e.raw_os_error() == Some(231) => {
+                if std::time::Instant::now() >= deadline {
+                    return Vec::new();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(_) => return Vec::new(),
+        }
     };
     let mut server_pid: u32 = 0;
     let ok =
@@ -99,32 +113,4 @@ pub fn wait_for_exit(pid: i64, deadline: std::time::Duration) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
     false
-}
-
-/// Enumerate every `cairnd.exe` process on the system via `tasklist`.
-///
-/// `tasklist /FI "IMAGENAME eq cairnd.exe" /FO CSV /NH` prints one CSV row
-/// per matching process: `"cairnd.exe","1234","Console","1","12,345 K"`.
-/// We parse the second field.
-fn list_cairnd_pids() -> Vec<i64> {
-    let out = Command::new("tasklist")
-        .args(["/FI", "IMAGENAME eq cairnd.exe", "/FO", "CSV", "/NH"])
-        .output();
-    let out = match out {
-        Ok(o) if o.status.success() => o,
-        _ => return Vec::new(),
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut pids = Vec::new();
-    for line in text.lines() {
-        let fields: Vec<&str> = line.split(',').collect();
-        if fields.len() < 2 {
-            continue;
-        }
-        let pid_text = fields[1].trim_matches('"');
-        if let Ok(p) = pid_text.parse::<i64>() {
-            pids.push(p);
-        }
-    }
-    pids
 }

@@ -233,28 +233,10 @@ pub async fn logout(d: &Daemon) -> Reply {
 pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create: bool) -> Reply {
     let r = d.resolve(cwd).await?;
 
-    // Bare `cairn link` asks "am I linked?", and the answer is already on
-    // disk. Read it before reaching for a server, for two reasons.
-    //
-    // It has to be *true*: this used to fall through and report `linked:
-    // false` unconditionally, so a linked project was told it was not linked
-    // and pointed at `cairn link --create`, which would have made a second
-    // shared project for a repository that already had one — while `cairn
-    // status`, reading the same row, said it was linked.
-    //
-    // And it has to work offline: link state is local, so asking for it must
-    // not need a server or a token (C1). It used to fail outright with
-    // `no server configured` on a machine that had simply not stored one.
-    if server_project_id.is_none() && !create && r.project.linked {
-        if let Some(target) = r.project.server_project_id {
-            return Ok(json!({
-                "linked": true,
-                "project": ProjectSummary::from(&r.project),
-                "server_project_id": target,
-                "hint": "already linked; run `cairn unlink` to stop sharing, \
-                         or `cairn link --project <id>` to join a different one",
-            }));
-        }
+    // No arguments is a question, not an instruction: "am I linked?". It is
+    // answered entirely from local state, before any server is contacted.
+    if server_project_id.is_none() && !create {
+        return link_status(d, &r).await;
     }
 
     let c = client(d).await?;
@@ -279,24 +261,8 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
                     WireError::new(codes::SERVER_UNAVAILABLE, "server returned no project id")
                 })?
         }
-        (None, false) => {
-            // Not linked — established above, not assumed. Discovery hint
-            // only from here; the user picks (D14).
-            let remote = r.project.repository_remote.clone().unwrap_or_default();
-            let candidates = c
-                .get(&format!(
-                    "/api/projects/lookup?remote={}",
-                    urlencode(&remote)
-                ))
-                .await
-                .unwrap_or_else(|_| json!({ "projects": [] }));
-            return Ok(json!({
-                "linked": false,
-                "candidates": candidates.get("projects").cloned().unwrap_or(json!([])),
-                "hint": "run `cairn link --create` for a new shared project, \
-                         or `cairn link --project <id>` to join one",
-            }));
-        }
+        // Handled above, before the client was built.
+        (None, false) => unreachable!("bare `link` is answered by link_status"),
     };
 
     let project = repo::link_project(&d.store, r.project.id, target)
@@ -312,6 +278,64 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
         "project": ProjectSummary::from(&project),
         "server_project_id": target,
     }))
+}
+
+/// Answer bare `cairn link`: am I linked, and if not, what could I join?
+///
+/// Whether this project is linked is local state, so the answer comes from
+/// the project row and never from the network (C1). This used to report
+/// `linked: false` unconditionally — so a linked project was told it was not
+/// linked and pointed at `cairn link --create`, which would have made a
+/// second shared project for a repository that already had one, while `cairn
+/// status` read the same row and said the opposite. It also used to fail
+/// outright with `no server configured` on a machine that simply had not
+/// stored one, for a question that needs no server to answer.
+async fn link_status(d: &Daemon, r: &crate::state::Resolved) -> Reply {
+    match (r.project.linked, r.project.server_project_id) {
+        (true, Some(target)) => Ok(json!({
+            "linked": true,
+            "project": ProjectSummary::from(&r.project),
+            "server_project_id": target,
+            "hint": "already linked; run `cairn unlink` to stop sharing, \
+                     or `cairn link --project <id>` to join a different one",
+        })),
+
+        // Linked to nothing. The schema permits the pair to disagree and
+        // nothing in this codebase writes it, so reaching here means the row
+        // was damaged. Reporting "not linked" would put us straight back to
+        // contradicting `cairn status`, which reads the same row and reports
+        // linked; say what is actually wrong instead.
+        (true, None) => Err(WireError::new(
+            codes::STORAGE_UNAVAILABLE,
+            "this project is marked linked but records no shared project id; \
+             run `cairn unlink` and link it again",
+        )),
+
+        // Not linked. Candidates are a convenience that needs a server, but
+        // the answer itself does not: a machine with no server configured
+        // still gets a truthful "not linked" rather than an error.
+        (false, _) => {
+            let candidates = match client(d).await {
+                Ok(c) => {
+                    let remote = r.project.repository_remote.clone().unwrap_or_default();
+                    c.get(&format!(
+                        "/api/projects/lookup?remote={}",
+                        urlencode(&remote)
+                    ))
+                    .await
+                    .unwrap_or_else(|_| json!({ "projects": [] }))
+                }
+                Err(_) => json!({ "projects": [] }),
+            };
+            // Discovery hint only. The user picks (D14).
+            Ok(json!({
+                "linked": false,
+                "candidates": candidates.get("projects").cloned().unwrap_or(json!([])),
+                "hint": "run `cairn link --create` for a new shared project, \
+                         or `cairn link --project <id>` to join one",
+            }))
+        }
+    }
 }
 
 fn urlencode(s: &str) -> String {

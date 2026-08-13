@@ -106,6 +106,51 @@ fn bare_link_reports_an_existing_link_instead_of_denying_it() {
     assert_eq!(s.json(&["status"])["project"]["linked"], true);
 }
 
+/// An unlinked project still gets a truthful answer with no server stored.
+///
+/// "Not linked" is local knowledge. Only the *candidate list* needs a server,
+/// so a machine with no credentials should still be told where it stands
+/// rather than handed `no server configured` (C1).
+#[test]
+fn bare_link_answers_for_an_unlinked_project_with_no_server_configured() {
+    let s = Sandbox::new();
+    let v = s.json(&["link"]);
+    assert_eq!(v["linked"], false);
+    assert_eq!(
+        v["candidates"].as_array().map(|a| a.len()),
+        Some(0),
+        "candidates need a server; with none stored the list is simply empty"
+    );
+}
+
+/// `linked = 1` with no `server_project_id` is a damaged row, and must be
+/// reported as one.
+///
+/// The schema permits the pair to disagree. Answering "not linked" here would
+/// reintroduce the exact contradiction with `cairn status` that this whole
+/// area was fixed for, so the daemon names the problem instead.
+#[test]
+fn bare_link_reports_a_damaged_row_rather_than_calling_it_unlinked() {
+    let s = Sandbox::new();
+    let project = s.json(&["status"])["project"]["id"]
+        .as_str()
+        .expect("project id")
+        .to_string();
+    s.execute_sql(&format!(
+        "UPDATE projects SET linked = 1, server_project_id = NULL WHERE id = '{project}'"
+    ));
+
+    let err = s.json_err(&["link"]);
+    assert_eq!(err["code"], "storage_unavailable");
+    assert!(
+        err["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no shared project id"),
+        "the error should say what is actually wrong: {err}"
+    );
+}
+
 #[test]
 fn linking_syncs_history_and_replaying_a_batch_changes_nothing() {
     let Some(server) = server() else { return };

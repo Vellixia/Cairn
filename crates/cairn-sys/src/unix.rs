@@ -33,7 +33,28 @@ pub fn kill(pid: i64) -> bool {
 }
 
 /// Whether `pid` is currently running.
+///
+/// A zombie counts as *not* running. It has already exited and only lingers
+/// as an unreaped table entry, but `kill(pid, 0)` still succeeds for it — so
+/// checking the signal alone reports a hard-killed daemon as alive forever.
+/// That is not hypothetical here: `cairn` spawns the daemon and exits
+/// immediately, orphaning it, so whether anything reaps it depends on whether
+/// this host's init does. On one that does not, `wait_for_exit` would never
+/// return true and a working `SIGKILL` would look broken.
 pub fn is_running(pid: i64) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            // `pid (comm) state ...`. The comm field is arbitrary and may
+            // contain both spaces and parentheses, so the state letter is
+            // found after the *last* ')', not by splitting on whitespace.
+            if let Some((_, rest)) = stat.rsplit_once(')') {
+                if rest.split_whitespace().next() == Some("Z") {
+                    return false;
+                }
+            }
+        }
+    }
     // SAFETY: `kill(2)` with signal 0 performs no signal delivery; it is the
     // standard liveness check. `ESRCH` means "no such process".
     unsafe {

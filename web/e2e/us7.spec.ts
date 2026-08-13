@@ -1,12 +1,27 @@
 import { expect, test } from "@playwright/test";
 import { openNav } from "./nav";
-import { seed, type Seeded } from "./seed";
+import { API, seed, type Seeded } from "./seed";
 
 /**
  * T073 — the four Independent Test actions for US7, without a terminal:
  * find the project, read its handoff, search memory, delete a memory (SC-011).
  */
 let fixture: Seeded;
+
+/** The server's web session cookie — `auth::COOKIE_NAME` on the Rust side. */
+const SESSION_COOKIE = "cairn_session";
+
+/**
+ * The session value out of a `set-cookie` header.
+ *
+ * Split on the *first* `=` only: the value is opaque and may itself contain
+ * `=`, which `split("=")[1]` would silently truncate.
+ */
+function sessionValue(setCookie: string | null): string {
+  const pair = (setCookie ?? "").split(";")[0];
+  const eq = pair.indexOf("=");
+  return eq === -1 ? "" : pair.slice(eq + 1);
+}
 
 test.beforeAll(async () => {
   fixture = await seed();
@@ -108,11 +123,14 @@ test("a non-member is refused rather than shown an empty page", async ({
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email: stranger, password }),
   });
-  const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
-
   // Set the stranger's cookie and try to access the fixture project.
   await page.context().addCookies([
-    { name: "session", value: cookie.split("=")[1] ?? "", domain: "127.0.0.1", path: "/" },
+    {
+      name: SESSION_COOKIE,
+      value: sessionValue(login.headers.get("set-cookie")),
+      domain: "127.0.0.1",
+      path: "/",
+    },
   ]);
   await page.goto(`/projects/${fixture.projectId}`);
   // The UI should show a refusal, not an empty project page.
@@ -135,10 +153,13 @@ test("the projects list shows an empty state when there are none", async ({
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ email: empty, password }),
   });
-  const cookie = (login.headers.get("set-cookie") ?? "").split(";")[0];
-
   await page.context().addCookies([
-    { name: "session", value: cookie.split("=")[1] ?? "", domain: "127.0.0.1", path: "/" },
+    {
+      name: SESSION_COOKIE,
+      value: sessionValue(login.headers.get("set-cookie")),
+      domain: "127.0.0.1",
+      path: "/",
+    },
   ]);
   await page.goto("/");
   await expect(page.getByTestId("project-list")).toBeVisible();
@@ -148,10 +169,19 @@ test("the projects list shows an empty state when there are none", async ({
 test("the sessions list shows an empty state when there are none", async ({
   page,
 }, testInfo) => {
-  // Create a project with no sessions.
+  // Create a project with no sessions. `beforeEach` has already signed in
+  // through the UI, so the real session cookie is on the browser context —
+  // an email address is not a credential and was never going to authenticate.
+  const cookies = await page.context().cookies();
+  const session = cookies.find((c) => c.name === SESSION_COOKIE);
+  expect(session, "beforeEach should have left a session cookie").toBeTruthy();
+
   const tokenBody = await fetch(`${API}/api/tokens`, {
     method: "POST",
-    headers: { cookie: `session=${fixture.email}` },
+    headers: {
+      cookie: `${SESSION_COOKIE}=${session?.value ?? ""}`,
+      "content-type": "application/json",
+    },
     body: JSON.stringify({ name: "empty-sessions-test" }),
   }).then(r => r.json());
   const token = tokenBody.token as string;
