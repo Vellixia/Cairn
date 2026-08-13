@@ -297,23 +297,6 @@ impl Sandbox {
         panic!("the daemon is still listening on {}", self.socket.display());
     }
 
-    /// Wait until the daemon has let go of the store, not merely the socket.
-    ///
-    /// The two are not the same moment: the daemon removes its socket first and
-    /// closes its connection pool afterwards, and closing checkpoints the
-    /// write-ahead log back into the database file. A test that rewrites that
-    /// file in between has its bytes overwritten by the checkpoint and then finds
-    /// a perfectly healthy database — the corruption it set up never happened.
-    /// SQLite deletes the `-wal` and `-shm` sidecars when the last connection
-    /// closes, so their absence is the signal to wait for.
-    pub fn settle_store_closed(&self) {
-        self.settle("the store to be closed", |s| {
-            ["-wal", "-shm"]
-                .iter()
-                .all(|suffix| !s.sidecar(suffix).exists())
-        });
-    }
-
     /// Stop and restart the daemon — the deterministic session boundary (D16).
     pub fn restart_daemon(&self) {
         self.stop_daemon();
