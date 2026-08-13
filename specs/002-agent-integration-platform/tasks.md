@@ -365,6 +365,9 @@ criterion has a passing named test.
 - [x] T126 [P] Write the connect, doctor, repair, disconnect, and distribute documentation in `README.md` and `docs/`, covering the per-resource scope defaults, what `--shared` changes, and the fact that cloning a repository installs and activates nothing (FR-216)
 - [x] T127 [P] Audit and record: exactly six MCP tools (FR-128); zero outbox entity types and zero server schema changes for any Feature 002 entity (FR-183, FR-184); `cairn-server` untouched; no manifest drift handling, merge semantics, or automatic application of intent on clone crept in (FR-227); and every item in `spec.md` §Out of Scope is still out
 - [ ] T128 Run the full `quickstart.md` walkthrough on macOS and Linux, hermetic sections in CI and live sections by hand, and fix what it surfaces
+  - **Linux, hermetic: done.** Every evidence command in §Measured checks was run, and the US1, US2, US7, US8 and US9 narratives were walked by hand against the real binaries. Four defects were found and fixed: `cairn repair` connected agents nobody had asked for and never converged; a disconnect left a zero-byte `CLAUDE.md` behind where Cairn had created the file; US2 pointed at a fixture path that did not exist (it exists now); and §Measured checks named a test that did not exist, so the command it gave a reader reported "0 passed".
+  - **macOS, hermetic: delegated to the `rust-macos` CI job**, which runs the same suite. Not observable from the implementation environment, which is Linux.
+  - **Live sections: not run.** They need authenticated Claude Code, Codex, OpenCode and CC Switch, which is what T121–T123 are for.
 
 ---
 
