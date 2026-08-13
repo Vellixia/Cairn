@@ -40,6 +40,18 @@ pub fn is_test_command(command: &str) -> bool {
         "gradle test",
         "phpunit",
         "playwright test",
+        // Python's stdlib runner. `pytest` above does not cover it, and a
+        // project with no third-party test dependency runs this one -- which
+        // made a green suite arrive as "0 test command(s) run".
+        "-m unittest",
+        "unittest discover",
+        "tox",
+        "bun test",
+        "deno test",
+        "dotnet test",
+        "swift test",
+        "mix test",
+        "ctest",
     ];
     MARKERS.iter().any(|m| c.contains(m))
 }
@@ -61,6 +73,9 @@ mod tests {
     fn recognises_test_commands_without_matching_builds() {
         assert!(is_test_command("cargo test --workspace"));
         assert!(is_test_command("npx playwright test"));
+        assert!(is_test_command("python3 -m unittest discover -s tests -q"));
+        assert!(is_test_command("python -m unittest"));
+        assert!(is_test_command("uv run tox"));
         assert!(!is_test_command("cargo build --release"));
         assert!(!is_test_command("npm run lint"));
     }

@@ -70,7 +70,13 @@ impl IntegrationManager for CcSwitch {
         let version = std::fs::read_to_string(dir.join("version"))
             .ok()
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| !s.is_empty())
+            // Installed CC Switch does not in fact write that marker -- 3.19.2
+            // ships none -- so every install reported "(version unknown)". The
+            // application bundle states its own version publicly, which is a
+            // different thing from the manager's private store: this reads the
+            // shipped bundle, never anything under `~/.cc-switch/`.
+            .or_else(bundle_version);
         Detection::found(version, Some(dir))
     }
 
@@ -238,6 +244,22 @@ fn urlencode(s: &str) -> String {
         }
     }
     out
+}
+
+/// The version the installed application states in its own bundle.
+///
+/// macOS only, and deliberately outside the manager's private store: an
+/// application bundle is public, shipped metadata.
+fn bundle_version() -> Option<String> {
+    if !cfg!(target_os = "macos") {
+        return None;
+    }
+    let text = std::fs::read_to_string("/Applications/CC Switch.app/Contents/Info.plist").ok()?;
+    let after = text.split("<key>CFBundleShortVersionString</key>").nth(1)?;
+    let open = after.find("<string>")? + "<string>".len();
+    let close = after[open..].find("</string>")? + open;
+    let v = after[open..close].trim();
+    (!v.is_empty()).then(|| v.to_string())
 }
 
 #[cfg(test)]

@@ -56,7 +56,11 @@ async fn main() -> anyhow::Result<()> {
     // with stderr on the null device, so whatever `main` returns is printed to
     // nobody.
     if let Err(ref e) = result {
-        tracing::error!(error = %one_line(e), "cairnd exited during startup");
+        tracing::error!(
+            error = %one_line(e),
+            "{}",
+            cairn_core::startup::STARTUP_FAILED
+        );
     }
     result
 }

@@ -388,13 +388,13 @@ impl CapabilityProfile {
                 c.insert(
                     LifecycleToolFailure,
                     CapabilityState::conditional(
-                        "OpenCode's tool output unambiguously establishing a failure",
+                        "OpenCode's tool output unambiguously establishes a failure",
                     ),
                 );
                 c.insert(
                     LifecyclePreCompaction,
                     CapabilityState::conditional(
-                        "the installed OpenCode exposing experimental.session.compacting",
+                        "the installed OpenCode exposes experimental.session.compacting",
                     ),
                 );
                 // The one genuine absence: OpenCode signals no session end at

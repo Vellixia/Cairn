@@ -19,3 +19,16 @@
 /// The daemon writes this line whatever `CAIRN_LOG` says. A user who silenced
 /// the log has not asked to be told less about why nothing works.
 pub const STORE_OPEN_FAILED: &str = "cairnd could not open the local store";
+
+/// Prefix of the log line a daemon writes when it exits during startup for any
+/// other reason. The reason follows as ` error=<reason>` on the same line.
+///
+/// The store is not the only thing that can stop a daemon before it binds. A
+/// `CAIRN_HOME` long enough to overflow a Unix socket path fails at bind with
+/// `path must be shorter than SUN_LEN`, and the CLI used to reduce that to
+/// `daemon_unavailable: cairnd did not start` -- the reason was already in the
+/// log, just behind a marker nobody read.
+pub const STARTUP_FAILED: &str = "cairnd exited during startup";
+
+/// The field the reason travels in on a [`STARTUP_FAILED`] line.
+pub const STARTUP_FAILED_FIELD: &str = "error=";

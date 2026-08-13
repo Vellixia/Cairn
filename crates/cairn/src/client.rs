@@ -63,7 +63,17 @@ impl DaemonLogMark {
                     },
                 )
             }
-            None => WireError::new(codes::DAEMON_UNAVAILABLE, unexplained),
+            // Not the store, then: anything else that stopped the daemon
+            // before it bound the socket. The reason is in the log behind the
+            // startup marker, and `daemon_unavailable: cairnd did not start`
+            // on its own names the symptom and hides it.
+            None => match self.startup_failure() {
+                Some(reason) if !reason.is_empty() => WireError::new(
+                    codes::DAEMON_UNAVAILABLE,
+                    format!("{unexplained}: {reason}"),
+                ),
+                _ => WireError::new(codes::DAEMON_UNAVAILABLE, unexplained),
+            },
         }
     }
 
@@ -75,6 +85,20 @@ impl DaemonLogMark {
         appended.lines().rev().find_map(|line| {
             let (_, reason) = line.split_once(cairn_core::startup::STORE_OPEN_FAILED)?;
             Some(reason.trim_start_matches([':', ' ']).trim().to_string())
+        })
+    }
+
+    /// Any other startup failure the daemon logged, if it logged one.
+    fn startup_failure(&self) -> Option<String> {
+        let appended = self.appended()?;
+        appended.lines().rev().find_map(|line| {
+            let (_, rest) = line.split_once(cairn_core::startup::STARTUP_FAILED)?;
+            // The marker is the tracing message; the reason travels in a field
+            // that may sit on either side of it depending on the formatter.
+            let field = cairn_core::startup::STARTUP_FAILED_FIELD;
+            let source = if rest.contains(field) { rest } else { line };
+            let (_, reason) = source.split_once(field)?;
+            Some(reason.trim().to_string())
         })
     }
 
