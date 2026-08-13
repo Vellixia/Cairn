@@ -102,7 +102,11 @@ export default function LoginPage() {
               </div>
 
               {message && (
-                <Alert variant="destructive" role="alert">
+                <Alert
+                  variant="destructive"
+                  role="alert"
+                  data-testid="login-error"
+                >
                   <AlertCircle />
                   <AlertDescription>{message}</AlertDescription>
                 </Alert>
