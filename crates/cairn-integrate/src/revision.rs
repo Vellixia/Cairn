@@ -380,6 +380,24 @@ mod tests {
     }
 
     #[test]
+    fn the_package_version_is_not_an_input_to_the_skill_revision() {
+        // D29b, and the reason Codex hook trust survives a release: the Skill
+        // is content-addressed, so an ordinary version bump must not move its
+        // revision and must not rewrite an installed tree. The revision only
+        // stays still if the package version never reaches the content, so
+        // that is what is asserted here rather than the digest of the day.
+        let version = env!("CARGO_PKG_VERSION");
+        for f in embedded_files_verbatim() {
+            assert!(
+                !f.content.contains(version),
+                "{} embeds the package version {version}; every release would \
+                 then move the Skill revision and rewrite installed Skills",
+                f.path
+            );
+        }
+    }
+
+    #[test]
     fn the_self_field_is_normalized_and_a_body_mention_is_not() {
         let doc = "---\nname: cairn\nmetadata:\n  cairn_skill_schema: 1\n  cairn_skill_revision: abc123abc123\n---\n\nThe field cairn_skill_revision: abc123abc123 is documented here.\n";
         let out = normalize_self_field(doc);

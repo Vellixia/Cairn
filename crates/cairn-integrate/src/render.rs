@@ -220,6 +220,19 @@ mod tests {
     }
 
     #[test]
+    fn the_package_version_is_not_an_input_to_the_contract_revision() {
+        // D26, from the other side: `the_revision_changes_only_when_the
+        // _rendered_text_changes` proves the digest follows the text, and this
+        // proves the text does not follow the release. Together they mean a
+        // package-only bump leaves every rendered contract byte-identical, so
+        // no agent's instructions are rewritten by a release alone.
+        let version = env!("CARGO_PKG_VERSION");
+        let c = Contract::canonical();
+        assert!(!c.block_body().contains(version));
+        assert!(!c.mcp_instructions().contains(version));
+    }
+
+    #[test]
     fn parsing_is_deterministic() {
         assert_eq!(Contract::canonical(), Contract::canonical());
         assert_eq!(
