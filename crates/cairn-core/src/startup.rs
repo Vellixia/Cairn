@@ -15,4 +15,7 @@
 
 /// Prefix of the log line a daemon writes when the local store cannot be
 /// opened. The underlying error follows it as `": <reason>"`, on one line.
+///
+/// The daemon writes this line whatever `CAIRN_LOG` says. A user who silenced
+/// the log has not asked to be told less about why nothing works.
 pub const STORE_OPEN_FAILED: &str = "cairnd could not open the local store";

@@ -155,13 +155,35 @@ async fn open_store() -> anyhow::Result<(Store, uuid::Uuid)> {
     }
     .await;
 
-    opened.inspect_err(|e| {
-        tracing::error!(
-            "{}: {}",
-            cairn_core::startup::STORE_OPEN_FAILED,
-            one_line(e)
-        );
-    })
+    opened.inspect_err(|e| record_store_failure(&one_line(e)))
+}
+
+/// Write the store-open failure where the CLI will find it.
+///
+/// Deliberately not a `tracing` event. Tracing is filtered by `CAIRN_LOG`, and
+/// `CAIRN_LOG=off` — or any directive that silences this target — would drop the
+/// one line the CLI depends on, putting a damaged store back to being reported
+/// as a daemon that never started. This line is a contract (see
+/// `cairn_core::startup`), not diagnostics, so no filter gets a say in it. It is
+/// shaped like the lines around it so the log still reads as one thing.
+///
+/// Best effort: a log that cannot be written leaves the CLI with its older,
+/// vaguer message, which is what it had before this line existed.
+fn record_store_failure(reason: &str) {
+    use std::io::Write;
+
+    let line = format!(
+        "{} ERROR cairnd: {}: {reason}\n",
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ"),
+        cairn_core::startup::STORE_OPEN_FAILED
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cairn_core::paths::daemon_log_path())
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 async fn shutdown_store(daemon: &Daemon) {

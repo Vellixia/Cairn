@@ -91,9 +91,13 @@ impl DaemonLogMark {
             from.max(len.saturating_sub(LOG_TAIL_LIMIT)),
         ))
         .ok()?;
-        let mut tail = String::new();
-        file.take(LOG_TAIL_LIMIT).read_to_string(&mut tail).ok()?;
-        Some(tail)
+        // Bytes, then a lossy decode. `read_to_string` refuses the whole tail
+        // over a single byte that is not UTF-8, and the offset above can land
+        // mid-codepoint, so that byte is easy to come by — losing the diagnosis
+        // to the encoding of a log we only want to find one line in.
+        let mut tail = Vec::new();
+        file.take(LOG_TAIL_LIMIT).read_to_end(&mut tail).ok()?;
+        Some(String::from_utf8_lossy(&tail).into_owned())
     }
 }
 

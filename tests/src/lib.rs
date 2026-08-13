@@ -69,6 +69,17 @@ impl Sandbox {
         self.home.path().join("cairn.sqlite3")
     }
 
+    /// A file SQLite keeps beside the database: `-wal`, `-shm`.
+    ///
+    /// Composed rather than formatted through `Path::display`, which is lossy for
+    /// any path the platform does not hand back as UTF-8 — and would then name a
+    /// file that is not the one we meant.
+    pub fn sidecar(&self, suffix: &str) -> PathBuf {
+        let mut path = self.db_path().into_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
     pub fn write_file(&self, name: &str, contents: &str) {
         let path = self.repo.path().join(name);
         if let Some(parent) = path.parent() {
@@ -94,14 +105,23 @@ impl Sandbox {
 
     /// Run `cairn` inside the sandbox.
     pub fn cairn(&self, args: &[&str]) -> CliResult {
-        let out = Command::new(binary("cairn"))
+        self.cairn_with_env(args, &[])
+    }
+
+    /// `cairn`, with extra environment for a test that needs to change how the
+    /// CLI or the daemon it starts is configured.
+    pub fn cairn_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> CliResult {
+        let mut command = Command::new(binary("cairn"));
+        command
             .args(args)
             .current_dir(self.repo.path())
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
-            .env("CAIRND_BIN", binary("cairnd"))
-            .output()
-            .expect("cairn runs");
+            .env("CAIRND_BIN", binary("cairnd"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let out = command.output().expect("cairn runs");
         CliResult {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
@@ -290,7 +310,7 @@ impl Sandbox {
         self.settle("the store to be closed", |s| {
             ["-wal", "-shm"]
                 .iter()
-                .all(|suffix| !PathBuf::from(format!("{}{suffix}", s.db_path().display())).exists())
+                .all(|suffix| !s.sidecar(suffix).exists())
         });
     }
 
@@ -362,8 +382,7 @@ impl Sandbox {
         self.cairn(&["status"]);
         let mut bytes = std::fs::read(self.db_path()).unwrap_or_default();
         for suffix in ["-wal", "-shm"] {
-            let extra = PathBuf::from(format!("{}{suffix}", self.db_path().display()));
-            if let Ok(mut more) = std::fs::read(&extra) {
+            if let Ok(mut more) = std::fs::read(self.sidecar(suffix)) {
                 bytes.append(&mut more);
             }
         }

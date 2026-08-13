@@ -183,4 +183,17 @@ fn a_corrupt_database_is_detected_and_reported() {
         message.contains("not a database"),
         "the message must name the real cause: {message}"
     );
+
+    // And a silenced log must not silence the diagnosis. `CAIRN_LOG` filters the
+    // daemon's tracing events, so a diagnosis carried by an ordinary one would
+    // vanish for exactly the user who is least likely to work out why nothing
+    // starts.
+    let quiet = s.cairn_with_env(&["--json", "status"], &[("CAIRN_LOG", "off")]);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&quiet.stdout).expect("envelope with the log off");
+    assert_eq!(
+        envelope["error"]["code"], "storage_unavailable",
+        "the reason must reach the CLI whatever CAIRN_LOG says: {}",
+        quiet.stdout
+    );
 }
