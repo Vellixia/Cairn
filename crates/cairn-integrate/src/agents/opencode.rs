@@ -244,11 +244,18 @@ fn exposes_compaction_hook(detection: &Detection) -> bool {
 
 /// Where OpenCode's Skill binding points.
 pub fn skill_location(env: &Env, record: &[RecordedInstall]) -> std::path::PathBuf {
+    // A record is authority only while it still describes something. One that
+    // names a directory with no `SKILL.md` in it is stale -- and trusting it
+    // anyway is what made `inspect` report `missing`, the plan plan an `ADD`,
+    // and the apply write the second copy D28 exists to prevent. Falling
+    // through to the rule below lets a wrong record heal itself.
     if let Some(r) = record
         .iter()
         .find(|r| r.agent == AgentId::Opencode && r.kind == ResourceKind::Skill)
     {
-        return r.location.clone();
+        if r.location.join("SKILL.md").exists() {
+            return r.location.clone();
+        }
     }
     let claude = env.home.join(".claude").join("skills").join("cairn");
     if claude.join("SKILL.md").exists() {
@@ -317,6 +324,72 @@ fn inspect_plugin(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn skill_env() -> (tempfile::TempDir, crate::scope::Env) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let env = crate::scope::Env::new(dir.path().join("home"), dir.path().join("repo"));
+        std::fs::create_dir_all(&env.home).unwrap();
+        (dir, env)
+    }
+
+    fn claude_skill(env: &crate::scope::Env) -> std::path::PathBuf {
+        let p = env.home.join(".claude").join("skills").join("cairn");
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("SKILL.md"), "---\nname: cairn\n---\n").unwrap();
+        p
+    }
+
+    /// D28: bind to Claude Code's copy, never write a second one.
+    #[test]
+    fn the_skill_binds_to_claude_codes_copy_where_it_exists() {
+        let (_d, env) = skill_env();
+        let claude = claude_skill(&env);
+        assert_eq!(skill_location(&env, &[]), claude);
+    }
+
+    /// A record naming a directory with no `SKILL.md` is stale. Trusting it made
+    /// `inspect` report `missing`, the next plan `ADD`, and the apply write the
+    /// duplicate D28 forbids -- so it must not win over the sharing rule.
+    #[test]
+    fn a_record_pointing_at_no_skill_does_not_win_over_sharing() {
+        let (_d, env) = skill_env();
+        let claude = claude_skill(&env);
+        let stale = crate::plan::RecordedInstall {
+            agent: AgentId::Opencode,
+            kind: ResourceKind::Skill,
+            owner: crate::model::ResourceOwner::Direct,
+            scope: InstallationScope::User,
+            location: env
+                .config_home
+                .join("opencode")
+                .join("skills")
+                .join("cairn"),
+            content_hash: None,
+            artifact_schema: None,
+            artifact_revision: None,
+            activation: crate::model::ActivationState::NotApplicable,
+            serves: vec![AgentId::Opencode],
+            container_single_line: false,
+            created_container: false,
+        };
+        assert_eq!(skill_location(&env, &[stale]), claude);
+    }
+
+    /// The plan and the apply both resolve through `materialize_install`, so it
+    /// has to agree with `inspect` about where the Skill is.
+    #[test]
+    fn materialize_agrees_with_the_sharing_rule() {
+        let (_d, env) = skill_env();
+        let claude = claude_skill(&env);
+        let m = crate::install::materialize_install(
+            &env,
+            AgentId::Opencode,
+            ResourceKind::Skill,
+            InstallationScope::User,
+        )
+        .expect("materialize");
+        assert_eq!(m.location, claude);
+    }
 
     fn payload(json: serde_json::Value) -> RawPayload {
         RawPayload::new(json, "/repo")

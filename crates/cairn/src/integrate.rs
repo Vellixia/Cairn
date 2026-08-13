@@ -685,6 +685,19 @@ async fn apply_plan(
             if let Ok(mut m) =
                 install::materialize_install(env, state.agent, wanted.kind, wanted.scope)
             {
+                // Where Claude Code's Cairn Skill exists, OpenCode binds to
+                // *that* resource rather than writing a second copy (D28), but
+                // `scope::location` is a fixed table and cannot see it. Left
+                // alone it records OpenCode's own path, which nothing ever
+                // installs -- so doctor reads a location with no Skill in it and
+                // calls a resource `missing` that is in fact shared and healthy,
+                // and the next `connect` plans an `ADD` for the duplicate D28
+                // forbids. The record has to name the same location the
+                // adapter's `inspect` reports. Resolved from disk rather than
+                // from `prior`, so an already-wrong record heals itself.
+                if state.agent == AgentId::Opencode && wanted.kind == ResourceKind::Skill {
+                    m.location = cairn_integrate::agents::opencode::skill_location(env, &[]);
+                }
                 // This resource was installed by an earlier run or by another
                 // agent, so the file already holds Cairn's content and its
                 // layout bits describe *that* edit. They are carried forward

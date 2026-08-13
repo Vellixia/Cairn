@@ -86,11 +86,19 @@ pub fn materialize_install(
     kind: ResourceKind,
     scope: InstallationScope,
 ) -> Result<Materialized, EditError> {
-    let location =
+    // `scope::location` is a fixed table. The OpenCode Skill is the one
+    // resource whose location is a decision rather than a lookup: where Claude
+    // Code's copy exists, OpenCode binds to that one instead of writing a
+    // second (D28). Resolving it here means the plan, the apply and the
+    // recorded binding cannot disagree about which path is Cairn's.
+    let location = if agent == AgentId::Opencode && kind == ResourceKind::Skill {
+        crate::agents::opencode::skill_location(env, &[])
+    } else {
         scope::location(env, agent, kind, scope).ok_or_else(|| EditError::UnexpectedShape {
             path: format!("{agent}/{kind}"),
             detail: "this agent installs no resource of that kind".into(),
-        })?;
+        })?
+    };
     let display = location.display().to_string();
     let current = std::fs::read_to_string(&location).unwrap_or_default();
 
