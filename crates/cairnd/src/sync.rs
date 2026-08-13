@@ -280,6 +280,13 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
     }))
 }
 
+/// How long bare `cairn link` will wait on a server for candidate projects.
+///
+/// Short on purpose. The answer it is really giving — linked or not — comes
+/// from the local row, so an unreachable server must cost a moment rather
+/// than the shared client's full 20 seconds.
+const CANDIDATE_LOOKUP_BUDGET: Duration = Duration::from_secs(3);
+
 /// Answer bare `cairn link`: am I linked, and if not, what could I join?
 ///
 /// Whether this project is linked is local state, so the answer comes from
@@ -314,16 +321,21 @@ async fn link_status(d: &Daemon, r: &crate::state::Resolved) -> Reply {
         // Not linked. Candidates are a convenience that needs a server, but
         // the answer itself does not: a machine with no server configured
         // still gets a truthful "not linked" rather than an error.
+        //
+        // A *configured but unreachable* server is the case that bites. The
+        // shared client allows 20s, and spending that on a question answered
+        // from the local row would make a nonsense of calling this offline —
+        // so the lookup gets its own short budget and the answer goes out
+        // with an empty list when it expires.
         (false, _) => {
             let candidates = match client(d).await {
                 Ok(c) => {
                     let remote = r.project.repository_remote.clone().unwrap_or_default();
-                    c.get(&format!(
-                        "/api/projects/lookup?remote={}",
-                        urlencode(&remote)
-                    ))
-                    .await
-                    .unwrap_or_else(|_| json!({ "projects": [] }))
+                    let path = format!("/api/projects/lookup?remote={}", urlencode(&remote));
+                    tokio::time::timeout(CANDIDATE_LOOKUP_BUDGET, c.get(&path))
+                        .await
+                        .unwrap_or_else(|_| Ok(json!({ "projects": [] })))
+                        .unwrap_or_else(|_| json!({ "projects": [] }))
                 }
                 Err(_) => json!({ "projects": [] }),
             };

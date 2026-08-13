@@ -2,8 +2,10 @@
 //!
 //! The test suite needs to identify `cairnd` processes by the `CAIRN_SOCKET`
 //! they were started with and hard-kill them, so it can exercise the daemon
-//! recovery path (FR-009, FR-047, H2) on every platform. Unix has `pgrep`/`ps`
-//! and `SIGKILL`; Windows has `CreateToolhelp32Snapshot` and `TerminateProcess`.
+//! recovery path (FR-009, FR-047, H2) on every platform. Unix matches on the
+//! process environment (`/proc`, or `ps eww` where there is none) and signals
+//! with `SIGKILL`; Windows asks the pipe itself who owns it, via
+//! `GetNamedPipeServerProcessId`, and ends it with `TerminateProcess`.
 //! This crate hides that difference behind one small surface so the tests do
 //! not grow their own per-platform scaffolding.
 //!
@@ -39,13 +41,28 @@ mod tests {
     }
 
     #[test]
-    fn nonexistent_pid_is_not_running() {
-        // A PID that does not exist. Picking a very large value keeps this
-        // true even on systems that recycle PIDs aggressively.
-        let dead = 2_000_000;
+    fn a_reaped_child_is_not_running() {
+        // Use a PID known to be dead rather than one assumed to be unused.
+        // A large constant is not safe to assume free: Linux allows `pid_max`
+        // up to 4,194,304, so the number could belong to a real process on a
+        // busy host and fail this test for the wrong reason. Spawning a child
+        // and reaping it leaves a PID that is genuinely finished.
+        let mut child = std::process::Command::new(if cfg!(windows) { "cmd" } else { "true" })
+            .args(if cfg!(windows) {
+                vec!["/C", "exit"]
+            } else {
+                vec![]
+            })
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a short-lived child");
+        let pid = child.id() as i64;
+        child.wait().expect("reap the child");
+
         assert!(
-            !super::is_running(dead),
-            "a phantom PID must not report running"
+            !super::is_running(pid),
+            "a reaped child ({pid}) must not report running"
         );
     }
 }

@@ -122,9 +122,15 @@ mod tests {
 
     #[test]
     fn current_is_a_parseable_semver() {
-        // `release::update_available` only returns true when both sides parse,
-        // so a self-comparison parsing the current version proves it is valid.
-        assert!(!release::update_available(CURRENT, CURRENT));
+        // Asserted against a known-lower baseline, not against itself.
+        // `update_available` returns false whenever *either* side fails to
+        // parse, so `!update_available(CURRENT, CURRENT)` holds just as well
+        // for a version that is not semver at all — it proved nothing. This
+        // can only pass if `CURRENT` parses and orders above 0.0.0.
+        assert!(
+            release::update_available("0.0.0", CURRENT),
+            "CURRENT ({CURRENT}) must be parseable semver above 0.0.0"
+        );
     }
 
     #[test]

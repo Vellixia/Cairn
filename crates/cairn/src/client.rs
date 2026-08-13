@@ -438,8 +438,24 @@ pub fn send_oneway_blocking(request: &Request, deadline: Duration) -> Result<(),
 mod tests {
     use super::*;
 
+    /// Serializes the tests below.
+    ///
+    /// The environment is process-global while `cargo test` runs a binary's
+    /// tests on parallel threads, so two tests each setting and restoring
+    /// `CAIRND_BIN` can interleave: one reads the other's temporary value, or
+    /// restores a value the other was still relying on. Neither test is wrong
+    /// on its own, which is what makes the resulting failure look random.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the env lock, surviving a poisoned mutex from an earlier panic —
+    /// a failed test elsewhere should not cascade into these.
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     #[test]
     fn cairnd_bin_env_var_wins_over_everything() {
+        let _guard = env_lock();
         let prev = std::env::var("CAIRND_BIN").ok();
         std::env::set_var("CAIRND_BIN", "/explicit/cairnd");
         assert_eq!(daemon_binary(), PathBuf::from("/explicit/cairnd"));
@@ -452,6 +468,7 @@ mod tests {
 
     #[test]
     fn empty_cairnd_bin_is_ignored() {
+        let _guard = env_lock();
         let prev = std::env::var("CAIRND_BIN").ok();
         std::env::set_var("CAIRND_BIN", "");
         let got = daemon_binary();
@@ -468,6 +485,7 @@ mod tests {
 
     #[test]
     fn socket_path_honours_cairn_socket() {
+        let _guard = env_lock();
         let prev = std::env::var("CAIRN_SOCKET").ok();
         std::env::set_var("CAIRN_SOCKET", "/tmp/cairn-test-sock");
         assert_eq!(socket_path(), PathBuf::from("/tmp/cairn-test-sock"));
