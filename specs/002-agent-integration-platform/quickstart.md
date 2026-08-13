@@ -439,13 +439,13 @@ by the test named beside it, so it can be re-measured rather than trusted.
 
 | Measurement | Value | Produced by |
 |---|---|---|
-| Capture latency, Claude adapter (median / p95) | 2.0 ms / 2.7 ms | `perf_capture` |
-| Capture latency, Codex adapter (median / p95) | 2.0 ms / 2.3 ms | `perf_capture` |
-| Capture latency, OpenCode adapter (median / p95) | 2.0 ms / 2.4 ms | `perf_capture` |
+| Capture latency, Claude adapter (median / p95) | 2.3 ms / 2.8 ms | `perf_capture` |
+| Capture latency, Codex adapter (median / p95) | 2.2 ms / 2.6 ms | `perf_capture` |
+| Capture latency, OpenCode adapter (median / p95) | 2.3 ms / 3.0 ms | `perf_capture` |
 | Codex seal phase duration (median / p95 / max) | 4.9 ms / 7.2 ms / 29.2 ms | `perf_session_close` |
 | Handoff-after-seal latency (p50 / p99) | 4 ms / 5 ms | `handoff_lands_without_restart` |
 | Rendered contract size (characters) | 778 (instruction block) · 809 (MCP) | `render::size` |
-| Per-user hook cost in an unmanaged repository | 2.0 ms median / 2.6 ms p95 · 53 ms first call | `perf_capture` |
+| Per-user hook cost in an unmanaged repository | 2.2 ms median / 2.5 ms p95 / 3.9 ms max | `perf_capture` |
 
 **What these say.**
 
@@ -466,8 +466,9 @@ design that passed one and failed the other would be worse than either.
 *The per-user cost is not material, and the D27 matrix stands.* Two milliseconds
 in an unmanaged repository is the same two milliseconds as everywhere else — the
 hook does not become cheaper by having nothing to do, and it does not become
-expensive either. The 53 ms outlier is the first call in a fresh repository,
-where Git discovery and the project insert happen once. So the scope matrix
+expensive either. Nothing in the distribution is an outlier: the slowest of the
+hundred invocations is under 4 ms, Git discovery and the project insert
+included. So the scope matrix
 keeps recommending user scope where the developer wants Cairn everywhere, and
 the reason to choose project scope stays what it always was: **a user-scope
 installation captures in every repository you open**, including ones you never

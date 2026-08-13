@@ -99,7 +99,10 @@ fn a_handler_killed_mid_flight_does_not_lose_the_session() {
         .args(["hook", "SessionEnd"])
         .current_dir(s.repo_path())
         .env("CAIRN_HOME", s.cairn_home())
-        .env("CAIRN_SOCKET", s.cairn_home().join("cairnd.sock"))
+        // The sandbox's own daemon — see the note in `perf_capture`: a
+        // hand-spelled path names nothing on Windows, and the hook's
+        // fail-soft path would hide that.
+        .env("CAIRN_SOCKET", &s.socket)
         .env("CAIRND_BIN", binary("cairnd"))
         .env("HOME", s.fake_home())
         .env("XDG_CONFIG_HOME", s.fake_home().join(".config"))
@@ -145,7 +148,10 @@ fn a_boundary_with_no_daemon_at_all_does_not_lose_the_session() {
 
     use std::io::Write;
     use std::process::Stdio;
-    let dead_socket = s.cairn_home().join("nothing-here.sock");
+    // A well-formed endpoint with nothing listening on it, on either
+    // platform — the case a developer actually hits. A malformed one would
+    // prove a different thing, and only by accident.
+    let dead_socket = cairn_e2e::sandbox_socket();
     let mut child = std::process::Command::new(binary("cairn"))
         .args(["hook", "SessionEnd"])
         .current_dir(s.repo_path())

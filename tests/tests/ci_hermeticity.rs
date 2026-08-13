@@ -117,11 +117,22 @@ fn no_required_evidence_reaches_the_network() {
     s.install_agent("claude-code");
     s.must(&["init"]);
 
+    // Its own daemon, so the *daemon* is network-starved too and not only the
+    // CLI that talks to it — and its endpoint comes from the helper, because
+    // a socket is a filesystem path on Unix and a name in the `\\.\pipe\`
+    // namespace on Windows. A path spelled by hand binds nothing there, and
+    // the failure arrives as "cairnd did not start" rather than as anything
+    // about sockets.
+    let socket = cairn_e2e::sandbox_socket();
+
     for command in [
         vec!["agents"],
         vec!["connect", "claude-code", "--yes"],
         vec!["doctor"],
         vec!["disconnect", "claude-code"],
+        // Leaves nothing behind: this daemon is not the sandbox's, so its
+        // Drop does not stop it.
+        vec!["daemon", "stop"],
     ] {
         let mut full = vec!["--json"];
         full.extend_from_slice(&command);
@@ -129,7 +140,7 @@ fn no_required_evidence_reaches_the_network() {
             .args(&full)
             .current_dir(s.repo_path())
             .env("CAIRN_HOME", s.cairn_home())
-            .env("CAIRN_SOCKET", s.cairn_home().join("cairnd.sock"))
+            .env("CAIRN_SOCKET", &socket)
             .env("CAIRND_BIN", cairn_e2e::binary("cairnd"))
             .env("HOME", s.fake_home())
             .env("XDG_CONFIG_HOME", s.fake_home().join(".config"))

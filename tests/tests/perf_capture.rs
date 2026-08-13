@@ -229,7 +229,12 @@ fn report_unmanaged_repository_cost(s: &Sandbox) {
             .args(["hook", "PostToolUse"])
             .current_dir(&elsewhere)
             .env("CAIRN_HOME", s.cairn_home())
-            .env("CAIRN_SOCKET", s.cairn_home().join("cairnd.sock"))
+            // The sandbox's own daemon: a hand-spelled path is a socket on
+            // Unix and nothing at all on Windows, where the endpoint lives in
+            // the `\\.\pipe\` namespace — and a hook that cannot reach a
+            // daemon still exits 0, so the measurement would quietly become
+            // one of a failed connection.
+            .env("CAIRN_SOCKET", &s.socket)
             .env("CAIRND_BIN", binary("cairnd"))
             .env("HOME", s.fake_home())
             .env("XDG_CONFIG_HOME", s.fake_home().join(".config"))
