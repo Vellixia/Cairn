@@ -143,6 +143,12 @@ jobs:
       # cargo test's own process tree gets torn down by then, but anything it
       # wrote to disk survives — the daemon logs in particular, since a
       # killed process skips Drop and never gets to clean up its temp dir.
+      #
+      # Tailed, and capped at the busiest few logs. `CAIRN_LOG=debug` makes
+      # each daemon log every statement it runs, and a suite that starts a
+      # hundred daemons then buries the one thing anybody came here to read —
+      # cargo's own failure summary, printed by the step above — under a
+      # megabyte of SQL. What matters in these logs is the end of them.
       - name: Dump daemon logs and process state on failure
         if: failure()
         shell: pwsh
@@ -150,11 +156,13 @@ jobs:
           Write-Host "--- cairnd / cairn processes still running? ---"
           Get-Process -Name cairnd, cairn -ErrorAction SilentlyContinue | Format-Table -AutoSize
 
-          Write-Host "--- daemon logs found under $env:TEMP ---"
+          Write-Host "--- daemon logs found under $env:TEMP (newest 10, last 80 lines each) ---"
           Get-ChildItem -Path $env:TEMP -Recurse -Include cairnd.log, cairn.log -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 10 |
             ForEach-Object {
               Write-Host "=== $($_.FullName) ==="
-              Get-Content $_.FullName -ErrorAction SilentlyContinue
+              Get-Content $_.FullName -Tail 80 -ErrorAction SilentlyContinue
               Write-Host ""
             }
 
