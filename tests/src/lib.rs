@@ -258,15 +258,45 @@ impl Sandbox {
         });
     }
 
-    /// Stop and restart the daemon — the deterministic session boundary (D16).
-    pub fn restart_daemon(&self) {
+    /// Stop the daemon and wait until it has actually let go of the socket.
+    ///
+    /// `daemon stop` returns as soon as the shutdown is requested, so a caller
+    /// that goes straight on to touching the store would be racing a process
+    /// that still has it open. The budget is the same 5 seconds `settle` allows,
+    /// which is generous enough that a loaded machine cannot make this flake and
+    /// short enough that a daemon which really is stuck is reported as such.
+    pub fn stop_daemon(&self) {
         self.cairn(&["daemon", "stop"]);
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             if !daemon_listening(&self.socket) {
-                break;
+                return;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        panic!("the daemon is still listening on {}", self.socket.display());
+    }
+
+    /// Wait until the daemon has let go of the store, not merely the socket.
+    ///
+    /// The two are not the same moment: the daemon removes its socket first and
+    /// closes its connection pool afterwards, and closing checkpoints the
+    /// write-ahead log back into the database file. A test that rewrites that
+    /// file in between has its bytes overwritten by the checkpoint and then finds
+    /// a perfectly healthy database — the corruption it set up never happened.
+    /// SQLite deletes the `-wal` and `-shm` sidecars when the last connection
+    /// closes, so their absence is the signal to wait for.
+    pub fn settle_store_closed(&self) {
+        self.settle("the store to be closed", |s| {
+            ["-wal", "-shm"]
+                .iter()
+                .all(|suffix| !PathBuf::from(format!("{}{suffix}", s.db_path().display())).exists())
+        });
+    }
+
+    /// Stop and restart the daemon — the deterministic session boundary (D16).
+    pub fn restart_daemon(&self) {
+        self.stop_daemon();
         // The next command starts it again automatically (FR-046).
         self.cairn(&["daemon", "start"]);
     }

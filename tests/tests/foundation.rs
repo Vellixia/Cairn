@@ -154,3 +154,33 @@ fn concurrent_first_use_of_one_fresh_repository_never_races() {
         "one repository must map to one project"
     );
 }
+
+#[test]
+fn a_corrupt_database_is_detected_and_reported() {
+    let s = Sandbox::new();
+
+    // The daemon holds the store open, so it has to be gone before the file is
+    // replaced — otherwise the running daemon keeps answering from a healthy
+    // connection pool and nothing here is exercised — and it has to have
+    // *finished* letting go, or its closing checkpoint writes the real database
+    // back over the damage.
+    s.stop_daemon();
+    s.settle_store_closed();
+    std::fs::write(s.db_path(), b"this is not a database").expect("overwrite the store");
+
+    let error = s.json_err(&["status"]);
+
+    // This used to report `daemon_unavailable: cairnd did not start` — true, and
+    // useless. The daemon does start; it cannot open the store and exits, and
+    // starting another one is not the remedy. The reason now travels out of the
+    // daemon's log and is reported as what it is.
+    assert_eq!(
+        error["code"], "storage_unavailable",
+        "a damaged store must not be reported as a missing daemon: {error}"
+    );
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not a database"),
+        "the message must name the real cause: {message}"
+    );
+}
