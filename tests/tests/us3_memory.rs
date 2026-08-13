@@ -26,6 +26,8 @@ fn seed(s: &Sandbox) -> String {
     task_id
 }
 
+/// Recall from a session bound to a task returns task-scoped memory ahead of
+/// branch and project scope (SC-005, FR-023).
 #[test]
 fn recall_favours_task_then_branch_then_project() {
     let s = Sandbox::new();
@@ -164,6 +166,8 @@ fn superseding_retains_the_original_and_the_link() {
     let original_id = created["memory"]["id"].as_str().unwrap().to_string();
 
     // Supersede through the tool that offers it, driving the real MCP server.
+    // The agent's own tool surface is a first-class way to write memory, not a
+    // wrapper over the CLI (FR-021).
     let cwd = s.repo_path().display().to_string();
     let mut mcp = Mcp::start(&s);
     mcp.call("initialize", json!({}));

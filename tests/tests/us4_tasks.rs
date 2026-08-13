@@ -314,7 +314,11 @@ fn a_task_spanning_multiple_sessions_accumulates_history() {
     ]);
     let id = created["task"]["id"].as_str().unwrap().to_string();
 
-    // Session 1.
+    // Session 1. `PostToolUse` is fire-and-forget (H3), so the observation
+    // is not written by the time the hook returns — settling is how the test
+    // waits for the write it is about to assert on. Without it, `SessionEnd`
+    // can generate the handoff before the edit has landed and the file is
+    // simply missing from `changed_files`, under load only.
     s.hook(
         "SessionStart",
         json!({ "session_id": "ms1", "source": "startup" }),
@@ -325,9 +329,19 @@ fn a_task_spanning_multiple_sessions_accumulates_history() {
         "PostToolUse",
         json!({ "session_id": "ms1", "tool_name": "Edit", "tool_input": { "file_path": "src/a.rs" } }),
     );
+    s.settle_observations(1);
     s.hook(
         "SessionEnd",
         json!({ "session_id": "ms1", "reason": "clear" }),
+    );
+
+    // Session 1's own handoff names session 1's file, so the accumulation
+    // asserted below is a real change rather than a coincidence.
+    let first = s.json(&["handoff", "show"])["handoff"].clone();
+    let first_files = first["changed_files"].as_array().unwrap();
+    assert!(
+        first_files.iter().any(|f| f.as_str() == Some("src/a.rs")),
+        "session 1's handoff should name its own file: {first_files:?}"
     );
 
     // Session 2 — should carry forward the previous handoff.
@@ -341,6 +355,7 @@ fn a_task_spanning_multiple_sessions_accumulates_history() {
         "PostToolUse",
         json!({ "session_id": "ms2", "tool_name": "Edit", "tool_input": { "file_path": "src/b.rs" } }),
     );
+    s.settle_observations(2);
     s.hook(
         "SessionEnd",
         json!({ "session_id": "ms2", "reason": "clear" }),
@@ -349,5 +364,29 @@ fn a_task_spanning_multiple_sessions_accumulates_history() {
     let handoff = s.json(&["handoff", "show"])["handoff"].clone();
     assert_eq!(handoff["goal"], "Work across sessions");
     let changed = handoff["changed_files"].as_array().unwrap();
-    assert!(changed.iter().any(|f| f.as_str() == Some("src/b.rs")));
+    assert!(
+        changed.iter().any(|f| f.as_str() == Some("src/b.rs")),
+        "session 2's handoff should name session 2's file: {changed:?}"
+    );
+
+    // The task, not the session, is what spans the two — so the work of both
+    // sessions is still reachable through it. Asserting only session 2's file
+    // left the test's name ("accumulates history") unproven.
+    let sessions = s.json(&["session", "list"])["sessions"].clone();
+    let for_task: Vec<_> = sessions
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|x| x["task_id"].as_str() == Some(id.as_str()))
+        .collect();
+    assert_eq!(
+        for_task.len(),
+        2,
+        "both sessions should be bound to the one task: {sessions:?}"
+    );
+    assert_eq!(
+        s.json(&["status"])["observation_count"].as_i64(),
+        Some(2),
+        "the task's history spans both sessions' observations"
+    );
 }

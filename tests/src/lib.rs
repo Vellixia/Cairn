@@ -428,6 +428,77 @@ pub fn sandbox_socket() -> PathBuf {
     std::env::temp_dir().join(format!("cairn-t-{}-{}.sock", std::process::id(), unique()))
 }
 
+/// Stops the daemon serving a hand-rolled socket, and removes the socket file.
+///
+/// [`Sandbox`] does this in its own `Drop`, so anything built on `Sandbox` is
+/// already covered. A test that takes a bare [`sandbox_socket`] instead — to
+/// drive `cairn` against a deliberately broken environment, say — has no such
+/// owner, and every one of those was leaking: `cairn` spawns `cairnd` *before*
+/// the request fails, so a daemon bound the socket and then nothing ever stopped
+/// it. The socket lives in the system temp directory rather than inside the
+/// test's own `TempDir`, so it outlived the test too.
+///
+/// Left running they accumulate across runs — 18 of them on the machine where
+/// this was found — competing for CPU with the suite that spawned them and
+/// making timing-sensitive tests fail for a reason that has nothing to do with
+/// the code under test.
+pub struct DaemonSocket {
+    pub path: PathBuf,
+}
+
+impl DaemonSocket {
+    pub fn new() -> Self {
+        Self {
+            path: sandbox_socket(),
+        }
+    }
+}
+
+// Stands in for the `PathBuf` these tests used to hold, so adopting the guard
+// is a one-line change at each call site rather than a rewrite.
+impl std::ops::Deref for DaemonSocket {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for DaemonSocket {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for DaemonSocket {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+impl Default for DaemonSocket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for DaemonSocket {
+    fn drop(&mut self) {
+        // Best effort, and never a panic: this runs during unwinding when a
+        // test has already failed, and a panic here would replace that failure
+        // with a SIGABRT.
+        if let Some(exe) = try_binary("cairn") {
+            let _ = Command::new(exe)
+                .args(["daemon", "stop"])
+                .env("CAIRN_SOCKET", &self.path)
+                .output();
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[cfg(windows)]
 pub fn sandbox_socket() -> PathBuf {
     PathBuf::from(format!(

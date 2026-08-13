@@ -96,6 +96,8 @@ fn the_budget_is_never_exceeded_however_much_memory_exists() {
     );
 }
 
+/// The briefing degrades in a defined priority order rather than by truncation,
+/// so what survives a tight budget is the part the agent needs most (FR-030).
 #[test]
 fn high_priority_sections_survive_a_tight_budget() {
     // SC-003's second clause: a normal start keeps task, repository and handoff.

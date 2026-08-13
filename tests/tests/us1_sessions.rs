@@ -398,7 +398,9 @@ fn an_idle_daemon_exits_when_a_timeout_is_configured() {
     // sandbox's own daemon competing for the same socket would decide the
     // outcome by the ownership path instead of the idle path.
     let home = tempfile::TempDir::new().expect("home");
-    let socket = cairn_e2e::sandbox_socket();
+    // Guarded, so the daemon `cairn` spawns below is stopped even when the
+    // request it was spawned for fails.
+    let socket = cairn_e2e::DaemonSocket::new();
 
     let mut child = std::process::Command::new(cairn_e2e::binary("cairnd"))
         .args([
@@ -470,6 +472,8 @@ fn a_second_session_end_on_an_already_completed_session_is_idempotent() {
     assert_eq!(sessions[0]["status"], "completed");
 }
 
+/// A `SessionStart` hook creates the session; a second one with the same key
+/// rejoins it rather than forking (FR-006).
 #[test]
 fn a_session_start_with_an_existing_key_rejoins_rather_than_creating_a_second() {
     let s = Sandbox::new();
