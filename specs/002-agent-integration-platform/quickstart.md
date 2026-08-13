@@ -60,7 +60,7 @@ unfamiliar area. The answer reflects the contract without further prompting.
 Reconstruct a Feature 001 installation, then upgrade:
 
 ```bash
-FIX=$REPO/crates/cairn-integrate/tests/fixtures/claude-code/legacy-f001
+FIX=$REPO/crates/cairn-integrate/tests/fixtures/legacy-f001
 mkdir -p .claude && cp $FIX/.claude/settings.json .claude/settings.json
 cp $FIX/.mcp.json .mcp.json
 sha256sum .claude/settings.json .mcp.json > /tmp/before

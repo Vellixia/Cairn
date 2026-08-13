@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": ["Bash(cargo test:*)", "Read(//Users/dev/notes/**)"]
+  },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "cairn hook SessionStart" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook PostToolUse" }] },
+      { "matcher": "Bash", "hooks": [{ "type": "command", "command": "./scripts/audit.sh" }] }
+    ],
+    "PostToolUseFailure": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "cairn hook PostToolUseFailure" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "cairn hook Stop" }] }
+    ],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "cairn hook PreCompact" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "command": "cairn hook SessionEnd" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "echo 'remember to run cairn hook first' >> ~/notes" }] }
+    ]
+  },
+  "model": "claude-sonnet-4-5"
+}

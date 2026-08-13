@@ -286,13 +286,18 @@ fn a_shared_resource_survives_the_first_disconnect_and_goes_with_the_last() {
         "OpenCode was left unhealthy by another agent's disconnect"
     );
 
-    // The last consumer's disconnect is what removes it.
+    // The last consumer's disconnect is what removes it. Cairn created this
+    // AGENTS.md, so the file goes with the block rather than being left behind
+    // empty; a file the developer wrote would survive with their content.
     assert!(s.cairn(&["disconnect", "opencode"]).ok());
+    let remaining = std::fs::read_to_string(&agents_md).unwrap_or_default();
     assert!(
-        !std::fs::read_to_string(&agents_md)
-            .unwrap()
-            .contains("cairn:managed:begin"),
+        !remaining.contains("cairn:managed:begin"),
         "the block outlived its last binding"
+    );
+    assert!(
+        remaining.trim().is_empty(),
+        "an instruction file Cairn created was left with content in it: {remaining}"
     );
 }
 

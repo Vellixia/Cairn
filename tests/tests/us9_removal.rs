@@ -351,3 +351,31 @@ fn a_dry_run_disconnect_names_its_blast_radius_and_writes_nothing() {
         "the plan did not name what it leaves alone: {untouched}"
     );
 }
+
+#[test]
+fn an_instruction_file_cairn_created_goes_with_its_block() {
+    // Found by walking the quickstart: disconnecting from a repository that
+    // had no CLAUDE.md left a zero-byte CLAUDE.md behind. Cairn created that
+    // file and nothing but Cairn's block was ever in it, so leaving it is
+    // litter in someone's repository rather than restraint — while a file the
+    // developer wrote keeps existing, with their content (FR-179).
+    let s = Sandbox::new();
+    s.install_agent("claude-code");
+    s.must(&["init"]);
+    assert!(
+        !s.repo_dir().join("CLAUDE.md").exists(),
+        "the fixture already has one"
+    );
+
+    s.must(&["connect", "claude-code", "--yes"]);
+    assert!(
+        s.repo_dir().join("CLAUDE.md").exists(),
+        "connect wrote none"
+    );
+
+    s.must(&["disconnect", "claude-code"]);
+    assert!(
+        !s.repo_dir().join("CLAUDE.md").exists(),
+        "an empty instruction file Cairn created was left behind"
+    );
+}

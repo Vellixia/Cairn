@@ -199,6 +199,11 @@ pub fn materialize_install(
             let body = contract.block_body();
             m.artifact = Some(contract.version());
             m.content_hash = Some(canonical_hash(&body));
+            // Whether the file itself is Cairn's. A `CLAUDE.md` that existed
+            // before keeps existing after a disconnect; one Cairn created
+            // because there was none goes with the block, rather than being
+            // left behind as an empty file in the developer's repository.
+            m.created_container = !location.exists();
             m.op = write_or_unchanged(markdown::upsert(
                 &display,
                 &current,
@@ -345,7 +350,16 @@ pub fn materialize_removal(
         }
 
         (_, ResourceKind::Instructions) => {
-            m.op = write_or_unchanged(markdown::remove(&display, &current, CONTRACT_ID)?);
+            let removed = markdown::remove(&display, &current, CONTRACT_ID)?;
+            let empty = removed.text().map(|t| t.trim().is_empty()).unwrap_or(false);
+            m.op = if created && empty {
+                // Cairn created this file and nothing but Cairn's block was
+                // ever in it. Leaving a zero-byte `CLAUDE.md` behind is litter
+                // in someone's repository, not restraint.
+                Op::RemoveTree
+            } else {
+                write_or_unchanged(removed)
+            };
         }
 
         (_, ResourceKind::Skill) => {
