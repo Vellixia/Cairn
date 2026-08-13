@@ -1,12 +1,31 @@
 import { expect, test } from "@playwright/test";
 import { openNav } from "./nav";
-import { seed, type Seeded } from "./seed";
+import {
+  SESSION_COOKIE,
+  createProject,
+  newToken,
+  registerAndLogin,
+  seed,
+  type Seeded,
+} from "./seed";
 
 /**
  * T073 — the four Independent Test actions for US7, without a terminal:
  * find the project, read its handoff, search memory, delete a memory (SC-011).
+ *
+ * Between them these cover the surface the web UI is required to provide — a
+ * projects list, a project overview, a tasks view, sessions and handoffs, and
+ * memory search (FR-060) — and deleting a memory from the browser (FR-062).
  */
 let fixture: Seeded;
+
+/** Put a signed-in session on the browser context. */
+async function signInAs(page: import("@playwright/test").Page, sessionValue: string) {
+  await page.context().clearCookies();
+  await page.context().addCookies([
+    { name: SESSION_COOKIE, value: sessionValue, domain: "127.0.0.1", path: "/" },
+  ]);
+}
 
 test.beforeAll(async () => {
   fixture = await seed();
@@ -90,4 +109,77 @@ test("tasks and sync status are reachable without a terminal", async ({
   await openNav(page, testInfo);
   await page.getByTestId("nav-sync").click();
   await expect(page.getByTestId("sync-status")).toContainText("items applied");
+});
+
+/**
+ * An empty list element has no box, so `toBeVisible()` reports it hidden — the
+ * three tests below assert `toBeAttached()` and a child count instead. That is
+ * what an empty-state test is really claiming: the list rendered, and it
+ * rendered nothing.
+ */
+async function expectEmptyList(page: import("@playwright/test").Page, testId: string) {
+  const list = page.getByTestId(testId);
+  await expect(list).toBeAttached();
+  await expect(list.locator("li")).toHaveCount(0);
+}
+
+test("a non-member is refused rather than shown an empty page", async ({
+  page,
+}) => {
+  const stranger = `stranger-${Date.now()}@example.test`;
+  const session = await registerAndLogin(stranger, "hunter2hunter2", "Stranger");
+  await signInAs(page, session);
+
+  // Prove the stranger is genuinely *signed in* first. Without this the test
+  // could not fail for the right reason: an empty or rejected cookie produces
+  // the same refusal as a real non-member, so a broken registration would
+  // still look like a pass. Their own projects page is the proof — a signed-out
+  // visitor is sent to sign in instead.
+  await page.goto("/");
+  await expect(page.getByText("No shared projects yet")).toBeVisible();
+
+  // Signed in, member of nothing — now the fixture's project must be refused,
+  // and refused visibly. Asserting the alert rather than the server's wording
+  // keeps this about the behaviour: the reader is told, instead of being shown
+  // an empty project that looks like it has no data.
+  await page.goto(`/projects/${fixture.projectId}`);
+  // `.first()`: the page may carry more than one alert region, and a strict
+  // locator would fail on the count rather than on the behaviour.
+  await expect(page.getByRole("alert").first()).toBeVisible();
+  await expect(page.getByText(/something went wrong/i).first()).toBeVisible();
+});
+
+test("the projects list shows an empty state when there are none", async ({
+  page,
+}) => {
+  const empty = `empty-${Date.now()}@example.test`;
+  const session = await registerAndLogin(empty, "hunter2hunter2", "Empty");
+  await signInAs(page, session);
+
+  await page.goto("/");
+  await expect(page.getByText("No shared projects yet")).toBeVisible();
+  await expect(page.getByText(/cairn link --create/)).toBeVisible();
+  await expectEmptyList(page, "project-list");
+});
+
+test("the sessions list shows an empty state when there are none", async ({
+  page,
+}) => {
+  // `beforeEach` has already signed in through the UI, so the real session
+  // cookie is on the browser context — an email address is not a credential
+  // and was never going to authenticate.
+  const cookies = await page.context().cookies();
+  const session = cookies.find((c) => c.name === SESSION_COOKIE);
+  expect(session, "beforeEach should have left a session cookie").toBeTruthy();
+
+  const token = await newToken(session?.value ?? "", "empty-sessions-test");
+  const projectId = await createProject(
+    token,
+    `Empty Sessions ${Date.now()}`,
+    "github.com/example/empty",
+  );
+
+  await page.goto(`/projects/${projectId}/sessions`);
+  await expect(page.getByText("No sessions yet")).toBeVisible();
+  await expectEmptyList(page, "session-list");
 });

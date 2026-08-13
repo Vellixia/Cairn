@@ -460,8 +460,11 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
                 create: *create,
             })
             .await?;
+            // `Display` on a `Value` quotes strings, which put the quotes in
+            // front of the reader: `Linked to shared project "019f…"`.
             let text = if v["linked"].as_bool().unwrap_or(false) {
-                format!("Linked to shared project {}.\n", v["server_project_id"])
+                let id = v["server_project_id"].as_str().unwrap_or_default();
+                format!("Linked to shared project {id}.\n")
             } else {
                 let candidates = v["candidates"].as_array().cloned().unwrap_or_default();
                 let mut t = String::from("Not linked.\n");
@@ -470,7 +473,11 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
                 } else {
                     t.push_str("Shared projects matching this remote:\n");
                     for c in candidates {
-                        t.push_str(&format!("  {}  {}\n", c["id"], c["name"]));
+                        t.push_str(&format!(
+                            "  {}  {}\n",
+                            c["id"].as_str().unwrap_or_default(),
+                            c["name"].as_str().unwrap_or_default()
+                        ));
                     }
                 }
                 t.push_str(

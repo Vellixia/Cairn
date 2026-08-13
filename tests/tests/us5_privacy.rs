@@ -274,3 +274,36 @@ fn deleting_a_memory_removes_only_that_memory() {
     assert_eq!(results.len(), 1);
     assert_eq!(results[0]["content"], "second fact");
 }
+
+#[test]
+fn deleting_a_nonexistent_memory_reports_not_found() {
+    let s = Sandbox::new();
+    let err = s.json_err(&["delete", "memory", "00000000-0000-0000-0000-000000000000"]);
+    assert_eq!(err["code"], "not_found");
+}
+
+#[test]
+fn deleting_a_nonexistent_session_reports_not_found() {
+    let s = Sandbox::new();
+    let err = s.json_err(&["delete", "session", "00000000-0000-0000-0000-000000000000"]);
+    assert_eq!(err["code"], "not_found");
+}
+
+#[test]
+fn deleting_a_nonexistent_observation_is_idempotent() {
+    // Observation and handoff deletes are idempotent: a non-existent id
+    // succeeds rather than erroring, because the end state (no record)
+    // matches the requested state.
+    let s = Sandbox::new();
+    s.must(&[
+        "delete",
+        "observation",
+        "00000000-0000-0000-0000-000000000000",
+    ]);
+}
+
+#[test]
+fn deleting_a_nonexistent_handoff_is_idempotent() {
+    let s = Sandbox::new();
+    s.must(&["delete", "handoff", "00000000-0000-0000-0000-000000000000"]);
+}

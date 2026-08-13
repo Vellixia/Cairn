@@ -11,6 +11,8 @@ mod handoffs;
 mod recover;
 mod state;
 mod sync;
+#[cfg(test)]
+mod testsupport;
 
 use cairn_core::domain::new_id;
 use cairn_core::wire::{Envelope, Request, WireError};
