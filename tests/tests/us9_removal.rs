@@ -148,11 +148,27 @@ fn disconnect_deletes_nothing_a_developer_recorded() {
             .contains("\"sessions_awaiting_handoff\": 0")
     });
 
+    // `idle_seconds` is derived from the clock at read time, not stored, so
+    // two reads a second apart differ by a second whatever disconnect did.
+    // Comparing it would make this a test of how fast the runner is, and it
+    // would fail claiming a session had been deleted.
+    let stored = |v: &Value| -> Vec<Value> {
+        v["sessions"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|mut s| {
+                if let Some(o) = s.as_object_mut() {
+                    o.remove("idle_seconds");
+                }
+                s
+            })
+            .collect()
+    };
+
     let before = s.json(&["status"]);
-    let sessions_before = s.json(&["session", "list"])["sessions"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let sessions_before = stored(&s.json(&["session", "list"]));
     let tasks_before = s.json(&["task", "list"])["tasks"]
         .as_array()
         .cloned()
@@ -170,10 +186,7 @@ fn disconnect_deletes_nothing_a_developer_recorded() {
         "the project was deleted or replaced"
     );
     assert_eq!(
-        s.json(&["session", "list"])["sessions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default(),
+        stored(&s.json(&["session", "list"])),
         sessions_before,
         "a session was deleted"
     );
