@@ -158,8 +158,21 @@ impl Env {
     }
 
     /// The real environment.
+    ///
+    /// `HOME` wins on every platform, not only where `dirs` happens to consult
+    /// it. Windows resolves the profile through a shell API that no
+    /// environment variable can redirect, so without this the end-to-end suite
+    /// reaches the developer's real `C:\Users\…\.claude` instead of its
+    /// sandbox — the isolation `install_agent` promises (FR-204, SC-124) holds
+    /// on Unix and silently does not on Windows. `XDG_CONFIG_HOME`, read just
+    /// below, is already honoured on every platform for the same reason, and
+    /// Git for Windows likewise takes `HOME` ahead of the profile.
     pub fn discover(worktree: impl Into<PathBuf>) -> Env {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .filter(|p| !p.as_os_str().is_empty())
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."));
         let config_home = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".config"));
@@ -495,6 +508,35 @@ mod tests {
             assert_eq!(location(&env, AgentId::GenericMcp, kind, User), None);
         }
         assert_eq!(kinds_for(AgentId::GenericMcp), vec![Mcp]);
+    }
+
+    /// The sandbox isolates the suite by exporting `HOME`; on Windows nothing
+    /// else can redirect the profile, so a `discover` that only asked `dirs`
+    /// would write the developer's real agent configuration from a test.
+    #[test]
+    fn home_redirects_discovery_on_every_platform() {
+        // Serialized within this test only; env is process-global.
+        let prev = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/tmp/cairn-fake-home");
+        let env = Env::discover("/tmp/cairn-fake-worktree");
+        assert_eq!(env.home, PathBuf::from("/tmp/cairn-fake-home"));
+        assert_eq!(
+            location(&env, AgentId::ClaudeCode, Lifecycle, User),
+            Some(PathBuf::from("/tmp/cairn-fake-home/.claude/settings.json"))
+        );
+
+        // Empty is not a home: it would resolve every agent path to a bare
+        // relative name and quietly write into the working directory.
+        std::env::set_var("HOME", "");
+        assert_ne!(
+            Env::discover("/tmp/cairn-fake-worktree").home,
+            PathBuf::new()
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]

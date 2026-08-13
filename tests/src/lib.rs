@@ -667,6 +667,11 @@ impl Mcp {
             .env("CAIRN_HOME", s.home.path())
             .env("CAIRN_SOCKET", &s.socket)
             .env("CAIRND_BIN", binary("cairnd"))
+            // Same fake home as every other entry point: the MCP server is a
+            // way into the same daemon, and inheriting the developer's real
+            // home would make one process in the sandbox able to escape it.
+            .env("HOME", s.fake_home())
+            .env("XDG_CONFIG_HOME", s.fake_home().join(".config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
