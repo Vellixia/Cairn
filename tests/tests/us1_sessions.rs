@@ -90,12 +90,20 @@ fn a_session_active_at_daemon_start_is_reconciled_and_can_resume() {
     let recovered_id = handoff["id"].clone();
 
     // A later event resumes it; the handoff already written stands.
-    s.hook(
-        "PostToolUse",
-        json!({ "session_id": "crashed", "tool_name": "Read", "tool_input": { "file_path": "README.md" } }),
-    );
-    // Capture is fire-and-forget, so observe the resume rather than assume it.
-    s.settle_session_status("active");
+    //
+    // Capture is fire-and-forget and a missed deadline is a *dropped* event by
+    // contract (FR-015, FR-193), so the event is re-sent while waiting rather
+    // than sent once and waited on. Under a loaded machine the first one can
+    // legitimately be dropped, and asserting otherwise would be asserting a
+    // guarantee Cairn deliberately does not make. What is under test is that
+    // an event which arrives resumes the session.
+    s.settle("the session to resume", |s| {
+        s.hook(
+            "PostToolUse",
+            json!({ "session_id": "crashed", "tool_name": "Read", "tool_input": { "file_path": "README.md" } }),
+        );
+        s.json(&["session", "list"])["sessions"][0]["status"] == "active"
+    });
     let resumed = s.json(&["session", "list"])["sessions"].clone();
     assert_eq!(
         resumed[0]["status"], "active",
