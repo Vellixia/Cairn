@@ -361,3 +361,348 @@ fn no_seeded_credential_is_ever_read_into_cairns_own_output() {
     }
     assert!(seen_a_seed, "the corpus seeds no credentials to test with");
 }
+
+// ---------------------------------------------------------------------------
+// T101–T103 — the integration manager (FR-232, FR-234, FR-146, FR-219, FR-200)
+// ---------------------------------------------------------------------------
+//
+// CC Switch is a manager, not an agent. Cairn asks it to distribute, verifies
+// against the *target applications'* own configuration, and never touches the
+// manager's private storage — not to write, not to read, not to check whether
+// something worked. That last one is the temptation: the answer really is in
+// `~/.cc-switch/cc-switch.db`, and reading it would be easier than inspecting
+// three applications' configuration files. FR-232 forbids it, and the whole
+// point of a checksum fixture is that the forbidden thing is provable.
+
+use cairn_integrate::adapter::{ImportRefusal, IntegrationManager};
+use cairn_integrate::managers::cc_switch::{self, CcSwitch};
+use cairn_integrate::model::{HealthCondition, ManagerId, ResourceKind};
+use cairn_integrate::scope::Env;
+
+/// A machine with CC Switch installed and its private storage populated.
+struct Machine {
+    _dir: tempfile::TempDir,
+    env: Env,
+}
+
+impl Machine {
+    fn new() -> Machine {
+        let dir = tempfile::tempdir().expect("temp home");
+        let home = dir.path().join("home");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        // CC Switch's own storage, exactly as D33 records it. Every one of
+        // these is private and none of it may be touched.
+        let private = home.join(".cc-switch");
+        std::fs::create_dir_all(private.join("skills").join("cairn")).unwrap();
+        std::fs::create_dir_all(private.join("backups")).unwrap();
+        std::fs::write(private.join("cc-switch.db"), b"SQLite format 3\0PRIVATE").unwrap();
+        std::fs::write(
+            private.join("settings.json"),
+            r#"{"providers":[{"name":"anthropic","apiKey":"sk-PRIVATE"}]}"#,
+        )
+        .unwrap();
+        std::fs::write(private.join("version"), "1.9.0\n").unwrap();
+        std::fs::write(
+            private.join("skills").join("cairn").join("SKILL.md"),
+            "---\nname: cairn\n---\n",
+        )
+        .unwrap();
+
+        Machine {
+            env: Env::new(&home, &worktree),
+            _dir: dir,
+        }
+    }
+
+    /// Every file under the manager's private storage, with its content.
+    fn manager_state(&self) -> std::collections::BTreeMap<String, Vec<u8>> {
+        let root = self.env.home.join(".cc-switch");
+        let mut out = std::collections::BTreeMap::new();
+        walk(&root, &root, &mut out);
+        out
+    }
+
+    /// Give a target application a `cairn` MCP entry, as a confirmed CC Switch
+    /// import would.
+    fn app_receives_mcp(&self, app: &str) {
+        let path = cairn_integrate::scope::manager_location(&self.env, app, ResourceKind::Mcp)
+            .expect("a known location");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let body = if app == "codex" {
+            "model = \"gpt-5-codex\"\n\
+             [mcp_servers.internal]\ncommand = \"internal-mcp\"\n\
+             [mcp_servers.cairn]\ncommand = \"cairn\"\nargs = [\"mcp\"]\n"
+                .to_string()
+        } else if app == "opencode" {
+            serde_json::json!({
+                "mcp": {
+                    "internal": { "type": "local", "command": ["internal-mcp"] },
+                    "cairn": { "type": "local", "command": ["cairn", "mcp"] }
+                }
+            })
+            .to_string()
+        } else {
+            serde_json::json!({
+                "mcpServers": {
+                    "internal": { "command": "internal-mcp" },
+                    "cairn": { "command": "cairn", "args": ["mcp"] }
+                }
+            })
+            .to_string()
+        };
+        std::fs::write(path, body).unwrap();
+    }
+}
+
+/// How many MCP servers named `cairn` a configuration file declares.
+///
+/// Counted as keys rather than as occurrences of the word: `"command":
+/// "cairn"` is the same entry, not a second one.
+fn cairn_entries(text: &str) -> usize {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+        return ["mcpServers", "mcp"]
+            .iter()
+            .filter_map(|k| v.get(*k))
+            .filter_map(|m| m.as_object())
+            .filter(|m| m.contains_key("cairn"))
+            .count();
+    }
+    // TOML: the entry is a `[mcp_servers.cairn]` table header.
+    text.lines()
+        .filter(|l| l.trim() == "[mcp_servers.cairn]")
+        .count()
+}
+
+fn walk(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        if path.is_dir() {
+            walk(base, &path, out);
+        } else {
+            let key = path
+                .strip_prefix(base)
+                .unwrap_or(&path)
+                .display()
+                .to_string();
+            out.insert(key, std::fs::read(&path).unwrap_or_default());
+        }
+    }
+}
+
+/// Every manager-touching operation there is, run once.
+///
+/// These are the only code paths any of `connect`, `distribute`, `migrate`,
+/// `repair` and `disconnect` reach the manager through: the command layer
+/// above them calls exactly these and then reports.
+fn every_manager_operation(m: &CcSwitch, machine: &Machine) {
+    let apps: Vec<String> = m.target_apps().iter().map(|s| s.to_string()).collect();
+
+    // connect / doctor: detection and verification.
+    let _ = m.detect(&machine.env);
+    for kind in cc_switch::DISTRIBUTABLE {
+        let _ = m.inspect_bindings(&machine.env, &apps, *kind);
+        // distribute: build the import link, and record what it produced.
+        if let Ok(uri) = m.import_uri(*kind, &apps) {
+            let _ = cc_switch::import_action(*kind, &apps, uri);
+        }
+        // disconnect / migrate: report the manual path, write nothing.
+        let _ = cc_switch::removal_action(*kind, &apps);
+    }
+}
+
+#[test]
+fn manager_zero_writes() {
+    // FR-232, SC-132: the manager's own storage is byte-identical after every
+    // operation Cairn can perform, in 100% of cases.
+    let machine = Machine::new();
+    let m = CcSwitch;
+
+    let before = machine.manager_state();
+    assert!(
+        before.contains_key("cc-switch.db"),
+        "the fixture does not have private storage to protect"
+    );
+
+    for _ in 0..3 {
+        every_manager_operation(&m, &machine);
+    }
+    // And again with the applications already configured, which is when a
+    // "verify by reading the manager's index" shortcut would be most tempting.
+    for app in m.target_apps() {
+        machine.app_receives_mcp(app);
+    }
+    every_manager_operation(&m, &machine);
+
+    assert_eq!(
+        before,
+        machine.manager_state(),
+        "an operation changed CC Switch's own storage"
+    );
+}
+
+#[test]
+fn manager_bindings() {
+    // FR-234, SC-112: ownership is updated only from verification against the
+    // target applications, never from the manager's own state.
+    let machine = Machine::new();
+    let m = CcSwitch;
+    let apps: Vec<String> = vec!["claude".into(), "codex".into()];
+
+    // Nothing distributed yet: every binding is missing, and each one says
+    // what to run rather than leaving the developer to guess.
+    let before = m.inspect_bindings(&machine.env, &apps, ResourceKind::Mcp);
+    assert_eq!(before.len(), 2);
+    for b in &before {
+        assert_eq!(b.condition, HealthCondition::Missing, "{b:?}");
+        assert!(b
+            .remedy
+            .as_deref()
+            .unwrap_or_default()
+            .contains("distribute"));
+    }
+
+    // The developer confirms the import for the two applications they chose.
+    machine.app_receives_mcp("claude");
+    machine.app_receives_mcp("codex");
+
+    let after = m.inspect_bindings(&machine.env, &apps, ResourceKind::Mcp);
+    for b in &after {
+        assert_eq!(
+            b.condition,
+            HealthCondition::Healthy,
+            "a confirmed import was not verified from the application's own \
+             configuration: {b:?}"
+        );
+    }
+
+    // Exactly one Cairn entry per selected application, and the applications
+    // that were not selected have none.
+    for app in ["claude", "codex"] {
+        let path =
+            cairn_integrate::scope::manager_location(&machine.env, app, ResourceKind::Mcp).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            cairn_entries(&text),
+            1,
+            "{app} did not receive exactly one cairn entry: {text}"
+        );
+        // The manager-held configuration around it is untouched.
+        assert!(text.contains("internal-mcp"), "{app}: {text}");
+    }
+    let unselected = m.inspect_bindings(&machine.env, &["opencode".into()], ResourceKind::Mcp);
+    assert_eq!(unselected[0].condition, HealthCondition::Missing);
+
+    // The import link itself names the chosen applications and nothing else.
+    let uri = m.import_uri(ResourceKind::Mcp, &apps).unwrap();
+    assert!(uri.contains("apps=claude,codex"), "{uri}");
+    assert!(!uri.contains("opencode"), "{uri}");
+}
+
+#[test]
+fn post_provider_switch() {
+    // FR-200, SC-113, US5 #8: a provider switch inside CC Switch rewrites the
+    // applications' configuration. Cairn's resources must still verify
+    // healthy, with no duplicates, and everything else must be untouched.
+    let machine = Machine::new();
+    let m = CcSwitch;
+    let apps: Vec<String> = m.target_apps().iter().map(|s| s.to_string()).collect();
+    for app in m.target_apps() {
+        machine.app_receives_mcp(app);
+    }
+    let before = m.inspect_bindings(&machine.env, &apps, ResourceKind::Mcp);
+    assert!(before
+        .iter()
+        .all(|b| b.condition == HealthCondition::Healthy));
+
+    // The switch: CC Switch rewrites the provider block and reorders the file,
+    // leaving Cairn's entry in place — the realistic shape of what it does.
+    let claude =
+        cairn_integrate::scope::manager_location(&machine.env, "claude", ResourceKind::Mcp)
+            .unwrap();
+    std::fs::write(
+        &claude,
+        serde_json::json!({
+            "primaryApiProvider": "bedrock",
+            "mcpServers": {
+                "cairn": { "command": "cairn", "args": ["mcp"] },
+                "internal": { "command": "internal-mcp" }
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let after = m.inspect_bindings(&machine.env, &apps, ResourceKind::Mcp);
+    for b in &after {
+        assert_eq!(
+            b.condition,
+            HealthCondition::Healthy,
+            "a provider switch broke a Cairn resource: {b:?}"
+        );
+    }
+    let text = std::fs::read_to_string(&claude).unwrap();
+    assert_eq!(
+        cairn_entries(&text),
+        1,
+        "the provider switch left a duplicate Cairn entry: {text}"
+    );
+    assert!(
+        text.contains("internal-mcp") && text.contains("bedrock"),
+        "another provider's configuration was disturbed: {text}"
+    );
+
+    // The manager's own storage is still untouched by the verification.
+    let state = machine.manager_state();
+    every_manager_operation(&m, &machine);
+    assert_eq!(state, machine.manager_state());
+}
+
+#[test]
+fn the_manager_produces_no_lifecycle_of_its_own() {
+    // T104, FR-101, FR-106: CC Switch is not an agent. It has no adapter, so
+    // there is no code path by which it could open a session, record an
+    // observation, or emit a lifecycle event — and the applications it happens
+    // to support reach Cairn through the generic MCP path, not through a
+    // native adapter Cairn grew for the manager's sake.
+    assert!(
+        cairn_integrate::AgentId::ALL
+            .iter()
+            .all(|a| a.as_str() != ManagerId::CcSwitch.as_str()),
+        "the manager appears in the agent vocabulary"
+    );
+    for a in cairn_integrate::AgentId::ALL {
+        let adapter = cairn_integrate::adapter_for(a);
+        assert_ne!(adapter.id().as_str(), "cc-switch");
+    }
+    // Whatever payload arrives, under whatever event name, no adapter claims
+    // it on the manager's behalf.
+    let payload = cairn_integrate::adapter::RawPayload::new(
+        serde_json::json!({ "session_id": "s", "sessionID": "s", "manager": "cc-switch" }),
+        "/home/dev/app",
+    );
+    for name in ["import", "provider.switch", "cc-switch", "skill.installed"] {
+        for a in cairn_integrate::AgentId::ALL {
+            assert!(
+                cairn_integrate::normalize(a, name, &payload).is_none(),
+                "{a:?} produced a lifecycle event from a manager event `{name}`"
+            );
+        }
+    }
+    // And a development build refuses to hand CC Switch a Skill ref it cannot
+    // publish, rather than pointing it at a branch that does not exist.
+    if cc_switch::published_skill_branch().is_none() {
+        assert!(matches!(
+            CcSwitch.import_uri(ResourceKind::Skill, &["claude".into()]),
+            Err(ImportRefusal::UnpublishedSkillRef { .. })
+        ));
+    }
+}

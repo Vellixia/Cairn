@@ -211,6 +211,42 @@ pub fn plan_agent(
                 detail: "not installed".into(),
             },
 
+            // Asking a manager to distribute something Cairn already owns
+            // directly would leave the developer with two copies of the same
+            // resource and no way to tell which one is live. Both owners are
+            // named and nothing is written (FR-146, FR-219, SC-112).
+            _ if wanted.owner == ResourceOwner::Manager
+                && seen.map(|o| o.owner) == Some(ResourceOwner::Direct)
+                && seen.map(|o| o.condition.is_acceptable()).unwrap_or(false) =>
+            {
+                plan.blocking.push(Blocking {
+                    agent,
+                    kind: wanted.kind,
+                    condition: HealthCondition::ConflictingOwner,
+                    detail: format!(
+                        "Cairn already owns {} for {agent} directly, and you asked an \
+                         integration manager to distribute it as well",
+                        wanted.kind
+                    ),
+                    manual_sequence: manual_sequence_for(
+                        agent,
+                        wanted.kind,
+                        HealthCondition::ConflictingOwner,
+                    ),
+                });
+                PlannedChange {
+                    action: ChangeAction::Conflict,
+                    agent,
+                    kind: wanted.kind,
+                    owner: ResourceOwner::Direct,
+                    scope: wanted.scope,
+                    target,
+                    detail: "owned directly by Cairn and requested from a manager; \
+                             migrate to one owner rather than keeping two copies"
+                        .into(),
+                }
+            }
+
             // A manager owns it: Cairn verifies rather than writing (FR-234).
             _ if wanted.owner == ResourceOwner::Manager => PlannedChange {
                 action: ChangeAction::Unchanged,
@@ -568,6 +604,76 @@ mod tests {
             .untouched
             .iter()
             .any(|u| u.contains("outside the cairn:managed markers")));
+    }
+
+    /// Ask a manager to distribute `mcp` for an agent whose `mcp` Cairn
+    /// already owns directly.
+    fn via_manager() -> DesiredIntegrationState {
+        DesiredIntegrationState::compose(
+            &Choices {
+                agents: vec![AgentId::ClaudeCode],
+                via_manager: Some(crate::model::ManagerId::CcSwitch),
+                manager_resources: vec![ResourceKind::Mcp],
+                manager_apps: vec!["claude".into()],
+                ..Default::default()
+            },
+            &[AgentId::ClaudeCode],
+            &[],
+            ArtifactVersion::new(1, "aaaaaaaaaaaa"),
+            ArtifactVersion::new(1, "bbbbbbbbbbbb"),
+        )
+    }
+
+    #[test]
+    fn two_owners_for_one_resource_is_a_conflict_rather_than_a_second_copy() {
+        // FR-146, FR-219, SC-112: a manager import on top of a resource Cairn
+        // already owns directly would leave two copies of the same entry and
+        // no way to tell which one is live.
+        let observed = vec![Observed::new(ResourceKind::Mcp, HealthCondition::Healthy)
+            .owned_by(ResourceOwner::Direct)];
+        let plan = plan_agent(
+            Intent::Connect,
+            AgentId::ClaudeCode,
+            &via_manager(),
+            &observed,
+        );
+
+        assert!(plan.is_blocked(), "a second owner was accepted silently");
+        let mcp = plan
+            .changes_for(AgentId::ClaudeCode, ResourceKind::Mcp)
+            .expect("an mcp change");
+        assert_eq!(mcp.action, ChangeAction::Conflict);
+        assert!(
+            !mcp.action.writes(),
+            "a conflicting owner still wrote something"
+        );
+
+        let blocking = plan
+            .blocking
+            .iter()
+            .find(|b| b.kind == ResourceKind::Mcp)
+            .expect("a blocking entry");
+        assert_eq!(blocking.condition, HealthCondition::ConflictingOwner);
+        // Both owners are named, and the way out is stated.
+        assert!(blocking.detail.contains("directly"), "{}", blocking.detail);
+        assert!(blocking.detail.contains("manager"), "{}", blocking.detail);
+        assert!(blocking
+            .manual_sequence
+            .iter()
+            .any(|s| s.contains("migrate")));
+    }
+
+    #[test]
+    fn a_manager_owned_resource_cairn_does_not_hold_is_verified_not_written() {
+        // The other half: with nothing of Cairn's own in place, the manager
+        // owns it and Cairn writes nothing (FR-234).
+        let plan = plan_agent(Intent::Connect, AgentId::ClaudeCode, &via_manager(), &[]);
+        let mcp = plan
+            .changes_for(AgentId::ClaudeCode, ResourceKind::Mcp)
+            .expect("an mcp change");
+        assert_eq!(mcp.action, ChangeAction::Unchanged);
+        assert_eq!(mcp.owner, ResourceOwner::Manager);
+        assert!(!mcp.action.writes());
     }
 
     #[test]
