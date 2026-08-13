@@ -282,48 +282,24 @@ fn a_daemon_restart_mid_session_loses_no_acknowledged_writes() {
     );
 }
 
-// The two tests below identify and hard-kill `cairnd` processes by PID,
-// which needs two things Windows has no direct equivalent for: matching a
-// process to this sandbox by an environment variable it was started with
-// (Unix has `ps`/`pgrep`; reading another process's environment on Windows
-// means opening it and walking its PEB) and an unstoppable, uncatchable
-// `SIGKILL` (the nearest analogue, `TerminateProcess`, is a real API, but
-// pairing it with the process-matching problem above is not something to
-// improvise without a Windows machine to verify it against). Left as
-// follow-up work rather than shipped unverified; the recovery logic these
-// tests exercise (FR-047, H2) is plain, non-platform-specific code that
-// other tests already drive.
+// The two tests below identify and hard-kill `cairnd` processes by PID.
+// Originally Unix-only (matched the process by its `CAIRN_SOCKET` env var
+// and sent `SIGKILL`), they now share `cairn_sys` so they run on Windows
+// too: `cairn_sys::daemons_for_socket` enumerates by named pipe, and
+// `cairn_sys::kill` calls `TerminateProcess`, the nearest analogue of
+// `SIGKILL` on Windows. The recovery logic these tests exercise
+// (FR-047, H2) is plain, non-platform-specific code that other tests
+// already drive, but covering the crash path on every platform is what
+// the windows-support branch is about.
 
 /// PIDs of daemons serving this sandbox's socket.
-///
-/// Identified by the `CAIRN_SOCKET` they were started with: macOS `lsof` does
-/// not report a renamed Unix socket's path, so the environment is the reliable
-/// signal.
-#[cfg(unix)]
-fn daemons_for(s: &Sandbox) -> Vec<i32> {
-    let socket = s.socket.display().to_string();
-    let listed = std::process::Command::new("pgrep")
-        .args(["-f", "cairnd"])
-        .output()
-        .expect("pgrep");
-    String::from_utf8_lossy(&listed.stdout)
-        .lines()
-        .filter_map(|p| p.trim().parse::<i32>().ok())
-        .filter(|pid| {
-            let env = std::process::Command::new("ps")
-                .args(["eww", "-p", &pid.to_string()])
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                .unwrap_or_default();
-            env.contains(&socket)
-        })
-        .collect()
+fn daemons_for(s: &Sandbox) -> Vec<i64> {
+    cairn_sys::daemons_for_socket(&s.socket)
 }
 
 #[test]
-#[cfg(unix)]
 fn a_real_process_kill_loses_nothing_and_reconciles_the_session() {
-    // M4 / FR-047: SIGKILL, not a graceful stop.
+    // M4 / FR-047: a hard kill, not a graceful stop.
     let s = Sandbox::new();
     s.hook(
         "SessionStart",
@@ -347,7 +323,14 @@ fn a_real_process_kill_loses_nothing_and_reconciles_the_session() {
         "a daemon should be serving this sandbox"
     );
     for pid in &victims {
-        unsafe { libc_kill(*pid, 9) };
+        assert!(cairn_sys::kill(*pid), "kill should succeed for {pid}");
+    }
+    // Give the OS time to reap and the socket to go quiet.
+    for pid in &victims {
+        assert!(
+            cairn_sys::wait_for_exit(*pid, std::time::Duration::from_millis(1500)),
+            "daemon {pid} should exit after a hard kill"
+        );
     }
     std::thread::sleep(std::time::Duration::from_millis(300));
 
@@ -355,12 +338,12 @@ fn a_real_process_kill_loses_nothing_and_reconciles_the_session() {
     assert_eq!(
         s.json(&["status"])["observation_count"].as_i64(),
         Some(8),
-        "acknowledged writes must survive SIGKILL"
+        "acknowledged writes must survive a hard kill"
     );
     assert_eq!(
         s.integrity_check(),
         "ok",
-        "the store must survive SIGKILL intact"
+        "the store must survive a hard kill intact"
     );
 
     // Daemon start is the boundary: the session is reconciled with a handoff.
@@ -371,17 +354,7 @@ fn a_real_process_kill_loses_nothing_and_reconciles_the_session() {
     );
 }
 
-/// `kill(2)`, so the test can end a process the way a crash does.
-#[cfg(unix)]
-unsafe fn libc_kill(pid: i32, sig: i32) {
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    kill(pid, sig);
-}
-
 #[test]
-#[cfg(unix)]
 fn repeated_concurrent_starts_leave_exactly_one_daemon() {
     // H2: superseded daemons must notice they no longer own the socket and go.
     let s = Sandbox::new();
@@ -425,7 +398,9 @@ fn an_idle_daemon_exits_when_a_timeout_is_configured() {
     // sandbox's own daemon competing for the same socket would decide the
     // outcome by the ownership path instead of the idle path.
     let home = tempfile::TempDir::new().expect("home");
-    let socket = cairn_e2e::sandbox_socket();
+    // Guarded, so the daemon `cairn` spawns below is stopped even when the
+    // request it was spawned for fails.
+    let socket = cairn_e2e::DaemonSocket::new();
 
     let mut child = std::process::Command::new(cairn_e2e::binary("cairnd"))
         .args([
@@ -472,4 +447,108 @@ fn an_idle_daemon_exits_when_a_timeout_is_configured() {
     {
         let _ = std::fs::remove_file(&socket);
     }
+}
+
+#[test]
+fn a_second_session_end_on_an_already_completed_session_is_idempotent() {
+    let s = Sandbox::new();
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "double-end", "source": "startup" }),
+    );
+    s.hook(
+        "SessionEnd",
+        json!({ "session_id": "double-end", "reason": "clear" }),
+    );
+    s.settle_session_status("completed");
+
+    // A second SessionEnd for the same session must not error or create a
+    // second handoff.
+    s.hook(
+        "SessionEnd",
+        json!({ "session_id": "double-end", "reason": "clear" }),
+    );
+    let sessions = s.json(&["session", "list"])["sessions"].clone();
+    assert_eq!(sessions[0]["status"], "completed");
+}
+
+/// A `SessionStart` hook creates the session; a second one with the same key
+/// rejoins it rather than forking (FR-006).
+#[test]
+fn a_session_start_with_an_existing_key_rejoins_rather_than_creating_a_second() {
+    let s = Sandbox::new();
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "rejoin", "source": "startup" }),
+    );
+    s.settle_session_count(1);
+
+    // A second SessionStart with the same key must not create a new session.
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "rejoin", "source": "startup" }),
+    );
+    let sessions = s.json(&["session", "list"])["sessions"].clone();
+    assert_eq!(
+        sessions.as_array().unwrap().len(),
+        1,
+        "a second SessionStart with the same key must rejoin, not fork"
+    );
+    assert_eq!(sessions[0]["status"], "active");
+}
+
+#[test]
+fn hook_events_for_a_never_started_session_are_dropped_cleanly() {
+    let s = Sandbox::new();
+    // Fire a PostToolUse for a session that was never started. The hook
+    // must exit 0 and not crash the daemon.
+    let result = s.hook(
+        "PostToolUse",
+        json!({ "session_id": "ghost", "tool_name": "Read", "tool_input": { "file_path": "x" } }),
+    );
+    assert!(result.ok(), "hook for a ghost session must exit 0");
+
+    // The daemon should still be healthy.
+    let status = s.json(&["status"]);
+    assert_eq!(status["daemon"], "running");
+}
+
+#[test]
+fn a_stop_turn_checkpoint_persists_across_a_daemon_restart() {
+    let s = Sandbox::new();
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "turn-persist", "source": "startup" }),
+    );
+    s.hook(
+        "PostToolUse",
+        json!({ "session_id": "turn-persist", "tool_name": "Read", "tool_input": { "file_path": "README.md" } }),
+    );
+    s.hook("Stop", json!({ "session_id": "turn-persist" }));
+
+    // Stop is fire-and-forget; wait for the turn checkpoint to land.
+    s.settle("turn checkpoint recorded", |s| {
+        s.json(&["session", "list"])["sessions"][0]["last_turn_ended_at"].is_string()
+    });
+
+    let before = s.json(&["session", "list"])["sessions"].clone();
+    assert!(before[0]["last_turn_ended_at"].is_string());
+
+    s.restart_daemon();
+
+    // FR-009: daemon start reconciles active sessions to interrupted.
+    // The turn checkpoint (last_turn_ended_at) should survive.
+    let after = s.json(&["session", "list"])["sessions"].clone();
+    assert!(
+        after[0]["last_turn_ended_at"].is_string(),
+        "the turn checkpoint should survive a daemon restart"
+    );
+    assert_eq!(after[0]["status"], "interrupted");
+
+    // A new event resumes it to active.
+    s.hook(
+        "PostToolUse",
+        json!({ "session_id": "turn-persist", "tool_name": "Read", "tool_input": { "file_path": "README.md" } }),
+    );
+    s.settle_session_status("active");
 }

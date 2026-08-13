@@ -9,7 +9,18 @@ function uuid(): string {
   return crypto.randomUUID();
 }
 
-async function json(path: string, init: RequestInit) {
+/** The server's web session cookie — `auth::COOKIE_NAME` on the Rust side. */
+export const SESSION_COOKIE = "cairn_session";
+
+/**
+ * Call the API and throw on any non-2xx.
+ *
+ * Exported so tests never hand-roll a bare `fetch`: an unchecked setup call
+ * fails silently and leaves the test asserting against a state it never
+ * reached — which, for a test about *refusing* access, is a pass for the
+ * wrong reason.
+ */
+export async function apiJson(path: string, init: RequestInit) {
   const response = await fetch(`${API}${path}`, {
     ...init,
     headers: { "content-type": "application/json", ...(init.headers ?? {}) },
@@ -19,6 +30,77 @@ async function json(path: string, init: RequestInit) {
     throw new Error(`${path}: ${response.status} ${JSON.stringify(body)}`);
   }
   return body;
+}
+
+const json = apiJson;
+
+/**
+ * Register a user, sign them in, and return their session cookie value.
+ *
+ * Throws if either step fails, and if the response carries no session — an
+ * empty cookie is indistinguishable from being signed out, so a test that
+ * accepted one could not tell "refused because not a member" from "refused
+ * because not logged in".
+ */
+export async function registerAndLogin(
+  email: string,
+  password: string,
+  displayName: string,
+): Promise<string> {
+  await apiJson("/api/auth/register", {
+    method: "POST",
+    body: JSON.stringify({ email, display_name: displayName, password }),
+  });
+
+  const login = await fetch(`${API}/api/auth/login`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  if (!login.ok) {
+    throw new Error(`login for ${email}: ${login.status}`);
+  }
+
+  const pair = (login.headers.get("set-cookie") ?? "").split(";")[0];
+  const eq = pair.indexOf("=");
+  // Split on the *first* `=` only: the value is opaque and may contain one.
+  const value = eq === -1 ? "" : pair.slice(eq + 1);
+  if (!value) {
+    throw new Error(`login for ${email} returned no ${SESSION_COOKIE} value`);
+  }
+  return value;
+}
+
+/** Mint an API token for a signed-in user. Throws on failure. */
+export async function newToken(sessionValue: string, name: string): Promise<string> {
+  const body = await apiJson("/api/tokens", {
+    method: "POST",
+    headers: { cookie: `${SESSION_COOKIE}=${sessionValue}` },
+    body: JSON.stringify({ name }),
+  });
+  const token = body.token as string | undefined;
+  if (!token) {
+    throw new Error(`/api/tokens returned no token: ${JSON.stringify(body)}`);
+  }
+  return token;
+}
+
+/** Create a shared project with a bearer token. Throws on failure. */
+export async function createProject(
+  token: string,
+  name: string,
+  repositoryRemote: string,
+): Promise<string> {
+  const project = await apiJson("/api/projects", {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}` },
+    body: JSON.stringify({ name, repository_remote: repositoryRemote }),
+  });
+  const id = project.id as string | undefined;
+  if (!id) {
+    throw new Error(`/api/projects returned no id: ${JSON.stringify(project)}`);
+  }
+  return id;
 }
 
 export interface Seeded {

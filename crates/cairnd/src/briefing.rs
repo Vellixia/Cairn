@@ -131,3 +131,158 @@ async fn latest_handoff_for_branch(
 fn store_err(e: cairn_store::StoreError) -> WireError {
     WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testsupport as fx;
+
+    /// A new session on a repository with prior history still opens informed
+    /// (US2 scenario 1, FR-027).
+    ///
+    /// With no predecessor of its own, the briefing falls back to the newest
+    /// handoff on the same branch.
+    #[tokio::test]
+    async fn the_newest_handoff_on_the_branch_is_found() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "history", None).await;
+
+        let first = fx::session_on_branch(&d, &p, "one", "main").await;
+        fx::observe_edit(&d, &first, "src/first.rs").await;
+        crate::handoffs::generate(
+            &d,
+            &first,
+            HandoffTrigger::SessionEnd,
+            cairn_store::outbox::SyncPolicy::from_project(&p),
+        )
+        .await
+        .expect("handoff");
+        fx::end(&d, &p, &first).await;
+
+        let found = latest_handoff_for_branch(&d, p.id, "main")
+            .await
+            .expect("query")
+            .expect("a handoff on this branch");
+        assert_eq!(found.session_id, first.id);
+    }
+
+    /// Handoffs from another branch are not offered.
+    ///
+    /// Switching branch changes what the next session should be told; carrying
+    /// the other branch's handoff over would brief it on the wrong work.
+    #[tokio::test]
+    async fn a_handoff_on_another_branch_is_not_offered() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "branched", None).await;
+
+        let other = fx::session_on_branch(&d, &p, "elsewhere", "feature/x").await;
+        crate::handoffs::generate(
+            &d,
+            &other,
+            HandoffTrigger::SessionEnd,
+            cairn_store::outbox::SyncPolicy::from_project(&p),
+        )
+        .await
+        .expect("handoff");
+        fx::end(&d, &p, &other).await;
+
+        assert!(
+            latest_handoff_for_branch(&d, p.id, "main")
+                .await
+                .expect("query")
+                .is_none(),
+            "main has no history of its own"
+        );
+        assert!(
+            latest_handoff_for_branch(&d, p.id, "feature/x")
+                .await
+                .expect("query")
+                .is_some(),
+            "but the branch that does keeps it"
+        );
+    }
+
+    /// An *active* session's handoff is not treated as prior history.
+    ///
+    /// It belongs to work still in progress — very likely the caller's own
+    /// session — so offering it back would brief a session on itself.
+    #[tokio::test]
+    async fn an_active_sessions_handoff_is_not_prior_history() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "inprogress", None).await;
+
+        let live = fx::session_on_branch(&d, &p, "current", "main").await;
+        crate::handoffs::generate(
+            &d,
+            &live,
+            HandoffTrigger::PreCompact,
+            cairn_store::outbox::SyncPolicy::from_project(&p),
+        )
+        .await
+        .expect("handoff");
+        // Deliberately not ended.
+
+        assert!(
+            latest_handoff_for_branch(&d, p.id, "main")
+                .await
+                .expect("query")
+                .is_none(),
+            "an active session is not a predecessor"
+        );
+    }
+
+    /// A repository with no history at all is not an error.
+    #[tokio::test]
+    async fn no_history_is_reported_as_none_rather_than_failing() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "fresh", None).await;
+        assert!(latest_handoff_for_branch(&d, p.id, "main")
+            .await
+            .expect("query")
+            .is_none());
+    }
+
+    /// Memory is presented to the agent tagged with its kind, so a decision is
+    /// distinguishable from a plain fact in the briefing text.
+    #[tokio::test]
+    async fn scope_memory_tags_each_item_with_its_kind() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "tagged", None).await;
+        let s = fx::session(&d, &p, "author").await;
+
+        repo::create_memory(
+            &d.store,
+            repo::NewMemory {
+                project_id: p.id,
+                kind: MemoryType::Decision,
+                scope: MemoryScope::Project,
+                scope_key: &p.id.to_string(),
+                content: "chose a token bucket",
+                origin_session_id: s.id,
+                local_only: false,
+                evidence: &[],
+            },
+            cairn_store::outbox::SyncPolicy::from_project(&p),
+        )
+        .await
+        .expect("memory");
+
+        let items = scope_memory(&d, p.id, MemoryScope::Project, &p.id.to_string())
+            .await
+            .expect("scope memory");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], "[decision] chose a token bucket");
+    }
+
+    /// An empty scope yields an empty list, not an error — a project with no
+    /// memory still gets a briefing (FR-031).
+    #[tokio::test]
+    async fn an_empty_scope_yields_no_items() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "bare", None).await;
+        assert!(scope_memory(&d, p.id, MemoryScope::Branch, "main")
+            .await
+            .expect("scope memory")
+            .is_empty());
+    }
+}

@@ -44,12 +44,19 @@ impl Stage {
 
 fn sink() -> Option<&'static str> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        std::env::var("CAIRN_CONTENTION_LOG")
-            .ok()
-            .filter(|p| !p.is_empty())
-    })
-    .as_deref()
+    PATH.get_or_init(|| sink_path(std::env::var("CAIRN_CONTENTION_LOG").ok().as_deref()))
+        .as_deref()
+}
+
+/// The path reporting writes to, for a given raw value of the variable.
+///
+/// Split out from [`sink`] so it can be tested. `sink` memoises in a
+/// `OnceLock`, which is right for a per-process setting but means a test that
+/// sets the variable and calls [`enabled`] observes only whatever the first
+/// caller in the process happened to cache — it proves nothing about the
+/// decision itself. This is the decision.
+fn sink_path(raw: Option<&str>) -> Option<String> {
+    raw.filter(|p| !p.is_empty()).map(str::to_owned)
 }
 
 /// True when contention reporting is switched on.
@@ -122,4 +129,68 @@ fn store_frames() -> String {
         }
     }
     seen.join(" <- ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_stage_has_a_stable_string_form() {
+        assert_eq!(Stage::Begin.as_str(), "begin_immediate");
+        assert_eq!(Stage::Body.as_str(), "statement");
+        assert_eq!(Stage::Commit.as_str(), "commit");
+        assert_eq!(Stage::Rollback.as_str(), "rollback");
+        assert_eq!(Stage::Autocommit.as_str(), "autocommit");
+        assert_eq!(Stage::Unknown.as_str(), "unknown");
+    }
+
+    /// Reporting is opt-in, and an empty value is not an opt-in.
+    ///
+    /// Asserted against `sink_path` rather than `enabled`, which reads a
+    /// `OnceLock`: a test that set the variable and called `enabled` would be
+    /// asserting on whatever the process's first caller cached, and would
+    /// pass or fail on test *order* and on whether the developer happens to
+    /// have the variable exported. This has neither dependency.
+    #[test]
+    fn reporting_is_off_unless_a_non_empty_path_is_given() {
+        assert_eq!(sink_path(None), None, "unset means off");
+        assert_eq!(sink_path(Some("")), None, "empty is not an opt-in");
+        assert_eq!(
+            sink_path(Some("/tmp/contention.log")),
+            Some("/tmp/contention.log".to_string()),
+            "a path switches reporting on"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_constraint_violation_is_not_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::Store::open(&dir.path().join("d.sqlite3"))
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE t (a INTEGER PRIMARY KEY)")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let err = sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(store.pool())
+            .await
+            .expect_err("duplicate");
+        assert!(!is_contention(&err), "a constraint violation is not a lock");
+        let (_, primary) = codes(&err).expect("a database error");
+        assert_eq!(primary, 19, "SQLITE_CONSTRAINT's primary code");
+        store.close().await;
+    }
+
+    #[tokio::test]
+    async fn a_non_database_error_has_no_codes() {
+        let err = sqlx::Error::RowNotFound;
+        assert!(codes(&err).is_none());
+        assert!(!is_contention(&err));
+    }
 }

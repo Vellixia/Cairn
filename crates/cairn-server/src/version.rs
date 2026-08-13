@@ -115,3 +115,52 @@ async fn fetch_latest() -> anyhow::Result<Release> {
     release::pick_release(&body, CURRENT)
         .ok_or_else(|| anyhow::anyhow!("no eligible release published"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn current_is_a_parseable_semver() {
+        // Asserted against a known-lower baseline, not against itself.
+        // `update_available` returns false whenever *either* side fails to
+        // parse, so `!update_available(CURRENT, CURRENT)` holds just as well
+        // for a version that is not semver at all — it proved nothing. This
+        // can only pass if `CURRENT` parses and orders above 0.0.0.
+        assert!(
+            release::update_available("0.0.0", CURRENT),
+            "CURRENT ({CURRENT}) must be parseable semver above 0.0.0"
+        );
+    }
+
+    #[test]
+    fn version_payload_serializes_with_expected_keys() {
+        let p = VersionPayload {
+            current: "0.1.0".to_string(),
+            latest: None,
+            update_available: false,
+            checked_at: None,
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"current\":\"0.1.0\""));
+        assert!(s.contains("\"update_available\":false"));
+    }
+
+    #[test]
+    fn version_payload_with_release_serializes() {
+        let r = Release {
+            tag: "v0.2.0".to_string(),
+            version: "0.2.0".to_string(),
+            url: "https://example.test/r".to_string(),
+        };
+        let p = VersionPayload {
+            current: "0.1.0".to_string(),
+            latest: Some(r),
+            update_available: true,
+            checked_at: Some(chrono::Utc::now()),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"tag\":\"v0.2.0\""));
+        assert!(s.contains("\"update_available\":true"));
+    }
+}

@@ -58,3 +58,35 @@ impl From<sqlx::Error> for ApiError {
 }
 
 pub type ApiResult<T> = Result<T, ApiError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_constructor_maps_to_its_status_and_code() {
+        assert_eq!(ApiError::unauthorized("x").status, StatusCode::UNAUTHORIZED);
+        assert_eq!(ApiError::unauthorized("x").code, "unauthorized");
+        assert_eq!(ApiError::forbidden("x").status, StatusCode::FORBIDDEN);
+        assert_eq!(ApiError::not_found("x").status, StatusCode::NOT_FOUND);
+        assert_eq!(ApiError::invalid("x").code, "invalid_request");
+        assert_eq!(ApiError::conflict("x").status, StatusCode::CONFLICT);
+        assert_eq!(ApiError::internal("x").code, "internal");
+    }
+
+    #[test]
+    fn row_not_found_becomes_not_found() {
+        let e = sqlx::Error::RowNotFound;
+        let api: ApiError = e.into();
+        assert_eq!(api.status, StatusCode::NOT_FOUND);
+        assert_eq!(api.code, "not_found");
+    }
+
+    #[test]
+    fn other_sqlx_error_becomes_internal() {
+        let e: sqlx::Error = sqlx::Error::Configuration(anyhow::anyhow!("bad cfg").into());
+        let api: ApiError = e.into();
+        assert_eq!(api.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(api.code, "internal");
+    }
+}

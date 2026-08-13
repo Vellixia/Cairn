@@ -26,6 +26,8 @@ fn seed(s: &Sandbox) -> String {
     task_id
 }
 
+/// Recall from a session bound to a task returns task-scoped memory ahead of
+/// branch and project scope (SC-005, FR-023).
 #[test]
 fn recall_favours_task_then_branch_then_project() {
     let s = Sandbox::new();
@@ -164,6 +166,8 @@ fn superseding_retains_the_original_and_the_link() {
     let original_id = created["memory"]["id"].as_str().unwrap().to_string();
 
     // Supersede through the tool that offers it, driving the real MCP server.
+    // The agent's own tool surface is a first-class way to write memory, not a
+    // wrapper over the CLI (FR-021).
     let cwd = s.repo_path().display().to_string();
     let mut mcp = Mcp::start(&s);
     mcp.call("initialize", json!({}));
@@ -369,4 +373,64 @@ fn memory_scoped_to_a_deleted_branch_becomes_stale_and_leaves_default_recall() {
     s.must(&["status"]);
     let project = s.json(&["memory", "search", "durable"]);
     assert_eq!(project["results"][0]["state"], "active");
+}
+
+#[test]
+fn forgetting_an_already_forgotten_memory_is_idempotent() {
+    let s = Sandbox::new();
+    let created = s.json(&[
+        "memory",
+        "add",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+        "to be forgotten",
+    ]);
+    let id = created["memory"]["id"].as_str().unwrap().to_string();
+
+    // First forget succeeds.
+    s.must(&["memory", "forget", &id]);
+    // Second forget should also succeed (idempotent).
+    s.must(&["memory", "forget", &id]);
+
+    // The memory is still gone from default recall.
+    assert!(s.json(&["memory", "search", "forgotten"])["results"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn a_memory_with_evidence_shows_it_in_recall() {
+    let s = Sandbox::new();
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "ev", "source": "startup" }),
+    );
+    s.hook(
+        "PostToolUse",
+        json!({ "session_id": "ev", "tool_name": "Edit", "tool_input": { "file_path": "evidenced.rs" } }),
+    );
+    s.settle_observations(1);
+
+    let obs_id = s.observation_ids()[0].clone();
+    let created = s.json(&[
+        "memory",
+        "add",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+        "--evidence",
+        &obs_id,
+        "supported by an observation",
+    ]);
+    let mem_id = created["memory"]["id"].as_str().unwrap().to_string();
+
+    let shown = s.json(&["memory", "show", &mem_id])["memory"].clone();
+    let evidence = shown["evidence"].as_array().unwrap();
+    assert_eq!(evidence.len(), 1);
+    assert_eq!(evidence[0]["observation_id"], obs_id);
+    assert_eq!(evidence[0]["deleted"], false);
 }
