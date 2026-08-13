@@ -415,14 +415,43 @@ writes.
 
 ## Measurements on record
 
-Filled in during implementation, as Feature 001 did:
+Measured on Linux x86_64 with **release builds** and a healthy daemon, at the
+production deadlines (250 ms capture, 1500 ms context). Each number is produced
+by the test named beside it, so it can be re-measured rather than trusted.
 
-| Measurement | Value |
-|---|---|
-| Capture latency, Claude adapter (median / p95) | — |
-| Capture latency, Codex adapter (median / p95) | — |
-| Capture latency, OpenCode adapter (median / p95) | — |
-| Codex seal phase duration (median / p95 / max) | — |
-| Handoff-after-seal latency (p50 / p99) | — |
-| Rendered contract size (characters) | — |
-| Per-user hook cost in an unmanaged repository | — |
+| Measurement | Value | Produced by |
+|---|---|---|
+| Capture latency, Claude adapter (median / p95) | 2.0 ms / 2.7 ms | `perf_capture` |
+| Capture latency, Codex adapter (median / p95) | 2.0 ms / 2.3 ms | `perf_capture` |
+| Capture latency, OpenCode adapter (median / p95) | 2.0 ms / 2.4 ms | `perf_capture` |
+| Codex seal phase duration (median / p95 / max) | 4.9 ms / 7.2 ms / 29.2 ms | `perf_session_close` |
+| Handoff-after-seal latency (p50 / p99) | 4 ms / 5 ms | `handoff_lands_without_restart` |
+| Rendered contract size (characters) | 778 (instruction block) · 809 (MCP) | `render::size` |
+| Per-user hook cost in an unmanaged repository | 2.0 ms median / 2.6 ms p95 · 53 ms first call | `perf_capture` |
+
+**What these say.**
+
+*Capture is not the cost anyone feared.* Feature 002 put an adapter, a canonical
+event and a much larger binary (`jsonc-parser`, `toml_edit`, the embedded Skill)
+on the hook path, and the per-invocation cost is the same 2 ms for all three
+adapters — a fifth of Feature 001's 10 ms median budget and under 1% of the
+250 ms deadline. The fallback D18 recorded as a risk — a thin hook binary that
+links only the normalize path — is not needed.
+
+*The seal is what makes Codex's budget survivable.* A boundary is acknowledged
+in about 5 ms, against a vendor default of 1000 ms, because what the vendor
+waits for is a durable termination record and not a summarization. The handoff
+then lands about 4 ms later. Both halves matter: SC-128 is the acknowledgment
+inside the budget, SC-136 is the handoff arriving without a restart, and a
+design that passed one and failed the other would be worse than either.
+
+*The per-user cost is not material, and the D27 matrix stands.* Two milliseconds
+in an unmanaged repository is the same two milliseconds as everywhere else — the
+hook does not become cheaper by having nothing to do, and it does not become
+expensive either. The 53 ms outlier is the first call in a fresh repository,
+where Git discovery and the project insert happen once. So the scope matrix
+keeps recommending user scope where the developer wants Cairn everywhere, and
+the reason to choose project scope stays what it always was: **a user-scope
+installation captures in every repository you open**, including ones you never
+meant to give Cairn — which is a decision about what gets recorded, not about
+milliseconds.

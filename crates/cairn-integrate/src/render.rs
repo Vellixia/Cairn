@@ -228,3 +228,20 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod size {
+    use super::*;
+
+    /// Print the rendered sizes for the record (quickstart §Measurements on
+    /// record). Not a gate — `contract_within_bound` is the gate.
+    #[test]
+    fn report_rendered_sizes() {
+        let c = Contract::canonical();
+        println!(
+            "contract size  block {} characters  mcp {} characters  (bound {CONTRACT_SIZE_BOUND})",
+            c.block_body().chars().count(),
+            c.mcp_instructions().chars().count(),
+        );
+    }
+}

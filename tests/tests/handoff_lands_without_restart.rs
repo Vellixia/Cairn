@@ -61,7 +61,17 @@ fn sealed_session(s: &Sandbox, key: &str) -> String {
 /// sealed close is that the boundary is acknowledged *before* the handoff
 /// exists, so its absence for a moment is the expected state, not a failure.
 fn handoff_within_bound(s: &Sandbox, id: &str) -> bool {
-    let deadline = std::time::Instant::now() + BOUND;
+    handoff_delay(s, id).is_some()
+}
+
+/// How long after the seal the handoff became readable, or `None` if it never
+/// did inside the bound.
+///
+/// The polling interval floors what this can resolve, which is fine: the
+/// number it feeds is a documented characteristic, not a budget.
+fn handoff_delay(s: &Sandbox, id: &str) -> Option<f64> {
+    let started = std::time::Instant::now();
+    let deadline = started + BOUND;
     loop {
         let result = s.cairn(&["--json", "handoff", "show", "--session", id]);
         if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&result.stdout) {
@@ -71,14 +81,22 @@ fn handoff_within_bound(s: &Sandbox, id: &str) -> bool {
                     .map(|h| !h.is_null())
                     .unwrap_or(false)
             {
-                return true;
+                return Some(started.elapsed().as_secs_f64() * 1000.0);
             }
         }
         if std::time::Instant::now() >= deadline {
-            return false;
+            return None;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+}
+
+fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let index = ((sorted.len() as f64) * p).ceil() as usize;
+    sorted[index.saturating_sub(1).min(sorted.len() - 1)]
 }
 
 fn status_of(s: &Sandbox, id: &str) -> String {
@@ -126,12 +144,30 @@ fn every_sealed_close_in_a_batch_lands() {
         .map(|i| sealed_session(&s, &format!("batch-{i}")))
         .collect();
 
-    let landed = ids.iter().filter(|id| handoff_within_bound(&s, id)).count();
+    let mut delays: Vec<f64> = Vec::with_capacity(BOUNDARIES);
+    for id in &ids {
+        if let Some(ms) = handoff_delay(&s, id) {
+            delays.push(ms);
+        }
+    }
     assert_eq!(
-        landed,
+        delays.len(),
         BOUNDARIES,
         "{} of {BOUNDARIES} sealed boundaries never produced a handoff",
-        BOUNDARIES - landed
+        BOUNDARIES - delays.len()
+    );
+
+    // Reported for the record (SC-136, quickstart §Measurements on record):
+    // how long after the acknowledgment the durable handoff became readable.
+    // Not a budget — the bound above is the assertion — but the number a
+    // developer experiences as "how soon can I read it".
+    delays.sort_by(|a, b| a.partial_cmp(b).expect("no NaN"));
+    println!(
+        "SC-136 handoff after seal ({BOUNDARIES} boundaries)  \
+         p50 {:.0} ms  p99 {:.0} ms  max {:.0} ms",
+        percentile(&delays, 0.50),
+        percentile(&delays, 0.99),
+        delays.last().copied().unwrap_or_default(),
     );
 }
 

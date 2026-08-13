@@ -328,6 +328,9 @@ fn level_line(state: &AgentState) -> String {
     let mut s = state.outcome.level.display().to_string();
     if state.outcome.level != IntegrationLevel::Full {
         if let Some(first) = state.outcome.missing_behaviors.first() {
+            // The behaviors read as noun phrases, some with a leading article.
+            // "no the Cairn usage contract" is not a sentence.
+            let first = first.strip_prefix("the ").unwrap_or(first);
             s.push_str(&format!("   (no {first})"));
         } else if let Some(first) = state.outcome.awaited_behaviors.first() {
             s.push_str(&format!("   (awaiting {first})"));

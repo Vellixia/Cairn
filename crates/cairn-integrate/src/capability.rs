@@ -527,12 +527,19 @@ impl CapabilityProfile {
 
     /// The behaviors the developer does not get. Mandatory below FULL
     /// (FR-111).
+    ///
+    /// Lifecycle first, because that is what a developer notices: "no
+    /// automatic session start" is the fact that explains why nothing is being
+    /// captured, and where Cairn's tools happen to be registered is not.
     pub fn missing_behaviors(&self) -> Vec<String> {
-        Capability::ALL
-            .iter()
-            .filter(|c| self.get(**c).availability == Availability::Absent)
-            .map(|c| c.missing_behavior().to_string())
-            .collect()
+        let absent = |lifecycle: bool| {
+            Capability::ALL
+                .iter()
+                .filter(move |c| c.is_lifecycle() == lifecycle)
+                .filter(|c| self.get(**c).availability == Availability::Absent)
+                .map(|c| c.missing_behavior().to_string())
+        };
+        absent(true).chain(absent(false)).collect()
     }
 
     /// The conditional entries, each with what it depends on (FR-241).
