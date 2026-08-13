@@ -26,6 +26,19 @@ pub fn socket_path() -> PathBuf {
 /// two; the cap is only so a runaway log cannot be pulled into memory whole.
 const LOG_TAIL_LIMIT: u64 = 64 * 1024;
 
+/// The `daemon_unavailable` message, with the daemon's own reason where it left
+/// one.
+///
+/// Idempotent on purpose: a `daemon_unavailable` is diagnosed once where it
+/// surfaces and again where it is returned, and appending the reason both times
+/// reported it twice.
+fn compose_unavailable(unexplained: &str, reason: Option<&str>) -> String {
+    match reason {
+        Some(r) if !r.is_empty() && !unexplained.contains(r) => format!("{unexplained}: {r}"),
+        _ => unexplained.to_string(),
+    }
+}
+
 /// Where `cairnd.log` ended before this process spawned a daemon.
 ///
 /// Everything appended after the mark was written by the daemon we started, so
@@ -67,13 +80,10 @@ impl DaemonLogMark {
             // before it bound the socket. The reason is in the log behind the
             // startup marker, and `daemon_unavailable: cairnd did not start`
             // on its own names the symptom and hides it.
-            None => match self.startup_failure() {
-                Some(reason) if !reason.is_empty() => WireError::new(
-                    codes::DAEMON_UNAVAILABLE,
-                    format!("{unexplained}: {reason}"),
-                ),
-                _ => WireError::new(codes::DAEMON_UNAVAILABLE, unexplained),
-            },
+            None => WireError::new(
+                codes::DAEMON_UNAVAILABLE,
+                compose_unavailable(unexplained, self.startup_failure().as_deref()),
+            ),
         }
     }
 
@@ -565,6 +575,45 @@ pub fn send_oneway_blocking(request: &Request, deadline: Duration) -> Result<(),
 
 #[cfg(test)]
 mod tests {
+    use super::compose_unavailable;
+
+    /// The daemon's own reason reaches the user instead of a bare symptom: a
+    /// `CAIRN_HOME` too long for a Unix socket path fails at bind, and the
+    /// reason was already in the log behind a marker nobody read.
+    #[test]
+    fn the_daemons_reason_reaches_the_message() {
+        assert_eq!(
+            compose_unavailable(
+                "cairnd did not start",
+                Some("path must be shorter than SUN_LEN")
+            ),
+            "cairnd did not start: path must be shorter than SUN_LEN"
+        );
+    }
+
+    /// Diagnosed twice, said once.
+    #[test]
+    fn composing_twice_does_not_repeat_the_reason() {
+        let once = compose_unavailable(
+            "cairnd did not start",
+            Some("path must be shorter than SUN_LEN"),
+        );
+        let twice = compose_unavailable(&once, Some("path must be shorter than SUN_LEN"));
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn no_reason_leaves_the_message_alone() {
+        assert_eq!(
+            compose_unavailable("cairnd did not start", None),
+            "cairnd did not start"
+        );
+        assert_eq!(
+            compose_unavailable("cairnd did not start", Some("")),
+            "cairnd did not start"
+        );
+    }
+
     use super::*;
 
     /// Serializes the tests below.
