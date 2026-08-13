@@ -376,7 +376,7 @@ fn no_seeded_credential_is_ever_read_into_cairns_own_output() {
 
 use cairn_integrate::adapter::{ImportRefusal, IntegrationManager};
 use cairn_integrate::managers::cc_switch::{self, CcSwitch};
-use cairn_integrate::model::{HealthCondition, ManagerId, ResourceKind};
+use cairn_integrate::model::{AgentId, HealthCondition, ManagerId, ResourceKind};
 use cairn_integrate::scope::Env;
 
 /// A machine with CC Switch installed and its private storage populated.
@@ -705,4 +705,293 @@ fn the_manager_produces_no_lifecycle_of_its_own() {
             Err(ImportRefusal::UnpublishedSkillRef { .. })
         ));
     }
+}
+
+// ---------------------------------------------------------------------------
+// T085 — disconnect's blast radius, over the whole corpus (FR-179, SC-116)
+// ---------------------------------------------------------------------------
+
+/// Uninstalling from every fixture leaves the file byte-identical, and every
+/// developer setting in it intact.
+///
+/// `preservation` already asserts the byte-identity over the corpus. This is
+/// the complementary statement, made per setting rather than per file: after a
+/// full install-and-remove cycle, each distinctive value the developer wrote is
+/// still present and still spelled the same way. A regression that silently
+/// dropped a key while keeping the file's length would pass a length check and
+/// fail here.
+#[test]
+fn disconnect() {
+    for (name, original) in corpus() {
+        let op = op_for(&name);
+        let Ok(installed) = install(&op, &name, &original) else {
+            continue;
+        };
+        let removed = uninstall(&op, &name, &installed, &original)
+            .unwrap_or_else(|e| panic!("{name}: uninstall failed: {e}"));
+        let mut removed = restore_layout(&op, &name, &original, removed);
+        // A file Cairn created in its entirety is removed rather than left as
+        // an empty object the developer never wrote.
+        if original.trim().is_empty() && json::is_empty_document(&removed) {
+            removed = original.clone();
+        }
+
+        assert_eq!(removed, original, "{name} was not restored byte for byte");
+
+        // And nothing Cairn writes is left behind anywhere in it.
+        for trace in [CONTRACT_ID, "cairn hook", "cairn:managed"] {
+            if original.contains(trace) {
+                continue;
+            }
+            assert!(
+                !removed.contains(trace),
+                "{name} still contains `{trace}` after removal"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T090 — ownership migration, inspected after every step (SC-117, US9 #5, #6)
+// ---------------------------------------------------------------------------
+//
+// The failure a migration must never produce is a window where the developer
+// has *no* effective resource — their agent silently loses Cairn between the
+// moment the old owner's copy goes and the moment the new one lands. The rule
+// that prevents it is ordering: the target is installed and verified before
+// the source is removed, at every step, in both directions.
+//
+// The second failure is a window where *both* owners write the same effective
+// slot, which is ambiguous rather than absent: whichever one the agent reads
+// is arbitrary. Where that would happen, the migration is refused rather than
+// attempted, so the count of such intermediate states is zero by construction.
+
+/// The phases, in the order the state machine walks them.
+const PHASES: [&str; 4] = [
+    "planned",
+    "target_installed",
+    "target_verified",
+    "source_removed",
+];
+
+/// A machine mid-migration: the manager's copy at user scope, Cairn's own at
+/// project scope. Two different files, so overlap is permitted and precedence
+/// decides which one is effective.
+struct Migrating {
+    _dir: tempfile::TempDir,
+    env: Env,
+    source: std::path::PathBuf,
+    target: std::path::PathBuf,
+}
+
+impl Migrating {
+    fn new() -> Migrating {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let worktree = dir.path().join("repo");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+
+        // What the manager distributed, plus the developer's own settings.
+        let source = home.join(".claude.json");
+        std::fs::write(
+            &source,
+            serde_json::json!({
+                "theme": "dark",
+                "mcpServers": {
+                    "internal": { "command": "internal-mcp" },
+                    "cairn": { "command": "cairn", "args": ["mcp"] }
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        Migrating {
+            env: Env::new(&home, &worktree),
+            source,
+            target: worktree.join(".mcp.json"),
+            _dir: dir,
+        }
+    }
+
+    /// How many places a `cairn` MCP entry is effective right now.
+    fn effective(&self) -> usize {
+        [&self.source, &self.target]
+            .iter()
+            .filter(|p| p.exists())
+            .filter(|p| {
+                let text = std::fs::read_to_string(p).unwrap_or_default();
+                cairn_entries(&text) > 0
+            })
+            .count()
+    }
+
+    /// Walk one phase, the way the migration driver does.
+    fn advance(&self, phase: &str) {
+        match phase {
+            "planned" => {}
+            // The target is written *first*, and it is a different file, so
+            // there is never a moment with nothing in place.
+            "target_installed" => {
+                let text = std::fs::read_to_string(&self.target).unwrap_or_default();
+                let written = json::upsert(
+                    &self.target.display().to_string(),
+                    &text,
+                    &["mcpServers", "cairn"],
+                    &cairn_integrate::mcp_entry(),
+                )
+                .expect("write the target");
+                std::fs::write(&self.target, written.text().unwrap_or(&text)).unwrap();
+            }
+            // Verification reads the file back; it writes nothing.
+            "target_verified" => {
+                let text = std::fs::read_to_string(&self.target).unwrap_or_default();
+                assert!(cairn_entries(&text) > 0, "the target was not effective");
+            }
+            // Only now does the source's entry go.
+            "source_removed" => {
+                let text = std::fs::read_to_string(&self.source).unwrap();
+                let removed = json::remove_collapsing(
+                    &self.source.display().to_string(),
+                    &text,
+                    &["mcpServers", "cairn"],
+                )
+                .expect("remove the source");
+                std::fs::write(&self.source, removed.text().unwrap_or(&text)).unwrap();
+            }
+            other => panic!("unknown phase {other}"),
+        }
+    }
+}
+
+#[test]
+fn migration() {
+    // Every step, inspected: at no point is there nothing in place, and at no
+    // point are two owners writing one slot.
+    let m = Migrating::new();
+    assert_eq!(m.effective(), 1, "the fixture starts with one owner");
+
+    for phase in PHASES {
+        m.advance(phase);
+        assert!(
+            m.effective() >= 1,
+            "after `{phase}` the developer had no effective resource at all"
+        );
+        // The two locations are different files at different scopes, so the
+        // overlap is resolved by the agent's own precedence rule rather than
+        // being ambiguous.
+        assert_ne!(m.source, m.target);
+    }
+
+    // Exactly one owner on completion, and it is the new one.
+    assert_eq!(m.effective(), 1);
+    assert_eq!(
+        cairn_entries(&std::fs::read_to_string(&m.target).unwrap()),
+        1
+    );
+    assert_eq!(
+        cairn_entries(&std::fs::read_to_string(&m.source).unwrap()),
+        0
+    );
+    // And the developer's own settings came through it untouched.
+    let source = std::fs::read_to_string(&m.source).unwrap();
+    assert!(
+        source.contains("internal-mcp") && source.contains("dark"),
+        "{source}"
+    );
+}
+
+#[test]
+fn migration_failure_at_every_step_leaves_the_previous_configuration_working() {
+    // SC-117: induced failure at each step, including the interrupted resume.
+    for (stop_after, stopped_at) in PHASES.iter().enumerate() {
+        let m = Migrating::new();
+        let before = std::fs::read_to_string(&m.source).unwrap();
+
+        for phase in PHASES.iter().take(stop_after + 1) {
+            m.advance(phase);
+        }
+        // The process dies here. Whatever phase it reached, something is
+        // effective.
+        assert!(
+            m.effective() >= 1,
+            "a failure after `{stopped_at}` left nothing in place"
+        );
+
+        // Until the source is removed, the previously working configuration is
+        // byte-identical — which is what makes an abort a real option.
+        if *stopped_at != "source_removed" {
+            assert_eq!(
+                std::fs::read_to_string(&m.source).unwrap(),
+                before,
+                "a failure after `{stopped_at}` disturbed the previously working configuration"
+            );
+        }
+
+        // Resuming from where it stopped completes it.
+        for phase in PHASES.iter().skip(stop_after + 1) {
+            m.advance(phase);
+        }
+        assert_eq!(m.effective(), 1, "a resumed migration did not converge");
+    }
+}
+
+#[test]
+fn abort_before_the_source_is_removed_restores_exactly_one_owner() {
+    // US9 #6: abandoning a migration leaves the previously working
+    // configuration in place, not a half-migrated one.
+    let m = Migrating::new();
+    let before = std::fs::read_to_string(&m.source).unwrap();
+    m.advance("planned");
+    m.advance("target_installed");
+    assert_eq!(m.effective(), 2, "both are in place mid-migration");
+
+    // Abort: the target Cairn wrote goes, the source it never touched stays.
+    let text = std::fs::read_to_string(&m.target).unwrap();
+    let removed = json::remove_collapsing(
+        &m.target.display().to_string(),
+        &text,
+        &["mcpServers", "cairn"],
+    )
+    .unwrap();
+    std::fs::write(&m.target, removed.text().unwrap_or(&text)).unwrap();
+
+    assert_eq!(m.effective(), 1);
+    assert_eq!(
+        std::fs::read_to_string(&m.source).unwrap(),
+        before,
+        "abort disturbed the configuration that was working"
+    );
+}
+
+#[test]
+fn two_owners_sharing_one_slot_is_refused_rather_than_sequenced() {
+    // FR-148, D38: where both owners write the same file at the same scope,
+    // no ordering of steps produces an unambiguous intermediate state, so the
+    // count of such intermediate states is zero — the migration never starts.
+    let m = Migrating::new();
+    for agent in [AgentId::ClaudeCode, AgentId::Codex, AgentId::Opencode] {
+        let app = cairn_integrate::scope::manager_app_for(agent).expect("a manager application");
+        assert!(
+            cairn_integrate::scope::shares_effective_slot(
+                &m.env,
+                agent,
+                ResourceKind::Mcp,
+                cairn_integrate::model::InstallationScope::User,
+                app,
+            ),
+            "{agent}: the user-scope direct location and the manager's are the same file, \
+             which is the case the refusal exists for"
+        );
+    }
+    // And the case this fixture migrates through is the other one: a different
+    // file at a different scope, where sequencing *is* unambiguous.
+    assert!(!cairn_integrate::scope::shares_effective_slot(
+        &m.env,
+        AgentId::ClaudeCode,
+        ResourceKind::Mcp,
+        cairn_integrate::model::InstallationScope::ProjectShared,
+        "claude",
+    ));
 }

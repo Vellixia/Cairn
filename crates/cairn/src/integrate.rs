@@ -580,6 +580,9 @@ async fn apply_plan(
     let mut applied = Vec::new();
     let mut not_applied = Vec::new();
     let mut artifacts: Vec<String> = Vec::new();
+    // What this run actually wrote, so the binding pass below does not
+    // re-record it from the changed file.
+    let mut written: Vec<(AgentId, ResourceKind)> = Vec::new();
 
     // The agent row comes first: a binding references it, and recording a
     // resource for an agent that does not exist yet is a foreign-key failure
@@ -621,6 +624,7 @@ async fn apply_plan(
             Ok(m) => match install::commit(&m) {
                 Ok(()) => {
                     record_resource(change.agent, &m).await?;
+                    written.push((change.agent, change.kind));
                     applied.push(json!({
                         "agent": change.agent.as_str(),
                         "kind": change.kind.as_str(),
@@ -647,12 +651,21 @@ async fn apply_plan(
     // agent already installed is exactly the shared case, and skipping it
     // because nothing changed is how a shared block loses the consumer that
     // depends on it (FR-243).
+    let prior = snapshot().await.ok();
     for state in states {
         let Some(want) = desired.agents.iter().find(|a| a.agent == state.agent) else {
             continue;
         };
         for wanted in &want.resources {
             if wanted.owner == ResourceOwner::Manager {
+                continue;
+            }
+            // Already recorded above, from the materialization that was
+            // actually applied. Re-recording here would overwrite the layout
+            // bits with values read back from the file Cairn has just
+            // changed — which is how a minified container stopped being
+            // restorable on disconnect.
+            if written.contains(&(state.agent, wanted.kind)) {
                 continue;
             }
             let present = state
@@ -662,8 +675,21 @@ async fn apply_plan(
             if !present && !applied.iter().any(|a| a["kind"] == wanted.kind.as_str()) {
                 continue;
             }
-            if let Ok(m) = install::materialize_install(env, state.agent, wanted.kind, wanted.scope)
+            if let Ok(mut m) =
+                install::materialize_install(env, state.agent, wanted.kind, wanted.scope)
             {
+                // This resource was installed by an earlier run or by another
+                // agent, so the file already holds Cairn's content and its
+                // layout bits describe *that* edit. They are carried forward
+                // rather than recomputed from a file that has already changed.
+                if let Some(p) = prior.as_ref().and_then(|s| {
+                    s.installs
+                        .iter()
+                        .find(|r| r.kind == wanted.kind && r.location == m.location)
+                }) {
+                    m.container_single_line = p.container_single_line;
+                    m.created_container = p.created_container;
+                }
                 record_resource(state.agent, &m).await?;
             }
         }
