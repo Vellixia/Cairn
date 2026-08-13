@@ -21,8 +21,7 @@ use clap::Parser;
 use state::{Daemon, ServerCredentials};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::RwLock;
 
 #[derive(Parser, Debug)]
@@ -45,15 +44,25 @@ async fn main() -> anyhow::Result<()> {
     let socket_path = args.socket.unwrap_or_else(cairn_core::paths::socket_path);
     cairn_core::paths::ensure_home()?;
 
-    // Single instance: a live socket means another daemon owns it.
-    if socket_path.exists() {
-        if UnixStream::connect(&socket_path).await.is_ok() {
-            tracing::info!(socket = %socket_path.display(), "another cairnd is already running");
-            return Ok(());
-        }
-        std::fs::remove_file(&socket_path)?;
-    }
+    run(
+        socket_path,
+        std::time::Duration::from_secs(args.idle_timeout),
+    )
+    .await
+}
 
+/// Open the store, build the daemon state, and run the start-of-day recovery
+/// that reconciles whatever a previous run left behind (FR-009, D16).
+///
+/// Shared by both transports, but each gives it a different guarantee. On
+/// Windows the exclusive pipe create *is* the ownership check, so by the time
+/// `run` calls this, ownership is real. On Unix `run` only calls it after a
+/// cheap pre-check — not proof, since two daemons starting at once can both
+/// pass it — and the actual race is settled later, at the rename. A losing
+/// Unix daemon can therefore still run this once before standing down; that
+/// is wasted work, not a correctness problem, since the loser's process (and
+/// everything this spawned) exits immediately after.
+async fn setup() -> anyhow::Result<Arc<Daemon>> {
     let store = Store::open(&cairn_core::paths::db_path()).await?;
     let user_id = repo::ensure_local_user(&store).await?;
     let config = CairnConfig::load();
@@ -75,8 +84,6 @@ async fn main() -> anyhow::Result<()> {
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
     });
 
-    // Daemon start is the deterministic boundary that reconciles sessions left
-    // active by a previous run (FR-009, D16).
     let reconciled = recover::reconcile_previous_runs(&daemon).await;
     if reconciled > 0 {
         tracing::info!(reconciled, "reconciled sessions from a previous run");
@@ -98,11 +105,6 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!(released, "released outbox claims from a previous run");
     }
 
-    // Bind privately, then rename into place. Removing the path and binding it
-    // as two steps lets a second daemon starting at the same moment unlink a
-    // socket that is already serving; `rename` publishes atomically instead.
-    let staging = socket_path.with_extension(format!("tmp{}", std::process::id()));
-    let _ = std::fs::remove_file(&staging);
     // Automatic delivery. Queued work reaches the server without anyone typing
     // `cairn sync now` (FR-056, C1).
     tokio::spawn(sync::run_worker(Arc::clone(&daemon)));
@@ -134,6 +136,45 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    Ok(daemon)
+}
+
+async fn shutdown_store(daemon: &Daemon) {
+    // Bounded: the background sync worker keeps acquiring pool connections, so
+    // an unbounded `close()` waits for a loop that never ends and the process
+    // never exits (H2).
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), daemon.store.close()).await;
+}
+
+/// Whether the daemon should exit for lack of anything to do.
+async fn idle_expired(daemon: &Daemon, idle_timeout: std::time::Duration) -> bool {
+    !idle_timeout.is_zero() && daemon.idle_for() > idle_timeout && daemon.no_active_sessions().await
+}
+
+// ---------------------------------------------------------------------------
+// Unix: a Unix domain socket under CAIRN_HOME.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+async fn run(socket_path: PathBuf, idle_timeout: std::time::Duration) -> anyhow::Result<()> {
+    use tokio::net::{UnixListener, UnixStream};
+
+    // Single instance: a live socket means another daemon owns it.
+    if socket_path.exists() {
+        if UnixStream::connect(&socket_path).await.is_ok() {
+            tracing::info!(socket = %socket_path.display(), "another cairnd is already running");
+            return Ok(());
+        }
+        std::fs::remove_file(&socket_path)?;
+    }
+
+    let daemon = setup().await?;
+
+    // Bind privately, then rename into place. Removing the path and binding it
+    // as two steps lets a second daemon starting at the same moment unlink a
+    // socket that is already serving; `rename` publishes atomically instead.
+    let staging = socket_path.with_extension(format!("tmp{}", std::process::id()));
+    let _ = std::fs::remove_file(&staging);
     let listener = UnixListener::bind(&staging)?;
 
     // Do not clobber a daemon that is already serving.
@@ -145,7 +186,7 @@ async fn main() -> anyhow::Result<()> {
     // When several daemons start at once — a cold socket and a burst of hooks —
     // the herd steals the socket from each other in turn. Standing down when
     // someone is already answering collapses that to one publisher.
-    if tokio::net::UnixStream::connect(&socket_path).await.is_ok() {
+    if UnixStream::connect(&socket_path).await.is_ok() {
         tracing::info!(
             socket = %socket_path.display(),
             "a daemon is already serving this socket; standing down"
@@ -165,7 +206,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::clone(&daemon),
         socket_path.clone(),
         owned,
-        std::time::Duration::from_secs(args.idle_timeout),
+        idle_timeout,
         shutdown_tx.clone(),
     ));
 
@@ -197,14 +238,12 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let _ = std::fs::remove_file(&socket_path);
-    // Bounded: the background sync worker keeps acquiring pool connections, so
-    // an unbounded `close()` waits for a loop that never ends and the process
-    // never exits (H2).
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), daemon.store.close()).await;
+    shutdown_store(&daemon).await;
     Ok(())
 }
 
 /// Device and inode of the socket this daemon published, or `None`.
+#[cfg(unix)]
 fn socket_identity(path: &std::path::Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt;
     std::fs::metadata(path).ok().map(|m| (m.dev(), m.ino()))
@@ -214,6 +253,7 @@ fn socket_identity(path: &std::path::Path) -> Option<(u64, u64)> {
 /// idle for `idle_timeout` with no active session.
 ///
 /// `idle_timeout` of zero disables the idle half; ownership is always checked.
+#[cfg(unix)]
 async fn supervise(
     daemon: Arc<Daemon>,
     socket_path: std::path::PathBuf,
@@ -234,10 +274,7 @@ async fn supervise(
             return;
         }
 
-        if !idle_timeout.is_zero()
-            && daemon.idle_for() > idle_timeout
-            && daemon.no_active_sessions().await
-        {
+        if idle_expired(&daemon, idle_timeout).await {
             tracing::info!(?idle_timeout, "idle with no active session; exiting");
             let _ = shutdown.send(()).await;
             return;
@@ -245,13 +282,146 @@ async fn supervise(
     }
 }
 
-/// One connection: newline-delimited JSON requests, one envelope per reply.
-async fn serve(
+// ---------------------------------------------------------------------------
+// Windows: a named pipe. There is no filesystem entry to stage-and-rename, so
+// ownership works differently: `first_pipe_instance` makes the *first* create
+// call the exclusive check-and-claim, atomically, with no race to lose.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+async fn run(pipe_name: PathBuf, idle_timeout: std::time::Duration) -> anyhow::Result<()> {
+    use tokio::net::windows::named_pipe::{NamedPipeServer, PipeMode, ServerOptions};
+
+    let name = pipe_name.to_string_lossy().into_owned();
+
+    let mut server: NamedPipeServer = match ServerOptions::new()
+        .first_pipe_instance(true)
+        .pipe_mode(PipeMode::Byte)
+        .create(name.as_str())
+    {
+        Ok(server) => server,
+        // ERROR_ACCESS_DENIED: another cairnd already holds this pipe name.
+        Err(e) if e.raw_os_error() == Some(5) => {
+            tracing::info!(pipe = %name, "another cairnd is already running");
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    };
+
+    // The pipe instance exists the moment `create` returns, so a client can
+    // open a handle to it immediately — before anyone has called `connect`.
+    // `setup` (opening the store, running recovery) can take real time, and
+    // leaving that first connection unserviced for all of it is exactly the
+    // kind of gap a client should never have to wait out. Run both
+    // concurrently instead of one after the other, so the accept is already
+    // in flight for as much of `setup` as possible.
+    let (daemon, first_connect) = tokio::join!(setup(), server.connect());
+    let daemon = daemon?;
+    first_connect?;
+    tracing::info!(pipe = %name, run_id = %daemon.run_id, "cairnd listening");
+
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+    tokio::spawn(supervise(
+        Arc::clone(&daemon),
+        idle_timeout,
+        shutdown_tx.clone(),
+    ));
+
+    // The join above already delivered this first connection; hand it off
+    // and open the next instance before entering the steady-state loop.
+    {
+        let handled = server;
+        server = ServerOptions::new()
+            .pipe_mode(PipeMode::Byte)
+            .create(name.as_str())?;
+        let daemon = Arc::clone(&daemon);
+        let shutdown = shutdown_tx.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve(daemon, handled, shutdown).await {
+                tracing::debug!(error = %e, "connection ended");
+            }
+        });
+    }
+
+    loop {
+        tokio::select! {
+            connected = server.connect() => {
+                let handled = server;
+                // Stand up the next instance before handling (or discarding)
+                // this one, so a client arriving meanwhile is never refused.
+                server = match ServerOptions::new().pipe_mode(PipeMode::Byte).create(name.as_str())
+                {
+                    Ok(next) => next,
+                    Err(e) => {
+                        tracing::error!(error = %e, "could not open the next pipe instance");
+                        break;
+                    }
+                };
+                match connected {
+                    Ok(()) => {
+                        let daemon = Arc::clone(&daemon);
+                        let shutdown = shutdown_tx.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = serve(daemon, handled, shutdown).await {
+                                tracing::debug!(error = %e, "connection ended");
+                            }
+                        });
+                    }
+                    Err(e) => tracing::warn!(error = %e, "accept failed"),
+                }
+            }
+            _ = shutdown_rx.recv() => {
+                tracing::info!("shutdown requested");
+                break;
+            }
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("interrupted");
+                break;
+            }
+        }
+    }
+
+    shutdown_store(&daemon).await;
+    Ok(())
+}
+
+/// Exit when this daemon has been idle for `idle_timeout` with no active
+/// session.
+///
+/// There is no Unix-style theft check: a named pipe cannot be silently
+/// replaced out from under the process holding it the way a socket *file*
+/// can, so the exclusive create in `run` is the only ownership check needed.
+#[cfg(windows)]
+async fn supervise(
     daemon: Arc<Daemon>,
-    stream: UnixStream,
+    idle_timeout: std::time::Duration,
     shutdown: tokio::sync::mpsc::Sender<()>,
-) -> anyhow::Result<()> {
-    let (read_half, mut write_half) = stream.into_split();
+) {
+    const TICK: std::time::Duration = std::time::Duration::from_secs(2);
+    loop {
+        tokio::time::sleep(TICK).await;
+        if idle_expired(&daemon, idle_timeout).await {
+            tracing::info!(?idle_timeout, "idle with no active session; exiting");
+            let _ = shutdown.send(()).await;
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Shared connection handling.
+// ---------------------------------------------------------------------------
+
+/// One connection: newline-delimited JSON requests, one envelope per reply.
+async fn serve<S>(
+    daemon: Arc<Daemon>,
+    stream: S,
+    shutdown: tokio::sync::mpsc::Sender<()>,
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (read_half, mut write_half) = tokio::io::split(stream);
     let mut lines = BufReader::new(read_half).lines();
 
     while let Some(line) = lines.next_line().await? {

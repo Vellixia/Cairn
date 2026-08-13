@@ -167,9 +167,6 @@ jobs:
   # --------------------------------------------------------------------------
   # Native archives. Each target builds on a runner of its own architecture, so
   # nothing is cross-compiled and nothing needs a cross toolchain.
-  #
-  # Windows is absent deliberately: the daemon and CLI speak over a Unix domain
-  # socket, so Cairn does not run there yet.
   # --------------------------------------------------------------------------
   binaries:
     name: ${{ matrix.target }}
@@ -190,6 +187,8 @@ jobs:
             os: macos-latest
           - target: x86_64-apple-darwin
             os: macos-latest
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -200,14 +199,20 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binaries
+        shell: bash
         env:
           CAIRN_SKILL_BRANCH: ${{ needs.publish-skill.outputs.skill_branch }}
         run: |
           cargo build --release --locked --target ${{ matrix.target }} \
             -p cairn -p cairnd -p cairn-server
 
+      # Windows binaries carry `.exe` and are archived as `.zip`, the native
+      # convention there; every other target keeps `.tar.gz`. `shell: bash`
+      # keeps one script for all four runners — GitHub's Windows images ship
+      # Git Bash for exactly this.
       - name: Package
         id: package
+        shell: bash
         env:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
@@ -215,11 +220,38 @@ jobs:
           name="cairn-v${VERSION}-${{ matrix.target }}"
           stage="dist/$name"
           mkdir -p "$stage"
-          cp target/${{ matrix.target }}/release/cairn "$stage/"
-          cp target/${{ matrix.target }}/release/cairnd "$stage/"
-          cp target/${{ matrix.target }}/release/cairn-server "$stage/"
+
+          ext=""
+          if [[ "${{ matrix.target }}" == *-pc-windows-* ]]; then
+            ext=".exe"
+          fi
+
+          cp "target/${{ matrix.target }}/release/cairn$ext" "$stage/"
+          cp "target/${{ matrix.target }}/release/cairnd$ext" "$stage/"
+          cp "target/${{ matrix.target }}/release/cairn-server$ext" "$stage/"
           cp LICENSE "$stage/"
           cp CHANGELOG.md "$stage/"
+
+          if [[ "${{ matrix.target }}" == *-pc-windows-* ]]; then
+          cat > "$stage/INSTALL.md" <<EOF
+          # Cairn v${VERSION} — ${{ matrix.target }}
+
+          Put \`cairn.exe\` and \`cairnd.exe\` in the same folder and add it to
+          your PATH; \`cairn\` starts the daemon on its own.
+
+              mkdir "\$env:LOCALAPPDATA\Cairn"
+              Copy-Item cairn.exe,cairnd.exe "\$env:LOCALAPPDATA\Cairn"
+              setx PATH "\$env:PATH;\$env:LOCALAPPDATA\Cairn"
+
+          Open a new terminal, then inside a Git repository:
+
+              cairn init
+              cairn connect claude-code
+
+          \`cairn-server.exe\` is only needed if you host shared project memory
+          yourself. Most people do not need it.
+          EOF
+          else
           cat > "$stage/INSTALL.md" <<EOF
           # Cairn v${VERSION} — ${{ matrix.target }}
 
@@ -236,15 +268,28 @@ jobs:
           \`cairn-server\` is only needed if you host shared project memory
           yourself. Most people do not need it.
           EOF
-          tar -C dist -czf "$name.tar.gz" "$name"
-          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [[ "${{ matrix.target }}" == *-pc-windows-* ]]; then
+            # 7-Zip ships with the Windows runner image; `zip` does not.
+            (cd dist && 7z a -tzip -bso0 "../$name.zip" "$name")
+            echo "archive=$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar -C dist -czf "$name.tar.gz" "$name"
+            echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Smoke-test the packaged binaries
+        shell: bash
         env:
           VERSION: ${{ needs.verify.outputs.version }}
         run: |
           set -euo pipefail
           name="cairn-v${VERSION}-${{ matrix.target }}"
+          ext=""
+          if [[ "${{ matrix.target }}" == *-pc-windows-* ]]; then
+            ext=".exe"
+          fi
           # Only a native archive can be executed on this runner.
           case "${{ matrix.target }}" in
             x86_64-apple-darwin)
@@ -252,14 +297,18 @@ jobs:
               exit 0 ;;
           esac
           tmp=$(mktemp -d)
-          tar -C "$tmp" -xzf "$name.tar.gz"
+          if [[ "${{ matrix.target }}" == *-pc-windows-* ]]; then
+            7z x -bso0 -o"$tmp" "$name.zip"
+          else
+            tar -C "$tmp" -xzf "$name.tar.gz"
+          fi
           bin="$tmp/$name"
-          "$bin/cairn" --version
-          "$bin/cairnd" --version
-          "$bin/cairn-server" --version
-          "$bin/cairn" --help > /dev/null
-          "$bin/cairn" --version | grep -q "${VERSION}"
-          "$bin/cairnd" --version | grep -q "${VERSION}"
+          "$bin/cairn$ext" --version
+          "$bin/cairnd$ext" --version
+          "$bin/cairn-server$ext" --version
+          "$bin/cairn$ext" --help > /dev/null
+          "$bin/cairn$ext" --version | grep -q "${VERSION}"
+          "$bin/cairnd$ext" --version | grep -q "${VERSION}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -291,7 +340,7 @@ jobs:
       - name: SHA256SUMS
         working-directory: dist
         run: |
-          sha256sum *.tar.gz | tee SHA256SUMS
+          sha256sum *.tar.gz *.zip | tee SHA256SUMS
           sha256sum -c SHA256SUMS
 
       - name: SBOM
@@ -306,7 +355,7 @@ jobs:
       - name: Attest the release archives
         uses: actions/attest-build-provenance@v2
         with:
-          subject-path: dist/*.tar.gz
+          subject-path: dist/*.tar.gz,dist/*.zip
 
       - uses: actions/upload-artifact@v4
         with:

@@ -7,6 +7,38 @@ All notable changes to Cairn are recorded here. The format follows
 Cairn is pre-1.0. Until 1.0.0, minor versions may change behaviour, storage
 schemas, and the wire protocol without a deprecation period.
 
+## [0.1.0-alpha.3] — 2026-08-12
+
+Windows is a supported platform.
+
+### Added
+
+- **Windows support.** `cairn` and `cairnd` talk over a named pipe instead of
+  a Unix domain socket when built for Windows, and releases publish an
+  `x86_64-pc-windows-msvc` archive alongside the existing macOS and Linux
+  ones. The full test suite runs on `windows-latest` in CI, not only on macOS
+  and Linux.
+- `cairn update` handles what Windows does differently: binaries carry `.exe`,
+  and a running binary cannot be overwritten in place, so it is renamed aside
+  before the new one takes its path.
+
+### Fixed
+
+- **`cairn` no longer leaks its standard handles into the daemon it starts.**
+  Windows `CreateProcess` hands a child every inheritable handle, not only the
+  three named in `STARTUPINFO`, so the daemon received a duplicate of whatever
+  pipe the CLI had been given for stdout and held it open for its whole life.
+  Anything capturing that output — a shell pipeline, or the agent running a
+  capture hook — waited for an EOF that could not arrive.
+
+### Notes
+
+- The API token file is written `0600` on Unix. Windows has no mode bits to
+  set, so there the file is only as private as the user-profile directory
+  holding it.
+- Server-sync tests need a PostgreSQL service container and so still run only
+  on Linux, as before.
+
 ## [0.1.0-alpha.2] — 2026-08-09
 
 Hardening on top of alpha.1: a deployment can now define its own operator, the
@@ -137,5 +169,6 @@ upgradeable to this one, and have been retired.
   may change without a deprecation period before 1.0.0.
 - Sharing requires running your own Cairn server; no hosted service exists.
 
+[0.1.0-alpha.3]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.1

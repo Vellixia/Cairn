@@ -98,6 +98,98 @@ jobs:
           git diff --check
           test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
 
+  # Windows is a first-class target too. Service containers are unavailable
+  # here — no Docker, same as macOS — so the server and sync suites skip
+  # themselves and this job proves the local-first product, which is most of
+  # Cairn, on its named-pipe transport rather than a Unix domain socket.
+  rust-windows:
+    name: rust (windows-latest)
+    runs-on: windows-latest
+    # The named-pipe transport is new; a hang here should fail loudly rather
+    # than run until someone notices and cancels it by hand.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        shell: bash
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Verify the toolchain is the pinned one
+        shell: bash
+        run: |
+          pinned=$(grep -m1 '^channel' rust-toolchain.toml | cut -d'"' -f2)
+          active=$(rustc --version | awk '{print $2}')
+          echo "pinned=$pinned active=$active"
+          test "$pinned" = "$active"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo build --workspace
+
+      # A tight timeout here, not just the job-level one: a hang should fail
+      # fast enough to leave time for the diagnostics step below to actually
+      # run, rather than eating the whole job budget before anything gets a
+      # chance to look at what was going on.
+      - name: Test
+        timeout-minutes: 5
+        env:
+          CAIRN_LOG: debug
+        run: cargo test --workspace --all-targets
+
+      # Only runs if the step above failed or was killed by its timeout.
+      # cargo test's own process tree gets torn down by then, but anything it
+      # wrote to disk survives — the daemon logs in particular, since a
+      # killed process skips Drop and never gets to clean up its temp dir.
+      - name: Dump daemon logs and process state on failure
+        if: failure()
+        shell: pwsh
+        run: |
+          Write-Host "--- cairnd / cairn processes still running? ---"
+          Get-Process -Name cairnd, cairn -ErrorAction SilentlyContinue | Format-Table -AutoSize
+
+          Write-Host "--- daemon logs found under $env:TEMP ---"
+          Get-ChildItem -Path $env:TEMP -Recurse -Include cairnd.log, cairn.log -ErrorAction SilentlyContinue |
+            ForEach-Object {
+              Write-Host "=== $($_.FullName) ==="
+              Get-Content $_.FullName -ErrorAction SilentlyContinue
+              Write-Host ""
+            }
+
+      # The release workflow packages Windows as a .zip, and that path only
+      # ever runs on a tag — so the first time a mistake in it surfaces would
+      # be a release Windows users cannot install. The runner image ships
+      # 7-Zip but not `zip`, which is exactly the kind of assumption worth
+      # holding to a test. This round-trips the archive with the same tooling
+      # the release uses, against binaries this job already built, and stays
+      # entirely under RUNNER_TEMP so the working-tree check below is unaffected.
+      - name: Release packaging round-trip
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/packaging-check"
+          stage="$work/cairn-packaging-check"
+          rm -rf "$work"
+          mkdir -p "$stage"
+          for bin in cairn cairnd cairn-server; do
+            cp "target/debug/$bin.exe" "$stage/"
+          done
+          (cd "$work" && 7z a -tzip -bso0 archive.zip cairn-packaging-check)
+          out="$work/extracted"
+          7z x -bso0 -o"$out" "$work/archive.zip"
+          "$out/cairn-packaging-check/cairn.exe" --version
+          "$out/cairn-packaging-check/cairnd.exe" --version
+          "$out/cairn-packaging-check/cairn-server.exe" --version
+
+      - name: Working tree is clean and free of conflict markers
+        if: success()
+        shell: bash
+        run: |
+          git diff --check
+          test -z "$(git status --porcelain)" || { git status --porcelain; exit 1; }
+
   web:
     name: web
     runs-on: ubuntu-latest

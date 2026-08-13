@@ -22,7 +22,7 @@ Download a release archive, verify it, and put the binaries on your PATH. `cairn
 `cairnd` must live in the same directory — `cairn` starts the daemon itself.
 
 ```bash
-VERSION=0.1.0-alpha.2
+VERSION=0.1.0-alpha.3
 TARGET=aarch64-apple-darwin   # x86_64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu
 
 curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/cairn-v${VERSION}-${TARGET}.tar.gz
@@ -31,6 +31,21 @@ sha256sum --ignore-missing -c SHA256SUMS
 
 tar -xzf cairn-v${VERSION}-${TARGET}.tar.gz
 sudo install -m 0755 cairn-v${VERSION}-${TARGET}/{cairn,cairnd} /usr/local/bin/
+```
+
+On Windows (PowerShell):
+
+```powershell
+$VERSION = "0.1.0-alpha.3"
+$TARGET = "x86_64-pc-windows-msvc"
+
+Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/cairn-v$VERSION-$TARGET.zip" -OutFile cairn.zip
+Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/SHA256SUMS" -OutFile SHA256SUMS
+
+Expand-Archive cairn.zip -DestinationPath .
+mkdir "$env:LOCALAPPDATA\Cairn" -Force
+Copy-Item "cairn-v$VERSION-$TARGET\cairn.exe","cairn-v$VERSION-$TARGET\cairnd.exe" "$env:LOCALAPPDATA\Cairn"
+setx PATH "$env:PATH;$env:LOCALAPPDATA\Cairn"
 ```
 
 Or build from source — nothing is needed beyond the pinned toolchain:
@@ -48,8 +63,9 @@ cairn init                                 # register this repository
 cairn connect claude-code                  # install hooks + the MCP server
 ```
 
-**Supported platforms:** macOS on Apple silicon and Intel, Linux on x86_64 and arm64.
-Windows is not supported — the CLI and daemon talk over a Unix domain socket.
+**Supported platforms:** macOS on Apple silicon and Intel, Linux on x86_64 and arm64,
+Windows on x86_64. The CLI and daemon talk over a Unix domain socket on Unix and a
+named pipe on Windows — either way, nothing is exposed on the network.
 
 `cairn connect` shows exactly what it would change and asks before touching anything. See
 [docs/integrations.md](docs/integrations.md) for the whole surface: which agents are
@@ -122,8 +138,8 @@ open http://127.0.0.1:3100
 Images are published per release, for `linux/amd64` and `linux/arm64`:
 
 ```
-ghcr.io/vellixia/cairn-server:0.1.0-alpha.2
-ghcr.io/vellixia/cairn-web:0.1.0-alpha.2
+ghcr.io/vellixia/cairn-server:0.1.0-alpha.3
+ghcr.io/vellixia/cairn-web:0.1.0-alpha.3
 ```
 
 Only the shared components ship as containers. The local agent stays native.

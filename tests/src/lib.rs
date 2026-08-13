@@ -22,9 +22,7 @@ impl Sandbox {
     pub fn new() -> Self {
         let home = TempDir::new().expect("home");
         let repo = TempDir::new().expect("repo");
-        // Unix socket paths are length-limited; keep this one short.
-        let socket =
-            std::env::temp_dir().join(format!("cairn-t-{}-{}.sock", std::process::id(), unique()));
+        let socket = sandbox_socket();
 
         let home_path = home.path().to_path_buf();
         let s = Self { home, repo, socket };
@@ -432,7 +430,7 @@ impl Sandbox {
     pub fn restart_daemon(&self) {
         self.cairn(&["daemon", "stop"]);
         for _ in 0..100 {
-            if !self.socket.exists() {
+            if !daemon_listening(&self.socket) {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -526,7 +524,12 @@ impl Drop for Sandbox {
                 .env("CAIRN_SOCKET", &self.socket)
                 .output();
         }
-        let _ = std::fs::remove_file(&self.socket);
+        // Named pipes have no filesystem entry to clean up; only Unix leaves
+        // a stale socket file behind when the daemon above did not remove it.
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&self.socket);
+        }
     }
 }
 
@@ -557,7 +560,7 @@ pub fn try_binary(name: &str) -> Option<PathBuf> {
     if dir.ends_with("deps") {
         dir.pop();
     }
-    let candidate = dir.join(name);
+    let candidate = dir.join(binary_file_name(name));
     candidate.exists().then_some(candidate)
 }
 
@@ -568,13 +571,59 @@ pub fn binary(name: &str) -> PathBuf {
     if dir.ends_with("deps") {
         dir.pop();
     }
-    let candidate = dir.join(name);
+    let candidate = dir.join(binary_file_name(name));
     assert!(
         candidate.exists(),
         "{} not built; run `cargo build --workspace` first",
         candidate.display()
     );
     candidate
+}
+
+fn binary_file_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    }
+}
+
+/// A fresh socket path (Unix) or pipe name (Windows). Usable both for a
+/// `Sandbox` and for a test that drives `cairnd` directly.
+#[cfg(unix)]
+pub fn sandbox_socket() -> PathBuf {
+    // Unix socket paths are length-limited; keep this one short.
+    std::env::temp_dir().join(format!("cairn-t-{}-{}.sock", std::process::id(), unique()))
+}
+
+#[cfg(windows)]
+pub fn sandbox_socket() -> PathBuf {
+    PathBuf::from(format!(
+        r"\\.\pipe\cairn-t-{}-{}",
+        std::process::id(),
+        unique()
+    ))
+}
+
+/// Whether something is currently listening on `socket` — used to poll for a
+/// daemon having actually bound (or stopped) rather than assuming a fixed
+/// delay was enough.
+#[cfg(unix)]
+pub fn daemon_listening(socket: &Path) -> bool {
+    std::os::unix::net::UnixStream::connect(socket).is_ok()
+}
+
+#[cfg(windows)]
+pub fn daemon_listening(socket: &Path) -> bool {
+    match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(socket)
+    {
+        Ok(_) => true,
+        // ERROR_PIPE_BUSY: every instance is taken, which still means alive.
+        Err(e) => e.raw_os_error() == Some(231),
+    }
 }
 
 /// A value no two sandboxes can share.
