@@ -397,6 +397,37 @@ impl Sandbox {
         });
     }
 
+    /// Stop the daemon and wait for its socket to go.
+    ///
+    /// The state a boundary can arrive into when the machine is busy, the
+    /// daemon was killed, or an upgrade replaced it mid-session.
+    pub fn stop_daemon(&self) {
+        self.cairn(&["daemon", "stop"]);
+        for _ in 0..200 {
+            if !self.socket.exists() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("the daemon did not stop");
+    }
+
+    /// Rewrite the hook deadlines this sandbox runs under.
+    ///
+    /// A deadline of one millisecond is how an unresponsive handler is induced
+    /// without making the test depend on machine load.
+    pub fn set_deadlines(&self, capture_ms: u64, context_ms: u64) {
+        std::fs::write(
+            self.home.path().join("config.json"),
+            serde_json::json!({
+                "capture_deadline_ms": capture_ms,
+                "context_deadline_ms": context_ms,
+            })
+            .to_string(),
+        )
+        .expect("write config");
+    }
+
     /// Stop and restart the daemon — the deterministic session boundary (D16).
     pub fn restart_daemon(&self) {
         self.cairn(&["daemon", "stop"]);
