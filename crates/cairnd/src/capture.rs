@@ -378,6 +378,8 @@ mod tests {
     }
 
     #[tokio::test]
+    /// Observations are stored as structured fields — command, exit code,
+    /// outcome — rather than as captured prose (FR-012).
     async fn a_failure_observation_is_captured_correctly() {
         // PostToolUseFailure produces an `error` observation. The capture
         // pipeline must handle it without inferring failure from a success.
