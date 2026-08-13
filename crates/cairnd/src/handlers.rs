@@ -1116,3 +1116,491 @@ async fn delete(
     }
     Ok(json!({ "deleted": id, "target": target, "with_memories": with_memories }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testsupport::{self as fx, Repo};
+
+    /// Dispatch is the daemon's whole surface, so drive it rather than the
+    /// private handlers: every reply an agent or the CLI ever sees passes
+    /// through here, including the error envelope.
+    async fn ok(r: &Repo, request: Request) -> serde_json::Value {
+        let envelope = dispatch(&r.daemon, request).await;
+        let json = serde_json::to_value(&envelope).expect("serializable envelope");
+        assert_eq!(json["ok"], true, "expected success, got {json}");
+        json["data"].clone()
+    }
+
+    async fn err(r: &Repo, request: Request) -> serde_json::Value {
+        let envelope = dispatch(&r.daemon, request).await;
+        let json = serde_json::to_value(&envelope).expect("serializable envelope");
+        assert_eq!(json["ok"], false, "expected failure, got {json}");
+        json["error"].clone()
+    }
+
+    #[tokio::test]
+    async fn daemon_status_reports_this_run_and_the_schema_it_opened() {
+        let r = Repo::new().await;
+        let v = ok(&r, Request::DaemonStatus).await;
+        assert_eq!(v["running"], true);
+        assert_eq!(v["run_id"], r.daemon.run_id.to_string());
+        assert_eq!(
+            v["schema_version"],
+            cairn_store::migrate::latest_version(),
+            "the reported schema must be the one actually applied"
+        );
+    }
+
+    /// `init` is idempotent: the same checkout is one project however often it
+    /// is registered (FR-004).
+    #[tokio::test]
+    async fn init_is_idempotent_for_one_checkout() {
+        let r = Repo::new().await;
+        let first = ok(&r, Request::Init { cwd: r.cwd.clone() }).await;
+        let second = ok(&r, Request::Init { cwd: r.cwd.clone() }).await;
+        assert_eq!(first["project"]["id"], second["project"]["id"]);
+
+        assert_eq!(
+            repo::list_projects(&r.daemon.store)
+                .await
+                .expect("projects")
+                .len(),
+            1,
+            "one repository is one project"
+        );
+    }
+
+    /// Repository state is derived from Git, never guessed (Principle VI).
+    #[tokio::test]
+    async fn status_reports_the_real_working_tree() {
+        let r = Repo::new().await;
+        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        assert_eq!(v["repository"]["branch"], "main");
+        assert!(v["repository"]["commit_sha"].is_string());
+        assert_eq!(v["repository"]["untracked"], 0);
+
+        // An untracked file must show up as one, rather than the cached value
+        // from a moment ago.
+        r.write("scratch.txt", "x\n");
+        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        assert_eq!(v["repository"]["untracked"], 1);
+    }
+
+    /// A directory that is not a repository is refused, and creates nothing
+    /// (FR-005).
+    #[tokio::test]
+    async fn a_non_repository_is_refused_and_stores_nothing() {
+        let r = Repo::new().await;
+        let elsewhere = tempfile::TempDir::new().expect("temp dir");
+        let e = err(
+            &r,
+            Request::Status {
+                cwd: elsewhere.path().display().to_string(),
+            },
+        )
+        .await;
+        assert_eq!(e["code"], codes::NOT_A_REPOSITORY);
+        assert!(
+            repo::list_projects(&r.daemon.store)
+                .await
+                .expect("projects")
+                .is_empty(),
+            "a refused directory must leave no project behind"
+        );
+    }
+
+    /// The same agent session key rejoins rather than forking (data-model.md).
+    #[tokio::test]
+    async fn a_repeated_session_key_rejoins_the_same_session() {
+        let r = Repo::new().await;
+        let start = |key: &str| Request::SessionStart {
+            cwd: r.cwd.clone(),
+            agent: "claude-code".into(),
+            agent_session_key: Some(key.to_string()),
+            task_id: None,
+        };
+        let first = ok(&r, start("k1")).await;
+        let second = ok(&r, start("k1")).await;
+        assert_eq!(first["session"]["id"], second["session"]["id"]);
+
+        let list = ok(&r, Request::SessionList { cwd: r.cwd.clone() }).await;
+        assert_eq!(list["sessions"].as_array().expect("sessions").len(), 1);
+    }
+
+    /// An agent with no session identity of its own gets one per connection, so
+    /// manual MCP mode behaves the same way (data-model.md, FR-040).
+    #[tokio::test]
+    async fn an_agent_with_no_key_is_given_one() {
+        let r = Repo::new().await;
+        let v = ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "some-mcp-client".into(),
+                agent_session_key: None,
+                task_id: None,
+            },
+        )
+        .await;
+        let key = v["agent_session_key"].as_str().expect("a generated key");
+        assert!(
+            key.starts_with("cairn-local-"),
+            "a generated key should be recognisable as one: {key}"
+        );
+    }
+
+    /// The session records the branch it actually ran on, so its memory and
+    /// handoff are scoped to the right work (Principle IV).
+    #[tokio::test]
+    async fn a_session_records_the_branch_it_started_on() {
+        let r = Repo::new().await;
+        r.checkout("feature/rate-limit");
+        let v = ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("branched".into()),
+                task_id: None,
+            },
+        )
+        .await;
+        assert_eq!(v["session"]["branch"], "feature/rate-limit");
+    }
+
+    /// A session never ends without a handoff (FR-032).
+    #[tokio::test]
+    async fn ending_a_session_always_writes_a_handoff_first() {
+        let r = Repo::new().await;
+        ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("ends".into()),
+                task_id: None,
+            },
+        )
+        .await;
+
+        let v = ok(
+            &r,
+            Request::SessionEnd {
+                cwd: r.cwd.clone(),
+                session_id: None,
+                agent_session_key: Some("ends".into()),
+                status: SessionStatus::Completed,
+                reason: Some("clear".into()),
+                // The command-line boundary: nothing holds a deadline over it,
+                // so the durable handoff is in the reply this asserts on.
+                wait_for_handoff: true,
+            },
+        )
+        .await;
+        assert_eq!(v["session"]["status"], "completed");
+        assert_eq!(v["handoff"]["trigger"], "session_end");
+        assert!(
+            v["handoff"]["next_step"].is_string(),
+            "a handoff always names a next step: {v}"
+        );
+    }
+
+    /// Selecting a task at session start binds it, including when the session
+    /// already existed (FR-038).
+    #[tokio::test]
+    async fn starting_with_a_task_binds_it_to_an_existing_session() {
+        let r = Repo::new().await;
+        let task = ok(
+            &r,
+            Request::TaskCreate {
+                cwd: r.cwd.clone(),
+                title: "Add rate limiting".into(),
+                goal: "Requests over the limit get 429".into(),
+                acceptance_criteria: vec!["429 above the threshold".into()],
+            },
+        )
+        .await;
+        let task_id: Uuid = task["task"]["id"]
+            .as_str()
+            .expect("task id")
+            .parse()
+            .expect("uuid");
+
+        // Session first, with no task.
+        let first = ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("late-bind".into()),
+                task_id: None,
+            },
+        )
+        .await;
+        assert!(first["session"]["task_id"].is_null());
+
+        // Then the same key again, this time naming the task.
+        let second = ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("late-bind".into()),
+                task_id: Some(task_id),
+            },
+        )
+        .await;
+        assert_eq!(second["session"]["id"], first["session"]["id"]);
+        assert_eq!(second["session"]["task_id"], task_id.to_string());
+    }
+
+    /// A task that does not exist is refused rather than silently ignored.
+    ///
+    /// Pinned to what the daemon *actually* returns, which is not what it
+    /// should: `start_session` is called with the `task_id` before anything
+    /// checks that the task exists, so the foreign key rejects it and the
+    /// failure surfaces as `storage_unavailable`. The existence check in
+    /// `session_start` only runs on the arm that binds a task to an
+    /// already-existing session, so it never sees this case.
+    ///
+    /// The user-visible effect is that `cairn session start --task <unknown>`
+    /// reports a storage problem rather than a missing task. Asserted rather
+    /// than glossed over, so that fixing the order trips this test and the
+    /// expectation is updated with it.
+    #[tokio::test]
+    async fn starting_with_an_unknown_task_is_refused() {
+        let r = Repo::new().await;
+        let e = err(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("bad-task".into()),
+                task_id: Some(Uuid::now_v7()),
+            },
+        )
+        .await;
+        assert_eq!(
+            e["code"],
+            codes::STORAGE_UNAVAILABLE,
+            "unknown-task diagnosis changed; it should now be not_found — update this: {e}"
+        );
+
+        // Whatever the code, nothing is left behind.
+        assert_eq!(
+            repo::list_projects(&r.daemon.store)
+                .await
+                .expect("projects")
+                .len(),
+            1,
+            "the project is created by resolve; the session must not be"
+        );
+        let sessions = ok(&r, Request::SessionList { cwd: r.cwd.clone() }).await;
+        assert!(
+            sessions["sessions"]
+                .as_array()
+                .expect("sessions")
+                .is_empty(),
+            "a refused session start must store no session: {sessions}"
+        );
+    }
+
+    /// Memory carries explicit scope and provenance; it is never global
+    /// (Principle IV, FR-019).
+    #[tokio::test]
+    async fn a_memory_records_its_scope_and_origin_session() {
+        let r = Repo::new().await;
+        ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("remembers".into()),
+                task_id: None,
+            },
+        )
+        .await;
+
+        let v = ok(
+            &r,
+            Request::MemoryCreate {
+                cwd: r.cwd.clone(),
+                agent_session_key: Some("remembers".into()),
+                session_id: None,
+                kind: MemoryType::Convention,
+                scope: Some(MemoryScope::Project),
+                scope_key: None,
+                content: "Errors are returned, never logged and swallowed".into(),
+                evidence_observation_ids: vec![],
+                local_only: false,
+            },
+        )
+        .await;
+        assert_eq!(v["memory"]["scope"], "project");
+        assert_eq!(v["memory"]["type"], "convention");
+        assert!(
+            v["memory"]["origin_session_id"].is_string(),
+            "memory must be traceable to where it came from: {v}"
+        );
+
+        let found = ok(
+            &r,
+            Request::MemorySearch {
+                cwd: r.cwd.clone(),
+                agent_session_key: None,
+                session_id: None,
+                query: MemoryQuery {
+                    query: Some("swallowed".into()),
+                    ..Default::default()
+                },
+            },
+        )
+        .await;
+        assert_eq!(found["results"].as_array().expect("results").len(), 1);
+    }
+
+    /// Deleting something that is not there is a `not_found`, not a crash.
+    #[tokio::test]
+    async fn deleting_an_unknown_memory_is_not_found() {
+        let r = Repo::new().await;
+        let e = err(
+            &r,
+            Request::Delete {
+                cwd: r.cwd.clone(),
+                target: DeleteTarget::Memory,
+                id: Uuid::now_v7(),
+                with_memories: false,
+            },
+        )
+        .await;
+        assert_eq!(e["code"], codes::NOT_FOUND);
+    }
+
+    /// Two worktrees of one repository are one project (FR-004).
+    ///
+    /// The Git *common* directory is the identity, not the worktree path, so a
+    /// second checkout of the same repository must not create a second project.
+    #[tokio::test]
+    async fn a_second_worktree_joins_the_same_project() {
+        let r = Repo::new().await;
+        let first = ok(&r, Request::Init { cwd: r.cwd.clone() }).await;
+
+        let linked = r.dir.path().parent().expect("parent").join("wt-2");
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(r.dir.path())
+            .args(["worktree", "add", "-q"])
+            .arg(&linked)
+            .args(["-b", "second"])
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git worktree add: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+
+        let cwd = std::fs::canonicalize(&linked)
+            .expect("canonical")
+            .display()
+            .to_string();
+        let second = ok(&r, Request::Init { cwd }).await;
+
+        assert_eq!(
+            first["project"]["id"], second["project"]["id"],
+            "one repository is one project, however many worktrees"
+        );
+        let _ = std::fs::remove_dir_all(&linked);
+    }
+
+    /// Excluded paths never reach storage (FR-050, Principle V).
+    ///
+    /// Exclusion is a daemon-side decision, so the CLI cannot be trusted to
+    /// have applied it — this drives the same request an excluded edit produces.
+    #[tokio::test]
+    async fn an_excluded_path_is_not_recorded() {
+        let config = cairn_core::CairnConfig {
+            excluded_paths: vec!["secrets/**".into()],
+            ..Default::default()
+        };
+        let r = Repo::with(config).await;
+        ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("private".into()),
+                task_id: None,
+            },
+        )
+        .await;
+
+        for path in ["secrets/token.txt", "src/fine.rs"] {
+            ok(
+                &r,
+                Request::Observe {
+                    cwd: r.cwd.clone(),
+                    agent_session_key: Some("private".into()),
+                    observation: ObservationInput {
+                        kind: ObservationType::FileChanged,
+                        path: Some(path.into()),
+                        command: None,
+                        exit_code: None,
+                        outcome: None,
+                        summary: format!("Edited {path}"),
+                        details: None,
+                        vendor_tool: None,
+                    },
+                },
+            )
+            .await;
+        }
+
+        let v = ok(&r, Request::Status { cwd: r.cwd.clone() }).await;
+        assert_eq!(
+            v["observation_count"], 1,
+            "only the non-excluded edit should have been stored: {v}"
+        );
+    }
+
+    /// Sessions and projects from one repository are not visible from another.
+    #[tokio::test]
+    async fn two_repositories_do_not_see_each_others_sessions() {
+        let r = Repo::new().await;
+        let other = Repo::new().await;
+        // One daemon, two checkouts: seed the second repository's instance into
+        // the first daemon's cache so both resolve against one store.
+        let instance =
+            cairn_git::discover(std::path::Path::new(&other.cwd)).expect("discover the second");
+        r.daemon
+            .repos
+            .write()
+            .await
+            .insert(other.cwd.clone(), instance);
+
+        ok(
+            &r,
+            Request::SessionStart {
+                cwd: r.cwd.clone(),
+                agent: "claude-code".into(),
+                agent_session_key: Some("here".into()),
+                task_id: None,
+            },
+        )
+        .await;
+
+        let theirs = ok(
+            &r,
+            Request::SessionList {
+                cwd: other.cwd.clone(),
+            },
+        )
+        .await;
+        assert!(
+            theirs["sessions"].as_array().expect("sessions").is_empty(),
+            "memory is project-scoped, never ambient: {theirs}"
+        );
+        let _ = fx::NOWHERE;
+    }
+}

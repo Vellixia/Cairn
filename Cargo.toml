@@ -5,6 +5,7 @@ members = [
     "crates/cairn-git",
     "crates/cairn-store",
     "crates/cairn-integrate",
+    "crates/cairn-sys",
     "crates/cairnd",
     "crates/cairn",
     "crates/cairn-server",
@@ -23,6 +24,7 @@ cairn-core = { path = "crates/cairn-core" }
 cairn-git = { path = "crates/cairn-git" }
 cairn-store = { path = "crates/cairn-store" }
 cairn-integrate = { path = "crates/cairn-integrate" }
+cairn-sys = { path = "crates/cairn-sys" }
 
 anyhow = "1"
 thiserror = "2"
@@ -77,6 +79,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",
 ] }
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

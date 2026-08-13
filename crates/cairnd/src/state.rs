@@ -252,3 +252,178 @@ pub fn repo_state(st: &cairn_git::GitStatus) -> cairn_core::domain::RepositorySt
         untracked: st.untracked,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testsupport as fx;
+
+    #[test]
+    fn git_errors_map_to_the_code_that_tells_the_user_what_to_do() {
+        let e = git_err(cairn_git::GitError::NotARepository("/tmp/x".into()));
+        assert_eq!(e.code, codes::NOT_A_REPOSITORY);
+        assert!(e.message.contains("run Cairn from a repository"));
+
+        // Missing Git is reported as "not a repository" too: from the user's
+        // side the remedy is the same shape, and it must never read as storage
+        // trouble.
+        let e = git_err(cairn_git::GitError::GitMissing("no git".into()));
+        assert_eq!(e.code, codes::NOT_A_REPOSITORY);
+        assert!(e.message.contains("PATH"));
+    }
+
+    #[test]
+    fn a_missing_row_is_not_found_rather_than_storage_trouble() {
+        let e = storage_err(cairn_store::StoreError::NotFound("task".into()));
+        assert_eq!(e.code, codes::NOT_FOUND);
+    }
+
+    #[test]
+    fn repo_state_carries_git_counts_across_unchanged() {
+        let st = cairn_git::GitStatus {
+            branch: "feature".into(),
+            commit_sha: Some("deadbee".into()),
+            staged: 1,
+            unstaged: 2,
+            untracked: 3,
+            changed_files: vec!["a".into()],
+        };
+        let converted = repo_state(&st);
+        assert_eq!(converted.branch, "feature");
+        assert_eq!(converted.commit_sha.as_deref(), Some("deadbee"));
+        assert_eq!(
+            (converted.staged, converted.unstaged, converted.untracked),
+            (1, 2, 3)
+        );
+    }
+
+    /// Discovery is cached, and the cache is actually consulted.
+    ///
+    /// Two `git` subprocesses per captured tool call would not fit the capture
+    /// budget (SC-007), so the instance is discovered once and remembered. The
+    /// test has teeth because the seeded path does not exist: if `repo_instance`
+    /// fell through to discovery it would fail rather than return.
+    #[tokio::test]
+    async fn a_cached_repository_instance_is_returned_without_discovery() {
+        let d = fx::daemon().await;
+        let cwd = format!("{}/cached", fx::NOWHERE);
+        let seeded = RepoInstance {
+            git_common_dir: PathBuf::from(format!("{cwd}/.git")),
+            worktree_path: PathBuf::from(&cwd),
+            name: "cached".into(),
+            remote: Some("github.com/example/cached".into()),
+        };
+        d.repos.write().await.insert(cwd.clone(), seeded.clone());
+
+        let got = d
+            .repo_instance(&cwd)
+            .await
+            .expect("the cache answers for a path discovery could not");
+        assert_eq!(got.name, seeded.name);
+        assert_eq!(got.remote, seeded.remote);
+    }
+
+    /// `cairn init` must be able to invalidate the cache, so a re-registered
+    /// checkout is discovered again rather than served from memory.
+    #[tokio::test]
+    async fn forgetting_a_repository_drops_it_from_the_cache() {
+        let d = fx::daemon().await;
+        let cwd = format!("{}/forgotten", fx::NOWHERE);
+        d.repos.write().await.insert(
+            cwd.clone(),
+            RepoInstance {
+                git_common_dir: PathBuf::from(format!("{cwd}/.git")),
+                worktree_path: PathBuf::from(&cwd),
+                name: "forgotten".into(),
+                remote: None,
+            },
+        );
+
+        d.forget_repo(&cwd).await;
+
+        assert!(d.repos.read().await.get(&cwd).is_none());
+        // And the next call now has to discover, which for this path fails —
+        // proving the entry is genuinely gone rather than merely stale.
+        assert!(
+            d.repo_instance(&cwd).await.is_err(),
+            "a forgotten path must be rediscovered, not served from the cache"
+        );
+    }
+
+    /// Capture is fire-and-forget (H3), so a handoff asked for immediately after
+    /// the last tool call must wait for the write to land — but boundedly, since
+    /// a handoff has to be produced either way.
+    #[tokio::test]
+    async fn quiesce_returns_once_the_last_capture_guard_is_dropped() {
+        let d = fx::daemon().await;
+        let guard = CaptureGuard::new(&d.in_flight_captures);
+        assert_eq!(d.in_flight_captures.load(Ordering::SeqCst), 1);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            drop(guard);
+        });
+
+        let started = std::time::Instant::now();
+        d.quiesce_captures().await;
+
+        assert_eq!(
+            d.in_flight_captures.load(Ordering::SeqCst),
+            0,
+            "quiesce should not return while a capture is still in flight"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(15),
+            "returning instantly would mean it never waited: {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// And it gives up rather than waiting forever.
+    #[tokio::test]
+    async fn quiesce_is_bounded_when_a_capture_never_lands() {
+        let d = fx::daemon().await;
+        // Leaked on purpose: a capture that never completes is exactly the case
+        // the bound exists for.
+        std::mem::forget(CaptureGuard::new(&d.in_flight_captures));
+
+        let started = std::time::Instant::now();
+        d.quiesce_captures().await;
+        let waited = started.elapsed();
+
+        assert!(
+            waited >= std::time::Duration::from_millis(400),
+            "it should actually wait for the in-flight capture, waited {waited:?}"
+        );
+        assert!(
+            waited < std::time::Duration::from_millis(2000),
+            "but it must give up: a handoff is produced either way, waited {waited:?}"
+        );
+        assert_eq!(d.in_flight_captures.load(Ordering::SeqCst), 1);
+    }
+
+    /// The idle-exit check must not fire while a session is still open.
+    #[tokio::test]
+    async fn a_daemon_with_an_active_session_is_not_idle() {
+        let d = fx::daemon().await;
+        assert!(
+            d.no_active_sessions().await,
+            "an empty store has nothing active"
+        );
+
+        let p = fx::project(&d, "busy", None).await;
+        let s = fx::session(&d, &p, "open").await;
+        assert!(!d.no_active_sessions().await);
+
+        repo::end_session(
+            &d.store,
+            s.id,
+            cairn_core::domain::SessionStatus::Completed,
+            Some("done"),
+            SyncPolicy::from_project(&p),
+        )
+        .await
+        .expect("end");
+        assert!(d.no_active_sessions().await);
+    }
+}

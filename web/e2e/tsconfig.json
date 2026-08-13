@@ -1,0 +1,20 @@
+{
+  // The Playwright suite, typechecked.
+  //
+  // The app's own tsconfig excludes `e2e` — it is a Next build config, and the
+  // specs are not part of the bundle. That exclusion also meant `tsc --noEmit`
+  // in CI never looked at these files, so the whole suite could drift without
+  // anything noticing. This config exists so it is checked on its own terms:
+  // Node globals and Playwright types, no Next plugin, no DOM-only assumptions.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "plugins": [],
+    "noEmit": true,
+    "incremental": false,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["**/*.ts"],
+  "exclude": []
+}

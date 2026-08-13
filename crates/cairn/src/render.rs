@@ -193,3 +193,132 @@ pub fn status(s: &StatusPayload) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cairn_core::domain::{HandoffTrigger, RepositoryState};
+    use cairn_core::wire::{
+        Briefing, BriefingMemory, ContextPayload, ProjectSummary, StatusPayload,
+    };
+    use uuid::Uuid;
+
+    fn project_summary() -> ProjectSummary {
+        ProjectSummary {
+            id: Uuid::nil(),
+            name: "demo".to_string(),
+            linked: false,
+            server_project_id: None,
+        }
+    }
+
+    fn clean_repo() -> RepositoryState {
+        RepositoryState {
+            branch: "main".to_string(),
+            commit_sha: Some("abc".to_string()),
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+        }
+    }
+
+    #[test]
+    fn briefing_reports_no_prior_history_when_set() {
+        let p = ContextPayload {
+            briefing: Briefing {
+                project: project_summary(),
+                repository: clean_repo(),
+                task: None,
+                previous_handoff: None,
+                decisions: vec![],
+                known_failures: vec![],
+                memory: BriefingMemory::default(),
+                no_prior_history: true,
+            },
+            estimated_tokens: 100,
+            budget: 1000,
+            truncated: false,
+            omitted_sections: vec![],
+            degraded: false,
+        };
+        let text = briefing(&p);
+        assert!(text.contains("no prior history"), "missing no-history line");
+        assert!(text.contains("Project**: demo"));
+    }
+
+    #[test]
+    fn briefing_notes_truncated_omitted_sections() {
+        let p = ContextPayload {
+            briefing: Briefing {
+                project: project_summary(),
+                repository: clean_repo(),
+                task: None,
+                previous_handoff: None,
+                decisions: vec![],
+                known_failures: vec![],
+                memory: BriefingMemory::default(),
+                no_prior_history: false,
+            },
+            estimated_tokens: 999,
+            budget: 1000,
+            truncated: true,
+            omitted_sections: vec!["decisions".to_string()],
+            degraded: false,
+        };
+        let text = briefing(&p);
+        assert!(
+            text.contains("omitted: decisions"),
+            "missing omitted sections"
+        );
+    }
+
+    #[test]
+    fn handoff_shows_trigger_and_next_step() {
+        let h = Handoff {
+            id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            trigger: HandoffTrigger::SessionEnd,
+            goal: "ship".to_string(),
+            progress: "halfway".to_string(),
+            completed_work: vec![],
+            remaining_work: vec![],
+            changed_files: vec![],
+            decisions: vec![],
+            failures: vec![],
+            tests_executed: vec![],
+            repository_state: clean_repo(),
+            next_step: "run tests".to_string(),
+            agent_note: None,
+            evidence: vec![],
+            created_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        let text = handoff(&h);
+        assert!(text.contains("session_end"), "missing trigger");
+        assert!(text.contains("Next step**: run tests"));
+        assert!(text.contains("0 supporting observation(s)"));
+    }
+
+    #[test]
+    fn status_local_only_sharing_line() {
+        let s = StatusPayload {
+            project: project_summary(),
+            repository: clean_repo(),
+            worktree_path: "/tmp/wt".to_string(),
+            sessions: vec![],
+            integration_mode: "manual".to_string(),
+            daemon: "running".to_string(),
+            observation_count: 0,
+            memory_count: 0,
+            server_url: None,
+            authenticated: false,
+            version: None,
+            local_schema_version: 0,
+            sessions_awaiting_handoff: 0,
+            handoff_synthesis_failures: vec![],
+        };
+        let text = status(&s);
+        assert!(text.contains("Sharing      local only"));
+        assert!(text.contains("Sessions     none active"));
+    }
+}

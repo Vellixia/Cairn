@@ -69,6 +69,17 @@ impl Sandbox {
         self.home.path().join("cairn.sqlite3")
     }
 
+    /// A file SQLite keeps beside the database: `-wal`, `-shm`.
+    ///
+    /// Composed rather than formatted through `Path::display`, which is lossy for
+    /// any path the platform does not hand back as UTF-8 — and would then name a
+    /// file that is not the one we meant.
+    pub fn sidecar(&self, suffix: &str) -> PathBuf {
+        let mut path = self.db_path().into_os_string();
+        path.push(suffix);
+        PathBuf::from(path)
+    }
+
     pub fn write_file(&self, name: &str, contents: &str) {
         let path = self.repo.path().join(name);
         if let Some(parent) = path.parent() {
@@ -94,7 +105,14 @@ impl Sandbox {
 
     /// Run `cairn` inside the sandbox.
     pub fn cairn(&self, args: &[&str]) -> CliResult {
-        let out = Command::new(binary("cairn"))
+        self.cairn_with_env(args, &[])
+    }
+
+    /// `cairn`, with extra environment for a test that needs to change how the
+    /// CLI or the daemon it starts is configured.
+    pub fn cairn_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> CliResult {
+        let mut command = Command::new(binary("cairn"));
+        command
             .args(args)
             .current_dir(self.repo.path())
             .env("CAIRN_HOME", self.home.path())
@@ -104,9 +122,11 @@ impl Sandbox {
             // gives it a home of its own so a test can never reach the
             // developer's real `~/.claude` or `~/.codex`.
             .env("HOME", self.fake_home())
-            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"))
-            .output()
-            .expect("cairn runs");
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"));
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let out = command.output().expect("cairn runs");
         CliResult {
             code: out.status.code().unwrap_or(-1),
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
@@ -395,21 +415,6 @@ impl Sandbox {
         });
     }
 
-    /// Stop the daemon and wait for its socket to go.
-    ///
-    /// The state a boundary can arrive into when the machine is busy, the
-    /// daemon was killed, or an upgrade replaced it mid-session.
-    pub fn stop_daemon(&self) {
-        self.cairn(&["daemon", "stop"]);
-        for _ in 0..200 {
-            if !self.socket.exists() {
-                return;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        panic!("the daemon did not stop");
-    }
-
     /// Rewrite the hook deadlines this sandbox runs under.
     ///
     /// A deadline of one millisecond is how an unresponsive handler is induced
@@ -426,15 +431,28 @@ impl Sandbox {
         .expect("write config");
     }
 
-    /// Stop and restart the daemon — the deterministic session boundary (D16).
-    pub fn restart_daemon(&self) {
+    /// Stop the daemon and wait until it has actually let go of the socket.
+    ///
+    /// `daemon stop` returns as soon as the shutdown is requested, so a caller
+    /// that goes straight on to touching the store would be racing a process
+    /// that still has it open. The budget is the same 5 seconds `settle` allows,
+    /// which is generous enough that a loaded machine cannot make this flake and
+    /// short enough that a daemon which really is stuck is reported as such.
+    pub fn stop_daemon(&self) {
         self.cairn(&["daemon", "stop"]);
-        for _ in 0..100 {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
             if !daemon_listening(&self.socket) {
-                break;
+                return;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
+        panic!("the daemon is still listening on {}", self.socket.display());
+    }
+
+    /// Stop and restart the daemon — the deterministic session boundary (D16).
+    pub fn restart_daemon(&self) {
+        self.stop_daemon();
         // The next command starts it again automatically (FR-046).
         self.cairn(&["daemon", "start"]);
     }
@@ -500,8 +518,7 @@ impl Sandbox {
         self.cairn(&["status"]);
         let mut bytes = std::fs::read(self.db_path()).unwrap_or_default();
         for suffix in ["-wal", "-shm"] {
-            let extra = PathBuf::from(format!("{}{suffix}", self.db_path().display()));
-            if let Ok(mut more) = std::fs::read(&extra) {
+            if let Ok(mut more) = std::fs::read(self.sidecar(suffix)) {
                 bytes.append(&mut more);
             }
         }
@@ -594,6 +611,77 @@ fn binary_file_name(name: &str) -> String {
 pub fn sandbox_socket() -> PathBuf {
     // Unix socket paths are length-limited; keep this one short.
     std::env::temp_dir().join(format!("cairn-t-{}-{}.sock", std::process::id(), unique()))
+}
+
+/// Stops the daemon serving a hand-rolled socket, and removes the socket file.
+///
+/// [`Sandbox`] does this in its own `Drop`, so anything built on `Sandbox` is
+/// already covered. A test that takes a bare [`sandbox_socket`] instead — to
+/// drive `cairn` against a deliberately broken environment, say — has no such
+/// owner, and every one of those was leaking: `cairn` spawns `cairnd` *before*
+/// the request fails, so a daemon bound the socket and then nothing ever stopped
+/// it. The socket lives in the system temp directory rather than inside the
+/// test's own `TempDir`, so it outlived the test too.
+///
+/// Left running they accumulate across runs — 18 of them on the machine where
+/// this was found — competing for CPU with the suite that spawned them and
+/// making timing-sensitive tests fail for a reason that has nothing to do with
+/// the code under test.
+pub struct DaemonSocket {
+    pub path: PathBuf,
+}
+
+impl DaemonSocket {
+    pub fn new() -> Self {
+        Self {
+            path: sandbox_socket(),
+        }
+    }
+}
+
+// Stands in for the `PathBuf` these tests used to hold, so adopting the guard
+// is a one-line change at each call site rather than a rewrite.
+impl std::ops::Deref for DaemonSocket {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<Path> for DaemonSocket {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRef<std::ffi::OsStr> for DaemonSocket {
+    fn as_ref(&self) -> &std::ffi::OsStr {
+        self.path.as_os_str()
+    }
+}
+
+impl Default for DaemonSocket {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for DaemonSocket {
+    fn drop(&mut self) {
+        // Best effort, and never a panic: this runs during unwinding when a
+        // test has already failed, and a panic here would replace that failure
+        // with a SIGABRT.
+        if let Some(exe) = try_binary("cairn") {
+            let _ = Command::new(exe)
+                .args(["daemon", "stop"])
+                .env("CAIRN_SOCKET", &self.path)
+                .output();
+        }
+        #[cfg(unix)]
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 #[cfg(windows)]

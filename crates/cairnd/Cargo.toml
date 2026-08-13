@@ -24,3 +24,6 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 reqwest.workspace = true
 sqlx.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

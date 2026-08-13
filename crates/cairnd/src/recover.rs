@@ -253,3 +253,186 @@ pub async fn sweep_pending_handoffs(daemon: &Daemon, owed_for: std::time::Durati
     }
     produced
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::testsupport as fx;
+    use cairn_core::domain::SessionStatus;
+
+    /// Daemon start is the boundary Cairn can observe (FR-009, D16).
+    ///
+    /// A session left `active` by a previous run is reconciled to `interrupted`
+    /// with a `recovered` handoff written from whatever it managed to record.
+    #[tokio::test]
+    async fn a_session_from_a_previous_run_is_reconciled_with_a_handoff() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "crashed", None).await;
+        // A different run id is what makes it "previous" — there is no liveness
+        // signal to consult, which is the whole point of the design.
+        let s = fx::session_in_run(&d, &p, "orphan", uuid::Uuid::now_v7()).await;
+        fx::observe_edit(&d, &s, "src/lib.rs").await;
+
+        assert_eq!(reconcile_previous_runs(&d).await, 1);
+
+        let reloaded = repo::session(&d.store, s.id).await.expect("session");
+        assert_eq!(reloaded.status, SessionStatus::Interrupted);
+        assert!(
+            reloaded
+                .end_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("previous run"),
+            "the reason should say why: {:?}",
+            reloaded.end_reason
+        );
+
+        let handoff = repo::latest_handoff(&d.store, s.id)
+            .await
+            .expect("query")
+            .expect("a recovered handoff must exist");
+        assert_eq!(handoff.trigger, HandoffTrigger::Recovered);
+        assert!(
+            handoff.changed_files.iter().any(|f| f == "src/lib.rs"),
+            "the handoff carries what the session recorded: {:?}",
+            handoff.changed_files
+        );
+    }
+
+    /// This run's own sessions are not touched.
+    ///
+    /// Reconciliation keys on the run id, so a daemon that restarts must not
+    /// close the session it is currently serving.
+    #[tokio::test]
+    async fn a_session_from_this_run_is_left_alone() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "live", None).await;
+        let s = fx::session(&d, &p, "current").await;
+
+        assert_eq!(reconcile_previous_runs(&d).await, 0);
+        assert_eq!(
+            repo::session(&d.store, s.id).await.expect("session").status,
+            SessionStatus::Active
+        );
+        assert!(
+            repo::latest_handoff(&d.store, s.id)
+                .await
+                .expect("query")
+                .is_none(),
+            "a live session should not get a recovery handoff"
+        );
+    }
+
+    /// Nothing to reconcile is not an error, and writes nothing.
+    #[tokio::test]
+    async fn an_empty_store_reconciles_nothing() {
+        let d = fx::daemon().await;
+        assert_eq!(reconcile_previous_runs(&d).await, 0);
+        assert_eq!(reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT).await, 0);
+        assert_eq!(release_abandoned_claims(&d).await, 0);
+    }
+
+    /// A session nothing has touched is presumed abandoned and closed.
+    ///
+    /// Not because Cairn knows the agent is gone, but because two `active`
+    /// sessions in one worktree make `cairn context` ambiguous — the call an
+    /// agent makes before it knows its own session key.
+    #[tokio::test]
+    async fn an_idle_session_is_reaped_with_a_recovered_handoff() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "idle", None).await;
+        let s = fx::session(&d, &p, "abandoned").await;
+
+        // Zero tolerance rather than a fabricated timestamp: every session is
+        // then idle, which is the condition under test without reaching into
+        // the schema to age a row.
+        assert_eq!(reap_idle_sessions(&d, std::time::Duration::ZERO).await, 1);
+
+        let reloaded = repo::session(&d.store, s.id).await.expect("session");
+        assert_eq!(reloaded.status, SessionStatus::Interrupted);
+        assert!(
+            reloaded
+                .end_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("idle timeout"),
+            "the reason should name the timeout: {:?}",
+            reloaded.end_reason
+        );
+        assert_eq!(
+            repo::latest_handoff(&d.store, s.id)
+                .await
+                .expect("query")
+                .map(|h| h.trigger),
+            Some(HandoffTrigger::Recovered)
+        );
+    }
+
+    /// A session inside the timeout is not reaped.
+    ///
+    /// The timeout is generous on purpose: a developer reading and thinking
+    /// must never be mistaken for one who left.
+    #[tokio::test]
+    async fn a_recently_active_session_is_not_reaped() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "thinking", None).await;
+        let s = fx::session(&d, &p, "reading").await;
+
+        assert_eq!(reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT).await, 0);
+        assert_eq!(
+            repo::session(&d.store, s.id).await.expect("session").status,
+            SessionStatus::Active
+        );
+    }
+
+    /// Reaping is idempotent: a closed session is not closed again.
+    #[tokio::test]
+    async fn reaping_twice_closes_nothing_the_second_time() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "twice", None).await;
+        fx::session(&d, &p, "once").await;
+
+        assert_eq!(reap_idle_sessions(&d, std::time::Duration::ZERO).await, 1);
+        assert_eq!(
+            reap_idle_sessions(&d, std::time::Duration::ZERO).await,
+            0,
+            "an already-interrupted session is no longer active, so not idle"
+        );
+    }
+
+    /// Claims standing at daemon start belong to a run that is already gone.
+    ///
+    /// Nothing is draining yet, so any claim still held is abandoned by
+    /// definition — the same reasoning as session reconciliation, and the same
+    /// absence of a lease (FR-056, D16).
+    #[tokio::test]
+    async fn claims_left_standing_are_handed_back() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "queued", None).await;
+        let target = uuid::Uuid::now_v7();
+        repo::link_project(&d.store, p.id, target)
+            .await
+            .expect("link");
+
+        // Starting a session on a *linked* project queues its provenance — the
+        // project has to be re-read first, because `p` still describes the row
+        // as it was before the link. Observations deliberately never queue:
+        // their content stays local (FR-055).
+        let linked = fx::reload(&d, p.id).await;
+        fx::session_in_run(&d, &linked, "sender", uuid::Uuid::now_v7()).await;
+
+        let claimed = cairn_store::outbox::claim(&d.store, p.id, 100)
+            .await
+            .expect("claim");
+        assert!(
+            !claimed.is_empty(),
+            "precondition: a linked project must have queued something"
+        );
+
+        assert_eq!(
+            release_abandoned_claims(&d).await,
+            claimed.len() as u64,
+            "every standing claim is handed back"
+        );
+    }
+}

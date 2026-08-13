@@ -12,6 +12,8 @@ mod integrations;
 mod recover;
 mod state;
 mod sync;
+#[cfg(test)]
+mod testsupport;
 
 use cairn_core::domain::new_id;
 use cairn_core::wire::{Envelope, Request, WireError};
@@ -44,11 +46,27 @@ async fn main() -> anyhow::Result<()> {
     let socket_path = args.socket.unwrap_or_else(cairn_core::paths::socket_path);
     cairn_core::paths::ensure_home()?;
 
-    run(
+    let result = run(
         socket_path,
         std::time::Duration::from_secs(args.idle_timeout),
     )
-    .await
+    .await;
+
+    // The log is the only place this can be said. `cairn` spawns us detached
+    // with stderr on the null device, so whatever `main` returns is printed to
+    // nobody.
+    if let Err(ref e) = result {
+        tracing::error!(error = %one_line(e), "cairnd exited during startup");
+    }
+    result
+}
+
+/// An error as a single log line.
+///
+/// The CLI reads these lines back one at a time, so a message that wrapped
+/// would arrive truncated at the first newline.
+fn one_line(e: &anyhow::Error) -> String {
+    e.to_string().replace(['\n', '\r'], " ")
 }
 
 /// Open the store, build the daemon state, and run the start-of-day recovery
@@ -63,8 +81,7 @@ async fn main() -> anyhow::Result<()> {
 /// is wasted work, not a correctness problem, since the loser's process (and
 /// everything this spawned) exits immediately after.
 async fn setup() -> anyhow::Result<Arc<Daemon>> {
-    let store = Store::open(&cairn_core::paths::db_path()).await?;
-    let user_id = repo::ensure_local_user(&store).await?;
+    let (store, user_id) = open_store().await?;
     let config = CairnConfig::load();
     let server = ServerCredentials::load(&config);
 
@@ -137,6 +154,54 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
     }
 
     Ok(daemon)
+}
+
+/// Open the local store, naming the reason in the log if it cannot be opened.
+///
+/// A store that will not open is fatal and the daemon exits, so this is the
+/// last chance to say why. The line carries the marker the CLI looks for, which
+/// is what turns `cairnd did not start` into `storage_unavailable` with the
+/// real cause attached (see `cairn_core::startup`).
+async fn open_store() -> anyhow::Result<(Store, uuid::Uuid)> {
+    let opened = async {
+        let store = Store::open(&cairn_core::paths::db_path()).await?;
+        // Part of opening the store as far as a user is concerned: it is the
+        // first read and the first write, so a database that is present but
+        // unusable fails here rather than at `open`.
+        let user_id = repo::ensure_local_user(&store).await?;
+        Ok::<_, anyhow::Error>((store, user_id))
+    }
+    .await;
+
+    opened.inspect_err(|e| record_store_failure(&one_line(e)))
+}
+
+/// Write the store-open failure where the CLI will find it.
+///
+/// Deliberately not a `tracing` event. Tracing is filtered by `CAIRN_LOG`, and
+/// `CAIRN_LOG=off` — or any directive that silences this target — would drop the
+/// one line the CLI depends on, putting a damaged store back to being reported
+/// as a daemon that never started. This line is a contract (see
+/// `cairn_core::startup`), not diagnostics, so no filter gets a say in it. It is
+/// shaped like the lines around it so the log still reads as one thing.
+///
+/// Best effort: a log that cannot be written leaves the CLI with its older,
+/// vaguer message, which is what it had before this line existed.
+fn record_store_failure(reason: &str) {
+    use std::io::Write;
+
+    let line = format!(
+        "{} ERROR cairnd: {}: {reason}\n",
+        chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ"),
+        cairn_core::startup::STORE_OPEN_FAILED
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cairn_core::paths::daemon_log_path())
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 async fn shutdown_store(daemon: &Daemon) {

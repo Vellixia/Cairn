@@ -12,6 +12,7 @@ path = "src/lib.rs"
 [dependencies]
 cairn-core.workspace = true
 cairn-store.workspace = true
+cairn-sys.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tempfile.workspace = true

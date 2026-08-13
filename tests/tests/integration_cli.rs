@@ -38,6 +38,11 @@ fn resource<'a>(health: &'a Value, kind: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("no {kind} resource in {health}"))
 }
 
+/// One command installs and configures the whole integration (FR-043).
+///
+/// Feature 001 proved this from `crates/cairn/src/connect.rs`, which the
+/// adapter boundary replaced. The claim did not change — the command that
+/// carries it did — so the citation moves to the test that exercises it.
 #[test]
 fn connect_installs_every_resource_and_doctor_reports_them_healthy() {
     // US1: from `cairn init` to a connected agent, with the contract and the
