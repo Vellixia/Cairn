@@ -261,8 +261,15 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
                     WireError::new(codes::SERVER_UNAVAILABLE, "server returned no project id")
                 })?
         }
-        // Handled above, before the client was built.
-        (None, false) => unreachable!("bare `link` is answered by link_status"),
+        // Handled above, before the client was built. Returned as an error
+        // rather than `unreachable!`: this is a daemon serving other
+        // sessions, and a refactor that lets this arm be reached should cost
+        // one failed request, not the process.
+        (None, false) => {
+            return Err(WireError::invalid(
+                "bare `link` is answered from local state; this is a bug",
+            ))
+        }
     };
 
     let project = repo::link_project(&d.store, r.project.id, target)
@@ -766,4 +773,155 @@ async fn import_memory(
     .await
     .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::ServerCredentials;
+    use crate::testsupport as fx;
+
+    /// A linked project must report the link it has.
+    ///
+    /// This is the regression this release is named for: bare `cairn link`
+    /// answered `linked: false` unconditionally, so a linked project was told
+    /// it was not linked and pointed at `cairn link --create` — which would
+    /// have made a second shared project for a repository that already had
+    /// one — while `cairn status`, reading the same row, said the opposite.
+    #[tokio::test]
+    async fn link_status_reports_an_existing_link() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "linked", Some("github.com/example/linked")).await;
+        let target = Uuid::now_v7();
+        repo::link_project(&d.store, p.id, target)
+            .await
+            .expect("link");
+
+        let v = link_status(&d, &fx::resolved(&fx::reload(&d, p.id).await))
+            .await
+            .expect("a linked project answers");
+
+        assert_eq!(v["linked"], true);
+        assert_eq!(v["server_project_id"], target.to_string());
+        assert!(
+            v["hint"].as_str().unwrap_or_default().contains("unlink"),
+            "the hint should offer the way out, not the way in: {v}"
+        );
+    }
+
+    /// And it must answer with no server and no token stored.
+    ///
+    /// Whether a project is linked is local state, so reading it must never
+    /// need the network (C1, FR-045). Before the fix this failed outright with
+    /// `no server configured`.
+    #[tokio::test]
+    async fn link_status_answers_offline_for_an_unlinked_project() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "solo", Some("github.com/example/solo")).await;
+
+        let v = link_status(&d, &fx::resolved(&p))
+            .await
+            .expect("an unlinked project answers without a server");
+
+        assert_eq!(v["linked"], false);
+        assert_eq!(
+            v["candidates"].as_array().map(Vec::len),
+            Some(0),
+            "candidates need a server; with none stored the list is empty"
+        );
+    }
+
+    /// A *configured but unreachable* server must not change the answer.
+    ///
+    /// The shared client allows 20s. Spending that on a question answered from
+    /// the local row would make nonsense of calling this offline-capable, so
+    /// the candidate lookup carries its own short budget and the answer goes
+    /// out with an empty list when it expires. Port 1 refuses immediately,
+    /// which exercises the same path without spending the budget.
+    #[tokio::test]
+    async fn an_unreachable_server_still_yields_a_truthful_answer() {
+        let d = fx::daemon_with(
+            cairn_core::CairnConfig::default(),
+            ServerCredentials {
+                url: Some("http://127.0.0.1:1".to_string()),
+                token: Some("irrelevant".to_string()),
+            },
+        )
+        .await;
+        let p = fx::project(&d, "offline", Some("github.com/example/offline")).await;
+
+        let started = std::time::Instant::now();
+        let v = link_status(&d, &fx::resolved(&p))
+            .await
+            .expect("an unreachable server is not an error here");
+
+        assert_eq!(v["linked"], false);
+        assert_eq!(v["candidates"].as_array().map(Vec::len), Some(0));
+        assert!(
+            started.elapsed() < CANDIDATE_LOOKUP_BUDGET,
+            "a refused connection should not spend the lookup budget, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// `linked = 1` with no `server_project_id` is a damaged row.
+    ///
+    /// The schema permits the pair to disagree. Answering "not linked" would
+    /// reintroduce the exact contradiction with `cairn status` that this area
+    /// was fixed for, so the daemon names the problem instead.
+    #[tokio::test]
+    async fn a_damaged_row_is_reported_rather_than_called_unlinked() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "damaged", None).await;
+        sqlx::query("UPDATE projects SET linked = 1, server_project_id = NULL WHERE id = ?1")
+            .bind(p.id.to_string())
+            .execute(d.store.pool())
+            .await
+            .expect("damage the row");
+
+        let err = link_status(&d, &fx::resolved(&fx::reload(&d, p.id).await))
+            .await
+            .expect_err("a damaged row must not be reported as a clean answer");
+
+        assert_eq!(err.code, codes::STORAGE_UNAVAILABLE);
+        assert!(
+            err.message.contains("no shared project id"),
+            "the error should say what is actually wrong: {}",
+            err.message
+        );
+    }
+
+    /// `unlink` leaves `server_project_id` set, so the pair disagrees the other
+    /// way round. That direction is *not* damage — it is a project that used to
+    /// be shared — and must read as simply unlinked.
+    #[tokio::test]
+    async fn a_project_that_was_unlinked_reads_as_unlinked() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "formerly", None).await;
+        repo::link_project(&d.store, p.id, Uuid::now_v7())
+            .await
+            .expect("link");
+        repo::unlink_project(&d.store, p.id).await.expect("unlink");
+
+        let reloaded = fx::reload(&d, p.id).await;
+        assert!(
+            reloaded.server_project_id.is_some(),
+            "precondition: unlink keeps the id, which is what makes this case real"
+        );
+
+        let v = link_status(&d, &fx::resolved(&reloaded))
+            .await
+            .expect("an unlinked project answers");
+        assert_eq!(v["linked"], false);
+    }
+
+    #[test]
+    fn urlencode_escapes_what_a_remote_can_contain() {
+        assert_eq!(
+            urlencode("github.com/example/repo"),
+            "github.com%2Fexample%2Frepo"
+        );
+        assert_eq!(urlencode("a b"), "a%20b");
+        assert_eq!(urlencode("plain-name_1.git"), "plain-name_1.git");
+    }
 }

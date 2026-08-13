@@ -44,12 +44,19 @@ impl Stage {
 
 fn sink() -> Option<&'static str> {
     static PATH: OnceLock<Option<String>> = OnceLock::new();
-    PATH.get_or_init(|| {
-        std::env::var("CAIRN_CONTENTION_LOG")
-            .ok()
-            .filter(|p| !p.is_empty())
-    })
-    .as_deref()
+    PATH.get_or_init(|| sink_path(std::env::var("CAIRN_CONTENTION_LOG").ok().as_deref()))
+        .as_deref()
+}
+
+/// The path reporting writes to, for a given raw value of the variable.
+///
+/// Split out from [`sink`] so it can be tested. `sink` memoises in a
+/// `OnceLock`, which is right for a per-process setting but means a test that
+/// sets the variable and calls [`enabled`] observes only whatever the first
+/// caller in the process happened to cache — it proves nothing about the
+/// decision itself. This is the decision.
+fn sink_path(raw: Option<&str>) -> Option<String> {
+    raw.filter(|p| !p.is_empty()).map(str::to_owned)
 }
 
 /// True when contention reporting is switched on.
@@ -138,14 +145,22 @@ mod tests {
         assert_eq!(Stage::Unknown.as_str(), "unknown");
     }
 
+    /// Reporting is opt-in, and an empty value is not an opt-in.
+    ///
+    /// Asserted against `sink_path` rather than `enabled`, which reads a
+    /// `OnceLock`: a test that set the variable and called `enabled` would be
+    /// asserting on whatever the process's first caller cached, and would
+    /// pass or fail on test *order* and on whether the developer happens to
+    /// have the variable exported. This has neither dependency.
     #[test]
-    fn enabled_is_off_by_default() {
-        let prev = std::env::var("CAIRN_CONTENTION_LOG").ok();
-        std::env::remove_var("CAIRN_CONTENTION_LOG");
-        assert!(!enabled(), "contention reporting should default to off");
-        if let Some(v) = prev {
-            std::env::set_var("CAIRN_CONTENTION_LOG", v);
-        }
+    fn reporting_is_off_unless_a_non_empty_path_is_given() {
+        assert_eq!(sink_path(None), None, "unset means off");
+        assert_eq!(sink_path(Some("")), None, "empty is not an opt-in");
+        assert_eq!(
+            sink_path(Some("/tmp/contention.log")),
+            Some("/tmp/contention.log".to_string()),
+            "a path switches reporting on"
+        );
     }
 
     #[tokio::test]

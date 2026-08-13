@@ -42,6 +42,26 @@ pub fn kill(pid: i64) -> bool {
 /// this host's init does. On one that does not, `wait_for_exit` would never
 /// return true and a working `SIGKILL` would look broken.
 pub fn is_running(pid: i64) -> bool {
+    if is_zombie(pid) {
+        return false;
+    }
+    // SAFETY: `kill(2)` with signal 0 performs no signal delivery; it is the
+    // standard liveness check. `ESRCH` means "no such process".
+    unsafe {
+        libc::kill(pid as i32, 0) == 0
+            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+}
+
+/// Whether `pid` has exited but not yet been reaped.
+///
+/// Implemented for every Unix, not only Linux. The hazard is the same
+/// everywhere — `kill(pid, 0)` succeeds for a zombie, so a hard-killed
+/// daemon reads as alive forever and `wait_for_exit` never returns true —
+/// and macOS is the platform where it is most likely to bite, because it is
+/// the one the local agent is developed on. Linux reads `/proc/<pid>/stat`;
+/// elsewhere `ps` reports the state directly.
+fn is_zombie(pid: i64) -> bool {
     #[cfg(target_os = "linux")]
     {
         if let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) {
@@ -49,17 +69,22 @@ pub fn is_running(pid: i64) -> bool {
             // contain both spaces and parentheses, so the state letter is
             // found after the *last* ')', not by splitting on whitespace.
             if let Some((_, rest)) = stat.rsplit_once(')') {
-                if rest.split_whitespace().next() == Some("Z") {
-                    return false;
-                }
+                return rest.split_whitespace().next() == Some("Z");
             }
         }
+        false
     }
-    // SAFETY: `kill(2)` with signal 0 performs no signal delivery; it is the
-    // standard liveness check. `ESRCH` means "no such process".
-    unsafe {
-        libc::kill(pid as i32, 0) == 0
-            || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `ps -o state=` prints just the state column. On Darwin and the BSDs
+        // a zombie is `Z`, possibly with a suffix flag such as `Z+`.
+        let out = std::process::Command::new("ps")
+            .args(["-o", "state=", "-p", &pid.to_string()])
+            .output();
+        match out {
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().starts_with('Z'),
+            Err(_) => false,
+        }
     }
 }
 
@@ -103,8 +128,9 @@ fn list_proc_linux(name_substring: &str) -> Vec<i64> {
             Ok(p) => p,
             Err(_) => continue,
         };
-        // The cmdline file is NUL-separated argv. Read a small prefix only;
-        // we just need to match the executable name.
+        // The cmdline file is NUL-separated argv, and short — argv[0] is all
+        // we match on, but reading the whole file is cheaper than seeking
+        // inside procfs.
         let cmdline = match std::fs::read(format!("/proc/{pid}/cmdline")) {
             Ok(b) => b,
             Err(_) => continue,
@@ -143,8 +169,7 @@ fn env_contains(pid: i64, key: &str, value: &str) -> bool {
         if let Ok(bytes) = std::fs::read(format!("/proc/{pid}/environ")) {
             // `/proc/<pid>/environ` is NUL-separated `KEY=VALUE` records.
             for record in bytes.split(|b| *b == 0) {
-                let s = String::from_utf8_lossy(record);
-                if s.starts_with(&format!("{key}=")) && s.as_ref() == format!("{key}={value}") {
+                if String::from_utf8_lossy(record) == format!("{key}={value}") {
                     return true;
                 }
             }
@@ -158,10 +183,81 @@ fn env_contains(pid: i64, key: &str, value: &str) -> bool {
     match out {
         Ok(o) => {
             let stdout = String::from_utf8_lossy(&o.stdout);
-            stdout
-                .split_whitespace()
-                .any(|entry| entry == format!("{key}={value}"))
+            contains_token(&stdout, &format!("{key}={value}"))
         }
         Err(_) => false,
+    }
+}
+
+/// Whether `haystack` contains `needle` as a whitespace-delimited token.
+///
+/// `ps eww` prints the environment space-separated, with no quoting, so there
+/// is no way to split it back into records: a value containing a space would
+/// be torn in two. Matching the whole `KEY=VALUE` needle and only checking
+/// its *boundaries* sidesteps that — the spaces inside the value are part of
+/// what we are looking for. Temporary directories with a space in the path
+/// are the case this exists for.
+fn contains_token(haystack: &str, needle: &str) -> bool {
+    let bytes = haystack.as_bytes();
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(needle) {
+        let start = from + offset;
+        let end = start + needle.len();
+        let before_ok = start == 0 || bytes[start - 1].is_ascii_whitespace();
+        let after_ok = end == bytes.len() || bytes[end].is_ascii_whitespace();
+        if before_ok && after_ok {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_token_is_matched_only_at_its_boundaries() {
+        assert!(contains_token("A=1 B=2", "A=1"));
+        assert!(contains_token("A=1 B=2", "B=2"));
+        assert!(contains_token("A=1", "A=1"));
+        // A prefix of a longer value must not match: this is what stops one
+        // sandbox's socket matching another whose path extends it.
+        assert!(!contains_token("SOCK=/tmp/a-1", "SOCK=/tmp/a"));
+        assert!(!contains_token("XA=1", "A=1"));
+    }
+
+    #[test]
+    fn a_value_containing_a_space_still_matches() {
+        // The case `split_whitespace` got wrong.
+        assert!(contains_token(
+            "HOME=/var/my folder/x SHELL=/bin/zsh",
+            "HOME=/var/my folder/x"
+        ));
+    }
+
+    #[test]
+    fn a_killed_but_unreaped_child_is_not_running() {
+        // A zombie: exited, but still in the process table because nothing
+        // has reaped it. `kill(pid, 0)` succeeds for one, so without the
+        // zombie probe this would report the process alive forever and
+        // `wait_for_exit` would never return.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a long-lived child");
+        let pid = child.id() as i64;
+        assert!(is_running(pid), "the child should start out running");
+
+        assert!(kill(pid), "SIGKILL should be delivered");
+
+        // Deliberately not reaped yet, so the entry lingers as a zombie.
+        assert!(
+            wait_for_exit(pid, std::time::Duration::from_secs(2)),
+            "an unreaped, killed child must be reported as not running"
+        );
+
+        child.wait().expect("reap the child");
     }
 }
