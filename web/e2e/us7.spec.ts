@@ -1,26 +1,30 @@
 import { expect, test } from "@playwright/test";
 import { openNav } from "./nav";
-import { API, seed, type Seeded } from "./seed";
+import {
+  SESSION_COOKIE,
+  createProject,
+  newToken,
+  registerAndLogin,
+  seed,
+  type Seeded,
+} from "./seed";
 
 /**
  * T073 — the four Independent Test actions for US7, without a terminal:
  * find the project, read its handoff, search memory, delete a memory (SC-011).
+ *
+ * Between them these cover the surface the web UI is required to provide — a
+ * projects list, a project overview, a tasks view, sessions and handoffs, and
+ * memory search (FR-060) — and deleting a memory from the browser (FR-062).
  */
 let fixture: Seeded;
 
-/** The server's web session cookie — `auth::COOKIE_NAME` on the Rust side. */
-const SESSION_COOKIE = "cairn_session";
-
-/**
- * The session value out of a `set-cookie` header.
- *
- * Split on the *first* `=` only: the value is opaque and may itself contain
- * `=`, which `split("=")[1]` would silently truncate.
- */
-function sessionValue(setCookie: string | null): string {
-  const pair = (setCookie ?? "").split(";")[0];
-  const eq = pair.indexOf("=");
-  return eq === -1 ? "" : pair.slice(eq + 1);
+/** Put a signed-in session on the browser context. */
+async function signInAs(page: import("@playwright/test").Page, sessionValue: string) {
+  await page.context().clearCookies();
+  await page.context().addCookies([
+    { name: SESSION_COOKIE, value: sessionValue, domain: "127.0.0.1", path: "/" },
+  ]);
 }
 
 test.beforeAll(async () => {
@@ -110,57 +114,31 @@ test("tasks and sync status are reachable without a terminal", async ({
 test("a non-member is refused rather than shown an empty page", async ({
   page,
 }) => {
-  // Register a second user who is NOT a member of the fixture project.
   const stranger = `stranger-${Date.now()}@example.test`;
   const password = "hunter2hunter2";
-  await fetch(`${API}/api/auth/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: stranger, display_name: "Stranger", password }),
-  });
-  const login = await fetch(`${API}/api/auth/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: stranger, password }),
-  });
-  // Set the stranger's cookie and try to access the fixture project.
-  await page.context().addCookies([
-    {
-      name: SESSION_COOKIE,
-      value: sessionValue(login.headers.get("set-cookie")),
-      domain: "127.0.0.1",
-      path: "/",
-    },
-  ]);
+  const session = await registerAndLogin(stranger, password, "Stranger");
+  await signInAs(page, session);
+
+  // Prove the stranger is genuinely *signed in* first. Without this the test
+  // could not fail for the right reason: an empty or rejected cookie produces
+  // the same refusal as a real non-member, so a broken registration would
+  // still look like a pass.
+  await page.goto("/");
+  await expect(page.getByTestId("project-list")).toBeVisible();
+  await expect(page.getByText(/no projects|create a project/i).first()).toBeVisible();
+
+  // Signed in, member of nothing — now the fixture's project must be refused.
   await page.goto(`/projects/${fixture.projectId}`);
-  // The UI should show a refusal, not an empty project page.
   await expect(page.getByText(/forbidden|not found|access denied/i).first()).toBeVisible();
 });
 
 test("the projects list shows an empty state when there are none", async ({
   page,
 }) => {
-  // Register a fresh user with no projects.
   const empty = `empty-${Date.now()}@example.test`;
-  const password = "hunter2hunter2";
-  await fetch(`${API}/api/auth/register`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: empty, display_name: "Empty", password }),
-  });
-  const login = await fetch(`${API}/api/auth/login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email: empty, password }),
-  });
-  await page.context().addCookies([
-    {
-      name: SESSION_COOKIE,
-      value: sessionValue(login.headers.get("set-cookie")),
-      domain: "127.0.0.1",
-      path: "/",
-    },
-  ]);
+  const session = await registerAndLogin(empty, "hunter2hunter2", "Empty");
+  await signInAs(page, session);
+
   await page.goto("/");
   await expect(page.getByTestId("project-list")).toBeVisible();
   await expect(page.getByText(/no projects|create a project/i).first()).toBeVisible();
@@ -168,32 +146,22 @@ test("the projects list shows an empty state when there are none", async ({
 
 test("the sessions list shows an empty state when there are none", async ({
   page,
-}, testInfo) => {
-  // Create a project with no sessions. `beforeEach` has already signed in
-  // through the UI, so the real session cookie is on the browser context —
-  // an email address is not a credential and was never going to authenticate.
+}) => {
+  // `beforeEach` has already signed in through the UI, so the real session
+  // cookie is on the browser context — an email address is not a credential
+  // and was never going to authenticate.
   const cookies = await page.context().cookies();
   const session = cookies.find((c) => c.name === SESSION_COOKIE);
   expect(session, "beforeEach should have left a session cookie").toBeTruthy();
 
-  const tokenBody = await fetch(`${API}/api/tokens`, {
-    method: "POST",
-    headers: {
-      cookie: `${SESSION_COOKIE}=${session?.value ?? ""}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({ name: "empty-sessions-test" }),
-  }).then(r => r.json());
-  const token = tokenBody.token as string;
-  const auth = { authorization: `Bearer ${token}` };
+  const token = await newToken(session?.value ?? "", "empty-sessions-test");
+  const projectId = await createProject(
+    token,
+    `Empty Sessions ${Date.now()}`,
+    "github.com/example/empty",
+  );
 
-  const project = await fetch(`${API}/api/projects`, {
-    method: "POST",
-    headers: { ...auth, "content-type": "application/json" },
-    body: JSON.stringify({ name: `Empty Sessions ${Date.now()}`, repository_remote: "github.com/example/empty" }),
-  }).then(r => r.json());
-
-  await page.goto(`/projects/${project.id}/sessions`);
+  await page.goto(`/projects/${projectId}/sessions`);
   await expect(page.getByTestId("session-list")).toBeVisible();
   await expect(page.getByText(/no sessions|no handoffs/i).first()).toBeVisible();
 });
