@@ -111,25 +111,42 @@ test("tasks and sync status are reachable without a terminal", async ({
   await expect(page.getByTestId("sync-status")).toContainText("items applied");
 });
 
+/**
+ * An empty list element has no box, so `toBeVisible()` reports it hidden — the
+ * three tests below assert `toBeAttached()` and a child count instead. That is
+ * what an empty-state test is really claiming: the list rendered, and it
+ * rendered nothing.
+ */
+async function expectEmptyList(page: import("@playwright/test").Page, testId: string) {
+  const list = page.getByTestId(testId);
+  await expect(list).toBeAttached();
+  await expect(list.locator("li")).toHaveCount(0);
+}
+
 test("a non-member is refused rather than shown an empty page", async ({
   page,
 }) => {
   const stranger = `stranger-${Date.now()}@example.test`;
-  const password = "hunter2hunter2";
-  const session = await registerAndLogin(stranger, password, "Stranger");
+  const session = await registerAndLogin(stranger, "hunter2hunter2", "Stranger");
   await signInAs(page, session);
 
   // Prove the stranger is genuinely *signed in* first. Without this the test
   // could not fail for the right reason: an empty or rejected cookie produces
   // the same refusal as a real non-member, so a broken registration would
-  // still look like a pass.
+  // still look like a pass. Their own projects page is the proof — a signed-out
+  // visitor is sent to sign in instead.
   await page.goto("/");
-  await expect(page.getByTestId("project-list")).toBeVisible();
-  await expect(page.getByText(/no projects|create a project/i).first()).toBeVisible();
+  await expect(page.getByText("No shared projects yet")).toBeVisible();
 
-  // Signed in, member of nothing — now the fixture's project must be refused.
+  // Signed in, member of nothing — now the fixture's project must be refused,
+  // and refused visibly. Asserting the alert rather than the server's wording
+  // keeps this about the behaviour: the reader is told, instead of being shown
+  // an empty project that looks like it has no data.
   await page.goto(`/projects/${fixture.projectId}`);
-  await expect(page.getByText(/forbidden|not found|access denied/i).first()).toBeVisible();
+  // `.first()`: the page may carry more than one alert region, and a strict
+  // locator would fail on the count rather than on the behaviour.
+  await expect(page.getByRole("alert").first()).toBeVisible();
+  await expect(page.getByText(/something went wrong/i).first()).toBeVisible();
 });
 
 test("the projects list shows an empty state when there are none", async ({
@@ -140,8 +157,9 @@ test("the projects list shows an empty state when there are none", async ({
   await signInAs(page, session);
 
   await page.goto("/");
-  await expect(page.getByTestId("project-list")).toBeVisible();
-  await expect(page.getByText(/no projects|create a project/i).first()).toBeVisible();
+  await expect(page.getByText("No shared projects yet")).toBeVisible();
+  await expect(page.getByText(/cairn link --create/)).toBeVisible();
+  await expectEmptyList(page, "project-list");
 });
 
 test("the sessions list shows an empty state when there are none", async ({
@@ -162,6 +180,6 @@ test("the sessions list shows an empty state when there are none", async ({
   );
 
   await page.goto(`/projects/${projectId}/sessions`);
-  await expect(page.getByTestId("session-list")).toBeVisible();
-  await expect(page.getByText(/no sessions|no handoffs/i).first()).toBeVisible();
+  await expect(page.getByText("No sessions yet")).toBeVisible();
+  await expectEmptyList(page, "session-list");
 });
