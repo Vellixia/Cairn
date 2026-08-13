@@ -8,7 +8,7 @@
 //! SC-124).
 
 use cairn_e2e::Sandbox;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 /// A sandbox with a fake home holding the agents named.
 fn with_agents(agents: &[&str]) -> Sandbox {
@@ -539,4 +539,67 @@ fn agents_reports_detection_without_touching_anything() {
         out.stdout
     );
     assert_eq!(before, s.checksum_tree(), "detection modified something");
+}
+
+#[test]
+fn repair_restores_what_cairn_owns_and_connects_nothing_new() {
+    // Found by walking the quickstart: `cairn repair` reached every *detected*
+    // agent rather than every *connected* one, so a developer who had
+    // connected Claude Code and then ran `cairn repair` silently got Codex and
+    // OpenCode installed too — an opt-in FR-164 requires, performed without
+    // one. It also never converged: each run discovered more to install.
+    let s = Sandbox::new();
+    for a in ["claude-code", "codex", "opencode"] {
+        s.install_agent(a);
+    }
+    s.must(&["init"]);
+    s.must(&["connect", "claude-code", "--yes"]);
+
+    // Break the one thing Cairn does own.
+    let hooks = s.repo_dir().join(".claude").join("settings.local.json");
+    let mut value: Value = serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
+    value["hooks"] = json!({});
+    std::fs::write(&hooks, value.to_string()).unwrap();
+
+    let before = s.checksum_tree();
+    s.must(&["repair"]);
+
+    // The broken resource is back.
+    let after = std::fs::read_to_string(&hooks).unwrap();
+    assert!(
+        after.contains("cairn hook"),
+        "repair did not restore: {after}"
+    );
+
+    // And nothing was installed for an agent nobody connected.
+    for path in [
+        s.fake_home().join(".codex").join("config.toml"),
+        s.fake_home().join(".codex").join("hooks.json"),
+        s.fake_home()
+            .join(".config")
+            .join("opencode")
+            .join("plugin")
+            .join("cairn.js"),
+        s.repo_dir().join("AGENTS.md"),
+    ] {
+        assert!(
+            !path.exists(),
+            "repair connected an agent the developer never asked for: {}",
+            path.display()
+        );
+    }
+
+    // Repair converges: a second run has nothing to do.
+    let out = s.must(&["repair"]);
+    assert!(
+        out.stdout.contains("nothing to do"),
+        "a second repair still had work: {}",
+        out.stdout
+    );
+
+    // Naming an unconnected agent explicitly still repairs it, because that is
+    // an explicit request.
+    s.must(&["connect", "codex", "--yes"]);
+    let _ = before;
+    s.must(&["repair", "codex"]);
 }

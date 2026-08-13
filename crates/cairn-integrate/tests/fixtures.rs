@@ -995,3 +995,136 @@ fn two_owners_sharing_one_slot_is_refused_rather_than_sequenced() {
         "claude",
     ));
 }
+
+// ---------------------------------------------------------------------------
+// T086 — a resource two agents share (FR-243, SC-137)
+// ---------------------------------------------------------------------------
+//
+// Codex and OpenCode both read `AGENTS.md`, and both read Claude Code's Skill
+// directory. So "disconnect Codex" cannot mean "delete the AGENTS.md block" —
+// OpenCode is still using it. Removal is by *binding*: the agent's dependency
+// goes, and the resource goes with the last dependency on it.
+
+/// The bindings on one physical resource, and what removing one does.
+#[derive(Default)]
+struct Bindings {
+    /// Which agents depend on this resource.
+    serves: Vec<AgentId>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Unbound {
+    /// The agent's dependency went; the resource stays for the others.
+    ResourceKept,
+    /// That was the last dependency, so the resource goes too.
+    ResourceRemoved,
+    Nothing,
+}
+
+impl Bindings {
+    fn bind(&mut self, agent: AgentId) {
+        if !self.serves.contains(&agent) {
+            self.serves.push(agent);
+        }
+    }
+    fn unbind(&mut self, agent: AgentId) -> Unbound {
+        let Some(i) = self.serves.iter().position(|a| *a == agent) else {
+            return Unbound::Nothing;
+        };
+        self.serves.remove(i);
+        if self.serves.is_empty() {
+            Unbound::ResourceRemoved
+        } else {
+            Unbound::ResourceKept
+        }
+    }
+}
+
+#[test]
+fn shared_binding() {
+    // Two agents on one instruction file, disconnected one at a time.
+    let dir = tempfile::tempdir().expect("temp");
+    let path = dir.path().join("AGENTS.md");
+    let developers = "# House rules\n\nRun the tests before committing.\n";
+    std::fs::write(&path, developers).unwrap();
+
+    // Install the managed block once; both agents bind to it.
+    let body = Contract::canonical().block_body();
+    let installed = markdown::upsert(
+        &path.display().to_string(),
+        developers,
+        CONTRACT_ID,
+        1,
+        &body,
+    )
+    .expect("install");
+    std::fs::write(&path, installed.text().unwrap_or(developers)).unwrap();
+
+    let mut bindings = Bindings::default();
+    bindings.bind(AgentId::Codex);
+    bindings.bind(AgentId::Opencode);
+
+    // The first disconnect unbinds and writes nothing.
+    let before = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(bindings.unbind(AgentId::Codex), Unbound::ResourceKept);
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        before,
+        "the first disconnect changed the file the other agent still needs"
+    );
+    assert!(before.contains(CONTRACT_ID), "the block went early");
+    assert_eq!(bindings.serves, vec![AgentId::Opencode]);
+
+    // The last one removes it — and leaves the developer's own file.
+    assert_eq!(bindings.unbind(AgentId::Opencode), Unbound::ResourceRemoved);
+    let removed = markdown::remove(&path.display().to_string(), &before, CONTRACT_ID)
+        .expect("remove")
+        .text()
+        .unwrap_or(&before)
+        .to_string();
+    std::fs::write(&path, &removed).unwrap();
+    assert_eq!(
+        removed, developers,
+        "removing the last binding did not restore the developer's file"
+    );
+
+    // And unbinding an agent that never bound does nothing at all.
+    assert_eq!(bindings.unbind(AgentId::ClaudeCode), Unbound::Nothing);
+}
+
+#[test]
+fn manager_state_survives() {
+    // SC-137's other half: an agent bound to a manager-distributed resource
+    // can be disconnected without Cairn touching the manager's state — or the
+    // application's own entry, which is the manager's to withdraw (FR-149,
+    // FR-233).
+    let machine = Machine::new();
+    let m = CcSwitch;
+    for app in m.target_apps() {
+        machine.app_receives_mcp(app);
+    }
+    let manager_before = machine.manager_state();
+    let claude =
+        cairn_integrate::scope::manager_location(&machine.env, "claude", ResourceKind::Mcp)
+            .unwrap();
+    let app_before = std::fs::read_to_string(&claude).unwrap();
+
+    // Disconnect: Cairn reports the manual step and writes nothing.
+    let action = cc_switch::removal_action(ResourceKind::Mcp, &["claude".into()]);
+    assert_eq!(action.status, "awaiting_user");
+    assert!(action.uri.is_none(), "a removal link was invented");
+
+    assert_eq!(
+        manager_before,
+        machine.manager_state(),
+        "disconnect wrote to the manager's own storage"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&claude).unwrap(),
+        app_before,
+        "disconnect removed a manager-owned entry behind the manager's back"
+    );
+    // The binding is still reported as present, because it is.
+    let bindings = m.inspect_bindings(&machine.env, &["claude".into()], ResourceKind::Mcp);
+    assert_eq!(bindings[0].condition, HealthCondition::Healthy);
+}

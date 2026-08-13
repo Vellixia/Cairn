@@ -1209,10 +1209,24 @@ pub async fn repair(opts: &Options) -> Result<Output, WireError> {
     let snap = snapshot().await?;
     let owed = boundary_owed().await;
 
+    // Repair restores what Cairn *owns*. An agent the developer never
+    // connected owns nothing, so a bare `cairn repair` that reached every
+    // detected agent would silently connect them — which is the opt-in
+    // FR-164 exists to require. Naming one explicitly still repairs it.
+    let connected: Vec<AgentId> = detected_agents(&env)
+        .into_iter()
+        .filter(|a| snap.installs.iter().any(|r| r.agent == *a))
+        .collect();
     let targets: Vec<AgentId> = match opts.agent {
         Some(a) => vec![a],
-        None => detected_agents(&env),
+        None => connected,
     };
+    if targets.is_empty() {
+        return Ok(Output::with(
+            json!({ "changes": [], "blocking": [], "connected": [] }),
+            "no connected agent to repair; run `cairn connect` first\n".into(),
+        ));
+    }
     let desired = compose(opts, &targets, &targets, &snap, &[]);
 
     let mut plan = IntegrationChangePlan::default();
