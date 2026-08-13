@@ -22,6 +22,85 @@ pub fn socket_path() -> PathBuf {
     cairn_core::paths::socket_path()
 }
 
+/// How much of the daemon's log to read back. The interesting part is a line or
+/// two; the cap is only so a runaway log cannot be pulled into memory whole.
+const LOG_TAIL_LIMIT: u64 = 64 * 1024;
+
+/// Where `cairnd.log` ended before this process spawned a daemon.
+///
+/// Everything appended after the mark was written by the daemon we started, so
+/// that is the only part worth reading when the socket never appears. Lines from
+/// an earlier run are somebody else's failure and must not be blamed for this
+/// one.
+struct DaemonLogMark(u64);
+
+impl DaemonLogMark {
+    /// Take the mark. Do this *before* spawning, or the reason we are looking
+    /// for may already be behind it.
+    fn take() -> Self {
+        Self(
+            std::fs::metadata(cairn_core::paths::daemon_log_path())
+                .map(|m| m.len())
+                .unwrap_or(0),
+        )
+    }
+
+    /// Why the daemon never bound its socket, falling back to `unexplained` when
+    /// it left nothing behind to say.
+    ///
+    /// A store the daemon could not open is the case worth distinguishing: it is
+    /// not a missing daemon, and starting one is not the remedy.
+    fn diagnose(&self, unexplained: &str) -> WireError {
+        match self.store_failure() {
+            Some(reason) => {
+                let marker = cairn_core::startup::STORE_OPEN_FAILED;
+                WireError::new(
+                    codes::STORAGE_UNAVAILABLE,
+                    if reason.is_empty() {
+                        marker.to_string()
+                    } else {
+                        format!("{marker}: {reason}")
+                    },
+                )
+            }
+            None => WireError::new(codes::DAEMON_UNAVAILABLE, unexplained),
+        }
+    }
+
+    /// The store-open failure the daemon logged, if it logged one.
+    fn store_failure(&self) -> Option<String> {
+        let appended = self.appended()?;
+        // Newest first: a burst of clients can each have started a daemon, and
+        // the most recent line is the one that describes the store as it is now.
+        appended.lines().rev().find_map(|line| {
+            let (_, reason) = line.split_once(cairn_core::startup::STORE_OPEN_FAILED)?;
+            Some(reason.trim_start_matches([':', ' ']).trim().to_string())
+        })
+    }
+
+    /// What the daemon appended to its log since the mark was taken.
+    fn appended(&self) -> Option<String> {
+        use std::io::{Read, Seek, SeekFrom};
+
+        let mut file = std::fs::File::open(cairn_core::paths::daemon_log_path()).ok()?;
+        let len = file.metadata().ok()?.len();
+        // A log shorter than the mark was truncated or replaced under us, so the
+        // mark means nothing any more; read the whole (bounded) tail instead.
+        let from = if len < self.0 { 0 } else { self.0 };
+        file.seek(SeekFrom::Start(
+            from.max(len.saturating_sub(LOG_TAIL_LIMIT)),
+        ))
+        .ok()?;
+        // Bytes, then a lossy decode. `read_to_string` refuses the whole tail
+        // over a single byte that is not UTF-8, and the offset above can land
+        // mid-codepoint, so that byte is easy to come by — losing the diagnosis
+        // to the encoding of a log we only want to find one line in.
+        let mut tail = Vec::new();
+        file.take(LOG_TAIL_LIMIT).read_to_end(&mut tail).ok()?;
+        Some(String::from_utf8_lossy(&tail).into_owned())
+    }
+}
+
 /// Send one request, starting the daemon first if it is not running.
 pub async fn send(request: &Request) -> Result<serde_json::Value, WireError> {
     send_with_deadline(request, Duration::from_secs(30)).await
@@ -50,27 +129,28 @@ pub async fn send_oneway(request: &Request, deadline: Duration) -> Result<(), Wi
 }
 
 async fn write_only(request: &Request) -> Result<(), WireError> {
+    let mark = DaemonLogMark::take();
     let stream = match connect().await {
         Some(s) => s,
         None => {
             start_daemon()?;
-            wait_for_daemon()
-                .await
-                .ok_or_else(|| WireError::new(codes::DAEMON_UNAVAILABLE, "cairnd did not start"))?
+            wait_for_daemon(&mark).await?
         }
     };
     let (_read_half, mut write_half) = tokio::io::split(stream);
     let mut line = serde_json::to_string(request)
         .map_err(|e| WireError::invalid(format!("unencodable request: {e}")))?;
     line.push('\n');
+    // A write that fails against a connection we did get is the other way a
+    // dead daemon shows up, so it is diagnosed like a daemon that never came.
     write_half
         .write_all(line.as_bytes())
         .await
-        .map_err(|e| WireError::new(codes::DAEMON_UNAVAILABLE, e.to_string()))?;
+        .map_err(|e| mark.diagnose(&e.to_string()))?;
     write_half
         .flush()
         .await
-        .map_err(|e| WireError::new(codes::DAEMON_UNAVAILABLE, e.to_string()))?;
+        .map_err(|e| mark.diagnose(&e.to_string()))?;
     Ok(())
 }
 
@@ -100,28 +180,41 @@ pub async fn send_with_deadline(
 const RETRY_BACKOFF_MS: [u64; 3] = [120, 350, 800];
 
 async fn exchange(request: &Request) -> Result<serde_json::Value, WireError> {
-    let mut last = attempt(request).await;
+    // Taken before anything is spawned, and shared by every attempt below: a
+    // daemon started by the first one may only be found dead by the fourth.
+    let mark = DaemonLogMark::take();
+    let mut last = attempt(request, &mark).await;
     for wait in RETRY_BACKOFF_MS {
         match last {
             // The daemon may have been restarting underneath us (FR-046).
             Err(ref e) if e.code == codes::DAEMON_UNAVAILABLE => {
                 tokio::time::sleep(Duration::from_millis(wait)).await;
-                last = attempt(request).await;
+                last = attempt(request, &mark).await;
             }
             other => return other,
         }
     }
-    last
+    // Every attempt is spent and the daemon is still unaccounted for. A daemon
+    // that died with the store unopened does not always fail to *appear*: on
+    // Windows a client can open a pipe instance whose server has already gone
+    // and only learn better when it writes, which never reaches
+    // `wait_for_daemon` and so never reached the log. So the last word on
+    // `daemon_unavailable` is the log's, wherever the failure surfaced.
+    last.map_err(|e| {
+        if e.code == codes::DAEMON_UNAVAILABLE {
+            mark.diagnose(&e.message)
+        } else {
+            e
+        }
+    })
 }
 
-async fn attempt(request: &Request) -> Result<serde_json::Value, WireError> {
+async fn attempt(request: &Request, mark: &DaemonLogMark) -> Result<serde_json::Value, WireError> {
     let stream = match connect().await {
         Some(s) => s,
         None => {
             start_daemon()?;
-            wait_for_daemon()
-                .await
-                .ok_or_else(|| WireError::new(codes::DAEMON_UNAVAILABLE, "cairnd did not start"))?
+            wait_for_daemon(mark).await?
         }
     };
     converse(stream, request).await
@@ -335,15 +428,26 @@ fn daemon_binary() -> PathBuf {
     PathBuf::from(DAEMON_NAME)
 }
 
-async fn wait_for_daemon() -> Option<IpcStream> {
+/// Wait for the daemon we just spawned to start answering, and explain it if it
+/// never does.
+///
+/// The log is consulted only once the wait is over, never to cut it short. A
+/// burst of clients can start several daemons at once; the ones that lose the
+/// socket can log store contention on their way out while the winner is still
+/// migrating a fresh database and has not bound yet. Reading the log early would
+/// take a loser's transient complaint for the fatal answer and report it instead
+/// of waiting the winner out. Waiting first costs a corrupt store the full
+/// timeout, once, which is still faster than the four attempts it used to take
+/// to arrive at a worse message.
+async fn wait_for_daemon(mark: &DaemonLogMark) -> Result<IpcStream, WireError> {
     let deadline = std::time::Instant::now() + DAEMON_START_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if let Some(stream) = connect().await {
-            return Some(stream);
+            return Ok(stream);
         }
         tokio::time::sleep(DAEMON_POLL).await;
     }
-    None
+    Err(mark.diagnose("cairnd did not start"))
 }
 
 /// True when a daemon is currently listening.
@@ -375,13 +479,14 @@ pub fn send_oneway_blocking(request: &Request, deadline: Duration) -> Result<(),
         Ok(s) => s,
         Err(_) => {
             // Cold daemon: start it, then wait — bounded by the deadline.
+            let mark = DaemonLogMark::take();
             start_daemon()?;
             loop {
                 if started.elapsed() >= deadline {
-                    return Err(WireError::new(
-                        codes::DAEMON_UNAVAILABLE,
-                        "cairnd did not start within the capture deadline",
-                    ));
+                    // As in `wait_for_daemon`: the log is read only now that
+                    // waiting is over, so a daemon that lost the socket cannot
+                    // have its complaint mistaken for the answer.
+                    return Err(mark.diagnose("cairnd did not start within the capture deadline"));
                 }
                 match StdUnixStream::connect(&path) {
                     Ok(s) => break s,

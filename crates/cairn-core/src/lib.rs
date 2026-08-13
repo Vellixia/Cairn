@@ -12,6 +12,7 @@ pub mod handoff;
 pub mod paths;
 pub mod redact;
 pub mod release;
+pub mod startup;
 pub mod tools;
 pub mod wire;
 

@@ -70,9 +70,7 @@ fn a_corrupt_database_is_detected_and_reported() {
     // over the garbage below — and `status` then succeeds, which is what made
     // this test fail about a third of the time.
     let victims = cairn_sys::daemons_for_socket(&s.socket);
-    s.settle("the daemon to stop listening", |s| {
-        !cairn_e2e::daemon_listening(&s.socket)
-    });
+    s.stop_daemon();
     for pid in &victims {
         assert!(
             cairn_sys::wait_for_exit(*pid, std::time::Duration::from_secs(5)),
@@ -85,13 +83,10 @@ fn a_corrupt_database_is_detected_and_reported() {
     // store: SQLite recovers from `-wal`, so the daemon opens a perfectly valid
     // database and `status` succeeds. That is what made this test flaky rather
     // than wrong, and it failed roughly three runs in five.
-    let db = s.db_path();
-    for sidecar in ["-wal", "-shm"] {
-        let mut path = db.clone().into_os_string();
-        path.push(sidecar);
-        let _ = std::fs::remove_file(std::path::PathBuf::from(path));
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(s.sidecar(suffix));
     }
-    std::fs::write(&db, b"not a valid sqlite database").expect("write");
+    std::fs::write(s.db_path(), b"not a valid sqlite database").expect("write");
 
     let out = s.cairn(&["--json", "status"]);
     assert!(
@@ -111,16 +106,32 @@ fn a_corrupt_database_is_detected_and_reported() {
         out.stdout,
         out.stderr
     );
-    // Pinned to what Cairn *actually* says today, which is not what it should
-    // say: the daemon fails to open the corrupt store, exits, and the CLI
-    // reports `daemon_unavailable: cairnd did not start` — true but useless,
-    // since the cause is a damaged database and the fix is to replace it, not
-    // to start a daemon. Asserted rather than glossed over so that improving
-    // the message trips this test and the expectation gets updated with it.
+    // This used to be pinned to `daemon_unavailable: cairnd did not start` —
+    // true, and useless. The daemon does start; it cannot open the store and
+    // exits, and starting another one is not the remedy. The reason now travels
+    // out of the daemon's log and is reported as what it is.
     assert_eq!(
-        envelope["error"]["code"], "daemon_unavailable",
-        "corrupt-store diagnosis changed; update this expectation: {}",
+        envelope["error"]["code"], "storage_unavailable",
+        "a damaged store must not be reported as a missing daemon: {}",
         out.stdout
+    );
+    let message = envelope["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("not a database"),
+        "the message must name the real cause: {message}"
+    );
+
+    // And a silenced log must not silence the diagnosis. `CAIRN_LOG` filters the
+    // daemon's tracing events, so a diagnosis carried by an ordinary one would
+    // vanish for exactly the user who is least likely to work out why nothing
+    // starts.
+    let quiet = s.cairn_with_env(&["--json", "status"], &[("CAIRN_LOG", "off")]);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&quiet.stdout).expect("envelope with the log off");
+    assert_eq!(
+        envelope["error"]["code"], "storage_unavailable",
+        "the reason must reach the CLI whatever CAIRN_LOG says: {}",
+        quiet.stdout
     );
 }
 
