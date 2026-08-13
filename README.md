@@ -22,7 +22,7 @@ Download a release archive, verify it, and put the binaries on your PATH. `cairn
 `cairnd` must live in the same directory — `cairn` starts the daemon itself.
 
 ```bash
-VERSION=0.1.0-alpha.3
+VERSION=0.1.0-alpha.4
 TARGET=aarch64-apple-darwin   # x86_64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu
 
 curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/cairn-v${VERSION}-${TARGET}.tar.gz
@@ -36,7 +36,7 @@ sudo install -m 0755 cairn-v${VERSION}-${TARGET}/{cairn,cairnd} /usr/local/bin/
 On Windows (PowerShell):
 
 ```powershell
-$VERSION = "0.1.0-alpha.3"
+$VERSION = "0.1.0-alpha.4"
 $TARGET = "x86_64-pc-windows-msvc"
 
 Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/cairn-v$VERSION-$TARGET.zip" -OutFile cairn.zip
@@ -138,8 +138,8 @@ open http://127.0.0.1:3100
 Images are published per release, for `linux/amd64` and `linux/arm64`:
 
 ```
-ghcr.io/vellixia/cairn-server:0.1.0-alpha.3
-ghcr.io/vellixia/cairn-web:0.1.0-alpha.3
+ghcr.io/vellixia/cairn-server:0.1.0-alpha.4
+ghcr.io/vellixia/cairn-web:0.1.0-alpha.4
 ```
 
 Only the shared components ship as containers. The local agent stays native.
