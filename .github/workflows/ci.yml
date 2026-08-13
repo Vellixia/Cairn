@@ -116,3 +116,112 @@ jobs:
       - name: TypeScript check
         run: npx tsc --noEmit
       - run: npm run build
+
+  # The web UI, driven the way a person drives it: a real browser against a
+  # real Next.js server against a real `cairn-server` against real PostgreSQL
+  # (D42, FR-206, SC-125). Lint, typecheck and build prove the code compiles;
+  # this proves the product works.
+  web-e2e:
+    name: web-e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cairn
+          POSTGRES_PASSWORD: cairn
+          POSTGRES_DB: cairn
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U cairn -d cairn"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+    env:
+      DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
+      # The browser and the seeding helpers reach the API directly; Next.js is
+      # only the UI under test.
+      NEXT_PUBLIC_CAIRN_API: http://127.0.0.1:8080
+      CAIRN_WEB_URL: http://127.0.0.1:3100
+      # The browser calls the API cross-origin from the page, so the server has
+      # to be told which origin that is.
+      CAIRN_WEB_ORIGIN: http://127.0.0.1:3100
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Released, because every test signs in for real and argon2 unoptimized
+      # costs ~0.7s per verify — which reads as a flaky interface rather than
+      # as a slow hash.
+      - name: Build the server
+        run: cargo build --release -p cairn-server
+
+      - name: Start the server
+        run: |
+          nohup ./target/release/cairn-server --addr 127.0.0.1:8080 \
+            > "$RUNNER_TEMP/cairn-server.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8080/api/health >/dev/null; then
+              echo "server is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "cairn-server never became healthy"
+          cat "$RUNNER_TEMP/cairn-server.log"
+          exit 1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install the web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Build the web application
+        working-directory: web
+        run: npm run build
+
+      - name: Start the web application
+        working-directory: web
+        run: |
+          nohup npm start > "$RUNNER_TEMP/cairn-web.log" 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:3100 >/dev/null; then
+              echo "web is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "the web application never became reachable"
+          cat "$RUNNER_TEMP/cairn-web.log"
+          exit 1
+
+      # Chromium only: the projects differ by viewport, not by engine, and a
+      # second engine would double the time to prove the same flows (D42).
+      - name: Install Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright (desktop and mobile)
+        working-directory: web
+        run: npx playwright test
+
+      - name: Upload traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: |
+            web/test-results/
+            web/playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Server log
+        if: failure()
+        run: cat "$RUNNER_TEMP/cairn-server.log" || true
