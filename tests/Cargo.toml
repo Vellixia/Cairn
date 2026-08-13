@@ -19,6 +19,9 @@ tokio.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+# The performance suite asserts the build-time budget claim the level
+# derivation makes, so it needs the crate that makes it.
+cairn-integrate.workspace = true
 uuid.workspace = true
 tokio.workspace = true
 sqlx.workspace = true

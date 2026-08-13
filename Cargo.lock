@@ -314,6 +314,7 @@ name = "cairn-e2e"
 version = "0.1.0-alpha.2"
 dependencies = [
  "cairn-core",
+ "cairn-integrate",
  "cairn-store",
  "serde_json",
  "sqlx",
