@@ -57,6 +57,15 @@ fn a_task_bound_session_leads_the_briefing_with_its_goal_and_criteria() {
         "SessionEnd",
         json!({ "session_id": "t1", "reason": "clear" }),
     );
+    // The close is sealed (D22): the boundary is acknowledged as soon as the
+    // termination record is durable, and the handoff lands a few milliseconds
+    // later. What the next session reads is the handoff, so this waits for it
+    // rather than for the boundary that promises it.
+    s.settle("the sealed boundary's handoff", |s| {
+        s.cairn(&["--json", "status"])
+            .stdout
+            .contains("\"sessions_awaiting_handoff\": 0")
+    });
 
     // A second session on the same task resumes with its goal and history.
     s.hook(
