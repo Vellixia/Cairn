@@ -35,8 +35,47 @@ pub const EVENTS: &[&str] = &[
 pub const SESSION_END_DEFAULT_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
 pub const SESSION_END_MAX_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// The step a developer runs inside Codex to activate the handlers.
-pub const TRUST_COMMAND: &str = "codex hooks trust";
+/// How a developer activates the handlers inside Codex.
+///
+/// Codex exposes no `hooks` subcommand -- verified against codex-cli 0.144.6,
+/// whose complete subcommand list has no such entry, so the `codex hooks trust`
+/// this once named simply errored with `unexpected argument 'trust'`. Trust is
+/// granted from an interactive session, and automation that already vets the
+/// hook source uses Codex's own bypass flag instead. Printing a command that
+/// does not exist is worse than describing the real step, because the developer
+/// concludes Cairn is broken rather than that a confirmation is waiting.
+pub const TRUST_REMEDY: &str =
+    "start an interactive `codex` session in this repository and approve the hook trust \
+     prompt (for unattended runs, Codex accepts `--dangerously-bypass-hook-trust`)";
+
+/// Codex's feature flag that has to be on before any hook runs at all.
+///
+/// A developer who has set `hooks = false` under `[features]` is not waiting on
+/// trust: nothing will run however trusted it is. Reporting trust as the blocker
+/// there names the wrong cause.
+pub const HOOKS_FEATURE_FLAG: &str = "hooks";
+
+/// Whether `~/.codex/config.toml` disables hooks outright.
+pub fn hooks_feature_disabled(config_toml: &str) -> bool {
+    let mut in_features = false;
+    for line in config_toml.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_features = line == "[features]";
+            continue;
+        }
+        if !in_features {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() == HOOKS_FEATURE_FLAG {
+            return value.split('#').next().unwrap_or("").trim() == "false";
+        }
+    }
+    false
+}
 
 /// The hook entry Cairn writes for one event.
 pub fn hook_entry(event: &str) -> serde_json::Value {
@@ -305,6 +344,24 @@ fn inspect_hooks(
             ))
             .remedy("cairn repair codex");
     }
+    // `[features] hooks = false` outranks trust: nothing runs however trusted
+    // it is, so naming trust as the blocker points the developer at the wrong
+    // switch. `config.toml` sits beside `hooks.json`.
+    let feature_off = path
+        .parent()
+        .map(|dir| dir.join("config.toml"))
+        .map(|cfg| hooks_feature_disabled(&read(&cfg)))
+        .unwrap_or(false);
+    if feature_off {
+        let mut o = at(HealthCondition::InstalledNotActivated)
+            .detail("Codex has hooks disabled outright: `[features] hooks = false`")
+            .remedy(
+                "set `hooks = true` under `[features]` in `~/.codex/config.toml`, then re-run \
+                 `cairn doctor codex`",
+            );
+        o.activation = activation;
+        return o;
+    }
     if activation.needs_user_action() {
         let mut o = at(HealthCondition::InstalledNotActivated)
             .detail(match activation {
@@ -313,9 +370,7 @@ fn inspect_hooks(
                 }
                 _ => "Codex will not run these handlers until you trust them",
             })
-            .remedy(format!(
-                "run `{TRUST_COMMAND}`, then re-run `cairn doctor codex`"
-            ));
+            .remedy(format!("{TRUST_REMEDY}, then re-run `cairn doctor codex`"));
         o.activation = activation;
         return o;
     }
@@ -346,6 +401,38 @@ fn trust_state(value: &serde_json::Value, recorded: Option<&RecordedInstall>) ->
 
 #[cfg(test)]
 mod tests {
+
+    /// codex-cli 0.144.6 has no `hooks` subcommand at all -- its full
+    /// subcommand list does not contain one -- so naming `codex hooks trust`
+    /// as the remedy sent the developer to `unexpected argument 'trust'`.
+    #[test]
+    fn the_trust_remedy_names_no_nonexistent_subcommand() {
+        assert!(!TRUST_REMEDY.contains("codex hooks"));
+        // It still has to say what to actually do.
+        assert!(TRUST_REMEDY.contains("codex"));
+    }
+
+    #[test]
+    fn hooks_disabled_outright_is_detected() {
+        let cfg = "\
+[features]
+hooks = false
+js_repl = false
+
+[desktop]
+followUpQueueMode = \"queue\"
+";
+        assert!(hooks_feature_disabled(cfg));
+    }
+
+    #[test]
+    fn hooks_enabled_or_absent_is_not_reported_as_disabled() {
+        assert!(!hooks_feature_disabled("[features]\nhooks = true\n"));
+        assert!(!hooks_feature_disabled("[features]\njs_repl = false\n"));
+        assert!(!hooks_feature_disabled(""));
+        // A `hooks` key in an unrelated table is not the feature flag.
+        assert!(!hooks_feature_disabled("[other]\nhooks = false\n"));
+    }
     use super::*;
     use serde_json::json;
 
