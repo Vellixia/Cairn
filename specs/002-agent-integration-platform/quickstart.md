@@ -413,6 +413,24 @@ writes.
 | Conversation text stays out | `cargo test -p cairn-e2e --test privacy_payloads` | Seeded assistant text and prompts appear in zero stored records (SC-121) |
 | Browser regression | CI `web-e2e` job | Desktop and mobile against a release-build server (SC-125) |
 
+## Audit on record
+
+Everything Feature 002 committed to *not* building, checked at the end and left
+as tests so it stays checked. `cargo test -p cairn-e2e --test scope_audit`.
+
+| Claim | How it is held |
+|---|---|
+| Exactly six MCP tools (FR-128) | `tools/list` is asserted to be Feature 001's six, and Feature 002's own operations are asserted **not** to be among them — an agent that could connect and disconnect itself could edit the developer's configuration unprompted |
+| Zero outbox entity types for any Feature 002 entity (FR-183) | The outbox's `entity_type` CHECK is a closed set of Feature 001's five; each of the seven integration tables is asserted absent from it and free of sync bookkeeping columns |
+| Zero server schema changes (FR-184) | `crates/cairn-server` has no commit in this feature, and its migration directory is unchanged |
+| `cairn-server` untouched | Same |
+| No committed manifest, drift handling, merge semantics, or application on clone (FR-227) | A `--shared` install is committed, cloned into a fresh checkout, and shown to register no project, start no session, and carry no manifest of Cairn's own |
+| No hand-edited resource is adopted | A default repair on an edited block refuses, reports both, exits non-zero, and changes nothing |
+| No memory scope keyed to agent identity | The scope vocabulary is Feature 001's four, and the `memories` schema names no agent |
+| No second service or datastore | One SQLite file and at most one socket under `CAIRN_HOME` after a full connect |
+| No native adapter beyond the three | `AgentId::ALL` is four including the generic path, and the manager adds none — asserted in `fixtures::the_manager_produces_no_lifecycle_of_its_own` |
+| No writes to a manager's private storage | `fixtures::manager_zero_writes` checksums `~/.cc-switch/` across every operation |
+
 ## Measurements on record
 
 Measured on Linux x86_64 with **release builds** and a healthy daemon, at the

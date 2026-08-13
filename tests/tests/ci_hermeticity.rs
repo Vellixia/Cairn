@@ -204,3 +204,29 @@ fn no_test_in_this_suite_requires_a_secret() {
         "the server suite does not skip itself"
     );
 }
+
+#[test]
+fn an_event_cairn_declines_still_reads_what_the_agent_wrote() {
+    // FR-193, FR-194: the hook is invisible when it does nothing. Exiting
+    // without draining stdin is not invisible — the agent is writing the
+    // payload at that moment and gets a broken pipe, which surfaces in *its*
+    // logs as Cairn failing.
+    let s = Sandbox::new();
+    s.install_agent("claude-code");
+    s.must(&["init"]);
+
+    // A large payload, so the write cannot fit in the pipe buffer and has to
+    // block on a reader actually being there.
+    let filler = "x".repeat(256 * 1024);
+    for event in ["UserPromptSubmit", "Notification", "PreToolUse", "Setup"] {
+        let out = s.hook(
+            event,
+            json!({ "session_id": "declined", "prompt": filler, "message": filler }),
+        );
+        assert_eq!(
+            out.code, 0,
+            "the declined event `{event}` failed the agent: {}",
+            out.stderr
+        );
+    }
+}

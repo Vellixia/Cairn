@@ -1241,15 +1241,27 @@ pub async fn repair(opts: &Options) -> Result<Output, WireError> {
         ));
     }
     if plan.is_noop() {
-        let mut text = String::from("nothing to do\n");
-        // A conflict repair will not resolve is still reported (FR-174).
-        for b in &plan.blocking {
-            text.push_str(&format!("\n{} {} — {}\n", b.agent, b.kind, b.detail));
-            for step in &b.manual_sequence {
-                text.push_str(&format!("  {step}\n"));
+        // A conflict repair will not resolve is reported, and it is not
+        // "nothing to do": there is something to do, and only the developer
+        // can decide it. Exiting non-zero is what lets a script notice
+        // (FR-174, FR-196).
+        if plan.is_blocked() {
+            let mut text = String::new();
+            for b in &plan.blocking {
+                text.push_str(&format!("{} {} — {}\n", b.agent, b.kind, b.detail));
+                for step in &b.manual_sequence {
+                    text.push_str(&format!("  {step}\n"));
+                }
             }
+            text.push_str("\nnothing was changed\n");
+            let mut out = Output::with(plan_json(&plan, false), text);
+            out.exit_nonzero = true;
+            return Ok(out);
         }
-        return Ok(Output::with(plan_json(&plan, false), text));
+        return Ok(Output::with(
+            plan_json(&plan, false),
+            "nothing to do\n".into(),
+        ));
     }
     apply_plan(&env, &desired, &plan, &states, opts).await
 }

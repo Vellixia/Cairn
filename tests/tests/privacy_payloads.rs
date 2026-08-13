@@ -139,14 +139,14 @@ fn no_conversation_content_from_claude_reaches_storage() {
     claude_session(&s);
 
     // The capture worked, so this is a test about filtering rather than about
-    // an empty database.
-    assert!(
+    // an empty database. Capture is fire-and-forget, so this is waited for
+    // rather than read (H3).
+    s.settle("the session's observations", |s| {
         s.json(&["status"])["observation_count"]
             .as_i64()
             .unwrap_or(0)
-            >= 2,
-        "nothing was captured, so this assertion proves nothing"
-    );
+            >= 2
+    });
     let stored = storage(&s);
     assert!(
         stored.contains("cargo test -p cairn-store"),

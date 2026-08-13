@@ -62,8 +62,15 @@ pub fn run_blocking(event: &str) -> bool {
     // reading the payload would leave the second one with nothing.
     match cairn_integrate::event_class(agent, event) {
         // Declined by the adapter: the normal way an event Cairn does not map
-        // is handled (FR-115). Nothing to do, and nothing is wrong.
-        None => return true,
+        // is handled (FR-115). Nothing to do, and nothing is wrong — but the
+        // agent is writing the payload to this process's stdin right now, and
+        // exiting without reading it gives *the agent* a broken pipe. Cairn's
+        // hook must be invisible even when it does nothing (FR-193, FR-194),
+        // so the payload is drained and discarded.
+        None => {
+            drain_stdin();
+            return true;
+        }
         Some(class) if class.is_boundary_class() => return false,
         Some(_) => {}
     }
@@ -262,6 +269,16 @@ fn read_raw() -> serde_json::Value {
         return serde_json::Value::Null;
     }
     serde_json::from_str(&buf).unwrap_or(serde_json::Value::Null)
+}
+
+/// Read whatever the agent is writing and throw it away.
+///
+/// For an event Cairn declines. The payload is of no interest; the *reading*
+/// is, because the writer on the other end is the agent.
+fn drain_stdin() {
+    use std::io::Read;
+    let mut sink = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut sink);
 }
 
 /// Cairn's own log. Never stderr in a way the agent would surface.
