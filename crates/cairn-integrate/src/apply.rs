@@ -396,30 +396,40 @@ mod tests {
         remove_tree(&root).unwrap();
     }
 
+    /// A directory Cairn cannot write into fails with the reason and leaves the
+    /// original file untouched.
+    ///
+    /// POSIX-only: the restriction under test is a directory mode, and Windows
+    /// governs the same thing through ACLs, which are a different mechanism
+    /// with different semantics. Asserting the Unix behavior there would be
+    /// asserting something the platform does not do. Windows keeps the rest of
+    /// the atomic-write contract, which every other test in this module covers
+    /// on all platforms.
+    #[cfg(unix)]
     #[test]
     fn a_read_only_file_fails_with_the_reason_and_leaves_the_original() {
+        use std::os::unix::fs::PermissionsExt;
+
         let d = tmp();
         let p = d.path().join("ro.json");
         write_atomic(&p, "original\n").unwrap();
+
         let mut perms = std::fs::metadata(d.path()).unwrap().permissions();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            perms.set_mode(0o500);
-            std::fs::set_permissions(d.path(), perms.clone()).unwrap();
-            let outcome = write_atomic(&p, "replacement\n");
-            perms.set_mode(0o700);
-            std::fs::set_permissions(d.path(), perms).unwrap();
-            match outcome {
-                Err(e) => {
-                    assert!(matches!(e, ApplyError::PermissionDenied { .. }), "{e}");
-                    assert_eq!(std::fs::read_to_string(&p).unwrap(), "original\n");
-                }
-                // Running with privileges that bypass file permissions (root
-                // in a container, for instance). There is nothing to assert
-                // about a restriction the kernel is not applying.
-                Ok(()) => eprintln!("skipped: file permissions are not enforced for this user"),
+        perms.set_mode(0o500);
+        std::fs::set_permissions(d.path(), perms.clone()).unwrap();
+        let outcome = write_atomic(&p, "replacement\n");
+        perms.set_mode(0o700);
+        std::fs::set_permissions(d.path(), perms).unwrap();
+
+        match outcome {
+            Err(e) => {
+                assert!(matches!(e, ApplyError::PermissionDenied { .. }), "{e}");
+                assert_eq!(std::fs::read_to_string(&p).unwrap(), "original\n");
             }
+            // Running with privileges that bypass file permissions (root in a
+            // container, for instance). There is nothing to assert about a
+            // restriction the kernel is not applying.
+            Ok(()) => eprintln!("skipped: file permissions are not enforced for this user"),
         }
     }
 }
