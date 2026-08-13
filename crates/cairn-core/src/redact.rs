@@ -29,6 +29,11 @@ fn patterns() -> &'static Patterns {
             r"\b(?:sk|pk|rk)-[A-Za-z0-9_\-]{16,}",
             r"\bghp_[A-Za-z0-9]{20,}",
             r"\bgithub_pat_[A-Za-z0-9_]{20,}",
+            // GitLab's prefixed token family: personal (`glpat-`), OAuth
+            // (`gloas-`), runner (`glrt-`), CI build (`glcbt-`), deploy
+            // (`gldt-`) and the rest. They share one shape, so one pattern
+            // covers the family rather than accruing a line per kind.
+            r"\bgl(?:pat|oas|rt|cbt|dt|soat|imt|ptt|ft|agent|rtc)-[A-Za-z0-9_\-]{20,}",
             r"\bxox[baprs]-[A-Za-z0-9\-]{10,}",
             r"\bAKIA[0-9A-Z]{16}\b",
             r"\bASIA[0-9A-Z]{16}\b",
@@ -170,16 +175,57 @@ mod tests {
     }
 
     #[test]
-    fn redacts_gitlab_token() {
-        // GitLab tokens (glpat-) are not in the current pattern set.
-        // This test documents that — if the pattern is added later, update it.
-        let _out = redact("glpat-abcdefghijklmnopqrstuv");
-        // Not redacted by whole-match patterns; but the keyed pattern
-        // catches it if it appears as TOKEN=glpat-...
-        let out2 = redact("PRIVATE_TOKEN=glpat-abcdefghijklmnopqrstuv");
+    fn redacts_a_bare_gitlab_token() {
+        // A bare token, with no assignment for the keyed pattern to latch
+        // onto. This is the case that matters: a token pasted into a command
+        // is captured verbatim, and the keyed pattern never sees a key.
+        let out = redact("glpat-abcdefghijklmnopqrstuv");
+        assert_eq!(out, REDACTED, "a bare GitLab PAT must not survive");
+
+        // And in the shape it actually appears in — inside a command line,
+        // where a whole-match pattern is the only thing that can catch it.
+        let out = redact("git push https://gitlab.com/x glpat-abcdefghijklmnopqrstuv");
         assert!(
-            out2.contains(REDACTED),
-            "keyed assignment should catch it: {out2}"
+            !out.contains("glpat-abcdefghijklmnopqrstuv"),
+            "a PAT in a command must not survive: {out}"
+        );
+        assert!(
+            out.contains("git push"),
+            "the command itself is kept: {out}"
+        );
+    }
+
+    #[test]
+    fn redacts_the_wider_gitlab_token_family() {
+        // One pattern covers the family, so each prefix is worth one case.
+        for token in [
+            "gloas-abcdefghijklmnopqrstuv",
+            "glrt-abcdefghijklmnopqrstuv",
+            "glcbt-abcdefghijklmnopqrstuv",
+            "gldt-abcdefghijklmnopqrstuv",
+        ] {
+            assert_eq!(redact(token), REDACTED, "{token} must be redacted");
+        }
+    }
+
+    #[test]
+    fn a_gitlab_prefix_alone_is_not_a_token() {
+        // The pattern must not fire on ordinary prose that happens to start
+        // with the prefix — the length floor is what separates the two.
+        let s = "glpat-short and gldt-x are not tokens";
+        assert_eq!(redact(s), s);
+    }
+
+    #[test]
+    fn redacts_a_keyed_gitlab_token_and_keeps_the_key_name() {
+        let out = redact("PRIVATE_TOKEN=glpat-abcdefghijklmnopqrstuv");
+        assert!(
+            out.contains("PRIVATE_TOKEN="),
+            "the key name is kept: {out}"
+        );
+        assert!(
+            !out.contains("glpat-abcdefghijklmnopqrstuv"),
+            "the value is not: {out}"
         );
     }
 
@@ -198,12 +244,20 @@ mod tests {
     }
 
     #[test]
-    fn redacts_a_key_with_no_value() {
-        // An empty value after = doesn't meet the 4-char minimum in the
-        // keyed pattern, so it passes through. This is correct: there's
-        // nothing to redact.
-        let out = redact("API_KEY=");
-        assert!(out.contains("API_KEY=") || out.contains(REDACTED));
+    fn a_key_with_no_value_passes_through_untouched() {
+        // An empty value after `=` does not meet the keyed pattern's 4-char
+        // minimum, so nothing matches — which is right, there is nothing to
+        // redact. Asserted as equality: `contains("API_KEY=") ||
+        // contains(REDACTED)` covered both possible outcomes and so could
+        // never fail.
+        assert_eq!(redact("API_KEY="), "API_KEY=");
+        assert_eq!(
+            redact("API_KEY=abc"),
+            "API_KEY=abc",
+            "3 chars is under the floor"
+        );
+        // One more character crosses it.
+        assert!(redact("API_KEY=abcd").contains(REDACTED));
     }
 
     #[test]

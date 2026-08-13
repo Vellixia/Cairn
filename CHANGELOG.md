@@ -24,6 +24,13 @@ Windows is a supported platform.
 
 ### Fixed
 
+- **GitLab tokens are redacted.** The pattern set covered GitHub, AWS, Slack,
+  Google and OpenAI-shaped keys but not GitLab's, so a `glpat-` token — or any
+  of the `gloas-`/`glrt-`/`glcbt-`/`gldt-` family — captured in a command was
+  stored verbatim unless it happened to sit next to a key name the assignment
+  pattern recognised. Redaction runs before any write (FR-049), so this was the
+  difference between a token never being persisted and one being persisted and
+  synced.
 - **`cairn link` no longer denies a link it already has.** With no arguments
   it reported `linked: false` unconditionally, so an already-linked project
   was told it was not linked and pointed at `cairn link --create` — which
