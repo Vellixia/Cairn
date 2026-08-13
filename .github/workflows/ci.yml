@@ -107,7 +107,7 @@ jobs:
     runs-on: windows-latest
     # The named-pipe transport is new; a hang here should fail loudly rather
     # than run until someone notices and cancels it by hand.
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -133,8 +133,18 @@ jobs:
       # fast enough to leave time for the diagnostics step below to actually
       # run, rather than eating the whole job budget before anything gets a
       # chance to look at what was going on.
+      #
+      # "Tight" is relative to how long the suite actually takes here, and
+      # Windows is the slow runner: the same `cargo test` is ~1m25s on Ubuntu
+      # and ~2m20s on macOS but around 8m30s on this one, because every
+      # sandbox spawns real processes over a named pipe. Five minutes was
+      # comfortable until Feature 002 and the daemon's own component tests
+      # arrived together; it then killed a run in which every test that got to
+      # execute had passed, which is the worst kind of red. This is sized at
+      # roughly half again the observed time — still a small fraction of the
+      # job budget, so a real hang is reported long before the job expires.
       - name: Test
-        timeout-minutes: 5
+        timeout-minutes: 12
         env:
           CAIRN_LOG: debug
         run: cargo test --workspace --all-targets
