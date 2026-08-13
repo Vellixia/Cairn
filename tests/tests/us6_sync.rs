@@ -51,6 +51,14 @@ fn seed_local_work(s: &Sandbox) {
         "SessionEnd",
         json!({ "session_id": "sync", "reason": "clear" }),
     );
+    // The close is sealed and its handoff is produced just after the hook
+    // returns (FR-240, D22). A fixture that queued the sync before the handoff
+    // existed would be testing the race, not the sync.
+    s.settle("the closed session's handoff", |s| {
+        s.cairn(&["--json", "status"])
+            .stdout
+            .contains("\"sessions_awaiting_handoff\": 0")
+    });
 
     // The fixture is only a fixture once its state exists. Asserting it here
     // means a seed that failed says so at the seed, instead of reappearing

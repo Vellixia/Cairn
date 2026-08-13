@@ -116,6 +116,11 @@ impl Sandbox {
         }
     }
 
+    /// `CAIRN_HOME` — everything Cairn itself writes on this machine.
+    pub fn cairn_home(&self) -> std::path::PathBuf {
+        self.home.path().to_path_buf()
+    }
+
     /// The per-user home the sandbox's agents live in.
     pub fn fake_home(&self) -> std::path::PathBuf {
         let p = self.home.path().join("fake-home");
@@ -710,6 +715,48 @@ impl Server {
         let _ = child.kill();
         let _ = child.wait();
         Err(format!("cairn-server did not become healthy at {base}"))
+    }
+
+    /// Every text value in every table of the shared database, concatenated.
+    ///
+    /// The endpoints are one view of what reached the server; this is the
+    /// other. A privacy assertion made only against the API would pass on a
+    /// server that stored something and merely declined to serve it back
+    /// (SC-119, SC-133).
+    pub fn dump(&self) -> String {
+        let url = std::env::var("CAIRN_TEST_DATABASE_URL").expect("a test database");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            let tables: Vec<String> = sqlx::query_scalar(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("list tables");
+
+            let mut out = String::new();
+            for table in tables {
+                // Render every row as JSON so no column type is skipped, and
+                // so a value nested inside a JSON column is still visible.
+                let sql = format!("SELECT to_jsonb(t)::text FROM \"{table}\" t");
+                let rows: Vec<String> = sqlx::query_scalar(&sql)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_default();
+                for row in rows {
+                    out.push_str(&table);
+                    out.push(' ');
+                    out.push_str(&row);
+                    out.push('\n');
+                }
+            }
+            pool.close().await;
+            out
+        })
     }
 
     /// Register a user and return a fresh personal API token.
