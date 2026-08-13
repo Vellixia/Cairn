@@ -318,7 +318,11 @@ pub async fn agents() -> Result<Output, WireError> {
 /// own state, and FR-109 reserves that word for a version that cannot be
 /// integrated safely.
 fn level_line(state: &AgentState) -> String {
-    if !state.connected {
+    // The generic path is never "connected": Cairn installs nothing for a
+    // client it has no adapter for, and the developer pastes the exported
+    // block themselves (FR-131). Telling them to run `cairn connect` would be
+    // advice for a command that has nothing to do here.
+    if !state.connected && state.agent != AgentId::GenericMcp {
         return "not connected   (run `cairn connect`)".into();
     }
     let mut s = state.outcome.level.display().to_string();

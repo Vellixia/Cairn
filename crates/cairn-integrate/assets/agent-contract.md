@@ -5,15 +5,15 @@ mcp_lede = Cairn is durable, project-scoped memory for this repository, shared b
 
 [rule context]
 block = Read the Cairn context you were given before re-deriving the project.
-mcp = Call the Cairn context tool first and use what it returns before re-deriving the project.
+mcp = Call `cairn_context` first and use what it returns before re-deriving the project.
 
 [rule search]
 block = Search Cairn memory before repeating an investigation you may already have done.
-mcp = Search Cairn memory before repeating an investigation you may already have done.
+mcp = Call `cairn_search` before repeating an investigation you may already have done.
 
 [rule record]
 block = Record durable facts, decisions, conventions, failures and procedures — never routine tool calls.
-mcp = Record durable facts, decisions, conventions, failures and procedures — never routine tool calls.
+mcp = Record durable facts, decisions, conventions, failures and procedures with `cairn_remember` — never routine tool calls.
 
 [rule scope]
 block = Use the narrowest correct scope: task, else branch, else project.
@@ -29,7 +29,7 @@ mcp = Never put secrets, credentials, raw prompts or unbounded output into memor
 
 [rule lifecycle]
 block = Session boundaries, checkpoints and handoffs are automatic here. Do not hand-roll them.
-mcp = Open and close sessions through Cairn's own tools; this client has no automatic lifecycle.
+mcp = Open and close sessions with `cairn_session`; this client has no automatic lifecycle.
 
 [rule task]
 block = Bind work to a Cairn task when one applies.
@@ -37,4 +37,4 @@ mcp = Bind work to a Cairn task when one applies.
 
 [rule depth]
 block = For deeper workflows, use the Cairn Skill.
-mcp = For deeper workflows, ask Cairn for the handoff and memory it already holds.
+mcp = For deeper workflows, call `cairn_handoff` for what the last session left you.
