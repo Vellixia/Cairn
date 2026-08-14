@@ -7,6 +7,58 @@ All notable changes to Cairn are recorded here. The format follows
 Cairn is pre-1.0. Until 1.0.0, minor versions may change behaviour, storage
 schemas, and the wire protocol without a deprecation period.
 
+## [0.1.0-alpha.4] — 2026-08-13
+
+The agent integration platform. Claude Code, Codex and OpenCode integrate
+natively, any MCP-compatible client integrates through the protocol, CC Switch
+can distribute Cairn, and each of them reports what it can actually do rather
+than what its vendor documents.
+
+### Added
+
+- **Native integration for Codex and OpenCode**, alongside Claude Code. One
+  canonical seven-event lifecycle sits behind all three, so no vendor event
+  name, payload shape or ordering assumption reaches the daemon.
+- **Generic MCP onboarding.** Any MCP-compatible client can connect over the
+  protocol without a bespoke adapter.
+- **The Cairn Skill and the rendered agent usage contract.** Both carry their
+  own content-addressed revisions, independent of the package version.
+- **`cairn agents`**, plus `connect`, `doctor`, `repair`, `disconnect` and
+  `integration`. Each previews what it would change and names what it leaves
+  alone before touching anything.
+- **Integration ownership and migration**, including adoption of an existing
+  Claude Code setup rather than competing with it.
+- **CC Switch as an integration manager.** It is classified as a manager and
+  never as an agent adapter, so Cairn asks it to act instead of editing state
+  it does not own; removals it must perform surface as
+  `manager_action_required`.
+- **A capability model that distinguishes what a vendor documents from what
+  Cairn has actually observed here** — `FULL`, `MCP_PLUS`, `MCP_ONLY`. FULL is
+  earned by an ordinary session rather than declared, and is withdrawn when an
+  agent updates past the evidence.
+- **Cross-agent project memory continuity.** Decisions, failures, procedures
+  and handoffs are keyed by project and task, never partitioned by the agent
+  that produced them.
+- **Source-preserving config mutation** for JSON/JSONC, TOML and Markdown, so
+  Cairn edits a user's configuration without reformatting the parts it does
+  not own.
+- **Hosted Playwright end-to-end CI**, on top of the existing Linux, macOS and
+  Windows suites.
+
+### Changed
+
+- Session close is sealed: the boundary is acknowledged once termination is
+  durable and the handoff is synthesized after, which keeps a one-second
+  vendor handler budget survivable without giving up the completion guarantee.
+
+### Notes
+
+- Windows is covered by the integration suites on the same terms as macOS and
+  Linux.
+- The live vendor-agent evidence, the cross-agent onboarding walkthrough and
+  the CC Switch Skill distribution path are recorded as manual release
+  evidence and are not yet complete at the time of this entry.
+
 ## [0.1.0-alpha.3] — 2026-08-12
 
 Windows is a supported platform.
@@ -183,6 +235,7 @@ upgradeable to this one, and have been retired.
   may change without a deprecation period before 1.0.0.
 - Sharing requires running your own Cairn server; no hosted service exists.
 
+[0.1.0-alpha.4]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.4
 [0.1.0-alpha.3]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.3
 [0.1.0-alpha.2]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.2
 [0.1.0-alpha.1]: https://github.com/Vellixia/Cairn/releases/tag/v0.1.0-alpha.1

@@ -107,7 +107,7 @@ jobs:
     runs-on: windows-latest
     # The named-pipe transport is new; a hang here should fail loudly rather
     # than run until someone notices and cancels it by hand.
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
@@ -133,8 +133,24 @@ jobs:
       # fast enough to leave time for the diagnostics step below to actually
       # run, rather than eating the whole job budget before anything gets a
       # chance to look at what was going on.
+      #
+      # "Tight" is relative to how long the suite actually takes here, and
+      # Windows is the slow runner: the same `cargo test` is ~1m25s on Ubuntu
+      # and ~2m20s on macOS, because every sandbox on this one spawns real
+      # processes and talks to them over a named pipe.
+      #
+      # The number is set from measurement, and the measurement is why it
+      # moved. This job took 4m04s before Feature 002 and the daemon's own
+      # component tests merged, and 4m58s after — against a five-minute cap.
+      # Two seconds of margin is not a margin: one run was killed with every
+      # test that reached execution passing, and the next finished. Run-to-run
+      # variance was deciding the colour of the build.
+      #
+      # Twelve is a little over twice the observed time, so ordinary variance
+      # cannot reach it, and it stays a small enough fraction of the job
+      # budget that a real hang is still reported with time to spare.
       - name: Test
-        timeout-minutes: 5
+        timeout-minutes: 12
         env:
           CAIRN_LOG: debug
         run: cargo test --workspace --all-targets
@@ -143,6 +159,12 @@ jobs:
       # cargo test's own process tree gets torn down by then, but anything it
       # wrote to disk survives — the daemon logs in particular, since a
       # killed process skips Drop and never gets to clean up its temp dir.
+      #
+      # Tailed, and capped at the busiest few logs. `CAIRN_LOG=debug` makes
+      # each daemon log every statement it runs, and a suite that starts a
+      # hundred daemons then buries the one thing anybody came here to read —
+      # cargo's own failure summary, printed by the step above — under a
+      # megabyte of SQL. What matters in these logs is the end of them.
       - name: Dump daemon logs and process state on failure
         if: failure()
         shell: pwsh
@@ -150,11 +172,13 @@ jobs:
           Write-Host "--- cairnd / cairn processes still running? ---"
           Get-Process -Name cairnd, cairn -ErrorAction SilentlyContinue | Format-Table -AutoSize
 
-          Write-Host "--- daemon logs found under $env:TEMP ---"
+          Write-Host "--- daemon logs found under $env:TEMP (newest 10, last 80 lines each) ---"
           Get-ChildItem -Path $env:TEMP -Recurse -Include cairnd.log, cairn.log -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 10 |
             ForEach-Object {
               Write-Host "=== $($_.FullName) ==="
-              Get-Content $_.FullName -ErrorAction SilentlyContinue
+              Get-Content $_.FullName -Tail 80 -ErrorAction SilentlyContinue
               Write-Host ""
             }
 

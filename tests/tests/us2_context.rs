@@ -33,7 +33,7 @@ fn seed_a_finished_session(s: &Sandbox) {
         "clear",
     ]);
     assert!(
-        s.json(&["handoff", "show"])["handoff"]["next_step"].is_string(),
+        s.handoff_after_close(&[])["next_step"].is_string(),
         "the fixture must leave a handoff behind"
     );
 }

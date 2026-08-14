@@ -5,6 +5,7 @@
 //! prints.
 
 use crate::domain::*;
+use crate::lifecycle::CanonicalLifecycleEvent;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -24,6 +25,52 @@ pub mod codes {
     pub const NOT_LINKED: &str = "not_linked";
     pub const SERVER_UNAVAILABLE: &str = "server_unavailable";
     pub const UNAUTHORIZED: &str = "unauthorized";
+
+    // Feature 002's integration codes (contracts/integration-cli.md §Error
+    // codes). A closed set, not ad-hoc strings (FR-167). Every one of them
+    // exits 1; `daemon_unavailable` and `storage_unavailable` keep exit 2.
+    //
+    // Configuration operations fail loudly — none of them is fail-soft
+    // (FR-196). Only the hook path fails soft, and it is unchanged (FR-193).
+    pub const AGENT_NOT_DETECTED: &str = "agent_not_detected";
+    pub const AGENT_UNSUPPORTED: &str = "agent_unsupported";
+    pub const MALFORMED_CONFIG: &str = "malformed_config";
+    pub const PERMISSION_DENIED: &str = "permission_denied";
+    pub const DAMAGED_MARKERS: &str = "damaged_markers";
+    pub const RESOURCE_MODIFIED: &str = "resource_modified";
+    pub const DUPLICATE_RESOURCE: &str = "duplicate_resource";
+    pub const CONFLICTING_OWNER: &str = "conflicting_owner";
+    pub const INSTALLED_NOT_ACTIVATED: &str = "installed_not_activated";
+    pub const MIGRATION_IN_PROGRESS: &str = "migration_in_progress";
+    pub const MIGRATION_UNSAFE: &str = "migration_unsafe";
+    pub const MANAGER_ACTION_REQUIRED: &str = "manager_action_required";
+    pub const VERIFICATION_FAILED: &str = "verification_failed";
+    pub const CONFIRMATION_REQUIRED: &str = "confirmation_required";
+    /// A manager Skill import was requested from a build whose embedded Skill
+    /// revision has no published `skill-release` branch. Emitting an
+    /// unpublished ref would make CC Switch silently install `main`.
+    pub const UNPUBLISHED_SKILL_REF: &str = "unpublished_skill_ref";
+    pub const PARTIAL_APPLY: &str = "partial_apply";
+
+    /// Every Feature 002 code, for the exit-code mapping and its test.
+    pub const INTEGRATION_CODES: &[&str] = &[
+        AGENT_NOT_DETECTED,
+        AGENT_UNSUPPORTED,
+        MALFORMED_CONFIG,
+        PERMISSION_DENIED,
+        DAMAGED_MARKERS,
+        RESOURCE_MODIFIED,
+        DUPLICATE_RESOURCE,
+        CONFLICTING_OWNER,
+        INSTALLED_NOT_ACTIVATED,
+        MIGRATION_IN_PROGRESS,
+        MIGRATION_UNSAFE,
+        MANAGER_ACTION_REQUIRED,
+        VERIFICATION_FAILED,
+        CONFIRMATION_REQUIRED,
+        UNPUBLISHED_SKILL_REF,
+        PARTIAL_APPLY,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +162,28 @@ pub struct ObservationInput {
     pub summary: String,
     #[serde(default)]
     pub details: Option<serde_json::Value>,
+    /// The raw vendor tool name, kept as bounded provenance only (FR-122,
+    /// D36). Normalized and truncated at construction; never consulted by
+    /// ranking, handoff synthesis or context assembly (FR-121).
+    #[serde(default)]
+    pub vendor_tool: Option<String>,
+}
+
+/// A request that does not say defaults to waiting, which is Feature 001's
+/// behavior and the safe answer for anything that is not a budgeted hook.
+fn default_wait_for_handoff() -> bool {
+    true
+}
+
+/// What to do with an ownership migration record.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationAction {
+    Start,
+    Advance,
+    Fail,
+    Clear,
+    Read,
 }
 
 /// Which entity a delete targets (FR-052).
@@ -193,12 +262,141 @@ pub enum Request {
         status: SessionStatus,
         #[serde(default)]
         reason: Option<String>,
+        /// Whether the caller waits for the durable handoff.
+        ///
+        /// True for `cairn session end` from the command line, which keeps
+        /// Feature 001's behavior — nothing holds a deadline over it. False
+        /// for a hook-driven boundary, where the vendor's own handler budget
+        /// does, and the seal is what is acknowledged (D22, FR-240).
+        #[serde(default = "default_wait_for_handoff")]
+        wait_for_handoff: bool,
     },
     /// `Stop`: a turn boundary. Never ends the session (FR-032, D16).
     TurnCheckpoint {
         cwd: String,
         #[serde(default)]
         agent_session_key: Option<String>,
+    },
+
+    /// One canonical lifecycle event, from an adapter (FR-112).
+    ///
+    /// The daemon's single lifecycle entry point. No vendor event name,
+    /// payload shape or ordering assumption reaches it: an adapter translates
+    /// first, and this is what it translates into.
+    CanonicalEvent {
+        event: CanonicalLifecycleEvent,
+        /// Whether the caller waits for a boundary's durable handoff. False
+        /// for a hook under a vendor deadline (D22).
+        #[serde(default)]
+        wait_for_handoff: bool,
+        /// The token budget for the context a `session_opened` delivers.
+        #[serde(default)]
+        token_budget: Option<usize>,
+    },
+
+    /// Read the local integration record for this machine (FR-182).
+    ///
+    /// Local only: nothing here has an outbox entity type and none of it ever
+    /// reaches the server (FR-183, FR-184).
+    IntegrationSnapshot {
+        cwd: String,
+    },
+    /// Record an agent's integration row.
+    IntegrationUpsertAgent {
+        cwd: String,
+        agent: String,
+        adapter_version: i64,
+        detected_version: Option<String>,
+        compatibility: String,
+        level: String,
+        completion_guarantee: String,
+    },
+    /// Record that this agent depends on a physical resource.
+    IntegrationBind {
+        cwd: String,
+        agent: String,
+        kind: String,
+        owner: String,
+        scope: String,
+        location: String,
+        #[serde(default)]
+        content_hash: Option<String>,
+        #[serde(default)]
+        artifact_schema: Option<i64>,
+        #[serde(default)]
+        artifact_revision: Option<String>,
+        activation: String,
+        #[serde(default)]
+        container_single_line: bool,
+        #[serde(default)]
+        created_container: bool,
+    },
+    /// Drop this agent's dependency on one resource kind.
+    ///
+    /// The resource itself goes only when no binding remains (FR-243).
+    IntegrationUnbind {
+        cwd: String,
+        agent: String,
+        kind: String,
+    },
+    /// Remove an agent's record, but only once its last binding is gone
+    /// (FR-244).
+    IntegrationForgetAgent {
+        cwd: String,
+        agent: String,
+    },
+    /// Record that a capability was established here (FR-242, D19a).
+    IntegrationEvidence {
+        cwd: String,
+        agent: String,
+        capability: String,
+        evidence: String,
+        #[serde(default)]
+        agent_version: Option<String>,
+        #[serde(default)]
+        degraded: Option<bool>,
+    },
+    /// Discard observation evidence a detected version change invalidated
+    /// (FR-245).
+    IntegrationInvalidateEvidence {
+        cwd: String,
+        agent: String,
+        #[serde(default)]
+        detected_version: Option<String>,
+    },
+    /// Record, resume, abort or complete an ownership migration (FR-228).
+    IntegrationMigration {
+        cwd: String,
+        agent: String,
+        kind: String,
+        action: MigrationAction,
+        #[serde(default)]
+        source_owner: Option<String>,
+        #[serde(default)]
+        source_scope: Option<String>,
+        #[serde(default)]
+        source_location: Option<String>,
+        #[serde(default)]
+        target_owner: Option<String>,
+        #[serde(default)]
+        target_scope: Option<String>,
+        #[serde(default)]
+        target_location: Option<String>,
+        #[serde(default)]
+        overlap_permitted: bool,
+        #[serde(default)]
+        phase: Option<String>,
+        #[serde(default)]
+        last_error: Option<String>,
+    },
+    /// Record a preserved recovery artifact's metadata (FR-222).
+    IntegrationRecovery {
+        cwd: String,
+        agent: String,
+        kind: String,
+        source_path: String,
+        artifact_path: String,
+        content_hash: String,
     },
 
     Observe {
@@ -397,6 +595,28 @@ pub struct StatusPayload {
     /// The build answering this, so a bug report can name it.
     #[serde(default)]
     pub version: Option<String>,
+    /// The local database's schema version, so doctor can report it without
+    /// linking the store into the CLI.
+    #[serde(default)]
+    pub local_schema_version: i64,
+    /// Boundaries that acknowledged but have not produced their handoff yet.
+    ///
+    /// A terminal session never sits silently owing one: this is what makes
+    /// the debt visible (FR-240 clause 3).
+    #[serde(default)]
+    pub sessions_awaiting_handoff: i64,
+    /// Boundaries whose synthesis has failed, with the redacted reason. They
+    /// stay retryable and actionable; this is not a terminal outcome.
+    #[serde(default)]
+    pub handoff_synthesis_failures: Vec<HandoffFailure>,
+}
+
+/// One boundary still owing a handoff, and why (FR-240 clause 3).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HandoffFailure {
+    pub session_id: Uuid,
+    /// Redacted and bounded; never file or conversation content.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -461,6 +681,12 @@ impl SessionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     pub session_id: Uuid,
+    /// The agent whose session produced this. US6 requires a retrieved item to
+    /// name the agent *and* the session; the session id alone made a reader
+    /// join by hand to find out which agent learned it. Optional so a record
+    /// whose session has since been deleted still returns.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent: Option<String>,
     pub observation_ids: Vec<Uuid>,
     pub evidence_count: usize,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -665,11 +891,41 @@ mod tests {
         // Manual MCP mode records memory with no observations (FR-019).
         let p = Provenance {
             session_id: crate::domain::new_id(),
+            agent: None,
             observation_ids: vec![],
             evidence_count: 0,
             deleted_observation_ids: vec![],
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"evidence_count\":0"));
+    }
+
+    /// US6: a retrieved item names the agent *and* the session that produced
+    /// it. The session id alone left a reader to join by hand to find out which
+    /// agent learned the thing.
+    #[test]
+    fn provenance_names_the_producing_agent() {
+        let p = Provenance {
+            session_id: crate::domain::new_id(),
+            agent: Some("claude-code".into()),
+            observation_ids: vec![],
+            evidence_count: 0,
+            deleted_observation_ids: vec![],
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"agent\":\"claude-code\""));
+        let back: Provenance = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.agent.as_deref(), Some("claude-code"));
+    }
+
+    /// A record whose origin session is gone still returns, and an older peer
+    /// that never sends the field still deserializes.
+    #[test]
+    fn provenance_without_an_agent_round_trips() {
+        let id = crate::domain::new_id();
+        let json = format!(r#"{{"session_id":"{id}","observation_ids":[],"evidence_count":0}}"#);
+        let back: Provenance = serde_json::from_str(&json).unwrap();
+        assert!(back.agent.is_none());
+        assert!(!serde_json::to_string(&back).unwrap().contains("agent"));
     }
 }

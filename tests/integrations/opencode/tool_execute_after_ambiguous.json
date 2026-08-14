@@ -1,0 +1,17 @@
+{
+  "event": "tool.execute.after",
+  "expect": "tool_succeeded",
+  "capability": "lifecycle_tool_success",
+  "note": "no outcome flag of any kind. The conditional failure capability produces nothing here: the observation is success-shaped and no failure is asserted (FR-117, SC-134)",
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "callID": "call_02",
+    "tool": "bash",
+    "args": { "command": "cargo test -p cairn-store" },
+    "title": "cargo test -p cairn-store",
+    "output": {
+      "text": "error[E0308]: mismatched types\ntest result: FAILED"
+    },
+    "metadata": {}
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "event": "session.idle",
+  "expect": "agent_quiesced",
+  "capability": "lifecycle_quiesce",
+  "note": "session.idle carries only {sessionID}. Idleness means the agent stopped working — never that the session ended (FR-116, FR-230, SC-111)",
+  "payload": { "sessionID": "ses_7f2a91c4e0" }
+}

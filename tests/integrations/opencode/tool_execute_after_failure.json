@@ -1,0 +1,15 @@
+{
+  "event": "tool.execute.after",
+  "expect": "tool_failed",
+  "capability": "lifecycle_tool_failure",
+  "note": "the conditional capability's other half: this output unambiguously establishes failure",
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "callID": "call_03",
+    "tool": "bash",
+    "args": { "command": "cargo test -p cairn-store" },
+    "title": "cargo test -p cairn-store",
+    "output": { "exit_code": 101 },
+    "metadata": {}
+  }
+}

@@ -187,6 +187,73 @@ pub async fn reconcile_previous_runs(daemon: &Daemon) -> usize {
     count
 }
 
+/// How long a sealed boundary may owe its handoff before the sweep takes it.
+///
+/// The synthesis task spawned at close is the primary path and normally lands
+/// in milliseconds; this is the interval after which a boundary is considered
+/// abandoned by it — a task that was cancelled, or a process that died between
+/// the two phases.
+pub const HANDOFF_SWEEP_AFTER: std::time::Duration = crate::handoffs::HANDOFF_BOUND;
+
+/// Synthesize the handoffs sealed boundaries still owe (FR-240 clause 2, D22).
+///
+/// **Progress is guaranteed while the daemon runs, not only across a
+/// restart.** The synthesis task retries on its own; this sweep runs on the
+/// maintenance tick that already reaps idle sessions and picks up anything
+/// that task gave up on or never got to. No new scheduler.
+///
+/// Returns how many handoffs it produced.
+pub async fn sweep_pending_handoffs(daemon: &Daemon, owed_for: std::time::Duration) -> usize {
+    let cutoff = chrono::Utc::now()
+        - chrono::Duration::from_std(owed_for).unwrap_or_else(|_| chrono::Duration::seconds(5));
+
+    let owed = match repo::sessions_awaiting_handoff(&daemon.store, cutoff).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read sessions awaiting a handoff");
+            return 0;
+        }
+    };
+
+    let mut produced = 0;
+    for session in owed {
+        let policy = match repo::project(&daemon.store, session.project_id).await {
+            Ok(p) => SyncPolicy::from_project(&p),
+            Err(_) => SyncPolicy {
+                linked: false,
+                server_project_id: None,
+            },
+        };
+        // The trigger stays `session_end`: this is the boundary's own handoff
+        // arriving late, not a recovery from silence. Recovery never satisfies
+        // the completion guarantee, and mislabelling this would make the
+        // distinction meaningless (FR-229).
+        match crate::handoffs::generate(daemon, &session, HandoffTrigger::SessionEnd, policy).await
+        {
+            Ok(_) => {
+                if let Err(e) = repo::clear_handoff_pending(&daemon.store, session.id).await {
+                    tracing::warn!(session = %session.id, error = %e, "could not clear handoff_pending");
+                    continue;
+                }
+                produced += 1;
+                tracing::info!(session = %session.id, "swept a pending handoff");
+            }
+            Err(e) => {
+                let attempts = repo::record_handoff_failure(&daemon.store, session.id, &e.message)
+                    .await
+                    .unwrap_or(0);
+                tracing::warn!(
+                    session = %session.id,
+                    attempts,
+                    error = %e.message,
+                    "pending handoff still failing; it stays owed and retryable"
+                );
+            }
+        }
+    }
+    produced
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

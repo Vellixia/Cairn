@@ -1,0 +1,9 @@
+{
+  "event": "SessionEnd",
+  "expect": null,
+  "payload": {
+    "cwd": "/home/dev/app",
+    "hook_event_name": "SessionEnd",
+    "reason": "other"
+  }
+}

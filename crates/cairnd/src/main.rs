@@ -8,6 +8,7 @@ mod briefing;
 mod capture;
 mod handlers;
 mod handoffs;
+mod integrations;
 mod recover;
 mod state;
 mod sync;
@@ -55,7 +56,11 @@ async fn main() -> anyhow::Result<()> {
     // with stderr on the null device, so whatever `main` returns is printed to
     // nobody.
     if let Err(ref e) = result {
-        tracing::error!(error = %one_line(e), "cairnd exited during startup");
+        tracing::error!(
+            error = %one_line(e),
+            "{}",
+            cairn_core::startup::STARTUP_FAILED
+        );
     }
     result
 }
@@ -86,6 +91,7 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
 
     let daemon = Arc::new(Daemon {
         store,
+        lifecycle_kinds: Arc::new(RwLock::new(Default::default())),
         run_id: new_id(),
         config: Arc::new(RwLock::new(config)),
         user_id,
@@ -108,6 +114,13 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         tracing::info!(stale, "memory marked stale");
     }
     // Queued work a previous run claimed but never delivered is ours again.
+    // The backstop for the process dying between the seal and the synthesis —
+    // not the only retry path, which is the point of D22 (FR-240).
+    let owed = recover::sweep_pending_handoffs(&daemon, std::time::Duration::ZERO).await;
+    if owed > 0 {
+        tracing::info!(owed, "produced handoffs owed by a previous run");
+    }
+
     let released = recover::release_abandoned_claims(&daemon).await;
     if released > 0 {
         tracing::info!(released, "released outbox claims from a previous run");
@@ -130,6 +143,13 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
                 ticks.tick().await;
                 let reaped =
                     recover::reap_idle_sessions(&daemon, recover::IDLE_SESSION_TIMEOUT).await;
+                // The same tick sweeps any boundary still owing a handoff, so
+                // progress does not depend on a restart (FR-240, D22).
+                let swept =
+                    recover::sweep_pending_handoffs(&daemon, recover::HANDOFF_SWEEP_AFTER).await;
+                if swept > 0 {
+                    tracing::info!(swept, "produced handoffs owed by sealed boundaries");
+                }
                 if reaped > 0 {
                     tracing::info!(reaped, "closed idle sessions");
                 }
@@ -482,8 +502,17 @@ where
                 daemon.touch();
                 // Held until this request is answered, so a handoff can wait
                 // for captures that have already arrived (H3).
-                let _capture = matches!(request, Request::Observe { .. })
-                    .then(|| state::CaptureGuard::new(&daemon.in_flight_captures));
+                //
+                // A capture now usually arrives as a canonical event rather
+                // than a bare `Observe`, and one that is not counted is one a
+                // boundary will not wait for (D22 phase two).
+                let is_capture = match &request {
+                    Request::Observe { .. } => true,
+                    Request::CanonicalEvent { event, .. } => !event.event.is_boundary_class(),
+                    _ => false,
+                };
+                let _capture =
+                    is_capture.then(|| state::CaptureGuard::new(&daemon.in_flight_captures));
                 let stop = matches!(request, Request::DaemonShutdown);
                 let reply = handlers::dispatch(&daemon, request).await;
                 if stop {

@@ -115,7 +115,13 @@ fn status_reports_which_mode_the_repository_is_in() {
     let s = Sandbox::new();
     assert_eq!(s.json(&["status"])["integration_mode"], "manual-mcp");
 
-    s.must(&["connect", "claude-code"]);
+    // Detection is filesystem-only and needs no vendor binary, so the sandbox
+    // says the agent is installed by creating the directory detection looks
+    // for (FR-105).
+    s.install_agent("claude-code");
+    // Non-interactive runs need the explicit opt-in: the plan is shown and
+    // nothing is applied without it (FR-164).
+    s.must(&["connect", "claude-code", "--yes"]);
     assert_eq!(s.json(&["status"])["integration_mode"], "claude-code-hooks");
 
     s.must(&["disconnect", "claude-code"]);

@@ -57,6 +57,15 @@ fn a_task_bound_session_leads_the_briefing_with_its_goal_and_criteria() {
         "SessionEnd",
         json!({ "session_id": "t1", "reason": "clear" }),
     );
+    // The close is sealed (D22): the boundary is acknowledged as soon as the
+    // termination record is durable, and the handoff lands a few milliseconds
+    // later. What the next session reads is the handoff, so this waits for it
+    // rather than for the boundary that promises it.
+    s.settle("the sealed boundary's handoff", |s| {
+        s.cairn(&["--json", "status"])
+            .stdout
+            .contains("\"sessions_awaiting_handoff\": 0")
+    });
 
     // A second session on the same task resumes with its goal and history.
     s.hook(
@@ -100,7 +109,7 @@ fn unmet_criteria_appear_as_remaining_work_in_the_handoff() {
         json!({ "session_id": "t3", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert_eq!(handoff["goal"], "429 over the limit");
     let remaining = serde_json::to_string(&handoff["remaining_work"]).unwrap();
     assert!(remaining.contains("429 above threshold"), "{remaining}");
@@ -123,7 +132,7 @@ fn a_session_with_no_task_remains_valid() {
         json!({ "session_id": "free", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert!(
         handoff["goal"].as_str().unwrap().contains("main"),
         "goal falls back to the branch"
@@ -215,7 +224,7 @@ fn a_task_marked_done_empties_remaining_work_in_the_handoff() {
         json!({ "session_id": "done-sess", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert_eq!(handoff["goal"], "All done");
     let remaining = handoff["remaining_work"].as_array().unwrap();
     assert!(
@@ -250,7 +259,7 @@ fn a_task_with_no_criteria_is_valid() {
         json!({ "session_id": "nc", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert_eq!(handoff["goal"], "Just a goal");
     assert!(handoff["remaining_work"].as_array().unwrap().is_empty());
 }
@@ -337,7 +346,7 @@ fn a_task_spanning_multiple_sessions_accumulates_history() {
 
     // Session 1's own handoff names session 1's file, so the accumulation
     // asserted below is a real change rather than a coincidence.
-    let first = s.json(&["handoff", "show"])["handoff"].clone();
+    let first = s.handoff_after_close(&[]);
     let first_files = first["changed_files"].as_array().unwrap();
     assert!(
         first_files.iter().any(|f| f.as_str() == Some("src/a.rs")),
@@ -361,7 +370,7 @@ fn a_task_spanning_multiple_sessions_accumulates_history() {
         json!({ "session_id": "ms2", "reason": "clear" }),
     );
 
-    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+    let handoff = s.handoff_after_close(&[]);
     assert_eq!(handoff["goal"], "Work across sessions");
     let changed = handoff["changed_files"].as_array().unwrap();
     assert!(

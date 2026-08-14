@@ -18,7 +18,7 @@ pub async fn dispatch(daemon: &Daemon, request: Request) -> Envelope {
     }
 }
 
-async fn handle(d: &Daemon, request: Request) -> Reply {
+pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
     match request {
         Request::DaemonStatus => Ok(json!({
             "running": true,
@@ -67,7 +67,19 @@ async fn handle(d: &Daemon, request: Request) -> Reply {
             agent_session_key,
             status,
             reason,
-        } => session_end(d, &cwd, session_id, agent_session_key, status, reason).await,
+            wait_for_handoff,
+        } => {
+            session_end(
+                d,
+                &cwd,
+                session_id,
+                agent_session_key,
+                status,
+                reason,
+                wait_for_handoff,
+            )
+            .await
+        }
         Request::TurnCheckpoint {
             cwd,
             agent_session_key,
@@ -78,6 +90,153 @@ async fn handle(d: &Daemon, request: Request) -> Reply {
             agent_session_key,
             observation,
         } => observe(d, &cwd, agent_session_key, observation).await,
+
+        // The daemon's single lifecycle entry point (FR-112).
+        Request::CanonicalEvent {
+            event,
+            wait_for_handoff,
+            token_budget,
+        } => crate::integrations::canonical_event(d, event, wait_for_handoff, token_budget).await,
+
+        Request::IntegrationSnapshot { cwd } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::snapshot(d).await
+        }
+        Request::IntegrationUpsertAgent {
+            cwd,
+            agent,
+            adapter_version,
+            detected_version,
+            compatibility,
+            level,
+            completion_guarantee,
+        } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::upsert_agent(
+                d,
+                agent,
+                adapter_version,
+                detected_version,
+                compatibility,
+                level,
+                completion_guarantee,
+            )
+            .await
+        }
+        Request::IntegrationBind {
+            cwd,
+            agent,
+            kind,
+            owner,
+            scope,
+            location,
+            content_hash,
+            artifact_schema,
+            artifact_revision,
+            activation,
+            container_single_line,
+            created_container,
+        } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::bind(
+                d,
+                agent,
+                kind,
+                owner,
+                scope,
+                location,
+                content_hash,
+                artifact_schema,
+                artifact_revision,
+                activation,
+                container_single_line,
+                created_container,
+            )
+            .await
+        }
+        Request::IntegrationUnbind { cwd, agent, kind } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::unbind(d, agent, kind).await
+        }
+        Request::IntegrationForgetAgent { cwd, agent } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::forget_agent(d, agent).await
+        }
+        Request::IntegrationEvidence {
+            cwd,
+            agent,
+            capability,
+            evidence,
+            agent_version,
+            degraded,
+        } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::record_evidence(
+                d,
+                agent,
+                capability,
+                evidence,
+                agent_version,
+                degraded,
+            )
+            .await
+        }
+        Request::IntegrationInvalidateEvidence {
+            cwd,
+            agent,
+            detected_version,
+        } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::invalidate_evidence(d, agent, detected_version).await
+        }
+        Request::IntegrationMigration {
+            cwd,
+            agent,
+            kind,
+            action,
+            source_owner,
+            source_scope,
+            source_location,
+            target_owner,
+            target_scope,
+            target_location,
+            overlap_permitted,
+            phase,
+            last_error,
+        } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::migration(
+                d,
+                agent,
+                kind,
+                action,
+                (source_owner, source_scope, source_location),
+                (target_owner, target_scope, target_location),
+                overlap_permitted,
+                phase,
+                last_error,
+            )
+            .await
+        }
+        Request::IntegrationRecovery {
+            cwd,
+            agent,
+            kind,
+            source_path,
+            artifact_path,
+            content_hash,
+        } => {
+            d.resolve(&cwd).await?;
+            crate::integrations::record_recovery(
+                d,
+                agent,
+                kind,
+                source_path,
+                artifact_path,
+                content_hash,
+            )
+            .await
+        }
 
         Request::Context {
             cwd,
@@ -324,12 +483,15 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         .map(|s| SessionSummary::from_session(s, now))
         .collect();
 
+    // What is still owed, so a developer never has to guess whether a
+    // boundary completed (FR-240 clause 3).
+    let debt = repo::handoff_debt(&d.store).await.map_err(storage_err)?;
     let payload = StatusPayload {
         project: ProjectSummary::from(&r.project),
         repository: repo_state(&git),
         worktree_path: r.worktree(),
         sessions: active,
-        integration_mode: integration_mode(&r),
+        integration_mode: integration_mode(d).await,
         daemon: "running".into(),
         observation_count: repo::count_observations(&d.store, r.project.id)
             .await
@@ -340,6 +502,13 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         server_url: d.server.read().await.url.clone(),
         authenticated: d.server.read().await.token.is_some(),
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
+        local_schema_version: cairn_store::migrate::latest_version(),
+        sessions_awaiting_handoff: debt.0,
+        handoff_synthesis_failures: debt
+            .1
+            .into_iter()
+            .map(|(session_id, reason)| cairn_core::wire::HandoffFailure { session_id, reason })
+            .collect(),
     };
     Ok(serde_json::to_value(payload).unwrap_or(json!({})))
 }
@@ -364,16 +533,26 @@ pub async fn reconcile_stale(d: &Daemon, r: &Resolved) {
 }
 
 /// Which mode this repository is operating in (FR-042).
-fn integration_mode(r: &Resolved) -> String {
-    let settings = r.repo.worktree_path.join(".claude").join("settings.json");
-    let hooks_installed = std::fs::read_to_string(&settings)
-        .map(|t| t.contains("cairn hook"))
-        .unwrap_or(false);
-    if hooks_installed {
-        "claude-code-hooks".into()
-    } else {
-        "manual-mcp".into()
+/// Which mode this repository is in, from the local integration record.
+///
+/// Feature 001 answered this by grepping a settings file for `cairn hook`,
+/// which is the fuzzy ownership test FR-139 forbids — it also matched a
+/// developer's own command that merely mentioned Cairn, and it only ever
+/// looked at the committed project file, while Feature 002's default
+/// lifecycle scope is the gitignored one. Ownership is the record.
+async fn integration_mode(d: &Daemon) -> String {
+    let agents = cairn_store::integrations::list_agents(&d.store)
+        .await
+        .unwrap_or_default();
+    for agent in agents {
+        let bound = cairn_store::integrations::bound_resources(&d.store, &agent)
+            .await
+            .unwrap_or_default();
+        if bound.iter().any(|b| b.resource.kind == "lifecycle") {
+            return format!("{agent}-hooks");
+        }
     }
+    "manual-mcp".into()
 }
 
 // ---------------------------------------------------------------------------
@@ -510,6 +689,18 @@ async fn session_list(d: &Daemon, cwd: &str) -> Reply {
     Ok(json!({ "sessions": sessions }))
 }
 
+/// The sealed close (D22, FR-240).
+///
+/// Two phases. **Seal**, synchronously, before the reply: one transaction sets
+/// the terminal status, the end reason, `ended_at` and `handoff_pending`. No
+/// Git, no capture quiesce, no synthesis. **Synthesize**, immediately after:
+/// build the handoff, write it, clear `handoff_pending`.
+///
+/// A caller that waits — `cairn session end` from the command line — gets
+/// Feature 001's behavior unchanged, because nothing holds a deadline over it.
+/// A hook-driven boundary does not wait: Codex's session-end handler has a
+/// one-second default budget, and the Feature 001 path can exceed it, which
+/// would make the completion guarantee unprovable rather than merely slow.
 async fn session_end(
     d: &Daemon,
     cwd: &str,
@@ -517,20 +708,45 @@ async fn session_end(
     agent_session_key: Option<String>,
     status: SessionStatus,
     reason: Option<String>,
+    wait_for_handoff: bool,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let session = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    // The final handoff is written before the status changes, so a session
-    // never ends without one (FR-032).
-    let handoff = handoffs::generate(d, &session, HandoffTrigger::SessionEnd, r.policy).await?;
-    let ended = repo::end_session(&d.store, session.id, status, reason.as_deref(), r.policy)
+    // Phase one: durable termination, before anything is acknowledged.
+    let sealed = repo::seal_session(&d.store, session.id, status, reason.as_deref(), r.policy)
         .await
         .map_err(storage_err)?;
 
+    if wait_for_handoff {
+        // Phase two, inline. The caller asked to wait, so a failure here is
+        // reported to it rather than left owed.
+        let handoff = handoffs::generate(d, &sealed, HandoffTrigger::SessionEnd, r.policy).await?;
+        repo::clear_handoff_pending(&d.store, sealed.id)
+            .await
+            .map_err(storage_err)?;
+        let ended = repo::session(&d.store, sealed.id)
+            .await
+            .map_err(storage_err)?;
+        return Ok(json!({
+            "session": SessionSummary::from_session(&ended, chrono::Utc::now()),
+            "handoff": handoff,
+        }));
+    }
+
+    // Phase two, after the reply. Progress is guaranteed while the daemon runs
+    // (FR-240 clause 2): this task retries with bounded backoff, and the
+    // maintenance tick sweeps anything it gives up on.
+    let daemon = d.clone();
+    let policy = r.policy;
+    let id = sealed.id;
+    tokio::spawn(async move {
+        crate::handoffs::synthesize_pending(&daemon, id, policy).await;
+    });
+
     Ok(json!({
-        "session": SessionSummary::from_session(&ended, chrono::Utc::now()),
-        "handoff": handoff,
+        "session": SessionSummary::from_session(&sealed, chrono::Utc::now()),
+        "handoff_pending": true,
     }))
 }
 
@@ -1076,6 +1292,9 @@ mod tests {
                 agent_session_key: Some("ends".into()),
                 status: SessionStatus::Completed,
                 reason: Some("clear".into()),
+                // The command-line boundary: nothing holds a deadline over it,
+                // so the durable handoff is in the reply this asserts on.
+                wait_for_handoff: true,
             },
         )
         .await;
@@ -1331,6 +1550,7 @@ mod tests {
                         outcome: None,
                         summary: format!("Edited {path}"),
                         details: None,
+                        vendor_tool: None,
                     },
                 },
             )

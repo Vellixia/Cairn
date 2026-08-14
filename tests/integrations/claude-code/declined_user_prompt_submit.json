@@ -1,0 +1,11 @@
+{
+  "event": "UserPromptSubmit",
+  "expect": null,
+  "note": "carries the developer's prompt verbatim; never mapped, never read",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "UserPromptSubmit",
+    "prompt": "please fix the connection pool and don't touch the migrations"
+  }
+}

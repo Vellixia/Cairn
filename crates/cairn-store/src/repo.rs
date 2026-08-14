@@ -1249,6 +1249,112 @@ pub async fn set_pull_cursor(store: &Store, project_id: Uuid, cursor: &str) -> R
     Ok(())
 }
 
+/// Seal a session's termination, durably, before anything is acknowledged
+/// (FR-240 clause 1, D22).
+///
+/// One transaction sets the terminal status, the end reason, `ended_at` and
+/// `handoff_pending`. No Git, no capture quiesce, no synthesis — this is the
+/// whole of what happens before the daemon answers, which is what makes a
+/// one-second vendor handler budget survivable without giving up the
+/// completion guarantee.
+pub async fn seal_session(
+    store: &Store,
+    id: Uuid,
+    status: SessionStatus,
+    reason: Option<&str>,
+    policy: SyncPolicy,
+) -> Result<Session> {
+    let now = rows::now_text();
+    sqlx::query(
+        "UPDATE sessions
+         SET status = ?1, ended_at = ?2, last_event_at = ?2, end_reason = ?3,
+             handoff_pending = 1, handoff_attempts = 0, handoff_error = NULL
+         WHERE id = ?4",
+    )
+    .bind(status.as_str())
+    .bind(&now)
+    .bind(reason)
+    .bind(id.to_string())
+    .execute(store.pool())
+    .await?;
+    let sealed = session(store, id).await?;
+    enqueue_session(store, policy, &sealed).await?;
+    Ok(sealed)
+}
+
+/// The handoff landed: the boundary is complete (FR-240 clause 2).
+pub async fn clear_handoff_pending(store: &Store, id: Uuid) -> Result<()> {
+    sqlx::query("UPDATE sessions SET handoff_pending = 0, handoff_error = NULL WHERE id = ?1")
+        .bind(id.to_string())
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// Synthesis failed again. The reason is redacted and never carries file or
+/// conversation content (FR-240 clause 3).
+pub async fn record_handoff_failure(store: &Store, id: Uuid, reason: &str) -> Result<i64> {
+    let redacted = cairn_core::redact::redact(reason);
+    let bounded = cairn_core::bound::bound_text(&redacted, 500).text;
+    sqlx::query(
+        "UPDATE sessions
+         SET handoff_attempts = handoff_attempts + 1, handoff_error = ?2
+         WHERE id = ?1",
+    )
+    .bind(id.to_string())
+    .bind(&bounded)
+    .execute(store.pool())
+    .await?;
+    let row = sqlx::query("SELECT handoff_attempts FROM sessions WHERE id = ?1")
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await?;
+    Ok(row.try_get::<i64, _>("handoff_attempts")?)
+}
+
+/// Sessions that acknowledged a boundary but have not produced its handoff.
+///
+/// Ordered oldest first, so the sweep clears the longest-owed first. A
+/// terminal session never sits silently owing a handoff (FR-240).
+pub async fn sessions_awaiting_handoff(
+    store: &Store,
+    sealed_before: DateTime<Utc>,
+) -> Result<Vec<Session>> {
+    let rows = sqlx::query(
+        "SELECT * FROM sessions
+         WHERE handoff_pending = 1 AND deleted_at IS NULL AND ended_at <= ?1
+         ORDER BY ended_at",
+    )
+    .bind(rows::ts_text(sealed_before))
+    .fetch_all(store.pool())
+    .await?;
+    rows.iter().map(rows::session).collect()
+}
+
+/// How many boundaries are currently owed a handoff, and which have stopped
+/// being retried quickly. Reported in `cairn status` and doctor's core section.
+pub async fn handoff_debt(store: &Store) -> Result<(i64, Vec<(Uuid, String)>)> {
+    let owed: i64 = sqlx::query("SELECT COUNT(*) AS n FROM sessions WHERE handoff_pending = 1")
+        .fetch_one(store.pool())
+        .await?
+        .try_get("n")?;
+    let rows = sqlx::query(
+        "SELECT id, handoff_error FROM sessions
+         WHERE handoff_pending = 1 AND handoff_error IS NOT NULL
+         ORDER BY ended_at",
+    )
+    .fetch_all(store.pool())
+    .await?;
+    let mut failures = Vec::new();
+    for r in &rows {
+        failures.push((
+            rows::uuid(r, "id")?,
+            r.try_get::<String, _>("handoff_error")?,
+        ));
+    }
+    Ok((owed, failures))
+}
+
 #[cfg(test)]
 mod idle_tests {
     use super::*;

@@ -1,0 +1,5 @@
+{
+  "event": "session.diff",
+  "expect": null,
+  "payload": { "sessionID": "ses_7f2a91c4e0", "files": ["src/pool.rs"] }
+}

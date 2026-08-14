@@ -1,0 +1,7 @@
+{
+  "event": "experimental.session.compacting",
+  "expect": "context_compacting",
+  "capability": "lifecycle_pre_compaction",
+  "note": "experimental: present only on installations that expose it, which is why the capability is conditional",
+  "payload": { "sessionID": "ses_7f2a91c4e0" }
+}

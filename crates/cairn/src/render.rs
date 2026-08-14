@@ -313,6 +313,9 @@ mod tests {
             server_url: None,
             authenticated: false,
             version: None,
+            local_schema_version: 0,
+            sessions_awaiting_handoff: 0,
+            handoff_synthesis_failures: vec![],
         };
         let text = status(&s);
         assert!(text.contains("Sharing      local only"));

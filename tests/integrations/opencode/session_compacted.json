@@ -1,0 +1,6 @@
+{
+  "event": "session.compacted",
+  "expect": "context_compacted",
+  "capability": "lifecycle_post_compaction",
+  "payload": { "sessionID": "ses_7f2a91c4e0" }
+}

@@ -4,6 +4,7 @@ members = [
     "crates/cairn-core",
     "crates/cairn-git",
     "crates/cairn-store",
+    "crates/cairn-integrate",
     "crates/cairn-sys",
     "crates/cairnd",
     "crates/cairn",
@@ -12,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0-alpha.3"
+version = "0.1.0-alpha.4"
 edition = "2021"
 rust-version = "1.97"
 license = "MIT"
@@ -22,6 +23,7 @@ repository = "https://github.com/Vellixia/Cairn"
 cairn-core = { path = "crates/cairn-core" }
 cairn-git = { path = "crates/cairn-git" }
 cairn-store = { path = "crates/cairn-store" }
+cairn-integrate = { path = "crates/cairn-integrate" }
 cairn-sys = { path = "crates/cairn-sys" }
 
 anyhow = "1"
@@ -70,6 +72,9 @@ semver = "1"
 flate2 = "1"
 tar = "0.4"
 tempfile = "3"
+jsonc-parser = { version = "0.33", features = ["cst", "serde"] }
+toml_edit = "0.22"
+include_dir = "0.7"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Console",

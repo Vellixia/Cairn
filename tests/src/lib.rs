@@ -117,7 +117,12 @@ impl Sandbox {
             .current_dir(self.repo.path())
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
-            .env("CAIRND_BIN", binary("cairnd"));
+            .env("CAIRND_BIN", binary("cairnd"))
+            // Feature 002 writes per-user agent configuration. The sandbox
+            // gives it a home of its own so a test can never reach the
+            // developer's real `~/.claude` or `~/.codex`.
+            .env("HOME", self.fake_home())
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"));
         for (key, value) in env {
             command.env(key, value);
         }
@@ -127,6 +132,62 @@ impl Sandbox {
             stdout: String::from_utf8_lossy(&out.stdout).to_string(),
             stderr: String::from_utf8_lossy(&out.stderr).to_string(),
         }
+    }
+
+    /// `CAIRN_HOME` — everything Cairn itself writes on this machine.
+    pub fn cairn_home(&self) -> std::path::PathBuf {
+        self.home.path().to_path_buf()
+    }
+
+    /// The per-user home the sandbox's agents live in.
+    pub fn fake_home(&self) -> std::path::PathBuf {
+        let p = self.home.path().join("fake-home");
+        let _ = std::fs::create_dir_all(&p);
+        p
+    }
+
+    /// The repository this sandbox works in.
+    pub fn repo_dir(&self) -> std::path::PathBuf {
+        self.repo.path().to_path_buf()
+    }
+
+    /// Add a linked worktree of the sandbox repository, on a branch of the same
+    /// name, and return its path.
+    ///
+    /// Kept inside the sandbox's own home so parallel tests never collide on a
+    /// shared path — and so it is removed with everything else.
+    pub fn add_worktree(&self, name: &str) -> std::path::PathBuf {
+        let path = self.home.path().join("worktrees").join(name);
+        std::fs::create_dir_all(path.parent().expect("worktrees parent")).expect("worktrees dir");
+        self.git(&["worktree", "add", "-b", name, &path.display().to_string()]);
+        path
+    }
+
+    /// Pretend an agent is installed, by creating the directory its detection
+    /// looks for. No vendor binary is involved, which is what keeps these
+    /// tests hermetic (FR-204, SC-124).
+    pub fn install_agent(&self, agent: &str) {
+        let home = self.fake_home();
+        let dir = match agent {
+            "claude-code" => home.join(".claude"),
+            "codex" => home.join(".codex"),
+            "opencode" => home.join(".config").join("opencode"),
+            "cc-switch" => home.join(".cc-switch"),
+            other => panic!("unknown agent {other}"),
+        };
+        std::fs::create_dir_all(&dir).expect("agent home");
+    }
+
+    /// A content hash of every file under the repository and the fake home.
+    ///
+    /// Used to prove an operation wrote nothing: comparing the listing as well
+    /// as the contents catches a temporary file that was created and removed.
+    pub fn checksum_tree(&self) -> std::collections::BTreeMap<String, String> {
+        let mut out = std::collections::BTreeMap::new();
+        for root in [self.repo.path().to_path_buf(), self.fake_home()] {
+            collect_tree(&root, &root, &mut out);
+        }
+        out
     }
 
     /// Run `cairn`, requiring it to succeed.
@@ -166,6 +227,40 @@ impl Sandbox {
         envelope["data"].clone()
     }
 
+    /// Read a handoff, waiting for one a sealed boundary still owes.
+    ///
+    /// A hook-driven `SessionEnd` is acknowledged after termination is
+    /// durably recorded, and its handoff is produced immediately afterwards
+    /// rather than inside the request (FR-240, D22) — that is what makes a
+    /// vendor's one-second handler budget survivable without giving up the
+    /// completion guarantee. The handoff's *substance* is unchanged; only the
+    /// moment it becomes readable is, and the documented bound is five
+    /// seconds on a running daemon.
+    ///
+    /// `args` are the arguments after `handoff show`, e.g. `["--session", id]`.
+    pub fn handoff_after_close(&self, args: &[&str]) -> serde_json::Value {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut full = vec!["--json", "handoff", "show"];
+        full.extend_from_slice(args);
+        loop {
+            let result = self.cairn(&full);
+            if let Ok(envelope) = serde_json::from_str::<serde_json::Value>(&result.stdout) {
+                if envelope["ok"] == true {
+                    let handoff = envelope["data"]["handoff"].clone();
+                    if !handoff.is_null() {
+                        return handoff;
+                    }
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no handoff within the documented bound after a sealed close: `cairn {}`",
+                full.join(" ")
+            );
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
     /// Run `cairn --json`, expecting failure, and return the error object.
     pub fn json_err(&self, args: &[&str]) -> serde_json::Value {
         let mut full = vec!["--json"];
@@ -178,15 +273,46 @@ impl Sandbox {
 
     /// Deliver a Claude Code hook event with the given payload.
     pub fn hook(&self, event: &str, payload: serde_json::Value) -> CliResult {
+        self.hook_as("claude-code", event, payload)
+    }
+
+    /// Drive a hook for a named adapter.
+    ///
+    /// Claude Code's entry is `cairn hook <Event>`, unchanged from Feature
+    /// 001; the others name themselves, because the same event word means a
+    /// different payload shape to a different vendor.
+    pub fn hook_as(&self, agent: &str, event: &str, payload: serde_json::Value) -> CliResult {
+        self.hook_in(&self.repo_dir(), agent, event, payload)
+    }
+
+    /// Drive a hook from a specific directory.
+    ///
+    /// A second worktree of the same repository is a different directory, and
+    /// the directory is the only thing that tells the two apart — an agent
+    /// working there reports it as its `cwd` exactly like this (US10 #5).
+    pub fn hook_in(
+        &self,
+        dir: &std::path::Path,
+        agent: &str,
+        event: &str,
+        payload: serde_json::Value,
+    ) -> CliResult {
         use std::io::Write;
         use std::process::Stdio;
 
+        let mut args: Vec<String> = vec!["hook".into(), event.into()];
+        if agent != "claude-code" {
+            args.push("--agent".into());
+            args.push(agent.into());
+        }
         let mut child = Command::new(binary("cairn"))
-            .args(["hook", event])
-            .current_dir(self.repo.path())
+            .args(&args)
+            .current_dir(dir)
             .env("CAIRN_HOME", self.home.path())
             .env("CAIRN_SOCKET", &self.socket)
             .env("CAIRND_BIN", binary("cairnd"))
+            .env("HOME", self.fake_home())
+            .env("XDG_CONFIG_HOME", self.fake_home().join(".config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -194,7 +320,7 @@ impl Sandbox {
             .expect("hook runs");
 
         let mut body = payload;
-        body["cwd"] = serde_json::json!(self.repo.path().display().to_string());
+        body["cwd"] = serde_json::json!(dir.display().to_string());
         child
             .stdin
             .as_mut()
@@ -258,6 +384,17 @@ impl Sandbox {
         });
     }
 
+    /// Wait until the newest session has recorded a turn checkpoint.
+    ///
+    /// `Stop` is capture class and fire-and-forget by contract (FR-015,
+    /// FR-193): the hook returns before the write lands, so a test that reads
+    /// immediately is racing Cairn's own deadline rather than testing it.
+    pub fn settle_turn_checkpoint(&self) {
+        self.settle("a turn checkpoint", |s| {
+            s.json(&["session", "list"])["sessions"][0]["last_turn_ended_at"].is_string()
+        });
+    }
+
     /// Wait until a handoff with `trigger` is readable.
     ///
     /// `PreCompact` is requested fire-and-forget, so the write lands shortly
@@ -276,6 +413,22 @@ impl Sandbox {
         self.settle(&format!("session status {status}"), |s| {
             s.json(&["session", "list"])["sessions"][0]["status"].as_str() == Some(status)
         });
+    }
+
+    /// Rewrite the hook deadlines this sandbox runs under.
+    ///
+    /// A deadline of one millisecond is how an unresponsive handler is induced
+    /// without making the test depend on machine load.
+    pub fn set_deadlines(&self, capture_ms: u64, context_ms: u64) {
+        std::fs::write(
+            self.home.path().join("config.json"),
+            serde_json::json!({
+                "capture_deadline_ms": capture_ms,
+                "context_deadline_ms": context_ms,
+            })
+            .to_string(),
+        )
+        .expect("write config");
     }
 
     /// Stop the daemon and wait until it has actually let go of the socket.
@@ -602,6 +755,11 @@ impl Mcp {
             .env("CAIRN_HOME", s.home.path())
             .env("CAIRN_SOCKET", &s.socket)
             .env("CAIRND_BIN", binary("cairnd"))
+            // Same fake home as every other entry point: the MCP server is a
+            // way into the same daemon, and inheriting the developer's real
+            // home would make one process in the sandbox able to escape it.
+            .env("HOME", s.fake_home())
+            .env("XDG_CONFIG_HOME", s.fake_home().join(".config"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -730,6 +888,48 @@ impl Server {
         let _ = child.kill();
         let _ = child.wait();
         Err(format!("cairn-server did not become healthy at {base}"))
+    }
+
+    /// Every text value in every table of the shared database, concatenated.
+    ///
+    /// The endpoints are one view of what reached the server; this is the
+    /// other. A privacy assertion made only against the API would pass on a
+    /// server that stored something and merely declined to serve it back
+    /// (SC-119, SC-133).
+    pub fn dump(&self) -> String {
+        let url = std::env::var("CAIRN_TEST_DATABASE_URL").expect("a test database");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            let tables: Vec<String> = sqlx::query_scalar(
+                "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename",
+            )
+            .fetch_all(&pool)
+            .await
+            .expect("list tables");
+
+            let mut out = String::new();
+            for table in tables {
+                // Render every row as JSON so no column type is skipped, and
+                // so a value nested inside a JSON column is still visible.
+                let sql = format!("SELECT to_jsonb(t)::text FROM \"{table}\" t");
+                let rows: Vec<String> = sqlx::query_scalar(&sql)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_default();
+                for row in rows {
+                    out.push_str(&table);
+                    out.push(' ');
+                    out.push_str(&row);
+                    out.push('\n');
+                }
+            }
+            pool.close().await;
+            out
+        })
     }
 
     /// Register a user and return a fresh personal API token.
@@ -902,4 +1102,40 @@ pub fn post_json_bearer(
 pub fn attach_server(s: &Sandbox, server: &Server, token: &str) {
     let result = s.cairn(&["auth", "token", "set", token, "--server", &server.base]);
     assert!(result.ok(), "auth token set failed: {}", result.stderr);
+}
+
+/// Every file under `dir`, keyed by its path relative to `root`.
+fn collect_tree(
+    root: &std::path::Path,
+    dir: &std::path::Path,
+    out: &mut std::collections::BTreeMap<String, String>,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_tree(root, &path, out);
+        } else {
+            let key = format!(
+                "{}:{}",
+                root.display(),
+                path.strip_prefix(root).unwrap_or(&path).display()
+            );
+            let body = std::fs::read(&path).unwrap_or_default();
+            out.insert(key, format!("{:x}", md5_like(&body)));
+        }
+    }
+}
+
+/// A cheap content digest. Not cryptographic — this only has to notice that a
+/// file changed.
+fn md5_like(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in bytes {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
 }

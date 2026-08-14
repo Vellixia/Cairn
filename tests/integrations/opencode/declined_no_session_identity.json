@@ -1,0 +1,5 @@
+{
+  "event": "session.created",
+  "expect": null,
+  "payload": { "title": "an event with no session identity" }
+}

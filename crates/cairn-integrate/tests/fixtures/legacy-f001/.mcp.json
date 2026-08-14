@@ -1,0 +1,6 @@
+{
+  "mcpServers": {
+    "internal": { "command": "internal-mcp", "args": ["--stdio"] },
+    "cairn": { "command": "cairn", "args": ["mcp"] }
+  }
+}

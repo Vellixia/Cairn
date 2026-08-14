@@ -40,7 +40,7 @@ pub fn synthesize(input: &HandoffInputs<'_>, trigger: HandoffTrigger) -> Handoff
     let completed_work = derive_completed(&changed_files, &tests_executed, &discoveries);
     let remaining_work = derive_remaining(input, &failures, &tests_executed);
     let progress = derive_progress(&changed_files, &tests_executed, &failures);
-    let next_step = derive_next_step(&failures, &remaining_work, &changed_files);
+    let next_step = derive_next_step(input, &failures, &remaining_work, &changed_files);
 
     Handoff {
         id: new_id(),
@@ -88,6 +88,21 @@ fn derive_changed_files(obs: &[Observation], git_changed: &[String]) -> Vec<Stri
         .collect();
     files.sort();
     files.dedup();
+    // Observations carry absolute paths; Git reports the same file relative to
+    // the repository root. Plain `dedup` cannot see that those are one file, so
+    // two edits arrived as "5 file(s) changed". Where one entry is a
+    // component-aligned suffix of another, keep the shorter, repository-relative
+    // form and drop the absolute duplicate.
+    let absolute_duplicates: Vec<String> = files
+        .iter()
+        .filter(|long| {
+            files
+                .iter()
+                .any(|short| short.len() < long.len() && long.ends_with(&format!("/{short}")))
+        })
+        .cloned()
+        .collect();
+    files.retain(|f| !absolute_duplicates.contains(f));
     files
 }
 
@@ -207,7 +222,15 @@ fn derive_remaining(
             }
         }
     }
-    out.extend(failures.iter().map(|f| format!("Open failure: {f}")));
+    // Same reasoning as `derive_next_step`: once the task is done, a failed
+    // tool call is a recorded lesson, not outstanding work.
+    let task_done = input
+        .task
+        .map(|t| t.status == TaskStatus::Done)
+        .unwrap_or(false);
+    if !task_done {
+        out.extend(failures.iter().map(|f| format!("Open failure: {f}")));
+    }
     if out.is_empty() && input.task.is_none() {
         out.push("No task bound; remaining work not tracked".to_string());
     }
@@ -228,9 +251,27 @@ fn derive_progress(
     )
 }
 
-fn derive_next_step(failures: &[String], remaining: &[String], changed_files: &[String]) -> String {
-    if let Some(first) = failures.first() {
-        return format!("Fix the open failure: {first}");
+fn derive_next_step(
+    input: &HandoffInputs<'_>,
+    failures: &[String],
+    remaining: &[String],
+    changed_files: &[String],
+) -> String {
+    // A tool that failed is not automatically work left to do. A session that
+    // deliberately proves an approach does not work -- and records the decision
+    // and the failure lesson saying so -- leaves a failed tool call behind on
+    // purpose. Ordering the next session to "fix" it sends it to redo the dead
+    // end the last one just ruled out, which is the opposite of carrying the
+    // lesson forward. A completed task is the recorded signal that the failure
+    // was accounted for rather than abandoned.
+    let task_done = input
+        .task
+        .map(|t| t.status == TaskStatus::Done)
+        .unwrap_or(false);
+    if !task_done {
+        if let Some(first) = failures.first() {
+            return format!("Fix the open failure: {first}");
+        }
     }
     if let Some(first) = remaining.first() {
         return format!("Continue with: {first}");
@@ -277,6 +318,9 @@ mod tests {
             daemon_run_id: new_id(),
             end_reason: None,
             deleted_at: None,
+            handoff_pending: false,
+            handoff_attempts: 0,
+            handoff_error: None,
         }
     }
 
@@ -428,5 +472,110 @@ mod tests {
             HandoffTrigger::Recovered,
         );
         assert_eq!(h.evidence, vec![id]);
+    }
+
+    /// A session that deliberately proves an approach wrong leaves a failed
+    /// tool behind and marks the task done. Ordering the next session to fix it
+    /// sends it back into the dead end the last one ruled out.
+    #[test]
+    fn a_done_task_does_not_order_the_next_session_to_fix_a_recorded_failure() {
+        let s = session();
+        let task = Task {
+            id: new_id(),
+            project_id: s.project_id,
+            title: "Typed values".into(),
+            goal: "parse_config coerces ints and bools".into(),
+            acceptance_criteria: vec!["ints coerce".into()],
+            status: TaskStatus::Done,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+        };
+        let observations = vec![obs(
+            ObservationType::Error,
+            "Bash failed: python3 -c \"import configparser\": tool execution failed",
+        )];
+        let h = synthesize(
+            &HandoffInputs {
+                session: &s,
+                task: Some(&task),
+                observations: &observations,
+                decision_memories: &[],
+                repository_state: RepositoryState::default(),
+                git_changed_files: &[],
+                agent_note: None,
+            },
+            HandoffTrigger::SessionEnd,
+        );
+        assert!(
+            !h.next_step.contains("Fix the open failure"),
+            "next_step was {:?}",
+            h.next_step
+        );
+        assert!(
+            !h.remaining_work
+                .iter()
+                .any(|r| r.starts_with("Open failure")),
+            "remaining_work was {:?}",
+            h.remaining_work
+        );
+        // The failure itself is still on record, just not as outstanding work.
+        assert_eq!(h.failures.len(), 1);
+    }
+
+    /// An unfinished task still owes the fix.
+    #[test]
+    fn an_unfinished_task_still_reports_the_open_failure() {
+        let s = session();
+        let task = Task {
+            id: new_id(),
+            project_id: s.project_id,
+            title: "Typed values".into(),
+            goal: "parse_config coerces ints and bools".into(),
+            acceptance_criteria: vec![],
+            status: TaskStatus::InProgress,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            deleted_at: None,
+        };
+        let observations = vec![obs(ObservationType::Error, "Bash failed: cargo test")];
+        let h = synthesize(
+            &HandoffInputs {
+                session: &s,
+                task: Some(&task),
+                observations: &observations,
+                decision_memories: &[],
+                repository_state: RepositoryState::default(),
+                git_changed_files: &[],
+                agent_note: None,
+            },
+            HandoffTrigger::SessionEnd,
+        );
+        assert!(h.next_step.starts_with("Fix the open failure"));
+    }
+
+    /// Observations carry absolute paths, Git reports the same file relative to
+    /// the repository root, and both used to be counted.
+    #[test]
+    fn one_file_reported_two_ways_is_one_changed_file() {
+        let mut o = obs(ObservationType::FileChanged, "edited confparse");
+        o.path = Some("/private/tmp/repo/src/confparse.py".into());
+        let observations = vec![o];
+        let out = derive_changed_files(&observations, &["src/confparse.py".to_string()]);
+        assert_eq!(out, vec!["src/confparse.py".to_string()]);
+    }
+
+    /// A green suite run with Python's stdlib runner is a test command.
+    #[test]
+    fn a_stdlib_unittest_run_counts_as_a_test_command() {
+        let mut o = obs(ObservationType::TestRun, "python3 -m unittest discover");
+        o.command = Some("python3 -m unittest discover -s tests -q".into());
+        o.outcome = Some("passed".into());
+        let observations = vec![o];
+        let progress = derive_progress(&[], &derive_tests(&observations), &[]);
+        assert!(
+            progress.contains("1 test command(s) run"),
+            "progress was {progress:?}"
+        );
     }
 }

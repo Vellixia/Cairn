@@ -1,0 +1,10 @@
+{
+  "event": "Notification",
+  "expect": null,
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "Notification",
+    "message": "Claude needs your permission to use Bash"
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "caf\u00e9": { "command": "cafe-server", "args": ["--caf\u00e9"] }
+  }
+}

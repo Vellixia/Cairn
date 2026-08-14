@@ -18,6 +18,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "outbox_claim",
         include_str!("../migrations/0003_outbox_claim.sql"),
     ),
+    (
+        4,
+        "integrations",
+        include_str!("../migrations/0004_integrations.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.

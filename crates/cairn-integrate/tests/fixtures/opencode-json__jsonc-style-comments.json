@@ -1,0 +1,8 @@
+{
+  // the developer keeps notes here
+  "theme": "dark",
+  "mcp": {
+    "local-tool": { "type": "local", "command": ["local-tool"] }
+  }
+  // and here
+}

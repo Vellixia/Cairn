@@ -1,0 +1,8 @@
+{
+  "permissions": { "allow": ["Bash(git *)"] },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [{ "type": "command", "command": "warm-cache" }] }
+    ]
+  }
+}

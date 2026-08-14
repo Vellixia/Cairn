@@ -1,0 +1,6 @@
+{
+  "event": "session.deleted",
+  "expect": null,
+  "note": "deleting a record is not completing work. There is no session-ended event at all (D32, FR-115)",
+  "payload": { "sessionID": "ses_7f2a91c4e0" }
+}

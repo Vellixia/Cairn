@@ -287,7 +287,10 @@ fn everything_local_works_with_no_network() {
         "SessionEnd",
         json!({ "session_id": "m", "reason": "clear" }),
     );
-    assert!(s.cairn(&["handoff", "show"]).ok());
+    // The sealed close acknowledges before the handoff is written, so the
+    // read waits the documented bound (FR-240, D22). What this test is about
+    // is unchanged: all of it works with no network.
+    assert!(!s.handoff_after_close(&[]).is_null());
 }
 
 #[test]

@@ -1,0 +1,12 @@
+[profiles.work]
+model = "gpt-5"
+
+[profiles.work.limits]
+max_tokens = 100000
+
+[mcp_servers.alpha]
+command = "alpha"
+
+[mcp_servers.beta]
+command = "beta"
+env = { API_KEY = "sk-not-a-real-secret-111" }

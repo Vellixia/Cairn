@@ -22,7 +22,7 @@ Download a release archive, verify it, and put the binaries on your PATH. `cairn
 `cairnd` must live in the same directory — `cairn` starts the daemon itself.
 
 ```bash
-VERSION=0.1.0-alpha.3
+VERSION=0.1.0-alpha.4
 TARGET=aarch64-apple-darwin   # x86_64-apple-darwin | x86_64-unknown-linux-gnu | aarch64-unknown-linux-gnu
 
 curl -fsSLO https://github.com/Vellixia/Cairn/releases/download/v${VERSION}/cairn-v${VERSION}-${TARGET}.tar.gz
@@ -36,7 +36,7 @@ sudo install -m 0755 cairn-v${VERSION}-${TARGET}/{cairn,cairnd} /usr/local/bin/
 On Windows (PowerShell):
 
 ```powershell
-$VERSION = "0.1.0-alpha.3"
+$VERSION = "0.1.0-alpha.4"
 $TARGET = "x86_64-pc-windows-msvc"
 
 Invoke-WebRequest "https://github.com/Vellixia/Cairn/releases/download/v$VERSION/cairn-v$VERSION-$TARGET.zip" -OutFile cairn.zip
@@ -66,6 +66,11 @@ cairn connect claude-code                  # install hooks + the MCP server
 **Supported platforms:** macOS on Apple silicon and Intel, Linux on x86_64 and arm64,
 Windows on x86_64. The CLI and daemon talk over a Unix domain socket on Unix and a
 named pipe on Windows — either way, nothing is exposed on the network.
+
+`cairn connect` shows exactly what it would change and asks before touching anything. See
+[docs/integrations.md](docs/integrations.md) for the whole surface: which agents are
+supported and what each one can actually do, where each resource is written and why,
+what `--shared` changes, and how to check, repair and remove an integration.
 
 Start a Claude Code session in that repository. Cairn starts its daemon on its own, opens a
 session, and begins capturing. When the session ends:
@@ -102,6 +107,11 @@ first: a fact about *this task* beats an unrelated one, however well it matches.
 | Command | What it does |
 |---|---|
 | `cairn status` | Project, branch, commit, working tree, active sessions, integration mode |
+| `cairn agents` | Which agents are installed, and what each integration actually provides |
+| `cairn connect [agent]` | Install or update an integration (preview first with `--dry-run`) |
+| `cairn doctor` | Check every installed resource and say what to run to fix it |
+| `cairn repair` | Restore what Cairn owns and nothing else |
+| `cairn disconnect <agent>` | Remove this agent's integration; your memory is untouched |
 | `cairn session list` | Every session, newest first |
 | `cairn task new --title T --goal G --criterion C` | Create a task |
 | `cairn memory add --type convention --scope project "…"` | Remember something |
@@ -128,8 +138,8 @@ open http://127.0.0.1:3100
 Images are published per release, for `linux/amd64` and `linux/arm64`:
 
 ```
-ghcr.io/vellixia/cairn-server:0.1.0-alpha.3
-ghcr.io/vellixia/cairn-web:0.1.0-alpha.3
+ghcr.io/vellixia/cairn-server:0.1.0-alpha.4
+ghcr.io/vellixia/cairn-web:0.1.0-alpha.4
 ```
 
 Only the shared components ship as containers. The local agent stays native.

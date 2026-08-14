@@ -46,7 +46,11 @@ test("wrong credentials are refused in place, not silently", async ({ page }) =>
   await page.getByTestId("email").fill(fixture.email);
   await page.getByTestId("password").fill("definitely-not-the-password");
   await page.getByTestId("submit").click();
-  await expect(page.getByRole("alert")).toBeVisible();
+  // Named rather than found by role: Next.js keeps its own `role="alert"`
+  // route announcer in the page, so asking for the role alone is ambiguous
+  // the moment a navigation has happened — and it fails as a strict-mode
+  // violation, which reads like a broken page rather than a broken locator.
+  await expect(page.getByTestId("login-error")).toBeVisible();
   await expect(page).toHaveURL(/\/login$/);
 });
 

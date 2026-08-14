@@ -7,6 +7,7 @@ use cairn_core::wire::WireError;
 use cairn_store::outbox::SyncPolicy;
 use cairn_store::repo;
 use std::path::PathBuf;
+use uuid::Uuid;
 
 /// Generate and store a handoff for `session`.
 ///
@@ -66,6 +67,118 @@ pub async fn generate(
     repo::insert_handoff(store, &handoff, session.project_id, policy)
         .await
         .map_err(storage_err)
+}
+
+/// How many quick attempts a sealed boundary gets before it is reported as a
+/// named, still-retryable failure (FR-240 clause 3).
+const QUICK_ATTEMPTS: u32 = 4;
+
+/// The documented bound: a recoverable boundary has its durable handoff inside
+/// this interval, and a non-recoverable one has surfaced a named condition
+/// inside it. Target under 5 seconds at p99 on a running daemon.
+///
+/// The quick attempts below are sized to fit well inside it; the constant is
+/// the contract SC-136 measures against.
+pub const HANDOFF_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether the quick retries fit inside the documented bound.
+///
+/// Asserted rather than assumed: a backoff change that pushed the last attempt
+/// past the bound would make FR-240 clause 2 unsatisfiable without any test
+/// noticing.
+#[cfg(test)]
+pub fn quick_attempts_fit_the_bound() -> bool {
+    let mut total = std::time::Duration::ZERO;
+    let mut backoff = std::time::Duration::from_millis(50);
+    for _ in 0..QUICK_ATTEMPTS {
+        total += backoff;
+        backoff *= 2;
+    }
+    total < HANDOFF_BOUND
+}
+
+/// Synthesize the handoff a sealed boundary owes, retrying with bounded
+/// backoff (D22, FR-240).
+///
+/// Progress is guaranteed while the daemon runs: this task is the primary
+/// path, the maintenance tick sweeps anything it gives up on, and daemon-start
+/// reconciliation remains the backstop for the process dying between the
+/// phases — not the only retry path.
+///
+/// After the quick attempts, the session is reported as `handoff synthesis
+/// failed` with its redacted reason in `cairn status` and doctor's core
+/// section, and retried at a slow cadence. It stays retryable and actionable;
+/// it is never treated as a terminal outcome that closes the matter.
+pub async fn synthesize_pending(daemon: &Daemon, session_id: Uuid, policy: SyncPolicy) {
+    settle_before_synthesis().await;
+    let mut backoff = std::time::Duration::from_millis(50);
+    for attempt in 0..QUICK_ATTEMPTS {
+        let session = match repo::session(&daemon.store, session_id).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(session = %session_id, error = %e, "sealed session vanished");
+                return;
+            }
+        };
+        // Another path — the sweep, or a restart's reconciliation — may have
+        // already produced it. That is a success, not a race to lose.
+        if !session_owes_handoff(&session) {
+            return;
+        }
+        match generate(daemon, &session, HandoffTrigger::SessionEnd, policy).await {
+            Ok(_) => {
+                if let Err(e) = repo::clear_handoff_pending(&daemon.store, session_id).await {
+                    tracing::warn!(session = %session_id, error = %e, "could not clear handoff_pending");
+                }
+                return;
+            }
+            Err(e) => {
+                let attempts = repo::record_handoff_failure(&daemon.store, session_id, &e.message)
+                    .await
+                    .unwrap_or(attempt as i64 + 1);
+                tracing::warn!(
+                    session = %session_id,
+                    attempts,
+                    error = %e.message,
+                    "handoff synthesis failed; retrying"
+                );
+            }
+        }
+        tokio::time::sleep(backoff).await;
+        backoff *= 2;
+    }
+    tracing::error!(
+        session = %session_id,
+        "handoff synthesis failed after the quick attempts; reported as owed and retried slowly"
+    );
+}
+
+/// Give a capture that is still on the socket time to arrive.
+///
+/// `generate` already quiesces captures the daemon has *accepted* (D22 phase
+/// two, Feature 001's own mechanism). This covers the moment before that: a
+/// tool call the agent reported immediately before the boundary may not have
+/// been read off the socket yet, so it would not be counted as in flight and
+/// would miss its own boundary's handoff.
+///
+/// Deliberately short. A boundary is worth a few milliseconds; a handoff that
+/// waits on something which is not coming is worse than one that is one
+/// observation short.
+async fn settle_before_synthesis() {
+    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+}
+
+/// Whether this session still owes a durable handoff.
+fn session_owes_handoff(session: &Session) -> bool {
+    session.handoff_pending
+}
+
+#[cfg(test)]
+mod bound_tests {
+    #[test]
+    fn the_quick_retries_fit_inside_the_documented_bound() {
+        assert!(super::quick_attempts_fit_the_bound());
+    }
 }
 
 #[cfg(test)]

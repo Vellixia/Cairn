@@ -13,8 +13,23 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 /// Everything a request handler needs.
+///
+/// Cheap to clone: every field is either `Copy` or already behind an `Arc`.
+/// The sealed close spawns a synthesis task that outlives its request, and it
+/// needs its own handle (D22).
+#[derive(Clone)]
 pub struct Daemon {
     pub store: Store,
+    /// Which canonical event kinds have been seen for one vendor-supplied
+    /// session key, this daemon run.
+    ///
+    /// `stable_session_identifier` is established only when two or more
+    /// canonical events, of at least two different kinds, carried a
+    /// vendor-supplied identifier and routed to the same Cairn session (D19a).
+    /// A single event carrying a non-empty string is not sufficient, and
+    /// Feature 001's synthesized fallback never reaches here because an
+    /// adapter declines an event it cannot route.
+    pub lifecycle_kinds: Arc<RwLock<std::collections::HashMap<String, Vec<&'static str>>>>,
     /// Identifies this daemon run. Sessions from a previous run are the ones
     /// reconciled at startup (FR-009, D16).
     pub run_id: Uuid,

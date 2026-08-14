@@ -1,0 +1,16 @@
+{
+  "event": "PostToolUse",
+  "expect": "tool_succeeded",
+  "capability": "lifecycle_tool_success",
+  "note": "no exit code and no error field: the success-shaped observation, never an asserted failure (US3 #4, US3 #5, FR-117)",
+  "payload": {
+    "session_id": "0199c1e4-5b2a-7d31-8f6c-1a2b3c4d5e6f",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "PostToolUse",
+    "turn_id": "turn_006",
+    "tool_name": "read_file",
+    "tool_use_id": "call_2Pq8",
+    "tool_input": { "file_path": "/home/dev/app/src/pool.rs" },
+    "tool_response": { "output": "pub struct Pool { .. }" }
+  }
+}

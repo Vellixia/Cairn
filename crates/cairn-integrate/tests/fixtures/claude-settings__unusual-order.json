@@ -1,0 +1,7 @@
+{
+  "zzz_last": true,
+  "hooks": {
+    "SessionEnd": [{ "hooks": [{ "type": "command", "command": "cleanup" }] }]
+  },
+  "aaa_first": 1
+}

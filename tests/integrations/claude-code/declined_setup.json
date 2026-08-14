@@ -1,0 +1,10 @@
+{
+  "event": "Setup",
+  "expect": null,
+  "note": "one of the events added since Feature 001; a larger vendor event set changes nothing here (D30)",
+  "payload": {
+    "session_id": "b7f3a1c2-0d44-4e91-9a10-2f6c8d5e7b31",
+    "cwd": "/home/dev/app",
+    "hook_event_name": "Setup"
+  }
+}

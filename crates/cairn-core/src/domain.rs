@@ -229,6 +229,17 @@ pub struct Session {
     pub last_turn_ended_at: Option<DateTime<Utc>>,
     pub daemon_run_id: Uuid,
     pub end_reason: Option<String>,
+    /// Set inside the seal transaction at session close and cleared when the
+    /// durable handoff is written (D22, FR-240). A terminal session carrying
+    /// this is *owed* a handoff, not complete.
+    #[serde(default)]
+    pub handoff_pending: bool,
+    /// How many synthesis attempts the boundary has taken.
+    #[serde(default)]
+    pub handoff_attempts: i64,
+    /// The last redacted failure reason. Never file or conversation content.
+    #[serde(default)]
+    pub handoff_error: Option<String>,
     pub deleted_at: Option<DateTime<Utc>>,
 }
 

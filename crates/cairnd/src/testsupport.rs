@@ -43,6 +43,7 @@ pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daem
     let user_id = repo::ensure_local_user(&store).await.expect("local user");
     Daemon {
         store,
+        lifecycle_kinds: Arc::new(RwLock::new(HashMap::new())),
         run_id: Uuid::now_v7(),
         config: Arc::new(RwLock::new(config)),
         user_id,

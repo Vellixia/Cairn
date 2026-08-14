@@ -64,13 +64,116 @@ jobs:
           CAIRN_TEST_DATABASE_URL: postgres://cairn:cairn@localhost:5433/cairn
         run: cargo test --workspace --all-targets
 
+
+  # --------------------------------------------------------------------------
+  # Publish the Skill ref CC Switch will fetch (D29a).
+  #
+  # CC Switch's downloader builds `…/archive/refs/heads/{branch}.zip` and, on
+  # any miss, silently retries `main` and then `master`. So a wrong or absent
+  # branch does not fail — it installs whatever is on the default branch, which
+  # is the worst possible outcome and an invisible one. Everything here exists
+  # to make that impossible:
+  #
+  #   * the branch is named for content (`skill-release/<schema>-<revision>`),
+  #     so a name that resolves is a name whose content is known;
+  #   * it is created once at the release commit and **never moved**, so a
+  #     developer who installed it keeps what they installed;
+  #   * it is verified by fetching it back the way CC Switch does and
+  #     recomputing the revision from the fetched tree, in both the created and
+  #     the already-present case.
+  #
+  # A mismatch fails the release rather than shipping a binary that points at
+  # a branch whose content is not what its name claims.
+  # --------------------------------------------------------------------------
+  publish-skill:
+    name: publish the Skill ref
+    needs: verify
+    runs-on: ubuntu-latest
+    # The only job in this workflow that writes a ref, and the only one that
+    # can.
+    permissions:
+      contents: write
+    outputs:
+      skill_schema: ${{ steps.ref.outputs.skill_schema }}
+      skill_revision: ${{ steps.ref.outputs.skill_revision }}
+      skill_branch: ${{ steps.ref.outputs.skill_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+
+      # Computed by the same code the released binary and `cairn doctor` use,
+      # never reimplemented in shell.
+      - name: Compute the Skill revision
+        id: ref
+        run: |
+          set -euo pipefail
+          json=$(cargo run -q -p cairn-integrate --bin skillref -- --json)
+          echo "$json"
+          schema=$(echo "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["skill_schema"])')
+          revision=$(echo "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["skill_revision"])')
+          branch=$(echo "$json" | python3 -c 'import json,sys; print(json.load(sys.stdin)["skill_branch"])')
+          echo "skill_schema=$schema" >> "$GITHUB_OUTPUT"
+          echo "skill_revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "skill_branch=$branch" >> "$GITHUB_OUTPUT"
+
+      - name: Create the branch, or leave the existing one exactly where it is
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.ref.outputs.skill_branch }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --heads origin "$BRANCH" >/dev/null 2>&1; then
+            echo "$BRANCH already exists; it is named for its content and is never moved"
+          else
+            echo "creating $BRANCH at $GITHUB_SHA"
+            git push origin "HEAD:refs/heads/$BRANCH"
+          fi
+
+      - name: Verify the branch the way CC Switch fetches it
+        env:
+          BRANCH: ${{ steps.ref.outputs.skill_branch }}
+          REVISION: ${{ steps.ref.outputs.skill_revision }}
+        run: |
+          set -euo pipefail
+          # Exactly the URL CC Switch builds. A miss here is the silent
+          # `main` fallback, so a miss must fail loudly instead.
+          url="https://github.com/${GITHUB_REPOSITORY}/archive/refs/heads/${BRANCH}.zip"
+          tmp=$(mktemp -d)
+          for attempt in 1 2 3 4 5; do
+            if curl -fsSL "$url" -o "$tmp/skill.zip"; then break; fi
+            echo "attempt $attempt: the ref is not servable yet; waiting"
+            sleep 5
+            if [ "$attempt" = "5" ]; then
+              echo "::error::$url is not fetchable, so CC Switch would silently install main"
+              exit 1
+            fi
+          done
+          unzip -q "$tmp/skill.zip" -d "$tmp/tree"
+          root=$(find "$tmp/tree" -maxdepth 1 -mindepth 1 -type d | head -n1)
+          # Recompute from the *fetched* tree, not from the checkout.
+          fetched=$(cargo run -q -p cairn-integrate --bin skillref -- --json \
+            --dir "$root/skills/cairn" \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["skill_revision"])')
+          echo "expected $REVISION, fetched $fetched"
+          if [ "$fetched" != "$REVISION" ]; then
+            echo "::error::$BRANCH serves revision $fetched, not the $REVISION its name claims"
+            exit 1
+          fi
+
   # --------------------------------------------------------------------------
   # Native archives. Each target builds on a runner of its own architecture, so
   # nothing is cross-compiled and nothing needs a cross toolchain.
   # --------------------------------------------------------------------------
   binaries:
     name: ${{ matrix.target }}
-    needs: verify
+    # The Skill ref is a *build input*: `CAIRN_SKILL_BRANCH` reaches the
+    # compiler only after the verification fetch above passed, so a released
+    # binary can never point at a branch that does not exist (D29a).
+    needs: [verify, publish-skill]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
@@ -97,6 +200,8 @@ jobs:
 
       - name: Build release binaries
         shell: bash
+        env:
+          CAIRN_SKILL_BRANCH: ${{ needs.publish-skill.outputs.skill_branch }}
         run: |
           cargo build --release --locked --target ${{ matrix.target }} \
             -p cairn -p cairnd -p cairn-server

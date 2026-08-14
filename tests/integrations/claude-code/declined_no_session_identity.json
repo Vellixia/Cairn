@@ -1,0 +1,10 @@
+{
+  "event": "SessionStart",
+  "expect": null,
+  "note": "an event that cannot name its session cannot be routed (FR-118, US10 #6)",
+  "payload": {
+    "cwd": "/home/dev/app",
+    "hook_event_name": "SessionStart",
+    "source": "startup"
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "event": "chat.message",
+  "expect": null,
+  "note": "carries conversation content; never mapped, never read",
+  "payload": {
+    "sessionID": "ses_7f2a91c4e0",
+    "message": { "role": "assistant", "content": "I raised the pool size to 8." }
+  }
+}
