@@ -1061,7 +1061,20 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
 
         let mut resources = Vec::new();
         for o in &state.observed {
-            let condition = migration_aware(&snap, a, o);
+            let manager_owned = manager_owns(&env, &snap, a, o.kind);
+            let condition = if manager_owned {
+                // The manager's binding is the authority for a resource the
+                // manager installed; comparing it to Cairn's own canonical
+                // entry reports a difference that is not a fault.
+                HealthCondition::Healthy
+            } else {
+                migration_aware(&snap, a, o)
+            };
+            let owner = if manager_owned {
+                ResourceOwner::Manager
+            } else {
+                o.owner
+            };
             if condition.is_acceptable() {
                 healthy += 1;
             } else {
@@ -1076,11 +1089,11 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             let mut entry = json!({
                 "kind": o.kind.as_str(),
                 "condition": condition.as_str(),
-                "owner": o.owner.as_str(),
+                "owner": owner.as_str(),
                 "scope": o.scope.as_str(),
                 "location": o.location.as_ref().map(|p| p.display().to_string()),
-                "detail": o.detail,
-                "remedy": o.remedy,
+                "detail": if manager_owned { None } else { o.detail.clone() },
+                "remedy": if manager_owned { None } else { o.remedy.clone() },
             });
             if serves.len() > 1 {
                 entry["serves"] = json!(serves);
@@ -1092,7 +1105,7 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
                 "  {:<13} {:<24} {:<8} {:<15} {}\n",
                 o.kind.as_str(),
                 condition.as_str(),
-                o.owner.as_str(),
+                owner.as_str(),
                 o.scope.as_str(),
                 o.location
                     .as_ref()
@@ -1100,7 +1113,9 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
                     .unwrap_or_default()
             ));
             if let Some(r) = &o.remedy {
-                text.push_str(&format!("                {r}\n"));
+                if !manager_owned {
+                    text.push_str(&format!("                {r}\n"));
+                }
             }
             resources.push(entry);
         }
@@ -1149,6 +1164,51 @@ fn evidence_json(snap: &Snapshot, agent: AgentId) -> Value {
     Value::Object(map)
 }
 
+/// Whether CC Switch, not Cairn, put this resource in the agent's own
+/// configuration.
+///
+/// Cairn assumes `Direct` whenever it holds no record, which after a manager
+/// import is wrong in a way that does damage: the entry CC Switch wrote is a
+/// superset of Cairn's canonical one for some targets -- CC Switch adds
+/// `type = "stdio"` for Codex -- so it was reported `modified` with the remedy
+/// `cairn repair --force`, which would overwrite the manager's entry and
+/// silently take ownership back. Absence of a direct record plus presence in
+/// the target's config means the manager owns it; there is no third writer.
+fn manager_owns(env: &Env, snap: &Snapshot, agent: AgentId, kind: ResourceKind) -> bool {
+    let manager = CcSwitch;
+    if !manager.detect(env).detected || !manager.distributable().contains(&kind) {
+        return false;
+    }
+    if snap
+        .installs
+        .iter()
+        .any(|r| r.agent == agent && r.kind == kind && r.owner == ResourceOwner::Direct)
+    {
+        return false;
+    }
+    let Some(app) = manager
+        .target_apps()
+        .iter()
+        .find(|a| agent_for_app(a) == Some(agent))
+    else {
+        return false;
+    };
+    manager
+        .inspect_bindings(env, &[(*app).to_string()], kind)
+        .iter()
+        .any(|b| b.condition.is_acceptable())
+}
+
+/// The agent behind a CC Switch target application name.
+fn agent_for_app(app: &str) -> Option<AgentId> {
+    match app {
+        "claude" => Some(AgentId::ClaudeCode),
+        "codex" => Some(AgentId::Codex),
+        "opencode" => Some(AgentId::Opencode),
+        _ => None,
+    }
+}
+
 fn manager_health(
     env: &Env,
     snap: &Snapshot,
@@ -1173,14 +1233,48 @@ fn manager_health(
         detection.version.as_deref().unwrap_or("(version unknown)")
     ));
     for kind in manager.distributable() {
-        let recorded = snap
-            .installs
+        // Presence in the target application's own configuration is the
+        // evidence, not a record of ours (FR-234).
+        //
+        // This used to require an existing install recorded with
+        // `owner == Manager` before it would look. Nothing ever records that:
+        // `distribute` returns `manager_action_required` and records nothing,
+        // because at that point the user has not confirmed the import yet. So
+        // the documented sequence -- distribute, confirm inside CC Switch, run
+        // `cairn doctor` -- could never report manager ownership, and the
+        // manager block stayed empty however many resources CC Switch had
+        // actually written.
+        //
+        // A kind with nothing installed anywhere is skipped rather than
+        // reported `Missing` for every target, so a machine that does not use
+        // CC Switch to distribute Cairn sees no new findings.
+        // Only applications Cairn does not own *directly* can be the
+        // manager's. There are two owners and no third, so a Cairn entry in a
+        // target's configuration that Cairn did not install itself was put
+        // there by the manager. Presence alone cannot tell them apart, which is
+        // why the directly-recorded ones are excluded rather than reported
+        // twice -- a Skill installed by `cairn connect` is not a CC Switch
+        // binding, and listing it as one manufactures the direct + manager dual
+        // ownership this is supposed to detect.
+        let manager_apps: Vec<String> = apps
             .iter()
-            .any(|r| r.kind == *kind && r.owner == ResourceOwner::Manager);
-        if !recorded {
+            .filter(|app| {
+                let Some(agent) = agent_for_app(app) else {
+                    return false;
+                };
+                !snap.installs.iter().any(|r| {
+                    r.agent == agent && r.kind == *kind && r.owner == ResourceOwner::Direct
+                })
+            })
+            .cloned()
+            .collect();
+        if manager_apps.is_empty() {
             continue;
         }
-        let bindings = manager.inspect_bindings(env, &apps, *kind);
+        let bindings = manager.inspect_bindings(env, &manager_apps, *kind);
+        if !bindings.iter().any(|b| b.condition.is_acceptable()) {
+            continue;
+        }
         let mut rows = Vec::new();
         for b in &bindings {
             if b.condition.is_acceptable() {
@@ -1696,12 +1790,6 @@ fn import_error(e: cairn_integrate::adapter::ImportRefusal) -> WireError {
             codes::INVALID_REQUEST,
             format!("CC Switch does not distribute {kind}"),
         ),
-        // One import carries one config, and OpenCode's MCP entry is shaped
-        // differently from every other client's. Splitting the request is the
-        // remedy; sending one shape to all of them would break the odd one out.
-        ref refusal @ ImportRefusal::MixedMcpShapes { .. } => {
-            err(codes::INVALID_REQUEST, refusal.to_string())
-        }
     }
 }
 

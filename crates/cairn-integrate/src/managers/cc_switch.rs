@@ -138,32 +138,24 @@ impl IntegrationManager for CcSwitch {
         let apps = apps.join(",");
         match kind {
             ResourceKind::Mcp => {
-                // One import carries one `config`, so every selected
-                // application has to take the same entry. OpenCode does not:
-                // it requires a tagged `type`/`command` array/`enabled` shape
-                // and rejects its entire configuration file over a malformed
-                // server entry. Emitting the generic block for it would break
-                // the application rather than half-configure it.
-                let mut split: std::collections::BTreeMap<String, Vec<String>> =
-                    std::collections::BTreeMap::new();
-                for app in apps.split(',').filter(|a| !a.is_empty()) {
-                    split
-                        .entry(mcp_entry_for_app(app).to_string())
-                        .or_default()
-                        .push(app.to_string());
-                }
-                if split.len() > 1 {
-                    return Err(ImportRefusal::MixedMcpShapes {
-                        split: split.into_iter().collect(),
-                    });
-                }
-                // The `config` value is the same secret-free block
-                // `cairn integration export mcp` emits (FR-162, SC-133).
-                let entry = split
-                    .into_keys()
-                    .next()
-                    .unwrap_or_else(|| crate::mcp_entry().to_string());
-                let config = urlencode(&entry);
+                // CC Switch needs a *named collection*, and Base64 rather than
+                // percent-encoded JSON. Both were wrong, and both fail in ways
+                // that look like the user's mistake: raw JSON is refused with
+                // `config 参数 Base64 解码失败: Invalid symbol 123, offset 0`
+                // (123 being `{`), and a bare server object opens the dialog
+                // reporting `MCP Servers (0)` and writes nothing. CC Switch
+                // states the requirement itself: `MCP config must contain
+                // 'mcpServers' object`.
+                //
+                // One generic entry serves every target. CC Switch keeps a
+                // single `server_config` with per-application enable flags and
+                // translates into each application's own format -- it ships an
+                // OpenCode MCP writer that knows `type: local` -- so handing it
+                // an already-translated entry would be wrong.
+                let payload = serde_json::json!({
+                    "mcpServers": { MCP_SERVER_NAME: crate::mcp_entry() }
+                });
+                let config = base64_url(payload.to_string().as_bytes());
                 Ok(format!(
                     "ccswitch://v1/import?resource=mcp&name={MCP_SERVER_NAME}&apps={apps}&config={config}"
                 ))
@@ -185,14 +177,6 @@ impl IntegrationManager for CcSwitch {
             }
             other => Err(ImportRefusal::NotDistributable(other)),
         }
-    }
-}
-
-/// Cairn's canonical MCP entry for a CC Switch target application.
-fn mcp_entry_for_app(app: &str) -> serde_json::Value {
-    match app {
-        "opencode" => crate::mcp_entry_opencode(),
-        _ => crate::mcp_entry(),
     }
 }
 
@@ -263,15 +247,30 @@ pub fn import_action(kind: ResourceKind, apps: &[String], uri: String) -> Manage
     }
 }
 
-/// Percent-encode a deep-link parameter value.
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 3);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
+/// URL-safe Base64 (RFC 4648 §5), unpadded.
+///
+/// CC Switch decodes the `config` parameter as Base64 and asks for `+` escaped
+/// as `%2B` or the URL-safe alphabet; the URL-safe alphabet needs no escaping
+/// afterwards. Encoding only, so this stays a few lines rather than a
+/// dependency added during a release.
+fn base64_url(input: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [
+            chunk[0],
+            chunk.get(1).copied().unwrap_or(0),
+            chunk.get(2).copied().unwrap_or(0),
+        ];
+        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+        let indices = [
+            (n >> 18) & 0x3F,
+            (n >> 12) & 0x3F,
+            (n >> 6) & 0x3F,
+            n & 0x3F,
+        ];
+        for i in &indices[..chunk.len() + 1] {
+            out.push(ALPHABET[*i as usize] as char);
         }
     }
     out
@@ -296,44 +295,53 @@ fn bundle_version() -> Option<String> {
 #[cfg(test)]
 mod tests {
 
-    /// One import carries one `config`. OpenCode's MCP entry is shaped
-    /// differently from every other client's, and OpenCode rejects its whole
-    /// configuration file over a malformed server entry -- so sending the
-    /// generic block to a selection that includes it would break the
-    /// application rather than half-configure it.
+    /// CC Switch requires a named collection -- `MCP config must contain
+    /// 'mcpServers' object` -- and decodes `config` as Base64. A bare server
+    /// object opened the dialog reporting `MCP Servers (0)`, and raw JSON was
+    /// refused outright with `Invalid symbol 123, offset 0`, which is `{`.
     #[test]
-    fn a_mixed_selection_is_refused_with_the_split_to_run() {
-        let apps = [
-            "claude".to_string(),
-            "codex".to_string(),
-            "opencode".to_string(),
-        ];
-        let err = CcSwitch
-            .import_uri(ResourceKind::Mcp, &apps)
-            .expect_err("a mixed selection cannot be one import");
-        let text = err.to_string();
-        assert!(text.contains("--apps claude,codex"), "{text}");
-        assert!(text.contains("--apps opencode"), "{text}");
+    fn the_import_carries_a_base64_named_mcp_servers_collection() {
+        let uri = CcSwitch
+            .import_uri(
+                ResourceKind::Mcp,
+                &["claude".to_string(), "codex".to_string()],
+            )
+            .expect("mcp import");
+        let config = uri.split("config=").nth(1).expect("a config parameter");
+        assert!(!config.starts_with('{'), "raw json: {config}");
+        assert!(!config.starts_with("%7B"), "percent-encoded: {config}");
+        assert!(!config.contains('%'), "needs escaping: {config}");
+        let expected = base64_url(
+            serde_json::json!({ "mcpServers": { MCP_SERVER_NAME: crate::mcp_entry() } })
+                .to_string()
+                .as_bytes(),
+        );
+        assert_eq!(config, expected);
     }
 
+    /// One generic entry for every target: CC Switch keeps a single
+    /// `server_config` with per-application enable flags and translates into
+    /// each application's own format itself, including OpenCode's `type: local`.
+    /// Handing it an already-translated entry would be wrong, and a selection
+    /// naming OpenCode is not refused.
     #[test]
-    fn opencode_alone_carries_opencodes_own_entry() {
-        let uri = CcSwitch
-            .import_uri(ResourceKind::Mcp, &["opencode".to_string()])
-            .expect("single-shape selection");
-        // urlencoded, so assert on the decoded markers.
-        assert!(uri.contains("%22type%22%3A%22local%22"), "{uri}");
-        assert!(uri.contains("%22enabled%22%3Atrue"), "{uri}");
+    fn every_selection_carries_the_same_generic_entry() {
+        let of = |apps: &[String]| {
+            CcSwitch
+                .import_uri(ResourceKind::Mcp, apps)
+                .expect("import")
+                .split("config=")
+                .nth(1)
+                .expect("config")
+                .to_string()
+        };
+        let uniform = of(&["claude".to_string(), "codex".to_string()]);
+        let with_opencode = of(&["claude".to_string(), "opencode".to_string()]);
+        let opencode_only = of(&["opencode".to_string()]);
+        assert_eq!(uniform, with_opencode);
+        assert_eq!(uniform, opencode_only);
     }
 
-    #[test]
-    fn a_uniform_selection_still_emits_one_import() {
-        let apps = ["claude".to_string(), "codex".to_string()];
-        let uri = CcSwitch
-            .import_uri(ResourceKind::Mcp, &apps)
-            .expect("uniform selection");
-        assert!(uri.contains("apps=claude,codex"), "{uri}");
-    }
     use super::*;
 
     #[test]
@@ -450,8 +458,21 @@ mod tests {
         assert_eq!(crate::AgentId::ALL.len(), 4);
     }
 
+    /// RFC 4648 §5 vectors, plus the bytes that distinguish the URL-safe
+    /// alphabet from the standard one.
     #[test]
-    fn urlencoding_is_stable() {
-        assert_eq!(urlencode(r#"{"a":"b"}"#), "%7B%22a%22%3A%22b%22%7D");
+    fn base64_url_matches_the_standard() {
+        assert_eq!(base64_url(b""), "");
+        assert_eq!(base64_url(b"f"), "Zg");
+        assert_eq!(base64_url(b"fo"), "Zm8");
+        assert_eq!(base64_url(b"foo"), "Zm9v");
+        assert_eq!(base64_url(b"foob"), "Zm9vYg");
+        assert_eq!(base64_url(b"fooba"), "Zm9vYmE");
+        assert_eq!(base64_url(b"foobar"), "Zm9vYmFy");
+        let encoded = base64_url(&[0xFB, 0xFF, 0xFF]);
+        assert!(
+            !encoded.contains('+') && !encoded.contains('/'),
+            "{encoded}"
+        );
     }
 }
