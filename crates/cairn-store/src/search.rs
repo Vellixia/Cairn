@@ -124,6 +124,10 @@ pub async fn search(
             created_at: m.created_at,
             provenance: Provenance {
                 session_id: m.origin_session_id,
+                agent: repo::session(store, m.origin_session_id)
+                    .await
+                    .ok()
+                    .map(|s| s.agent),
                 observation_ids: evidence.iter().map(|e| e.observation_id).collect(),
                 evidence_count: evidence.len(),
                 deleted_observation_ids: evidence

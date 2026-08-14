@@ -681,6 +681,12 @@ impl SessionSummary {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provenance {
     pub session_id: Uuid,
+    /// The agent whose session produced this. US6 requires a retrieved item to
+    /// name the agent *and* the session; the session id alone made a reader
+    /// join by hand to find out which agent learned it. Optional so a record
+    /// whose session has since been deleted still returns.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub agent: Option<String>,
     pub observation_ids: Vec<Uuid>,
     pub evidence_count: usize,
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -885,11 +891,41 @@ mod tests {
         // Manual MCP mode records memory with no observations (FR-019).
         let p = Provenance {
             session_id: crate::domain::new_id(),
+            agent: None,
             observation_ids: vec![],
             evidence_count: 0,
             deleted_observation_ids: vec![],
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"evidence_count\":0"));
+    }
+
+    /// US6: a retrieved item names the agent *and* the session that produced
+    /// it. The session id alone left a reader to join by hand to find out which
+    /// agent learned the thing.
+    #[test]
+    fn provenance_names_the_producing_agent() {
+        let p = Provenance {
+            session_id: crate::domain::new_id(),
+            agent: Some("claude-code".into()),
+            observation_ids: vec![],
+            evidence_count: 0,
+            deleted_observation_ids: vec![],
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"agent\":\"claude-code\""));
+        let back: Provenance = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.agent.as_deref(), Some("claude-code"));
+    }
+
+    /// A record whose origin session is gone still returns, and an older peer
+    /// that never sends the field still deserializes.
+    #[test]
+    fn provenance_without_an_agent_round_trips() {
+        let id = crate::domain::new_id();
+        let json = format!(r#"{{"session_id":"{id}","observation_ids":[],"evidence_count":0}}"#);
+        let back: Provenance = serde_json::from_str(&json).unwrap();
+        assert!(back.agent.is_none());
+        assert!(!serde_json::to_string(&back).unwrap().contains("agent"));
     }
 }

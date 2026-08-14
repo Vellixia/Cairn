@@ -994,11 +994,12 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             }
             for r in &payload.results {
                 text.push_str(&format!(
-                    "{}  [{}/{}] {}\n    from session {} · {} evidence\n",
+                    "{}  [{}/{}] {}\n    from {} session {} · {} evidence\n",
                     r.id,
                     r.kind,
                     r.scope,
                     r.content,
+                    r.provenance.agent.as_deref().unwrap_or("unknown"),
                     r.provenance.session_id,
                     r.provenance.evidence_count
                 ));
