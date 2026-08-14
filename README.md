@@ -144,6 +144,12 @@ ghcr.io/vellixia/cairn-web:0.1.0-alpha.4
 
 Only the shared components ship as containers. The local agent stays native.
 
+The web image is not tied to a hostname. It calls the same origin that served the
+page, so behind a reverse proxy publishing the UI at `/` and the API at `/api` on
+one domain there is nothing to configure. For a split-origin deployment set
+`CAIRN_API_ORIGIN` on the web container — it is read at start, so no rebuild is
+needed to move domains.
+
 To run the same thing from source instead:
 
 ```bash
