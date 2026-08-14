@@ -57,10 +57,14 @@ services:
       - server
     ports:
       - "${CAIRN_WEB_PORT:-3100}:3100"
-    # The browser bundle is compiled with its API origin baked in. The published
-    # image targets http://127.0.0.1:8080; to point the UI elsewhere, rebuild:
-    #   docker build -f docker/web.Dockerfile \
-    #     --build-arg NEXT_PUBLIC_CAIRN_API=https://cairn.example.com -t cairn-web .
+    environment:
+      # Where the browser should reach the API. Leave it empty behind a reverse
+      # proxy that serves the UI at `/` and the API at `/api` on one hostname —
+      # the UI then calls the same origin it was loaded from, which is the
+      # arrangement to prefer. Set it only for a split-origin deployment, for
+      # example https://cairn-api.example.com. Read on every request, so
+      # changing it is an edit and a restart, never a rebuild.
+      CAIRN_API_ORIGIN: ${CAIRN_API_ORIGIN:-}
 
 volumes:
   cairn-postgres:

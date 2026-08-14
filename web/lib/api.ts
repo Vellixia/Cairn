@@ -5,8 +5,48 @@
  * request is credentialed.
  */
 
-export const API_BASE =
-  process.env.NEXT_PUBLIC_CAIRN_API ?? "http://127.0.0.1:8080";
+declare global {
+  interface Window {
+    __CAIRN_API_ORIGIN__?: string;
+  }
+}
+
+/**
+ * Where the API lives, resolved per call rather than baked into the bundle.
+ *
+ * The published image used to carry `http://127.0.0.1:8080` because
+ * `NEXT_PUBLIC_*` is inlined at `next build`, which meant every operator with
+ * their own domain had to rebuild the image for that one domain. Resolution
+ * order now:
+ *
+ * 1. `window.__CAIRN_API_ORIGIN__`, written per request by the root layout from
+ *    the container's `CAIRN_API_ORIGIN`. The runtime knob: set it and restart,
+ *    no rebuild.
+ * 2. `NEXT_PUBLIC_CAIRN_API`, still inlined at build time, for anyone who
+ *    prefers a baked origin — and how the e2e job points the UI at its server.
+ * 3. In development only, the loopback server. `next dev` serves the UI on :3100
+ *    while cairn-server runs natively on :8080, so development is the one case
+ *    that is genuinely split-origin; defaulting it here keeps `npm run dev`
+ *    working with no configuration and without a committed env file, which is
+ *    gitignored anyway.
+ * 4. Same origin. The empty base sends requests to `/api/...` on whichever host
+ *    served the page, which is the recommended layout (web at `/`, API at
+ *    `/api` behind one hostname) and what the published image now defaults to.
+ *
+ * A relative base is safe because every caller of `request` is a client
+ * component: nothing below is fetched during server rendering, so no absolute
+ * URL is ever required.
+ */
+export function apiBase(): string {
+  const runtime =
+    typeof window === "undefined" ? undefined : window.__CAIRN_API_ORIGIN__;
+  const devDefault =
+    process.env.NODE_ENV === "development" ? "http://127.0.0.1:8080" : "";
+  const base =
+    runtime?.trim() || process.env.NEXT_PUBLIC_CAIRN_API?.trim() || devDefault;
+  // A trailing slash would produce `//api/...`, which is a protocol-relative URL.
+  return base.replace(/\/+$/, "");
+}
 
 export class ApiError extends Error {
   constructor(
@@ -24,7 +64,7 @@ export function isUnauthorized(error: unknown): boolean {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await fetch(`${apiBase()}${path}`, {
     ...init,
     credentials: "include",
     headers: { "content-type": "application/json", ...(init?.headers ?? {}) },

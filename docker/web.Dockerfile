@@ -13,9 +13,16 @@ RUN npm ci
 
 COPY web/ ./
 
-# The browser bundle is compiled, so the API origin is fixed at build time.
-# Override it when the server is not reached at http://127.0.0.1:8080.
-ARG NEXT_PUBLIC_CAIRN_API=http://127.0.0.1:8080
+# The API origin is configured at *run* time, not here: set CAIRN_API_ORIGIN in
+# the container's environment and the root layout serves it to the browser on
+# every request. One published image therefore works behind any hostname.
+#
+# This build arg remains for the two cases that still want a baked origin — a
+# private image for a fixed deployment, and the e2e job, which serves the UI and
+# the API on different ports. Left empty the bundle resolves to the same origin
+# that served the page, which is the recommended layout (web at `/`, API at
+# `/api` behind one hostname).
+ARG NEXT_PUBLIC_CAIRN_API=
 ENV NEXT_PUBLIC_CAIRN_API=${NEXT_PUBLIC_CAIRN_API}
 ENV NEXT_TELEMETRY_DISABLED=1
 
