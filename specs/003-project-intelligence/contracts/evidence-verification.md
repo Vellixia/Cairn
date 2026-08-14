@@ -96,18 +96,78 @@ verification" and "no autonomous command execution" (D52).
 
 | Verifier | Source | May establish |
 |---|---|---|
-| `runtime_state` | the agent submits an observed value and its digest | a memory's `verified`, labelled attested |
+| `runtime_state` | the agent submits an observed value and its digest | a memory's `verified`, authority `attested` |
 | `test_outcome` / `command_outcome` with no captured observation | the agent submits outcome and exit code | as above |
 
 Attested evidence:
 
-- is stored with `collector = 'agent'` and is always labelled where it is reported;
-- can move a **memory** to `verified` (FR-355);
+- is stored with `collector = 'agent'`;
+- can move a **memory** to `verified` — with authority `attested`, which travels with the state
+  everywhere, including across a sync boundary (FR-355, FR-370);
 - can **never** move a **task criterion** to `verified` (D69, FR-484, SC-328);
+- can **never** make a memory eligible for cross-project promotion (FR-396, D62 check 2);
 - is never re-executed or re-collected by Cairn — a recheck of attested evidence yields
   `needs_recheck`, not `verified`, until the agent attests again.
 
 That last rule is what stops attested evidence from decaying into a permanent unfalsifiable claim.
+
+## Verification authority
+
+The state says *what* was established. The authority says *what established it*. Collapsing them would
+let an agent's own assertion wear the same badge as a check Cairn performed — the one thing this
+contract exists to prevent (FR-370).
+
+Authority is a separate dimension, exactly as verification is separate from lifecycle. It is **derived**,
+not asserted:
+
+```text
+authority(memory) =
+    cairn            ≥1 verification run with result `verified` consulted evidence
+                     whose collector is `cairn`
+    attested         the memory is `verified`, and every run that established it
+                     consulted only `collector = agent` evidence
+    remote_cairn     the state was imported, and the peer's authority was `cairn`
+    remote_attested  the state was imported, and the peer's authority was `attested`
+    —                the memory is not `verified` (authority is meaningless)
+```
+
+The strongest basis wins: a memory supported by both an attested fact and a Cairn-read file digest,
+verified by the digest, has authority `cairn`. The attested fact stays attached and stays labelled. A
+deterministic check did establish the claim, so saying otherwise would understate what Cairn knows.
+
+This replaces the earlier `verification_origin ∈ {local, remote}`, which distinguished *which machine*
+but not *what kind of check* — so an attested `test_outcome` synced as
+`{state: verified, basis: ["test_outcome"]}` and arrived indistinguishable from a peer that had really
+run the tests. `basis` cannot close that gap, because `test_outcome` and `command_outcome` are each
+reachable both ways (D76).
+
+### What each consumer accepts
+
+| Consumer | Accepts | Refuses |
+|---|---|---|
+| Memory `verified` state | `cairn`, `attested` | — |
+| Subject representative ranking | both; `cairn` outranks `attested` | — |
+| Task criterion `verified` | `cairn` only | `attested`, and **every** imported authority (FR-484) |
+| Cross-project promotion | `cairn` only | `attested`, `remote_*` (FR-396) |
+| Local completion readiness | `cairn` only | `attested`, `remote_*` |
+| Context and search output | both, always labelled | — |
+
+Criterion verification and promotion are the two places with an incentive attached, so both take the
+strict setting. Everywhere else attested evidence is useful and is simply told apart.
+
+### How it is reported
+
+Never bare. Every surface that shows a verification state shows its authority:
+
+```text
+✓ verified                      configuration @ config/app.yml · 2026-08-14   (authority: cairn)
+✓ verified (attested)           runtime_state · attested by session 0192f4…   (authority: attested)
+✓ verified elsewhere            deterministic check on another machine        (authority: remote_cairn)
+✓ verified elsewhere (attested) attested on another machine                   (authority: remote_attested)
+```
+
+The two `remote_*` renderings are what a teammate sees, and the distinction is exactly the information
+FR-368 requires them to have.
 
 ### Refused
 
@@ -138,7 +198,7 @@ Total. Every transition names its trigger; nothing else moves the state (FR-375,
 | `drifted` | run → `verified` | `verified` |
 | `conflicted` | evidence fingerprint changed | `needs_recheck` |
 | `conflicted` | the contradicting evidence removed | `needs_recheck` |
-| any | imported from a peer | unchanged locally; `verification_origin = 'remote'` |
+| any | imported from a peer | unchanged locally; authority becomes `remote_cairn` or `remote_attested` per the peer's value |
 
 **Not transitions** — asserted unreachable:
 
@@ -151,6 +211,13 @@ Total. Every transition names its trigger; nothing else moves the state (FR-375,
 `conflicted` here means **this memory's own evidence disagrees with itself**: supporting and
 contradicting facts both attached, or two runs of the same verifier disagreeing at the same
 `repo_commit`. It is not subject-level disagreement, which is a `SubjectView` state (FR-369).
+
+**Authority under transition.** Authority is recomputed with the state, from the runs that established
+it. A memory `verified` by attestation that later passes a Cairn-collected verifier becomes
+`verified` with authority `cairn` — an upgrade, and the honest one. The reverse cannot happen: a
+Cairn-established verification does not degrade to `attested` because someone attaches an attested
+fact, since the deterministic run still stands. A memory leaving `verified` has no authority at all
+until it is verified again.
 
 ## Drift
 
@@ -251,7 +318,8 @@ cached `verification` and `last_verified_at` reflect the latest.
 | `absolute_locator` | The locator was absolute |
 | `verifier_unavailable` | No verifier exists for that evidence kind |
 | `verification_inconclusive` | The check ran and could not establish either outcome |
-| `attested_not_sufficient` | Attested evidence was offered for a criterion's verification |
+| `attested_not_sufficient` | Attested evidence was offered where a deterministic check is required — a criterion's verification, or promotion |
+| `imported_not_sufficient` | An imported verification was offered for a criterion's verification; readiness is a local claim |
 | `verify_pass_yielded` | The bounded pass hit a cap; remaining work is queued |
 
 `verification_inconclusive` and `verify_pass_yielded` are `ok: true` with a note — they are outcomes,

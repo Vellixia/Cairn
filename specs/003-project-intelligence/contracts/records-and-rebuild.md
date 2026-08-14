@@ -20,14 +20,14 @@ idempotent, and how it behaves under concurrency.
 | Record | Owner (writer) | Identity / idempotency | Append-only | Ordering matters? |
 |---|---|---|---|---|
 | `memories` (row) | daemon, per request | `id` (UUIDv7) | rows yes | no — distinct proposals are independent |
-| `memory_relations` | daemon, per request | PK `(from, to, kind)` | yes | no — the derivation is order-independent |
+| `memory_relations` | daemon, per request | PK `(from, to, kind)`, endpoints normalized for symmetric kinds | yes | no — the derivation is order-independent |
 | `evidence_facts` | daemon (collector), agent (attested) | `id` | yes | no |
 | `memory_evidence_facts` | daemon | PK `(memory, evidence, role)` | yes | no |
 | `verification_runs` | daemon only | `id` | yes | yes — latest by `checked_at` sets the cached state |
 | `continuity_checkpoints` | daemon only | `id` | yes | yes — latest by `created_at` is restored |
-| `task_criteria` | daemon, per request | `id`; `revision` for CAS | state mutable, every change logged | per criterion only |
+| `task_criteria` | daemon, per request | `id`; local `revision` for CAS | state mutable, every change logged | per criterion only |
 | `task_blockers` | daemon, per request | `id`; one transition | yes | no |
-| `task_changes` | daemon, in the same transaction | `id`; `(task_id, revision)` unique | yes | yes — the revision sequence |
+| `task_changes` | daemon, in the same transaction | `id`; `(task_id, local_revision)` unique | yes | yes — the local counter sequence |
 | `pattern_applications` | daemon, per request | unique `(pattern, project, signal_digest)` | yes | no |
 
 **Aggregate ownership.** Three aggregates, each with one writer and one transaction boundary:
@@ -49,7 +49,8 @@ implied by arrival:
 |---|---|---|
 | Which verification run set the cached state | `checked_at DESC`, then `id DESC` | Runs are local-only; there is one writer and one clock |
 | Which checkpoint is restored | `created_at DESC` | Same |
-| The task revision sequence | `tasks.revision`, monotone under `BEGIN IMMEDIATE` | One writer, one counter |
+| This machine's task change sequence | `tasks.local_revision`, monotone under `BEGIN IMMEDIATE` | One writer, one counter, **never transmitted** — so it is never compared across stores (D80) |
+| Whether two machines hold the same task state | `task_state_digest`, derived from sorted converged records | No clock and no counter is an input; identical inputs give an identical value (FR-493) |
 | Stable output ordering of a conflicted answer set | `id ASC` | Presentation only, never arbitration (D49) |
 
 **Nothing that syncs depends on order.** Relations are order-independent by construction: applying a
@@ -62,9 +63,11 @@ That property is what makes cross-device merge simple: there is no ordering auth
 
 Three layers, all existing mechanisms:
 
-1. **Record identity.** `memory_relations` on `(from, to, kind)`, `memory_evidence_facts` on
-   `(memory, evidence, role)`, `pattern_applications` on `(pattern, project, signal_digest)`,
-   `task_changes` on `(task_id, revision)`. Recording twice changes nothing (FR-305, I2).
+1. **Record identity.** `memory_relations` on `(from, to, kind)` — with **endpoints normalized for
+   symmetric kinds** so two machines detecting one conflict produce one row, not two facing opposite
+   ways (D78) — `memory_evidence_facts` on `(memory, evidence, role)`, `pattern_applications` on
+   `(pattern, project, signal_digest)`, `task_changes` on `(task_id, local_revision)`. Recording twice
+   changes nothing (FR-305, I2).
 2. **Delivery.** The existing outbox idempotency key —
    `digest(entity_type:entity_id:operation:digest(payload))` — with the server's
    `sync_state` claim under `ON CONFLICT DO NOTHING`. Unchanged (FR-414).
@@ -82,8 +85,10 @@ nothing and can duplicate nothing (`cairn-store/src/tx.rs`). Feature 003 adds no
 |---|---|
 | Two sessions propose incompatible knowledge concurrently | Two memory rows, distinct ids. Both survive. The subject derives `Conflicted`. No lost write, no winner (FR-336, SC-303) |
 | Two sessions record the same relation concurrently | One row. The second collides on the PK and is ignored |
-| Two sessions reinforce the same memory concurrently | Two `reinforces` rows from different sources; `distinct_origin_count` = 2. Correct by construction |
-| Two sessions update different criteria concurrently | Both apply, different rows. `tasks.revision` advances twice; two change rows (SC-317) |
+| Two sessions explicitly reinforce the same memory concurrently | Two `reinforces` rows from different sources; `distinct_origin_count` = 2. Correct by construction |
+| Two machines independently detect the same conflict while offline | Endpoint normalization makes both write the same primary key; exactly one durable row survives the merge (D78, SC-324) |
+| Two machines change different criteria of one task while offline | Both criterion rows converge by id; each machine's local counter advances independently and is never compared; both compute the same `task_state_digest` (D80, SC-330) |
+| Two sessions update different criteria concurrently | Both apply, different rows. `tasks.local_revision` advances twice; two change rows (SC-317) |
 | Two sessions update the same criterion, both supplying `expected_revision` | One applies; the other is refused `revision_conflict` with the current state named (FR-337) |
 | Two sessions update the same criterion, neither supplying a revision | Both apply in lock order; both are recorded in `task_changes` with `blind_write = true`. Nothing is lost, and the overwrite is visible (see [task-model.md](./task-model.md)) |
 | Two sessions pin concurrently at the budget edge | The lock serializes them; the second is refused `pin_budget_exhausted` |
@@ -107,6 +112,8 @@ Every derived value has one. Each is a pure function of durable records, and eac
 | `rebuild_reinforcement(memory)` | `reinforcement_count`, `distinct_origin_count` | `reinforces` + `duplicates` relations, and the origin sessions of the memories they come from | after import; on demand |
 | `rebuild_verification(memory)` | `verification`, `last_verified_at` | latest `verification_runs` + current evidence fingerprints | after import; after a fingerprint change; on demand |
 | `rebuild_criteria_projection(task)` | `tasks.acceptance_criteria` | `task_criteria.text` in ordinal order | same transaction as any criterion change; on demand |
+| `derive_task_state_digest(task)` | the cross-device task state identity | title, goal, status, and the sorted criteria and blockers | every read (nothing stored) |
+| `derive_authority(memory)` | `verification_authority` | the runs that established the state, and their evidence collectors | with `rebuild_verification`; after import |
 | `rebuild_pattern_trust(pattern)` | `reusable_patterns.trust` | the gate outcome + `pattern_applications` | after any application; on demand |
 | `derive_progress(task)` | progress counts, `completion_readiness` | criteria + blockers | every read (nothing stored) |
 | `classify_checkpoint(checkpoint)` | `checkpoint_state`, divergences | assumptions vs Git, task revision, observations | every restore (nothing stored) |
@@ -123,6 +130,8 @@ outcome — the command prints how many differed and exits non-zero if any did.
 | A derived value cannot be computed (storage busy, corrupt row) | Report **unavailable**, never a guess. Context marks `degraded: true` — Feature 001's existing flag |
 | `memory_relations` names a memory that does not exist | The relation is ignored by the derivation and reported by `doctor`. It is never deleted automatically — it may be a memory that has not synced yet |
 | A relation set implies mutual supersession (A supersedes B and B supersedes A) | The derivation refuses to resolve, reports `Conflicted`, and `doctor` names the cycle. Writing the second such relation is refused with `relation_conflict` |
+| Two `conflicts_with` rows exist facing opposite ways, from a store written before normalization | The derivation treats them as one edge; `doctor --rebuild-derived` collapses them to the normalized row and reports the count |
+| An outbox row sits `blocked` against a server that has since been upgraded | The capability probe returns it to `pending` on the next drain cycle; delivery is exactly-once by its original idempotency key (D81, FR-418) |
 | A `verification_run` references a deleted evidence fact | The run stays as history; the cached state rebuilds to `needs_recheck` |
 | A checkpoint's handoff is deleted | The checkpoint is tombstoned with it (deletion cascade) |
 | The store is unreadable | Existing Feature 001 behaviour: the damaged store is reported as damaged, not as "the daemon did not start" |
@@ -149,7 +158,8 @@ it supports, rather than writing against a schema it does not understand (FR-516
 | Not built | Why |
 |---|---|
 | An event log | B1; a second transactional model the brief forbids |
-| A global sequence number or vector clock | Nothing that syncs depends on order (`relation_order_invariance`) |
+| A global sequence number or vector clock | Nothing that syncs depends on order (`relation_order_invariance`). Task state identity is content-addressed rather than versioned, which is what removed the need (D80) |
+| A CRDT for task state | The records converge by stable identity already — disjoint criterion changes never collide. What was missing was an identity for the *resulting* state, which a digest over converged records supplies without any merge algebra |
 | A materialized subject projection | D44; the derivation on read is cheaper than the invalidation it would need |
 | Conflict resolution by version vector | FR-334 — a conflict is *reported*, not resolved. A vector clock would tell us which write was concurrent, which we already know; it would not tell us which answer is true, which is the actual question |
 | Snapshotting or compaction of the record set | The record volumes are bounded by project size; the derivation is a small indexed query |

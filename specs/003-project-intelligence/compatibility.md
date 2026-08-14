@@ -20,7 +20,7 @@ changes.
 | Deleted-evidence provenance ("evidence deleted") | **extended, compatible** | Same semantics applied to every new reference type (FR-505) |
 | FTS5/BM25 lexical retrieval | **unchanged** | Same table, same triggers, same ranking. `topic_key` is an SQL filter, not an FTS column (B7) |
 | Scope-first ranking (task 0, branch 1, project 2, session 3) | **unchanged** | `MemoryScope::bucket` untouched. Verification and importance order *within* a bucket only (FR-308) |
-| `MemoryQuery` fields and defaults | **extended, compatible** | New optional filters; `state` still defaults to `active` |
+| `MemoryQuery` fields and defaults | **extended, compatible** | New optional filters (`verification`, `authority`, `corroborated`, `conflicted`, `topic_key`, `as_of`, `pinned`, `include_patterns`); `state` still defaults to `active` |
 | Context budget in Cairn-estimated tokens | **unchanged** | Default still 3000 (FR-442) |
 | `estimated_tokens <= budget` | **unchanged** | `try_spend` measure-before-emit preserved (I16, FR-445) |
 | `truncated`, `omitted_sections`, `degraded` | **unchanged** | Still always present; `degraded` gains one new cause (subject scan cap) |
@@ -31,13 +31,15 @@ changes.
 | Session identity by `agent_session_key`, never worktree | **unchanged** | |
 | Session states (`active`, `completed`, `interrupted`) | **unchanged** | |
 | Sealed session close, `handoff_pending`, the maintenance sweep | **extended, compatible** | The checkpoint is written in the same synthesis step, so the existing sweep covers both |
-| Task fields and `TaskStatus` | **unchanged** | `revision` added; status transitions still unrestricted and never set by Cairn (FR-487) |
+| Task fields and `TaskStatus` | **unchanged** | A **local, unsynced** counter is added; status transitions still unrestricted and never set by Cairn (FR-487). The server's `tasks` table is untouched (D80) |
 | `tasks.acceptance_criteria` as an array of strings | **retained** | Kept as a synchronized projection of `task_criteria` (D68, FR-492) |
 | `cairn task update --acceptance-criteria` whole-list form | **unchanged in behaviour** | Diffs by text, preserving ids for unchanged entries |
 | Six MCP tools | **unchanged** | Exactly six; extended by action and parameter (FR-495) |
 | MCP error-code set; no `budget_exceeded` | **extended, compatible** | New codes added to the one stable set |
 | `--json` envelope shape | **unchanged** | New fields are additive |
-| Outbox + idempotency key + server `sync_state` claim | **unchanged** | Three entity types added; the mechanism is untouched (FR-414) |
+| Outbox + idempotency key + server `sync_state` claim | **unchanged** | Three entity types added and one state (`blocked`); the key, the claim, the stale-claim timeout and the drainers are untouched (FR-414, D81) |
+| Outbox states | **extended, compatible** | `blocked` added. Existing `pending`/`in_flight`/`delivered`/`failed` rows keep their meaning; nothing becomes `blocked` by migration |
+| Permanent-rejection handling | **corrected** | A **content** rejection stays permanently `failed`, exactly as today. A **capability** rejection now becomes `blocked` and recovers, where before it was stranded as `failed` forever (research, D81) |
 | No observation entity type in the outbox | **unchanged, and extended** | The existing test is extended to cover every Feature 003 local-only record |
 | Server has no observations table | **unchanged** | And gains no evidence, verification, checkpoint or pattern table |
 | Wire field allowlist | **extended** | 16 forbidden field names and 6 forbidden entity types added (FR-506) |
@@ -102,7 +104,7 @@ automatic guarantee (Feature 002 FR-241).
 | `memory_evidence` rows whose observation was deleted | Still resolve to "evidence deleted" |
 | Sessions, handoffs, observations | Untouched |
 | Sessions with `handoff_pending = 1` | The existing sweep still completes them; a checkpoint is written with the handoff |
-| Sessions bound to a task before the upgrade | `task_revision_at_bind` is NULL — honestly unknown — and no divergence is reported for them |
+| Sessions bound to a task before the upgrade | `task_snapshot_at_bind` is NULL — honestly unknown — and no divergence is reported for them |
 | Tasks with empty `acceptance_criteria` | No criteria rows; readiness is `not_ready`; nothing breaks |
 | Tasks with duplicate criterion strings | Distinct criteria with distinct ids; not merged |
 | Pending, in-flight and failed outbox rows | Untouched and still deliverable |
@@ -124,11 +126,11 @@ automatic guarantee (Feature 002 FR-241).
 | `cairn pattern list / show / promote / outcome / forget` | **new** |
 | `cairn context [--explain] [--depth …]` | extended |
 | `cairn session checkpoint` | **new** |
-| `cairn task get` | now shows criteria with ids, states, verification, blockers, progress, readiness |
+| `cairn task get` | now shows the local counter, the cross-device state digest, criteria with ids/states/verification/authority, blockers, progress, readiness |
 | `cairn task criterion add/set/verify/remove` | **new** |
 | `cairn task blocker open/clear` | **new** |
 | `cairn task readiness / history` | **new** |
-| `cairn status` | adds the share of project memories carrying a subject, and any sync degradation |
+| `cairn status` | adds the share of project memories carrying a subject (FR-499), and any sync degradation including the blocked count |
 | `cairn doctor` | adds `continuity_mode` per agent, and `--rebuild-derived` |
 | `cairn sync status` | adds the degradation line when a server predates the feature |
 | Web UI — memory list | verification state, conflict marker, subject; read-only |
@@ -136,6 +138,7 @@ automatic guarantee (Feature 002 FR-241).
 | Web API `/api/projects/{id}/memories` | adds `verification` and `subject` |
 | `GET /api/sync/changes` | adds optional `relations`, `criteria`, `blockers` arrays |
 | `POST /api/sync/batch` | accepts three new entity types; rejects six by name |
+| `GET /api/version` | adds `schema_version` and a `capabilities` array — additive, unauthenticated, and the probe that unblocks retained work (D81). An older server returns neither, and that absence is the answer |
 
 The web UI stays read-only for Feature 003 state. Editing knowledge from a browser would be a second
 write path into canonical knowledge, which the proposal boundary exists to prevent.
@@ -154,13 +157,24 @@ Recorded so they are not rediscovered. None is a correctness, privacy, data-loss
    Documented in [migration.md](./migration.md) §Step 2(b). Affects only historical `as_of` placement
    of memories superseded before this feature existed.
 
-3. **(MEDIUM) `sessions.task_revision_at_bind` is NULL for pre-upgrade sessions,** so no divergence is
-   reported for them. This is honest — the revision they bound at is unknowable — and it self-corrects
-   as sessions turn over.
+3. **(MEDIUM) `sessions.task_snapshot_at_bind` is NULL for pre-upgrade sessions,** so no divergence is
+   reported for them. This is honest — the state they bound at is unknowable — and it self-corrects as
+   sessions turn over.
 
-4. **(LOW) Reconciliation depends on agents supplying topic keys.** Mitigated on three surfaces and
-   measured by a reported metric in `cairn status`. The fallback if adoption is poor is a better
-   prompt, not a similarity heuristic (D46, plan Risks).
+4. **(LOW) Reconciliation depends on agents supplying topic keys, and now on their being specific
+   enough.** Because a shared value key no longer merges, a coarse key costs deduplication rather than
+   correctness — the failure mode moved from *wrong* to *less useful*, which is the right direction.
+   Mitigated on three surfaces, measured by the adoption metric in `cairn status` (FR-499), and observed
+   per agent by the non-gating effectiveness evaluation
+   ([contracts/evaluation.md](./contracts/evaluation.md) §Topic-key effectiveness).
+
+4a. **(LOW) `stale_at` is NULL for memories that went stale before the upgrade,** so their historical
+   applicability is reported as unknown. Deliberate: no authoritative instant exists and inferring one
+   would be a second approximation (D82).
+
+4b. **(LOW) A `size`-class path fingerprint cannot see a same-length edit.** It applies only to files
+   over the payload cap, where source edits are rare, and the class is reported so the weaker comparison
+   is visible rather than implied (D79).
 
 5. **(LOW) Pattern suggestion matches signals lexically.** A pattern whose signals are worded
    differently from the receiving project's error text will not surface. Accepted: a missed suggestion

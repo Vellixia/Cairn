@@ -40,11 +40,12 @@ ALTER TABLE memories ADD COLUMN topic_key             TEXT;
 ALTER TABLE memories ADD COLUMN value_key             TEXT;
 ALTER TABLE memories ADD COLUMN content_norm_digest   TEXT;
 ALTER TABLE memories ADD COLUMN importance            TEXT NOT NULL DEFAULT 'normal';
-ALTER TABLE memories ADD COLUMN verification          TEXT NOT NULL DEFAULT 'unverified';
-ALTER TABLE memories ADD COLUMN verification_origin   TEXT NOT NULL DEFAULT 'local';
-ALTER TABLE memories ADD COLUMN last_verified_at      TEXT;
-ALTER TABLE memories ADD COLUMN effective_from        TEXT;
-ALTER TABLE memories ADD COLUMN superseded_at         TEXT;
+ALTER TABLE memories ADD COLUMN verification           TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE memories ADD COLUMN verification_authority TEXT;
+ALTER TABLE memories ADD COLUMN last_verified_at       TEXT;
+ALTER TABLE memories ADD COLUMN effective_from         TEXT;
+ALTER TABLE memories ADD COLUMN superseded_at          TEXT;
+ALTER TABLE memories ADD COLUMN stale_at               TEXT;
 ALTER TABLE memories ADD COLUMN pinned                INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN pinned_at             TEXT;
 ALTER TABLE memories ADD COLUMN pinned_by_session     TEXT;
@@ -93,6 +94,8 @@ Deliberately **not** backfilled:
 | `topic_key`, `value_key` | NULL | Inferring a subject from prose is exactly what FR-317 and D46 forbid |
 | `content_norm_digest` | NULL | Computed lazily on next write or by `doctor --rebuild-derived`; a NULL simply means "no exact-duplicate detection for this row yet" |
 | `verification` | `unverified` | The honest state. No evidence exists, so nothing is verified (FR-514) |
+| `verification_authority` | NULL | Meaningless unless `verified`, and nothing is |
+| `stale_at` | NULL | **Deliberately not inferred.** A memory already `stale` has no authoritative instant, and `updated_at` is a worse source here than for supersession — several paths touch it. NULL means *unknown*, which is exactly what a historical answer will say (FR-341, D82). Set going forward by the maintenance tick |
 | `reinforcement_count` | 0 | No relations exist yet |
 | `distinct_origin_count` | 1 | Exactly one origin session — which is true |
 | `pinned` | 0 | No one has pinned anything |
@@ -126,16 +129,25 @@ by the derivation (D49), so its imprecision has no effect on any outcome.
 `task_blockers`, `task_changes`, `criterion_evidence` — created with their `CHECK` constraints and
 indexes as specified in [data-model.md](./data-model.md).
 
-Plus the six new `memories` indexes and `tasks.revision` / `sessions.task_revision_at_bind`:
+Plus the six new `memories` indexes, the task and session columns, and the recoverable-refusal columns:
 
 ```sql
-ALTER TABLE tasks    ADD COLUMN revision              INTEGER NOT NULL DEFAULT 1;
-ALTER TABLE sessions ADD COLUMN task_revision_at_bind INTEGER;
+ALTER TABLE tasks     ADD COLUMN local_revision        INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE sessions  ADD COLUMN task_snapshot_at_bind TEXT;
+
+ALTER TABLE outbox    ADD COLUMN blocked_reason        TEXT;
+ALTER TABLE outbox    ADD COLUMN blocked_at_capability TEXT;
+ALTER TABLE sync_meta ADD COLUMN server_capability     TEXT;
 ```
 
-`sessions.task_revision_at_bind` stays NULL for existing sessions. A session that bound before this
-feature existed genuinely does not know what revision it bound at, and claiming 1 would produce a
-false "task updated 1 → 1" report. NULL means "unknown", and divergence is not reported for it.
+`sessions.task_snapshot_at_bind` stays NULL for existing sessions. A session that bound before this
+feature existed genuinely does not know the state it bound at, and synthesizing one would produce a false
+divergence report. NULL means "unknown", and divergence is not reported for it.
+
+The three refusal columns are nullable and default to NULL, so every existing queued, in-flight,
+delivered and failed outbox row is untouched and stays exactly as claimable as it was. **No existing row
+becomes `blocked` by migration** — `blocked` is only ever reached by an actual capability refusal
+(D81).
 
 ### Step 5 — criteria from the existing JSON arrays
 
@@ -147,7 +159,7 @@ label          AC-<ordinal>
 text           the string, unchanged
 state          pending
 verification   unverified
-revision       1
+local_revision 1
 created_at     the task's created_at        (not "now" — the criterion is as old as the task)
 ```
 
@@ -168,7 +180,9 @@ Additive, run by the server's own migration path.
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS topic_key             TEXT;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS value_key             TEXT;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS importance            TEXT NOT NULL DEFAULT 'normal';
-ALTER TABLE memories ADD COLUMN IF NOT EXISTS verification          TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS verification           TEXT NOT NULL DEFAULT 'unverified';
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS verification_authority TEXT;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS stale_at               TIMESTAMPTZ;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_verified_at      TIMESTAMPTZ;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS verification_basis    JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS evidence_fact_count   INTEGER NOT NULL DEFAULT 0;
@@ -177,8 +191,6 @@ ALTER TABLE memories ADD COLUMN IF NOT EXISTS superseded_at         TIMESTAMPTZ;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS pinned                BOOLEAN NOT NULL DEFAULT false;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS reinforcement_count   INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE memories ADD COLUMN IF NOT EXISTS distinct_origin_count INTEGER NOT NULL DEFAULT 1;
-
-ALTER TABLE tasks    ADD COLUMN IF NOT EXISTS revision              INTEGER NOT NULL DEFAULT 1;
 
 CREATE TABLE IF NOT EXISTS memory_relations (…);   -- no basis_evidence_id, no rationale
 CREATE TABLE IF NOT EXISTS task_criteria    (…);
@@ -235,6 +247,8 @@ migrations 1–4 only, not by hand-writing DDL — populates it, migrates, and a
 | 11 | Every Feature 001 and Feature 002 end-to-end suite passes against the migrated store |
 | 12 | An interrupted migration (injected failure mid-script) leaves `schema_migrations` at 4 and the store fully usable by the old build |
 | 13 | Running the migration twice is a no-op |
+| 13a | Every pre-existing outbox row keeps its state; none becomes `blocked`; pending rows remain claimable |
+| 13b | `stale` memories have `stale_at IS NULL`, and a historical query reports their applicability as unknown rather than bounded |
 | 14 | Every rebuild procedure equals what the migration wrote, except `superseded_at` (named explicitly) |
 
 Assertion 10 is worth its place: FTS is an external-content table with triggers, and the most likely

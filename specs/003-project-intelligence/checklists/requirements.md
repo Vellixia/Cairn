@@ -69,6 +69,37 @@
 - [x] Migration is additive, lossless, and fabricates nothing (FR-513–FR-515)
 - [x] Every derived value is rebuildable from durable records (FR-302, FR-517, SC-324)
 - [x] Feature 001 and Feature 002 compatibility is stated as a requirement (FR-492, FR-519, SC-323)
+
+## Design-reconciliation gates (added 2026-08-14)
+
+- [x] An agent's attestation can never become indistinguishable from a deterministic Cairn check, on
+      any surface or across synchronization (FR-370, FR-502, SC-329)
+- [x] Attested evidence remains useful and can support a memory, while being refused by criterion
+      verification and by promotion (FR-355, FR-396, FR-484, SC-328)
+- [x] A receiving machine knows whether a peer's verification was deterministic or attested
+      (FR-368, FR-370)
+- [x] No false-merge path exists via a coarse value key; only identical normalized content merges
+      (FR-316, FR-321, FR-327, SC-301)
+- [x] Reinforcement is an explicit act and is never inferred from a matching key (FR-321)
+- [x] The deterministic corpus contains adversarial coarse-value-key cases
+      ([evaluation](../contracts/evaluation.md) §corpus)
+- [x] The task counter is local, never transmitted, and never treated as a shared identity (FR-488)
+- [x] Cross-device task state has a deterministic, content-addressed convergence story with no CRDT
+      (FR-493, SC-330)
+- [x] A session bound earlier learns about changes that originated on another machine (FR-489, SC-318)
+- [x] Capability-refused synchronization work is retained, not retried futilely, not marked failed,
+      and recovers automatically after a server upgrade with delivery exactly once
+      (FR-418, SC-326, SC-331)
+- [x] Level 0's guarantee is finite and achievable: an O(1) work-state tier plus a bounded detail tier
+      with counted omissions and a retrieval path (FR-443, FR-448, SC-309)
+- [x] Checkpoint staleness detects a relevant-path change whoever made it, and reports a path it could
+      not fingerprint as such rather than as unchanged (FR-432, SC-311)
+- [x] Symmetric decision kinds normalize their endpoints so one fact is one durable record
+      (FR-305, SC-324)
+- [x] No historical guarantee is stronger than the stored evidence supports (FR-341, FR-342, SC-305)
+- [x] Topic-key effectiveness is measured as informational release evidence and is explicitly not a
+      deterministic gate ([evaluation](../contracts/evaluation.md) §Topic-key effectiveness, FR-499)
+- [x] The reconciliation pass added no crate, dependency, service, datastore, MCP tool or table
 - [x] Out-of-scope boundary explicitly excludes code intelligence and retrieval-augmented
       source search
 
@@ -125,3 +156,38 @@ Requirements added or tightened by this pass:
 Re-validated after planning. Result: **all items pass**, unchanged. Planning added no requirement
 and removed none; it assigned every requirement an owning design surface. See
 [traceability.md](../traceability.md).
+
+
+### Iteration 4 — 2026-08-14 (design reconciliation pass)
+
+Result: **all items pass**, including sixteen new Feature 003 gates. Eight independently raised concerns
+were verified against both the artifacts and the implementation; **all eight were valid** and all eight
+are resolved. Disposition in [plan.md](../plan.md) §Reconciliation R11–R18; reasoning in
+[research.md](../research.md) D76–D83.
+
+**Requirements**: 158 → **163 FR**, 28 → **31 SC**.
+
+Added — five FRs, each carrying a distinct obligation no existing requirement could hold:
+
+- **FR-327** corroboration: same subject and value, differing content — retained, never merged
+- **FR-370** verification authority as a dimension distinct from state
+- **FR-418** capability refusal is retained, not retried, and recovers
+- **FR-448** deterministic Level 0 detail admission with counted omissions
+- **FR-493** derived cross-device task state identity
+
+Added — three SCs: **SC-329** authority across sync, **SC-330** offline task convergence,
+**SC-331** blocked-then-recovered delivery.
+
+Tightened rather than duplicated — seventeen: FR-305, FR-316, FR-321, FR-341, FR-342, FR-355, FR-368,
+FR-396, FR-415, FR-432, FR-443, FR-484, FR-488, FR-489, FR-490, FR-499, FR-502. Eight SCs restated:
+SC-301, SC-305, SC-309, SC-311, SC-318, SC-324, SC-326, SC-328.
+
+**Requirement-numbering convention**, for the record: a requirement added to qualify an existing one is
+placed **beside** it rather than appended, so several sections are not in ascending numeric order. This
+follows Feature 002, whose capability section interleaves FR-241/FR-242/FR-245 among FR-107–FR-109 for the
+same reason. Readability beats numeric order; traceability covers every id regardless of position.
+
+**Complexity**: no crate, no dependency, no service, no datastore, no MCP tool, no new table. One outbox
+state, three nullable columns, one widened column, one replaced column, two new derived values, one
+additive field on an existing endpoint. Two changes made the design **smaller** — the task counter left
+the sync payload and the server schema, and automatic reconciliation lost one of its two rules.

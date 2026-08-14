@@ -43,10 +43,12 @@ obligation is that everything derived is rebuildable from durable records (D43).
 | `memories.reinforcement_count` | count of inbound `reinforces` + `duplicates` relations | `rebuild_reinforcement(memory)` |
 | `memories.distinct_origin_count` | distinct `origin_session_id` over the memory and its reinforcing memories | `rebuild_reinforcement(memory)` |
 | `memories.verification`, `last_verified_at` | latest `verification_runs` row + evidence fingerprint comparison | `rebuild_verification(memory)` |
+| `memories.verification_authority` | the runs that established the state, and the `collector` of the evidence each consulted | `derive_authority(memory)` |
 | `tasks.acceptance_criteria` | `task_criteria` text in ordinal order | `rebuild_criteria_projection(task)` |
+| `task_state_digest` | title, goal, status + sorted criteria and blockers | `derive_task_state_digest(task)` — nothing stored |
 | Task progress, `completion_readiness` | `task_criteria` + `task_blockers` | on every read; nothing stored |
 | `reusable_patterns.trust` | the gate outcome + `pattern_applications` | `rebuild_pattern_trust(pattern)` |
-| `checkpoint_state`, divergences | checkpoint assumptions vs current Git/task/observations | on every restore; nothing stored |
+| `checkpoint_state`, divergences | checkpoint assumptions vs current Git, the derived task state digest, and recomputed path fingerprints | on every restore; nothing stored |
 
 Rebuild procedures and their equality test are specified in
 [contracts/records-and-rebuild.md](./contracts/records-and-rebuild.md).
@@ -67,10 +69,11 @@ Existing columns unchanged: `id`, `project_id`, `type`, `scope`, `scope_key`, `c
 | `content_norm_digest` | TEXT NULL | NULL | no | SHA-256 of normalized content, for exact duplicate detection (D46) |
 | `importance` | TEXT | `'normal'` | yes | `low \| normal \| high` — within-bucket ordering only (FR-308) |
 | `verification` | TEXT | `'unverified'` | yes | `unverified \| verified \| needs_recheck \| drifted \| conflicted` |
-| `verification_origin` | TEXT | `'local'` | no | `local \| remote` — a peer's verification is never verified *here* (FR-368) |
+| `verification_authority` | TEXT NULL | NULL | **yes**, as `cairn`/`attested` | `cairn \| attested \| remote_cairn \| remote_attested`. Derived from the runs that established the state; NULL when not `verified` (FR-370) |
 | `last_verified_at` | TEXT NULL | NULL | yes | Instant of the run that produced the current state |
 | `effective_from` | TEXT | `created_at` | yes | Start of the interval this memory was current |
 | `superseded_at` | TEXT NULL | NULL | yes | End of that interval; set with the `supersedes` relation |
+| `stale_at` | TEXT NULL | NULL | yes | Set by the maintenance tick when the scope key stops resolving. NULL means **unknown**, never "not stale" (FR-341, D82) |
 | `pinned` | INTEGER | `0` | yes | Protected invariant (FR-451) |
 | `pinned_at` | TEXT NULL | NULL | yes | |
 | `pinned_by_session` | TEXT NULL | NULL | yes | |
@@ -83,7 +86,8 @@ Existing columns unchanged: `id`, `project_id`, `type`, `scope`, `scope_key`, `c
 - `value_key IS NULL OR topic_key IS NOT NULL`
 - `importance IN ('low','normal','high')`
 - `verification IN ('unverified','verified','needs_recheck','drifted','conflicted')`
-- `verification_origin IN ('local','remote')`
+- `verification_authority IS NULL OR verification_authority IN ('cairn','attested','remote_cairn','remote_attested')`
+- `verification <> 'verified'` implies `verification_authority IS NULL`
 - `pinned IN (0,1)`; `pinned = 0` implies `pinned_at`, `pinned_by_session`, `pin_reason` all NULL
 - `superseded_at IS NULL OR state = 'superseded'`
 
@@ -110,7 +114,7 @@ triggers (research B7). `topic_key` is matched by exact or prefix SQL filter, no
 
 | Column | Type | Default | Syncs | Meaning |
 |---|---|---|---|---|
-| `revision` | INTEGER | `1` | yes | Monotone; advances on any change to the task, its criteria or its blockers (FR-488) |
+| `local_revision` | INTEGER | `1` | **no** | Monotone counter for **this store only**; advances on any local change to the task, its criteria or its blockers. Never transmitted, never a shared identity (FR-488, D80) |
 
 `acceptance_criteria` is **retained** as the ordinal-ordered projection of `task_criteria.text`
 (D68). It is rewritten in the same transaction as any criterion change.
@@ -119,7 +123,7 @@ triggers (research B7). `topic_key` is matched by exact or prefix SQL filter, no
 
 | Column | Type | Default | Syncs | Meaning |
 |---|---|---|---|---|
-| `task_revision_at_bind` | INTEGER NULL | NULL | no | The `tasks.revision` this session bound at (FR-489) |
+| `task_snapshot_at_bind` | TEXT NULL | NULL | no | Bounded JSON snapshot of the task state this session bound at, in the same shape as `continuity_checkpoints.criteria_snapshot`. The bind-time state digest is derived from it, so one column carries both (FR-489, D80) |
 
 Set by `bind_task` and by `start_session` when a task is supplied. Local: it is a fact about this
 machine's session, and Feature 001 already keeps session-local fields off the server.
@@ -147,6 +151,12 @@ The whole reconciliation record, and the reason no canonical row exists (D47).
 
 **Primary key** `(from_memory_id, to_memory_id, kind)` — this is what makes recording the same
 decision twice a no-op, on one machine and across a merge (FR-305, FR-336).
+
+**Symmetric kinds normalize their endpoints before the write.** `conflicts_with` is the one kind whose
+meaning has no direction, so `from = min(id)` and `to = max(id)` lexicographically. Without that, two
+machines detecting one conflict while offline produce `A→B` and `B→A` — two durable rows for one fact,
+both syncing, and the same conflict reported twice. Every other kind is directional and is **not**
+normalized (D78, [knowledge.md](./contracts/knowledge.md) §Symmetric relation normalization).
 
 **Semantics**
 
@@ -258,8 +268,9 @@ cached state changes.
 | `assumed_branch` | TEXT | Assumption set (FR-424) |
 | `assumed_commit` | TEXT NULL | |
 | `assumed_task_id` | TEXT NULL | |
-| `assumed_task_revision` | INTEGER NULL | |
+| `assumed_task_state_digest` | TEXT NULL | The derived cross-device task state identity at that instant (D80) |
 | `relevant_paths` | TEXT | JSON array, bounded to 32 repository-relative paths |
+| `path_fingerprints` | TEXT | JSON array, one per relevant path: `{path, class, value}` with `class` ∈ `digest \| size \| unknown` (D79) |
 | `criteria_snapshot` | TEXT | JSON: `[{criterion_id, state, verification}]` at that instant |
 | `open_blockers` | TEXT | JSON array of blocker ids and bounded descriptions |
 | `pinned_constraints` | TEXT | JSON array of memory ids in force at that instant |
@@ -375,7 +386,7 @@ Only transition: `open → cleared`. Reopening creates a new blocker (FR-485).
 |---|---|---|
 | `id` | TEXT | PK |
 | `task_id` | TEXT | |
-| `revision` | INTEGER | The `tasks.revision` this change produced |
+| `local_revision` | INTEGER | The `tasks.local_revision` this change produced (local sequence only) |
 | `kind` | TEXT | `goal_changed \| title_changed \| status_changed \| criterion_added \| criterion_text \| criterion_state \| criterion_verification \| criterion_removed \| blocker_opened \| blocker_cleared` |
 | `subject_id` | TEXT NULL | Criterion or blocker id |
 | `session_id` | TEXT | Author |
@@ -439,12 +450,21 @@ which is what lets a historical query say what was verified then (D50, D53).
 ### 4.3 Subject reconciliation — derived, never stored
 
 ```text
-Historical   every member superseded or stale        → no canonical answer
-Settled      exactly one active member               → that member
-Reinforced   several active, all equal value_key     → the reinforced answer
-Conflicted   several active, differing value_key,
-             same scope and scope key                → every competing answer, no winner
+Historical    every member superseded or stale        → no canonical answer
+Settled       exactly one active member               → that member
+Reinforced    several active, one value_key,
+              all sharing one content_norm_digest     → one answer + duplication accounting
+Corroborated  several active, one value_key,
+              differing content                       → every distinct statement; the VALUE is
+                                                        agreed, the statements are several
+Conflicted    several active, differing value_key,
+              same scope and scope key                → every competing answer, no winner
 ```
+
+`Corroborated` is the state that closed the coarse-value-key false-merge path (D77). It is not a
+conflict — the members agree — and it is not a merge — they say different things. Leaving it needs no
+decision at all; collapsing it needs an explicit `reinforce` or `duplicates` from the party that can read
+both statements.
 
 Leaving `Conflicted` requires a recorded decision: `supersedes`, `narrows`, or a verification result
 that distinguishes the members (FR-335). Cairn never leaves it on its own (FR-334).
@@ -501,16 +521,22 @@ Each is asserted by a named test; the map is in [traceability.md](./traceability
 | I7 | `memories.state`/`superseded_by_id` always agree with the `supersedes` relations | Written in one transaction; `rebuild_supersession` equality test |
 | I8 | Evidence content, verification runs, checkpoints, patterns, applications and task changes cannot reach the server | No outbox entity type, no server table (structural) |
 | I9 | A stored evidence value is ≤256 bytes after redaction and carries no absolute path | Column constraint + locator check + `privacy_payloads` |
-| I10 | A criterion is `verified` only with Cairn-collected evidence | Code check + SC-328 |
+| I10 | A criterion is `verified` only on a local `cairn`-authority verification | Code check + SC-328 |
+| I10a | An attested verification is never rendered or transmitted as a deterministic one | Authority on every surface and on the wire + SC-329 |
 | I11 | `tasks.acceptance_criteria` equals the ordinal projection of `task_criteria` | Same transaction + `rebuild_criteria_projection` equality test |
-| I12 | `tasks.revision` advances on every task, criterion or blocker change | Same transaction + `task_changes` row count equality |
+| I12 | `tasks.local_revision` advances on every local task, criterion or blocker change | Same transaction + `task_changes` row count equality |
+| I12a | Two stores holding the same converged task compute the same `task_state_digest` | `derive_task_state_digest` over sorted records + SC-330 |
+| I12b | The local counter never appears in any payload or server column | Payload construction test + server schema |
 | I13 | One pattern incident in one project counts once | `pattern_applications` unique key |
+| I13a | One symmetric decision is one durable row, whichever machine wrote it | Endpoint normalization + PK |
 | I14 | A pinned memory loses its pin when superseded | Same transaction as the `supersedes` relation |
 | I15 | Pins never exceed their budget and are never silently cleared | Refusal path + `pin_budget_exhausted` |
 | I16 | `estimated_tokens <= budget`, always | `Budget::try_spend` measure-before-emit, unchanged |
 | I17 | Level 0 content cannot be displaced by Level 1 or Level 2 | Reserve accounting in `Budget` |
 | I18 | Unspent reserve returns to the general pool | Reserve released after Level 0 completes |
 | I19 | No verification work runs on the session-open path | `perf_intelligence` + absence of a call site |
+| I19a | Tier 0a guaranteed work state is present at any budget ≥ the documented minimum | `us10_min_safe_context` + O(1) field set |
+| I19b | Capability-refused outbox work is never `failed` and never stranded | `blocked` state + capability probe + SC-331 |
 | I20 | Every derived value equals its rebuild | `rebuild_equivalence` |
 
 ---
@@ -532,7 +558,7 @@ Project ──1:N──▶ Task ──1:N──▶ TaskCriterion ──1:N──
                    └──1:N──▶ TaskChange
 
 Session ──1:N──▶ Handoff ──0:1──▶ ContinuityCheckpoint
-Session ──0:1──▶ Task            (task_revision_at_bind records the revision bound at)
+Session ──0:1──▶ Task            (task_snapshot_at_bind records the state bound at; its digest is derived)
 
 ReusablePattern ──1:N──▶ PatternApplication ──N:1──▶ Project   (local only)
 ```
@@ -551,7 +577,7 @@ round-trip test, matching every existing enum.
 
 ```text
 VerificationState      unverified | verified | needs_recheck | drifted | conflicted
-VerificationOrigin     local | remote
+VerificationAuthority  cairn | attested | remote_cairn | remote_attested
 Importance             low | normal | high
 RelationKind           reinforces | duplicates | supersedes | conflicts_with | narrows |
                        not_applicable_to
@@ -564,12 +590,14 @@ VerifierKind           file_exists | file_digest | git_ref | git_commit | config
                        schema_version | test_outcome | command_outcome | runtime_state
 VerifyResult           verified | drifted | inconclusive
 VerifyTrigger          background_pass | on_demand | attach
-Reconciliation         historical | settled | reinforced | conflicted
+Reconciliation         historical | settled | reinforced | corroborated | conflicted
 CriterionState         pending | satisfied | blocked | waived
 CriterionVerification  unverified | verified | failed
 BlockerState           open | cleared
 CheckpointTrigger      context_compacting | session_closed | explicit
 CheckpointState        current | diverged | unresolvable
+FingerprintClass       digest | size | unknown
+PathOutcome            unchanged | changed | removed | added | not_fingerprintable
 DivergenceKind         branch | commit | task | files
 PatternTrust           candidate | sanitized | validated | contested
 PatternOutcome         resolved | not_applicable | failed
@@ -594,6 +622,37 @@ has one either.
 
 ---
 
+## 7a. `outbox` — additive columns for recoverable capability refusal
+
+Feature 003 adds one state and two columns to Feature 001's `outbox`. Nothing else about the queue
+changes: the idempotency key, the claim mechanism, the stale-claim timeout and the drainers are
+untouched (D81, FR-418).
+
+| Column | Type | Default | Meaning |
+|---|---|---|---|
+| `blocked_reason` | TEXT NULL | NULL | The capability class that refused it: `unknown_entity_type \| unknown_field \| schema_older` |
+| `blocked_at_capability` | TEXT NULL | NULL | The server capability fingerprint observed when it was blocked, so a change is detectable |
+
+`state` gains `blocked`. The `CHECK` on `outbox.state` **can** be extended without rewriting rows only
+by recreating the table, so — as with `memories` (§2.1) — the predicate is enforced in code and asserted
+by test, and the existing `CHECK` continues to permit the four original values. A `blocked` row is
+stored with the state string and is excluded from `claim` by an explicit predicate rather than by the
+constraint.
+
+`outbox_claimable` already indexes `(project_id, state, created_at)`, so excluding `blocked` costs
+nothing and finding blocked rows to release is a single indexed scan.
+
+| State | Claimable | Terminal |
+|---|---|---|
+| `pending` | yes | no |
+| `in_flight` | on stale claim | no |
+| `delivered` | no | yes |
+| `failed` | no | yes — the **content** was refused |
+| `blocked` | **no, until the server capability changes** | **no** — retained and deliverable later |
+
+`sync_meta` gains `server_capability` (TEXT NULL) — the last capability fingerprint observed from
+`/api/version`, and the value a change is compared against.
+
 ## 8. Server schema additions
 
 `cairn-server/migrations/0002_project_intelligence.sql`. Additive only.
@@ -603,7 +662,8 @@ has one either.
 `effective_from`, `superseded_at`, `pinned BOOLEAN`, `reinforcement_count`,
 `distinct_origin_count`.
 
-**`tasks`** gains `revision INTEGER NOT NULL DEFAULT 1`.
+**`tasks`** gains **nothing**. The local counter is not transmitted and the state digest is derived on
+each side, so the server's `tasks` table is untouched (D80).
 
 **New tables**: `memory_relations` (without `basis_evidence_id`), `task_criteria`, `task_blockers`.
 

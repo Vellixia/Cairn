@@ -11,6 +11,7 @@
 | Initial specification | this artifact set | 158 FR / 28 SC |
 | Clarification pass | this artifact set | 11 resolutions, +FR-308, FR-369, FR-500, +SC-326–SC-328 |
 | Planning reconciliation | this artifact set | no requirement added; every requirement assigned an owning surface |
+| Design reconciliation pass | this artifact set | 158 → **163 FR**, 28 → **31 SC**; D76–D83; four HIGH and four MEDIUM findings resolved |
 
 Three of the brief's structural assumptions did not survive inspection of the baseline, and the
 design turns on the corrections. They are recorded as baseline findings B1–B7 in
@@ -32,28 +33,36 @@ overwrite, and after any merge from any device the answer is simply recomputed.
 On top of that boundary the feature adds four capabilities that share it:
 
 - **Evidence and verification.** Bounded, redacted, attributable facts, checked by deterministic
-  verifiers that read files and Git and run nothing. A memory carries a verification state that is
-  separate from its lifecycle state, and an agent's opinion is never verification.
+  verifiers that read files and Git and run nothing. A memory carries a verification state separate from
+  its lifecycle state, and an **authority** separate from both — what established it. An agent may attest
+  a fact Cairn cannot read, and that attestation is useful, labelled everywhere, carried across sync, and
+  refused by the two consumers where it would matter: criterion verification and cross-project promotion.
 - **Drift.** A changed evidence fingerprint marks a claim `needs_recheck`; a verifier then finds it
   `verified`, `drifted` or `inconclusive`. No memory is ever rewritten because a file moved.
 - **Compression-safe continuity.** A structured checkpoint, anchored to the handoff Cairn already
-  derives, carrying the assumptions it was taken under — so a session resuming after compaction is
-  told when the branch, the commit, the task revision or a relevant file has moved beneath it.
+  derives, carrying the assumptions it was taken under — including a bounded fingerprint per relevant
+  path, so a session resuming after compaction is told when the branch, the commit, the task state or a
+  file has moved beneath it, whoever moved it and whether or not Cairn was watching.
 - **Conservative cross-project reuse.** Reusable patterns: a separate, project-independent, local,
   never-synchronized record, promoted only through a deterministic fail-closed gate, with trust that
   advances on distinct non-origin projects and never on repetition or on Cairn's own suggestion.
 
-Underneath all four, the context assembler gains a **reserved floor**. Feature 001's briefing is one
-flat priority list spending one budget top-down; adding warnings and criteria states to it would put
-them exactly where they get dropped. Level 0 — task, next action, blockers, critical warnings,
-pinned constraints, repository state — draws from a reserve the lower levels cannot take, and the
-measure-before-emit loop that guarantees `estimated_tokens <= budget` is untouched.
+Underneath all four, the context assembler gains a **reserved floor** with a guarantee it can actually
+keep. Feature 001's briefing is one flat priority list spending one budget top-down; adding warnings and
+criteria states to it would put them exactly where they get dropped. Level 0 draws from a reserve the
+lower levels cannot take, and it is split in two: a **guaranteed tier** whose every field is O(1) in the
+size of the project and the task — goal, status, derived progress counts, readiness, the most actionable
+blocker, the next action, warning counts, repository state — and a **bounded detail tier** admitted as
+budget allows, with omissions counted by kind and a retrieval path. Unbounded prose was never something a
+finite budget could promise; bounded state is, and it is what an agent needs to continue.
 
-Secondarily, tasks get stable criterion identity, blockers, a revision counter and derived
-readiness. This is not decoration: `update_task` writes the whole acceptance-criteria array today,
-so two sessions editing different criteria lose one another's work. Per-criterion rows remove that
-by construction, and `tasks.acceptance_criteria` is retained as a synchronized projection so the
-CLI, the briefing, the server and the web UI keep working unchanged.
+Secondarily, tasks get stable criterion identity, blockers, and derived readiness. This is not
+decoration: `update_task` writes the whole acceptance-criteria array today, so two sessions editing
+different criteria lose one another's work. Per-criterion rows remove that by construction, and
+`tasks.acceptance_criteria` is retained as a synchronized projection so the CLI, the briefing, the server
+and the web UI keep working unchanged. Task *identity* across machines is content-addressed — a digest
+over the converged criteria and blockers — because a per-store counter cannot mean the same thing on two
+machines, and the counter therefore never leaves the store.
 
 **No new crate, no new service, no new datastore, no new transactional model, no seventh tool, and
 no model or vector dependency anywhere in the correctness path.**
@@ -102,13 +111,20 @@ agents, worktrees, machines and team members; ten consecutive compaction cycles
 | II. Simple Architecture | PASS, and this is the principle the design was optimised for. No new crate, no new dependency, no new service, no new datastore, no new transactional model, no seventh tool. The largest simplification is D44: the canonical answer is derived on read, so there is no projection, no invalidation, and no rebuild path. Speculative machinery the brief invited — embeddings, a graph store, an event log, a confidence engine — is rejected with reasons in research §6. |
 | III. Local-First Reliability | PASS — everything works offline: reconciliation, verification, drift, context, continuity and pattern suggestion are all local. Nothing Feature 003 adds runs on the session-open or capture path beyond one indexed lookup with a documented cap (D54). Verification is background or on demand, and `unverified`/`needs_recheck` is a valid answer rather than a stall (FR-473). Cairn failure degrades Cairn's output, never the agent's operation. |
 | IV. Project-Scoped Memory | PASS — no scope is added. Subjects are keyed *by* project, scope and scope key, so they narrow rather than widen. Reusable patterns are deliberately a different record rather than a wider scope (D61), which is what keeps Feature 002's FR-189/FR-190 invariant intact: nothing is keyed to the agent, and retrieval still ranks by project/branch/task/session only. Every new field carries provenance to the session that wrote it. |
-| V. Privacy by Default | PASS — the boundary is drawn structurally. Evidence facts, verification runs, checkpoints, patterns, applications, task changes and selection diagnostics have **no outbox entity type and no server table**, which is the same mechanism that already makes "raw observations never sync" a schema property. What a shared memory may say about evidence is an enumerated four-field object carrying verifier *kinds* only. Promotion — the highest risk in the feature — is a deterministic fail-closed gate with a seeded adversarial corpus. |
+| V. Privacy by Default | PASS — the boundary is drawn structurally. Evidence facts, verification runs, checkpoints, patterns, applications, task changes and selection diagnostics have **no outbox entity type and no server table**, which is the same mechanism that already makes "raw observations never sync" a schema property. What a shared memory may say about evidence is an enumerated five-field object carrying verifier *kinds* and one authority enum, no content. Promotion — the highest risk in the feature — is a deterministic fail-closed gate with a seeded adversarial corpus. |
 | VI. Deterministic Data Boundaries | PASS, and strengthened. Reconciliation reads no clock and no identifier order (D49), asserted by a clock-swap invariance test. Relations are idempotent on their primary key. Every derived value has a documented rebuild exercised by test. Git remains the only source of repository state. The same inputs still produce the same briefing, now including the new levels. |
 | VII. Testable Behavior | PASS — every success criterion has a named test at a named tier, including the negative ones: no false merge on the paired corpus, no silent winner on any conflict case, no lost write under 32-way concurrency, no clock-order dependence, no criterion verified on attested evidence alone, no pattern validated on repetition, no promotion that leaks a seeded secret, and no verification work on the session-open path. |
 
 **Re-check after Phase 1 design**: PASS. The design added zero crates, zero dependencies and zero
 components. Two judgment calls are recorded in Complexity Tracking; neither introduces
 infrastructure.
+
+**Re-check after the design reconciliation pass (2026-08-14)**: PASS. Eight findings resolved (R11–R18),
+four of them HIGH. The resolutions added no crate, dependency, service, datastore, tool or table. Two
+reduced the design: the task counter was removed from the sync payload and the server schema, and
+automatic reconciliation lost one of its two rules. Principle V is strengthened — an attestation can no
+longer arrive at a peer wearing a deterministic check's badge. Principle VI is strengthened — task state
+identity is content-addressed rather than counter-based, so it cannot disagree across devices.
 
 **Re-check after cross-artifact reconciliation (2026-08-14)**: PASS. Reconciliation closed ten
 findings — two CRITICAL/HIGH structural, four MEDIUM, four LOW consistency (see
@@ -125,7 +141,7 @@ Every structural resolution made the design smaller, and none added a component,
 ```text
 specs/003-project-intelligence/
 ├── plan.md                          # This file
-├── spec.md                          # Feature specification (158 FR, 28 SC)
+├── spec.md                          # Feature specification (163 FR, 31 SC)
 ├── research.md                      # Baseline findings B1–B7; decisions D43–D75
 ├── data-model.md                    # Entities, fields, invariants, state transitions, rebuilds
 ├── migration.md                     # Additive migration design and its no-loss proof
@@ -256,6 +272,14 @@ Full reasoning in [research.md](./research.md); this is the index.
 | AD | A deterministic corpus, five tiers, model judgement outside every gate | D73, [contracts/evaluation.md](./contracts/evaluation.md) |
 | AE | One additive local migration, one additive server migration | D74, [migration.md](./migration.md) |
 | AF | Every bound has a documented, configurable, test-asserted default | D75 |
+| AG | Verification carries an **authority**; `verification_origin` is retired | D76, [evidence-verification](./contracts/evidence-verification.md) §Authority |
+| AH | Equal value keys never merge; `Corroborated` is a derived subject state | D77, [knowledge](./contracts/knowledge.md) |
+| AI | Symmetric relation kinds normalize their endpoints | D78, [knowledge](./contracts/knowledge.md) §Symmetric |
+| AJ | Checkpoints record a bounded fingerprint per relevant path | D79, [continuity-context](./contracts/continuity-context.md) |
+| AK | The task counter is local; cross-device identity is a derived digest | D80, [task-model](./contracts/task-model.md) |
+| AL | `blocked` — a fifth outbox state for recoverable capability refusal | D81, [privacy-sync](./contracts/privacy-sync.md) |
+| AM | The temporal claim is narrowed; `stale_at` added going forward | D82, [knowledge](./contracts/knowledge.md) §Temporal |
+| AN | Level 0 has a guaranteed O(1) tier and a bounded detail tier | D83, [continuity-context](./contracts/continuity-context.md) |
 
 ### The shape of the derivation
 
@@ -318,7 +342,11 @@ performance and privacy suites in H exercise everything.
 | A mixed-version deployment — newer daemon, older server — silently stops syncing something | **MEDIUM** | The daemon records the rejection class, stops sending that class, keeps delivering everything the server accepts, and names the degradation in `cairn sync status` (D67, FR-415). SC-326 measures it against a server accepting no Feature 003 field. |
 | `superseded_at` backfilled from `updated_at` is wrong for a memory superseded and later touched | **LOW** | It is an approximation and is recorded as one (D74). It affects only historical `as_of` queries for memories superseded *before* this feature existed, where no better source exists; nothing derived from it changes current knowledge. Documented in [migration.md](./migration.md) rather than silently applied. |
 | The reconciliation derivation acquires a clock read during maintenance | **LOW** | `clock_swap_invariance` runs the whole offline-merge corpus with reversed clocks and asserts a byte-identical result (D49, SC-304). A clock read that changes an outcome fails that test. |
-| 158 requirements is a large surface for one feature | **LOW** | Recorded in Complexity Tracking. The feature combines four capabilities the brief deliberately merged; the requirement count is proportionate to that (Feature 002 carried 145 for one). The eight-phase slicing is what keeps it deliverable, and every phase ends demonstrable. |
+| An agent attests a fact and it becomes indistinguishable from a check Cairn ran | **resolved** | Was a real gap on the wire, not a hypothetical: `collector` lived on the evidence fact, which never syncs. Closed by `verification_authority` travelling with the state everywhere, and by the two strict consumers refusing attestation (D76, R11, SC-329). |
+| A coarse value key silently merges two different claims | **resolved** | Closed by removing the rule: only identical normalized content merges, and equal-value/differing-content derives `Corroborated` with both retained. The residual cost is deduplication requiring one explicit call, which is prompted in the response (D77, R12, SC-301). |
+| Two offline machines disagree about what "revision 6" means | **resolved** | Closed by taking the counter off the wire and deriving a content-addressed `task_state_digest` from the converged records. No CRDT (D80, R13, SC-330). |
+| Feature 003 sync data stranded against an old server | **resolved** | Closed by the `blocked` outbox state plus a capability probe on an endpoint that already exists, whose *absence* of the new fields is the answer for an old server (D81, R14, SC-331). |
+| 163 requirements is a large surface for one feature | **LOW** | Recorded in Complexity Tracking. The feature combines four capabilities the brief deliberately merged; the requirement count is proportionate to that (Feature 002 carried 145 for one). Fifteen requirements were tightened rather than duplicated during reconciliation, which is the discipline that keeps the count honest. The eight-phase slicing is what keeps it deliverable, and every phase ends demonstrable. |
 
 ## Reconciliation
 
@@ -338,10 +366,38 @@ made the design smaller.
 | R9 | LOW | The evaluation harness claimed a "byte-identical" briefing against the pre-feature output, which cannot hold once the response carries new top-level objects | Narrowed to the fields the claim is actually about: the `briefing` object, `estimated_tokens`, `truncated` and `omitted_sections` |
 | R10 | LOW | Four planned test binaries appeared in the evaluation and traceability tables but not in the plan's source tree | Added to the tree, with the three extended existing suites named separately |
 
-Findings R1–R6 came from reconciling the design against the requirements; R7–R10 from a final
-consistency pass across the artifact set, which also verified that all 158 requirements and 28 success
-criteria are cited, that every cross-feature citation resolves in the Feature 001 or 002 spec, and
-that every internal link resolves.
+### Design reconciliation pass (2026-08-14)
+
+A second pass re-verified eight independently raised concerns against both the artifacts and the
+implementation. **All eight were valid**; four were HIGH. Each resolution was checked for whether the
+existing architecture already solved the problem before anything was added.
+
+| # | Severity | Finding | Verified against | Resolution |
+|---|---|---|---|---|
+| R11 | **HIGH** | Agent-attested evidence could reach `verified` and sync as indistinguishable from a deterministic Cairn check. `verification_origin ∈ {local, remote}` distinguished the *machine*, not the *kind of check*; `collector` lived on the evidence fact, which never syncs; and `basis` could not close the gap because `test_outcome`/`command_outcome` are reachable both ways | `contracts/evidence-verification.md` line 99, `contracts/privacy-sync.md` payload shape, `data-model.md` §2.1 | `verification_authority ∈ {cairn, attested, remote_cairn, remote_attested}`, derived, reported everywhere, and on the wire as one enum key. Criterion verification and promotion accept `cairn` only. No new axis — the existing `verification_origin` column was widened (D76) |
+| R12 | **HIGH** | Equal `value_key` triggered automatic `reinforces`, and `derive_subject` then collapsed the value partition to one representative — so `auth.strategy=jwt` "HS256 with a shared secret" and "RS256 with rotating public keys" merged into one canonical answer with a false reinforcement | `contracts/knowledge.md` automatic-reconciliation table + `derive_subject` step 4 | Automatic merging requires identical normalized content. Equal value + differing content derives **`Corroborated`**: no relation, every statement retained, the matched member reported to the writer. `reinforces` demoted to explicit-only. Automatic behaviour got *smaller* (D77) |
+| R13 | **HIGH** | `tasks.revision` was described as monotone and used for CAS, but it synced, so two offline machines each advancing 5→6 produced two different "revision 6" states — and because `task_changes` is local, a divergence report omitted criterion changes that had arrived from another machine | `contracts/task-model.md`, `data-model.md` §2.2/2.3, `contracts/privacy-sync.md` | Counter renamed `local_revision`, **removed from the payload and the server schema**. Cross-device identity is a derived `task_state_digest` over sorted converged records. Divergence diffs `sessions.task_snapshot_at_bind` against current records, so remote changes appear. No CRDT, and the sync surface shrank (D80) |
+| R14 | **HIGH** | Capability-refused work was stranded. `outbox::claim` takes only `pending` and stale `in_flight`; `cairnd/src/sync.rs` calls `mark_failed` on a `rejected` status — so a relation an old server refused stayed `failed` forever, including after an upgrade | `crates/cairn-store/src/outbox.rs::claim`, `crates/cairnd/src/sync.rs` line 646, `0003_outbox_claim.sql` | Fifth outbox state `blocked`, distinct from `failed`; two nullable columns; a capability probe on the existing public `/api/version`, whose *absence* of the new fields is itself the answer for an old server. Blocked rows return to `pending` on a capability change and deliver exactly once by their original idempotency key (D81) |
+| R15 | MEDIUM | FR-443 required criterion text in Level 0 and SC-309 claimed it fits the minimum budget — forty criteria at ~20 tokens is 800 against a 600-token minimum. The budget was never at risk; the *claim* was false | `spec.md` FR-443/SC-309, `contracts/continuity-context.md` Level 0 order | Level 0 split: **Tier 0a** guaranteed and O(1) (goal, progress counts, readiness, top blocker, next action, warning counts, repository state); **Tier 0b** bounded detail with criterion text in action order, omissions counted by kind with a retrieval path (D83, FR-448) |
+| R16 | MEDIUM | Path divergence depended on a `file_changed` observation from another session, so an edit by a human, a formatter, `git apply` or an IDE was invisible while the commit stayed put | `contracts/continuity-context.md` divergence table | Bounded per-path fingerprints recorded at checkpoint and recomputed on restore — `digest`, `size` above the payload cap, `unknown` when excluded. `not_fingerprintable` is reported as itself, never as unchanged. ≤32 paths, no scan, no execution (D79) |
+| R17 | MEDIUM | `conflicts_with` was documented as symmetric but keyed `(from, to, kind)`, so two offline machines detecting one conflict produced two durable rows facing opposite ways | `data-model.md` §3.1 | Endpoint normalization (`min`/`max` on the identifier) for symmetric kinds only; directional kinds untouched. The primary key then absorbs the second machine's record (D78) |
+| R18 | MEDIUM | The `as_of` predicate claimed "what was effective at T" but `mark_stale_scopes` records no instant, so a memory stale since T2 was still reported as effective for every later T | `crates/cairn-store/src/repo.rs::mark_stale_scopes`, `contracts/knowledge.md` temporal section | Claim narrowed to proposal effectiveness and explicit supersession intervals; nullable `stale_at` added and set going forward, NULL meaning **unknown**; a transition with no authoritative instant reports `applicability: unknown` rather than a bounded fact. No backfill — that would be a second approximation (D82) |
+
+**Requirement accounting for this pass**: 5 new FRs (FR-327, FR-370, FR-418, FR-448, FR-493) and 3 new
+SCs (SC-329, SC-330, SC-331). Fifteen existing requirements were **tightened rather than duplicated** —
+FR-305, FR-316, FR-321, FR-341, FR-342, FR-355, FR-368, FR-396, FR-415, FR-432, FR-443, FR-484, FR-488,
+FR-489, FR-490, FR-499, FR-502 — and eight SCs restated. Nothing was added that an existing requirement
+could carry.
+
+**Complexity added by this pass**: no crate, no dependency, no service, no datastore, no MCP tool, no new
+table. One outbox state, three nullable columns, one renamed column, one replaced column, one new derived
+value, and one additive field on an endpoint that already exists. Two changes made the design *smaller*:
+the task counter left the wire and the server schema, and automatic reconciliation lost a rule.
+
+Findings R1–R6 came from reconciling the design against the requirements; R7–R10 from a consistency pass
+across the artifact set; R11–R18 from this independent design reconciliation. All three passes verified
+that every requirement and success criterion is cited, that every cross-feature citation resolves in the
+Feature 001 or 002 spec, and that every internal link resolves.
 
 Remaining MEDIUM/LOW notes are non-blocking and recorded in [compatibility.md](./compatibility.md)
 §Open notes.
@@ -350,5 +406,5 @@ Remaining MEDIUM/LOW notes are non-blocking and recorded in [compatibility.md](.
 
 | Violation | Why Needed | Simpler Alternative Rejected Because |
 |---|---|---|
-| 158 functional requirements for one feature, against Constitution "requirement counts kept proportionate to the work" | The brief deliberately combines four capabilities — canonical reconciliation, evidence/verification/drift, compression-safe continuity, and conservative cross-project reuse — plus a secondary task capability. Each carries its own privacy, concurrency, migration and degradation obligations, and the constitution requires those stated as requirements rather than left to implementation. Feature 002 carried 145 for one capability | Splitting into four features was considered and rejected on the brief's own terms and on the constitution's: the four share one boundary (proposal → reconciliation → canonical answer), one context budget and one privacy model, so specifying them separately would either duplicate that boundary four times or leave three features depending on an unspecified one. The eight-phase slicing delivers the same incrementality a split would, with one coherent design |
+| 163 functional requirements for one feature, against Constitution "requirement counts kept proportionate to the work" | The brief deliberately combines four capabilities — canonical reconciliation, evidence/verification/drift, compression-safe continuity, and conservative cross-project reuse — plus a secondary task capability. Each carries its own privacy, concurrency, migration and degradation obligations, and the constitution requires those stated as requirements rather than left to implementation. Feature 002 carried 145 for one capability | Splitting into four features was considered and rejected on the brief's own terms and on the constitution's: the four share one boundary (proposal → reconciliation → canonical answer), one context budget and one privacy model, so specifying them separately would either duplicate that boundary four times or leave three features depending on an unspecified one. The eight-phase slicing delivers the same incrementality a split would, with one coherent design |
 | One denormalization retained: `tasks.acceptance_criteria` as a projection of `task_criteria` | Three live readers plus the shared server and the web UI consume the JSON array today. Retaining it as a synchronized projection is what makes criterion identity an *additive* change rather than a simultaneous break across `cairn-core/context.rs`, the `cairn task` CLI, `cairn-server/sync.rs` and `web/app/(app)/projects/[id]/tasks` | Replacing the column with a join breaks all five readers at once for no capability gain. Leaving criteria as strings keeps the lost-update defect B3 identified, which is the reason the task capability is in scope at all. The drift risk is answered by writing both in one transaction and asserting the rebuild (SC-324) |

@@ -45,13 +45,26 @@ cairn memory add --type fact --scope project \
 cairn memory add --type fact --scope project \
   --topic-key infrastructure.production_database --value-key postgresql \
   "The production database is Postgres"
-#   reconciliation: reinforced  →  memory 0192f4…
-#   subject: infrastructure.production_database (project)
+#   reconciliation: corroborating
+#   agrees on value `postgresql` with memory 0192f4…, but the wording differs
+#   → if this is the same claim: cairn memory reinforce 0192f4…
 
+cairn memory reinforce 0192f4…
+#   reinforced  →  memory 0192f4…  (explicit, session 0192a1…)
+```
+
+Cairn will not decide for you that two differently-worded statements are one claim — that needs reading
+them, which is judgement, not a rule. It tells you which memory yours agrees with and makes collapsing
+them one call. If you skip the call, nothing is lost: both stand, and the briefing shows one plus a
+count.
+
+An **identical** statement needs no call at all:
+
+```bash
 cairn memory add --type fact --scope project \
   --topic-key infrastructure.production_database --value-key postgresql \
-  "prod DB: postgresql"
-#   reconciliation: reinforced  →  memory 0192f4…
+  "Production runs PostgreSQL 16"
+#   reconciliation: duplicate  →  memory 0192f4…   (content identical after normalization)
 ```
 
 Ask what the project holds:
@@ -64,12 +77,35 @@ cairn memory subject infrastructure.production_database
 #            reinforced 2 times · 3 distinct origin sessions · unverified
 #   members  3 (all retrievable individually with their own provenance)
 #   decisions
-#     0192f5… reinforces 0192f4…  (deterministic_rule, session 0192a1…, claude-code)
-#     0192f6… reinforces 0192f4…  (deterministic_rule, session 0192b7…, codex)
+#     0192f5… reinforces 0192f4…  (explicit_agent,     session 0192a1…, claude-code)
+#     0192f6… duplicates 0192f4…  (deterministic_rule, session 0192b7…, codex)
 ```
 
-**What you see**: one answer in the briefing, not three. All three memories still exist, each with its
-own session provenance. `cairn context` spends budget once for this fact instead of three times.
+### A coarse value key does not merge two different claims
+
+```bash
+cairn memory add --type decision --scope project \
+  --topic-key auth.strategy --value-key jwt "JWT uses HS256 with a shared secret"
+cairn memory add --type decision --scope project \
+  --topic-key auth.strategy --value-key jwt "JWT uses RS256 with rotating public keys"
+#   reconciliation: corroborating
+#   agrees on value `jwt` with memory 0192h1…, but the wording differs
+
+cairn memory subject auth.strategy
+#   SUBJECT  auth.strategy  (project)
+#   state    CORROBORATED — the value is agreed, the statements are not
+#   value    jwt
+#   answers  "JWT uses HS256 with a shared secret"        (0192h1…, claude-code)
+#            "JWT uses RS256 with rotating public keys"   (0192h2…, codex)
+#   no reinforcement recorded — these are different claims about one value
+```
+
+Both survive. Neither is suppressed. The briefing shows one plus `+1 further statement`, and an agent
+that needs to know which algorithm is in force is told there is more to read.
+
+**What you see**: the repeated fact costs budget once instead of three times, every contributing memory
+still exists with its own provenance — and two genuinely different claims are never quietly collapsed
+into one just because an agent wrote a broad value key.
 
 ### The scope exception
 
@@ -163,11 +199,12 @@ cairn evidence add --memory <id> --kind configuration \
 
 cairn verify --memory <id>
 #   verified  ·  configuration @ config/app.yml  ·  abc1234 on main  ·  2026-08-14T09:12:04Z
+#   authority: cairn  (a deterministic check Cairn ran itself)
 ```
 
 ```bash
 cairn memory search --topic-key service.api_port
-#   [fact] The API listens on 8080   active  ✓ verified (configuration) 2026-08-14
+#   [fact] The API listens on 8080   active  ✓ verified (configuration) 2026-08-14  authority: cairn
 ```
 
 An assertion of importance is not evidence:
@@ -176,6 +213,33 @@ An assertion of importance is not evidence:
 cairn evidence add --memory <id> --kind runtime_state \
   --subject "the team thinks this matters" --value important
 #   error: verifier_unavailable — no deterministic verifier for that subject
+```
+
+### Attested evidence is useful, and never wears the same badge
+
+Cairn cannot call a staging API. An agent can, and telling Cairn the result is worth recording:
+
+```bash
+cairn evidence add --memory <id> --kind runtime_state --collector agent \
+  --subject "GET /health version field" --value "2.4.1"
+cairn verify --memory <id>
+#   verified  ·  runtime_state  ·  authority: attested
+#              established by an agent's submission, not by a check Cairn ran
+
+cairn memory search --topic-key service.version
+#   [fact] The service reports 2.4.1   active  ✓ verified (attested)  authority: attested
+```
+
+It is `verified`, and it says how. The two places where that difference decides something both refuse it:
+
+```bash
+cairn task criterion verify <ac-id>
+#   error: attested_not_sufficient
+#     A criterion is verified only on evidence Cairn collected itself.
+
+cairn pattern promote --memory <id> --dry-run
+#   refused: attested_not_sufficient
+#     Cross-project promotion needs a deterministic check Cairn ran on this machine.
 ```
 
 ---
@@ -261,16 +325,43 @@ Session A resumes:
 ```bash
 cairn context --reason post_compaction
 #   ⚠ CHECKPOINT DIVERGED
-#       recorded at abc123 on main, task revision 7
-#       current:      def456 on main, task revision 8
-#       task changed: criterion added — AC-4 "production smoke passes"
-#       files changed by another session: src/config.rs
-#                                        (session 0192e9…, claude-code)
+#       recorded at abc123 on main
+#       current:      def456 on main
+#       task changed: AC-4 added "production smoke passes"   (another machine)
+#                     blocker opened "staging credentials"    (this machine)
+#       files changed: src/config.rs  (digest differs; session 0192e9…, claude-code)
 #       previous next action (may be stale):
 #           "finish the retry backoff in config.rs"
 ```
 
 **What you see**: Cairn does not tell you to carry on editing `config.rs` from a commit that has moved.
+
+### A change nobody told Cairn about
+
+Now do it with no Cairn session at all — edit in your editor, run a formatter, apply a patch — and do
+not commit:
+
+```bash
+$EDITOR src/config.rs                 # or: cargo fmt, or git apply, or an IDE refactor
+git status --short                     # M src/config.rs — commit unchanged
+
+cairn context --reason post_compaction
+#   ⚠ CHECKPOINT DIVERGED
+#       commit unchanged (abc123)
+#       files changed: src/config.rs  (digest differs; no Cairn session recorded a change)
+#       previous next action (may be stale):
+#           "finish the retry backoff in config.rs"
+```
+
+**What you see**: the checkpoint compares the fingerprint it recorded, so it does not matter who made
+the change or whether Cairn was watching. And a path it cannot fingerprint says so rather than
+pretending:
+
+```bash
+cairn session checkpoint
+#   checkpoint 0192j1…  ·  8 relevant paths fingerprinted
+#     6 digest · 1 size (vendor/large.bin exceeds the payload cap) · 1 unknown (secrets/** excluded)
+```
 
 ### An agent without a post-compaction signal
 
@@ -328,6 +419,57 @@ cairn memory subject infrastructure.production_database
 #   answer  cockroachdb
 #   the postgresql memory is superseded here too, from A's recorded decision
 ```
+
+### A peer's verification says how it was established
+
+```bash
+# machine B, reading a memory machine A verified
+cairn memory search --topic-key service.api_port
+#   [fact] The API listens on 8080   active
+#          ✓ verified elsewhere  authority: remote_cairn
+#            a deterministic check on another machine, 2026-08-14
+
+# and one machine A only attested
+cairn memory search --topic-key service.version
+#   [fact] The service reports 2.4.1   active
+#          ✓ verified elsewhere (attested)  authority: remote_attested
+#            an agent's submission on another machine — not a check
+```
+
+**What you see**: two verifications that would have looked identical now do not. Neither counts toward
+this machine's task readiness, and neither can be promoted from here.
+
+### An old server, and then an upgraded one
+
+```bash
+# server still on Feature 001's schema
+cairn sync now
+cairn sync status
+#   pending 0 · blocked 3 · failed 0 · last success 2026-08-14T09:14:02Z
+#   ⚠ degraded: this server does not accept memory relations or task criteria
+#     (server schema 1, this build expects 2). 3 items are retained and will be
+#     delivered automatically when the server is upgraded. Memories, tasks,
+#     sessions and handoffs are syncing normally.
+```
+
+Nothing is lost and nothing is retried pointlessly. Upgrade the server, and the next drain cycle notices:
+
+```bash
+# after the server is upgraded
+cairn sync now
+#   server capability changed (schema 1 → 2) · released 3 blocked items
+#   applied 3 · duplicate 0 · rejected 0
+
+cairn sync status
+#   pending 0 · blocked 0 · failed 0 · last success 2026-08-14T11:02:18Z
+
+# machine B
+cairn sync now
+cairn memory subject infrastructure.production_database
+#   state   settled          ← A's supersession finally arrived, applied exactly once
+```
+
+**What you see**: no manual repair, no re-running anything, no lost intent.
 
 ---
 
@@ -459,6 +601,31 @@ cairn context --token-budget 800 --explain
 #     pattern ×1     cap_reached
 ```
 
+### A task with forty criteria, and a budget that cannot hold them
+
+```bash
+cairn context --token-budget 800
+#   TASK       Retry backoff — transient failures retry with jitter   (in_progress)
+#   PROGRESS   12 verified · 6 satisfied but unverified · 3 blocked · 19 pending
+#   READINESS  not_ready
+#   BLOCKERS   4 open — "staging credentials expired"
+#   NEXT       add the configurable cap to RetryConfig
+#   ⚠ 1 conflict · 1 drift
+#   REPOSITORY main @ def4567 · 3 unstaged
+#   CONSTRAINTS
+#     • never mutate CC Switch's private database directly
+#   CRITERIA   AC-9 blocked · AC-14 blocked · AC-3 satisfied (unverified)
+#              + 37 criteria omitted — `cairn task get <id>`
+#   BLOCKERS   1 of 4 shown — `cairn task get <id>`
+#
+#   estimated 794 / 800 tokens · truncated
+
+**What you see**: forty criteria do not fit in 800 tokens and Cairn does not pretend otherwise. What is
+guaranteed is the *state* — goal, progress counts, readiness, the blocker that matters, the next action,
+the warnings, the constraints — none of which grows with the task. Criterion text is admitted
+blocked-first, and what did not fit is counted with the call that retrieves it.
+```
+
 ---
 
 ## US11 — Evidence-aware tasks
@@ -487,6 +654,42 @@ cairn task get <task-id>
 #     AC-2 satisfied     ← session A's change survived
 #     AC-3 satisfied     ← session B's change survived
 ```
+
+### Two machines, two criteria, offline
+
+```bash
+# machine A, offline                      # machine B, offline
+cairn task criterion set <ac-1-id> \      cairn task criterion set <ac-2-id> \
+  --state satisfied                         --state satisfied
+
+# both reconnect
+cairn sync now                            cairn sync now
+
+# machine A                                machine B
+cairn task get <task-id>                  cairn task get <task-id>
+#   local_revision 7                      #   local_revision 7
+#   state_digest   8b21c4…                #   state_digest   8b21c4…   ← identical
+#     AC-1 satisfied  ← A's change        #     AC-1 satisfied  ← arrived from A
+#     AC-2 satisfied  ← arrived from B    #     AC-2 satisfied  ← B's change
+```
+
+The two `local_revision` values agreeing is a coincidence and is never compared — each is a private
+counter. The `state_digest` agreeing is the guarantee, because it is computed from the criteria
+themselves.
+
+A session that bound before either change is told about both:
+
+```bash
+cairn context
+#   ⚠ TASK UPDATED
+#     the task advanced since you started
+#     changes:
+#       • AC-1 pending → satisfied   (this machine)
+#       • AC-2 pending → satisfied   (arrived from another machine)
+```
+
+**What you see**: neither change overwrote the other, both machines agree on the state, and the older
+session learns about the remote change too — not just the local one.
 
 An agent cannot self-certify:
 
@@ -517,14 +720,14 @@ cairn task readiness <task-id>
 
 | Story | The user-visible result |
 |---|---|
-| US1 | Repetition becomes one answer with reinforcement, not three competing truths |
+| US1 | Repetition costs budget once, and two different claims sharing a value key are never merged |
 | US2 | Today's answer and July's answer, both correct, neither rewritten |
 | US3 | Two agents disagree and Cairn says so instead of picking |
-| US4 | A fact reports what verified it, when, and at which commit |
+| US4 | A fact reports what verified it, when, at which commit — and whether Cairn checked it or an agent said so |
 | US5 | Configuration moves and Cairn says the claim drifted, without editing it |
-| US6 | Ten compactions later the agent still knows the goal, the state and the next step |
-| US7 | Two offline machines merge to a visible conflict, clock order irrelevant |
+| US6 | Ten compactions later the agent still knows the goal, the state and the next step — and is told when a file moved beneath it, whoever moved it |
+| US7 | Two offline machines merge to a visible conflict, clock order irrelevant; an old server strands nothing |
 | US8 | A prior project's fix arrives labelled unverified here |
 | US9 | Eleven applications, and Cairn still says nobody validated it independently |
-| US10 | 5,000 memories, 800 tokens, and nothing critical is lost |
-| US11 | Two sessions, two criteria, both survive; readiness derived, completion still yours |
+| US10 | 5,000 memories and forty criteria at 800 tokens: the state survives, and what was dropped is named |
+| US11 | Two sessions — or two offline machines — two criteria, both survive and both agree; readiness derived, completion still yours |

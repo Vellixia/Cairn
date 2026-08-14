@@ -49,17 +49,27 @@ continuity (D57, FR-426). It restores the latest checkpoint, runs staleness dete
   "omitted_sections": ["project_memory"], "degraded": false,
 
   "minimum_safe": {
-    "task": { "id": "…", "goal": "…", "status": "in_progress" },
-    "criteria": [{ "id": "…", "label": "AC-1", "text": "…",
-                   "state": "satisfied", "verification": "verified" }],
-    "progress": { "verified": 3, "satisfied_unverified": 1, "blocked": 1,
-                  "pending": 2, "waived": 0, "total": 7 },
-    "completion_readiness": "not_ready",
-    "open_blockers": ["staging credentials expired"],
-    "next_action": "finish the retry backoff in config.rs",
-    "previous_next_action": null,
-    "pinned_constraints": [{ "id": "…", "content": "…", "verification": "verified" }],
-    "repository": { "…": "Feature 001 RepositoryState" }
+    "guaranteed": {
+      "task": { "id": "…", "goal": "…", "status": "in_progress" },
+      "progress": { "verified": 3, "satisfied_unverified": 1, "blocked": 1,
+                    "pending": 2, "waived": 0, "total": 7 },
+      "completion_readiness": "not_ready",
+      "open_blocker_count": 4,
+      "top_blocker": "staging credentials expired",
+      "next_action": "finish the retry backoff in config.rs",
+      "previous_next_action": null,
+      "warning_counts": { "checkpoint_divergence": 1, "conflict": 1, "drift": 1 },
+      "repository": { "…": "Feature 001 RepositoryState" }
+    },
+    "detail": {
+      "criteria": [{ "id": "…", "label": "AC-3", "text": "…",
+                     "state": "blocked", "verification": "unverified" }],
+      "pinned_constraints": [{ "id": "…", "content": "…",
+                               "verification": { "state": "verified", "authority": "cairn" } }],
+      "further_blockers": []
+    },
+    "omitted": { "criteria": 37, "blockers": 3, "warnings": 0,
+                 "retrieval": "cairn task get <id>" }
   },
 
   "continuity": {
@@ -67,11 +77,24 @@ continuity (D57, FR-426). It restores the latest checkpoint, runs staleness dete
     "checkpoint": { "id": "…", "created_at": "…", "restore_count": 3,
                     "state": "diverged",
                     "divergences": [
-                      { "kind": "commit",  "recorded": "abc123", "current": "def456" },
-                      { "kind": "task",    "recorded": 7, "current": 8,
-                        "changes": ["criterion added — AC-4", "blocker opened"] },
-                      { "kind": "files",   "paths": ["src/config.rs"],
-                        "changed_by_session": "0192f4…", "changed_by_agent": "claude-code" }
+                      { "kind": "commit", "recorded": "abc123", "current": "def456" },
+                      { "kind": "task",
+                        "recorded_state_digest": "3f9c…", "current_state_digest": "8b21…",
+                        "changes": [
+                          { "kind": "criterion_added", "label": "AC-4",
+                            "origin": "another_machine" },
+                          { "kind": "blocker_opened", "origin": "this_machine" }
+                        ] },
+                      { "kind": "files",
+                        "changed": [
+                          { "path": "src/config.rs", "fingerprint_class": "digest",
+                            "outcome": "changed", "last_touched_by_session": "0192f4…" },
+                          { "path": "src/retry.rs", "fingerprint_class": "digest",
+                            "outcome": "changed", "last_touched_by_session": null }
+                        ],
+                        "not_fingerprintable": [
+                          { "path": "vendor/large.bin", "reason": "over_payload_cap" }
+                        ] }
                     ] }
   },
 
@@ -95,8 +118,14 @@ continuity (D57, FR-426). It restores the latest checkpoint, runs staleness dete
 }
 ```
 
+`minimum_safe.guaranteed` is Tier 0a — every field is O(1) in the size of the project and the task, so
+it is present at any budget from the documented minimum upwards. `minimum_safe.detail` is Tier 0b,
+admitted as budget allows, and `minimum_safe.omitted` reports what did not fit by kind with the call
+that retrieves it (FR-443, FR-448).
+
 `warnings` is Level 0 content and appears whether or not `explain` is set (FR-464). `patterns` always
-carries `verified_in_this_project: false` (SC-312).
+carries `verified_in_this_project: false` (SC-312). `last_touched_by_session` is `null` when no Cairn
+session recorded the change — which is exactly the case path fingerprints exist to catch (FR-432).
 
 ---
 
@@ -107,6 +136,8 @@ carries `verified_in_this_project: false` (SC-312).
 | Field | Type | Notes |
 |---|---|---|
 | `verification` | enum | `unverified \| verified \| needs_recheck \| drifted \| conflicted` |
+| `authority` | enum | `cairn \| attested \| remote_cairn \| remote_attested` — filter by what established it |
+| `corroborated` | bool | Restrict to memories in a subject whose members agree on a value and differ in content |
 | `conflicted` | bool | Restrict to memories in a conflicted subject |
 | `topic_key` | string | Exact or prefix match (`infrastructure.` matches the subtree) |
 | `as_of` | timestamp | Temporal query: what was effective then (FR-342) |
@@ -129,18 +160,20 @@ therefore returned by default, with its verification state visible (FR-373).
   "value_key": "postgresql",
   "importance": "normal",
   "pinned": false,
-  "verification": { "state": "verified", "origin": "local",
+  "verification": { "state": "verified", "authority": "cairn",
                     "last_verified_at": "…", "fact_count": 2,
                     "basis": ["configuration", "git_ref"] },
   "temporal": { "effective_from": "…", "superseded_at": null },
   "reinforcement": { "count": 3, "distinct_origins": 3 },
   "subject": { "reconciliation": "reinforced", "is_canonical_answer": true,
-               "competing_answers": [] }
+               "competing_answers": [], "corroborating_answers": [] }
 }
 ```
 
 `verification.basis` carries **verifier kinds only** — never a subject, value, locator or digest
-(FR-502). `reinforcement` is never labelled as verifications (FR-406).
+(FR-502). `verification.authority` is one of `cairn`, `attested`, `remote_cairn`, `remote_attested` and
+is always present when the state is `verified`, so a caller can never mistake an attestation for a
+deterministic check (FR-370). `reinforcement` is never labelled as verifications (FR-406).
 
 Patterns, when requested, are a separate array — never mixed into `results`, so a caller cannot
 mistake a cross-project pattern for project knowledge.
@@ -180,28 +213,42 @@ One discriminator per tool. No action takes a sub-operation (D70).
 
 ```json
 { "ok": true, "memory": { "…": "as today" },
-  "reconciliation": { "outcome": "reinforced",
-                      "reinforced_memory_id": "…",
-                      "subject": "infrastructure.production_database",
-                      "relation_recorded": "reinforces",
-                      "conflict_detected": false },
-  "notes": [] }
+  "reconciliation": { "outcome": "corroborating",
+                      "matched_memory_id": "…",
+                      "matched_value_key": "jwt",
+                      "subject": "auth.strategy",
+                      "relation_recorded": null,
+                      "conflict_detected": false,
+                      "next_step": "if this is the same claim, call action=reinforce with memory_id" },
+  "notes": ["corroborating_member"] }
 ```
 
-`outcome` ∈ `created | reinforced | duplicate | conflict_detected | deferred`. `deferred` carries the
-note `reconciliation_deferred` when `reconcile_members_max` was exceeded — the memory is stored either
-way.
+`outcome` ∈ `created | duplicate | corroborating | conflict_detected | deferred`.
 
-**`reinforce`** — `memory_id`. Records `reinforces` from the caller's session context. Idempotent per
-`(from, to, kind)`.
+- `duplicate` — content identical after normalization; a `duplicates` relation was recorded
+  automatically, and `matched_memory_id` names the canonical member.
+- **`corroborating`** — the same subject and value key, differing content. **Nothing was merged and no
+  relation was recorded.** `matched_memory_id` names the member it agrees with, and `next_step` states
+  the one call that would collapse them if the agent — which can read both — judges them the same claim.
+  This is the prompt that keeps deduplication cheap without letting Cairn infer (FR-327).
+- `conflict_detected` — same subject, incompatible value key, overlapping scope.
+- `deferred` — `reconcile_members_max` was exceeded; the memory is stored either way.
+
+There is deliberately no `reinforced` outcome: reinforcement is an explicit act, never an automatic
+one (FR-321).
+
+**`reinforce`** — `memory_id`. Records an explicit `reinforces` relation from the caller's session
+context, meaning *this session confirmed that memory is still true*. Idempotent per
+`(from, to, kind)`. This is the **only** path that produces a `reinforces` relation; Cairn never infers
+one (FR-321).
 
 **`attach_evidence`** — `memory_id`, `kind`, `subject`, `observed_value`, `source_locator`, optional
 `observation_id`, `role` (default `supports`), optional `collector` (`agent` when the agent is
 attesting). Refuses `absolute_locator`, `evidence_excluded`, `evidence_outside_worktree`,
 `evidence_too_large`.
 
-**`verify`** — `memory_id`. Runs the applicable verifiers within the standard caps and returns the
-run. `verification_inconclusive` is `ok: true`.
+**`verify`** — `memory_id`. Runs the applicable verifiers within the standard caps and returns the run,
+including the resulting `authority`. `verification_inconclusive` is `ok: true`.
 
 **`pin`** — `memory_id`, `pinned` (bool), `reason` (bounded). Refuses `pin_budget_exhausted` with the
 current pins listed.
@@ -239,11 +286,22 @@ FR-425 requires and the one an `unavailable_automatic` agent uses.
 `current` response gains:
 
 ```json
-{ "task_revision_at_bind": 5,
-  "task_divergence": { "from": 5, "to": 6,
-                       "changes": ["criterion added — AC-4", "blocker opened"] },
+{ "task_state_digest_at_bind": "3f9c…",
+  "task_divergence": { "advanced": true,
+                       "current_state_digest": "8b21…",
+                       "changes": [
+                         { "kind": "criterion_state", "label": "AC-2",
+                           "from": "pending", "to": "satisfied", "origin": "this_machine" },
+                         { "kind": "criterion_added", "label": "AC-4",
+                           "origin": "another_machine" },
+                         { "kind": "blocker_opened", "origin": "another_machine" }
+                       ] },
   "latest_checkpoint": { "id": "…", "created_at": "…", "state": "diverged" } }
 ```
+
+The change list is diffed from the session's bound snapshot against the current synchronized records, so
+a change that arrived from another machine appears with `origin: "another_machine"` rather than being
+invisible (D80, FR-489).
 
 ---
 
@@ -253,7 +311,7 @@ FR-425 requires and the one an `unavailable_automatic` agent uses.
 |---|---|---|
 | `list`, `get`, `create`, `update` | existing | Unchanged; `get`/`list` gain read-only fields |
 | `add_criterion` | **new** | `task_id`, `text` |
-| `update_criterion` | **new** | `criterion_id`, optional `text`, `state`, `verification`, `evidence_observation_id`, `expected_revision` |
+| `update_criterion` | **new** | `criterion_id`, optional `text`, `state`, `verification`, `evidence_observation_id`, `expected_revision` (the **local** counter read from `get`) |
 | `blocker` | **new** | `task_id` + `description` to open; `blocker_id` + `clear: true` to clear |
 | `readiness` | **new** | `task_id`; derived counts and readiness |
 
@@ -261,8 +319,13 @@ FR-425 requires and the one an `unavailable_automatic` agent uses.
 exactly as today; `update` diffs by text, preserving ids for unchanged entries (see
 [task-model.md](./task-model.md)).
 
-`get` response gains `revision`, `criteria[]` (with `id`, `label`, `text`, `state`, `verification`,
-`revision`, `evidence_count`), `blockers[]`, `progress`, `completion_readiness`.
+`get` response gains `local_revision`, `state_digest`, `criteria[]` (with `id`, `label`, `text`,
+`state`, `verification`, `verification_authority`, `revision`, `evidence_count`), `blockers[]`,
+`progress`, `completion_readiness`.
+
+`local_revision` is this store's concurrency token — pass it back as `expected_revision`. `state_digest`
+is the cross-device state identity; it is the value to compare when asking whether two machines agree
+(D80).
 
 ---
 
@@ -286,7 +349,7 @@ within the existing size discipline:
 |---|---|
 | `cairn_context` | "…plus the minimum safe continuity, drift and conflict warnings, and whether your checkpoint diverged." |
 | `cairn_search` | "Filter by verification state or subject; ask for reusable patterns explicitly." |
-| `cairn_remember` | "Give durable project facts a `topic_key` so Cairn can reconcile them. Attach evidence rather than asserting importance. Record a conflict rather than overwriting." |
+| `cairn_remember` | "Give durable project facts a `topic_key` and a `value_key` specific enough to state the whole claim. Attach evidence rather than asserting importance. If Cairn reports a corroborating member and it is the same claim, reinforce it. Record a conflict rather than overwriting." |
 | `cairn_session` | "…or write a continuity checkpoint before you compact." |
 | `cairn_task` | "Update one criterion at a time and pass the `expected_revision` you read." |
 | `cairn_handoff` | "…optionally with its continuity checkpoint." |

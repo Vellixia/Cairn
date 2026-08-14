@@ -163,11 +163,19 @@ provenance chains resolvable.
 
 **Acceptance Scenarios**:
 
-1. **(A)** **Given** three sessions that each recorded the same subject with an equivalent value —
-   either the same topic key and value, or identical normalized content — **When** the project
-   briefing is assembled, **Then** exactly one active canonical item for that subject appears,
-   its reinforcement count is 3, its distinct-origin count is 3, and each contributing memory
-   remains individually retrievable with its own session provenance.
+1. **(A)** **Given** three sessions that each recorded the same subject with content identical after
+   normalization, **When** the project briefing is assembled, **Then** exactly one active canonical
+   item for that subject appears, its duplication is recorded, its distinct-origin count is 3, and
+   each contributing memory remains individually retrievable with its own session provenance.
+   **And given** the three instead share a topic key and value key but are worded differently,
+   **Then** the subject reports its value as agreed, the briefing carries **one** bounded entry for
+   it plus the count of the further statements and how to retrieve them, no reinforcement is claimed
+   between them, and none of the three is dropped from storage or from search.
+2. **(A2)** **Given** two memories on `auth.strategy` both with value key `jwt`, one stating
+   "JWT uses HS256 with a shared secret" and the other "JWT uses RS256 with rotating public keys",
+   **When** reconciliation runs, **Then** neither is merged into the other, no reinforcement relation
+   is recorded, both remain active and retrievable, the writer of the second is told which member it
+   matched, and the briefing states that a further statement about this value exists.
 2. **(B)** **Given** a project-scoped memory "production database is PostgreSQL" and a
    task-scoped memory "this integration fixture uses SQLite", **When** reconciliation runs,
    **Then** no conflict is declared, the task-scoped memory is the applicable answer inside that
@@ -261,8 +269,14 @@ memory's verification state and basis.
    verification runs, **Then** the memory stays `unverified`, and the agent's assertion is
    recorded as a proposal rather than as verification.
 3. **Given** evidence collected by an agent rather than by Cairn — a test exit code, a runtime
-   response — **When** it is attached, **Then** it is recorded as agent-attested, is usable to
-   reach `verified`, and is distinguishable from evidence Cairn read itself.
+   response — **When** it is attached, **Then** it is recorded as agent-attested and is usable to
+   reach `verified`; the resulting verification's authority is reported as resting on attestation
+   everywhere the state is shown, it is refused for criterion verification and for promotion, and it
+   is never rendered identically to a verification Cairn established by a deterministic check.
+4. **Given** a memory supported by both an attested fact and a Cairn-collected file digest, **When**
+   the deterministic verifier succeeds, **Then** the authority is reported as the deterministic
+   check — the stronger basis is what established it — and the attested fact remains attached and
+   labelled.
 4. **Given** a configuration file containing a credential, **When** evidence is recorded from it,
    **Then** the stored evidence carries the subject, the observed value after redaction, a digest
    and a locator, and never the raw secret-bearing text.
@@ -320,12 +334,18 @@ the branch head mid-flight and assert the divergence is reported.
    with their states, the derived progress, the open blocker, the active decisions, the critical
    constraints, the rejected approaches and a next action — and none of them is a paraphrase of a
    conversation.
-2. **(K)** **Given** a checkpoint recorded at commit `abc123` with task revision 7, **When**
-   another session advances the branch head to `def456`, advances the task to revision 8 and
-   modifies a file the checkpoint named, and the first session then resumes, **Then** the
-   checkpoint is reported `diverged`, the context names the commit change, the revision change
-   and the file with the session that changed it, and the recorded next action is presented as
-   possibly stale rather than as the instruction to follow.
+2. **(K)** **Given** a checkpoint recorded at commit `abc123` with a recorded task state, **When**
+   another session advances the branch head to `def456`, changes the task, and modifies a file the
+   checkpoint named, and the first session then resumes, **Then** the checkpoint is reported
+   `diverged`, the context names the commit change, what materially changed about the task, and the
+   file with the session that changed it, and the recorded next action is presented as possibly stale
+   rather than as the instruction to follow.
+3. **(K2)** **Given** a checkpoint naming `src/config.rs`, **When** that file is modified with no
+   Cairn session involved at all — by a human editor, a formatter, `git apply`, or an IDE refactor —
+   and the commit has not moved, **Then** restoration still reports the path as changed, because the
+   checkpoint compares the fingerprint it recorded rather than looking for a session's observation.
+   **And given** a relevant path that is privacy-excluded or too large to fingerprint, **Then** it is
+   reported as not fingerprintable rather than as unchanged.
 3. **(S)** **Given** an agent whose adapter has no post-compaction signal, **When** continuity is
    reported, **Then** Cairn reports continuity as agent-initiated rather than automatic, names
    the tool call that retrieves it, and never claims guaranteed rehydration.
@@ -362,8 +382,15 @@ conflicted. Then repeat with the write order and the clocks reversed and assert 
 4. **Given** two worktrees of one repository with concurrent sessions, **When** both propose
    knowledge, **Then** both are attributed to their own session and worktree and neither is lost.
 5. **Given** a memory verified on machine A, **When** machine B reads it, **Then** B reports it as
-   verified elsewhere rather than as verified here, and B's own completion readiness does not
-   count it.
+   verified elsewhere rather than as verified here, states whether A's verification was a
+   deterministic check or rested on attestation, and does not count it toward B's own completion
+   readiness.
+6. **Given** a machine syncing to a server that predates this feature, **When** a reconciliation
+   decision is refused for lack of capability, **Then** the decision is retained locally in a state
+   that is neither delivered nor permanently failed, is not retried against that server, and is
+   reported as awaiting server capability; **and when** the server is later upgraded, **Then** the
+   decision is delivered without user intervention, applied exactly once, and both peers converge —
+   with no manual repair of stored data at any point.
 
 ---
 
@@ -443,10 +470,16 @@ budget, and assert the reserved content is present and the budget is not exceede
 
 1. **(O)** **Given** a project with 5,000 memories, a relevant pinned constraint, an active drift
    warning and a conflicted subject, **When** the briefing is assembled at any budget from the
-   documented minimum upwards, **Then** the current task with its criteria states, the next
-   action, the pinned constraint, the drift warning and the conflict warning are all present, the
-   estimated tokens never exceed the budget, and the omissions are reported.
-2. **Given** a budget below the documented minimum, **When** the briefing is assembled, **Then**
+   documented minimum upwards, **Then** the task with its goal and status, the derived progress
+   counts, the most actionable open blocker, the next action, the pinned constraint, the drift
+   warning and the conflict warning are all present, the estimated tokens never exceed the budget,
+   and the omissions are reported.
+2. **(O2)** **Given** a task carrying forty acceptance criteria whose text alone exceeds the whole
+   budget, **When** the briefing is assembled at the documented minimum budget, **Then** the
+   guaranteed work state of scenario O is still complete, criterion text is admitted in the
+   documented order until the budget binds, the number of criteria omitted is stated, the means of
+   retrieving them is stated, and the budget is not exceeded.
+3. **Given** a budget below the documented minimum, **When** the briefing is assembled, **Then**
    it is truncated rather than rejected, the reserved content is admitted in its documented
    internal order, and what was dropped is named.
 3. **Given** an unlimited number of low-priority memories, **When** the briefing is assembled,
@@ -472,11 +505,16 @@ An older session detects that the task advanced and receives the changes.
 
 1. **(P)** **Given** a task with four criteria and two sessions that each update a different
    criterion, **When** both updates complete, **Then** both are present, no criterion was reset by
-   the other session's write, and the task's revision reflects both changes.
-2. **(Q)** **Given** a session that bound the task at revision 5 and a task now at revision 6,
-   **When** that session's context is refreshed, **Then** it is told the task advanced from 5 to
-   6 and which criteria, blockers, goal or status changed, and Cairn does not present the session
-   as having always worked against revision 6.
+   the other session's write, and the task's state identity reflects both changes.
+2. **(Q)** **Given** a session that bound the task at a recorded state and a task that has since
+   advanced, **When** that session's context is refreshed, **Then** it is told the task advanced and
+   which criteria, blockers, goal or status changed, and Cairn does not present the session as having
+   always worked against the current state.
+3. **(P2)** **Given** one task at a shared state, machine A offline changing AC-1 and machine B
+   offline changing AC-2, **When** both reconnect and sync, **Then** both criterion changes are
+   present on both machines, neither overwrote the other, both machines compute the **same** task
+   state identity, and a session on either machine that bound before the change is told about **both**
+   changes — including the one that originated on the other machine.
 3. **Given** every criterion satisfied and verified and no open blocker, **When** readiness is
    derived, **Then** it reports ready, and the task's status is not changed to done by Cairn.
 4. **Given** an agent asserting that a criterion is satisfied with no evidence, **When** progress
@@ -507,6 +545,19 @@ An older session detects that the task advanced and receives the changes.
   worktree and inside Git; nothing else.
 - **An evidence locator that becomes ambiguous after a rename.** Re-verification is inconclusive
   and the memory returns no stronger than `needs_recheck`.
+- **A relevant path changed with no Cairn session involved.** A human editor, a formatter, `git apply`
+  or an IDE refactor, with the commit unmoved. The recorded fingerprint differs, so the change is
+  detected regardless of who made it.
+- **A relevant path that cannot be fingerprinted.** Privacy-excluded, unreadable, or larger than the
+  payload cap. Reported as not fingerprintable — never as unchanged, because "I could not look" and
+  "nothing moved" are different answers.
+- **A memory that went stale before Cairn recorded staleness instants.** Its historical applicability
+  interval is unknown, so a historical query returns it as a proposal that was effective and says the
+  applicability is unknown, rather than implying it applied throughout.
+- **A memory whose only verification came from a peer.** Reported as verified elsewhere, with the
+  peer's authority named, and excluded from local readiness and from promotion.
+- **Two machines independently detecting the same conflict.** The symmetric decision normalizes its
+  endpoints, so exactly one durable record exists after they merge, not two facing opposite ways.
 - **A checkpoint whose task no longer exists.** Reported `unresolvable`; the continuity fields that
   do not depend on the task are still delivered.
 - **A checkpoint from a deleted session.** Deletion tombstones the checkpoint with the session, as
@@ -553,7 +604,10 @@ An older session detects that the task advanced and receives the changes.
   which it was decided: a deterministic rule, attached evidence, or an explicit agent or user
   instruction.
 - **FR-305**: A reconciliation decision record MUST be idempotent: recording the same decision
-  twice MUST leave the same state and MUST NOT double-count reinforcement.
+  twice MUST leave the same state and MUST NOT double-count reinforcement. Where a decision kind is
+  logically symmetric, its endpoints MUST be normalized deterministically so that two machines
+  recording the same symmetric fact independently produce exactly one durable record, not two facing
+  opposite ways. Directional kinds MUST NOT be normalized.
 - **FR-306**: Cairn MUST NOT delete, rewrite or truncate the content of a proposal as a
   consequence of reconciliation. The only fields reconciliation may change on an existing memory
   are its lifecycle state, its supersession link, and cached derivations of the durable records
@@ -581,9 +635,12 @@ An older session detects that the task advanced and receives the changes.
 - **FR-315**: A **subject** MUST be identified by project, memory scope, scope key and topic key
   together. Two memories with the same topic key in different scopes or scope keys MUST NOT be
   members of the same subject.
-- **FR-316**: Automatic reconciliation MUST be limited to cases decidable without inference:
-  same subject with equal value keys, or same subject and scope with identical normalized content.
-  Everything else MUST remain a candidate requiring evidence or an explicit decision.
+- **FR-316**: Automatic reconciliation MUST be limited to the single case decidable without
+  inference: two members of one subject whose content is identical after normalization. Equal value
+  keys alone MUST NOT cause an automatic merge, because a value key does not establish that two
+  differently-worded statements assert the same proposition — the content may carry material claims
+  the key does not capture. Everything else MUST remain a candidate requiring evidence or an explicit
+  decision.
 - **FR-317**: Cairn MUST NOT infer that two differently-worded free-form memories concern the same
   subject, and MUST NOT merge, supersede or reinforce them on the basis of similarity.
 - **FR-318**: Agents MUST be able to propose a topic key and value key when recording knowledge,
@@ -591,9 +648,18 @@ An older session detects that the task advanced and receives the changes.
 
 ### Reinforcement, duplication and supersession
 
-- **FR-321**: When a proposal matches an existing subject member with an equal value key, Cairn
-  MUST record a reinforcement rather than a second competing active answer, and MUST keep the new
-  proposal individually retrievable with its own provenance.
+- **FR-321**: When a proposal's content is identical after normalization to an existing member of the
+  same subject, Cairn MUST record the duplication rather than a second competing active answer, and
+  MUST keep the new proposal individually retrievable with its own provenance. A reinforcement — a
+  session asserting that an existing memory is still true — MUST be an explicit act, never inferred
+  from a matching value key.
+- **FR-327**: Where two active members of one subject share a value key but differ in content, Cairn
+  MUST treat the subject's **value** as agreed and its **statements** as several. It MUST NOT merge
+  them, MUST NOT claim reinforcement between them, MUST retain and rank every one of them, and MUST
+  represent the subject in automatic context as one bounded entry plus the count of the further
+  statements and the means of retrieving them. Cairn MUST report the match to the writer, naming the
+  member matched, so that the party able to read both statements can decide explicitly whether they
+  are one claim.
 - **FR-322**: Reinforcement accounting MUST distinguish the number of reinforcements from the
   number of **distinct origin sessions**, and MUST NOT present a repetition count as independent
   confirmation.
@@ -633,10 +699,15 @@ An older session detects that the task advanced and receives the changes.
 ### Temporal truth
 
 - **FR-341**: A memory MUST carry the instant from which it is effective, and, once superseded, the
-  instant from which it no longer is.
+  instant from which it no longer is. Where Cairn itself performs a lifecycle transition it MUST
+  record that instant too; where it holds no authoritative instant for a transition, it MUST record
+  none rather than infer one.
 - **FR-342**: Cairn MUST be able to answer both "what is the best-supported current project
-  knowledge" and "what was effective at a given instant", and MUST distinguish the two in its
-  output.
+  knowledge" and "what was effective at a given instant", and MUST distinguish the two in its output.
+  The historical answer is bounded by what Cairn can actually prove: it reconstructs proposal
+  effectiveness and explicit supersession intervals. Where a lifecycle transition has no
+  authoritative instant, Cairn MUST NOT claim exact historical applicability for it, and MUST say so
+  rather than presenting an unbounded interval as fact.
 - **FR-343**: Answering a historical question MUST NOT modify any record.
 - **FR-344**: A memory MUST carry the instant it was last verified, distinct from the instants it
   was created, updated or made effective.
@@ -659,7 +730,9 @@ An older session detects that the task advanced and receives the changes.
   payload-bounding pipeline before storage. Cairn MUST NOT store raw secret-bearing configuration
   in order to support a memory; it MUST store the safe fact, its digest and its locator.
 - **FR-355**: Cairn MUST distinguish evidence it collected itself from evidence an agent attested.
-  Agent-attested evidence MUST be usable, MUST be labelled, and MUST NOT be re-executed by Cairn.
+  Agent-attested evidence MUST be usable, MUST be labelled wherever it is reported, and MUST NOT be
+  re-executed by Cairn. The label MUST survive every boundary the verification it supports crosses,
+  including synchronization to another machine (FR-370).
 - **FR-356**: Feature 001's observation-reference provenance MUST continue to work unchanged, and a
   memory MUST remain valid with zero evidence of any kind.
 - **FR-357**: An evidence fact MUST be able to become stale, and MUST be able to be rechecked where
@@ -696,7 +769,18 @@ An older session detects that the task advanced and receives the changes.
   for it, and Cairn MUST record the distinction between the proposal, the evidence and the result.
 - **FR-368**: A verification state imported from another machine MUST be labelled as established
   elsewhere, MUST NOT be presented as verified here, and MUST NOT contribute to locally derived
-  readiness.
+  readiness. The import MUST preserve whether the peer's verification was deterministic or rested on
+  attestation (FR-370).
+- **FR-370**: A verification MUST carry an **authority** — what established it — as a dimension
+  distinct from its state, and Cairn MUST NOT allow an agent's own attestation to become
+  indistinguishable from a deterministic check that Cairn performed. Authority MUST distinguish at
+  least: a deterministic check this machine ran over evidence Cairn collected; a verification resting
+  on agent-attested evidence; and, for an imported verification, which of those two the originating
+  machine had. Authority MUST be derived from the evidence a successful run consulted, MUST be
+  reported wherever a verification state is reported, and MUST accompany a verification state
+  whenever one is transmitted. A verification whose only successful basis is attested evidence MUST
+  NOT satisfy any requirement that calls for a deterministic check — specifically criterion
+  verification (FR-484) and promotion eligibility (FR-396).
 
 ### Drift
 
@@ -749,9 +833,12 @@ An older session detects that the task advanced and receives the changes.
   Cairn MUST NOT promote autonomously. Cairn MAY compute and report promotion suggestions, and
   those suggestions MUST NOT themselves change trust.
 - **FR-396**: Cairn MUST refuse promotion, naming the reason, when the source is not lifecycle
-  `active`, is not verified, has no evidence, is `local_only`, belongs to a conflicted subject, is
-  of a memory type whose content is inherently project-specific, fails a deterministic privacy
-  check, duplicates an existing pattern, or defines signals below a documented minimum specificity.
+  `active`, is not verified **by a deterministic check Cairn performed** (FR-370), has no evidence, is
+  `local_only`, belongs to a conflicted subject, is of a memory type whose content is inherently
+  project-specific, fails a deterministic privacy check, duplicates an existing pattern, or defines
+  signals below a documented minimum specificity. A source whose verification rests only on
+  attestation MUST be refused: an agent MUST NOT be able to promote its own assertion into
+  cross-project knowledge.
 - **FR-397**: A privacy refusal MUST name the offending class and MUST NOT echo the offending
   value. A refusal MUST leave no partial pattern.
 - **FR-398**: A pattern MUST be offered to another project only where the current project's own
@@ -794,6 +881,13 @@ An older session detects that the task advanced and receives the changes.
   Feature 001 synchronization semantics for the affected entities, MUST continue to deliver
   everything the server does accept, and MUST report the degradation in its synchronization status
   rather than failing the batch or retrying indefinitely.
+- **FR-418**: Work the server refused **because it lacks the capability** MUST be retained locally in
+  a state distinct from both pending and permanently failed. That state MUST NOT be retried against a
+  server known to lack the capability, MUST NOT be reported as delivered, and MUST NOT be reported as
+  a permanent failure. When the server's capability changes, the retained work MUST become eligible
+  for delivery again without user intervention and without any manual repair of stored data, and MUST
+  still be delivered exactly once. A capability refusal MUST be distinguishable from a refusal of the
+  content itself, which remains permanent.
 - **FR-416**: Cairn MUST detect same-subject incompatibility introduced by a merge and expose it as
   a conflict, on every device that holds both proposals.
 - **FR-417**: The design MUST hold for several sessions, several agents, several worktrees, several
@@ -831,8 +925,14 @@ An older session detects that the task advanced and receives the changes.
 - **FR-431**: On restoration, Cairn MUST compare a checkpoint's recorded assumptions against
   current state and MUST classify the checkpoint as current, diverged or unresolvable.
 - **FR-432**: Divergence MUST be detected for at least: a different branch, a different commit, an
-  advanced task revision, and a relevant path modified by another session after the checkpoint was
-  taken.
+  advanced task state, and a change to a relevant path. Detection of a path change MUST NOT depend on
+  the change having been made inside a Cairn session: a checkpoint MUST record a bounded fingerprint
+  per relevant path and compare it on restoration, so an edit by a human, a formatter, a patch
+  application, an IDE or any other process is detected even when the commit has not moved. The
+  comparison MUST be bounded to the paths the checkpoint already names, MUST respect privacy
+  exclusions, MUST NOT scan the repository, MUST NOT execute anything, and MUST report which
+  fingerprint class was used so a path that could not be fingerprinted degrades honestly rather than
+  reading as unchanged.
 - **FR-433**: A diverged checkpoint's report MUST name the specific differences, including the
   recorded and current commit, the task revision transition, and which paths changed and which
   session changed them.
@@ -851,9 +951,16 @@ An older session detects that the task advanced and receives the changes.
   Level 0 must spend: where no Level 0 content exists, the whole budget MUST remain available to
   Level 1. Level 0 MAY spend beyond its reserve when the budget allows. The default context budget
   MUST NOT change.
-- **FR-443**: Level 0 MUST contain at least: the current task and goal, acceptance criteria with
-  their states, open blockers, the next action with its staleness assessment, critical drift and
-  conflict warnings, pinned constraints in force, and essential repository state.
+- **FR-443**: Level 0 MUST guarantee **work state**, whose size does not grow with the project:
+  the current task, its goal and status; derived progress as counts by criterion state; the count of
+  open blockers and the single most actionable one; the next action with its staleness assessment;
+  critical drift, conflict and divergence warnings; pinned constraints in force; and essential
+  repository state. Cairn MUST NOT guarantee that unbounded prose fits a bounded budget: criterion
+  text, further blockers and further warnings are a **bounded detail tier** admitted as budget allows.
+- **FR-448**: Where Level 0's detail tier does not fit, admission MUST follow a documented
+  deterministic order that prefers what an agent must act on, the number of omitted items MUST be
+  reported by kind, and the means of retrieving them MUST be stated. Omission MUST never be silent,
+  and the guaranteed work state of FR-443 MUST never be displaced by detail.
 - **FR-444**: Level 2 content MUST NOT appear in the automatic briefing and MUST be reachable only
   by explicit request.
 - **FR-445**: The assembler MUST retain Feature 001's guarantee that estimated tokens never exceed
@@ -924,24 +1031,37 @@ An older session detects that the task advanced and receives the changes.
 - **FR-483**: Cairn MUST NOT equate an agent's assertion that a criterion is satisfied with
   verification of it.
 - **FR-484**: A criterion MUST be able to carry evidence, using the same evidence facts as memory. A
-  criterion MUST reach `verified` only on **Cairn-collected** evidence — a captured test or command
-  observation with its recorded outcome, a file digest, a Git reference, or a configuration value
-  Cairn read. Agent-attested evidence MAY be attached and MUST be labelled, and MUST NOT by itself
-  make a criterion `verified`.
+  criterion MUST reach `verified` only on a verification whose authority is a deterministic check Cairn
+  performed (FR-370) over **Cairn-collected** evidence — a captured test or command observation with
+  its recorded outcome, a file digest, a Git reference, or a configuration value Cairn read.
+  Agent-attested evidence MAY be attached and MUST be labelled, and MUST NOT by itself make a
+  criterion `verified`. An imported verification MUST NOT make a criterion `verified` either,
+  whatever its authority, because a criterion's readiness is a local claim (FR-368).
 - **FR-485**: A task MUST support blockers as append-only records with an explicit cleared
   transition, each attributed to the session that opened or cleared it.
 - **FR-486**: Task progress MUST be derived and reported as counts by state. Cairn MUST NOT accept
   or store an agent-authored completion percentage.
 - **FR-487**: Cairn MUST derive a completion readiness value and MUST NOT change a task's status on
   the basis of it. Completing a task remains an explicit act.
-- **FR-488**: A task MUST carry a monotone revision that advances on any change to the task, its
-  criteria or its blockers, and every such change MUST be recorded in an append-only change log
-  naming its author, the prior and the new value.
-- **FR-489**: A session MUST record the task revision it bound at. Where the task has advanced,
-  context refresh MUST state the transition and what changed, and MUST NOT present the session as
-  having worked against the current revision all along.
-- **FR-490**: Concurrent updates to different criteria or different blockers MUST both apply. A
-  caller that supplies the revision it read MUST be refused when that revision has advanced.
+- **FR-488**: A task MUST carry a monotone counter that advances on any local change to the task, its
+  criteria or its blockers, and every such change MUST be recorded in an append-only change log naming
+  its author, the prior and the new value. That counter is **local to one store**: it MUST NOT be
+  transmitted, MUST NOT be treated as a shared identity, and MUST NOT be presented as though two
+  machines showing the same number hold the same state.
+- **FR-493**: A task MUST additionally have a **cross-device state identity** that is derived
+  deterministically from the task's synchronized records alone, so that two machines holding the same
+  criteria, blockers, goal, title and status compute the same value regardless of the order in which
+  changes arrived, how many local changes each made, or either machine's clock. Advancement across
+  devices MUST be determined by this identity and never by the local counter.
+- **FR-489**: A session MUST record the task state it bound at, in enough detail to describe what
+  subsequently changed. Where the task has advanced, context refresh MUST state that it advanced and
+  what materially changed — including changes that originated on another machine — and MUST NOT present
+  the session as having worked against the current state all along. The change description MUST be
+  derivable from synchronized records, so that it does not depend on a change log that stays local.
+- **FR-490**: Concurrent updates to different criteria or different blockers MUST both apply, on one
+  machine and across machines. A caller that supplies the local counter it read MUST be refused when
+  that counter has advanced; because the counter is never transmitted, such a token cannot originate
+  from another store and cannot be honoured against one.
 - **FR-491**: Feature 003 MUST NOT introduce sprints, story points, epics, boards, assignees,
   estimates, dependencies between tasks, or reporting unrelated to agent continuity.
 - **FR-492**: Feature 001's task fields and their existing meanings MUST continue to work
@@ -963,8 +1083,9 @@ An older session detects that the task advanced and receives the changes.
 - **FR-499**: Every new capability MUST be reachable from the command line with the existing stable
   JSON envelope, covering at least: inspecting a subject and its reconciliation state; recording and
   resolving a conflict; attaching evidence; running and reading verification; pinning and unpinning;
-  reading and writing a continuity checkpoint; explaining a context assembly; and listing,
-  promoting, and recording outcomes for reusable patterns.
+  reading and writing a continuity checkpoint; explaining a context assembly; listing, promoting, and
+  recording outcomes for reusable patterns; and reporting what share of durable project knowledge
+  carries a subject identity, so that the mechanism's actual reach is observable rather than assumed.
 - **FR-500**: Every bound this feature relies on MUST have a documented default, MUST be asserted by
   test rather than assumed, and MUST be adjustable through the existing configuration file. The set
   MUST include at least: the reserved Level 0 share; the minimum budget below which Level 0 itself
@@ -981,8 +1102,9 @@ An older session detects that the task advanced and receives the changes.
   table and to reject observation-bearing payloads.
 - **FR-502**: Evidence fact content — observed values, subjects, locators and digests — MUST NOT
   leave the machine in this feature. What a shared memory may carry about evidence is limited to
-  the verification state, the instant of verification, the count of supporting facts, and the kinds
-  of verifier involved.
+  the verification state, its authority (FR-370), the instant of verification, the count of supporting
+  facts, and the kinds of verifier involved. Authority is an enumerated value carrying no content, and
+  it is required precisely so that a peer cannot mistake an attestation for a deterministic check.
 - **FR-503**: Verification runs, drift records, continuity checkpoints, selection diagnostics,
   reusable patterns and pattern applications MUST be local machine state and MUST NOT be
   transmitted.
@@ -1061,9 +1183,11 @@ An older session detects that the task advanced and receives the changes.
 
 ### Measurable Outcomes
 
-- **SC-301**: On a curated deterministic corpus of equivalent-knowledge cases, reconciliation
-  produces exactly one canonical answer per subject in 100% of cases and produces zero false
-  merges across a paired corpus of deliberately distinct cases.
+- **SC-301**: On a curated deterministic corpus of content-identical cases, reconciliation produces
+  exactly one canonical answer per subject in 100% of cases. Across a paired corpus of deliberately
+  distinct cases — including coarse-value-key cases where two materially different statements share
+  one topic and value key — it produces **zero** false merges and zero unrequested reinforcement
+  relations, and every distinct statement remains active and retrievable.
 - **SC-302**: For every real-conflict case in the corpus, both proposals remain active, the subject
   reports conflicted, and no case produces a single canonical answer. Zero silent winners.
 - **SC-303**: Under 32 concurrent proposals against one subject from separate processes, the number
@@ -1072,21 +1196,28 @@ An older session detects that the task advanced and receives the changes.
   merged canonical state and an identical conflict set.
 - **SC-305**: For every supersession in the corpus, the superseded proposal's content, provenance
   and evidence references are byte-identical before and after, and a historical query at an instant
-  before the supersession returns the historical answer.
+  before the supersession returns the historical answer. Where a lifecycle transition has no
+  authoritative instant, the historical answer says so rather than presenting an unbounded interval,
+  in 100% of such cases.
 - **SC-306**: The verification state machine is exercised exhaustively: every documented transition
   is reachable by a test and every undocumented transition is unreachable.
 - **SC-307**: For every drift case, the observed sequence is verified → needs_recheck → drifted, no
   memory content changes at any step, and no memory is created without an explicit act.
 - **SC-308**: Across budgets from the documented minimum to four times the default, estimated
   tokens never exceed the budget, in 100% of assemblies, including with 5,000 memories present.
-- **SC-309**: At the documented minimum budget with 5,000 memories present, the relevant pinned
-  constraint, the active drift warning, the conflict warning, the current task with criteria states
-  and the next action are all present in 100% of assemblies.
+- **SC-309**: At the documented minimum budget with 5,000 memories present, the guaranteed work
+  state — task, goal, status, derived progress counts, the most actionable open blocker, the next
+  action, the relevant pinned constraint, and the drift and conflict warnings — is present in 100% of
+  assemblies. With a task whose criterion text alone exceeds the whole budget, the guaranteed work
+  state is still complete, the omitted-item counts are reported by kind with a retrieval path, and the
+  budget is not exceeded, in 100% of assemblies.
 - **SC-310**: Across ten consecutive compaction cycles, every continuity field that exists in
   recorded state is present after every cycle, in 100% of cycles.
-- **SC-311**: Every divergence class — branch, commit, task revision, concurrently modified
-  relevant path — is detected in 100% of seeded cases, and a diverged checkpoint never presents its
-  recorded next action as the action to take.
+- **SC-311**: Every divergence class — branch, commit, task state, changed relevant path — is
+  detected in 100% of seeded cases, and a diverged checkpoint never presents its recorded next action
+  as the action to take. Path-change detection succeeds in 100% of cases where the change was made
+  with no Cairn session involved and the commit did not move, and a path that cannot be fingerprinted
+  is reported as such rather than as unchanged.
 - **SC-312**: A pattern promoted from one project and offered in another is labelled unverified in
   the receiving project in 100% of suggestions.
 - **SC-313**: Recording a not-applicable outcome increases no success count in 100% of cases, and
@@ -1101,8 +1232,9 @@ An older session detects that the task advanced and receives the changes.
   field. Enforced on the wire and asserted by test.
 - **SC-317**: Two sessions updating different criteria on one task both persist their change in
   100% of cases, and no criterion is reset by another session's write.
-- **SC-318**: A session bound at an earlier revision is told the transition and the specific changes
-  in 100% of cases where the task advanced.
+- **SC-318**: A session bound at an earlier task state is told that it advanced and what materially
+  changed, in 100% of cases, including changes that originated on another machine and were learned
+  through synchronization.
 - **SC-319**: Session-open latency and capture-hook latency are within the Feature 001 budgets on
   the same measurement, with Feature 003 enabled and a project carrying 5,000 memories, 10,000
   evidence facts and 500 subjects.
@@ -1117,17 +1249,32 @@ An older session detects that the task advanced and receives the changes.
 - **SC-323**: The Feature 001 and Feature 002 test suites pass unchanged, the MCP surface is still
   exactly six tools, and the outbox still has no observation entity type.
 - **SC-324**: Every derived value is rebuilt from durable records in a test, and the rebuilt value
-  equals the incrementally maintained value in 100% of cases.
+  equals the incrementally maintained value in 100% of cases. A symmetric decision recorded
+  independently on two machines converges to exactly **one** durable record, under any order of
+  arrival and any relative clock skew.
 - **SC-325**: No release gate depends on a language-model judgement. Any semantic-similarity
   evaluation runs outside the release gates with its trust boundary documented.
 - **SC-326**: Against a server that accepts no Feature 003 field, synchronization still delivers
-  100% of the Feature 001 payload, loses nothing from the outbox, and reports the degradation by
-  name in synchronization status.
+  100% of the Feature 001 payload, loses nothing from the outbox, retains every refused item in a
+  recoverable state rather than marking it failed or delivered, does not retry it against that server,
+  and reports the degradation by name in synchronization status.
 - **SC-327**: No memory scope, partition, ownership domain or retrieval filter is added beyond
   project, branch, task and session, and no importance, pin or verification value can change scope
   precedence. Asserted by the existing scope audit extended to the new fields.
-- **SC-328**: A task criterion never reaches `verified` on agent-attested evidence alone, in 100% of
-  seeded cases.
+- **SC-328**: A task criterion never reaches `verified` on agent-attested evidence alone, nor on an
+  imported verification of any authority, in 100% of seeded cases. Promotion of a memory whose
+  verification rests only on attestation is refused in 100% of seeded cases.
+- **SC-329**: A verification's authority is preserved across synchronization in 100% of cases: a peer
+  receiving a verification established by attestation never reports it as a deterministic check, a
+  peer receiving a deterministic verification never reports it as attested, and no surface renders the
+  two identically.
+- **SC-330**: For every offline task-divergence case in the corpus — including two machines changing
+  different criteria of one task while disconnected — every criterion and blocker change is present on
+  both machines, no change is overwritten, and both machines compute an identical task state identity,
+  under any order of arrival and any relative clock skew.
+- **SC-331**: For the capability-refusal recovery scenario, work refused by a server lacking the
+  capability is delivered after the server is upgraded, applied exactly once, requires no user
+  intervention and no manual data repair, and leaves both peers converged.
 
 ## Assumptions
 
@@ -1135,7 +1282,15 @@ An older session detects that the task advanced and receives the changes.
   cannot deterministically decide that two differently-worded sentences concern one subject, and it
   will not pretend to. Feature 003's reconciliation is strongest on memories that carry a subject
   identity, and the usage contract, the Skill and the tool descriptions all ask for one on durable
-  project facts. Free-form memories remain correct, they simply do not reconcile.
+  project facts. Free-form memories remain correct, they simply do not reconcile. Whether this
+  actually happens in practice is measured — by a reported adoption metric (FR-499) and by a manual
+  cross-agent effectiveness evaluation that is explicitly **not** a release gate.
+- **A value key states a value, not a whole proposition.** Two agents can honestly write the same
+  topic and value key for statements that differ in something material, so Cairn treats a shared value
+  key as agreement about the *value* and never as evidence that two statements are one claim. Only
+  content that is identical after normalization is merged automatically. The consequence is accepted
+  deliberately: deduplicating differently-worded equivalents needs one explicit act by the party that
+  can read both, and Cairn prompts for it by naming the member that matched.
 - **Deterministic verification covers the cases that matter most.** File existence, digests, Git
   refs, configuration values read from the repository, recorded test outcomes and recorded command
   outcomes cover the great majority of what a project memory asserts. Claims that cannot be checked
@@ -1150,7 +1305,17 @@ An older session detects that the task advanced and receives the changes.
 - **Task work state legitimately has a current value.** The invariant Feature 003 protects is that
   no canonical project knowledge is silently overwritten and no criterion's change is lost. A
   criterion's state is work state; its history is preserved in an append-only change log, and a
-  caller that reads before writing is protected by revision comparison.
+  caller that reads before writing is protected by comparing the local counter it read.
+- **A counter is a local concurrency token; identity across machines has to be derived.** Two offline
+  machines can each advance a counter by one and mean entirely different things, so the counter stays
+  local and unsent, and cross-device advancement is decided by a value derived from the records that
+  actually converge. This is why no vector clock or CRDT is needed: the records converge by
+  identity, and the identity of the resulting state is computable from them.
+- **Attestation is useful and must stay visibly weaker than a check.** An agent can tell Cairn a
+  deterministic fact Cairn cannot read for itself, and that is worth recording. It is never worth
+  letting it wear the same badge as a check Cairn performed, so authority travels with the state
+  everywhere, including across a sync boundary, and the strict consumers — criterion verification and
+  cross-project promotion — refuse it.
 - **The existing 15-minute maintenance tick is the right home for bounded background work.** It
   already reaps idle sessions, sweeps owed handoffs and marks stale scopes. Verification and drift
   passes join it rather than introducing a scheduler.

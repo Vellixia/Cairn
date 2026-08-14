@@ -6,7 +6,7 @@ Every functional requirement has an owning design surface and a phase. Every suc
 named test. This is the pre-task gate: a requirement with no owner, or a criterion with no test, is a
 planning defect.
 
-**Spec**: 158 FR · 28 SC. **Coverage**: 158/158 FR owned · 28/28 SC tested.
+**Spec**: 163 FR · 31 SC. **Coverage**: 163/163 FR owned · 31/31 SC tested.
 
 ## Legend
 
@@ -35,7 +35,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-302 canonical answer is a deterministic derivation, rebuildable | core `knowledge.rs::derive_subject` | [knowledge](./contracts/knowledge.md), [records](./contracts/records-and-rebuild.md) | A, B |
 | FR-303 no clock or id arbitration | core `knowledge.rs` | [knowledge](./contracts/knowledge.md) §derive_subject | A |
 | FR-304 decisions are durable, append-only, with basis and provenance | store `knowledge.rs`, `memory_relations` | [data-model](./data-model.md) §3.1 | B |
-| FR-305 decisions are idempotent | `memory_relations` PK | [records](./contracts/records-and-rebuild.md) §Idempotency | B |
+| FR-305 decisions are idempotent; symmetric kinds normalize endpoints | `memory_relations` PK + core `knowledge.rs` normalization | [knowledge](./contracts/knowledge.md) §Symmetric, [records](./contracts/records-and-rebuild.md) | B |
 | FR-306 reconciliation never rewrites proposal content | store `knowledge.rs` (no such UPDATE) | [data-model](./data-model.md) §5 I5 | B |
 | FR-307 subjects are reportable with their decisions | cli `cairn memory subject` | [knowledge](./contracts/knowledge.md) | B |
 | FR-308 importance orders within a bucket only | core `context.rs`, `search.rs` | [knowledge](./contracts/knowledge.md) | A, E |
@@ -49,7 +49,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-313 free-form memories fully valid | absence of any required-key path | [compatibility](./compatibility.md) | B |
 | FR-314 no vocabulary, taxonomy or registry | absence of one | [research](./research.md) D45 | — |
 | FR-315 subject = project + scope + scope key + topic key | core `knowledge.rs`, `memories_subject` index | [knowledge](./contracts/knowledge.md) | A, B |
-| FR-316 automatic reconciliation limited to two decidable cases | core `knowledge.rs` | [knowledge](./contracts/knowledge.md) §Automatic reconciliation | A |
+| FR-316 automatic merging limited to identical normalized content | core `knowledge.rs` | [knowledge](./contracts/knowledge.md) §Automatic reconciliation | A |
 | FR-317 no similarity-based merging | absence of any similarity function | [research](./research.md) D46 | — |
 | FR-318 agents may propose keys through the existing tools | cli `mcp.rs`, `cairn_remember` | [mcp-tools](./contracts/mcp-tools.md) | B |
 
@@ -57,12 +57,13 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 
 | FR | Owner | Contract | Phase |
 |---|---|---|---|
-| FR-321 reinforcement instead of a second active answer | core + store `knowledge.rs` | [knowledge](./contracts/knowledge.md) | B |
+| FR-321 duplication recorded; reinforcement is explicit-only | core + store `knowledge.rs`, `cairn_remember action=reinforce` | [knowledge](./contracts/knowledge.md) | B |
 | FR-322 reinforcements distinguished from distinct origins | `reinforcement_count`, `distinct_origin_count` | [data-model](./data-model.md) §2.1 | B |
 | FR-323 supersession preserves the predecessor entirely | store `knowledge.rs` | [knowledge](./contracts/knowledge.md) | B |
 | FR-324 Feature 001's supersession link stays accurate | store, same transaction as the relation | [compatibility](./compatibility.md) | B |
 | FR-325 supersession is never automatic | absence of an automatic caller | [knowledge](./contracts/knowledge.md) | B |
 | FR-326 duplicate detection is content-exact after normalization | core `knowledge.rs::content_norm` | [knowledge](./contracts/knowledge.md) | A |
+| FR-327 corroboration: value agreed, statements several; never merged | core `knowledge.rs::derive_subject`, daemon `briefing.rs` | [knowledge](./contracts/knowledge.md) §Why equal value keys do not merge | A, B, E |
 
 ### Conflict — FR-331 … FR-337
 
@@ -80,8 +81,8 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 
 | FR | Owner | Contract | Phase |
 |---|---|---|---|
-| FR-341 effective from, superseded at | `memories` columns | [data-model](./data-model.md) §2.1 | B |
-| FR-342 current and as-of answered and distinguished | store `search.rs`, cli `--as-of` | [knowledge](./contracts/knowledge.md) §Temporal queries | B |
+| FR-341 effective from, superseded at, `stale_at` where authoritative | `memories` columns; daemon maintenance tick | [data-model](./data-model.md) §2.1 | B |
+| FR-342 current and as-of answered, distinguished, and bounded by stored evidence | store `search.rs`, cli `--as-of` | [knowledge](./contracts/knowledge.md) §What a historical answer claims | B |
 | FR-343 historical queries modify nothing | read-only query path | [knowledge](./contracts/knowledge.md) | B |
 | FR-344 `last_verified_at` distinct from other instants | `memories` column | [data-model](./data-model.md) §2.1 | C |
 | FR-345 not bitemporal | absence of a valid-time table | [research](./research.md) D50 | — |
@@ -94,7 +95,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-352 required evidence fields | `evidence_facts` | [data-model](./data-model.md) §3.2 | C |
 | FR-353 locator repository-relative, never absolute | store `evidence.rs` validation | [evidence-verification](./contracts/evidence-verification.md) | C |
 | FR-354 exclusion, redaction and bounding before storage | daemon, reusing `redact.rs` and `config.rs` | [evidence-verification](./contracts/evidence-verification.md) | C |
-| FR-355 collector distinguished; attested never re-run | `collector` column, daemon `verify.rs` | [evidence-verification](./contracts/evidence-verification.md) | C |
+| FR-355 collector distinguished; label survives every boundary; attested never re-run | `collector` column, daemon `verify.rs`, `verification_authority` | [evidence-verification](./contracts/evidence-verification.md) §Authority | C |
 | FR-356 Feature 001 observation evidence unchanged; zero evidence valid | `memory_evidence` untouched | [compatibility](./compatibility.md) | C |
 | FR-357 evidence can go stale and be rechecked | `fingerprint`, daemon `drift.rs` | [evidence-verification](./contracts/evidence-verification.md) §Drift | D |
 | FR-358 deleted evidence resolves as deleted | store `evidence.rs` tombstone | [privacy-sync](./contracts/privacy-sync.md) §Deletion | C |
@@ -111,7 +112,8 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-365 verifiers read the worktree and Git only | daemon `verify.rs`, git | [evidence-verification](./contracts/evidence-verification.md) §Refused | C |
 | FR-366 unreadable target is inconclusive | daemon `verify.rs` | [evidence-verification](./contracts/evidence-verification.md) | C |
 | FR-367 proposal, evidence and result distinguished | `cairn_remember` actions + `verification_runs` | [mcp-tools](./contracts/mcp-tools.md) | C |
-| FR-368 imported verification labelled, not local | `verification_origin` | [privacy-sync](./contracts/privacy-sync.md) §Import | G |
+| FR-368 imported verification labelled, not local, and preserves the peer's authority | `verification_authority` → `remote_cairn`/`remote_attested` | [privacy-sync](./contracts/privacy-sync.md) §Import | G |
+| FR-370 verification authority as a distinct dimension; attestation never equals a check | core `verify.rs::derive_authority`; every reporting surface; the wire payload | [evidence-verification](./contracts/evidence-verification.md) §Authority | A, C, G |
 | FR-369 `conflicted` verification defined and separate | core `verify.rs` | [evidence-verification](./contracts/evidence-verification.md) | A, C |
 
 ### Drift — FR-371 … FR-375
@@ -143,7 +145,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-393 no project identity; opaque origin | `origin_ref` digest | [patterns](./contracts/patterns.md) | H |
 | FR-394 staged trust ladder | store `patterns.rs::rebuild_pattern_trust` | [patterns](./contracts/patterns.md) §Trust | H |
 | FR-395 promotion is explicit; suggestions change no trust | cli/MCP `promote`; absence of an automatic caller | [patterns](./contracts/patterns.md) | H |
-| FR-396 ten enumerated refusal classes | store `patterns.rs::gate` | [patterns](./contracts/patterns.md) §Gate | H |
+| FR-396 ten enumerated refusal classes; `cairn` authority required | store `patterns.rs::gate` | [patterns](./contracts/patterns.md) §Gate | H |
 | FR-397 refusal names the class, echoes nothing, writes nothing | store `patterns.rs::gate` | [patterns](./contracts/patterns.md) | H |
 | FR-398 offered only on signal match, labelled unverified here | daemon `briefing.rs` | [patterns](./contracts/patterns.md) §Suggestion | H |
 | FR-399 deleted origin: pattern survives, reports deletion | store `patterns.rs` | [privacy-sync](./contracts/privacy-sync.md) §Deletion | H |
@@ -168,6 +170,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-413 decisions synchronize and are applied as decisions | outbox `MemoryRelation`, `sync_changes.relations` | [privacy-sync](./contracts/privacy-sync.md) | G |
 | FR-414 reuse the outbox, keys and applied-once claim | store `outbox.rs`, server `sync.rs` | [records](./contracts/records-and-rebuild.md) | G |
 | FR-415 additive both ways; degrade and report | daemon `sync.rs`, `sync_meta` | [privacy-sync](./contracts/privacy-sync.md) §Degradation | G |
+| FR-418 capability refusal is retained, not retried, and recovers | store `outbox.rs` `blocked` state; daemon capability probe; server `/api/version` | [privacy-sync](./contracts/privacy-sync.md) §blocked | G |
 | FR-416 merge-introduced incompatibility surfaces on every device | core `knowledge.rs` (derived on read) | [knowledge](./contracts/knowledge.md) | G |
 | FR-417 holds for sessions, agents, worktrees, machines, members | the whole sync design | [privacy-sync](./contracts/privacy-sync.md) | G |
 
@@ -189,7 +192,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR | Owner | Contract | Phase |
 |---|---|---|---|
 | FR-431 classify current / diverged / unresolvable | core `continuity.rs::classify_checkpoint` | [continuity-context](./contracts/continuity-context.md) | A, E |
-| FR-432 four divergence classes | core `continuity.rs` | [continuity-context](./contracts/continuity-context.md) | A, E |
+| FR-432 four divergence classes; path change detected whoever made it | core `continuity.rs`; daemon bounded fingerprint read | [continuity-context](./contracts/continuity-context.md) §Path fingerprints | A, E |
 | FR-433 name the specific differences | daemon `continuity.rs`, cli renderer | [continuity-context](./contracts/continuity-context.md) | E |
 | FR-434 stale next action is labelled, never instructed | `previous_next_action` field | [continuity-context](./contracts/continuity-context.md) | E |
 | FR-435 unresolvable still delivers what it can | daemon `continuity.rs` | [continuity-context](./contracts/continuity-context.md) | E |
@@ -200,7 +203,8 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 |---|---|---|---|
 | FR-441 three levels | core `context.rs` | [continuity-context](./contracts/continuity-context.md) §Part 2 | E |
 | FR-442 reserved share; a cap not a floor; budget unchanged | core `budget.rs::with_reserve` | [continuity-context](./contracts/continuity-context.md) §Reserve | A, E |
-| FR-443 Level 0 contents | core `context.rs` | [continuity-context](./contracts/continuity-context.md) | E |
+| FR-443 Level 0 guarantees O(1) work state, not unbounded prose | core `context.rs` Tier 0a | [continuity-context](./contracts/continuity-context.md) §Level 0 | E |
+| FR-448 deterministic detail admission, counted omissions, retrieval path | core `context.rs` Tier 0b | [continuity-context](./contracts/continuity-context.md) §Level 0 | E |
 | FR-444 Level 2 never automatic | core `context.rs` (no admission path) | [continuity-context](./contracts/continuity-context.md) | E |
 | FR-445 never exceed the budget; truncate not reject | core `budget.rs::try_spend` unchanged | [compatibility](./compatibility.md) | A |
 | FR-446 documented deterministic Level 0 order | core `context.rs` | [continuity-context](./contracts/continuity-context.md) | A, E |
@@ -247,13 +251,14 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-481 stable criterion identity | `task_criteria.id` | [task-model](./contracts/task-model.md) | F |
 | FR-482 work state distinct from verification | two columns | [task-model](./contracts/task-model.md) | F |
 | FR-483 assertion is not verification | `satisfied` + `unverified` reported separately | [task-model](./contracts/task-model.md) | F |
-| FR-484 criterion evidence; `verified` needs Cairn-collected | `criterion_evidence` + the collector check | [task-model](./contracts/task-model.md) | C, F |
+| FR-484 criterion `verified` needs local `cairn` authority | `criterion_evidence` + the authority check | [task-model](./contracts/task-model.md) | C, F |
 | FR-485 append-only blockers with one cleared transition | `task_blockers` | [task-model](./contracts/task-model.md) | F |
 | FR-486 derived counts; no stored percentage | store `criteria.rs::derive_progress` | [task-model](./contracts/task-model.md) §Progress | F |
 | FR-487 readiness derived; status never changed by Cairn | store `criteria.rs` | [task-model](./contracts/task-model.md) §Readiness | F |
-| FR-488 monotone revision + append-only change log | `tasks.revision`, `task_changes` | [task-model](./contracts/task-model.md) | F |
-| FR-489 session records its bind revision; divergence reported | `sessions.task_revision_at_bind` | [task-model](./contracts/task-model.md) §Divergence | F |
-| FR-490 different criteria both apply; supplied revision protects | store `criteria.rs` | [task-model](./contracts/task-model.md) §Concurrency | F |
+| FR-488 local monotone counter, never transmitted, + append-only change log | `tasks.local_revision`, `task_changes` | [task-model](./contracts/task-model.md) §Revision | F |
+| FR-493 derived cross-device task state identity | store `criteria.rs::derive_task_state_digest` | [task-model](./contracts/task-model.md) §state_digest | F |
+| FR-489 session records the state it bound at; divergence diffs converged records | `sessions.task_snapshot_at_bind` | [task-model](./contracts/task-model.md) §Divergence | F |
+| FR-490 different criteria both apply, locally and across machines; supplied counter protects | store `criteria.rs` | [task-model](./contracts/task-model.md) §Concurrency | F |
 | FR-491 no project-management machinery | absence of it | spec Out of Scope | — |
 | FR-492 Feature 001 task fields keep working | the retained projection | [compatibility](./compatibility.md) | F |
 
@@ -265,7 +270,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR-496 backward-compatible action and parameter extension | cli `mcp.rs` | [mcp-tools](./contracts/mcp-tools.md) | B–H |
 | FR-497 Feature 001 calls behave as today | cli `mcp.rs` defaults | [mcp-tools](./contracts/mcp-tools.md) | B–H |
 | FR-498 usage contract teaches the new obligations, in bound | `skills/cairn/`, `cairn-integrate/render.rs` | [mcp-tools](./contracts/mcp-tools.md) §Descriptions | H |
-| FR-499 every capability on the command line with the JSON envelope | cli `main.rs` | [compatibility](./compatibility.md) §Surfaces | B–H |
+| FR-499 every capability on the command line, incl. the subject-adoption metric | cli `main.rs`, `cairn status` | [compatibility](./compatibility.md) §Surfaces, [evaluation](./contracts/evaluation.md) §Topic-key | B–H |
 | FR-500 every bound documented, configurable, asserted | core `config.rs` | [research](./research.md) D75 | A |
 
 ### Privacy — FR-501 … FR-508
@@ -273,7 +278,7 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 | FR | Owner | Contract | Phase |
 |---|---|---|---|
 | FR-501 raw observations stay local | absence of an entity type and a server table | [privacy-sync](./contracts/privacy-sync.md) | G |
-| FR-502 evidence content never leaves; four-field verification only | outbox payload shape | [privacy-sync](./contracts/privacy-sync.md) §Evidence | C, G |
+| FR-502 evidence content never leaves; five-field verification incl. authority | outbox payload shape | [privacy-sync](./contracts/privacy-sync.md) §Evidence | C, G |
 | FR-503 runs, checkpoints, patterns, applications, changes are local | absence of entity types and tables | [privacy-sync](./contracts/privacy-sync.md) | C–H |
 | FR-504 `local_only` means never transmitted, transitively | existing outbox behaviour + gate check 4 | [privacy-sync](./contracts/privacy-sync.md) | G, H |
 | FR-505 deleted-origin semantics for every new reference | store tombstones | [privacy-sync](./contracts/privacy-sync.md) §Deletion | C–H |
@@ -301,34 +306,37 @@ verification, **D** Drift, **E** Context & continuity, **F** Tasks, **G** Sync &
 
 | SC | Test | Tier | Phase |
 |---|---|---|---|
-| SC-301 one canonical answer, zero false merges | `us1_reconciliation` + corpus `equivalent/`, `distinct/`, `free_form/` | 2, 3 | B |
+| SC-301 one canonical answer; zero false merges incl. coarse keys; zero unrequested reinforcement | `us1_reconciliation` + corpus `equivalent/`, `distinct/`, `coarse_value_key/`, `free_form/` | 2, 3 | B |
 | SC-302 zero silent winners, zero false conflicts | `us3_conflict` + corpus `conflict/*` | 2, 3 | B |
 | SC-303 32 concurrent proposals, zero lost writes | `us3_conflict::concurrent_proposals` | 3 | B |
 | SC-304 clock reversal yields an identical merged state | `clock_swap_invariance` | 3 | G |
-| SC-305 supersession history byte-identical; `as_of` correct | `us2_temporal` | 2, 3 | B |
+| SC-305 supersession history byte-identical; `as_of` correct; unknown applicability reported as unknown | `us2_temporal`, `us2_temporal::unknown_applicability` | 2, 3 | B |
 | SC-306 verification transitions exhaustive; undocumented unreachable | `us4_evidence::state_machine` | 2 | A, C |
 | SC-307 drift sequence correct; memory unchanged | `us5_drift` | 2, 3 | D |
 | SC-308 estimated tokens never exceed the budget | `us10_min_safe_context` (+ the existing 5,000-memory property test) | 2 | A, E |
-| SC-309 Level 0 retention at the minimum budget | `us10_min_safe_context` | 2, 3 | E |
+| SC-309 Tier 0a present at the minimum budget; oversized task reports counted omissions | `us10_min_safe_context`, `::oversized_task`, `::action_order` | 2, 3 | E |
 | SC-310 continuity fields present after each of ten cycles | `us6_continuity` | 3 | E |
-| SC-311 every divergence class detected; no live stale action | `us6_continuity::staleness` | 2, 3 | E |
+| SC-311 every divergence class detected incl. external edits; unfingerprintable reported; no live stale action | `us6_continuity::staleness`, `::external_edit`, `::not_fingerprintable` | 2, 3 | E |
 | SC-312 pattern labelled unverified in the receiving project | `us8_patterns` | 3 | H |
 | SC-313 counterexample increases nothing; pattern retained | `us9_counterexamples` | 2, 3 | H |
 | SC-314 ten same-project applications → distinct count 1 | `us9_counterexamples` | 2, 3 | H |
 | SC-315 promotion refuses every seeded violation, echoes nothing | `privacy_promotion` | 3 | H |
 | SC-316 no evidence, run, checkpoint, pattern or observation field accepted | `privacy_payloads` (extended) | 3, 4 | G |
 | SC-317 concurrent criterion updates both persist | `us11_task_criteria` | 3 | F |
-| SC-318 revision divergence reported with its change list | `us11_task_criteria` | 3 | F |
+| SC-318 task advancement reported with its change list, including remote-origin changes | `us11_task_criteria` | 3 | F |
 | SC-319 session-open and capture latency within Feature 001 budgets, loaded | `perf_intelligence` | 3 | H |
 | SC-320 every bound asserted; zero verification at session open | `bounds`, `perf_intelligence` | 1, 3 | A, C |
 | SC-321 no model, embedding, vector or graph dependency | `ci_hermeticity` (extended) | 1 | A |
 | SC-322 alpha.4 migration: zero rows lost, zero rewritten | `migration_alpha4` | 3 | B |
 | SC-323 Feature 001/002 suites pass; six tools; no observation entity type | existing suites, `mcp_backward_compatibility` | 1–4 | all |
-| SC-324 every derived value equals its rebuild | `rebuild_equivalence`, `relation_order_invariance` | 2, 3 | B–H |
+| SC-324 every derived value equals its rebuild; one symmetric decision is one row | `rebuild_equivalence`, `relation_order_invariance`, `clock_swap_invariance::symmetric_relation` | 2, 3 | B–H |
 | SC-325 no release gate reads a model judgement | CI configuration review + `evals/` isolation | — | H |
-| SC-326 degraded sync delivers everything accepted and says so | `sync_degradation` | 4 | G |
+| SC-326 degraded sync delivers everything accepted, retains the rest as `blocked`, no futile retry | `sync_degradation`, `::no_futile_retry` | 4 | G |
 | SC-327 no scope added; no importance/pin/verification scope override | `scope_audit` (extended) | 1, 3 | A, E |
-| SC-328 criterion never verified on attested evidence alone | `us11_task_criteria` | 2, 3 | F |
+| SC-328 criterion never verified on attested or imported evidence; promotion refuses attested-only | `us11_task_criteria`, `privacy_promotion::attested_source` | 2, 3 | F, H |
+| SC-329 authority preserved across sync; the two are never rendered alike | `us7_offline_merge::authority_survives`, `us4_evidence::authority` | 2, 3, 4 | C, G |
+| SC-330 offline task divergence: every change present, identical state digest on both stores | `us11_task_criteria::offline_convergence` | 3, 4 | F, G |
+| SC-331 capability-refused work delivered after upgrade, exactly once, no manual repair | `sync_degradation::recovers_after_upgrade` | 4 | G |
 
 ---
 
@@ -342,28 +350,37 @@ The twenty invariants in [data-model.md](./data-model.md) §5 map to tests as fo
 | I2 | `us1_reconciliation::idempotent_decision` |
 | I3 | `clock_swap_invariance` |
 | I6 | `us5_drift::marks_only_verification` |
-| I7, I11, I12, I20 | `rebuild_equivalence` |
+| I7, I11, I12, I12a, I12b, I20 | `rebuild_equivalence`, `us11_task_criteria::offline_convergence` |
 | I8, I9 | `privacy_payloads`, `privacy_promotion` |
-| I10 | `us11_task_criteria::attested_is_not_enough` |
+| I10, I10a | `us11_task_criteria::attested_is_not_enough`, `us7_offline_merge::authority_survives` |
 | I13 | `us9_counterexamples::one_incident_counts_once` |
+| I13a | `clock_swap_invariance::symmetric_relation` |
 | I14, I15 | `us10_min_safe_context::pins` |
 | I16, I17, I18 | `us10_min_safe_context::budget` |
-| I19 | `perf_intelligence::no_verification_at_session_open` |
+| I19, I19a, I19b | `perf_intelligence::no_verification_at_session_open`, `us10_min_safe_context`, `sync_degradation::recovers_after_upgrade` |
 
 ## Gate status
 
 | Gate | Status |
 |---|---|
-| Every FR has an owning design surface | ✅ 158/158 |
-| Every SC has a named test at a named tier | ✅ 28/28 |
-| Every invariant has a test | ✅ 20/20 |
+| Every FR has an owning design surface | ✅ 163/163 |
+| Every SC has a named test at a named tier | ✅ 31/31 |
+| Every invariant has a test | ✅ 26/26 |
 | Privacy boundary explicit per record type | ✅ [privacy-sync](./contracts/privacy-sync.md) |
 | Migration and rebuild explicit | ✅ [migration](./migration.md), [records](./contracts/records-and-rebuild.md) |
 | Concurrency semantics explicit | ✅ [records](./contracts/records-and-rebuild.md) §Concurrency |
 | No silent last-write-wins path remains | ✅ FR-303, FR-336, FR-411, FR-412; task work state is recorded and attributed |
+| No false-merge path via `value_key` | ✅ FR-316, FR-327; only identical content merges (SC-301) |
+| Verification authority is unambiguous everywhere, including on the wire | ✅ FR-370, FR-502 (SC-329) |
+| Distributed task state has a deterministic convergence story | ✅ FR-488, FR-493 (SC-330) |
+| Mixed-version sync is recoverable | ✅ FR-418 (SC-331) |
+| No symmetric duplicate relation | ✅ FR-305 (SC-324) |
+| No historical guarantee stronger than stored evidence | ✅ FR-341, FR-342 (SC-305) |
+| Minimum-safe context guarantee is finite and achievable | ✅ FR-443, FR-448 (SC-309) |
+| Checkpoint staleness detects edits made outside a Cairn session | ✅ FR-432 (SC-311) |
 | Feature 001 compatibility accounted for | ✅ [compatibility](./compatibility.md) |
 | Feature 002 six-tool and agent compatibility accounted for | ✅ [compatibility](./compatibility.md) |
-| Task capability remains secondary | ✅ 12 of 158 FR; phase F; FR-491 |
+| Task capability remains secondary | ✅ 13 of 163 FR; phase F; FR-491 |
 | No mandatory model or vector dependency in core correctness | ✅ FR-511, SC-321 |
 | No code-intelligence or source-RAG scope creep | ✅ spec Out of Scope |
 | Quickstart demonstrates the user-visible result | ✅ [quickstart](./quickstart.md) |

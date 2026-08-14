@@ -15,7 +15,8 @@ another's work, on one machine and across sync (research B3).
 Task
 ├── stable identity                 (existing)
 ├── goal, title, status             (existing)
-├── revision                        NEW — monotone, advances on any change
+├── local_revision                  NEW — monotone LOCAL counter, never transmitted
+├── state_digest                    NEW — DERIVED cross-device state identity
 ├── criteria[]                      NEW — stable ids, state ⊥ verification, evidence
 ├── blockers[]                      NEW — append-only, one cleared transition
 ├── change log                      NEW — append-only, local
@@ -74,9 +75,12 @@ verification: unverified ⇄ verified,  unverified ⇄ failed
 
 ### Criterion verification requires Cairn-collected evidence
 
-`verification = 'verified'` requires ≥1 `criterion_evidence` row whose evidence fact has
-`collector = 'cairn'` (D69, FR-484). Attested evidence may be attached, is labelled, and leaves the
-criterion `unverified`, refused with `attested_not_sufficient`.
+`verification = 'verified'` requires a verification whose **authority is `cairn`** — a deterministic
+check this machine ran over `collector = 'cairn'` evidence (D69, FR-370, FR-484). Attested evidence may
+be attached and is labelled, but leaves the criterion `unverified`, refused with
+`attested_not_sufficient`. An **imported** verification is refused too, whatever its authority, with
+`imported_not_sufficient`: a criterion's readiness is a claim about this machine's work, and another
+machine's check is not a substitute (FR-368).
 
 This is not pedantry. Completion readiness is the one derived value with an incentive attached; if an
 agent can attest its way to `verified`, readiness becomes self-certification. The path stays open
@@ -103,14 +107,66 @@ Both ends are attributed: `opened_by_session`/`opened_at`, `cleared_by_session`/
 no edit and no delete-and-recreate, so "who said this was blocked and who said it was not" is always
 answerable.
 
-## Revision and the change log
+## Revision, state identity and the change log
 
-`tasks.revision` is a monotone integer advanced **in the same transaction** as any change to the
-task, its criteria or its blockers (FR-488, I12).
+Two different questions need two different answers, and conflating them was a real defect in the first
+design (D80).
 
-Every such change also writes a `task_changes` row naming its author, the kind, and the prior and new
-value. That is what makes FR-488's "no assertion is lost even when a later one replaces it" true, and
-what supplies the *content* of a divergence report.
+| Question | Answer | Scope |
+|---|---|---|
+| "Has anything changed since I read this, **here**?" | `tasks.local_revision` — a monotone counter | one store; never transmitted |
+| "Do two machines hold the same task state?" | `task_state_digest` — derived from synchronized records | global; computed, never stored as authority |
+
+### `local_revision` — a local concurrency token
+
+A monotone integer advanced **in the same transaction** as any local change to the task, its criteria or
+its blockers (FR-488, I12). It is used for optimistic concurrency on this machine and to order this
+machine's change log.
+
+It is **not** transmitted: it is absent from the task sync payload and absent from the server schema.
+That is what makes the token sound — an `expected_revision` an agent holds can only have come from a
+`cairn_task get` against this store, because nothing carries the number anywhere else (FR-490).
+
+Two offline machines can each advance it from 5 to 6 and mean entirely different things. Treating that
+number as a shared identity was the bug; the fix is that it never leaves.
+
+### `task_state_digest` — the cross-device state identity
+
+Derived from the records that actually converge, so two machines holding the same task compute the same
+value regardless of arrival order, local counter values, or either clock (FR-493):
+
+```text
+task_state_digest = SHA-256 of the canonical serialization of
+
+    title_digest, goal_digest, status
+
+ ++ for each non-deleted criterion, ordered by (ordinal, id):
+        criterion_id, ordinal, text_digest, state, verification
+
+ ++ for each non-deleted blocker, ordered by id:
+        blocker_id, state
+```
+
+Properties, each asserted by test:
+
+- **order-independent** — inputs are sorted by stable identifiers before hashing, so the sequence in
+  which changes arrived cannot change the result;
+- **clock-independent** — no timestamp is an input (D49 applies here too);
+- **counter-independent** — `local_revision` is not an input;
+- **content-addressed** — two machines agree exactly when their converged records agree, which is the
+  definition of "the same task state";
+- **derived** — nothing stores it, so nothing can disagree with it (FR-493, SC-330).
+
+Cross-device advancement is decided by this digest. `local_revision` never is.
+
+### The change log
+
+Every local change also writes a `task_changes` row naming its author, the kind, and the prior and new
+value. That is what makes FR-488's "no assertion is lost even when a later one replaces it" true, and it
+is what `cairn task history` reads.
+
+It is **not** the source of a divergence report — that would have made remote changes invisible, since
+the log stays local. See [Divergence](#task-divergence-for-an-older-session).
 
 | `kind` | `subject_id` | `prior_value` → `new_value` |
 |---|---|---|
@@ -128,11 +184,42 @@ provenance-rich diagnostics for the machine that produced it.
 
 ### Different criteria — no interaction
 
-Two sessions updating different criteria touch different rows. Both apply. `tasks.revision` advances
+Two sessions updating different criteria touch different rows. Both apply. `tasks.local_revision` advances
 twice and both changes appear in the log (FR-490, SC-317). This is what B3's defect cost, removed by
 construction.
 
-### The same criterion — revision comparison
+### Across machines — convergence
+
+```text
+task state S,  task_state_digest = D0
+
+machine A offline:  AC-1 pending → satisfied     local_revision 5 → 6
+machine B offline:  AC-2 pending → satisfied     local_revision 5 → 6
+
+both reconnect and sync:
+  criteria upsert by id     → AC-1 and AC-2 both carry their new state on both machines
+  local_revision            → A shows 7, B shows 7 (each applied one remote change);
+                              the numbers are local bookkeeping and are never compared
+  task_state_digest         → D1 on BOTH machines — identical, because it is computed
+                              from the converged criteria, not from either counter
+```
+
+Answering the seven questions this scenario poses:
+
+| Question | Answer |
+|---|---|
+| Resulting revision? | There is no single revision. Each machine has its own counter; both compute the same `task_state_digest` |
+| How do both converge? | Criteria and blockers upsert by stable id, so disjoint changes both land; the digest is recomputed from them |
+| How does a session bound at S learn both changes? | By diffing its bound snapshot against the converged records — which contain both |
+| If the change log stays local, how is remote divergence explained? | It is not explained from the log. The diff is against synchronized records |
+| Is the counter global or local? | **Local**, explicitly, and never transmitted |
+| Can two independent "revision 6" states exist? | Yes — which is precisely why the counter is not an identity and the digest is |
+| Is the counter safe for optimistic concurrency after a merge? | Yes, **because** it never leaves: a token can only have come from this store |
+
+No CRDT, no vector clock, no ordering authority. The records converge by identity; the identity of the
+resulting state is computed from them.
+
+### The same criterion — local revision comparison
 
 ```text
 cairn_task action=get                       → returns each criterion's `revision`
@@ -200,25 +287,41 @@ which is correct.
 
 ## Task divergence for an older session
 
-`sessions.task_revision_at_bind` records what a session bound at (FR-489). On context refresh:
+A session records the task **state it bound at** — `sessions.task_snapshot_at_bind`, a bounded local
+JSON snapshot in the same shape the checkpoint already stores (FR-489). Its digest is derived from it, so
+one column carries both.
+
+On context refresh:
 
 ```text
-if session.task_revision_at_bind < tasks.revision:
-    emit a Level 0 task-divergence warning with the change list from `task_changes`
+if task_state_digest(snapshot_at_bind) != task_state_digest(current):
+    diff the snapshot against current criteria and blockers
+    emit a Level 0 task-divergence warning with that diff
 ```
 
-Rendered:
+The change list is **derived by diffing the snapshot against the current synchronized records** — not
+read from `task_changes`. That is the whole point: `task_changes` is local, so a log-based report would
+describe only this machine's edits and would silently omit a criterion another machine changed, even
+though the criterion row itself had arrived (D80).
+
+Diffing converged records instead reports both origins with no new payload and no log synchronization:
 
 ```text
 ⚠ TASK UPDATED
-  you started at revision 5 · current revision 6
+  the task advanced since you started
   changes:
+    • AC-2 pending → satisfied          (this machine)
+    • AC-3 pending → satisfied          (arrived from another machine)
     • criterion added — AC-4 "production smoke passes"
     • blocker opened  — "staging credentials expired"
 ```
 
-Cairn does not silently present the session as having worked against revision 6 (FR-489, SC-318). The
-session's binding revision is not rewritten; only the report changes.
+Attribution per change comes from the criterion's own `updated_by_session` where the session is known
+locally, and reads "arrived from another machine" otherwise — honest, and requiring nothing new on the
+wire.
+
+Cairn does not silently present the session as having worked against the current state (FR-489,
+SC-318). The bound snapshot is never rewritten; only the report changes.
 
 ## Surfaces
 
@@ -226,7 +329,7 @@ session's binding revision is not rewritten; only the report changes.
 
 | Command | Notes |
 |---|---|
-| `cairn task get <id>` | Now includes `revision`, criteria with ids/labels/states/verification/evidence counts, blockers, progress, readiness |
+| `cairn task get <id>` | Now includes `local_revision`, `state_digest`, criteria with ids/labels/states/verification/evidence counts, blockers, progress, readiness |
 | `cairn task criterion add <task-id> --text …` | |
 | `cairn task criterion set <criterion-id> --state … [--expected-revision N]` | |
 | `cairn task criterion verify <criterion-id> [--evidence <id>]` | |
@@ -250,9 +353,10 @@ and `readiness`; `get` and `list` gain the new read-only fields.
 
 | Code | Meaning |
 |---|---|
-| `revision_conflict` | `expected_revision` did not match; the current state and revision are named |
+| `revision_conflict` | `expected_revision` did not match the criterion's local revision; the current state and revision are named |
 | `criterion_not_found` | |
 | `blocker_not_found` | |
 | `blocker_already_cleared` | The only transition has already happened |
-| `attested_not_sufficient` | Attested evidence was offered for a criterion's verification (D69) |
+| `attested_not_sufficient` | Attested evidence was offered for a criterion's verification (D69, FR-370) |
+| `imported_not_sufficient` | An imported verification was offered for a criterion's verification; readiness is a local claim (FR-368) |
 | `criterion_waived` | A state or verification change was requested for a waived criterion |

@@ -7,7 +7,7 @@ record, with no project identity, promoted only through a deterministic fail-clo
 trusted only by evidence from projects other than the one it came from.
 
 ```text
-project knowledge (verified, evidence-backed, active, unconflicted)
+project knowledge (verified by a deterministic Cairn check, evidence-backed, active, unconflicted)
     │
     │  explicit proposal — never automatic (FR-395)
     ▼
@@ -76,7 +76,7 @@ class, never echoes the offending value, and writes nothing (FR-396, FR-397).
 | # | Check | Refusal class |
 |---|---|---|
 | 1 | Source memory lifecycle is `active` | `source_not_active` |
-| 2 | Source `verification = 'verified'` | `source_unverified` |
+| 2 | Source `verification = 'verified'` **and** `verification_authority = 'cairn'` | `source_unverified` if not verified; `attested_not_sufficient` if verified only by attestation (FR-370, FR-396) |
 | 3 | Source has ≥1 supporting evidence fact | `no_evidence` |
 | 4 | Source is not `local_only` | `local_only_memory` |
 | 5 | Source's subject is not `Conflicted` | `source_conflicted` |
@@ -89,6 +89,12 @@ class, never echoes the offending value, and writes nothing (FR-396, FR-397).
 Check 6 is the one that earns its place: "production database is PostgreSQL" is true, verified,
 evidence-backed and completely untransferable. A pattern must describe a *problem and its
 resolution*, not a project's configuration.
+
+Check 2's authority clause closes the other way an agent could launder its own claim into shared
+knowledge: attest a fact, watch it become `verified`, then promote it. Cross-project knowledge is the
+furthest-travelling thing Cairn produces, so it takes the strictest setting — a deterministic check
+Cairn ran itself, on this machine (FR-370). An **imported** verification is refused for the same reason:
+`remote_cairn` means another machine checked it against evidence this machine cannot see.
 
 Check 10 is enforced by a unique index as well as by the check, so a race cannot create a duplicate.
 
@@ -235,6 +241,8 @@ should be able to ask before committing to the wording.
 | Code | Meaning |
 |---|---|
 | `source_not_active`, `source_unverified`, `no_evidence`, `local_only_memory`, `source_conflicted`, `not_transferable`, `possible_secret`, `project_identifying`, `insufficient_specificity`, `duplicate_pattern` | The ten gate refusals |
+| `attested_not_sufficient` | The source is `verified`, but only by attestation — promotion needs a deterministic Cairn check (FR-370) |
+| `imported_not_sufficient` | The source's verification was established on another machine |
 | `pattern_not_found` | |
 | `outcome_already_recorded` | An application for this `(pattern, project, signal_digest)` exists; use a new signal set or amend |
 

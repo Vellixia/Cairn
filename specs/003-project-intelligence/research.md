@@ -418,7 +418,7 @@ Extending `handoffs` in place — rejected, `handoffs` syncs and a checkpoint mu
 |---|---|---|
 | `branch` | checkpoint `branch` vs current | `cairn-git` |
 | `commit` | checkpoint `commit_sha` vs current head | `cairn-git` |
-| `task` | checkpoint `task_revision` vs `tasks.revision` | store, with `task_changes` for the change list |
+| `task` | checkpoint `assumed_task_state_digest` vs the current derived digest | store; the change list is diffed from the bound snapshot. **Revised by D80** — the original wording compared a local counter and read the local change log, both of which miss remote changes |
 | `files` | a `relevant_paths` entry with a `file_changed` observation from **another** session after `created_at` | store, indexed by session and time |
 
 `unresolvable` when the task or the worktree the checkpoint names no longer exists; the
@@ -636,8 +636,10 @@ relations are imported separately with `INSERT OR IGNORE` on their primary key, 
 `state`/`superseded_by_id` view is then **re-derived from relations** rather than copied from the
 remote row.
 
-Verification state imported from a peer is stored with `verification_origin = 'remote'` and is
-reported as verified elsewhere; it never counts toward local readiness (FR-368, SC-305 companion).
+Verification state imported from a peer is reported as verified elsewhere and never counts toward local
+readiness (FR-368, SC-305 companion). **Revised by D76**: the import records the peer's *authority* —
+`remote_cairn` or `remote_attested` — rather than a single `remote` flag, because a peer's attestation and
+a peer's deterministic check are not the same claim.
 
 Where the server rejects a new field or entity type, the daemon records the rejection class, stops
 sending that class, keeps delivering everything else, and surfaces it in `cairn sync status`
@@ -661,6 +663,13 @@ to work with no change (FR-492).
 `tasks.revision` is a monotone counter advanced by any change to the task, its criteria or its
 blockers, in that same transaction. `task_changes` is a local append-only log naming author, kind,
 prior and new value. `sessions.task_revision_at_bind` records what a session bound at.
+
+> **Revised by D80.** The counter turned out to be sound only *within* one store: it synced, so two
+> offline machines each advancing 5→6 produced two different "revision 6" states, and a divergence report
+> built from the local change log omitted criterion changes that arrived from elsewhere. D80 makes the
+> counter local and unsent, adds a derived `task_state_digest` for cross-device identity, and derives the
+> change list by diffing a bound snapshot against the converged records. The per-criterion row design
+> below is unchanged, and is what made that fix cheap.
 
 **Rationale**: B3 is the lost-update surface; per-criterion rows remove it by construction, because
 two sessions editing different criteria touch different rows. Keeping the JSON array as a projection
@@ -754,12 +763,12 @@ positive/negative corpus is what makes "zero false merges" measurable rather tha
 
 **Decision**: `0005_project_intelligence.sql` (local) and `0002_project_intelligence.sql` (server).
 Existing migrations are untouched (FR-513). Defaults on migration: `verification = 'unverified'`,
-`verification_origin = 'local'`, `topic_key`/`value_key` NULL, `importance = 'normal'`,
+`verification_authority` NULL (D76), `topic_key`/`value_key` NULL, `importance = 'normal'`,
 `pinned = 0`, `effective_from = created_at`, `superseded_at` set from existing superseded rows'
 `updated_at` **only where `state = 'superseded'`** — the one derived backfill, and it is the best
 available approximation, recorded as such. `reinforcement_count = 0`,
 `distinct_origin_count = 1`. Existing `acceptance_criteria` entries become `task_criteria` rows in
-position order with `state = 'pending'`, `verification = 'unverified'`; `tasks.revision = 1`.
+position order with `state = 'pending'`, `verification = 'unverified'`; `tasks.local_revision = 1`.
 
 Nothing is fabricated (FR-515). Full procedure and its proof in [migration.md](./migration.md).
 
@@ -797,6 +806,197 @@ a test can assert the default did not drift.
 
 ---
 
+## 7. Reconciliation-pass decisions (D76–D83)
+
+Eight decisions taken during the design reconciliation pass. Four resolve HIGH findings, four MEDIUM.
+Each was verified against the artifacts *and* the implementation before being accepted; the disposition
+is in [plan.md](./plan.md) §Reconciliation.
+
+### D76 — Verification carries an **authority**, and `verification_origin` is retired
+
+**Decision**: replace `verification_origin ∈ {local, remote}` with
+`verification_authority ∈ {cairn, attested, remote_cairn, remote_attested}`. Derived from the runs that
+established the state and the `collector` of the evidence each consulted. Present on every surface that
+shows a state, and on the wire as `cairn`/`attested` inside the existing verification object (now five
+keys). Strict consumers — criterion verification (FR-484) and promotion (FR-396) — accept `cairn` only.
+
+**Rationale**: the gap was real and it was on the wire. An agent attests a `test_outcome`, the memory
+becomes `verified`, and it synced as `{state: verified, basis: ["test_outcome"]}`. A peer stored
+`verification_origin = 'remote'` and rendered it exactly like a peer that had actually run the tests.
+`basis` could not close it, because `test_outcome` and `command_outcome` are each reachable both ways —
+from a captured observation, or from an agent's submission. `collector` lived on the evidence fact, which
+never syncs, so the label did not survive the boundary.
+
+**Alternatives considered**: `attested` as a fifth *verification state* — rejected, it conflates *what
+was established* with *how*, and it loses the ability to say "attested and now needs recheck", since an
+attested claim's fingerprint can change like any other. A third orthogonal enum — rejected as
+unnecessary: `verification_origin` already existed to answer "where did this come from", so widening it
+adds no column and no axis. Renaming was free because Feature 003 is unimplemented.
+
+### D77 — Equal value keys no longer merge; `Corroborated` is a derived subject state
+
+**Decision**: automatic merging requires equal `content_norm_digest`. Same subject + equal `value_key` +
+differing content derives `Corroborated` — several answers that agree on the value — records **no**
+relation, retains every statement, and reports the matched member to the writer. `reinforces` becomes
+**explicit-only**.
+
+**Rationale**: `auth.strategy=jwt` is an honest value key for both "HS256 with a shared secret" and
+"RS256 with rotating public keys". The old rule wrote a `reinforces` relation and `derive_subject` then
+collapsed the partition to a single representative — suppressing one of two materially different claims
+from the canonical answer and reporting corroboration that never happened. Telling them apart requires
+reading the content, which is inference (FR-317, FR-511).
+
+So Cairn decides what it can — they agree on the value — and hands the rest to the party that can read
+both. This is the proposal boundary applied one level deeper, and it makes automatic behaviour *smaller*:
+one automatic rule instead of two, one relation kind demoted to explicit.
+
+**Alternatives considered**: telling agents to write more specific keys (the brief's option A) — rejected
+as unenforceable; the failure was silent, and correctness would rest on agent discipline. A token-
+containment rule — "the content adds no token beyond the keys" — rejected as a heuristic dressed as a
+rule: "PostgreSQL 16" versus "postgresql" would fail it, and it would fire constantly. Requiring an
+explicit merge for *identical* content too — rejected, nothing is lost by collapsing byte-identical
+claims, and it would cost the deduplication the feature exists for.
+
+**Accepted cost**: three differently-worded equivalents no longer collapse without one explicit call.
+The response names the member matched and the exact call, the usage contract asks for it, and if it never
+comes the briefing still spends budget once and reports `+N further statements`. The failure mode moved
+from *wrong* to *slightly less compact*, which is the right direction.
+
+### D78 — Symmetric relation kinds normalize their endpoints
+
+**Decision**: for `conflicts_with` only, `from = min(id)` and `to = max(id)` lexicographically before the
+write. Every other kind is directional and is not normalized.
+
+**Rationale**: the primary key is `(from, to, kind)`, so two machines detecting one conflict offline
+produced `A→B` and `B→A` — two durable rows for one fact, both syncing, and `cairn memory subject`
+reporting the same conflict twice. Normalization makes the primary key absorb the second machine's record
+exactly as it absorbs a local duplicate.
+
+**Alternatives considered**: a canonical-form check at read time — rejected, it leaves two rows in the
+store and two rows on the wire. Making all kinds symmetric — rejected, `supersedes` direction *is* its
+content.
+
+### D79 — Checkpoints record a bounded fingerprint per relevant path
+
+**Decision**: store one fingerprint per `relevant_path` at checkpoint time — `digest` (content SHA-256)
+by default, `size` (existence + length) above the payload cap, `unknown` when excluded or unreadable —
+and recompute on restoration. Per-path outcome is `unchanged | changed | removed | added |
+not_fingerprintable`.
+
+**Rationale**: the old rule detected a path change by looking for a `file_changed` observation from
+another session, which misses every change Cairn did not see — a human editor, a formatter, `git apply`,
+an IDE refactor — all of which leave the commit unmoved. Those are precisely the cases where a stale
+"continue editing config.rs" is most dangerous.
+
+Bounded: ≤32 paths (the existing cap), ≤`payload_cap_bytes` per path, no globbing, no directory walk, no
+repository scan, no execution — and it runs on *restoration*, not on every session open, so FR-471 is
+untouched.
+
+**Alternatives considered**: `mtime` — rejected, it changes on checkout and `touch` without the content
+changing, and a spurious divergence warning trains people to ignore warnings. A repository-wide scan —
+rejected by FR-471 and by the non-goals. Watching the filesystem — rejected, a new long-running
+platform-specific mechanism.
+
+`not_fingerprintable` is deliberately not folded into `unchanged`: "I could not look" and "nothing moved"
+are different answers.
+
+### D80 — The task counter is local; cross-device identity is a derived digest
+
+**Decision**: three changes together.
+
+1. `tasks.revision` → `tasks.local_revision`: a monotone counter for **one store**, removed from the sync
+   payload and from the server schema.
+2. `task_state_digest`: derived, content-addressed over the converged records —
+   `title_digest, goal_digest, status` ++ criteria sorted by `(ordinal, id)` ++ blockers sorted by `id`.
+   Nothing stores it.
+3. `sessions.task_revision_at_bind` → `sessions.task_snapshot_at_bind`: a bounded local JSON snapshot.
+   The divergence change list is derived by **diffing it against the current synchronized records**, not
+   by reading `task_changes`.
+
+**Rationale**: the seven questions the brief poses each exposed the same error — treating a per-store
+counter as a shared identity. Two offline machines each advancing 5→6 produce two different "revision 6"
+states; the counter was in the payload and in the server schema, so an `expected_revision` could cross a
+store boundary and be honoured against different content. And because `task_changes` is local, a
+log-based divergence report described only this machine's edits and silently omitted a criterion the other
+machine had changed — even though the criterion row itself had arrived.
+
+The criteria and blockers already converged correctly by stable id; what was missing was an *identity for
+the resulting state*, and a digest over converged records supplies it with no merge algebra. Removing the
+counter from the wire is a **deletion** from the sync surface, not an addition.
+
+**Alternatives considered**: a CRDT or a vector clock — rejected and unnecessary: disjoint criterion
+changes never collide, so there is nothing to merge; the open question was identity, not resolution.
+Syncing `task_changes` — rejected, it carries `prior_value`/`new_value` free text about local context and
+the privacy default is conservative; and it is not needed, because diffing converged records is strictly
+better information. A server-assigned revision — rejected, it would make task edits require the network,
+breaking local-first.
+
+### D81 — `blocked`: a fifth outbox state for capability refusal
+
+**Decision**: classify a rejection as **content** (permanent → `failed`, unchanged) or **capability**
+(`unknown_entity_type | unknown_field | schema_older` → `blocked`). `blocked` rows keep their payload and
+idempotency key, carry `blocked_reason` and `blocked_at_capability`, and are excluded from `claim`. The
+server's existing public `/api/version` gains `schema_version` and a `capabilities` array; the sync worker
+probes it at most once per drain cycle, caches it in `sync_meta.server_capability`, and returns blocked
+rows to `pending` when the capability changes.
+
+**Rationale**: verified in the code — `outbox::claim` takes only `pending` and stale `in_flight` rows, and
+`cairnd/src/sync.rs` calls `mark_failed` on a `rejected` status with the comment "`rejected` is permanent".
+So a relation refused by an old server was `failed` forever, including after the server was upgraded. The
+first design stopped at "stop sending that class", which is correct and insufficient.
+
+The probe works against exactly the servers it must detect: an old server returns neither field, and that
+**absence is the answer**. Delivery stays exactly-once because the original idempotency key is reused and
+the server's `sync_state` claim is unchanged.
+
+**Alternatives considered**: leaving rows `pending` and relying on the class filter — rejected, they would
+be claimed and re-sent on every cycle, which is the futile retry FR-415 forbids. A new `blocked` table —
+rejected, two nullable columns and one state on the existing queue is smaller. Requiring an operator
+command — rejected by FR-418's "no manual repair".
+
+### D82 — Narrow the temporal claim, and add `stale_at` going forward
+
+**Decision**: the historical answer reconstructs **proposal effectiveness and explicit supersession
+intervals**. Add nullable `stale_at`, set by the maintenance tick from now on; NULL means **unknown**,
+never "not stale". Where a transition has no authoritative instant, the answer reports
+`applicability: unknown` rather than an unbounded interval. Deleted memories are absent and reported as
+deleted; their content is not reconstructable, which is what deletion means.
+
+**Rationale**: `mark_stale_scopes` set only `state` and `updated_at`, so a memory that went stale at T2
+still satisfied `superseded_at IS NULL` and was reported as effective for every T after T2. The claim was
+stronger than the stored evidence. Adding a nullable column costs nothing and makes the answer precise
+going forward; backfilling it from `updated_at` would be a **second** approximation on top of the one
+already documented, and several paths touch `updated_at` on a stale row, so it would be a worse one.
+
+**Alternatives considered**: a full bitemporal model — rejected by FR-345. Backfilling `stale_at` —
+rejected as above. Narrowing only, with no new column — considered, and rejected because the column is one
+nullable field that makes every future answer exact for free.
+
+### D83 — Level 0 has a guaranteed O(1) tier and a bounded detail tier
+
+**Decision**: split Level 0. **Tier 0a** is guaranteed and every field is O(1) in project and task size —
+task, goal, status, derived progress counts, readiness, open-blocker count plus the single most actionable
+blocker, next action with staleness, warning kinds with counts, repository state. **Tier 0b** is bounded
+detail — warning detail, pins, criterion text in **action order** (`blocked → satisfied-unverified →
+pending → verified → waived`), further blockers — admitted while budget allows, with omissions counted by
+kind and a retrieval path.
+
+**Rationale**: FR-443 said Level 0 "MUST contain acceptance criteria with their states" and SC-309 claimed
+they are present at the documented minimum budget. Forty criteria at ~20 tokens is 800 tokens against a
+600-token minimum: the requirement was unsatisfiable. The budget was never at risk — the admission order
+already put criteria last and `try_spend` measures before emitting — but the *claim* was false.
+
+Splitting the tier makes the guarantee true and keeps it meaningful: what an agent needs to continue is
+the state, not the prose, and the state has a bounded worst case. Action order is the part that earns its
+place — a blocked criterion is what stops progress, so it arrives first.
+
+**Alternatives considered**: dropping the criteria guarantee entirely — rejected, criterion *states* are
+continuity. Summarizing criterion text — rejected, that is generation, and Cairn derives rather than
+writes. Raising the minimum budget until forty criteria fit — rejected, unbounded input cannot be fixed by
+a larger constant.
+
+---
+
 ## 6. Rejected scope
 
 Recorded so it is not rediscovered.
@@ -817,4 +1017,11 @@ Recorded so it is not rediscovered.
 | A new crate | D72; no testability or dependency-direction argument for one |
 | Raising the default context budget | D58; silently increases every agent's cost to solve a prioritization problem |
 | Autonomous promotion | FR-395; the brief asks for explicit promotion in the first version |
+| Automatic merging on equal value keys | D77; a value key states a value, not a whole proposition |
+| `attested` as a verification state | D76; conflates what was established with how, and loses recheck |
+| A CRDT or vector clock for task state | D80; records already converge by identity — only the identity of the result was missing |
+| Syncing the task change log | D80; free text about local context, and diffing converged records is better information |
+| Backfilling `stale_at` from `updated_at` | D82; a second approximation, and a worse one than the first |
+| `mtime` as a path fingerprint | D79; changes without the content changing, and false warnings train people to ignore warnings |
+| Summarizing criterion text to fit a budget | D83; that is generation, and Cairn derives rather than writes |
 | Code intelligence, symbol graphs, source RAG | spec Out of Scope; separate future work |

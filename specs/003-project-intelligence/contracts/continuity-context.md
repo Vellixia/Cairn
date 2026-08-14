@@ -26,8 +26,9 @@ step. The checkpoint adds only what the handoff cannot:
 |---|---|
 | `handoff_id` | Everything the handoff already derives, by reference |
 | `assumed_branch`, `assumed_commit` | Staleness detection |
-| `assumed_task_id`, `assumed_task_revision` | Staleness detection |
+| `assumed_task_id`, `assumed_task_state_digest` | Staleness detection, device-independent (see [task-model.md](./task-model.md)) |
 | `relevant_paths` (≤32) | Staleness detection — the changed and read paths of this session |
+| `path_fingerprints` | One bounded fingerprint per relevant path, so a change is detected whoever made it |
 | `criteria_snapshot` | Criterion states at that instant, for the divergence diff |
 | `open_blockers` | Blockers in force |
 | `pinned_constraints` | Pinned memory ids in force |
@@ -74,8 +75,40 @@ On restore, compare the assumption set against current state (FR-431):
 |---|---|---|
 | `branch` | `assumed_branch` vs current branch | `cairn-git` |
 | `commit` | `assumed_commit` vs current head | `cairn-git` |
-| `task` | `assumed_task_revision` vs `tasks.revision` | store; `task_changes` supplies the diff |
-| `files` | a `relevant_paths` entry with a `file_changed` observation from **another session**, `occurred_at > created_at` | store |
+| `task` | `assumed_task_state_digest` vs the current derived digest | store; the diff comes from `criteria_snapshot` |
+| `files` | recorded `path_fingerprints` vs recomputed fingerprints | the worktree, bounded to the recorded paths |
+
+#### Path fingerprints — detecting a change whoever made it
+
+The earlier design detected a path change by looking for a `file_changed` observation from another
+session. That misses everything Cairn did not see: a human editing in an editor, a formatter,
+`git apply`, an IDE refactor, another process — all of which leave the commit unmoved and produce no
+observation at all (D79).
+
+So the checkpoint records what each relevant path *was*, and restoration recomputes it:
+
+| Class | Recorded | When used |
+|---|---|---|
+| `digest` | content SHA-256 | Default — readable, not excluded, within `payload_cap_bytes` |
+| `size` | existence + byte length | The file exceeds the payload cap; a digest would be unbounded work |
+| `unknown` | nothing comparable | Privacy-excluded, unreadable, or absent when the checkpoint was taken |
+
+Per-path outcome: `unchanged`, `changed`, `removed`, `added`, `not_fingerprintable`.
+
+`not_fingerprintable` is reported as itself, **never** as `unchanged`. "I could not look" and "nothing
+moved" are different answers, and conflating them is exactly how a stale checkpoint would read as
+current (FR-432).
+
+**Bounds.** At most the 32 paths the checkpoint already names, at most `payload_cap_bytes` read per
+path, no globbing, no directory walk, no repository scan, no command execution. Thirty-two bounded
+reads on a *restoration* is a different order of work from the repository scan FR-471 forbids, and it
+does not run on an ordinary session open. A path over the byte cap downgrades to `size` rather than
+spending the budget.
+
+A `size` match is weaker than a digest match — a same-length edit reads as unchanged — and that is
+stated rather than hidden. It applies only above the payload cap, where source edits are rare. `mtime`
+was deliberately not used: it changes on checkout and `touch` without the content changing, and a
+spurious divergence warning trains people to ignore warnings.
 
 Outcome:
 
@@ -98,7 +131,9 @@ The recorded next action is emitted as **`previous_next_action`**, never as `nex
   recorded at commit abc123 on main, task revision 7
   current:        commit def456 on main, task revision 8
   task changed:   criterion AC-3 added; blocker "staging credentials" opened
-  files changed by another session: src/config.rs (session 0192f4…, claude-code)
+  files changed: src/config.rs (digest differs; last touched by session 0192f4…, claude-code)
+                 src/retry.rs  (digest differs; no Cairn session recorded a change)
+  not fingerprintable: vendor/large.bin (exceeds the payload cap — compared by size)
   previous next action (may be stale): "finish the retry backoff in config.rs"
 ```
 
@@ -119,17 +154,57 @@ Nothing is carried in the conversation, so nothing degrades with each pass. That
 
 ### Level 0 — minimum safe continuity
 
-Contents (FR-443), and the admission order applied when even the reserve binds (FR-446):
+Level 0 has two tiers, and the distinction is what makes its guarantee achievable. A budget is finite;
+criterion text, blocker descriptions and warning detail are not. Guaranteeing that all of them fit
+would be a promise Cairn cannot keep (FR-443, FR-448).
 
-| # | Item | Notes |
+**Tier 0a — guaranteed work state.** Every item is O(1) in the size of the project and the task, so the
+tier has a bounded worst case that fits the documented minimum budget:
+
+| # | Item | Bound |
 |---|---|---|
-| 1 | Task identity, goal, status | The frame everything else hangs on |
-| 2 | `next_action`, or `previous_next_action` + divergence statement | Never both |
-| 3 | Open blockers | |
-| 4 | Critical warnings | Order: checkpoint divergence → task divergence → conflict → drift. Cap `warnings_in_context_max` (5) |
-| 5 | Pinned constraints in force | Cap `pins_in_context_max` (4) |
-| 6 | Repository state | Feature 001's `repository` section |
-| 7 | Acceptance criteria with states, then derived progress | The largest item; last so a tiny budget still gets 1–6 |
+| 1 | Task id, goal, status | goal truncated to `goal_max_tokens` (60) with an ellipsis marker |
+| 2 | Derived progress as counts by state | fixed shape: `3 verified · 1 satisfied unverified · 1 blocked · 2 pending` |
+| 3 | `completion_readiness` | one enum |
+| 4 | Open blocker count, plus the **single most actionable** blocker, summarized | one bounded line |
+| 5 | `next_action`, or `previous_next_action` + divergence statement | never both; bounded |
+| 6 | Critical warning **kinds** with counts | e.g. `⚠ 1 conflict · 1 drift · checkpoint diverged` |
+| 7 | Repository state | Feature 001's `repository` section, fixed shape |
+
+Tier 0a is what "state continuity" means: after any number of compactions the agent knows what it is
+doing, how far along it is, what is blocking it, what to do next, and that something is wrong. None of
+that grows with the project or the task.
+
+**Tier 0b — bounded detail**, admitted in this order while the reserve and then the general budget
+allow:
+
+| # | Item | Cap |
+|---|---|---|
+| 8 | Warning detail, highest precedence first | `warnings_in_context_max` (5); order divergence → task → conflict → drift |
+| 9 | Pinned constraints in force | `pins_in_context_max` (4) |
+| 10 | Criterion text, in **action order** | until the budget binds |
+| 11 | Further open blockers | until the budget binds |
+
+**Criterion action order** — deterministic, and chosen so the ones an agent must act on arrive first:
+
+```text
+blocked  →  satisfied but unverified  →  pending  →  verified  →  waived
+            (ties broken by ordinal, ascending)
+```
+
+A `blocked` criterion is what stops progress; a `satisfied but unverified` one is what needs a check;
+`verified` and `waived` are the ones an agent least needs to re-read.
+
+**Omission reporting.** Whatever does not fit is counted by kind and given a retrieval path:
+
+```text
+CRITERIA   AC-3 blocked · AC-7 satisfied (unverified) · AC-1 pending
+           + 37 criteria omitted — `cairn task get <id>`
+BLOCKERS   1 of 4 shown — `cairn task get <id>`
+WARNINGS   3 of 3 shown
+```
+
+Omission is never silent (FR-448), and Tier 0b can never displace Tier 0a.
 
 ### Level 1 — relevant current knowledge
 
@@ -255,6 +330,7 @@ CRITICAL CONSTRAINTS
 | `pin_budget_exhausted` | The project or scope pin budget is full; current pins are listed |
 | `checkpoint_not_found` | No checkpoint exists for the session |
 | `checkpoint_unresolvable` | The assumed task or worktree no longer exists; partial continuity returned |
+| `path_not_fingerprintable` | A relevant path could not be fingerprinted — excluded, unreadable, or over the cap. Reported per path, never as unchanged |
 | `no_boundary_record` | A checkpoint was requested with no handoff to anchor to; one is derived first |
 
 `checkpoint_unresolvable` is `ok: true` with a note — partial continuity is a result, not a failure
