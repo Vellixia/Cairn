@@ -54,6 +54,33 @@ pub fn mcp_entry() -> serde_json::Value {
     serde_json::json!({ "command": "cairn", "args": ["mcp"] })
 }
 
+/// Cairn's MCP entry in **OpenCode's** schema.
+///
+/// OpenCode does not accept the `command` + `args` shape every other client
+/// uses. It requires a tagged union -- `type: "local" | "remote"` -- with the
+/// whole invocation in one `command` array and an explicit `enabled`. Writing
+/// the generic shape did not merely fail to register Cairn: OpenCode rejects
+/// the entire configuration file over one bad server entry, so
+/// `cairn connect opencode` left OpenCode unable to start at all with
+/// `Missing key mcp.cairn.enabled`. An integration must never be able to break
+/// the tool it integrates with.
+pub fn mcp_entry_opencode() -> serde_json::Value {
+    serde_json::json!({
+        "type": "local",
+        "command": ["cairn", "mcp"],
+        "enabled": true,
+    })
+}
+
+/// Cairn's canonical MCP entry for `agent`.
+pub fn mcp_entry_for(agent: model::AgentId) -> serde_json::Value {
+    if agent == model::AgentId::Opencode {
+        mcp_entry_opencode()
+    } else {
+        mcp_entry()
+    }
+}
+
 /// The reserved MCP server name. Ownership is this name plus a recorded
 /// canonical hash — never a search for the word "cairn" (FR-139).
 pub const MCP_SERVER_NAME: &str = "cairn";
@@ -113,6 +140,35 @@ pub fn event_class(agent: AgentId, event: &str) -> Option<cairn_core::lifecycle:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OpenCode rejects the whole configuration file over one malformed server
+    /// entry, so the generic `command` + `args` shape did not merely fail to
+    /// register Cairn -- it left OpenCode unable to start with `Missing key
+    /// mcp.cairn.enabled`. An integration must not be able to break the tool it
+    /// integrates with.
+    #[test]
+    fn the_opencode_mcp_entry_matches_opencodes_own_schema() {
+        let e = mcp_entry_opencode();
+        assert_eq!(e["type"], "local");
+        assert_eq!(e["enabled"], true);
+        // The whole invocation lives in one array; there is no `args`.
+        assert_eq!(e["command"], serde_json::json!(["cairn", "mcp"]));
+        assert!(e.get("args").is_none());
+        let text = e.to_string();
+        for word in ["token", "key", "secret", "password"] {
+            assert!(!text.to_lowercase().contains(word));
+        }
+    }
+
+    /// The shapes are per-agent, and picking by agent is the whole point.
+    #[test]
+    fn only_opencode_gets_the_opencode_shape() {
+        use model::AgentId;
+        assert_eq!(mcp_entry_for(AgentId::Opencode), mcp_entry_opencode());
+        for agent in [AgentId::ClaudeCode, AgentId::Codex, AgentId::GenericMcp] {
+            assert_eq!(mcp_entry_for(agent), mcp_entry(), "{agent}");
+        }
+    }
 
     #[test]
     fn the_mcp_entry_is_deterministic_and_carries_no_secret() {

@@ -128,7 +128,7 @@ pub fn materialize_install(
         }
         (_, ResourceKind::Mcp) => {
             let keys = mcp_keys(agent);
-            let entry = crate::mcp_entry();
+            let entry = crate::mcp_entry_for(agent);
             m.content_hash = Some(canonical_hash(&entry.to_string()));
             m.container_single_line = json::container_is_single_line(&display, &current, keys);
             m.created_container = json::get(&display, &current, &keys[..keys.len() - 1])?.is_none();

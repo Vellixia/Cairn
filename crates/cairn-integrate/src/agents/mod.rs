@@ -45,6 +45,7 @@ pub(crate) fn inspect_mcp_json(
     keys: &[&str],
     scope: InstallationScope,
     recorded: Option<&RecordedInstall>,
+    canonical: serde_json::Value,
 ) -> Observed {
     let display = path.display().to_string();
     let text = read(path);
@@ -52,14 +53,7 @@ pub(crate) fn inspect_mcp_json(
         Ok(v) => v,
         Err(e) => return malformed(ResourceKind::Mcp, scope, path, &e),
     };
-    classify_entry(
-        ResourceKind::Mcp,
-        scope,
-        path,
-        found,
-        recorded,
-        crate::mcp_entry(),
-    )
+    classify_entry(ResourceKind::Mcp, scope, path, found, recorded, canonical)
 }
 
 /// Compare a found entry against Cairn's canonical one.

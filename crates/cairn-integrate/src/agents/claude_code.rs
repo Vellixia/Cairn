@@ -128,6 +128,7 @@ impl AgentAdapter for ClaudeCode {
                 &keys,
                 mcp_scope,
                 find(ResourceKind::Mcp),
+                crate::mcp_entry(),
             ));
         }
 
