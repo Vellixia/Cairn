@@ -234,6 +234,11 @@ pub enum ImportRefusal {
     UnpublishedSkillRef { revision: String, manual: String },
     /// This manager does not distribute this resource kind.
     NotDistributable(ResourceKind),
+    /// The selected applications do not all take the same MCP entry, and one
+    /// import carries one config. Distributing the wrong shape is not a
+    /// degraded install: OpenCode rejects its whole configuration file over a
+    /// single malformed server entry.
+    MixedMcpShapes { split: Vec<(String, Vec<String>)> },
 }
 
 impl std::fmt::Display for ImportRefusal {
@@ -245,6 +250,18 @@ impl std::fmt::Display for ImportRefusal {
             ),
             ImportRefusal::NotDistributable(k) => {
                 write!(f, "{k} is not distributable through this manager")
+            }
+            ImportRefusal::MixedMcpShapes { split } => {
+                let groups: Vec<String> = split
+                    .iter()
+                    .map(|(_, apps)| format!("--apps {}", apps.join(",")))
+                    .collect();
+                write!(
+                    f,
+                    "these applications do not take the same MCP entry, and one import carries \
+                     one config; distribute them separately: {}",
+                    groups.join(" then ")
+                )
             }
         }
     }

@@ -138,9 +138,32 @@ impl IntegrationManager for CcSwitch {
         let apps = apps.join(",");
         match kind {
             ResourceKind::Mcp => {
+                // One import carries one `config`, so every selected
+                // application has to take the same entry. OpenCode does not:
+                // it requires a tagged `type`/`command` array/`enabled` shape
+                // and rejects its entire configuration file over a malformed
+                // server entry. Emitting the generic block for it would break
+                // the application rather than half-configure it.
+                let mut split: std::collections::BTreeMap<String, Vec<String>> =
+                    std::collections::BTreeMap::new();
+                for app in apps.split(',').filter(|a| !a.is_empty()) {
+                    split
+                        .entry(mcp_entry_for_app(app).to_string())
+                        .or_default()
+                        .push(app.to_string());
+                }
+                if split.len() > 1 {
+                    return Err(ImportRefusal::MixedMcpShapes {
+                        split: split.into_iter().collect(),
+                    });
+                }
                 // The `config` value is the same secret-free block
                 // `cairn integration export mcp` emits (FR-162, SC-133).
-                let config = urlencode(&crate::mcp_entry().to_string());
+                let entry = split
+                    .into_keys()
+                    .next()
+                    .unwrap_or_else(|| crate::mcp_entry().to_string());
+                let config = urlencode(&entry);
                 Ok(format!(
                     "ccswitch://v1/import?resource=mcp&name={MCP_SERVER_NAME}&apps={apps}&config={config}"
                 ))
@@ -162,6 +185,14 @@ impl IntegrationManager for CcSwitch {
             }
             other => Err(ImportRefusal::NotDistributable(other)),
         }
+    }
+}
+
+/// Cairn's canonical MCP entry for a CC Switch target application.
+fn mcp_entry_for_app(app: &str) -> serde_json::Value {
+    match app {
+        "opencode" => crate::mcp_entry_opencode(),
+        _ => crate::mcp_entry(),
     }
 }
 
@@ -264,6 +295,45 @@ fn bundle_version() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    /// One import carries one `config`. OpenCode's MCP entry is shaped
+    /// differently from every other client's, and OpenCode rejects its whole
+    /// configuration file over a malformed server entry -- so sending the
+    /// generic block to a selection that includes it would break the
+    /// application rather than half-configure it.
+    #[test]
+    fn a_mixed_selection_is_refused_with_the_split_to_run() {
+        let apps = [
+            "claude".to_string(),
+            "codex".to_string(),
+            "opencode".to_string(),
+        ];
+        let err = CcSwitch
+            .import_uri(ResourceKind::Mcp, &apps)
+            .expect_err("a mixed selection cannot be one import");
+        let text = err.to_string();
+        assert!(text.contains("--apps claude,codex"), "{text}");
+        assert!(text.contains("--apps opencode"), "{text}");
+    }
+
+    #[test]
+    fn opencode_alone_carries_opencodes_own_entry() {
+        let uri = CcSwitch
+            .import_uri(ResourceKind::Mcp, &["opencode".to_string()])
+            .expect("single-shape selection");
+        // urlencoded, so assert on the decoded markers.
+        assert!(uri.contains("%22type%22%3A%22local%22"), "{uri}");
+        assert!(uri.contains("%22enabled%22%3Atrue"), "{uri}");
+    }
+
+    #[test]
+    fn a_uniform_selection_still_emits_one_import() {
+        let apps = ["claude".to_string(), "codex".to_string()];
+        let uri = CcSwitch
+            .import_uri(ResourceKind::Mcp, &apps)
+            .expect("uniform selection");
+        assert!(uri.contains("apps=claude,codex"), "{uri}");
+    }
     use super::*;
 
     #[test]

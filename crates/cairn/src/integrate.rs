@@ -1696,6 +1696,12 @@ fn import_error(e: cairn_integrate::adapter::ImportRefusal) -> WireError {
             codes::INVALID_REQUEST,
             format!("CC Switch does not distribute {kind}"),
         ),
+        // One import carries one config, and OpenCode's MCP entry is shaped
+        // differently from every other client's. Splitting the request is the
+        // remedy; sending one shape to all of them would break the odd one out.
+        ref refusal @ ImportRefusal::MixedMcpShapes { .. } => {
+            err(codes::INVALID_REQUEST, refusal.to_string())
+        }
     }
 }
 
