@@ -192,6 +192,31 @@ Switch, and `cairn doctor` verifies the result afterwards by reading the *target
 applications'* configuration. Cairn never writes to CC Switch's own storage, for anything,
 including checking whether an import worked.
 
+### The Skill takes two actions in CC Switch, not one
+
+`--resource mcp` finishes when you confirm the import. `--resource skill` does not. Observed
+against CC Switch 3.19.2:
+
+1. `cairn integration distribute --via cc-switch --resource skill --apps claude` opens the
+   `ccswitch://v1/import?resource=skill&…` link, pinned to the published
+   `skill-release/<schema>-<revision>` branch.
+2. Confirming it **registers the Skill repository**. CC Switch records the repository, fetches
+   the branch, and unpacks the tree into its own `~/.cc-switch/skills/cairn`.
+3. The Skill now appears in CC Switch — with its **per-application toggles off**. Nothing has
+   been installed for any agent yet.
+4. Open **Skills Management** in CC Switch and **enable Cairn for Claude** explicitly.
+5. That is what creates `~/.claude/skills/cairn`, as a link to CC Switch's copy.
+6. `cairn doctor claude-code` then reports the Skill `healthy` with `owner manager`, having
+   recomputed `metadata.cairn_skill_revision` from the installed files.
+
+Between steps 2 and 4, `cairn doctor` reports the Skill `missing`. That is correct, not a
+fault: no target application has the Skill yet.
+
+> **Do not re-import the repository to update or re-check a Skill.** Re-running the
+> `resource=skill` import can reset the per-application enable toggles, silently withdrawing
+> a Skill you had enabled. To verify, run `cairn doctor`. To change which applications get
+> it, use Skills Management.
+
 There is no documented removal interface, so `cairn disconnect` reports the manual step
 rather than inventing one.
 

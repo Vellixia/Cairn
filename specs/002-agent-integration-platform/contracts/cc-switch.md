@@ -66,6 +66,29 @@ This is why the Skill's canonical source is a repository path rather than a gene
 artifact (D29): CC Switch fetches Skills from a public Git repository, so the repository
 *is* the distribution channel, and there is no second copy to drift.
 
+**"The same flow" overstates it, and this is where.** Observed against CC Switch 3.19.2 on
+2026-08-14: confirming a `resource=skill` import **registers** the Skill and does not install
+it. The dialog writes a `skill_repos` row for the repository and a `skills` row whose
+`enabled_claude`, `enabled_codex` and `enabled_opencode` are all `0`, and unpacks the tree
+into CC Switch's own `~/.cc-switch/skills/cairn`. Nothing appears under
+`~/.claude/skills/cairn`, so `cairn doctor` reports the Skill `missing` — truthfully. The
+install is a **second, separate manual action** in CC Switch's Skills Management, enabling the
+Skill per application; only then does the target directory exist. `resource=mcp` has no such
+second step, which is why the two were assumed alike.
+
+This is a documentation accuracy matter, not a Feature 002 code defect: Cairn emitted the
+correct branch, refused nothing it should have allowed, and doctor's `missing` is the correct
+reading of the filesystem. Anything that treats confirming the dialog as the end of Skill
+distribution — here or in `quickstart.md` — is wrong about CC Switch, not about Cairn.
+
+Re-running the deep link also **resets** the per-application toggles rather than preserving
+them: an import recorded at `installed_at` 1786692890 left `enabled_claude = 0` on a Skill
+whose own pre-import backup metadata (`skill-backups/20260814_073336_cairn/meta.json`)
+recorded `apps.claude = true`. **Therefore re-import is never the documented update or
+verification path.** `cairn doctor` verifies; CC Switch's Skills Management changes which
+applications receive the Skill. Nothing in Cairn's documentation may tell a developer to
+re-run the import to re-check a Skill, because doing so can silently withdraw one.
+
 ### Skill Git ref
 
 Direct installation always uses the Skill embedded in the running binary — the binary is the
