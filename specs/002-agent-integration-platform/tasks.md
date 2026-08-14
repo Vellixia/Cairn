@@ -362,6 +362,36 @@ project, and an actionable ambiguous-session error instead of a guess.
   - One caveat recorded rather than smoothed over: the Codex measurement used `-c features.hooks=true --dangerously-bypass-hook-trust`, because the measuring machine has `[features] hooks = false` set as a user override and codex-cli 0.144.6 exposes no CLI command to grant hook trust. Both are Codex-side facts, not Cairn steps; a developer whose Codex has hooks enabled by default reaches the same state through `cairn connect codex` plus one interactive trust confirmation.
 - [ ] T123 [MANUAL] [US5] Live release evidence for Skill distribution — with CC Switch installed, a published `skill-release/<schema>-<revision>` branch fetches through CC Switch's own `refs/heads` path, the installed `metadata.cairn_skill_revision` equals the embedded one, and an unchanged Skill across two releases reuses the branch without moving it (SC-112 live half, D29a, D29b)
   - **Also carries the `publish-skill` release-path preflight.** T096 required the workflow and T097 required hermetic evidence for its branch-state logic; both are complete. What no test can establish is the part that only exists inside GitHub: whether the job's `contents: write` grant actually creates `refs/heads/skill-release/…`, whether the archive endpoint serves that ref, and whether the job output propagates into `binaries` as `CAIRN_SKILL_BRANCH`. The first real execution of `publish-skill` is the gate. **Do not create a tag or a test ref to close this early** — a `skill-release` branch is content-addressed and permanent, and one created by a rehearsal would be indistinguishable from a real one forever after.
+  - **The MCP and manager half is observed and passes, against CC Switch 3.19.2.**
+    `cairn agents` classifies `cc-switch` as a manager, not an adapter. `integration
+    distribute --via cc-switch --resource mcp --apps claude,codex,opencode` returned
+    `manager_action_required` and exited 1 without completing, opening a real
+    `ccswitch://v1/import` link; the confirmation dialog listed one server, `cairn`,
+    for the three target applications, and was approved by hand. After it: exactly one
+    effective Cairn MCP entry per target, all three reporting `owner manager`,
+    `ownership_consistent: true`, zero `conflicting_owner` findings, and the five
+    unrelated MCP servers untouched. CC Switch translated the single generic entry into
+    each application's own format itself, including OpenCode's
+    `{"type":"local","command":["cairn","mcp"],"enabled":true}`.
+  - Switching provider inside CC Switch left every Cairn resource healthy and
+    manager-owned with no duplicates (SC-113). Removing the entry through CC Switch's
+    own interface withdrew it from all three targets, which `cairn doctor` then reported
+    as `missing` with an empty manager block — and `~/.cc-switch/cc-switch.db` was
+    byte-identical across every Cairn command run against it (SC-132).
+  - **Four defects surfaced here that no hermetic test could reach**, each needing a real
+    dialog to accept real input: the `config` parameter was percent-encoded JSON where CC
+    Switch decodes Base64 (`Invalid symbol 123, offset 0` — `{`); it carried a bare server
+    object where CC Switch requires `mcpServers` (the dialog opened reporting `MCP Servers
+    (0)` and wrote nothing); `doctor` gated manager inspection on a record nothing ever
+    writes, so the documented distribute-confirm-doctor sequence could never report
+    manager ownership; and with no record `doctor` assumed `Direct`, reporting CC Switch's
+    Codex entry as `modified` with the remedy `cairn repair --force`, which would have
+    overwritten the manager's entry and silently taken ownership back.
+  - **What remains is the Skill half, and it is release-gated by construction.** From this
+    build, `integration distribute --resource skill` correctly refuses with
+    `unpublished_skill_ref`, naming `skill-release/1-62c4053fc613`; `git ls-remote` confirms
+    no `skill-release/*` branch exists. That branch is created by the first real
+    `publish-skill` run, which is this task's gate.
 
 **Checkpoint**: The quickstart's hermetic sections run end to end; `web-e2e` exists and is
 green in hosted CI before release; every success criterion has a passing named test or is
