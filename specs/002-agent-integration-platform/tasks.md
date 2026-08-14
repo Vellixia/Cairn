@@ -360,7 +360,7 @@ project, and an actionable ambiguous-session error instead of a guess.
   - **Also carries T128's live sections**: the `*(live)*` half of the US1, US3, US4, US6 and US10 walkthroughs, which need authenticated vendor agents and therefore cannot run in the implementation environment or in required CI (FR-205, D40 tier 5).
   - **Measured, and this task is closed.** Time from `cairn connect <agent>` to a session Cairn is capturing, on the alpha.4 candidate: **Claude Code 67.5 s**, **OpenCode 21.4 s**, **Codex 23.4 s**. All are inside SC-101's five minutes with room to spare.
   - One caveat recorded rather than smoothed over: the Codex measurement used `-c features.hooks=true --dangerously-bypass-hook-trust`, because the measuring machine has `[features] hooks = false` set as a user override and codex-cli 0.144.6 exposes no CLI command to grant hook trust. Both are Codex-side facts, not Cairn steps; a developer whose Codex has hooks enabled by default reaches the same state through `cairn connect codex` plus one interactive trust confirmation.
-- [ ] T123 [MANUAL] [US5] Live release evidence for Skill distribution — with CC Switch installed, a published `skill-release/<schema>-<revision>` branch fetches through CC Switch's own `refs/heads` path, the installed `metadata.cairn_skill_revision` equals the embedded one, and an unchanged Skill across two releases reuses the branch without moving it (SC-112 live half, D29a, D29b)
+- [x] T123 [MANUAL] [US5] Live release evidence for Skill distribution — with CC Switch installed, a published `skill-release/<schema>-<revision>` branch fetches through CC Switch's own `refs/heads` path, the installed `metadata.cairn_skill_revision` equals the embedded one, and an unchanged Skill across two releases reuses the branch without moving it (SC-112 live half, D29a, D29b)
   - **Also carries the `publish-skill` release-path preflight.** T096 required the workflow and T097 required hermetic evidence for its branch-state logic; both are complete. What no test can establish is the part that only exists inside GitHub: whether the job's `contents: write` grant actually creates `refs/heads/skill-release/…`, whether the archive endpoint serves that ref, and whether the job output propagates into `binaries` as `CAIRN_SKILL_BRANCH`. The first real execution of `publish-skill` is the gate. **Do not create a tag or a test ref to close this early** — a `skill-release` branch is content-addressed and permanent, and one created by a rehearsal would be indistinguishable from a real one forever after.
   - **The MCP and manager half is observed and passes, against CC Switch 3.19.2.**
     `cairn agents` classifies `cc-switch` as a manager, not an adapter. `integration
@@ -374,7 +374,11 @@ project, and an actionable ambiguous-session error instead of a guess.
     each application's own format itself, including OpenCode's
     `{"type":"local","command":["cairn","mcp"],"enabled":true}`.
   - Switching provider inside CC Switch left every Cairn resource healthy and
-    manager-owned with no duplicates (SC-113). Removing the entry through CC Switch's
+    manager-owned with no duplicates (SC-113) — **historical live observation, not reproduced
+    during alpha.4 post-release validation**, where four attempted provider and configuration
+    changes persisted nothing to reproduce it against (issue #38). Nothing establishes that this
+    observation was wrong; it is annotated rather than restated because the current environment
+    cannot re-derive it. Removing the entry through CC Switch's
     own interface withdrew it from all three targets, which `cairn doctor` then reported
     as `missing` with an empty manager block — and `~/.cc-switch/cc-switch.db` was
     byte-identical across every Cairn command run against it (SC-132).
@@ -387,11 +391,85 @@ project, and an actionable ambiguous-session error instead of a guess.
     manager ownership; and with no record `doctor` assumed `Direct`, reporting CC Switch's
     Codex entry as `modified` with the remedy `cairn repair --force`, which would have
     overwritten the manager's entry and silently taken ownership back.
-  - **What remains is the Skill half, and it is release-gated by construction.** From this
-    build, `integration distribute --resource skill` correctly refuses with
+  - **What remained was the Skill half, and it was release-gated by construction.** From the
+    pre-release build, `integration distribute --resource skill` correctly refuses with
     `unpublished_skill_ref`, naming `skill-release/1-62c4053fc613`; `git ls-remote` confirms
     no `skill-release/*` branch exists. That branch is created by the first real
     `publish-skill` run, which is this task's gate.
+  - **The gate opened with v0.1.0-alpha.4, and most of the Skill half now passes.** Evidence,
+    all against the released artifact (`cairn-v0.1.0-alpha.4-aarch64-apple-darwin.tar.gz`,
+    SHA-256 verified against the release's `SHA256SUMS` digest):
+    - `publish-skill` really did create the ref: `git ls-remote` shows exactly one
+      `refs/heads/skill-release/1-62c4053fc613`, at `e94215e` — the commit
+      `v0.1.0-alpha.4` was tagged from. `contents: write` works.
+    - The job output really did propagate: the released binary carries
+      `CAIRN_SKILL_BRANCH=skill-release/1-62c4053fc613` and embeds a `SKILL.md` declaring
+      `cairn_skill_schema: 1`, `cairn_skill_revision: 62c4053fc613`.
+    - CC Switch's own `refs/heads` path really does serve it: CC Switch 3.19.2 fetched the
+      branch and materialized the seven-file tree at `~/.cc-switch/skills/cairn`, byte-identical
+      to `skills/cairn` at `e94215e` (`diff -r`, no differences).
+    - The installed revision equals the embedded one. The canonical algorithm recomputed over
+      the fetched tree — path-byte sort, CRLF→LF, one trailing newline, the parsed
+      `metadata.cairn_skill_revision` value replaced with `<REVISION>`, SHA-256 over the
+      length-prefixed stream, first 12 hex — yields **`62c4053fc613`**, matching both the
+      installed frontmatter and the binary's embedded value. Recomputed independently of the
+      Rust module and cross-checked against it.
+    - Unrelated configuration is untouched: `~/.claude/settings.json` unmodified since
+      2026-08-03, the `cairn` MCP entry intact alongside four unrelated servers in
+      `~/.claude.json`, and CC Switch's 7 providers / 9 MCP servers / 3 prompts / 7 skill
+      repositories and sixteen other Skills' per-application toggles all unchanged.
+  - **The Skill half is observed and passes.** One thing was outstanding, and it is a CC Switch
+    behavior rather than a Cairn defect: confirming the `resource=skill` deep link writes the
+    repository row and a `skills` row with every per-application toggle `0`, and unpacks the tree
+    into CC Switch's own directory only. Until the developer enables the Skill in **Skills
+    Management**, `~/.claude/skills/cairn` does not exist and doctor reports
+    `skill missing / owner direct` — correctly. After that second action, taken by hand on
+    2026-08-14 (CC Switch logged the three enablements at 15:00:49–15:00:52):
+    - `~/.claude/skills/cairn`, `~/.codex/skills/cairn` and `~/.config/opencode/skills/cairn`
+      all resolve to the one CC Switch-managed tree at `~/.cc-switch/skills/cairn`. One physical
+      copy, so there is no direct duplicate to conflict with.
+    - Released-alpha.4 `cairn doctor claude-code` reports `skill healthy`, `owner manager`, with
+      its own recomputation `installed: {revision: 62c4053fc613, schema: 1}`. The manager block
+      carries both `mcp` and `skill`, each healthy for claude, codex and opencode;
+      `ownership_consistent: true`; zero `conflicting_owner`; `blocking: 0`.
+    - CC Switch's toggles read `claude=1 codex=1 opencode=1` with `installed_at` and
+      `content_hash` unchanged — enabled, not re-imported. Re-import is deliberately avoided:
+      it can reset those toggles.
+    Recorded as a documentation accuracy issue and corrected in `contracts/cc-switch.md`
+    §Skill Git ref, `quickstart.md`, and `docs/integrations.md`.
+  - **Correction, recorded rather than quietly dropped.** An earlier pass of this evidence block
+    added a second blocker: that "an unchanged Skill across two releases reuses the branch
+    without moving it" needed a second published release (alpha.5) before this task could
+    close. That was an over-reading of this task's own title, and it is withdrawn. The
+    invariant is owned by **T097**, which is complete: `release_branch.rs` covers release **A**
+    introducing revision `R`, release **B** changing no Skill file and leaving the branch at A
+    unmoved with its content re-verified, release **C** introducing `S` and leaving `…-R`
+    untouched, and the content/name mismatch failure — with no force update in any case. What
+    this task adds beyond T096/T097 is stated in its own scope note above and is limited to the
+    three facts that exist only inside GitHub: the `contents: write` grant creating the ref, the
+    archive endpoint serving it, and the job output reaching `binaries` as
+    `CAIRN_SKILL_BRANCH`. All three are observed. Neither SC-112 nor any other success criterion
+    asks for live two-release evidence, so requiring it here would have invented a requirement.
+    Real branch reuse at the next release remains worth watching — as **regression** evidence
+    for T097's invariant in production, not as Feature 002 completion evidence.
+  - **Second correction, same class as the first.** A post-release pass of this block also made a
+    fresh *live* SC-113 provider-switch observation a prerequisite for closing this task. That is
+    withdrawn too. **SC-113 is owned by T103**, which is complete: `fixtures::post_provider_switch`
+    asserts that after a provider or configuration switch inside CC Switch every Cairn resource is
+    healthy with zero duplicates and every other CC Switch-managed provider, MCP server, prompt
+    and Skill is untouched (FR-200, SC-113, US5 #8) — and `traceability.md` records SC-113's
+    evidence as exactly that fixture. This task's own acceptance line names SC-112, D29a and D29b;
+    it does not name SC-113. Neither SC-113 nor T103 is weakened or removed by this correction —
+    only the accidental prerequisite is, and this is an evidence-ownership correction rather than a
+    requirement change.
+    For the record of what was actually attempted: during alpha.4 post-release validation four live
+    CC Switch 3.19.2 provider/configuration mutations were tried and **none persisted** —
+    `providers.is_current` never moved, the target applications' configuration and auth digests
+    stayed byte-identical, and CC Switch logged no provider event, while Skill toggle writes in the
+    same session did persist and were logged. All four are therefore NO-OP controls and cannot
+    count as additional SC-113 evidence in either direction, and no current live SC-113 result was
+    obtained. Being unable to obtain a supplementary live observation does not invalidate T103's
+    specified evidence. Tracked as ecosystem compatibility in issue #38.
 
 **Checkpoint**: The quickstart's hermetic sections run end to end; `web-e2e` exists and is
 green in hosted CI before release; every success criterion has a passing named test or is
@@ -537,6 +615,15 @@ This ledger is the record of what is actually built, not a plan. A task is
 checked only when its requirement is implemented and its named evidence
 passes; partial work is left unchecked with the gap stated here.
 
+> **Historical snapshot, superseded by the checkboxes above.** The three summaries that follow
+> were written partway through implementation and are kept for traceability, not as current
+> state. Everything they list as "not yet built" — the CLI surface (`cairn agents`, `doctor`,
+> `repair`, `disconnect`, `integration *`), apply-side wiring, the health report, ownership
+> migration, manager distribution, the `publish-skill` release job, the `web-e2e` CI job and the
+> Phase 11 evidence suites — shipped in v0.1.0-alpha.4, and the five tasks listed as partial
+> (T031, T032, T034, T054, T055) are checked. As of the alpha.4 post-release close the ledger is
+> **128 / 128**. Read the checkboxes, not this section, for status.
+
 **Complete**: Phases 1–3 in full (the `cairn-integrate` crate, the capability
 model, desired state, ownership markers, the scope matrix, both contract
 renderings, the canonical Skill revision algorithm and `skillref`, the three
@@ -566,3 +653,39 @@ persists the result.
 - **T055** — the owed-boundary gate is implemented and unit-tested in
   `capability::completion_guarantee`, but nothing feeds it live state until
   doctor does.
+
+---
+
+## Post-release validation — v0.1.0-alpha.4
+
+Recorded once, after the release, against the **released** artifacts. Nothing here changed a
+released artifact: `v0.1.0-alpha.4` and `skill-release/1-62c4053fc613` both stayed at
+`e94215e4b1374557ff1a66c4d35488b62d255c8a`.
+
+**Skill distribution through CC Switch 3.19.2** — see T123's evidence block. Published branch
+fetched through CC Switch's own `refs/heads` path; installed tree byte-identical to
+`skills/cairn` at the release commit; declared, recomputed, doctor-recomputed and
+binary-embedded revisions all `62c4053fc613`; released-alpha.4 `cairn doctor` reports the Skill
+`healthy` and `owner manager` for claude, codex and opencode with `ownership_consistent: true`,
+zero `conflicting_owner`, `blocking: 0`, and one physical copy so no direct duplicate.
+
+**Server deployment** — the `cairn-dev` Dokploy stack only; production was not touched.
+
+| | |
+|---|---|
+| Environment | `cairn-dev` (Cairn project, `development`), nothing else deployed or modified |
+| Server image | `ghcr.io/vellixia/cairn-server:0.1.0-alpha.4`, the released image |
+| Image revision label | `e94215e4b1374557ff1a66c4d35488b62d255c8a` |
+| Server health | PASS — container healthy, `FailingStreak 0`, `RestartCount 0`, `/api/health` → `{"ok":true}` |
+| `/api/version` | `0.1.0-alpha.4`, `update_available: false` |
+| Web | built from release commit `e94215e` with the deployment's own `NEXT_PUBLIC_CAIRN_API`; served bundle carries that origin and no loopback |
+| PostgreSQL | existing `cairn-dev-postgres` volume preserved; the postgres container was not recreated |
+| Existing data | projects, tasks, sessions, memories and handoffs all readable, including records predating the release |
+| Migrations | applied against the existing database with no error; the operator account was updated, not recreated |
+| Production | untouched |
+
+The published `cairn-web` image bakes `NEXT_PUBLIC_CAIRN_API` at image-build time, which is why
+web is built from the release commit here rather than pulled. That is release packaging, outside
+Feature 002's acceptance criteria, and is tracked in issue #37. The live CC Switch provider-switch
+reproduction that could not be obtained is tracked in issue #38; SC-113 itself is owned by the
+completed T103 fixture.

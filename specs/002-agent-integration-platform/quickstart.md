@@ -217,7 +217,15 @@ cairn integration distribute --via cc-switch --resource skill --apps claude --dr
 - The emitted deep link's `branch=` is that branch — never a commit SHA, never a tag, never
   `main`.
 
-Then complete the import in CC Switch and verify:
+Then complete the import in CC Switch. **This takes two actions, not one** (CC Switch
+3.19.2, observed 2026-08-14): confirming the deep link only *registers* the Skill — it writes
+the repository and a `skills` row with every per-application toggle off, and unpacks the tree
+into `~/.cc-switch/skills/cairn`. Enabling it for Claude in CC Switch's **Skills Management**
+is the separate second action that creates `~/.claude/skills/cairn`. Until that action,
+`cairn doctor` reports the Skill `missing`, which is correct. Verify only after both — and
+**do not re-run the import to re-check or update a Skill**: a re-import can reset the
+per-application toggles and silently withdraw an enabled Skill. `cairn doctor` is the
+verification path; Skills Management is the change path.
 
 ```bash
 grep cairn_skill_revision ~/.claude/skills/cairn/SKILL.md
