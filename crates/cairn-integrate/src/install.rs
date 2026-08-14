@@ -162,16 +162,21 @@ pub fn materialize_install(
             };
         }
 
+        // Codex keys hooks by event and nests a group under each, exactly as
+        // Claude Code does. A flat array at `hooks` is rejected outright --
+        // `invalid type: map, expected a sequence` -- taking every registration
+        // with it (D31).
         (AgentId::Codex, ResourceKind::Lifecycle) => {
             let mut text = current.clone();
             let mut changed = false;
-            m.created_container = json::get(&display, &current, &["hooks"])?.is_none();
-            m.container_single_line = json::value_is_single_line(&display, &current, &["hooks"]);
             for ev in codex::EVENTS {
+                m.created_container |= json::get(&display, &current, &["hooks", ev])?.is_none();
+                m.container_single_line |=
+                    json::value_is_single_line(&display, &current, &["hooks", ev]);
                 let entry = codex::hook_entry(ev);
                 let is_ours = |v: &serde_json::Value| codex::is_cairn_hook_entry(v, ev);
                 if let Change::Written(s) =
-                    json::upsert_array_entry(&display, &text, &["hooks"], &is_ours, &entry)?
+                    json::upsert_array_entry(&display, &text, &["hooks", ev], &is_ours, &entry)?
                 {
                     text = s;
                     changed = true;
@@ -325,20 +330,23 @@ pub fn materialize_removal(
             };
         }
 
+        // Removal mirrors the install: per event, under `hooks.<Event>`.
         (AgentId::Codex, ResourceKind::Lifecycle) => {
             let mut text = current.clone();
             let mut changed = false;
             for ev in codex::EVENTS {
                 let is_ours = |v: &serde_json::Value| codex::is_cairn_hook_entry(v, ev);
                 if let Change::Written(s) =
-                    json::remove_array_entries(&display, &text, &["hooks"], &is_ours, created)?
+                    json::remove_array_entries(&display, &text, &["hooks", ev], &is_ours, created)?
                 {
                     text = s;
                     changed = true;
                 }
             }
             if changed && single_line {
-                text = json::collapse_path(&text, &["hooks"]);
+                for ev in codex::EVENTS {
+                    text = json::collapse_path(&text, &["hooks", ev]);
+                }
             }
             m.op = if changed {
                 Op::File { contents: text }

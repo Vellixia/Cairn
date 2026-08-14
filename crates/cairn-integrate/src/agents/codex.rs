@@ -78,11 +78,20 @@ pub fn hooks_feature_disabled(config_toml: &str) -> bool {
 }
 
 /// The hook entry Cairn writes for one event.
+///
+/// Codex keys hooks by event and nests a group under each, the same structure
+/// Claude Code uses -- `hooks.<Event>[group].hooks[i]` -- which is what its own
+/// persisted trust keys describe when they read
+/// `<path>/hooks.json:session_start:0:0`. Cairn used to write a flat array of
+/// `{event, type, command}` instead. Codex parses the file, rejects it with
+/// `invalid type: map, expected a sequence`, and drops every registration, so
+/// no Cairn hook ran and the whole Codex lifecycle integration was inert while
+/// reporting itself installed. Verified against codex-cli 0.144.6 with a probe
+/// hook that fires.
 pub fn hook_entry(event: &str) -> serde_json::Value {
+    let _ = event;
     serde_json::json!({
-        "event": event,
-        "type": "command",
-        "command": hook_command(event),
+        "hooks": [ { "type": "command", "command": hook_command(event) } ]
     })
 }
 
@@ -97,9 +106,22 @@ pub fn hook_command(event: &str) -> String {
 }
 
 /// Whether a hook entry is Cairn's own, by exact shape (FR-139).
+///
+/// The closed set is a group whose `hooks` list holds exactly one command hook
+/// whose command is exactly Cairn's for an event Cairn registers. A longer
+/// command that merely mentions `cairn hook` does not match.
 pub fn is_cairn_hook_entry(entry: &serde_json::Value, event: &str) -> bool {
-    entry.get("type").and_then(|t| t.as_str()) == Some("command")
-        && entry.get("command").and_then(|c| c.as_str()) == Some(hook_command(event).as_str())
+    let Some(hooks) = entry.get("hooks").and_then(|h| h.as_array()) else {
+        return false;
+    };
+    if hooks.len() != 1 {
+        return false;
+    }
+    let h = &hooks[0];
+    if h.get("type").and_then(|t| t.as_str()) != Some("command") {
+        return false;
+    }
+    h.get("command").and_then(|c| c.as_str()) == Some(hook_command(event).as_str())
 }
 
 /// Classify a Codex tool response (D23).
@@ -300,19 +322,17 @@ fn inspect_hooks(
         Ok(v) => v,
         Err(e) => return malformed(ResourceKind::Lifecycle, scope, path, &e),
     };
-    let entries = value
-        .get("hooks")
-        .and_then(|h| h.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // Hooks are keyed by event, each holding a list of groups.
+    let hooks = value.get("hooks");
 
     let mut present = 0usize;
     let mut duplicated = false;
     for ev in EVENTS {
-        let ours = entries
-            .iter()
-            .filter(|e| is_cairn_hook_entry(e, ev))
-            .count();
+        let ours = hooks
+            .and_then(|h| h.get(ev))
+            .and_then(|g| g.as_array())
+            .map(|groups| groups.iter().filter(|e| is_cairn_hook_entry(e, ev)).count())
+            .unwrap_or(0);
         if ours > 0 {
             present += 1;
         }
@@ -401,6 +421,68 @@ fn trust_state(value: &serde_json::Value, recorded: Option<&RecordedInstall>) ->
 
 #[cfg(test)]
 mod tests {
+
+    /// Pinned against **Codex's** shape, not against `hook_entry` itself.
+    ///
+    /// Cairn used to write a flat array of `{event, type, command}`. codex-cli
+    /// 0.144.6 parses `hooks.json`, rejects that with `invalid type: map,
+    /// expected a sequence`, and drops every registration -- so no Cairn hook
+    /// ran while doctor reported the resource installed. The fixtures could not
+    /// catch it because they build their expectation from `hook_entry` too;
+    /// this asserts the literal structure a real Codex accepts, verified with a
+    /// probe hook that fires.
+    #[test]
+    fn the_hook_entry_is_a_group_codex_will_actually_load() {
+        let e = hook_entry("SessionStart");
+        // A group, whose `hooks` is a sequence of command hooks.
+        let inner = e
+            .get("hooks")
+            .and_then(|h| h.as_array())
+            .expect("group carries a `hooks` sequence");
+        assert_eq!(inner.len(), 1);
+        assert_eq!(inner[0]["type"], "command");
+        assert_eq!(inner[0]["command"], "cairn hook SessionStart --agent codex");
+        // The event is the *key* it is filed under, never a field on the entry:
+        // a member named `event` is what made the file a map where Codex wanted
+        // a sequence.
+        assert!(e.get("event").is_none());
+        assert!(e.get("command").is_none());
+    }
+
+    /// The whole document, as Codex reads it: `hooks.<Event>[group].hooks[i]`.
+    #[test]
+    fn the_installed_document_is_keyed_by_event() {
+        let mut hooks = serde_json::Map::new();
+        for ev in EVENTS {
+            hooks.insert((*ev).to_string(), serde_json::json!([hook_entry(ev)]));
+        }
+        let doc = serde_json::json!({ "hooks": hooks });
+        for ev in EVENTS {
+            let groups = doc["hooks"][ev]
+                .as_array()
+                .unwrap_or_else(|| panic!("{ev} is keyed to a sequence of groups"));
+            assert_eq!(groups.len(), 1);
+            assert!(is_cairn_hook_entry(&groups[0], ev));
+        }
+        // Codex's trust keys are `<path>:<event>:<group>:<hook>`; two indices
+        // only exist because a group nests a list.
+        assert!(doc["hooks"]["SessionStart"][0]["hooks"][0]["command"].is_string());
+    }
+
+    #[test]
+    fn a_foreign_group_is_not_mistaken_for_cairns() {
+        let foreign = serde_json::json!({
+            "hooks": [ { "type": "command", "command": "cairn hook SessionStart --agent codex && rm -rf /" } ]
+        });
+        assert!(!is_cairn_hook_entry(&foreign, "SessionStart"));
+        let two = serde_json::json!({
+            "hooks": [
+                { "type": "command", "command": "cairn hook SessionStart --agent codex" },
+                { "type": "command", "command": "something-else" }
+            ]
+        });
+        assert!(!is_cairn_hook_entry(&two, "SessionStart"));
+    }
 
     /// codex-cli 0.144.6 has no `hooks` subcommand at all -- its full
     /// subcommand list does not contain one -- so naming `codex hooks trust`
