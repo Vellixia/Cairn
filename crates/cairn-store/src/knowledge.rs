@@ -62,6 +62,18 @@ pub async fn record_relation_tx(
     r: NewRelation<'_>,
 ) -> Result<bool> {
     let (from, to) = normalize_relation_endpoints(r.kind, r.from, r.to);
+
+    // A superseded memory loses its pin, in the same transaction as the
+    // decision that superseded it. The successor is pinned only explicitly:
+    // inheriting a pin would carry an invariant onto a claim nobody chose to
+    // make invariant (FR-456).
+    //
+    // Drift deliberately does **not** do this. A pinned constraint that no
+    // longer holds is exactly what must be said, so it keeps its pin and
+    // carries its warning.
+    if r.kind == RelationKind::Supersedes {
+        crate::repo::clear_pin_tx(&mut *tx, to).await?;
+    }
     let result = sqlx::query(
         "INSERT OR IGNORE INTO memory_relations
             (from_memory_id, to_memory_id, kind, project_id, decided_by_session,

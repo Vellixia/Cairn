@@ -244,7 +244,19 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             session_id,
             reason,
             token_budget,
-        } => context(d, &cwd, agent_session_key, session_id, reason, token_budget).await,
+            explain,
+        } => {
+            context(
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                reason,
+                token_budget,
+                explain,
+            )
+            .await
+        }
 
         Request::HandoffGenerate {
             cwd,
@@ -532,6 +544,31 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 })
                 .collect();
             Ok(json!({ "changes": changes }))
+        }
+
+        Request::MemoryPin {
+            cwd,
+            agent_session_key,
+            session_id,
+            memory_id,
+            pinned,
+            reason,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+            let config = d.config.read().await.clone();
+            repo::set_pinned(
+                &d.store,
+                memory_id,
+                pinned,
+                reason.as_deref(),
+                s.id,
+                config.pin_budget_project,
+                config.pin_budget_per_scope,
+            )
+            .await
+            .map_err(storage_err)?;
+            Ok(json!({ "memory_id": memory_id, "pinned": pinned }))
         }
 
         Request::MemoryCreate {
@@ -1131,6 +1168,7 @@ async fn context(
     session_id: Option<Uuid>,
     _reason: Option<ContextReason>,
     token_budget: Option<usize>,
+    explain: bool,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let budget = token_budget.unwrap_or(d.config.read().await.context_budget_tokens);
@@ -1140,7 +1178,7 @@ async fn context(
     // another agent's task goal (FR-010, M1).
     let session = session_for_read(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    let payload = briefing::build(d, &r, session.as_ref(), budget, false).await?;
+    let payload = briefing::build(d, &r, session.as_ref(), budget, false, explain).await?;
     let mut out = serde_json::to_value(payload).unwrap_or(json!({}));
 
     // Whether the task advanced since this session bound to it (FR-489, D80).

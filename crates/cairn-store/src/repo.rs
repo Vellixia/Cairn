@@ -1935,3 +1935,152 @@ mod intelligence_constraint_tests {
         assert_eq!(row, (0, None, None, None));
     }
 }
+
+// ---------------------------------------------------------------------------
+// Pinned invariants (`contracts/continuity-context.md` Part 3)
+// ---------------------------------------------------------------------------
+
+/// Pin a memory, or unpin it.
+///
+/// Refused with `pin_budget_exhausted` when the project or scope budget is full,
+/// **listing the current pins and unpinning nothing** (FR-454). Automatically
+/// evicting someone else's constraint to make room for a new one would be the
+/// opposite of what a pin is for.
+pub async fn set_pinned(
+    store: &Store,
+    memory_id: Uuid,
+    pinned: bool,
+    reason: Option<&str>,
+    session: Uuid,
+    project_pin_budget: usize,
+    scope_pin_budget: usize,
+) -> Result<()> {
+    let mut tx = tx::begin(store, "set_pinned").await?;
+    let row =
+        sqlx::query("SELECT project_id, scope, scope_key, pinned FROM memories WHERE id = ?1")
+            .bind(memory_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("memory {memory_id}")))?;
+    let project_id: String = row.try_get("project_id")?;
+    let scope: String = row.try_get("scope")?;
+    let scope_key: String = row.try_get("scope_key")?;
+    let already: i64 = row.try_get("pinned")?;
+
+    if !pinned {
+        sqlx::query(
+            "UPDATE memories SET pinned = 0, pinned_at = NULL, pinned_by_session = NULL,
+                                 pin_reason = NULL
+             WHERE id = ?1",
+        )
+        .bind(memory_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        return tx::commit(tx, "set_pinned").await;
+    }
+    if already == 1 {
+        return tx::commit(tx, "set_pinned").await;
+    }
+
+    let in_project: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE project_id = ?1 AND pinned = 1")
+            .bind(&project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let in_scope: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memories
+          WHERE project_id = ?1 AND scope = ?2 AND scope_key = ?3 AND pinned = 1",
+    )
+    .bind(&project_id)
+    .bind(&scope)
+    .bind(&scope_key)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if in_project as usize >= project_pin_budget || in_scope as usize >= scope_pin_budget {
+        let current: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM memories WHERE project_id = ?1 AND pinned = 1")
+                .bind(&project_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        return Err(StoreError::Refused {
+            code: cairn_core::wire::codes::PIN_BUDGET_EXHAUSTED,
+            message: format!(
+                "the pin budget is full ({in_project} of {project_pin_budget} in this project, \
+                 {in_scope} of {scope_pin_budget} in this scope); nothing was unpinned. \
+                 Current pins: {}",
+                current.join(", ")
+            ),
+        });
+    }
+
+    let bounded =
+        reason.map(|r| cairn_core::bound::bound_text(&cairn_core::redact::redact(r), 200).text);
+    sqlx::query(
+        "UPDATE memories SET pinned = 1, pinned_at = ?2, pinned_by_session = ?3, pin_reason = ?4
+         WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .bind(rows::now_text())
+    .bind(session.to_string())
+    .bind(bounded)
+    .execute(&mut *tx)
+    .await?;
+    tx::commit(tx, "set_pinned").await
+}
+
+/// Clear a superseded memory's pin, in the caller's transaction.
+///
+/// The successor is pinned only explicitly: inheriting a pin would carry an
+/// invariant onto a claim nobody chose to make invariant (FR-456).
+pub async fn clear_pin_tx(tx: &mut sqlx::SqliteConnection, memory_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "UPDATE memories SET pinned = 0, pinned_at = NULL, pinned_by_session = NULL,
+                             pin_reason = NULL
+         WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// The pins in force here, ordered by scope precedence then importance.
+///
+/// A pin never widens scope: a pinned `branch:feature/x` memory is in force only
+/// on that branch (FR-453). A pin whose claim drifted is **kept** and carries its
+/// warning — a constraint that stopped being true is exactly what must be said
+/// (FR-456).
+pub async fn applicable_pins(
+    store: &Store,
+    project_id: Uuid,
+    branch: &str,
+    task_id: Option<Uuid>,
+) -> Result<Vec<cairn_core::wire::PinnedConstraint>> {
+    let rows = sqlx::query(
+        "SELECT id, content, scope, scope_key, verification FROM memories
+          WHERE project_id = ?1 AND pinned = 1 AND deleted_at IS NULL
+            AND state != 'superseded'
+            AND ( scope = 'project'
+               OR (scope = 'branch' AND scope_key = ?2)
+               OR (scope = 'task'   AND scope_key = ?3) )
+          ORDER BY CASE scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1 ELSE 2 END,
+                   importance DESC, id",
+    )
+    .bind(project_id.to_string())
+    .bind(branch)
+    .bind(task_id.map(|t| t.to_string()).unwrap_or_default())
+    .fetch_all(store.pool())
+    .await?;
+
+    rows.iter()
+        .map(|r| {
+            let verification: Option<String> = r.try_get("verification").ok();
+            Ok(cairn_core::wire::PinnedConstraint {
+                id: rows::uuid(r, "id")?,
+                text: r.try_get("content")?,
+                drifted: verification.as_deref() == Some("drifted"),
+            })
+        })
+        .collect()
+}

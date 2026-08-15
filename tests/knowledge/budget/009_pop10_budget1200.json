@@ -1,0 +1,21 @@
+{
+  "description": "10 memories at 1200 tokens. Level 1 cannot displace Level 0, and the measured cost never exceeds the budget.",
+  "input": {
+    "extra": {
+      "memories": 10,
+      "budget": 1200,
+      "criteria": 3,
+      "blockers": 1,
+      "warnings": 2,
+      "pins": 1,
+      "task": true
+    }
+  },
+  "expect": {
+    "extra": {
+      "within_budget": true,
+      "tier_0a_complete": true,
+      "no_regression": false
+    }
+  }
+}

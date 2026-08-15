@@ -130,11 +130,17 @@ enum Command {
     },
     /// Print the briefing a session would receive.
     Context {
-        #[arg(long)]
+        #[arg(long, alias = "token-budget")]
         budget: Option<usize>,
         /// Which session to brief, when more than one is open here.
         #[arg(long)]
         session: Option<Uuid>,
+        /// Show why each item was selected and why each omission was left out.
+        ///
+        /// Costs no budget when absent: the diagnostics are computed but only
+        /// returned on request (FR-462, FR-463).
+        #[arg(long)]
+        explain: bool,
     },
     /// Capture exclusions.
     Privacy {
@@ -427,6 +433,21 @@ enum EvidenceAction {
 
 #[derive(Subcommand)]
 enum MemoryAction {
+    /// Hold a memory in Level 0 as a standing constraint.
+    ///
+    /// A pin never widens scope, and nothing is ever auto-unpinned to make room
+    /// (FR-453, FR-454).
+    Pin {
+        id: Uuid,
+        /// Unpin it instead.
+        #[arg(long = "off")]
+        off: bool,
+        /// Bounded and redacted before it is stored.
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
     Add {
         content: String,
         #[arg(long = "type", default_value = "fact")]
@@ -847,18 +868,27 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             Ok(Output::with(v, render::handoff(&h)))
         }
 
-        Command::Context { budget, session } => {
+        Command::Context {
+            budget,
+            session,
+            explain,
+        } => {
             let v = client::send(&Request::Context {
                 cwd: cwd(),
                 agent_session_key: None,
                 session_id: *session,
                 reason: Some(ContextReason::Refresh),
                 token_budget: *budget,
+                explain: *explain,
             })
             .await?;
             let payload: ContextPayload =
                 serde_json::from_value(v.clone()).map_err(|e| WireError::invalid(e.to_string()))?;
-            Ok(Output::with(v, render::briefing(&payload)))
+            let mut text = render::briefing(&payload);
+            if let Some(selection) = payload.selection.as_ref() {
+                text.push_str(&render::selection(selection));
+            }
+            Ok(Output::with(v, text))
         }
 
         Command::Privacy { action } => privacy(action).await,
@@ -1379,6 +1409,30 @@ async fn evidence(action: &EvidenceAction) -> Result<Output, WireError> {
 
 async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
     match action {
+        MemoryAction::Pin {
+            id,
+            off,
+            reason,
+            session,
+        } => {
+            let v = client::send(&Request::MemoryPin {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                memory_id: *id,
+                pinned: !*off,
+                reason: reason.clone(),
+            })
+            .await?;
+            Ok(Output::with(
+                v,
+                if *off {
+                    "Unpinned.\n".to_string()
+                } else {
+                    "Pinned. It now leads every briefing in this scope.\n".to_string()
+                },
+            ))
+        }
         MemoryAction::Add {
             content,
             kind,

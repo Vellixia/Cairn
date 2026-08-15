@@ -664,6 +664,43 @@ pub async fn summary(store: &Store, memory_id: Uuid) -> Result<VerificationSumma
     })
 }
 
+/// Drifted memories, for the Level 0 warning tier.
+///
+/// Returns `(subject, detail)` per claim whose support moved. Drift is a
+/// **state**, never an edit: the memory still says what it said, and this is how
+/// the agent is told it no longer holds (FR-371, FR-372).
+pub async fn drifted_memories(
+    store: &Store,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<(String, String)>> {
+    let rows = sqlx::query(
+        "SELECT topic_key, content, verification FROM memories
+          WHERE project_id = ?1 AND deleted_at IS NULL
+            AND verification IN ('drifted', 'needs_recheck')
+            AND state != 'superseded'
+          ORDER BY pinned DESC, updated_at DESC
+          LIMIT ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?;
+
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let topic: Option<String> = r.try_get("topic_key").ok().flatten();
+            let content: String = r.try_get("content").unwrap_or_default();
+            let verification: String = r.try_get("verification").unwrap_or_default();
+            (
+                topic.unwrap_or_else(|| content.chars().take(48).collect()),
+                verification,
+            )
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

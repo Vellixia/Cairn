@@ -264,6 +264,8 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .get("token_budget")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize),
+                // The six tools are fixed; diagnostics stay a CLI affordance.
+                explain: false,
             })
             .await?;
             // The agent gets the rendered briefing plus the raw envelope, so it

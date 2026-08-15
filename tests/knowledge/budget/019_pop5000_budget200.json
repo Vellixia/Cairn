@@ -1,0 +1,21 @@
+{
+  "description": "5000 memories at 200 tokens, below the documented minimum of 600. The briefing is still produced and truncated in Level 0's admission order - never rejected for size.",
+  "input": {
+    "extra": {
+      "memories": 5000,
+      "budget": 200,
+      "criteria": 3,
+      "blockers": 1,
+      "warnings": 2,
+      "pins": 1,
+      "task": true
+    }
+  },
+  "expect": {
+    "extra": {
+      "within_budget": true,
+      "tier_0a_complete": false,
+      "no_regression": false
+    }
+  }
+}

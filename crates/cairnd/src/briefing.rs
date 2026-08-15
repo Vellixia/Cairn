@@ -22,6 +22,7 @@ pub async fn build(
     session: Option<&Session>,
     budget: usize,
     degraded: bool,
+    explain: bool,
 ) -> Result<ContextPayload, WireError> {
     let store = &daemon.store;
     let project = &resolved.project;
@@ -70,8 +71,39 @@ pub async fn build(
         || !branch_memory.is_empty()
         || !project_memory.is_empty();
 
+    // ---- Level 0 -----------------------------------------------------------
+    //
+    // Read only what the bound task actually has. A project with no task reads
+    // nothing here and pays nothing, which is what keeps the no-regression
+    // property true on the daemon path as well as in the assembler (FR-442).
+    let (criteria, blockers, blocker_text) = match task.as_ref() {
+        Some(t) => level0_task_state(daemon, t.id).await,
+        None => (Vec::new(), Vec::new(), Vec::new()),
+    };
+
+    let warnings = level0_warnings(daemon, session, task.as_ref()).await;
+    let pins = level0_pins(daemon, project.id, &git.branch, task.as_ref()).await;
+
+    let config = daemon.config.read().await.clone();
+    let caps = cairn_core::context::Caps {
+        goal_max_tokens: config.goal_max_tokens,
+        warnings_in_context_max: config.warnings_in_context_max,
+        pins_in_context_max: config.pins_in_context_max,
+        reserve_fraction: config.min_safe_context_fraction,
+    };
+
     Ok(assemble(
         &ContextInputs {
+            level0: cairn_core::context::Level0 {
+                criteria: &criteria,
+                blockers: &blockers,
+                blocker_text: &blocker_text,
+                warnings: &warnings,
+                pins: &pins,
+                previous_next_action: None,
+                explain,
+                caps,
+            },
             project,
             repository,
             task: task.as_ref(),
@@ -130,6 +162,104 @@ async fn latest_handoff_for_branch(
 
 fn store_err(e: cairn_store::StoreError) -> WireError {
     WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Level 0 inputs (`contracts/continuity-context.md` Part 2)
+// ---------------------------------------------------------------------------
+
+/// The bound task's criteria and blockers, as the assembler's plain data.
+async fn level0_task_state(
+    daemon: &Daemon,
+    task_id: Uuid,
+) -> (
+    Vec<cairn_core::tasks::CriterionFacts>,
+    Vec<cairn_core::tasks::BlockerFacts>,
+    Vec<(Uuid, String)>,
+) {
+    let facts = match cairn_store::criteria::task_state_facts(&daemon.store, task_id).await {
+        Ok(f) => f,
+        // A briefing is never refused for a read that failed; it is reported
+        // degraded by the caller and the tier is simply absent (FR-046).
+        Err(_) => return (Vec::new(), Vec::new(), Vec::new()),
+    };
+    let text = cairn_store::criteria::blockers(&daemon.store, task_id)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|b| (b.id, b.description))
+        .collect();
+    (facts.criteria, facts.blockers, text)
+}
+
+/// The critical warnings in force.
+///
+/// Warnings are Level 0 **content**, not diagnostics: they are here whether or
+/// not `explain` was requested (FR-464).
+async fn level0_warnings(
+    daemon: &Daemon,
+    session: Option<&Session>,
+    task: Option<&Task>,
+) -> Vec<cairn_core::wire::ContextWarning> {
+    let mut out = Vec::new();
+
+    // A task that advanced under a session that bound at an earlier state.
+    if let (Some(s), Some(t)) = (session, task) {
+        let snapshot: Option<String> =
+            sqlx::query_scalar("SELECT task_snapshot_at_bind FROM sessions WHERE id = ?1")
+                .bind(s.id.to_string())
+                .fetch_optional(daemon.store.pool())
+                .await
+                .ok()
+                .flatten();
+        if let Some(snapshot) = snapshot {
+            if let Ok(changes) =
+                cairn_store::criteria::divergence(&daemon.store, t.id, &snapshot).await
+            {
+                for c in changes.iter().take(4) {
+                    out.push(cairn_core::wire::ContextWarning {
+                        kind: "task_divergence".into(),
+                        subject: c.subject.clone(),
+                        detail: format!("{} ({})", c.what, c.origin),
+                    });
+                }
+            }
+        }
+    }
+
+    // Drifted memories — the claim moved out from under what was remembered.
+    if let Ok(drifted) = cairn_store::evidence::drifted_memories(
+        &daemon.store,
+        task.map(|t| t.project_id).unwrap_or_default(),
+        4,
+    )
+    .await
+    {
+        for (subject, detail) in drifted {
+            out.push(cairn_core::wire::ContextWarning {
+                kind: "drift".into(),
+                subject,
+                detail,
+            });
+        }
+    }
+
+    out
+}
+
+/// The pinned constraints applicable here.
+///
+/// A pin never widens scope: a pinned `branch:feature/x` memory is in force only
+/// on that branch (FR-453).
+async fn level0_pins(
+    daemon: &Daemon,
+    project_id: Uuid,
+    branch: &str,
+    task: Option<&Task>,
+) -> Vec<cairn_core::wire::PinnedConstraint> {
+    repo::applicable_pins(&daemon.store, project_id, branch, task.map(|t| t.id))
+        .await
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

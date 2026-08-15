@@ -590,6 +590,10 @@ pub enum Request {
         reason: Option<ContextReason>,
         #[serde(default)]
         token_budget: Option<usize>,
+        /// Return the selection diagnostics. Costs no budget when false, which
+        /// is why it is opt-in rather than always present (FR-463).
+        #[serde(default)]
+        explain: bool,
     },
 
     HandoffGenerate {
@@ -723,6 +727,18 @@ pub enum Request {
         task_id: Uuid,
         #[serde(default)]
         limit: Option<i64>,
+    },
+
+    MemoryPin {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        memory_id: Uuid,
+        pinned: bool,
+        #[serde(default)]
+        reason: Option<String>,
     },
 
     MemoryCreate {
@@ -1128,6 +1144,18 @@ pub struct Briefing {
     pub known_failures: Vec<String>,
     pub memory: BriefingMemory,
     pub no_prior_history: bool,
+    // ---- Feature 003. Every one is skipped when empty, so a project with no
+    // Level 0 content produces exactly the bytes Feature 001 produced (FR-442).
+    /// Critical warning kinds with counts (Tier 0a), then their detail (Tier 0b).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ContextWarning>,
+    /// Pinned constraints in force for this scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<PinnedConstraint>,
+    /// The recorded next action of a diverged checkpoint, **never** presented as
+    /// `next_action` (FR-434). Absent until Phase 9 records checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_next_action: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1137,6 +1165,92 @@ pub struct BriefingTask {
     pub goal: String,
     pub acceptance_criteria: Vec<String>,
     pub status: TaskStatus,
+    // ---- Feature 003 Tier 0a. Every one is O(1) in the size of the task, which
+    // is what makes the tier's guarantee keepable (FR-443).
+    /// Counts by state. Never a percentage — there is no field for one (FR-486).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<crate::tasks::Progress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_readiness: Option<CompletionReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_blockers: Option<usize>,
+    /// The single most actionable open blocker, summarized to one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+    /// True when the goal was truncated to `goal_max_tokens`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub goal_truncated: bool,
+    /// Criterion labels admitted as Tier 0b detail, in action order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<BriefingCriterion>,
+    /// How many criteria did not fit, with the path that retrieves them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criteria_omitted: Option<usize>,
+}
+
+/// One criterion as Level 0 renders it — both axes named, never collapsed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BriefingCriterion {
+    pub label: String,
+    pub text: String,
+    pub state: CriterionState,
+    pub verification: CriterionVerification,
+}
+
+/// A Level 0 warning. Content, not diagnostics: present whether or not
+/// `explain` was requested (FR-464).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextWarning {
+    /// `task_divergence` | `checkpoint` | `task` | `conflict` | `drift`.
+    pub kind: String,
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// A pinned constraint in force for this scope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinnedConstraint {
+    pub id: Uuid,
+    pub text: String,
+    /// A pin whose claim no longer holds keeps its pin and carries its warning —
+    /// a constraint that stopped being true is exactly what must be said
+    /// (FR-456).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drifted: bool,
+}
+
+/// Why each admitted item was chosen, and why each omission was left out.
+///
+/// Returned only when `explain` was requested, so it costs no budget otherwise
+/// (FR-463).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Selection {
+    pub budget: usize,
+    pub reserve: usize,
+    pub reserve_used: usize,
+    pub reserve_released: usize,
+    pub included: Vec<SelectedItem>,
+    pub omitted: Vec<OmittedItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedItem {
+    pub level: ContextLevel,
+    pub kind: String,
+    pub id: String,
+    pub reasons: Vec<SelectionReason>,
+    pub cost: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmittedItem {
+    pub kind: String,
+    pub count: usize,
+    pub reason: OmissionReason,
+    /// How to retrieve what was left out. Omission is never silent (FR-448).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub retrieval: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1167,6 +1281,9 @@ pub struct ContextPayload {
     pub omitted_sections: Vec<String>,
     /// True when the briefing could not be fully assembled in time (FR-046).
     pub degraded: bool,
+    /// Present only when `explain` was requested (FR-463).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Selection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

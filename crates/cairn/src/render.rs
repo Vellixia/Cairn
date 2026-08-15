@@ -507,6 +507,46 @@ pub fn task_history(v: &serde_json::Value) -> String {
     out
 }
 
+/// The selection table — the answer to "why did Cairn tell the agent this?"
+/// (FR-462).
+pub fn selection(s: &cairn_core::wire::Selection) -> String {
+    let mut out = format!(
+        "\nbudget {} · reserve {} · reserve used {} · released {}\n",
+        s.budget, s.reserve, s.reserve_used, s.reserve_released
+    );
+    if !s.included.is_empty() {
+        out.push_str("INCLUDED\n");
+        for item in &s.included {
+            let reasons: Vec<&str> = item.reasons.iter().map(|r| r.as_str()).collect();
+            out.push_str(&format!(
+                "  {:<13} {:<10} {:<36} {}\n",
+                item.level.as_str(),
+                item.kind,
+                reasons.join(" "),
+                item.cost
+            ));
+        }
+    }
+    if !s.omitted.is_empty() {
+        out.push_str("OMITTED\n");
+        for item in &s.omitted {
+            let retrieval = if item.retrieval.is_empty() {
+                String::new()
+            } else {
+                format!("  — `{}`", item.retrieval)
+            };
+            out.push_str(&format!(
+                "  {} ×{:<8} {}{}\n",
+                item.kind,
+                item.count,
+                item.reason.as_str(),
+                retrieval
+            ));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -547,12 +587,16 @@ mod tests {
                 known_failures: vec![],
                 memory: BriefingMemory::default(),
                 no_prior_history: true,
+                warnings: Vec::new(),
+                constraints: Vec::new(),
+                previous_next_action: None,
             },
             estimated_tokens: 100,
             budget: 1000,
             truncated: false,
             omitted_sections: vec![],
             degraded: false,
+            selection: None,
         };
         let text = briefing(&p);
         assert!(text.contains("no prior history"), "missing no-history line");
@@ -571,12 +615,16 @@ mod tests {
                 known_failures: vec![],
                 memory: BriefingMemory::default(),
                 no_prior_history: false,
+                warnings: Vec::new(),
+                constraints: Vec::new(),
+                previous_next_action: None,
             },
             estimated_tokens: 999,
             budget: 1000,
             truncated: true,
             omitted_sections: vec!["decisions".to_string()],
             degraded: false,
+            selection: None,
         };
         let text = briefing(&p);
         assert!(

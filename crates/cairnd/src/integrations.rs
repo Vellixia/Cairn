@@ -151,6 +151,7 @@ async fn dispatch(
                     session_id: None,
                     reason: Some(cairn_core::wire::ContextReason::SessionStart),
                     token_budget,
+                    explain: false,
                 },
             )
             .await
@@ -204,6 +205,7 @@ async fn dispatch(
                     session_id: None,
                     reason: Some(cairn_core::wire::ContextReason::Continuation),
                     token_budget,
+                    explain: false,
                 },
             )
             .await

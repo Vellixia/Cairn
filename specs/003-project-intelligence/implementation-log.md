@@ -411,9 +411,83 @@ a stranded `#[allow(clippy::too_many_arguments)]` and an orphaned doc comment in
 files across `cairn-core`, `cairn-store`, `cairnd` and the test crate. They are fixed here rather
 than carried forward, which is why the diff touches files Phase 7 otherwise has no business in.
 
+### Checkpoint F(ii) — the Phase 7 review
+
+An independent adversarial review of `3479da5` found one **CRITICAL** defect, reachable
+through the ordinary CLI with no unusual setup, plus three smaller ones. All are fixed in
+`b09d0fc` with regression tests.
+
+**The critical one.** `verify_criterion` derived a criterion's *state* from the newest run but
+its *authority* from every run ever recorded. One genuine Cairn-verified run therefore supplied
+the authority permanently: once the evidence drifted, an agent could attach its own attested
+"pass" and the gate would admit it — reporting `authority: cairn` for a check Cairn never ran,
+and moving the task to `ready`. That is exactly the self-certification FR-484 and D69 exist to
+prevent, and the precondition was one prior genuine verification: the normal lifecycle of any
+criterion.
+
+The gate now reads only the runs recorded in the pass that is running. A memory's authority is
+still derived over its whole history, which is the intended strongest-basis-wins rule there; a
+criterion is the strict consumer and the two windows must not be confused.
+
+**The other three.**
+
+1. A criterion whose evidence drifted now returns to `unverified`, not `failed`. A fingerprint
+   mismatch cannot distinguish "the evidence moved" from "the criterion is false", and the
+   contract names exactly one outcome for it.
+2. Nothing re-checked criteria in the background — no task owned it, though
+   `contracts/task-model.md` §Completion readiness states the behaviour. The bounded pass now
+   re-checks them within what the memory pass left of the same caps. This is the one place a
+   task list gap was filled rather than a task reinterpreted.
+3. A two-field criterion update with no `expected_revision` recorded only its first half as a
+   blind write, and a task update that changed nothing still advanced `local_revision`.
+
+The review confirmed clean: counter transmission (absent from the payload, the domain struct and
+the server schema), the writers of `task_criteria.verification`, ordinal allocation over
+tombstones, transaction integrity, and `derive_task_state_digest`'s inputs.
+
+### Checkpoint G — Phase 8 (T076–T085) complete: minimum-safe context
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace --all-targets` green, 925 tests, 0 failures |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+**What landed**
+
+- `cairn-core::context` restructured into the three levels with Level 0 split in two. Tier 0a is
+  the O(1) guaranteed work state; Tier 0b is bounded detail admitted warnings → pins → criterion
+  text in action order → further blockers, with omissions counted by kind and given a retrieval
+  path. Both spend through `try_spend_reserved`; `release_reserve()` runs once between Level 0
+  and Level 1.
+- The pin repository in `cairn-store::repo`: `set_pinned` with the project and per-scope budgets
+  enforced by refusal, `applicable_pins` scoped so a pin never widens scope, and `clear_pin_tx`
+  called from `record_relation_tx` on a `supersedes` decision.
+- `cairnd::briefing` reads the Level 0 inputs — criteria, blockers, task divergence, drift
+  warnings and applicable pins — and passes the config caps through.
+- `cairn context --explain` / `--token-budget` and `cairn memory pin <id> [--off] [--reason]`.
+- Corpus: `budget/` — 24 population × budget cases and 9 oversized-task cases, written as
+  parameters rather than materialized briefings.
+- Tests: `us10_min_safe_context` (8).
+
+**Decisions**
+
+1. **The header is charged against the reserve.** It was previously charged with `try_spend`,
+   which now sees a smaller general pool. Charging it as Level 0 keeps the total identical while
+   removing any chance that withholding a reserve makes the frame fail where it previously fit.
+2. **Level 0 inputs are a defaulted sub-struct** (`Level0`), so every existing construction of
+   `ContextInputs` keeps working and a caller with none of it gets Feature 001's briefing
+   unchanged. `cairn-core` gained no dependency on `cairn-store`.
+3. **Every new briefing field is skipped when empty.** That is what makes the byte-identical
+   no-regression assertion possible at all; a field serialized as `[]` or `null` would break it.
+4. **`no_regression` was written and run green *before* the restructure**, against the
+   unmodified assembler, so it guarded the change rather than judging it afterwards.
+5. **Tier 0a's worst case is ≈200 estimated tokens** against the documented 600 minimum, so the
+   contract's "bounded worst case fits the minimum budget" is arithmetically true rather than
+   asserted.
+
 ## Where the run stands
 
-**75 of 148 tasks complete**, each with its named evidence passing.
+**85 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
@@ -424,30 +498,32 @@ than carried forward, which is why the diff touches files Phase 7 otherwise has 
 | 5 Evidence & authority | T044–T059 | complete |
 | 6 Drift | T060–T064 | complete |
 | 7 Evidence-aware tasks | T065–T075 | complete |
-| 8–16 | T076–T148 | not started |
+| 8 Minimum-safe context | T076–T085 | complete |
+| 9–16 | T086–T148 | not started |
 
 ## Next action
 
-**Phase 8 (US10 — minimum-safe context, pins and explainability), starting at T076**: the test-first
-cluster T076–T078 — the `tests/knowledge/budget/` corpus across memory populations 0, 10, 500 and
-5,000 × budgets 200…12,000 plus `budget/oversized_task/`, then `us10_min_safe_context::budget` as a
-property test and `::no_regression` against the T004 baseline — then T079–T085.
+**Phase 9 (US6 — compression-safe continuity), starting at T086**: the test-first cluster
+T086–T088 — the `tests/knowledge/staleness/` corpus covering every divergence class alone and in
+combination plus `staleness/external_edit/`, then `us6_continuity::staleness_is_never_current` and
+the ten-compaction test — then T089–T095.
+
+Phase 8 left two things Phase 9 consumes directly: `Level0::previous_next_action` is already
+threaded through the assembler and is simply `None` until checkpoints exist, and Tier 0a already
+reserves its place in the admission order. Writing a checkpoint's `previous_next_action` is
+therefore a store and daemon change, not an assembler change.
+
+`contracts/continuity-context.md` Part 1 governs the phase and **has** been read in this run.
+
+### Superseded next-action note
+
+**Phase 8 (US10 — minimum-safe context, pins and explainability), starting at T076**: the
+test-first cluster T076–T078 — the `tests/knowledge/budget/` corpus across memory populations 0,
+10, 500 and 5,000 × budgets 200…12,000 plus `budget/oversized_task/`, then
+`us10_min_safe_context::budget` as a property test and `::no_regression` against the T004
+baseline — then T079–T085.
 
 Phase 8 consumes Phase 7's output directly: Tier 0a is task work state, and `action_order` is what
 Level 0 admits criteria in. Both are in place and tested.
 
 `contracts/continuity-context.md` governs the phase and has **not** been read yet in this run.
-
-### Superseded next-action note
-
-**Phase 7 (US11 — evidence-aware tasks), starting at T065**: the test-first cluster T065–T067
-(`no_silent_overwrite`, `attested_is_not_enough` / `no_percentage_field`, and the
-`tests/knowledge/tasks/` corpus), then T068–T075.
-
-The pure half is already implemented and tested in `cairn-core::tasks`:
-`derive_task_state_digest`, `progress`, `completion_readiness`, `action_order`,
-`criteria_projection` and `criterion_label`. Phase 7 is the `task_criteria` and `task_blockers`
-repositories, the local counter and change log, the retained projection, criterion verification
-restricted to `cairn` authority, the bind snapshot, and the `cairn task` surfaces.
-
-`contracts/task-model.md` has already been read and governs the phase.
