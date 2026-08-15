@@ -1458,3 +1458,248 @@ mod idle_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Feature 003 — the repository boundary for the columns SQLite cannot CHECK
+// ---------------------------------------------------------------------------
+
+/// Write the Feature 003 columns of a memory, refusing anything a `CHECK` would
+/// have refused (data-model.md §2.1).
+///
+/// This is the single boundary those predicates are enforced at, so a later
+/// writer cannot reach the columns without passing them. Only the fields a
+/// caller supplies are written; `None` leaves the stored value alone, which is
+/// what lets one function serve reconciliation, verification, pinning and the
+/// temporal fields without any of them clobbering another's work.
+pub async fn set_memory_intelligence(
+    store: &Store,
+    id: Uuid,
+    columns: crate::constraints::MemoryColumns<'_>,
+) -> Result<()> {
+    crate::constraints::check_memory_columns(columns)?;
+
+    let mut tx = tx::begin(store, "set_memory_intelligence").await?;
+    sqlx::query(
+        "UPDATE memories SET
+             topic_key              = COALESCE(?2, topic_key),
+             value_key              = COALESCE(?3, value_key),
+             importance             = COALESCE(?4, importance),
+             verification           = COALESCE(?5, verification),
+             verification_authority = CASE WHEN ?5 IS NOT NULL THEN ?6
+                                           ELSE COALESCE(?6, verification_authority) END,
+             pinned                 = COALESCE(?7, pinned),
+             pinned_at              = CASE WHEN ?7 IS NOT NULL THEN ?8
+                                           ELSE COALESCE(?8, pinned_at) END,
+             pinned_by_session      = CASE WHEN ?7 IS NOT NULL THEN ?9
+                                           ELSE COALESCE(?9, pinned_by_session) END,
+             pin_reason             = CASE WHEN ?7 IS NOT NULL THEN ?10
+                                           ELSE COALESCE(?10, pin_reason) END,
+             superseded_at          = COALESCE(?11, superseded_at)
+         WHERE id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(id.to_string())
+    .bind(columns.topic_key)
+    .bind(columns.value_key)
+    .bind(columns.importance)
+    .bind(columns.verification)
+    .bind(columns.verification_authority)
+    .bind(columns.pinned)
+    .bind(columns.pinned_at)
+    .bind(columns.pinned_by_session)
+    .bind(columns.pin_reason)
+    .bind(columns.superseded_at)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod intelligence_constraint_tests {
+    use super::*;
+    use crate::constraints::MemoryColumns;
+    use crate::Store;
+
+    async fn store_with_memory() -> (tempfile::TempDir, Store, Uuid) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("cairn.sqlite3")).await.unwrap();
+
+        let project = Uuid::now_v7();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked,
+                                   server_project_id, created_at, updated_at, deleted_at)
+             VALUES (?1, 'test', ?2, NULL, 0, NULL, ?3, ?3, NULL)",
+        )
+        .bind(project.to_string())
+        .bind(format!("/tmp/git-{project}"))
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let memory = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state,
+                                   superseded_by_id, origin_session_id, local_only,
+                                   created_at, updated_at)
+             VALUES (?1, ?2, 'fact', 'project', ?3, 'a claim', 'active', NULL, ?4, 0, ?5, ?5)",
+        )
+        .bind(memory.to_string())
+        .bind(project.to_string())
+        .bind(project.to_string())
+        .bind(Uuid::now_v7().to_string())
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        (dir, store, memory)
+    }
+
+    /// Each predicate a `CHECK` would have expressed is refused at the
+    /// repository boundary, against a real store rather than in the abstract.
+    #[tokio::test]
+    async fn the_boundary_refuses_what_a_check_would_have() {
+        let (_dir, store, id) = store_with_memory().await;
+
+        let cases: Vec<(&str, MemoryColumns<'_>)> = vec![
+            (
+                "value_key IS NULL OR topic_key IS NOT NULL",
+                MemoryColumns {
+                    value_key: Some("postgresql"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "importance",
+                MemoryColumns {
+                    importance: Some("critical"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "verification",
+                MemoryColumns {
+                    verification: Some("probably"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "implies verification_authority IS NULL",
+                MemoryColumns {
+                    verification: Some("drifted"),
+                    verification_authority: Some("cairn"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pinned = 0 implies",
+                MemoryColumns {
+                    pinned: Some(0),
+                    pin_reason: Some("a reason with no pin"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "state = 'superseded'",
+                MemoryColumns {
+                    state: Some("active"),
+                    superseded_at: Some("2026-01-01T00:00:00Z"),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        for (predicate, columns) in cases {
+            let err = set_memory_intelligence(&store, id, columns)
+                .await
+                .expect_err(&format!("{predicate} was accepted"))
+                .to_string();
+            assert!(err.contains(predicate), "expected {predicate}, got {err}");
+        }
+
+        // And nothing was written by any of the refusals.
+        let row: (Option<String>, String, Option<String>) = sqlx::query_as(
+            "SELECT value_key, importance, verification_authority FROM memories WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row, (None, "normal".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn a_valid_write_lands() {
+        let (_dir, store, id) = store_with_memory().await;
+
+        set_memory_intelligence(
+            &store,
+            id,
+            MemoryColumns {
+                topic_key: Some("infra.production_database"),
+                value_key: Some("postgresql"),
+                importance: Some("high"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let row: (Option<String>, Option<String>, String) =
+            sqlx::query_as("SELECT topic_key, value_key, importance FROM memories WHERE id = ?1")
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            row,
+            (
+                Some("infra.production_database".into()),
+                Some("postgresql".into()),
+                "high".into()
+            )
+        );
+    }
+
+    /// Unpinning clears the pin's metadata rather than leaving it behind.
+    #[tokio::test]
+    async fn unpinning_clears_the_metadata_it_required() {
+        let (_dir, store, id) = store_with_memory().await;
+
+        set_memory_intelligence(
+            &store,
+            id,
+            MemoryColumns {
+                pinned: Some(1),
+                pinned_at: Some("2026-01-01T00:00:00Z"),
+                pinned_by_session: Some("s1"),
+                pin_reason: Some("never move a published ref"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        set_memory_intelligence(
+            &store,
+            id,
+            MemoryColumns {
+                pinned: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let row: (i64, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT pinned, pinned_at, pinned_by_session, pin_reason FROM memories WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row, (0, None, None, None));
+    }
+}

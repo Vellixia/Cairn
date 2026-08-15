@@ -4,6 +4,7 @@
 //! Everything here is local and works offline. No call in this crate touches
 //! the network.
 
+pub mod constraints;
 pub mod diag;
 pub mod integrations;
 pub mod migrate;
