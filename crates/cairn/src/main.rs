@@ -287,7 +287,61 @@ enum MemoryAction {
         /// Supporting observation ids. Optional, and never invented.
         #[arg(long = "evidence")]
         evidence: Vec<Uuid>,
+        /// The subject this states something about — `infra.production_database`.
+        ///
+        /// Optional. Without one the memory is free-form and behaves exactly as
+        /// it does today; with one it takes part in reconciliation.
+        #[arg(long)]
+        topic_key: Option<String>,
+        /// The comparable value it asserts. Only meaningful with a topic key.
+        #[arg(long)]
+        value_key: Option<String>,
+        /// Ranks within a bucket, and nothing more: it never changes scope
+        /// precedence and never admits an item into reserved context.
+        #[arg(long)]
+        importance: Option<String>,
         /// Which session recorded this, when more than one is open here.
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Inspect a subject: its members, its answer or answers, and why.
+    Subject {
+        topic_key: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        scope_key: Option<String>,
+    },
+    /// Confirm that an existing memory is still true.
+    ///
+    /// Explicit, always. Cairn never infers a reinforcement from a matching
+    /// value key.
+    Reinforce {
+        id: Uuid,
+        /// The memory carrying this session's confirming statement.
+        #[arg(long)]
+        from: Uuid,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Record an explicit reconciliation decision.
+    Reconcile {
+        #[arg(long)]
+        from: Uuid,
+        #[arg(long)]
+        to: Uuid,
+        /// `supersedes`, `narrows`, `not_applicable_to`, `duplicates` or
+        /// `reinforces`. A conflict is detected, never declared.
+        #[arg(long)]
+        relation: String,
+        /// `deterministic_rule`, `evidence`, `explicit_agent` or
+        /// `explicit_user`.
+        #[arg(long, default_value = "explicit_user")]
+        basis: String,
+        #[arg(long)]
+        basis_evidence: Option<Uuid>,
+        #[arg(long)]
+        rationale: Option<String>,
         #[arg(long)]
         session: Option<Uuid>,
     },
@@ -303,6 +357,19 @@ enum MemoryAction {
         state: Option<String>,
         #[arg(long)]
         limit: Option<i64>,
+        /// Exact subject identity, or a prefix when it ends in a dot.
+        #[arg(long)]
+        topic_key: Option<String>,
+        /// What was effective at an instant, RFC 3339. A historical answer,
+        /// echoed back so it cannot be mistaken for a current one.
+        #[arg(long)]
+        as_of: Option<String>,
+        /// Only memories whose subject is conflicted.
+        #[arg(long)]
+        conflicted: bool,
+        /// Only memories whose subject is corroborated.
+        #[arg(long)]
+        corroborated: bool,
         /// Which session's task to rank by, when more than one is open here.
         #[arg(long)]
         session: Option<Uuid>,
@@ -929,9 +996,16 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             scope_key,
             local_only,
             evidence,
+            topic_key,
+            value_key,
+            importance,
             session,
         } => {
             let kind: MemoryType = parse_enum("type", kind)?;
+            let importance = match importance {
+                Some(i) => Some(parse_enum::<Importance>("importance", i)?),
+                None => None,
+            };
             let scope = match scope {
                 Some(s) => Some(parse_enum::<MemoryScope>("scope", s)?),
                 None => None,
@@ -944,6 +1018,9 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 scope,
                 scope_key: scope_key.clone(),
                 content: content.clone(),
+                topic_key: topic_key.clone(),
+                value_key: value_key.clone(),
+                importance,
                 evidence_observation_ids: evidence.clone(),
                 local_only: *local_only,
             })
@@ -953,6 +1030,64 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 format!("Remembered {}.\n", v["memory"]["id"]),
             ))
         }
+        MemoryAction::Subject {
+            topic_key,
+            scope,
+            scope_key,
+        } => {
+            let scope = match scope {
+                Some(s) => Some(parse_enum::<MemoryScope>("scope", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::MemorySubject {
+                cwd: cwd(),
+                topic_key: topic_key.clone(),
+                scope,
+                scope_key: scope_key.clone(),
+            })
+            .await?;
+            let text = render::subject(&v);
+            Ok(Output::with(v, text))
+        }
+        MemoryAction::Reinforce { id, from, session } => {
+            let v = client::send(&Request::MemoryReinforce {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                memory_id: *id,
+                from_memory_id: Some(*from),
+            })
+            .await?;
+            let counts = format!(
+                "Reinforced. reinforcements {} · distinct origins {}\n",
+                v.get("reinforcements").and_then(|n| n.as_i64()).unwrap_or(0),
+                v.get("distinct_origins").and_then(|n| n.as_i64()).unwrap_or(1),
+            );
+            Ok(Output::with(v, counts))
+        }
+        MemoryAction::Reconcile {
+            from,
+            to,
+            relation,
+            basis,
+            basis_evidence,
+            rationale,
+            session,
+        } => {
+            let v = client::send(&Request::MemoryReconcile {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                from_memory_id: *from,
+                to_memory_id: *to,
+                relation: parse_enum("relation", relation)?,
+                basis: parse_enum("basis", basis)?,
+                basis_evidence_id: *basis_evidence,
+                rationale: rationale.clone(),
+            })
+            .await?;
+            Ok(Output::with(v, "Decision recorded.\n".to_string()))
+        }
         MemoryAction::Search {
             query,
             scope,
@@ -960,8 +1095,24 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             kind,
             state,
             limit,
+            topic_key,
+            as_of,
+            conflicted,
+            corroborated,
             session,
         } => {
+            let as_of = match as_of {
+                Some(t) => Some(
+                    chrono::DateTime::parse_from_rfc3339(t)
+                        .map_err(|e| {
+                            WireError::invalid(format!(
+                                "--as-of must be an RFC 3339 instant: {e}"
+                            ))
+                        })?
+                        .with_timezone(&chrono::Utc),
+                ),
+                None => None,
+            };
             let q = MemoryQuery {
                 query: query.clone(),
                 scope: match scope {
@@ -978,6 +1129,10 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                     None => None,
                 },
                 limit: *limit,
+                topic_key: topic_key.clone(),
+                as_of,
+                conflicted: *conflicted,
+                corroborated: *corroborated,
             };
             let v = client::send(&Request::MemorySearch {
                 cwd: cwd(),

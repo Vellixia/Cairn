@@ -319,6 +319,7 @@ dependencies = [
  "cairn-integrate",
  "cairn-store",
  "cairn-sys",
+ "chrono",
  "serde_json",
  "sqlx",
  "tempfile",

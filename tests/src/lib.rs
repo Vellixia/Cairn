@@ -1752,3 +1752,149 @@ pub mod baseline {
         }
     }
 }
+
+/// A real local store with a project, for the knowledge suites.
+///
+/// Feature 003's canonical-knowledge tests need a store and the repository API,
+/// not a daemon or a repository on disk: what they exercise is what the *store*
+/// decides when a proposal arrives. Driving `cairn` over a socket for that would
+/// test the socket.
+///
+/// The suites that need the whole path — `cairn memory add` through the daemon —
+/// use [`Sandbox`] instead, and T042 is where that lands.
+pub mod store_fixture {
+    use cairn_core::domain::{MemoryScope, MemoryType};
+    use cairn_store::knowledge::SubjectRead;
+    use cairn_store::outbox::SyncPolicy;
+    use cairn_store::repo::{self, CreateOutcome, NewMemory};
+    use cairn_store::Store;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    pub struct Fixture {
+        _dir: TempDir,
+        pub store: Store,
+        pub project: Uuid,
+        pub scope_key: String,
+    }
+
+    impl Fixture {
+        pub async fn new() -> Self {
+            let dir = TempDir::new().expect("dir");
+            let store = Store::open(&dir.path().join("cairn.sqlite3"))
+                .await
+                .expect("open");
+            let project = Uuid::now_v7();
+            let now = "2026-01-02T03:04:05Z".to_string();
+            sqlx::query(
+                "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked,
+                                       server_project_id, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'knowledge-fixture', ?2, NULL, 0, NULL, ?3, ?3, NULL)",
+            )
+            .bind(project.to_string())
+            .bind(format!("/fixture/{project}/.git"))
+            .bind(&now)
+            .execute(store.pool())
+            .await
+            .expect("project");
+
+            Self {
+                _dir: dir,
+                store,
+                project,
+                scope_key: project.to_string(),
+            }
+        }
+
+        pub fn blocking() -> (tokio::runtime::Runtime, Self) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let f = rt.block_on(Self::new());
+            (rt, f)
+        }
+
+        /// Record a proposal exactly as the store would on a real write.
+        pub async fn propose(
+            &self,
+            session: Uuid,
+            topic: Option<&str>,
+            value: Option<&str>,
+            content: &str,
+        ) -> CreateOutcome {
+            self.propose_scoped(session, MemoryScope::Project, None, topic, value, content)
+                .await
+        }
+
+        pub async fn propose_scoped(
+            &self,
+            session: Uuid,
+            scope: MemoryScope,
+            scope_key: Option<&str>,
+            topic: Option<&str>,
+            value: Option<&str>,
+            content: &str,
+        ) -> CreateOutcome {
+            let key = scope_key.unwrap_or(&self.scope_key).to_string();
+            repo::create_memory_reconciled(
+                &self.store,
+                NewMemory {
+                    project_id: self.project,
+                    kind: MemoryType::Fact,
+                    scope,
+                    scope_key: &key,
+                    content,
+                    origin_session_id: session,
+                    local_only: false,
+                    evidence: &[],
+                    topic_key: topic,
+                    value_key: value,
+                    importance: cairn_core::Importance::Normal,
+                },
+                SyncPolicy {
+                    linked: false,
+                    server_project_id: None,
+                },
+                cairn_store::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+            )
+            .await
+            .expect("propose")
+        }
+
+        pub async fn subject(&self, topic: &str) -> SubjectRead {
+            cairn_store::knowledge::subject(
+                &self.store,
+                self.project,
+                MemoryScope::Project,
+                &self.scope_key,
+                topic,
+                cairn_store::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+            )
+            .await
+            .expect("subject")
+        }
+
+        pub async fn count(&self, sql: &str) -> i64 {
+            sqlx::query_scalar::<_, i64>(sql)
+                .fetch_one(self.store.pool())
+                .await
+                .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        }
+
+        /// Rewrite a memory's clock columns.
+        ///
+        /// Used only to prove they cannot matter: nothing in the derivation
+        /// reads them, and the way to demonstrate that is to move them and show
+        /// the answer does not.
+        pub async fn set_clock(&self, memory: Uuid, created_at: &str, updated_at: &str) {
+            sqlx::query("UPDATE memories SET created_at = ?2, updated_at = ?3 WHERE id = ?1")
+                .bind(memory.to_string())
+                .bind(created_at)
+                .bind(updated_at)
+                .execute(self.store.pool())
+                .await
+                .expect("set clock");
+        }
+    }
+}

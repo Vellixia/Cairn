@@ -412,7 +412,19 @@ def build():
                 for i in range(3)
             ],
         },
-        "expect": {"reconciliation": "settled", "answers": ["d"]},
+        "expect": {
+            "reconciliation": "settled",
+            "answers": ["d"],
+            "extra": {
+                "as_of": [
+                    {"after_supersession": 0, "effective": ["a"]},
+                    {"after_supersession": 1, "effective": ["b"]},
+                    {"after_supersession": 2, "effective": ["c"]},
+                    {"after_supersession": 3, "effective": ["d"]},
+                ],
+                "chain": ["a", "b", "c", "d"],
+            },
+        },
     })
 
     write("supersession", 2, "predecessor_is_not_an_answer", {
@@ -425,7 +437,17 @@ def build():
             ],
             "relations": [{"from": B, "to": A, "kind": "supersedes", "basis": "explicit_user"}],
         },
-        "expect": {"reconciliation": "settled", "answers": [B]},
+        "expect": {
+            "reconciliation": "settled",
+            "answers": [B],
+            "extra": {
+                "as_of": [
+                    {"after_supersession": 0, "effective": [A]},
+                    {"after_supersession": 1, "effective": [B]},
+                ],
+                "chain": [A, B],
+            },
+        },
     })
 
     write("supersession", 3, "every_member_historical", {
@@ -474,7 +496,11 @@ def build():
         "expect": {
             "reconciliation": "historical",
             "answers": [],
-            "extra": {"stale_at": None, "applicability": "unknown"},
+            "extra": {
+                "stale_at": None,
+                "applicability": "unknown",
+                "historical_answer": "returned as effective, applicability unknown",
+            },
         },
     })
 

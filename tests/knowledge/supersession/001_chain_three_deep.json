@@ -67,6 +67,40 @@
     "reconciliation": "settled",
     "answers": [
       "d"
-    ]
+    ],
+    "extra": {
+      "as_of": [
+        {
+          "after_supersession": 0,
+          "effective": [
+            "a"
+          ]
+        },
+        {
+          "after_supersession": 1,
+          "effective": [
+            "b"
+          ]
+        },
+        {
+          "after_supersession": 2,
+          "effective": [
+            "c"
+          ]
+        },
+        {
+          "after_supersession": 3,
+          "effective": [
+            "d"
+          ]
+        }
+      ],
+      "chain": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    }
   }
 }

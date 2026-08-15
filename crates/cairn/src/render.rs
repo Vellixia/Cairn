@@ -322,3 +322,114 @@ mod tests {
         assert!(text.contains("Sessions     none active"));
     }
 }
+
+/// Render a subject: its answer or answers, and why (FR-307).
+///
+/// The reconciliation state leads, because it is the thing a reader needs
+/// first — a conflicted subject has no single answer, and presenting one of its
+/// members as the answer would be the silent winner this feature exists to
+/// prevent.
+pub fn subject(v: &serde_json::Value) -> String {
+    let s = &v["subject"];
+    let mut out = String::new();
+    let state = s["reconciliation"].as_str().unwrap_or("unknown");
+    out.push_str(&format!(
+        "# {} ({}:{})\n\n",
+        s["topic_key"].as_str().unwrap_or("?"),
+        s["scope"].as_str().unwrap_or("?"),
+        s["scope_key"].as_str().unwrap_or("?")
+    ));
+    out.push_str(&format!("**Reconciliation**: {state}\n"));
+
+    let answers = s["answers"].as_array().cloned().unwrap_or_default();
+    match state {
+        "historical" => out.push_str("\nNo current answer: every member is history.\n"),
+        "conflicted" => out.push_str(&format!(
+            "\n⚠ {} competing answers, and no winner. Resolve by superseding one, \
+             narrowing its scope, or attaching verification that distinguishes them.\n",
+            answers.len()
+        )),
+        "corroborated" => out.push_str(&format!(
+            "\nThe value is agreed and the statements are several: {} distinct statements.\n",
+            answers.len()
+        )),
+        _ => {}
+    }
+
+    if !answers.is_empty() {
+        out.push_str("\n## Answers\n");
+        let accounting = s["accounting"].as_array().cloned().unwrap_or_default();
+        for (i, a) in answers.iter().enumerate() {
+            let id = a.as_str().unwrap_or("?");
+            let member = s["members"]
+                .as_array()
+                .and_then(|ms| ms.iter().find(|m| m["id"].as_str() == Some(id)));
+            let verification = member
+                .and_then(|m| m["verification"].as_str())
+                .unwrap_or("unverified");
+            let authority = member
+                .and_then(|m| m["verification_authority"].as_str())
+                .map(|a| format!(" ({a})"))
+                .unwrap_or_default();
+            out.push_str(&format!("- `{id}` — {verification}{authority}"));
+            if let Some(acc) = accounting.get(i) {
+                let origins = acc["distinct_origins"].as_i64().unwrap_or(1);
+                let dupes = acc["duplicates"].as_array().map(|d| d.len()).unwrap_or(0);
+                if dupes > 0 {
+                    // Never presented as a number of independent verifications
+                    // (FR-406).
+                    out.push_str(&format!(
+                        " · {dupes} duplicate statements · {origins} distinct origins"
+                    ));
+                }
+            }
+            out.push('\n');
+        }
+    }
+
+    let narrowed = s["narrowed_by"].as_array().cloned().unwrap_or_default();
+    if !narrowed.is_empty() {
+        out.push_str("\n## Narrowed by\n");
+        for n in &narrowed {
+            out.push_str(&format!("- `{}`\n", n.as_str().unwrap_or("?")));
+        }
+    }
+
+    let decisions = s["decisions"].as_array().cloned().unwrap_or_default();
+    if !decisions.is_empty() {
+        out.push_str("\n## Decisions\n");
+        for d in &decisions {
+            out.push_str(&format!(
+                "- {} `{}` → `{}` ({})\n",
+                d["kind"].as_str().unwrap_or("?"),
+                d["from"].as_str().unwrap_or("?"),
+                d["to"].as_str().unwrap_or("?"),
+                d["basis"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+
+    let elevation = s["elevation_candidates"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    if !elevation.is_empty() {
+        out.push_str("\n## Elevation candidates\n");
+        out.push_str(
+            "Reported, never applied. A merge does not make branch knowledge project \
+             knowledge; that takes an explicit decision.\n",
+        );
+        for c in &elevation {
+            out.push_str(&format!(
+                "- `{}` from `{}`\n",
+                c["memory_id"].as_str().unwrap_or("?"),
+                c["branch"].as_str().unwrap_or("?")
+            ));
+        }
+    }
+
+    if s["degraded"].as_bool().unwrap_or(false) {
+        out.push_str("\n⚠ The subject read hit its bound; some members were not examined.\n");
+    }
+    out
+}

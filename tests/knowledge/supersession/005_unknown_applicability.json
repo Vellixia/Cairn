@@ -19,7 +19,8 @@
     "answers": [],
     "extra": {
       "stale_at": null,
-      "applicability": "unknown"
+      "applicability": "unknown",
+      "historical_answer": "returned as effective, applicability unknown"
     }
   }
 }

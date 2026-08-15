@@ -356,6 +356,28 @@ pub struct MemoryQuery {
     pub state: Option<MemoryState>,
     #[serde(default)]
     pub limit: Option<i64>,
+
+    // Feature 003. Every one defaults to absent, so a caller that omits them
+    // all receives Feature 001 behaviour exactly (FR-497).
+    /// Exact or prefix match on the normalized subject identity. A trailing
+    /// `.` makes it a prefix — `infrastructure.` matches every subject beneath
+    /// it. Matched by SQL, never by FTS: a topic key is an identity, not text.
+    #[serde(default)]
+    pub topic_key: Option<String>,
+    /// What was effective at an instant (FR-342).
+    ///
+    /// Reconstructs proposal effectiveness and explicit supersession
+    /// intervals, which is the whole of what Cairn stores authoritatively. The
+    /// lifecycle filter is relaxed when this is set, because a historical
+    /// answer is precisely the set of proposals that are no longer current.
+    #[serde(default)]
+    pub as_of: Option<DateTime<Utc>>,
+    /// Only memories whose subject is `Conflicted`.
+    #[serde(default)]
+    pub conflicted: bool,
+    /// Only memories whose subject is `Corroborated`.
+    #[serde(default)]
+    pub corroborated: bool,
 }
 
 /// Everything the daemon can be asked to do.
@@ -634,6 +656,14 @@ pub enum Request {
         evidence_observation_ids: Vec<Uuid>,
         #[serde(default)]
         local_only: bool,
+        /// The subject this proposal concerns (FR-318). Optional: a free-form
+        /// memory is fully valid and behaves exactly as it does in Feature 001.
+        #[serde(default)]
+        topic_key: Option<String>,
+        #[serde(default)]
+        value_key: Option<String>,
+        #[serde(default)]
+        importance: Option<Importance>,
     },
     MemorySupersede {
         cwd: String,
@@ -650,6 +680,14 @@ pub enum Request {
         evidence_observation_ids: Vec<Uuid>,
         #[serde(default)]
         local_only: bool,
+        /// The subject this proposal concerns (FR-318). Optional: a free-form
+        /// memory is fully valid and behaves exactly as it does in Feature 001.
+        #[serde(default)]
+        topic_key: Option<String>,
+        #[serde(default)]
+        value_key: Option<String>,
+        #[serde(default)]
+        importance: Option<Importance>,
     },
     MemoryForget {
         cwd: String,
@@ -667,6 +705,49 @@ pub enum Request {
         session_id: Option<Uuid>,
         #[serde(flatten)]
         query: MemoryQuery,
+    },
+
+    /// Inspect a subject: its members, its canonical answer or answers, its
+    /// reconciliation state, and the decisions that produced it (FR-307).
+    MemorySubject {
+        cwd: String,
+        topic_key: String,
+        #[serde(default)]
+        scope: Option<MemoryScope>,
+        #[serde(default)]
+        scope_key: Option<String>,
+    },
+    /// A session confirms an existing memory is still true (FR-321).
+    ///
+    /// Explicit only. Cairn never infers a reinforcement from a matching value
+    /// key — that inference was the false-merge path this feature closed.
+    MemoryReinforce {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        memory_id: Uuid,
+        /// The memory carrying the confirming session's statement. When absent
+        /// the confirmation is recorded against the session itself.
+        #[serde(default)]
+        from_memory_id: Option<Uuid>,
+    },
+    /// Record an explicit reconciliation decision (FR-335).
+    MemoryReconcile {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        from_memory_id: Uuid,
+        to_memory_id: Uuid,
+        relation: RelationKind,
+        basis: RelationBasis,
+        #[serde(default)]
+        basis_evidence_id: Option<Uuid>,
+        #[serde(default)]
+        rationale: Option<String>,
     },
 
     PrivacyExclude {
@@ -859,7 +940,37 @@ pub struct MemoryResult {
     pub created_at: DateTime<Utc>,
     pub provenance: Provenance,
     pub rank: RankInfo,
+
+    // Feature 003 read-only fields. A Feature 001 caller sees its existing
+    // fields unchanged and simply gains these (FR-497).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal: Option<Temporal>,
 }
+
+/// What Cairn can say about when a proposal applied.
+///
+/// The claim is bounded by what Cairn stores authoritatively: an
+/// `effective_from` it recorded, and a `superseded_at` set with the
+/// supersession relation. A lifecycle transition with no authoritative instant
+/// reports `applicability: unknown` rather than an unbounded interval (FR-342,
+/// D82).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Temporal {
+    pub effective_from: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<DateTime<Utc>>,
+    /// NULL means **unknown**, never "not stale".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_at: Option<DateTime<Utc>>,
+    /// `bounded` when every transition this memory underwent has an
+    /// authoritative instant; `unknown` when one does not.
+    pub applicability: Applicability,
+}
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchPayload {

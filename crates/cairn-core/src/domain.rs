@@ -734,6 +734,14 @@ text_enum!(
 );
 
 text_enum!(
+    /// Whether a historical answer can bound the interval it reports.
+    Applicability, "applicability", {
+        Bounded => "bounded",
+        Unknown => "unknown",
+    }
+);
+
+text_enum!(
     /// What Cairn can honestly promise an agent about continuity across a
     /// compaction boundary.
     ///

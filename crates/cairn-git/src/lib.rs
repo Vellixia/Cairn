@@ -241,6 +241,74 @@ pub fn local_branches(worktree: &Path) -> Result<Vec<String>, GitError> {
         .collect())
 }
 
+/// Whether `branch` has been merged into `target`.
+///
+/// True when the branch tip is an ancestor of the target tip — which is what
+/// "merged" means to Git and what Cairn needs to know before it may offer a
+/// branch's knowledge as an **elevation candidate** (FR-382).
+///
+/// It is only ever a candidate. Branch-scoped knowledge never becomes project
+/// knowledge automatically when a branch merges: a merge may *produce* a
+/// candidate, which is then verified against the current target branch and
+/// applied only on an explicit decision.
+///
+/// An unresolvable ref is `Ok(false)` rather than an error: a branch that no
+/// longer exists has not been merged, and a status read must not fail because
+/// of it (FR-476).
+pub fn is_merged_into(worktree: &Path, branch: &str, target: &str) -> Result<bool, GitError> {
+    if branch == target {
+        return Ok(false);
+    }
+    let Some(branch_tip) = resolve_ref(worktree, branch)? else {
+        return Ok(false);
+    };
+    let Some(target_tip) = resolve_ref(worktree, target)? else {
+        return Ok(false);
+    };
+    if branch_tip == target_tip {
+        return Ok(true);
+    }
+    // `merge-base --is-ancestor` exits 0 when it is, 1 when it is not, and
+    // something else on a real failure. Only the last is an error.
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["merge-base", "--is-ancestor", &branch_tip, &target_tip])
+        .output()
+        .map_err(|e| GitError::CommandFailed { command: "rev-parse".into(), stderr: e.to_string() })?;
+    match out.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Ok(false),
+    }
+}
+
+/// Resolve a ref to an object id, or `None` when it does not resolve.
+///
+/// Unresolvable is a distinguishable outcome rather than an error, because
+/// every caller treats it as "inconclusive" rather than as a failure (FR-366).
+pub fn resolve_ref(worktree: &Path, name: &str) -> Result<Option<String>, GitError> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")])
+        .output()
+        .map_err(|e| GitError::CommandFailed { command: "rev-parse".into(), stderr: e.to_string() })?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok((!id.is_empty()).then_some(id))
+}
+
+/// Whether a commit is present in this clone.
+///
+/// Absent is `Ok(false)`: a commit this clone has never fetched is not an
+/// error, it is a check that cannot conclude.
+pub fn commit_present(worktree: &Path, commit: &str) -> Result<bool, GitError> {
+    Ok(resolve_ref(worktree, commit)?.is_some())
+}
+
 /// True when `git` can be executed at all.
 pub fn git_available() -> bool {
     Command::new("git")
@@ -419,6 +487,85 @@ mod tests {
         assert_eq!(
             normalize_remote("https://user:pass@github.com/Vellixia/Cairn"),
             "github.com/Vellixia/Cairn"
+        );
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn repo() -> TempDir {
+        let dir = TempDir::new().expect("dir");
+        let p = dir.path();
+        git(p, &["init", "--initial-branch=main"]);
+        git(p, &["config", "user.email", "t@example.com"]);
+        git(p, &["config", "user.name", "T"]);
+        git(p, &["config", "commit.gpgsign", "false"]);
+        fs::write(p.join("a.txt"), "one\n").expect("write");
+        git(p, &["add", "."]);
+        git(p, &["commit", "-m", "one", "--no-gpg-sign"]);
+        dir
+    }
+
+    #[test]
+    fn a_merged_branch_is_an_ancestor_of_the_target() {
+        let dir = repo();
+        let p = dir.path();
+        git(p, &["checkout", "-b", "feature/x"]);
+        fs::write(p.join("b.txt"), "two\n").expect("write");
+        git(p, &["add", "."]);
+        git(p, &["commit", "-m", "two", "--no-gpg-sign"]);
+
+        // Not merged yet.
+        assert!(!is_merged_into(p, "feature/x", "main").expect("check"));
+
+        git(p, &["checkout", "main"]);
+        git(p, &["merge", "--no-ff", "feature/x", "-m", "merge", "--no-gpg-sign"]);
+        assert!(is_merged_into(p, "feature/x", "main").expect("check"));
+    }
+
+    #[test]
+    fn a_branch_is_never_merged_into_itself() {
+        let dir = repo();
+        assert!(!is_merged_into(dir.path(), "main", "main").expect("check"));
+    }
+
+    #[test]
+    fn an_unresolvable_ref_is_not_merged_rather_than_an_error() {
+        // A branch that no longer exists has not been merged, and a status read
+        // must not fail because of it.
+        let dir = repo();
+        assert!(!is_merged_into(dir.path(), "branch/gone", "main").expect("check"));
+        assert!(!is_merged_into(dir.path(), "main", "branch/gone").expect("check"));
+        assert_eq!(resolve_ref(dir.path(), "branch/gone").expect("resolve"), None);
+    }
+
+    #[test]
+    fn a_ref_resolves_to_a_commit_and_a_missing_commit_is_absent() {
+        let dir = repo();
+        let head = resolve_ref(dir.path(), "HEAD").expect("resolve").expect("head");
+        assert_eq!(head.len(), 40, "{head}");
+        assert!(commit_present(dir.path(), &head).expect("present"));
+        assert!(
+            !commit_present(dir.path(), "0000000000000000000000000000000000000000")
+                .expect("absent")
         );
     }
 }

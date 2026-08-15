@@ -980,16 +980,48 @@ pub async fn supersede_memory(
     policy: SyncPolicy,
 ) -> Result<(Memory, Memory)> {
     let original = memory(store, original_id).await?;
+    let session = replacement.origin_session_id;
     let new = create_memory(store, replacement, policy).await?;
+    let now = rows::now_text();
+
+    // The relation, the lifecycle columns and the pin move together (FR-323,
+    // FR-341, FR-456). Feature 001's `state` and `superseded_by_id` become a
+    // *view* of the relation, which is what makes FR-324 true and what lets a
+    // remotely decided supersession land on import without a row being
+    // overwritten.
+    crate::constraints::check_supersession(MemoryState::Superseded.as_str(), Some(&now))?;
+    let mut tx = tx::begin(store, "supersede_memory").await?;
+
+    crate::knowledge::record_relation_tx(
+        &mut tx,
+        crate::knowledge::NewRelation {
+            project_id: original.project_id,
+            from: new.id,
+            to: original.id,
+            kind: RelationKind::Supersedes,
+            decided_by_session: session,
+            // Supersession is never automatic (FR-325): reaching this function
+            // is itself the explicit act.
+            basis: RelationBasis::ExplicitAgent,
+            basis_evidence_id: None,
+            rationale: None,
+        },
+    )
+    .await?;
+
     sqlx::query(
-        "UPDATE memories SET state = 'superseded', superseded_by_id = ?1, updated_at = ?2
+        "UPDATE memories SET state = 'superseded', superseded_by_id = ?1, updated_at = ?2,
+                             superseded_at = ?2,
+                             pinned = 0, pinned_at = NULL, pinned_by_session = NULL,
+                             pin_reason = NULL
          WHERE id = ?3",
     )
     .bind(new.id.to_string())
-    .bind(rows::now_text())
+    .bind(&now)
     .bind(original.id.to_string())
-    .execute(store.pool())
+    .execute(&mut *tx)
     .await?;
+    tx::commit(tx, "supersede_memory").await?;
 
     let updated = memory(store, original_id).await?;
     if !updated.local_only {
@@ -1042,11 +1074,22 @@ pub async fn mark_stale_scopes(
             _ => false,
         };
         if gone {
-            sqlx::query("UPDATE memories SET state = 'stale', updated_at = ?1 WHERE id = ?2")
-                .bind(rows::now_text())
-                .bind(rows::uuid(r, "id")?.to_string())
-                .execute(store.pool())
-                .await?;
+            // `stale_at` records the instant Cairn itself performed the
+            // transition, going forward only (FR-341, D82). A memory that went
+            // stale before this feature existed keeps NULL, which means
+            // **unknown** — never "not stale" — and a historical answer says so
+            // rather than presenting an unbounded interval as fact. Inferring
+            // one from `updated_at` would be a second approximation on top of
+            // the one the migration already documents, and several paths touch
+            // `updated_at`, so it is a worse source here than for supersession.
+            sqlx::query(
+                "UPDATE memories SET state = 'stale', updated_at = ?1, stale_at = ?1
+                 WHERE id = ?2",
+            )
+            .bind(rows::now_text())
+            .bind(rows::uuid(r, "id")?.to_string())
+            .execute(store.pool())
+            .await?;
             marked += 1;
         }
     }

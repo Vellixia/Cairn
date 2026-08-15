@@ -285,6 +285,20 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                 kind: enum_arg(args, "type"),
                 state: enum_arg(args, "state"),
                 limit: args.get("limit").and_then(|v| v.as_i64()),
+                topic_key: str_arg(args, "topic_key"),
+                as_of: str_arg(args, "as_of").and_then(|t| {
+                    chrono::DateTime::parse_from_rfc3339(&t)
+                        .ok()
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                }),
+                conflicted: args
+                    .get("conflicted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                corroborated: args
+                    .get("corroborated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             };
             let value = client::send(&Request::MemorySearch {
                 cwd,
@@ -320,6 +334,9 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                             content,
                             evidence_observation_ids: evidence,
                             local_only,
+                            topic_key: str_arg(args, "topic_key"),
+                            value_key: str_arg(args, "value_key"),
+                            importance: enum_arg(args, "importance"),
                         })
                         .await?
                     } else {
@@ -333,6 +350,9 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                             content,
                             evidence_observation_ids: evidence,
                             local_only,
+                            topic_key: str_arg(args, "topic_key"),
+                            value_key: str_arg(args, "value_key"),
+                            importance: enum_arg(args, "importance"),
                         })
                         .await?
                     }

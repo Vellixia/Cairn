@@ -349,6 +349,9 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             content,
             evidence_observation_ids,
             local_only,
+            topic_key,
+            value_key,
+            importance,
         } => {
             memory_create(
                 d,
@@ -362,6 +365,11 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 evidence_observation_ids,
                 local_only,
                 None,
+                SubjectProposal {
+                    topic_key,
+                    value_key,
+                    importance,
+                },
             )
             .await
         }
@@ -375,6 +383,9 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             content,
             evidence_observation_ids,
             local_only,
+            topic_key,
+            value_key,
+            importance,
         } => {
             memory_create(
                 d,
@@ -388,6 +399,50 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 evidence_observation_ids,
                 local_only,
                 Some(memory_id),
+                SubjectProposal {
+                    topic_key,
+                    value_key,
+                    importance,
+                },
+            )
+            .await
+        }
+        Request::MemorySubject {
+            cwd,
+            topic_key,
+            scope,
+            scope_key,
+        } => memory_subject(d, &cwd, topic_key, scope, scope_key).await,
+        Request::MemoryReinforce {
+            cwd,
+            agent_session_key,
+            session_id,
+            memory_id,
+            from_memory_id,
+        } => memory_reinforce(d, &cwd, agent_session_key, session_id, memory_id, from_memory_id)
+            .await,
+        Request::MemoryReconcile {
+            cwd,
+            agent_session_key,
+            session_id,
+            from_memory_id,
+            to_memory_id,
+            relation,
+            basis,
+            basis_evidence_id,
+            rationale,
+        } => {
+            memory_reconcile(
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                from_memory_id,
+                to_memory_id,
+                relation,
+                basis,
+                basis_evidence_id,
+                rationale,
             )
             .await
         }
@@ -905,6 +960,234 @@ async fn most_recent_session(d: &Daemon, r: &Resolved) -> Result<Session, WireEr
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+
+/// The subject identity a caller proposed, carried as one value so the create
+/// path does not grow three more positional arguments.
+///
+/// Every field optional: a caller that supplies none receives Feature 001
+/// behaviour exactly, and the memory is stored free-form (FR-313, FR-497).
+#[derive(Debug, Clone, Default)]
+pub struct SubjectProposal {
+    pub topic_key: Option<String>,
+    pub value_key: Option<String>,
+    pub importance: Option<Importance>,
+}
+
+/// Inspect a subject and the decisions that produced its answer (FR-307).
+async fn memory_subject(
+    d: &Daemon,
+    cwd: &str,
+    topic_key: String,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let git = git_status(r.repo.worktree_path.clone()).await?;
+    let scope = scope.unwrap_or(MemoryScope::Project);
+    let key = match (&scope, scope_key) {
+        (_, Some(k)) => k,
+        (MemoryScope::Project, None) => r.project.id.to_string(),
+        (MemoryScope::Branch, None) => git.branch.clone(),
+        (_, None) => {
+            return Err(WireError::invalid(
+                "a task- or session-scoped subject needs an explicit --scope-key",
+            ))
+        }
+    };
+
+    let normalized = cairn_core::knowledge::normalize_topic_key(&topic_key).ok_or_else(|| {
+        WireError::new(
+            codes::INVALID_TOPIC_KEY,
+            "that topic key has no representable characters",
+        )
+    })?;
+
+    let cap = d.config.read().await.reconcile_members_max;
+    let read = cairn_store::knowledge::subject(&d.store, r.project.id, scope, &key, &normalized, cap)
+        .await
+        .map_err(storage_err)?;
+
+    if read.members.is_empty() {
+        return Err(WireError::new(
+            codes::SUBJECT_NOT_FOUND,
+            format!("no subject {normalized} in {scope}:{key}"),
+        ));
+    }
+
+    // Elevation candidates are *reported*, never applied: branch-scoped
+    // knowledge never becomes project knowledge because a branch merged
+    // (FR-382).
+    let mut elevation = Vec::new();
+    if scope == MemoryScope::Project {
+        let worktree = std::path::PathBuf::from(&r.repo.worktree_path);
+        for c in cairn_store::knowledge::branch_scoped_subjects(&d.store, r.project.id)
+            .await
+            .map_err(storage_err)?
+            .into_iter()
+            .filter(|c| c.topic_key == normalized)
+        {
+            let merged = tokio::task::spawn_blocking({
+                let worktree = worktree.clone();
+                let branch = c.branch.clone();
+                let target = git.branch.clone();
+                move || cairn_git::is_merged_into(&worktree, &branch, &target).unwrap_or(false)
+            })
+            .await
+            .unwrap_or(false);
+            if merged {
+                elevation.push(json!({
+                    "memory_id": c.memory_id,
+                    "branch": c.branch,
+                    "value_key": c.value_key,
+                    "applied": false,
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "subject": {
+            "topic_key": normalized,
+            "scope": scope,
+            "scope_key": key,
+            "reconciliation": read.view.reconciliation,
+            "answers": read.view.answers,
+            "narrowed_by": read.view.narrowed_by,
+            "accounting": read.view.accounting.iter().map(|a| json!({
+                "memory_id": a.memory_id,
+                "duplicates": a.duplicates,
+                "distinct_origins": a.distinct_origins,
+            })).collect::<Vec<_>>(),
+            "decisions": read.view.decisions.iter().map(|r| json!({
+                "from": r.from, "to": r.to, "kind": r.kind, "basis": r.basis,
+            })).collect::<Vec<_>>(),
+            "members": read.members.iter().map(|m| json!({
+                "id": m.id,
+                "state": m.state,
+                "value_key": m.value_key,
+                "verification": m.verification,
+                "verification_authority": m.verification_authority,
+                "pinned": m.pinned,
+                "importance": m.importance,
+            })).collect::<Vec<_>>(),
+            "degraded": read.degraded,
+            "elevation_candidates": elevation,
+        }
+    }))
+}
+
+/// Record that a session confirms an existing memory is still true (FR-321).
+async fn memory_reinforce(
+    d: &Daemon,
+    cwd: &str,
+    agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    memory_id: Uuid,
+    from_memory_id: Option<Uuid>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+    let target = repo::memory(&d.store, memory_id)
+        .await
+        .map_err(storage_err)?;
+
+    // Without a memory of its own, the confirmation still needs a `from`
+    // endpoint. The session's own most recent memory is not a substitute — it
+    // may be about something else entirely — so the caller supplies one.
+    let from = from_memory_id.ok_or_else(|| {
+        WireError::invalid(
+            "reinforcement needs the memory that carries the confirming statement",
+        )
+    })?;
+
+    let wrote = cairn_store::knowledge::reinforce(
+        &d.store,
+        target.project_id,
+        from,
+        memory_id,
+        session.id,
+        RelationBasis::ExplicitAgent,
+    )
+    .await
+    .map_err(storage_err)?;
+
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT reinforcement_count, distinct_origin_count FROM memories WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .fetch_one(d.store.pool())
+    .await
+    .map_err(|e| storage_err(cairn_store::StoreError::Sqlx(e)))?;
+
+    Ok(json!({
+        "reinforced": memory_id,
+        "recorded": wrote,
+        // Never presented as a number of independent verifications (FR-406).
+        "reinforcements": counts.0,
+        "distinct_origins": counts.1,
+    }))
+}
+
+/// Record an explicit reconciliation decision (FR-335).
+#[allow(clippy::too_many_arguments)]
+async fn memory_reconcile(
+    d: &Daemon,
+    cwd: &str,
+    agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    from_memory_id: Uuid,
+    to_memory_id: Uuid,
+    relation: RelationKind,
+    basis: RelationBasis,
+    basis_evidence_id: Option<Uuid>,
+    rationale: Option<String>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+
+    // A conflict is detected automatically and resolved never. Leaving one
+    // requires a supersession, a narrowing, or a verification result that
+    // distinguishes the members (FR-334).
+    if relation == RelationKind::ConflictsWith {
+        return Err(WireError::new(
+            codes::NOT_CONFLICTED,
+            "a conflict is detected, not declared; resolve it by superseding or narrowing",
+        ));
+    }
+
+    let rationale = rationale.map(|t| cairn_core::redact::redact(&t));
+    let wrote = cairn_store::knowledge::reconcile_as(
+        &d.store,
+        r.project.id,
+        session.id,
+        from_memory_id,
+        to_memory_id,
+        relation,
+        basis,
+        basis_evidence_id,
+        rationale.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        let text = e.to_string();
+        if text.contains("relation_conflict") {
+            WireError::new(codes::RELATION_CONFLICT, text)
+        } else if text.contains("invalid_request") {
+            WireError::invalid(text)
+        } else {
+            storage_err(e)
+        }
+    })?;
+
+    Ok(json!({
+        "from": from_memory_id,
+        "to": to_memory_id,
+        "relation": relation,
+        "basis": basis,
+        "recorded": wrote,
+    }))
+}
+
 async fn memory_create(
     d: &Daemon,
     cwd: &str,
@@ -917,6 +1200,7 @@ async fn memory_create(
     evidence: Vec<Uuid>,
     local_only: bool,
     supersedes: Option<Uuid>,
+    subject: SubjectProposal,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     // A memory needs an origin session, and only that. Evidence is optional and
@@ -936,13 +1220,9 @@ async fn memory_create(
         origin_session_id: session.id,
         local_only,
         evidence: &evidence,
-        // The subject identity arrives with the tool and CLI surfaces (T040,
-        // T125). Until then every proposal is free-form, which is Feature 001's
-        // behaviour exactly — the storage layer below is already reconciling,
-        // it simply has no key to reconcile on.
-        topic_key: None,
-        value_key: None,
-        importance: cairn_core::Importance::Normal,
+        topic_key: subject.topic_key.as_deref(),
+        value_key: subject.value_key.as_deref(),
+        importance: subject.importance.unwrap_or(cairn_core::Importance::Normal),
     };
 
     match supersedes {
@@ -953,10 +1233,26 @@ async fn memory_create(
             Ok(json!({ "memory": new, "superseded": old.id }))
         }
         None => {
-            let m = repo::create_memory(&d.store, new, r.policy)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "memory": m }))
+            let out = repo::create_memory_reconciled(
+                &d.store,
+                new,
+                r.policy,
+                d.config.read().await.reconcile_members_max,
+            )
+            .await
+            .map_err(storage_err)?;
+
+            // What reconciliation decided, and the notes that ride an `ok: true`
+            // envelope: an unrepresentable topic key, a deferred decision, or a
+            // corroborating member the writer should look at (FR-312, FR-327,
+            // FR-474).
+            let mut body = json!({ "memory": out.memory });
+            body["reconciliation"] = serde_json::to_value(&out.reconciliation)
+                .unwrap_or(serde_json::Value::Null);
+            if !out.notes.is_empty() {
+                body["notes"] = json!(out.notes);
+            }
+            Ok(body)
         }
     }
 }
@@ -1441,6 +1737,9 @@ mod tests {
                 content: "Errors are returned, never logged and swallowed".into(),
                 evidence_observation_ids: vec![],
                 local_only: false,
+                topic_key: None,
+                value_key: None,
+                importance: None,
             },
         )
         .await;
