@@ -38,7 +38,8 @@ Commits are unsigned, matching the three commits already on this branch.
 | | |
 |---|---|
 | Tasks | T001, T002, T003, T004, T005 |
-| Commit | see `git log` for `feat(003): corpus scaffolding, the alpha.4 fixture and the pre-feature baseline` |
+| Commit | `e5d4ff1` — pushed |
+| Suite | `cargo test --workspace` — exit 0, 0 failures across every target |
 
 **What landed**
 
@@ -101,12 +102,74 @@ Commits are unsigned, matching the three commits already on this branch.
    have nothing to do with regression. `baseline::normalize` replaces those by shape and touches no
    field name, so a dropped or renamed field — the actual regression — still fails the comparison.
 
+### Checkpoint B(i) — Phase 2 (T006–T017): domain types, bounds, and the pure functions
+
+| | |
+|---|---|
+| Tasks | T006–T017 |
+| Suite | `cargo test -p cairn-core` — 181 unit tests, 5 corpus-target tests, 0 failures |
+
+Plan phase A. Everything here is pure data or a pure function with no I/O, testable with no
+database — which is what lets the reconciliation derivation, the verification state machine and the
+staleness comparison be interrogated by a JSON corpus rather than by an end-to-end run.
+
+**What landed**
+
+- `domain.rs` — 29 new enums plus three `OutboxEntityType` variants and the fifth `OutboxState`.
+  The `text_enum!` macro gained per-variant doc comments and `Ord` (declaration order, for stable
+  output only — nothing decides correctness by comparing enums).
+- `knowledge.rs` — `normalize_topic_key`, `normalize_value_key`, `content_norm_digest`,
+  `scope_overlap`, `normalize_relation_endpoints`, `derive_subject`. The contract's normalization
+  table is the test table, verbatim.
+- `verify.rs` — the total verification state machine as an explicit transition table,
+  `derive_authority`, and the per-verifier fingerprint forms.
+- `continuity.rs` — `classify_checkpoint` and `compare_path_fingerprint`.
+- `tasks.rs` — `derive_task_state_digest`, derived progress, completion readiness, the action order
+  and the criteria projection.
+- `budget.rs` — `with_reserve` / `try_spend_reserved` / `release_reserve`, with the never-exceed
+  property test extended to interleaved reserved and general spending.
+- `config.rs` — the seventeen D75 bound fields, and `context_reserve`.
+- `wire.rs` — 38 Feature 003 error codes in the existing stable set, with no `budget_exceeded`.
+
+**Decisions taken while implementing, and why**
+
+1. **`derive_subject` reports a mutual supersession rather than resolving it.** Step 1 of the
+   contract's algorithm drops every member a `supersedes` points at. Applied literally to a cycle —
+   A supersedes B and B supersedes A, which two offline machines can each decide — it drops both
+   and the subject reads as `Historical`. That would let two mutually exclusive decisions annihilate
+   a subject. T034 already requires the cycle to report `Conflicted`, so the derivation returns
+   `Conflicted` with both members when the drop would empty an otherwise non-empty active set.
+
+2. **`SubjectView.narrowed_by` comes from recorded `narrows` relations.** The contract's step 6 says
+   "from the caller's applicable set", but the declared signature takes only members and relations.
+   The durable record of a scope exception *is* the `narrows` relation (data-model §3.1), so that is
+   what the derivation reads. Selection-time precedence — the project/task-fixture case — is
+   `scope_overlap` plus the assembler, not this function.
+
+3. **Reinforcement accounting is a separate field from `answers`.** A duplicate is dropped from the
+   answer set but stays individually retrievable and still counts toward `distinct_origin_count`.
+   Collapsing the two would lose exactly the accounting FR-406 forbids misreporting.
+
+4. **Deviation: `unicode-normalization` added to `cairn-core`.** The plan says "No dependency is
+   added". `contracts/knowledge.md` specifies Unicode NFC in all three normalizers, and without it
+   `content_norm_digest` differs for two canonically equal strings — so exact-duplicate detection
+   misses them and FR-326 is silently weakened. The crate was already in the workspace lockfile via
+   `stringprep`; adding it produced a **one-line** lockfile change (a new edge, zero new packages),
+   measured rather than assumed. The dependency the plan actually rejects is a *similarity* library,
+   rejected by D46 on correctness grounds; this one is the opposite — it is what makes the digest
+   deterministic. T136's hermeticity assertion must be a denylist of model/embedding/vector/graph
+   clients rather than an allowlist of current dependencies, or it will trip on this.
+
+5. **`PathFingerprint` carries an explicit `exists` flag.** The contract's three classes conflate
+   "absent when the checkpoint was taken" with "excluded" and "unreadable" under `unknown`, which
+   leaves `PathOutcome::Added` and `Removed` underivable — and both are in the enum the data model
+   names. The flag is local-only (checkpoints never synchronize), so it costs nothing on the wire.
+
 ## Next action
 
-Phase 2 (Foundational), starting at **T006**: the Feature 003 domain enums in
-`crates/cairn-core/src/domain.rs`. Phase 2 blocks every story phase.
+Phase 3 (Local schema migration), starting at **T018**: write
+`crates/cairn-store/migrations/0005_project_intelligence.sql` steps 1 and 4. Phase 3 blocks every
+storage phase.
 
-Read before starting: `contracts/evidence-verification.md` (T013's state machine and
-`derive_authority`), `contracts/continuity-context.md` (T014's divergence classes and T016's
-reserve), `contracts/task-model.md` (T015's digest). `contracts/knowledge.md` has already been read
-and governs T009–T012.
+Read before starting: `migration.md` (already read) and `contracts/records-and-rebuild.md`, which
+T038's rebuild procedures depend on.

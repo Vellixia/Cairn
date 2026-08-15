@@ -16,3 +16,10 @@ thiserror.workspace = true
 sha2.workspace = true
 hex.workspace = true
 dirs.workspace = true
+# Unicode NFC for subject-identity and content normalization
+# (`contracts/knowledge.md` §Normalization). Already present in the workspace
+# lockfile via `stringprep`, so this adds a direct edge rather than a
+# dependency. Without it `content_norm_digest` differs for two canonically
+# equal strings and exact-duplicate detection misses them, which would weaken
+# FR-326 silently. Recorded in the implementation log.
+unicode-normalization = "0.1"

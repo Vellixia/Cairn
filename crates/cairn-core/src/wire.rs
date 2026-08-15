@@ -71,6 +71,151 @@ pub mod codes {
         UNPUBLISHED_SKILL_REF,
         PARTIAL_APPLY,
     ];
+
+    // -----------------------------------------------------------------------
+    // Feature 003 (FR-499). Added to the same stable set, with the same exit
+    // mapping. Deliberately **no** `budget_exceeded`: a briefing is truncated
+    // to fit and never rejected for size (FR-445).
+    // -----------------------------------------------------------------------
+
+    // Knowledge (`contracts/knowledge.md` §Error codes)
+    /// The proposed key did not normalize; the memory was stored free-form.
+    pub const INVALID_TOPIC_KEY: &str = "invalid_topic_key";
+    pub const VALUE_WITHOUT_TOPIC: &str = "value_without_topic";
+    pub const SUBJECT_NOT_FOUND: &str = "subject_not_found";
+    pub const NOT_CONFLICTED: &str = "not_conflicted";
+    /// The requested relation contradicts an existing one — a mutual
+    /// supersession, for instance.
+    pub const RELATION_CONFLICT: &str = "relation_conflict";
+    /// The write succeeded; the relation exceeded `reconcile_members_max`.
+    pub const RECONCILIATION_DEFERRED: &str = "reconciliation_deferred";
+    /// The write succeeded and agrees on the value with a named existing
+    /// member while differing in content. Not a failure — the prompt for an
+    /// explicit decision (FR-327).
+    pub const CORROBORATING_MEMBER: &str = "corroborating_member";
+
+    // Evidence and verification (`contracts/evidence-verification.md`)
+    pub const EVIDENCE_EXCLUDED: &str = "evidence_excluded";
+    pub const EVIDENCE_OUTSIDE_WORKTREE: &str = "evidence_outside_worktree";
+    pub const EVIDENCE_TOO_LARGE: &str = "evidence_too_large";
+    pub const ABSOLUTE_LOCATOR: &str = "absolute_locator";
+    pub const VERIFIER_UNAVAILABLE: &str = "verifier_unavailable";
+    /// The check ran and could not establish either outcome (FR-366).
+    pub const VERIFICATION_INCONCLUSIVE: &str = "verification_inconclusive";
+    /// Attested evidence was offered where a deterministic check is required —
+    /// a criterion's verification, or promotion (FR-370).
+    pub const ATTESTED_NOT_SUFFICIENT: &str = "attested_not_sufficient";
+    /// An imported verification was offered for a criterion; readiness is a
+    /// local claim (FR-368).
+    pub const IMPORTED_NOT_SUFFICIENT: &str = "imported_not_sufficient";
+    /// The bounded pass hit a cap; remaining work is queued.
+    pub const VERIFY_PASS_YIELDED: &str = "verify_pass_yielded";
+
+    // Continuity and context (`contracts/continuity-context.md`)
+    pub const PIN_BUDGET_EXHAUSTED: &str = "pin_budget_exhausted";
+    pub const CHECKPOINT_NOT_FOUND: &str = "checkpoint_not_found";
+    pub const CHECKPOINT_UNRESOLVABLE: &str = "checkpoint_unresolvable";
+    /// A relevant path could not be fingerprinted — excluded, unreadable, or
+    /// over the cap. Reported per path, never as unchanged (FR-432).
+    pub const PATH_NOT_FINGERPRINTABLE: &str = "path_not_fingerprintable";
+    pub const NO_BOUNDARY_RECORD: &str = "no_boundary_record";
+
+    // Task work state (`contracts/task-model.md`)
+    pub const REVISION_CONFLICT: &str = "revision_conflict";
+    pub const CRITERION_NOT_FOUND: &str = "criterion_not_found";
+    pub const BLOCKER_NOT_FOUND: &str = "blocker_not_found";
+    pub const BLOCKER_ALREADY_CLEARED: &str = "blocker_already_cleared";
+    pub const CRITERION_WAIVED: &str = "criterion_waived";
+
+    // The ten promotion refusals, in the gate's fixed order so the reported
+    // reason is stable (`contracts/patterns.md` §The promotion gate).
+    pub const SOURCE_NOT_ACTIVE: &str = "source_not_active";
+    pub const SOURCE_UNVERIFIED: &str = "source_unverified";
+    pub const NO_EVIDENCE: &str = "no_evidence";
+    pub const LOCAL_ONLY_MEMORY: &str = "local_only_memory";
+    pub const SOURCE_CONFLICTED: &str = "source_conflicted";
+    pub const NOT_TRANSFERABLE: &str = "not_transferable";
+    pub const POSSIBLE_SECRET: &str = "possible_secret";
+    pub const PROJECT_IDENTIFYING: &str = "project_identifying";
+    pub const INSUFFICIENT_SPECIFICITY: &str = "insufficient_specificity";
+    pub const DUPLICATE_PATTERN: &str = "duplicate_pattern";
+    pub const PATTERN_NOT_FOUND: &str = "pattern_not_found";
+    pub const OUTCOME_ALREADY_RECORDED: &str = "outcome_already_recorded";
+
+    /// The ten gate refusals **in gate order**. The order is the contract: it
+    /// is what makes the reported reason stable when a candidate violates more
+    /// than one check.
+    pub const PROMOTION_REFUSALS: &[&str] = &[
+        SOURCE_NOT_ACTIVE,
+        SOURCE_UNVERIFIED,
+        NO_EVIDENCE,
+        LOCAL_ONLY_MEMORY,
+        SOURCE_CONFLICTED,
+        NOT_TRANSFERABLE,
+        POSSIBLE_SECRET,
+        PROJECT_IDENTIFYING,
+        INSUFFICIENT_SPECIFICITY,
+        DUPLICATE_PATTERN,
+    ];
+
+    /// Feature 003 codes that are **not failures**.
+    ///
+    /// Each rides an `ok: true` envelope in a `notes` array, because the
+    /// operation succeeded and the note is what the caller needs to know:
+    /// FR-312 requires a memory with an unrepresentable topic key to be stored
+    /// regardless, FR-366 makes an inconclusive check an outcome rather than an
+    /// error, and FR-435 makes partial continuity a result.
+    pub const FEATURE_003_NOTES: &[&str] = &[
+        INVALID_TOPIC_KEY,
+        RECONCILIATION_DEFERRED,
+        CORROBORATING_MEMBER,
+        VERIFICATION_INCONCLUSIVE,
+        VERIFY_PASS_YIELDED,
+        CHECKPOINT_UNRESOLVABLE,
+        PATH_NOT_FINGERPRINTABLE,
+    ];
+
+    /// Every Feature 003 code, for the exit-code mapping and its test.
+    pub const INTELLIGENCE_CODES: &[&str] = &[
+        INVALID_TOPIC_KEY,
+        VALUE_WITHOUT_TOPIC,
+        SUBJECT_NOT_FOUND,
+        NOT_CONFLICTED,
+        RELATION_CONFLICT,
+        RECONCILIATION_DEFERRED,
+        CORROBORATING_MEMBER,
+        EVIDENCE_EXCLUDED,
+        EVIDENCE_OUTSIDE_WORKTREE,
+        EVIDENCE_TOO_LARGE,
+        ABSOLUTE_LOCATOR,
+        VERIFIER_UNAVAILABLE,
+        VERIFICATION_INCONCLUSIVE,
+        ATTESTED_NOT_SUFFICIENT,
+        IMPORTED_NOT_SUFFICIENT,
+        VERIFY_PASS_YIELDED,
+        PIN_BUDGET_EXHAUSTED,
+        CHECKPOINT_NOT_FOUND,
+        CHECKPOINT_UNRESOLVABLE,
+        PATH_NOT_FINGERPRINTABLE,
+        NO_BOUNDARY_RECORD,
+        REVISION_CONFLICT,
+        CRITERION_NOT_FOUND,
+        BLOCKER_NOT_FOUND,
+        BLOCKER_ALREADY_CLEARED,
+        CRITERION_WAIVED,
+        SOURCE_NOT_ACTIVE,
+        SOURCE_UNVERIFIED,
+        NO_EVIDENCE,
+        LOCAL_ONLY_MEMORY,
+        SOURCE_CONFLICTED,
+        NOT_TRANSFERABLE,
+        POSSIBLE_SECRET,
+        PROJECT_IDENTIFYING,
+        INSUFFICIENT_SPECIFICITY,
+        DUPLICATE_PATTERN,
+        PATTERN_NOT_FOUND,
+        OUTCOME_ALREADY_RECORDED,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -927,5 +1072,99 @@ mod tests {
         let back: Provenance = serde_json::from_str(&json).unwrap();
         assert!(back.agent.is_none());
         assert!(!serde_json::to_string(&back).unwrap().contains("agent"));
+    }
+}
+
+#[cfg(test)]
+mod feature_003_code_tests {
+    use super::codes::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn every_code_is_unique_across_the_whole_stable_set() {
+        // One set, not three: a code that means two things on two surfaces is
+        // a code an agent cannot act on.
+        let mut all: Vec<&str> = Vec::new();
+        all.extend_from_slice(INTEGRATION_CODES);
+        all.extend_from_slice(INTELLIGENCE_CODES);
+        all.extend_from_slice(&[
+            NOT_A_REPOSITORY,
+            NO_ACTIVE_SESSION,
+            AMBIGUOUS_SESSION,
+            NOT_FOUND,
+            INVALID_REQUEST,
+            STORAGE_UNAVAILABLE,
+            DAEMON_UNAVAILABLE,
+            NOT_LINKED,
+            SERVER_UNAVAILABLE,
+            UNAUTHORIZED,
+        ]);
+        let unique: BTreeSet<&str> = all.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "duplicate code in the stable set: {all:?}"
+        );
+    }
+
+    #[test]
+    fn there_is_no_budget_exceeded_code() {
+        // FR-445: a briefing is truncated to fit, never rejected for size. A
+        // code for the rejection would invite one.
+        assert!(!INTELLIGENCE_CODES.contains(&"budget_exceeded"));
+        assert!(!INTELLIGENCE_CODES.iter().any(|c| c.contains("budget_exceeded")));
+    }
+
+    #[test]
+    fn the_promotion_gate_order_is_the_contract() {
+        // The reported reason must be stable when a candidate violates several
+        // checks, and the order is what makes it so (FR-396, FR-397).
+        assert_eq!(PROMOTION_REFUSALS.len(), 10);
+        assert_eq!(PROMOTION_REFUSALS[0], SOURCE_NOT_ACTIVE);
+        assert_eq!(PROMOTION_REFUSALS[1], SOURCE_UNVERIFIED);
+        assert_eq!(
+            PROMOTION_REFUSALS[6], POSSIBLE_SECRET,
+            "the secret scan runs before the identifier scan"
+        );
+        assert_eq!(PROMOTION_REFUSALS[7], PROJECT_IDENTIFYING);
+        assert_eq!(PROMOTION_REFUSALS[9], DUPLICATE_PATTERN);
+        for code in PROMOTION_REFUSALS {
+            assert!(INTELLIGENCE_CODES.contains(code), "{code} is not in the set");
+        }
+    }
+
+    #[test]
+    fn notes_are_a_subset_of_the_codes_and_are_not_failures() {
+        for note in FEATURE_003_NOTES {
+            assert!(
+                INTELLIGENCE_CODES.contains(note),
+                "{note} is a note for a code that does not exist"
+            );
+        }
+        // The four the contracts call out explicitly as `ok: true`.
+        for note in [
+            INVALID_TOPIC_KEY,
+            RECONCILIATION_DEFERRED,
+            VERIFICATION_INCONCLUSIVE,
+            CHECKPOINT_UNRESOLVABLE,
+        ] {
+            assert!(FEATURE_003_NOTES.contains(&note), "{note}");
+        }
+        // And a refusal is never one of them.
+        for refusal in PROMOTION_REFUSALS {
+            assert!(
+                !FEATURE_003_NOTES.contains(refusal),
+                "{refusal} must fail loudly"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_strict_consumer_refusals_exist_and_are_distinct() {
+        // They are told apart because they mean different things: one says
+        // "an agent said so", the other says "another machine checked it".
+        assert_ne!(ATTESTED_NOT_SUFFICIENT, IMPORTED_NOT_SUFFICIENT);
+        assert!(INTELLIGENCE_CODES.contains(&ATTESTED_NOT_SUFFICIENT));
+        assert!(INTELLIGENCE_CODES.contains(&IMPORTED_NOT_SUFFICIENT));
     }
 }
