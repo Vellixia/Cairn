@@ -623,3 +623,98 @@ fn an_older_build_refuses_a_newer_store_and_a_newer_build_migrates_an_older_one(
     // And the refusal changed nothing.
     assert_eq!(store.schema_version(), 5);
 }
+
+/// The DDL constraints on the new tables are live, not decorative.
+///
+/// A `CHECK` calling a JSON1 function is accepted at `CREATE TABLE` whether or
+/// not it does anything at insert time, so "the migration applied" says nothing
+/// about whether the constraint constrains. Both halves are exercised here
+/// rather than discovered in Phase 12.
+#[test]
+fn the_new_tables_enforce_their_check_constraints() {
+    let store = Alpha4Store::build();
+    store.migrate_to_latest();
+
+    let pattern = |signals: &str| {
+        format!(
+            "INSERT INTO reusable_patterns
+                (id, title, problem, signals, signal_digest, root_cause, root_cause_digest,
+                 approach, trust, origin_ref, created_at, updated_at)
+             VALUES (lower(hex(randomblob(16))), 't', 'p', '{signals}', lower(hex(randomblob(16))),
+                     'rc', lower(hex(randomblob(16))), 'a', 'candidate',
+                     lower(hex(randomblob(16))), '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+        )
+    };
+
+    // A pattern that matches indiscriminately is worse than none, so the
+    // minimum signal count is structural as well as a gate check.
+    assert!(
+        store.try_execute(&pattern(r#"["only one"]"#)).is_err(),
+        "a one-signal pattern was accepted; the json_array_length CHECK is inert"
+    );
+    let sixteen: Vec<String> = (0..17).map(|i| format!("\"s{i}\"")).collect();
+    assert!(
+        store
+            .try_execute(&pattern(&format!("[{}]", sixteen.join(","))))
+            .is_err(),
+        "a seventeen-signal pattern was accepted"
+    );
+    store
+        .try_execute(&pattern(r#"["first signal","second signal"]"#))
+        .expect("two signals is the documented minimum");
+
+    // The duplicate-refusal index is structural too, so a race cannot create
+    // one (gate check 10).
+    let duplicate = "INSERT INTO reusable_patterns
+            (id, title, problem, signals, signal_digest, root_cause, root_cause_digest,
+             approach, trust, origin_ref, created_at, updated_at)
+         VALUES (lower(hex(randomblob(16))), 't', 'p', '[\"a signal\",\"b signal\"]', 'sig-1',
+                 'rc', 'rc-1', 'a', 'candidate', 'origin', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')";
+    store.try_execute(duplicate).expect("the first lands");
+    assert!(
+        store.try_execute(duplicate).is_err(),
+        "a duplicate (signal_digest, root_cause_digest) was accepted"
+    );
+
+    // And the enum columns on the new tables really are constrained.
+    assert!(store
+        .try_execute(
+            "INSERT INTO memory_relations
+                (from_memory_id, to_memory_id, kind, project_id, decided_by_session, decided_at, basis)
+             VALUES ('a', 'b', 'invented_kind', 'p', 's', '2026-01-01T00:00:00Z', 'explicit_user')"
+        )
+        .is_err());
+}
+
+/// A relation may name a memory that has not arrived yet.
+///
+/// `contracts/records-and-rebuild.md` §Fail-closed requires a dangling endpoint
+/// to be **ignored by the derivation and reported by `doctor`** — never
+/// deleted, because it may be a memory that has not synced yet. A foreign key
+/// on those columns would refuse the insert instead, so a decision that arrived
+/// before its proposal would be dropped silently on import.
+#[test]
+fn a_relation_may_reference_a_memory_that_has_not_arrived() {
+    let store = Alpha4Store::build();
+    store.migrate_to_latest();
+
+    let project = store.scalar("SELECT id FROM projects LIMIT 1");
+    let present = ids::MEM_ACTIVE_A;
+
+    store
+        .try_execute(&format!(
+            "INSERT INTO memory_relations
+                (from_memory_id, to_memory_id, kind, project_id, decided_by_session, decided_at, basis)
+             VALUES ('{present}', 'not-yet-synced', 'conflicts_with', '{project}',
+                     '{}', '2026-01-01T00:00:00Z', 'deterministic_rule')",
+            ids::SESSION_ACTIVE
+        ))
+        .expect("a relation whose endpoint has not synced yet must be storable");
+
+    assert_eq!(
+        store.scalar(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM memory_relations WHERE to_memory_id = 'not-yet-synced'"
+        ),
+        "1"
+    );
+}

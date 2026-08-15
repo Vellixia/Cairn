@@ -1493,8 +1493,7 @@ pub async fn set_memory_intelligence(
              pinned_by_session      = CASE WHEN ?7 IS NOT NULL THEN ?9
                                            ELSE COALESCE(?9, pinned_by_session) END,
              pin_reason             = CASE WHEN ?7 IS NOT NULL THEN ?10
-                                           ELSE COALESCE(?10, pin_reason) END,
-             superseded_at          = COALESCE(?11, superseded_at)
+                                           ELSE COALESCE(?10, pin_reason) END
          WHERE id = ?1 AND deleted_at IS NULL",
     )
     .bind(id.to_string())
@@ -1507,7 +1506,6 @@ pub async fn set_memory_intelligence(
     .bind(columns.pinned_at)
     .bind(columns.pinned_by_session)
     .bind(columns.pin_reason)
-    .bind(columns.superseded_at)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1602,10 +1600,9 @@ mod intelligence_constraint_tests {
                 },
             ),
             (
-                "state = 'superseded'",
+                "pinned = 1 requires",
                 MemoryColumns {
-                    state: Some("active"),
-                    superseded_at: Some("2026-01-01T00:00:00Z"),
+                    pinned: Some(1),
                     ..Default::default()
                 },
             ),

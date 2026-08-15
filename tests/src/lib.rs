@@ -1351,15 +1351,28 @@ pub mod alpha4 {
         }
 
         pub fn execute(&self, sql: &str) {
+            self.try_execute(sql)
+                .unwrap_or_else(|e| panic!("execute {sql:?} failed: {e}"));
+        }
+
+        /// Execute, returning the database's error instead of panicking.
+        ///
+        /// A constraint that is never exercised is a constraint that may be
+        /// inert — a `CHECK` calling a JSON1 function, for instance, is
+        /// accepted at `CREATE TABLE` whether or not it does anything at
+        /// insert. Asserting the refusal is the only way to know.
+        pub fn try_execute(&self, sql: &str) -> Result<(), String> {
             let sql = sql.to_string();
             self.block_on(async {
                 let pool = self.open().await;
-                sqlx::query(&sql)
+                let out = sqlx::query(&sql)
                     .execute(&pool)
                     .await
-                    .unwrap_or_else(|e| panic!("execute {sql:?} failed: {e}"));
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
                 pool.close().await;
-            });
+                out
+            })
         }
 
         async fn open(&self) -> sqlx::SqlitePool {

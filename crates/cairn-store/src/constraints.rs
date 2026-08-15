@@ -18,7 +18,16 @@ use cairn_core::domain::{
     Importance, MemoryState, OutboxState, VerificationAuthority, VerificationState,
 };
 
-/// The Feature 003 columns of one `memories` row, as a write proposes them.
+/// The Feature 003 columns one write may set on a `memories` row.
+///
+/// Exactly the fields `repo::set_memory_intelligence` writes — no more. A field
+/// that is checked but not written would make the predicate an assertion about
+/// what the caller *claims* rather than about the row, which is how a
+/// constraint quietly stops constraining anything.
+///
+/// `state` and `superseded_at` are therefore **not** here. They move together,
+/// in one transaction, and their predicate lives with the code that writes both
+/// — see [`check_supersession`].
 ///
 /// Borrowed rather than owned so the check costs nothing on the write path.
 #[derive(Debug, Clone, Copy, Default)]
@@ -32,8 +41,6 @@ pub struct MemoryColumns<'a> {
     pub pinned_at: Option<&'a str>,
     pub pinned_by_session: Option<&'a str>,
     pub pin_reason: Option<&'a str>,
-    pub state: Option<&'a str>,
-    pub superseded_at: Option<&'a str>,
 }
 
 fn refuse(predicate: &str) -> StoreError {
@@ -93,19 +100,33 @@ pub fn check_memory_columns(c: MemoryColumns<'_>) -> Result<()> {
                 "pinned = 0 implies pinned_at, pinned_by_session and pin_reason are NULL",
             ));
         }
-    }
-
-    in_domain::<MemoryState>(c.state, "state IN ('active','stale','superseded')")?;
-
-    // The end of an applicability interval only means something for a memory
-    // that has one (FR-341).
-    if c.superseded_at.is_some() {
-        match c.state {
-            Some(s) if s == MemoryState::Superseded.as_str() => {}
-            _ => return Err(refuse("superseded_at IS NULL OR state = 'superseded'")),
+        // The other direction, which no `CHECK` in the data model states but
+        // FR-452 requires: a pin records who pinned it, when and why. Setting
+        // `pinned = 1` without them would write a pin nobody can account for,
+        // and because the write clears the metadata columns it would also erase
+        // a previous pin's attribution.
+        if p == 1
+            && (c.pinned_at.is_none() || c.pinned_by_session.is_none() || c.pin_reason.is_none())
+        {
+            return Err(refuse(
+                "pinned = 1 requires pinned_at, pinned_by_session and pin_reason (FR-452)",
+            ));
         }
     }
 
+    Ok(())
+}
+
+/// The one predicate that spans two columns written together (FR-341).
+///
+/// `supersede_memory` sets `state`, `superseded_by_id` and `superseded_at` in
+/// one transaction, so the predicate belongs with it rather than with the
+/// general column writer — where `state` would be checked and never persisted.
+pub fn check_supersession(state: &str, superseded_at: Option<&str>) -> Result<()> {
+    in_domain::<MemoryState>(Some(state), "state IN ('active','stale','superseded')")?;
+    if superseded_at.is_some() && state != MemoryState::Superseded.as_str() {
+        return Err(refuse("superseded_at IS NULL OR state = 'superseded'"));
+    }
     Ok(())
 }
 
@@ -132,7 +153,6 @@ mod tests {
             value_key: Some("postgresql"),
             importance: Some("normal"),
             verification: Some("unverified"),
-            state: Some("active"),
             ..Default::default()
         }
     }
@@ -175,13 +195,6 @@ mod tests {
                 MemoryColumns {
                     verification: Some("verified"),
                     verification_authority: Some("vibes"),
-                    ..ok()
-                },
-            ),
-            (
-                "state",
-                MemoryColumns {
-                    state: Some("archived"),
                     ..ok()
                 },
             ),
@@ -235,6 +248,18 @@ mod tests {
             assert!(err.contains("pinned = 0 implies"), "{err}");
         }
 
+        // And a pin with no attribution is refused too (FR-452). Without this
+        // the write would set `pinned = 1` and clear the metadata columns,
+        // erasing a previous pin's author in the process.
+        for missing in [
+            MemoryColumns { pinned: Some(1), pinned_by_session: Some("s1"), pin_reason: Some("r"), ..ok() },
+            MemoryColumns { pinned: Some(1), pinned_at: Some("2026-01-01T00:00:00Z"), pin_reason: Some("r"), ..ok() },
+            MemoryColumns { pinned: Some(1), pinned_at: Some("2026-01-01T00:00:00Z"), pinned_by_session: Some("s1"), ..ok() },
+        ] {
+            let err = check_memory_columns(missing).unwrap_err().to_string();
+            assert!(err.contains("pinned = 1 requires"), "{err}");
+        }
+
         check_memory_columns(MemoryColumns {
             pinned: Some(1),
             pinned_at: Some("2026-01-01T00:00:00Z"),
@@ -256,20 +281,14 @@ mod tests {
     #[test]
     fn superseded_at_belongs_only_to_a_superseded_memory() {
         for state in ["active", "stale"] {
-            let bad = MemoryColumns {
-                state: Some(state),
-                superseded_at: Some("2026-01-01T00:00:00Z"),
-                ..ok()
-            };
-            let err = check_memory_columns(bad).unwrap_err().to_string();
+            let err = check_supersession(state, Some("2026-01-01T00:00:00Z"))
+                .unwrap_err()
+                .to_string();
             assert!(err.contains("state = 'superseded'"), "{state}: {err}");
         }
-        check_memory_columns(MemoryColumns {
-            state: Some("superseded"),
-            superseded_at: Some("2026-01-01T00:00:00Z"),
-            ..ok()
-        })
-        .expect("the normal case");
+        check_supersession("superseded", Some("2026-01-01T00:00:00Z")).expect("the normal case");
+        check_supersession("active", None).expect("an active memory has no end instant");
+        assert!(check_supersession("archived", None).is_err(), "unknown state accepted");
     }
 
     #[test]

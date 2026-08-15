@@ -165,11 +165,58 @@ staleness comparison be interrogated by a JSON corpus rather than by an end-to-e
    leaves `PathOutcome::Added` and `Removed` underivable — and both are in the enum the data model
    names. The flag is local-only (checkpoints never synchronize), so it costs nothing on the wire.
 
+### Checkpoint B(ii) — Phase 3 (T018–T023): the additive local migration
+
+| | |
+|---|---|
+| Tasks | T018–T023 |
+| Commit | `c4177aa`, plus the review fixes below |
+| Suite | `migration_alpha4` 14 passed · `cairn-store` 54 passed · `cargo test --workspace` green |
+
+**What landed**
+
+- `migrations/0005_project_intelligence.sql` — sixteen columns on `memories`, one on `tasks`, one on
+  `sessions`, two on `outbox`, one on `sync_meta`; eleven new tables with their DDL `CHECK`s; six new
+  `memories` indexes; the two backfills; the supersession-relation conversion.
+- `migrate::run_to` gained a Rust **finisher** step, inside the migration's own transaction.
+- `cairn-store/src/constraints.rs` — the predicates SQLite cannot add to an existing table.
+- `repo::set_memory_intelligence` — the single boundary those predicates are enforced at.
+- `tests/tests/migration_alpha4.rs` — fourteen tests.
+
+**Decisions**
+
+1. **The criteria conversion is Rust, not SQL.** A criterion's `id` is a UUIDv7 by the convention
+   every other identifier in this schema follows, and SQLite can only produce a random value *shaped*
+   like one. A migration that claims a time ordering its values do not have is a small lie in a table
+   other code sorts by. The step runs inside the same transaction, so
+   `an_interrupted_migration_rolls_back_entirely` still holds — proved by injecting a mid-script
+   failure and asserting `schema_migrations` stayed at 4 and the store still opens.
+
+**Review findings, raised against the committed migration and fixed**
+
+| # | Finding | Fix |
+|---|---|---|
+| A1 | `set_memory_intelligence` validated `state` and never wrote it, so the `superseded_at` predicate was an assertion about what the caller *claimed* rather than about the row — and `supersede_memory` (T033) would bypass the boundary entirely | `MemoryColumns` narrowed to exactly the fields the function writes. The two-column predicate moved to `check_supersession`, which T033 calls where it writes both |
+| A2 | `pinned: Some(1)` with no metadata set the pin **and cleared** `pinned_at`, `pinned_by_session` and `pin_reason` — a pin nobody could account for, erasing a previous pin's author | `pinned = 1` now requires all three (FR-452), refused at the boundary |
+| A3 | `json_array_length(signals) BETWEEN 2 AND 16` is a `CHECK` calling a JSON1 function. `CREATE TABLE` accepting it says nothing about whether it constrains at insert | `the_new_tables_enforce_their_check_constraints` exercises the refusal — one signal, seventeen signals, and the duplicate-identity index |
+| A4 | `memory_relations` had foreign keys on both endpoints, but `records-and-rebuild.md` §Fail-closed requires a relation naming a memory that has not synced yet to be **ignored and reported**, never refused. A hard FK refuses the insert, so T103's `INSERT OR IGNORE` would have dropped it silently | The foreign keys are gone from those two columns, with the reason in the DDL. `a_relation_may_reference_a_memory_that_has_not_arrived` asserts it |
+
+A4 was found before Phase 10 could inherit it, which is the whole value of reviewing a migration
+while it is still the newest thing in the tree. **Open for T102/T103**: `task_criteria.task_id` and
+`task_blockers.task_id` keep their foreign keys, matching Feature 001's existing precedent
+(`sessions.task_id` references `tasks`). If sync can deliver a criterion before its task, that
+ordering needs the same hold-and-retry T102 already specifies for relations.
+
+### Disk
+
+`target/debug/incremental` had reached 7.9 GB and was the real pressure, not the dependency cache.
+Removing it freed 5.8 GB. Every cargo invocation from here passes `CARGO_INCREMENTAL=0` so it does
+not regrow; the cost is slower rebuilds of changed crates, which is the right trade on this host.
+
 ## Next action
 
-Phase 3 (Local schema migration), starting at **T018**: write
-`crates/cairn-store/migrations/0005_project_intelligence.sql` steps 1 and 4. Phase 3 blocks every
-storage phase.
+Phase 4 (US1 + US2 + US3 — canonical knowledge), starting at **T024**: populate
+`tests/knowledge/reconciliation/coarse_value_key/` with ≥15 adversarial cases. The test-first
+cluster T024–T028 comes before any storage work in this phase.
 
-Read before starting: `migration.md` (already read) and `contracts/records-and-rebuild.md`, which
-T038's rebuild procedures depend on.
+`contracts/knowledge.md` is already read and governs the whole phase.

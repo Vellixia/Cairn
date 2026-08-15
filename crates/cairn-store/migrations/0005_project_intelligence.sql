@@ -92,9 +92,17 @@ UPDATE memories SET superseded_at = updated_at
 -- endpoints normalized to (min, max) before the write, so two machines
 -- detecting one conflict while offline produce one row rather than two facing
 -- opposite ways (D78).
+-- `from_memory_id` and `to_memory_id` deliberately carry **no** foreign key.
+-- `contracts/records-and-rebuild.md` §Fail-closed requires a relation naming a
+-- memory that does not exist to be *ignored by the derivation and reported by
+-- `doctor`* — never deleted, because it may be a memory that has not synced
+-- yet. A hard foreign key would refuse the insert instead, so importing a
+-- decision that arrived before its proposal would drop it silently. The
+-- derivation already tolerates a dangling endpoint by construction: it only
+-- considers relations whose endpoints are in the member set.
 CREATE TABLE IF NOT EXISTS memory_relations (
-    from_memory_id     TEXT NOT NULL REFERENCES memories(id),
-    to_memory_id       TEXT NOT NULL REFERENCES memories(id),
+    from_memory_id     TEXT NOT NULL,
+    to_memory_id       TEXT NOT NULL,
     kind               TEXT NOT NULL CHECK (kind IN (
         'reinforces', 'duplicates', 'supersedes',
         'conflicts_with', 'narrows', 'not_applicable_to')),
