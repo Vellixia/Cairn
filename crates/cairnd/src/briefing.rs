@@ -261,6 +261,9 @@ mod tests {
                 origin_session_id: s.id,
                 local_only: false,
                 evidence: &[],
+                topic_key: None,
+                value_key: None,
+                importance: cairn_core::Importance::Normal,
             },
             cairn_store::outbox::SyncPolicy::from_project(&p),
         )

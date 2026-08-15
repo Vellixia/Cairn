@@ -9,6 +9,8 @@ use crate::rows;
 use crate::tx;
 use crate::{Result, Store, StoreError};
 use cairn_core::domain::*;
+use cairn_core::knowledge as knowledge_core;
+use cairn_core::knowledge::ProposalOutcome;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
@@ -667,17 +669,125 @@ pub struct NewMemory<'a> {
     pub local_only: bool,
     /// Zero or more. Never fabricated to satisfy the schema (FR-019).
     pub evidence: &'a [Uuid],
+    /// The subject this proposal concerns, as the caller proposed it. Optional:
+    /// a free-form memory is fully valid, searchable, briefable and syncable,
+    /// and behaves exactly as it does in Feature 001 (FR-313).
+    ///
+    /// Normalized here rather than by the caller, so every writer gets the same
+    /// treatment. An unrepresentable key does **not** reject the memory: it is
+    /// stored free-form and the reason is reported (FR-312).
+    pub topic_key: Option<&'a str>,
+    /// The comparable value it asserts. Accepted only alongside a topic key.
+    pub value_key: Option<&'a str>,
+    /// A within-bucket ranking hint, and nothing more (FR-308).
+    pub importance: Importance,
+}
+
+impl<'a> NewMemory<'a> {
+    /// A proposal with no subject identity — Feature 001's shape.
+    pub fn free_form(
+        project_id: Uuid,
+        kind: MemoryType,
+        scope: MemoryScope,
+        scope_key: &'a str,
+        content: &'a str,
+        origin_session_id: Uuid,
+        local_only: bool,
+        evidence: &'a [Uuid],
+    ) -> Self {
+        Self {
+            project_id,
+            kind,
+            scope,
+            scope_key,
+            content,
+            origin_session_id,
+            local_only,
+            evidence,
+            topic_key: None,
+            value_key: None,
+            importance: Importance::Normal,
+        }
+    }
+}
+
+/// What creating a proposal turned out to mean for its subject.
+///
+/// Returned alongside the memory so the writer learns what Cairn decided — and,
+/// where Cairn deliberately did **not** decide, which member it matched, so the
+/// party that can read both statements can settle it explicitly (FR-327).
+#[derive(Debug, Clone)]
+pub struct CreateOutcome {
+    pub memory: Memory,
+    pub reconciliation: ProposalOutcome,
+    /// Notes for the `ok: true` envelope: `invalid_topic_key`,
+    /// `corroborating_member`, `reconciliation_deferred` (FR-312, FR-474).
+    pub notes: Vec<&'static str>,
 }
 
 pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) -> Result<Memory> {
+    Ok(create_memory_reconciled(store, m, policy, DEFAULT_RECONCILE_MEMBERS_MAX)
+        .await?
+        .memory)
+}
+
+/// The per-write bound, when the caller has no configuration to hand.
+///
+/// Mirrors `CairnConfig::reconcile_members_max`; `bounds.rs` (T140) asserts the
+/// two agree.
+pub const DEFAULT_RECONCILE_MEMBERS_MAX: usize = 64;
+
+/// Create a proposal and run bounded reconciliation in the same transaction.
+///
+/// The proposal and any relation it implies commit together
+/// (`contracts/records-and-rebuild.md` §Aggregate ownership), so a reader never
+/// sees a member without the decision that placed it.
+///
+/// Exactly one merging case exists — content identical after normalization —
+/// and it is the only one Cairn can decide without inference (D46). A shared
+/// value key with differing content records **nothing**: the value is agreed
+/// and the statements are several.
+pub async fn create_memory_reconciled(
+    store: &Store,
+    m: NewMemory<'_>,
+    policy: SyncPolicy,
+    reconcile_members_max: usize,
+) -> Result<CreateOutcome> {
     let id = new_id();
     let now = rows::now_text();
+    let mut notes: Vec<&'static str> = Vec::new();
+
+    // An unrepresentable key never rejects the memory (FR-312).
+    let topic_key = match m.topic_key {
+        Some(raw) => {
+            let normalized = knowledge_core::normalize_topic_key(raw);
+            if normalized.is_none() {
+                notes.push(cairn_core::wire::codes::INVALID_TOPIC_KEY);
+            }
+            normalized
+        }
+        None => None,
+    };
+    let value_key = match (m.value_key, topic_key.as_ref()) {
+        (Some(raw), Some(_)) => knowledge_core::normalize_value_key(raw),
+        // A value key with no topic key has no subject to be a value of. The
+        // memory is still stored; the key is dropped and the reason reported.
+        (Some(_), None) => {
+            notes.push(cairn_core::wire::codes::VALUE_WITHOUT_TOPIC);
+            None
+        }
+        (None, _) => None,
+    };
+    let content_norm_digest = knowledge_core::content_norm_digest(m.content);
+
     let mut tx = tx::begin(store, "create_memory").await?;
     sqlx::query(
         "INSERT INTO memories
             (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
-             origin_session_id, local_only, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, ?8, ?9, ?9)",
+             origin_session_id, local_only, created_at, updated_at,
+             topic_key, value_key, content_norm_digest, importance, effective_from)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, ?8, ?9, ?9,
+                 ?10, ?11, ?12, ?13, ?9)",
     )
     .bind(id.to_string())
     .bind(m.project_id.to_string())
@@ -688,6 +798,10 @@ pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) 
     .bind(m.origin_session_id.to_string())
     .bind(m.local_only as i64)
     .bind(&now)
+    .bind(topic_key.as_deref())
+    .bind(value_key.as_deref())
+    .bind(&content_norm_digest)
+    .bind(m.importance.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -756,8 +870,71 @@ pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) 
         .await?;
     }
 
+    // Bounded reconciliation, in this same transaction (FR-474).
+    let mut reconciliation = ProposalOutcome::Created;
+    if let Some(topic) = topic_key.as_deref() {
+        let (members, over_bound) = crate::knowledge::subject_members_tx(
+            &mut tx,
+            m.project_id,
+            m.scope,
+            m.scope_key,
+            topic,
+            reconcile_members_max,
+        )
+        .await?;
+
+        let proposal = knowledge_core::MemoryFacts {
+            id,
+            state: MemoryState::Active,
+            scope: m.scope,
+            scope_key: m.scope_key.to_string(),
+            topic_key: topic_key.clone(),
+            value_key: value_key.clone(),
+            content_norm_digest: Some(content_norm_digest.clone()),
+            verification: cairn_core::VerificationState::Unverified,
+            verification_authority: None,
+            evidence_fact_count: 0,
+            pinned: false,
+            importance: m.importance,
+            origin_session_id: m.origin_session_id,
+        };
+
+        if over_bound {
+            reconciliation = ProposalOutcome::Deferred;
+            notes.push(cairn_core::wire::codes::RECONCILIATION_DEFERRED);
+        } else {
+            let (outcome, relations) =
+                knowledge_core::classify_proposal(&proposal, &members, reconcile_members_max);
+            for r in relations {
+                crate::knowledge::record_relation_tx(
+                    &mut tx,
+                    crate::knowledge::NewRelation {
+                        project_id: m.project_id,
+                        from: r.from,
+                        to: r.to,
+                        kind: r.kind,
+                        decided_by_session: m.origin_session_id,
+                        basis: r.basis,
+                        basis_evidence_id: None,
+                        rationale: None,
+                    },
+                )
+                .await?;
+            }
+            if matches!(outcome, ProposalOutcome::Corroborating { .. }) {
+                notes.push(cairn_core::wire::codes::CORROBORATING_MEMBER);
+            }
+            reconciliation = outcome;
+        }
+    }
+
     tx::commit(tx, "create_memory").await?;
-    memory(store, id).await
+    let memory = memory(store, id).await?;
+    Ok(CreateOutcome {
+        memory,
+        reconciliation,
+        notes,
+    })
 }
 
 pub async fn memory(store: &Store, id: Uuid) -> Result<Memory> {

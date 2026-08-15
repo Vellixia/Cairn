@@ -936,6 +936,13 @@ async fn memory_create(
         origin_session_id: session.id,
         local_only,
         evidence: &evidence,
+        // The subject identity arrives with the tool and CLI surfaces (T040,
+        // T125). Until then every proposal is free-form, which is Feature 001's
+        // behaviour exactly — the storage layer below is already reconciling,
+        // it simply has no key to reconcile on.
+        topic_key: None,
+        value_key: None,
+        importance: cairn_core::Importance::Normal,
     };
 
     match supersedes {

@@ -7,6 +7,7 @@
 pub mod constraints;
 pub mod diag;
 pub mod integrations;
+pub mod knowledge;
 pub mod migrate;
 pub mod outbox;
 pub mod repo;
