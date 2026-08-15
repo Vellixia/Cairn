@@ -1,0 +1,14 @@
+{
+  "description": "Scope staleness and evidence are orthogonal.",
+  "input": {
+    "extra": {
+      "from": "verified",
+      "trigger": "marked_stale"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": null
+    }
+  }
+}

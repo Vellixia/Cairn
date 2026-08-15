@@ -1,0 +1,14 @@
+{
+  "description": "The file is gone or the ref is unresolvable. The claim stays owing a recheck: neither verified nor drifted is honest (FR-366).",
+  "input": {
+    "extra": {
+      "from": "needs_recheck",
+      "trigger": "run_inconclusive"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

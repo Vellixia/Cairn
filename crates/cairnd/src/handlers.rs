@@ -877,6 +877,29 @@ async fn observe(
     repo::touch_session(&d.store, session.id)
         .await
         .map_err(storage_err)?;
+
+    // Drift marking rides the capture path (T063). It is one indexed lookup by
+    // exact locator, capped at `evidence_lookups_per_event_max`, and it writes
+    // exactly `verification` on the memories the fact supports. Exceeding the
+    // cap defers to the background pass and is not an error, which is what
+    // keeps a hook inside Feature 001's 250 ms deadline with its always-exit-0
+    // rule unchanged (FR-374, FR-475).
+    if let Some(o) = &stored {
+        if o.kind == ObservationType::FileChanged {
+            if let Some(path) = o.path.as_deref() {
+                let report = crate::drift::mark_for_path(d, r.project.id, path).await;
+                if report.marked > 0 {
+                    tracing::debug!(
+                        path,
+                        marked = report.marked,
+                        deferred = report.deferred,
+                        "marked claims for recheck"
+                    );
+                }
+            }
+        }
+    }
+
     match stored {
         Some(o) => Ok(json!({ "observation_id": o.id, "recorded": true })),
         None => Ok(json!({ "recorded": false, "reason": "excluded" })),

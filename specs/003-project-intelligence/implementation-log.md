@@ -325,9 +325,35 @@ merges nothing, and history is answerable.
    `reqwest` and the rest. It is a blunt check, and it is the one that would actually catch someone
    adding a shell-out to make a verifier "work".
 
+### Checkpoint E — Phase 6 (T060–T064) complete: drift
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` green, 60 suites, 0 failures |
+
+**What landed**
+
+- `cairnd::drift` — `mark_for_path` (exact locator equality, capped at
+  `evidence_lookups_per_event_max`, deferring rather than continuing) and `mark_for_commit_change`
+  (only facts pinned to a commit that is no longer current).
+- Marking wired into the observe path for a `file_changed` observation, and the commit-change form
+  onto the maintenance tick immediately before the verification pass.
+- Corpus: `drift/` — 15 cases, each naming a `(state, trigger)` pair and the state it produces, or
+  `null` where the contract documents no transition. Checked against the real `transition`.
+- Tests: `us5_drift` (4), `cairnd::drift` (8).
+
+**Decisions**
+
+1. **An `unverified` memory is never marked.** There is nothing to recheck, and moving it would
+   claim a verification it never had. `mark_supported` filters to `verified`, `drifted` and
+   `conflicted`.
+2. **`mark_for_commit_change` takes the current head** and marks only facts recorded at a
+   *different* commit. Marking every commit-pinned fact on a branch would recheck things that have
+   not moved.
+
 ## Where the run stands
 
-**59 of 148 tasks complete**, each with its named evidence passing.
+**64 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
@@ -336,9 +362,24 @@ merges nothing, and history is answerable.
 | 3 Local migration | T018–T023 | complete |
 | 4 Canonical knowledge | T024–T043 | complete |
 | 5 Evidence & authority | T044–T059 | complete |
-| 6–16 | T060–T148 | not started |
+| 6 Drift | T060–T064 | complete |
+| 7–16 | T065–T148 | not started |
 
 ## Next action
+
+**Phase 7 (US11 — evidence-aware tasks), starting at T065**: the test-first cluster T065–T067
+(`no_silent_overwrite`, `attested_is_not_enough` / `no_percentage_field`, and the
+`tests/knowledge/tasks/` corpus), then T068–T075.
+
+The pure half is already implemented and tested in `cairn-core::tasks`:
+`derive_task_state_digest`, `progress`, `completion_readiness`, `action_order`,
+`criteria_projection` and `criterion_label`. Phase 7 is the `task_criteria` and `task_blockers`
+repositories, the local counter and change log, the retained projection, criterion verification
+restricted to `cairn` authority, the bind snapshot, and the `cairn task` surfaces.
+
+`contracts/task-model.md` has already been read and governs the phase.
+
+### Superseded next-action note
 
 **Phase 6 (US5 — drift), starting at T060**: populate `tests/knowledge/drift/` with the full
 transition set, then `us5_drift::marks_only_verification` (T061) before the marking code (T062).

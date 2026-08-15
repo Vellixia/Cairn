@@ -1,0 +1,14 @@
+{
+  "description": "Already owing a recheck, and now with nothing left to check against. It stays where it is rather than reporting an outcome it does not have.",
+  "input": {
+    "extra": {
+      "from": "needs_recheck",
+      "trigger": "last_supporting_evidence_deleted"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

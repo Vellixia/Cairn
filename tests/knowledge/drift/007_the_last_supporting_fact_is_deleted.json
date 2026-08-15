@@ -1,0 +1,14 @@
+{
+  "description": "Deleting a fact tombstones it and clears its fingerprint. The supported memory becomes needs_recheck, never stays verified.",
+  "input": {
+    "extra": {
+      "from": "verified",
+      "trigger": "last_supporting_evidence_deleted"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

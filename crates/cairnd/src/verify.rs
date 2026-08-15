@@ -500,6 +500,19 @@ pub async fn sweep_projects(d: &Daemon) -> PassReport {
             continue;
         }
 
+        // A commit change marks commit-pinned facts for rechecking before the
+        // pass runs, so a rebase is noticed rather than silently re-verified
+        // against the wrong state (FR-384). Bounded by the same per-event cap.
+        if let Ok(status) = cairn_git::status(&worktree) {
+            crate::drift::mark_for_commit_change(
+                d,
+                project_id,
+                &status.branch,
+                status.commit_sha.as_deref(),
+            )
+            .await;
+        }
+
         let report = bounded_pass(d, project_id, &worktree).await;
         total.facts_examined += report.facts_examined;
         total.runs_recorded += report.runs_recorded;

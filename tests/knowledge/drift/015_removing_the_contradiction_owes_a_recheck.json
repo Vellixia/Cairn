@@ -1,0 +1,14 @@
+{
+  "description": "The disagreement is gone, and what remains has not been checked since.",
+  "input": {
+    "extra": {
+      "from": "conflicted",
+      "trigger": "contradicting_evidence_removed"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

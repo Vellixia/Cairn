@@ -648,3 +648,60 @@ fn an_authority_never_crosses_a_boundary_wearing_the_wrong_badge() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Drift (T060, SC-307)
+// ---------------------------------------------------------------------------
+
+/// Every drift case names a `(state, trigger)` pair and the state it produces —
+/// or `null` where the contract documents **no** transition at all.
+///
+/// The exhaustive proof that the machine is total lives in `cairn-core::verify`
+/// and enumerates the whole product. This corpus is the readable form: each
+/// case says, in words, why the transition is what it is.
+#[test]
+fn the_drift_corpus_matches_the_state_machine() {
+    use cairn_core::verify::{transition, VerificationTrigger};
+    use cairn_core::VerifyResult;
+
+    let cases = corpus::load_group(&corpus::root(), "drift").expect("the drift corpus loads");
+    assert!(cases.len() >= 10, "{} cases", cases.len());
+
+    for case in &cases {
+        let from = VerificationState::from_str(
+            case.input.extra["from"].as_str().expect("from"),
+        )
+        .expect("state");
+
+        let trigger = match case.input.extra["trigger"].as_str().expect("trigger") {
+            "fingerprint_changed" => VerificationTrigger::FingerprintChanged,
+            "run_verified" => VerificationTrigger::Run(VerifyResult::Verified),
+            "run_drifted" => VerificationTrigger::Run(VerifyResult::Drifted),
+            "run_inconclusive" => VerificationTrigger::Run(VerifyResult::Inconclusive),
+            "last_supporting_evidence_deleted" => {
+                VerificationTrigger::LastSupportingEvidenceDeleted
+            }
+            "contradicting_evidence_attached" => {
+                VerificationTrigger::ContradictingEvidenceAttached
+            }
+            "contradicting_evidence_removed" => {
+                VerificationTrigger::ContradictingEvidenceRemoved
+            }
+            "superseded" => VerificationTrigger::Superseded,
+            "marked_stale" => VerificationTrigger::MarkedStale,
+            "imported" => VerificationTrigger::Imported,
+            other => panic!("{}", case.context(format!("unknown trigger {other}"))),
+        };
+
+        let expected = case.expect.extra["to"]
+            .as_str()
+            .map(|t| VerificationState::from_str(t).expect("state"));
+
+        assert_eq!(
+            transition(from, trigger),
+            expected,
+            "{}",
+            case.context("the transition differs from what the case states")
+        );
+    }
+}

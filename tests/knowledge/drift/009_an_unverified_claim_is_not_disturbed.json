@@ -1,0 +1,14 @@
+{
+  "description": "There is nothing to recheck. Moving it would claim a verification it never had.",
+  "input": {
+    "extra": {
+      "from": "unverified",
+      "trigger": "fingerprint_changed"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": null
+    }
+  }
+}

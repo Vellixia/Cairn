@@ -1,0 +1,14 @@
+{
+  "description": "Only a run clears drift. A file moving again does not make a stale claim true.",
+  "input": {
+    "extra": {
+      "from": "drifted",
+      "trigger": "fingerprint_changed"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "description": "The file changed and changed back, or the change was elsewhere in it. The claim is verified again.",
+  "input": {
+    "extra": {
+      "from": "needs_recheck",
+      "trigger": "run_verified"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "verified"
+    }
+  }
+}

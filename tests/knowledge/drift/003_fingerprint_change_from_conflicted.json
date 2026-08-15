@@ -1,0 +1,14 @@
+{
+  "description": "The memory's own evidence disagreed with itself, and then the support moved. The disagreement is no longer about the same thing.",
+  "input": {
+    "extra": {
+      "from": "conflicted",
+      "trigger": "fingerprint_changed"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

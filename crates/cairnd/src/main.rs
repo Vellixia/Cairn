@@ -7,6 +7,7 @@
 mod briefing;
 mod capture;
 mod handlers;
+mod drift;
 mod handoffs;
 mod integrations;
 mod recover;

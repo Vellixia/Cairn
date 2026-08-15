@@ -1,0 +1,14 @@
+{
+  "description": "The remembered value is no longer what the evidence says. The memory is drifted - and it is not rewritten, superseded or hidden (FR-372).",
+  "input": {
+    "extra": {
+      "from": "needs_recheck",
+      "trigger": "run_drifted"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "drifted"
+    }
+  }
+}

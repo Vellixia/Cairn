@@ -1,0 +1,14 @@
+{
+  "description": "This memory's own evidence disagrees with itself: supporting and contradicting facts both attached (FR-369).",
+  "input": {
+    "extra": {
+      "from": "verified",
+      "trigger": "contradicting_evidence_attached"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "conflicted"
+    }
+  }
+}
