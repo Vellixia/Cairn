@@ -446,6 +446,33 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             )
             .await
         }
+        Request::EvidenceAdd {
+            cwd,
+            agent_session_key,
+            session_id,
+            kind,
+            collector,
+            subject,
+            observed_value,
+            source_locator,
+            observation_id,
+            memory_id,
+            role,
+        } => {
+            evidence_add(
+                d, &cwd, agent_session_key, session_id, kind, collector, subject,
+                observed_value, source_locator, observation_id, memory_id, role,
+            )
+            .await
+        }
+        Request::EvidenceList { cwd, memory_id } => evidence_list(d, &cwd, memory_id).await,
+        Request::EvidenceShow { cwd, evidence_id } => evidence_show(d, &cwd, evidence_id).await,
+        Request::Verify {
+            cwd,
+            memory_id,
+            all,
+            explain,
+        } => verify_now(d, &cwd, memory_id, all, explain).await,
         Request::MemoryForget { cwd, memory_id } => {
             let r = d.resolve(&cwd).await?;
             repo::delete_memory(&d.store, memory_id, r.policy)
@@ -974,6 +1001,265 @@ pub struct SubjectProposal {
 }
 
 /// Inspect a subject and the decisions that produced its answer (FR-307).
+
+// ---------------------------------------------------------------------------
+// Evidence and verification (T057)
+// ---------------------------------------------------------------------------
+
+/// Render one fact for output, with its value already redacted and bounded at
+/// the point it was stored.
+fn evidence_json(f: &cairn_store::evidence::EvidenceFact) -> serde_json::Value {
+    json!({
+        "id": f.id,
+        "kind": f.kind,
+        "collector": f.collector,
+        "subject": f.subject,
+        "observed_value": f.observed_value,
+        "source_locator": f.source_locator,
+        "repo_branch": f.repo_branch,
+        "repo_commit": f.repo_commit,
+        "collected_by_session": f.collected_by_session,
+        "observation_id": f.observation_id,
+        // A deleted fact resolves as deleted rather than disappearing
+        // (FR-358, FR-505).
+        "deleted": f.deleted,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn evidence_add(
+    d: &Daemon,
+    cwd: &str,
+    agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    kind: EvidenceKind,
+    collector: Option<EvidenceCollector>,
+    subject: String,
+    observed_value: String,
+    source_locator: String,
+    observation_id: Option<Uuid>,
+    memory_id: Option<Uuid>,
+    role: Option<EvidenceRole>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+    let git = git_status(r.repo.worktree_path.clone()).await?;
+    let config = d.config.read().await.clone();
+
+    // A path Cairn was told not to look at yields no fact at all, and the
+    // reason is `evidence_excluded` rather than `no_evidence` — "I was told not
+    // to look" and "nobody attached anything" are different answers.
+    if config.is_path_excluded(&source_locator) {
+        return Err(WireError::new(
+            codes::EVIDENCE_EXCLUDED,
+            "that locator matches a privacy exclusion; no evidence was created",
+        ));
+    }
+
+    // Cairn may only claim to have collected something it can actually read.
+    // Anything else is an agent's attestation, and is labelled as one.
+    let collector = collector.unwrap_or(match kind {
+        EvidenceKind::RuntimeState => EvidenceCollector::Agent,
+        _ => EvidenceCollector::Cairn,
+    });
+
+    let fingerprint = cairn_core::digest(&observed_value);
+    let fact = cairn_store::evidence::record(
+        &d.store,
+        cairn_store::evidence::NewEvidence {
+            project_id: r.project.id,
+            kind,
+            collector,
+            subject: &subject,
+            observed_value: &observed_value,
+            source_locator: &source_locator,
+            fingerprint: &fingerprint,
+            observation_id,
+            repo_branch: &git.branch,
+            repo_commit: git.commit_sha.as_deref(),
+            collected_by_session: session.id,
+        },
+        config.evidence_value_max_bytes,
+        config.evidence_locator_max_bytes,
+    )
+    .await
+    .map_err(|e| {
+        let text = e.to_string();
+        if text.contains(codes::ABSOLUTE_LOCATOR) {
+            WireError::new(codes::ABSOLUTE_LOCATOR, text)
+        } else if text.contains(codes::EVIDENCE_OUTSIDE_WORKTREE) {
+            WireError::new(codes::EVIDENCE_OUTSIDE_WORKTREE, text)
+        } else {
+            storage_err(e)
+        }
+    })?;
+
+    let mut body = json!({ "evidence": evidence_json(&fact) });
+    if let Some(memory_id) = memory_id {
+        cairn_store::evidence::attach_to_memory(
+            &d.store,
+            memory_id,
+            fact.id,
+            role.unwrap_or(EvidenceRole::Supports),
+            session.id,
+        )
+        .await
+        .map_err(storage_err)?;
+        body["attached_to"] = json!(memory_id);
+    }
+    Ok(body)
+}
+
+async fn evidence_list(d: &Daemon, cwd: &str, memory_id: Option<Uuid>) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let facts = match memory_id {
+        Some(id) => cairn_store::evidence::facts_for_memory(&d.store, id)
+            .await
+            .map_err(storage_err)?
+            .into_iter()
+            .map(|(role, f)| {
+                let mut v = evidence_json(&f);
+                v["role"] = json!(role);
+                v
+            })
+            .collect::<Vec<_>>(),
+        None => cairn_store::evidence::facts_for_project(&d.store, r.project.id)
+            .await
+            .map_err(storage_err)?
+            .iter()
+            .map(evidence_json)
+            .collect(),
+    };
+    Ok(json!({ "evidence": facts, "total": facts.len() }))
+}
+
+async fn evidence_show(d: &Daemon, cwd: &str, evidence_id: Uuid) -> Reply {
+    d.resolve(cwd).await?;
+    let fact = cairn_store::evidence::fact(&d.store, evidence_id)
+        .await
+        .map_err(storage_err)?;
+    Ok(json!({ "evidence": evidence_json(&fact) }))
+}
+
+/// Verify on demand: the same verifiers and the same caps as the background
+/// pass, reported synchronously (FR-472).
+async fn verify_now(
+    d: &Daemon,
+    cwd: &str,
+    memory_id: Option<Uuid>,
+    all: bool,
+    explain: bool,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let worktree = std::path::PathBuf::from(&r.repo.worktree_path);
+
+    if let Some(id) = memory_id {
+        let (state, authority) = verify_one(d, r.project.id, &worktree, id).await?;
+        let mut body = json!({
+            "memory_id": id,
+            "verification": state,
+            // Never bare: every surface that shows a state shows its authority
+            // (FR-370).
+            "authority": authority,
+        });
+        if explain {
+            body["runs"] = json!(run_history(d, id).await?);
+        }
+        return Ok(body);
+    }
+
+    if !all {
+        return Err(WireError::invalid("verify needs --memory or --all"));
+    }
+
+    let report = crate::verify::bounded_pass(d, r.project.id, &worktree).await;
+    let mut body = json!({
+        "facts_examined": report.facts_examined,
+        "runs_recorded": report.runs_recorded,
+        "memories_updated": report.memories_updated,
+    });
+    if report.yielded {
+        // A cap bound. Remaining work is queued for the next tick; this is an
+        // outcome, not a failure (FR-473).
+        body["notes"] = json!([codes::VERIFY_PASS_YIELDED]);
+    }
+    Ok(body)
+}
+
+async fn verify_one(
+    d: &Daemon,
+    project_id: Uuid,
+    worktree: &std::path::Path,
+    memory_id: Uuid,
+) -> Result<(VerificationState, Option<VerificationAuthority>), WireError> {
+    let config = d.config.read().await.clone();
+    let git = git_status(worktree.to_path_buf()).await?;
+
+    let linked = cairn_store::evidence::facts_for_memory(&d.store, memory_id)
+        .await
+        .map_err(storage_err)?;
+    if linked.is_empty() {
+        // No evidence is a state, not an error: the memory stays unverified and
+        // the reason is that nobody attached anything (FR-473).
+        return Err(WireError::new(
+            codes::NO_EVIDENCE,
+            "that memory carries no evidence, so nothing can be checked",
+        ));
+    }
+
+    for (role, fact) in linked {
+        if role != EvidenceRole::Supports {
+            continue;
+        }
+        let Some(verifier) = crate::verify::verifier_for(&fact) else {
+            continue;
+        };
+        let outcome = crate::verify::run_verifier(worktree, &config, &fact, verifier, None);
+        cairn_store::evidence::record_run(
+            &d.store,
+            cairn_store::evidence::NewRun {
+                project_id,
+                memory_id: Some(memory_id),
+                criterion_id: None,
+                verifier,
+                evidence_id: Some(fact.id),
+                expected_digest: fact.fingerprint.as_deref(),
+                observed_digest: outcome.observed.as_deref(),
+                result: outcome.result,
+                detail: outcome.detail.as_deref(),
+                repo_branch: &git.branch,
+                repo_commit: git.commit_sha.as_deref(),
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .map_err(storage_err)?;
+    }
+
+    cairn_store::evidence::rebuild_verification(&d.store, memory_id)
+        .await
+        .map_err(storage_err)
+}
+
+async fn run_history(d: &Daemon, memory_id: Uuid) -> Result<Vec<serde_json::Value>, WireError> {
+    Ok(cairn_store::evidence::runs_for_memory(&d.store, memory_id)
+        .await
+        .map_err(storage_err)?
+        .into_iter()
+        .map(|r| {
+            json!({
+                "verifier": r.verifier,
+                "result": r.result,
+                "detail": r.detail,
+                "repo_branch": r.repo_branch,
+                "repo_commit": r.repo_commit,
+                "checked_at": r.checked_at,
+                "triggered_by": r.trigger,
+            })
+        })
+        .collect())
+}
+
 async fn memory_subject(
     d: &Daemon,
     cwd: &str,

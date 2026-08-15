@@ -1,0 +1,24 @@
+{
+  "description": "A peer learns what kind of check stands behind the state, not that this machine imported it. `remote_cairn` is sent as `cairn`, `remote_attested` as `attested` — and the receiver maps them back to `remote_*` on import, so neither side ever sees the other's provenance as its own.",
+  "input": {
+    "extra": {
+      "runs": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "on_the_wire": {
+        "cairn": "cairn",
+        "attested": "attested",
+        "remote_cairn": "cairn",
+        "remote_attested": "attested"
+      },
+      "on_import": {
+        "cairn": "remote_cairn",
+        "attested": "remote_attested",
+        "remote_cairn": "remote_cairn",
+        "remote_attested": "remote_attested"
+      }
+    }
+  }
+}

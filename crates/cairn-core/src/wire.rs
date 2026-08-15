@@ -378,6 +378,13 @@ pub struct MemoryQuery {
     /// Only memories whose subject is `Corroborated`.
     #[serde(default)]
     pub corroborated: bool,
+    /// Filter by verification state. A `drifted` memory is still returned by
+    /// default, because it stays lifecycle-`active` (FR-373).
+    #[serde(default)]
+    pub verification: Option<VerificationState>,
+    /// Filter by what established the verification (FR-370).
+    #[serde(default)]
+    pub authority: Option<VerificationAuthority>,
 }
 
 /// Everything the daemon can be asked to do.
@@ -732,6 +739,57 @@ pub enum Request {
         /// the confirmation is recorded against the session itself.
         #[serde(default)]
         from_memory_id: Option<Uuid>,
+    },
+    /// Attach a bounded, redacted, attributable evidence fact (FR-351).
+    ///
+    /// Local, always: there is no outbox entity type and no server table for
+    /// one, which is what makes "evidence content never leaves the machine" a
+    /// property of the schema rather than a promise.
+    EvidenceAdd {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        kind: EvidenceKind,
+        /// `cairn` when Cairn read it; `agent` when an agent attested it. An
+        /// attested fact is usable, labelled everywhere, and refused by the two
+        /// strict consumers (FR-355, FR-370).
+        #[serde(default)]
+        collector: Option<EvidenceCollector>,
+        subject: String,
+        observed_value: String,
+        /// Repository-relative, or a Git ref. Never absolute (FR-353).
+        source_locator: String,
+        #[serde(default)]
+        observation_id: Option<Uuid>,
+        /// The memory this supports or contradicts, when it is being attached.
+        #[serde(default)]
+        memory_id: Option<Uuid>,
+        #[serde(default)]
+        role: Option<EvidenceRole>,
+    },
+    EvidenceList {
+        cwd: String,
+        #[serde(default)]
+        memory_id: Option<Uuid>,
+    },
+    EvidenceShow {
+        cwd: String,
+        evidence_id: Uuid,
+    },
+    /// Run verification on demand. Same caps, same verifiers, reported
+    /// synchronously (FR-472).
+    Verify {
+        cwd: String,
+        #[serde(default)]
+        memory_id: Option<Uuid>,
+        /// Every memory in the project that owes a check.
+        #[serde(default)]
+        all: bool,
+        /// Return the run history rather than only the current state.
+        #[serde(default)]
+        explain: bool,
     },
     /// Record an explicit reconciliation decision (FR-335).
     MemoryReconcile {

@@ -1,0 +1,18 @@
+{
+  "description": "A peer established this deterministically. It is reported as verified elsewhere, never as verified here, and it does not count toward local readiness (FR-368).",
+  "input": {
+    "extra": {
+      "runs": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "imported_from": "cairn",
+      "authority": "remote_cairn",
+      "satisfies_deterministic_requirement": false,
+      "criterion_may_verify": false,
+      "promotion_eligible": false,
+      "refusal": "imported_not_sufficient"
+    }
+  }
+}

@@ -299,6 +299,8 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .get("corroborated")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
+                verification: enum_arg(args, "verification"),
+                authority: enum_arg(args, "authority"),
             };
             let value = client::send(&Request::MemorySearch {
                 cwd,

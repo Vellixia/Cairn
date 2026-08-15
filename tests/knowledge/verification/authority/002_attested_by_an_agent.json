@@ -1,0 +1,23 @@
+{
+  "description": "The memory is verified, and every run that established it consulted only agent-attested evidence. Useful, labelled everywhere, and visibly weaker.",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "verified",
+          "collector": "agent",
+          "verifier": "runtime_state"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": "attested",
+      "satisfies_deterministic_requirement": false,
+      "criterion_may_verify": false,
+      "promotion_eligible": false,
+      "refusal": "attested_not_sufficient"
+    }
+  }
+}

@@ -688,7 +688,7 @@ pub async fn branch_scoped_subjects(
 }
 
 #[cfg(test)]
-mod tests_support {
+pub(crate) mod tests_support {
     use super::*;
     use crate::outbox::SyncPolicy;
     use crate::repo::{self, NewMemory};

@@ -1,0 +1,20 @@
+{
+  "description": "A memory that is unverified carries no authority at all. Authority says what established a verification, and nothing established one.",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "verified",
+          "collector": "cairn",
+          "verifier": "file_digest"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "unverified",
+      "authority": null
+    }
+  }
+}

@@ -433,3 +433,102 @@ pub fn subject(v: &serde_json::Value) -> String {
     }
     out
 }
+
+/// Render a verification result.
+///
+/// **Never bare.** Every line that shows a verification state shows its
+/// authority, because collapsing the two is exactly what lets an agent's own
+/// assertion wear a deterministic check's badge (FR-370).
+pub fn verification(v: &serde_json::Value) -> String {
+    if let Some(state) = v["verification"].as_str() {
+        let authority = v["authority"].as_str();
+        let mut out = format!("{}\n", authority_line(state, authority));
+        if let Some(runs) = v["runs"].as_array() {
+            out.push_str("\n## Runs\n");
+            for r in runs {
+                out.push_str(&format!(
+                    "- {} → {} at {} ({})\n",
+                    r["verifier"].as_str().unwrap_or("?"),
+                    r["result"].as_str().unwrap_or("?"),
+                    r["checked_at"].as_str().unwrap_or("?"),
+                    r["triggered_by"].as_str().unwrap_or("?"),
+                ));
+                if let Some(detail) = r["detail"].as_str() {
+                    out.push_str(&format!("  {detail}\n"));
+                }
+            }
+        }
+        return out;
+    }
+
+    // A whole pass.
+    let mut out = format!(
+        "Examined {} facts · {} runs recorded · {} memories updated\n",
+        v["facts_examined"].as_i64().unwrap_or(0),
+        v["runs_recorded"].as_i64().unwrap_or(0),
+        v["memories_updated"].as_i64().unwrap_or(0),
+    );
+    if v["notes"]
+        .as_array()
+        .map(|n| n.iter().any(|x| x.as_str() == Some("verify_pass_yielded")))
+        .unwrap_or(false)
+    {
+        out.push_str("The pass hit a cap and yielded; the rest is queued for the next tick.\n");
+    }
+    out
+}
+
+/// The four renderings a verification state can have, and they are four rather
+/// than one on purpose (`contracts/evidence-verification.md` §How it is
+/// reported).
+pub fn authority_line(state: &str, authority: Option<&str>) -> String {
+    match (state, authority) {
+        ("verified", Some("cairn")) => "✓ verified                      (authority: cairn)".into(),
+        ("verified", Some("attested")) => {
+            "✓ verified (attested)           (authority: attested)".into()
+        }
+        ("verified", Some("remote_cairn")) => {
+            "✓ verified elsewhere            (authority: remote_cairn)".into()
+        }
+        ("verified", Some("remote_attested")) => {
+            "✓ verified elsewhere (attested) (authority: remote_attested)".into()
+        }
+        ("verified", None) => "✓ verified                      (authority: unknown)".into(),
+        (other, _) => format!("· {other}"),
+    }
+}
+
+/// Render evidence facts. A deleted fact says so rather than vanishing.
+pub fn evidence_list(v: &serde_json::Value) -> String {
+    let items = match v["evidence"].as_array() {
+        Some(a) => a.clone(),
+        None => vec![v["evidence"].clone()],
+    };
+    if items.is_empty() {
+        return "No evidence.\n".to_string();
+    }
+    let mut out = String::new();
+    for e in &items {
+        if e["deleted"].as_bool().unwrap_or(false) {
+            out.push_str(&format!(
+                "- `{}` {} — evidence deleted\n",
+                e["id"].as_str().unwrap_or("?"),
+                e["kind"].as_str().unwrap_or("?"),
+            ));
+            continue;
+        }
+        out.push_str(&format!(
+            "- `{}` {} [{}] {} = {}\n  at {}\n",
+            e["id"].as_str().unwrap_or("?"),
+            e["kind"].as_str().unwrap_or("?"),
+            e["collector"].as_str().unwrap_or("?"),
+            e["subject"].as_str().unwrap_or("?"),
+            e["observed_value"].as_str().unwrap_or("—"),
+            e["source_locator"].as_str().unwrap_or("—"),
+        ));
+        if let Some(role) = e["role"].as_str() {
+            out.push_str(&format!("  role: {role}\n"));
+        }
+    }
+    out
+}

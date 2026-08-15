@@ -1,0 +1,19 @@
+{
+  "description": "A successful run with no evidence fact behind it is an inconsistent cache, and the honest answer is none rather than a guess (FR-478).",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "verified",
+          "collector": null,
+          "verifier": "file_digest"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": null
+    }
+  }
+}

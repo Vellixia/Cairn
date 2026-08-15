@@ -98,6 +98,16 @@ pub async fn search(
     }
     sql.push_str(&scope_clause);
 
+    // A `drifted` memory is still returned by default: hiding it would make an
+    // agent silently re-derive knowledge Cairn holds (FR-373). These filters
+    // narrow deliberately; they change no default.
+    if q.verification.is_some() {
+        sql.push_str(" AND m.verification = ?");
+    }
+    if q.authority.is_some() {
+        sql.push_str(" AND m.verification_authority = ?");
+    }
+
     if q.kind.is_some() {
         sql.push_str(" AND m.type = ?");
     }
@@ -139,6 +149,12 @@ pub async fn search(
         if let Some(s) = ctx.session_id {
             query = query.bind(s.to_string());
         }
+    }
+    if let Some(v) = q.verification {
+        query = query.bind(v.as_str());
+    }
+    if let Some(a) = q.authority {
+        query = query.bind(a.as_str());
     }
     if let Some(kind) = q.kind {
         query = query.bind(kind.as_str());

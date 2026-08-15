@@ -6,6 +6,7 @@
 
 pub mod constraints;
 pub mod diag;
+pub mod evidence;
 pub mod integrations;
 pub mod knowledge;
 pub mod migrate;

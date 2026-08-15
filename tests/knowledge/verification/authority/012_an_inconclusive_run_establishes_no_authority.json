@@ -1,0 +1,19 @@
+{
+  "description": "The check ran and could establish neither outcome (FR-366).",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "inconclusive",
+          "collector": "cairn",
+          "verifier": "file_digest"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": null
+    }
+  }
+}

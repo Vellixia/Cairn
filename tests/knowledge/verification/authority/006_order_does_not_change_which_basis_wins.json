@@ -1,0 +1,25 @@
+{
+  "description": "The same two bases in the other order. Which run was recorded first cannot decide what established the claim.",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "verified",
+          "collector": "cairn",
+          "verifier": "file_digest"
+        },
+        {
+          "result": "verified",
+          "collector": "agent",
+          "verifier": "runtime_state"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": "cairn",
+      "satisfies_deterministic_requirement": true
+    }
+  }
+}

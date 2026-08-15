@@ -103,6 +103,26 @@ enum Command {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Bounded, redacted evidence facts. Local, always.
+    Evidence {
+        #[command(subcommand)]
+        action: EvidenceAction,
+    },
+    /// Run deterministic verification.
+    ///
+    /// Cairn reads files inside the worktree and Git. It runs no build, no test
+    /// suite and no shell command, and it reaches no network.
+    Verify {
+        /// One memory.
+        #[arg(long)]
+        memory: Option<Uuid>,
+        /// Every memory in the project that owes a check, within the pass caps.
+        #[arg(long)]
+        all: bool,
+        /// Print the run history, not only the current state.
+        #[arg(long)]
+        explain: bool,
+    },
     /// Read a handoff.
     Handoff {
         #[command(subcommand)]
@@ -272,6 +292,46 @@ enum TaskAction {
 }
 
 #[derive(Subcommand)]
+enum EvidenceAction {
+    /// Record a fact, optionally attaching it to a memory.
+    Add {
+        /// `observation`, `file`, `git_ref`, `configuration`, `test_outcome`,
+        /// `command_outcome`, `runtime_state`, `schema_version`.
+        #[arg(long = "type")]
+        kind: String,
+        /// What it describes — "database backend".
+        #[arg(long)]
+        subject: String,
+        /// The observed value. Redacted, then bounded.
+        #[arg(long)]
+        value: String,
+        /// Repository-relative path or Git ref. Never absolute. A configuration
+        /// locator names its key after a `#`: `config/app.yml#server.port`.
+        #[arg(long)]
+        locator: String,
+        /// `cairn` when Cairn can read it; `agent` when an agent attests it.
+        #[arg(long)]
+        collector: Option<String>,
+        #[arg(long)]
+        observation: Option<Uuid>,
+        /// The memory it bears on.
+        #[arg(long)]
+        memory: Option<Uuid>,
+        /// `supports` (default) or `contradicts`.
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    List {
+        /// Only the facts attached to this memory.
+        #[arg(long)]
+        memory: Option<Uuid>,
+    },
+    Show { id: Uuid },
+}
+
+#[derive(Subcommand)]
 enum MemoryAction {
     Add {
         content: String,
@@ -370,6 +430,13 @@ enum MemoryAction {
         /// Only memories whose subject is corroborated.
         #[arg(long)]
         corroborated: bool,
+        /// `unverified`, `verified`, `needs_recheck`, `drifted`, `conflicted`.
+        #[arg(long)]
+        verification: Option<String>,
+        /// What established it: `cairn`, `attested`, `remote_cairn`,
+        /// `remote_attested`.
+        #[arg(long)]
+        authority: Option<String>,
         /// Which session's task to rank by, when more than one is open here.
         #[arg(long)]
         session: Option<Uuid>,
@@ -656,6 +723,22 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         Command::Session { action } => session(action).await,
         Command::Task { action } => task(action).await,
         Command::Memory { action } => memory(action).await,
+        Command::Evidence { action } => evidence(action).await,
+        Command::Verify {
+            memory,
+            all,
+            explain,
+        } => {
+            let v = client::send(&Request::Verify {
+                cwd: cwd(),
+                memory_id: *memory,
+                all: *all,
+                explain: *explain,
+            })
+            .await?;
+            let text = render::verification(&v);
+            Ok(Output::with(v, text))
+        }
 
         Command::Handoff { action } => {
             let HandoffAction::Show { session } = action;
@@ -987,6 +1070,62 @@ async fn task(action: &TaskAction) -> Result<Output, WireError> {
     }
 }
 
+async fn evidence(action: &EvidenceAction) -> Result<Output, WireError> {
+    match action {
+        EvidenceAction::Add {
+            kind,
+            subject,
+            value,
+            locator,
+            collector,
+            observation,
+            memory,
+            role,
+            session,
+        } => {
+            let v = client::send(&Request::EvidenceAdd {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                kind: parse_enum("type", kind)?,
+                collector: match collector {
+                    Some(c) => Some(parse_enum("collector", c)?),
+                    None => None,
+                },
+                subject: subject.clone(),
+                observed_value: value.clone(),
+                source_locator: locator.clone(),
+                observation_id: *observation,
+                memory_id: *memory,
+                role: match role {
+                    Some(r) => Some(parse_enum("role", r)?),
+                    None => None,
+                },
+            })
+            .await?;
+            Ok(Output::with(v, "Evidence recorded.\n".to_string()))
+        }
+        EvidenceAction::List { memory } => {
+            let v = client::send(&Request::EvidenceList {
+                cwd: cwd(),
+                memory_id: *memory,
+            })
+            .await?;
+            let text = render::evidence_list(&v);
+            Ok(Output::with(v, text))
+        }
+        EvidenceAction::Show { id } => {
+            let v = client::send(&Request::EvidenceShow {
+                cwd: cwd(),
+                evidence_id: *id,
+            })
+            .await?;
+            let text = render::evidence_list(&v);
+            Ok(Output::with(v, text))
+        }
+    }
+}
+
 async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
     match action {
         MemoryAction::Add {
@@ -1099,6 +1238,8 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             as_of,
             conflicted,
             corroborated,
+            verification,
+            authority,
             session,
         } => {
             let as_of = match as_of {
@@ -1133,6 +1274,14 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 as_of,
                 conflicted: *conflicted,
                 corroborated: *corroborated,
+                verification: match verification {
+                    Some(v) => Some(parse_enum("verification", v)?),
+                    None => None,
+                },
+                authority: match authority {
+                    Some(a) => Some(parse_enum("authority", a)?),
+                    None => None,
+                },
             };
             let v = client::send(&Request::MemorySearch {
                 cwd: cwd(),

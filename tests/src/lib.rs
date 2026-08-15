@@ -1898,3 +1898,27 @@ pub mod store_fixture {
         }
     }
 }
+
+/// The authority rendering, exposed so a test can assert that four authorities
+/// produce four different lines.
+///
+/// The renderer lives in the `cairn` binary, which a test cannot link. Keeping
+/// one copy of the *shape* here and asserting the binary's output matches it in
+/// `us4_evidence::a_configuration_value_verifies_with_its_authority_named` is
+/// how both halves stay honest.
+pub fn render_authority(state: &str, authority: Option<&str>) -> String {
+    match (state, authority) {
+        ("verified", Some("cairn")) => "✓ verified                      (authority: cairn)".into(),
+        ("verified", Some("attested")) => {
+            "✓ verified (attested)           (authority: attested)".into()
+        }
+        ("verified", Some("remote_cairn")) => {
+            "✓ verified elsewhere            (authority: remote_cairn)".into()
+        }
+        ("verified", Some("remote_attested")) => {
+            "✓ verified elsewhere (attested) (authority: remote_attested)".into()
+        }
+        ("verified", None) => "✓ verified                      (authority: unknown)".into(),
+        (other, _) => format!("· {other}"),
+    }
+}

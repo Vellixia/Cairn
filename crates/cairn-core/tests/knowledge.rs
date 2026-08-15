@@ -507,3 +507,144 @@ fn the_corpus_is_at_least_the_size_the_contract_asks_for() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Verification authority (T044, SC-329)
+// ---------------------------------------------------------------------------
+
+/// Every authority case derives what it says, through the real
+/// `derive_authority`.
+#[test]
+fn the_authority_corpus_derives_what_it_says() {
+    use cairn_core::verify::{derive_authority, RunFacts};
+    use cairn_core::{EvidenceCollector, VerifierKind, VerifyResult};
+
+    let cases = corpus::load_group(&corpus::root(), "verification/authority")
+        .expect("the authority corpus loads");
+    assert!(cases.len() >= 12, "{} cases", cases.len());
+
+    let mut exercised = 0usize;
+    for case in &cases {
+        let Some(runs) = case.input.extra.get("runs").and_then(|r| r.as_array()) else {
+            continue;
+        };
+        // An imported case has no local runs, and the wire case asserts a
+        // different property. Both are checked in their own tests.
+        if case.expect.extra.contains_key("imported_from")
+            || case.expect.extra.contains_key("on_the_wire")
+        {
+            continue;
+        }
+        exercised += 1;
+
+        let facts: Vec<RunFacts> = runs
+            .iter()
+            .map(|r| RunFacts {
+                verifier: VerifierKind::from_str(r["verifier"].as_str().unwrap_or("file_digest"))
+                    .expect("verifier"),
+                result: VerifyResult::from_str(r["result"].as_str().expect("result"))
+                    .expect("result"),
+                evidence_collector: r["collector"]
+                    .as_str()
+                    .map(|c| EvidenceCollector::from_str(c).expect("collector")),
+            })
+            .collect();
+
+        let state = VerificationState::from_str(
+            case.expect
+                .extra
+                .get("state")
+                .and_then(|s| s.as_str())
+                .unwrap_or("verified"),
+        )
+        .expect("state");
+
+        let expected = case
+            .expect
+            .extra
+            .get("authority")
+            .and_then(|a| a.as_str())
+            .map(|a| VerificationAuthority::from_str(a).expect("authority"));
+
+        assert_eq!(
+            derive_authority(state, &facts),
+            expected,
+            "{}",
+            case.context("the derived authority differs")
+        );
+    }
+    assert!(exercised >= 10, "only {exercised} local cases exercised");
+}
+
+/// Only a deterministic check this machine ran satisfies the two strict
+/// consumers — a criterion's verification and cross-project promotion.
+#[test]
+fn the_authority_corpus_agrees_about_the_strict_consumers() {
+    use cairn_core::verify::{deterministic_refusal_code, satisfies_deterministic_requirement};
+
+    for case in corpus::load_group(&corpus::root(), "verification/authority").expect("loads") {
+        let Some(expected) = case
+            .expect
+            .extra
+            .get("satisfies_deterministic_requirement")
+            .and_then(|v| v.as_bool())
+        else {
+            continue;
+        };
+        let authority = case
+            .expect
+            .extra
+            .get("authority")
+            .and_then(|a| a.as_str())
+            .map(|a| VerificationAuthority::from_str(a).expect("authority"));
+
+        assert_eq!(
+            satisfies_deterministic_requirement(authority),
+            expected,
+            "{}",
+            case.context("a strict consumer disagreed with the corpus")
+        );
+
+        if let Some(refusal) = case.expect.extra.get("refusal").and_then(|r| r.as_str()) {
+            assert_eq!(
+                deterministic_refusal_code(authority),
+                Some(refusal),
+                "{}",
+                case.context("the refusal code differs")
+            );
+        }
+    }
+}
+
+/// The wire carries only the two local values, and an import maps them back.
+#[test]
+fn an_authority_never_crosses_a_boundary_wearing_the_wrong_badge() {
+    let case = corpus::load_group(&corpus::root(), "verification/authority")
+        .expect("loads")
+        .into_iter()
+        .find(|c| c.expect.extra.contains_key("on_the_wire"))
+        .expect("the wire case");
+
+    for (sent, expected) in case.expect.extra["on_the_wire"]
+        .as_object()
+        .expect("object")
+    {
+        let a = VerificationAuthority::from_str(sent).expect("authority");
+        assert_eq!(
+            a.on_the_wire().as_str(),
+            expected.as_str().expect("value"),
+            "{}",
+            case.context(format!("{sent} went onto the wire wrong"))
+        );
+    }
+
+    for (received, expected) in case.expect.extra["on_import"].as_object().expect("object") {
+        let a = VerificationAuthority::from_str(received).expect("authority");
+        assert_eq!(
+            VerificationAuthority::imported(a).as_str(),
+            expected.as_str().expect("value"),
+            "{}",
+            case.context(format!("{received} was imported wrong"))
+        );
+    }
+}

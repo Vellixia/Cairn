@@ -1,0 +1,22 @@
+{
+  "description": "A deterministic check this machine ran over evidence Cairn collected. The only authority a task criterion or a cross-project promotion accepts.",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "verified",
+          "collector": "cairn",
+          "verifier": "configuration"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": "cairn",
+      "satisfies_deterministic_requirement": true,
+      "criterion_may_verify": true,
+      "promotion_eligible": true
+    }
+  }
+}

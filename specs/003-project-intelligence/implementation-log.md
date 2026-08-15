@@ -289,9 +289,45 @@ merges nothing, and history is answerable.
    (512), because a subject state cannot be a SQL predicate. The limit is applied after derivation,
    or it would cut the set the derivation is computed over.
 
+### Checkpoint D — Phase 5 (T044–T059) complete: evidence, verification and authority
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` green, 59 suites, 0 failures |
+
+**What landed**
+
+- `cairn-store::evidence` — the `evidence_facts` repository with locator validation, redaction
+  **before** bounding, the tombstone that keeps a reference resolvable, the two link tables, the
+  append-only `verification_runs`, `rebuild_verification`, and the five-key sync `summary`.
+- `cairnd::verify` — the verifier catalog (`file_exists`, `file_digest`, `git_ref`, `git_commit`,
+  `configuration`, `schema_version`, `test_outcome`, `command_outcome`), the attested path, and the
+  bounded pass wired onto the existing 15-minute maintenance tick.
+- Wire and CLI: `EvidenceAdd/List/Show`, `Verify`; `cairn evidence add|list|show`,
+  `cairn verify [--memory|--all] [--explain]`; `--verification` and `--authority` on
+  `memory search`. `render::authority_line` gives the four authorities four distinct renderings.
+- Corpus: `verification/authority/` — 15 cases, checked by three tier-2 tests.
+- Tests: `us4_evidence` (8), `perf_intelligence` (3).
+
+**Decisions taken while implementing**
+
+1. **A configuration locator names its key after a `#`** — `config/app.yml#server.port`. The reader
+   handles `key: value`, `key = value` and `"key": value`, and matches a dotted key on its **last
+   segment**. That can find the wrong `port` in a file with two, which makes the check
+   inconclusive-prone rather than wrong — and a wrong verification is the failure that matters.
+2. **`set_verification` refuses to write `verified`.** Reaching `verified` is only expressible by
+   recording a run and rebuilding, so no code path can mark a memory verified without a durable
+   record behind it.
+3. **`file_exists` treats absence as a result, not a failure to look.** `exists:0:0` is a legitimate
+   fingerprint, so a file that has gone has *drifted* rather than become inconclusive.
+4. **The verifier module is asserted to contain no process or socket call at all.**
+   `us4_evidence::cairn_runs_nothing` reads the source and refuses `Command::new`, `TcpStream`,
+   `reqwest` and the rest. It is a blunt check, and it is the one that would actually catch someone
+   adding a shell-out to make a verifier "work".
+
 ## Where the run stands
 
-**43 of 148 tasks complete**, each with its named evidence passing.
+**59 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
@@ -299,16 +335,18 @@ merges nothing, and history is answerable.
 | 2 Foundational | T006–T017 | complete |
 | 3 Local migration | T018–T023 | complete |
 | 4 Canonical knowledge | T024–T043 | complete |
-| 5–16 | T044–T148 | not started |
+| 5 Evidence & authority | T044–T059 | complete |
+| 6–16 | T060–T148 | not started |
 
 ## Next action
 
-**Phase 5 (US4 — evidence, verification and authority), starting at T044**: populate
-`tests/knowledge/verification/authority/` with a case per authority value and per strict-consumer
-refusal. The test-first cluster is T044–T047, and all four are `[P]` — separate files, no shared
-module.
+**Phase 6 (US5 — drift), starting at T060**: populate `tests/knowledge/drift/` with the full
+transition set, then `us5_drift::marks_only_verification` (T061) before the marking code (T062).
 
-`contracts/evidence-verification.md` has already been read and governs the phase. The pure half is
-already implemented and tested (`cairn-core::verify`): the total state machine, `derive_authority`,
-the fingerprint forms, and `satisfies_deterministic_requirement`. Phase 5 is the storage, the
-verifiers in `cairnd`, the bounded background pass, and the surfaces.
+Drift is small because the pieces are already in place: the state machine and its triggers are in
+`cairn-core::verify`, the `(project_id, source_locator)` index and `facts_by_locator` are in
+`cairn-store::evidence`, and `set_verification` already writes exactly `verification` and nothing
+else. T062 is the capture-path lookup in a new `cairnd/src/drift.rs`; T063 wires it into
+`capture.rs` inside the 250 ms deadline.
+
+`contracts/evidence-verification.md` §Drift governs it and has already been read.
