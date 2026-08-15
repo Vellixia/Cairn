@@ -43,6 +43,20 @@ pub enum MigrateError {
 
 /// Apply every migration the database has not seen yet.
 pub async fn run(pool: &SqlitePool) -> Result<i64, MigrateError> {
+    run_to(pool, latest_version()).await
+}
+
+/// Apply migrations up to and including `target`, and refuse a database that
+/// is already past it.
+///
+/// This is what `run` does with `target = latest_version()`. It is separate so
+/// that a caller can stand a database up at an *older* schema through the real
+/// migration scripts rather than through hand-written DDL — which is how the
+/// alpha.4 fixture is built and how the schema-version guard is exercised
+/// (migration.md §Proof, assertions 11–12). A hand-written approximation of a
+/// historical schema proves the migration works against the schema someone
+/// wrote down, not against the one users actually have.
+pub async fn run_to(pool: &SqlitePool, target: i64) -> Result<i64, MigrateError> {
     pool.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
              version    INTEGER PRIMARY KEY,
@@ -57,7 +71,7 @@ pub async fn run(pool: &SqlitePool) -> Result<i64, MigrateError> {
             .fetch_one(pool)
             .await?;
 
-    let supported = latest_version();
+    let supported = target;
     if current > supported {
         return Err(MigrateError::TooNew {
             found: current,
@@ -66,7 +80,7 @@ pub async fn run(pool: &SqlitePool) -> Result<i64, MigrateError> {
     }
 
     for (version, name, sql) in MIGRATIONS {
-        if *version <= current {
+        if *version <= current || *version > target {
             continue;
         }
         let mut tx = pool.begin().await?;

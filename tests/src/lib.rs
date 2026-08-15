@@ -798,6 +798,24 @@ impl Mcp {
             .unwrap_or_default()
             .to_string()
     }
+
+    /// Call a tool and return the whole `tools/call` result, with the tool's
+    /// own JSON body parsed in place of the text block.
+    ///
+    /// `tool` is the ergonomic form for a test asserting on one string. This is
+    /// what a *comparison* needs: `isError`, the content envelope and every
+    /// field of the body, so that a dropped or renamed field is visible rather
+    /// than swallowed by a `contains` (SC-323).
+    pub fn tool_result(&mut self, name: &str, mut args: Value, cwd: &str) -> Value {
+        args["cwd"] = json!(cwd);
+        let mut result = self.call("tools/call", json!({ "name": name, "arguments": args }));
+        if let Some(text) = result["content"][0]["text"].as_str() {
+            if let Ok(body) = serde_json::from_str::<Value>(text) {
+                result["content"][0]["text"] = body;
+            }
+        }
+        result
+    }
 }
 
 impl Drop for Mcp {
@@ -1138,4 +1156,586 @@ fn md5_like(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+/// A store at the **real** v0.1.0-alpha.4 schema, populated with the state a
+/// store in use actually carries.
+///
+/// Feature 003's migration has to be proved against the thing users have, not
+/// against a clean database and not against a hand-written approximation of the
+/// historical DDL. So this builds the fixture by running migrations 1–4 through
+/// `cairn_store::migrate` itself and stops there
+/// (migration.md §What an existing store actually contains).
+///
+/// Everything it writes is fixed — identifiers, timestamps, content — so a test
+/// can compare a table byte for byte before and after migrating and attribute
+/// any difference to the migration rather than to the fixture.
+pub mod alpha4 {
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    /// The schema version this fixture stands the store up at.
+    pub const SCHEMA: i64 = 4;
+
+    /// Identifiers the fixture uses, so assertions can name a row rather than
+    /// rediscover it.
+    pub mod ids {
+        pub const USER: &str = "00000000-0000-7000-8000-0000000000a0";
+        pub const PROJECT_LINKED: &str = "10000000-0000-7000-8000-000000000001";
+        pub const PROJECT_UNLINKED: &str = "10000000-0000-7000-8000-000000000002";
+        pub const SERVER_PROJECT: &str = "1f000000-0000-7000-8000-0000000000ff";
+
+        pub const TASK_EMPTY_CRITERIA: &str = "20000000-0000-7000-8000-000000000001";
+        pub const TASK_DUPLICATE_CRITERIA: &str = "20000000-0000-7000-8000-000000000002";
+        pub const TASK_NORMAL: &str = "20000000-0000-7000-8000-000000000003";
+        /// Tombstoned, and carrying criteria that must produce **no** rows.
+        pub const TASK_DELETED: &str = "20000000-0000-7000-8000-000000000004";
+
+        pub const SESSION_ACTIVE: &str = "30000000-0000-7000-8000-000000000001";
+        /// `handoff_pending = 1`: terminal but owed a handoff (D22).
+        pub const SESSION_OWED_HANDOFF: &str = "30000000-0000-7000-8000-000000000002";
+        pub const SESSION_INTERRUPTED: &str = "30000000-0000-7000-8000-000000000003";
+        pub const SESSION_DELETED: &str = "30000000-0000-7000-8000-000000000004";
+
+        pub const OBS_LIVE: &str = "40000000-0000-7000-8000-000000000001";
+        /// Tombstoned: a `memory_evidence` row points at it and must keep
+        /// resolving to "evidence deleted" (FR-052, FR-505).
+        pub const OBS_DELETED: &str = "40000000-0000-7000-8000-000000000002";
+
+        pub const MEM_ACTIVE_A: &str = "50000000-0000-7000-8000-00000000000a";
+        pub const MEM_ACTIVE_B: &str = "50000000-0000-7000-8000-00000000000b";
+        pub const MEM_STALE: &str = "50000000-0000-7000-8000-00000000000c";
+        pub const MEM_LOCAL_ONLY: &str = "50000000-0000-7000-8000-00000000000d";
+        /// A supersession chain three links deep: C1 → C2 → C3 → C4 (current).
+        pub const MEM_CHAIN_1: &str = "50000000-0000-7000-8000-000000000011";
+        pub const MEM_CHAIN_2: &str = "50000000-0000-7000-8000-000000000012";
+        pub const MEM_CHAIN_3: &str = "50000000-0000-7000-8000-000000000013";
+        pub const MEM_CHAIN_4: &str = "50000000-0000-7000-8000-000000000014";
+
+        pub const HANDOFF_PRE_COMPACT: &str = "60000000-0000-7000-8000-000000000001";
+        pub const HANDOFF_SESSION_END: &str = "60000000-0000-7000-8000-000000000002";
+        pub const HANDOFF_RECOVERED: &str = "60000000-0000-7000-8000-000000000003";
+
+        pub const OUTBOX_PENDING: &str = "70000000-0000-7000-8000-000000000001";
+        pub const OUTBOX_IN_FLIGHT: &str = "70000000-0000-7000-8000-000000000002";
+        pub const OUTBOX_DELIVERED: &str = "70000000-0000-7000-8000-000000000003";
+        pub const OUTBOX_FAILED: &str = "70000000-0000-7000-8000-000000000004";
+    }
+
+    /// Every table an alpha.4 store carries, for row-count and snapshot
+    /// assertions. Ordered so a diff reads top-down.
+    pub const PRE_EXISTING_TABLES: &[&str] = &[
+        "users",
+        "projects",
+        "tasks",
+        "sessions",
+        "observations",
+        "memories",
+        "memory_evidence",
+        "handoffs",
+        "outbox",
+        "sync_meta",
+        "agent_integrations",
+        "manager_integrations",
+        "installed_resources",
+        "resource_bindings",
+        "capability_evidence",
+        "migration_states",
+        "recovery_artifacts",
+    ];
+
+    /// A populated store standing at schema 4.
+    pub struct Alpha4Store {
+        dir: TempDir,
+    }
+
+    impl Alpha4Store {
+        /// Build the fixture: migrations 1–4 through the real path, then the
+        /// state of a store in use.
+        pub fn build() -> Self {
+            let dir = TempDir::new().expect("alpha4 dir");
+            let store = Self { dir };
+            store.block_on(async {
+                let pool = store.open().await;
+                cairn_store::migrate::run_to(&pool, SCHEMA)
+                    .await
+                    .expect("migrations 1-4 apply");
+                populate(&pool).await;
+                pool.close().await;
+            });
+            store
+        }
+
+        pub fn db_path(&self) -> PathBuf {
+            self.dir.path().join("cairn.sqlite3")
+        }
+
+        pub fn dir(&self) -> &Path {
+            self.dir.path()
+        }
+
+        /// Apply every remaining migration — the operation under test.
+        pub fn migrate_to_latest(&self) -> i64 {
+            self.block_on(async {
+                let pool = self.open().await;
+                let v = cairn_store::migrate::run(&pool).await.expect("migrate");
+                pool.close().await;
+                v
+            })
+        }
+
+        /// Apply migrations up to `target`, refusing a store already past it.
+        pub fn migrate_to(&self, target: i64) -> Result<i64, String> {
+            self.block_on(async {
+                let pool = self.open().await;
+                let out = cairn_store::migrate::run_to(&pool, target)
+                    .await
+                    .map_err(|e| e.to_string());
+                pool.close().await;
+                out
+            })
+        }
+
+        pub fn schema_version(&self) -> i64 {
+            // Cast in SQL: `query_scalar::<String>` will not decode an INTEGER
+            // column, and every reader here wants one string type.
+            self.scalar("SELECT CAST(COALESCE(MAX(version), 0) AS TEXT) FROM schema_migrations")
+                .parse()
+                .expect("version is an integer")
+        }
+
+        pub fn row_count(&self, table: &str) -> i64 {
+            self.scalar(&format!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}"))
+                .parse()
+                .expect("count is an integer")
+        }
+
+        /// Row counts for every pre-existing table, for the "zero rows lost"
+        /// assertion (SC-322).
+        pub fn row_counts(&self) -> std::collections::BTreeMap<String, i64> {
+            PRE_EXISTING_TABLES
+                .iter()
+                .map(|t| ((*t).to_string(), self.row_count(t)))
+                .collect()
+        }
+
+        /// Every value of the named columns, ordered by `id`, as one string per
+        /// row — the byte-identity comparison migration.md §Proof asserts.
+        pub fn snapshot(&self, table: &str, columns: &[&str]) -> Vec<String> {
+            let list = columns
+                .iter()
+                .map(|c| format!("COALESCE(CAST({c} AS TEXT), '<null>')"))
+                .collect::<Vec<_>>()
+                .join(" || '\u{1f}' || ");
+            self.query_column(&format!("SELECT {list} FROM {table} ORDER BY rowid"))
+        }
+
+        pub fn query_column(&self, sql: &str) -> Vec<String> {
+            let sql = sql.to_string();
+            self.block_on(async {
+                let pool = self.open().await;
+                let rows: Vec<String> = sqlx::query_scalar(&sql)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("query {sql:?} failed: {e}"));
+                pool.close().await;
+                rows
+            })
+        }
+
+        pub fn scalar(&self, sql: &str) -> String {
+            self.query_column(sql)
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        }
+
+        pub fn execute(&self, sql: &str) {
+            let sql = sql.to_string();
+            self.block_on(async {
+                let pool = self.open().await;
+                sqlx::query(&sql)
+                    .execute(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("execute {sql:?} failed: {e}"));
+                pool.close().await;
+            });
+        }
+
+        async fn open(&self) -> sqlx::SqlitePool {
+            use sqlx::sqlite::SqliteConnectOptions;
+            let options = SqliteConnectOptions::new()
+                .filename(self.db_path())
+                .create_if_missing(true)
+                .foreign_keys(true);
+            sqlx::SqlitePool::connect_with(options)
+                .await
+                .expect("open alpha4 store")
+        }
+
+        fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(f)
+        }
+    }
+
+    const T0: &str = "2026-01-02T03:04:05Z";
+    const T1: &str = "2026-01-03T03:04:05Z";
+    const T2: &str = "2026-01-04T03:04:05Z";
+    const T3: &str = "2026-01-05T03:04:05Z";
+
+    async fn exec(pool: &sqlx::SqlitePool, sql: &str) {
+        sqlx::query(sql)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("fixture statement failed: {e}\n{sql}"));
+    }
+
+    /// The state migration.md §What an existing store actually contains names.
+    async fn populate(pool: &sqlx::SqlitePool) {
+        use ids::*;
+
+        exec(
+            pool,
+            &format!(
+                "INSERT INTO users (id, email, display_name, created_at)
+                 VALUES ('{USER}', 'dev@example.com', 'Dev', '{T0}')"
+            ),
+        )
+        .await;
+
+        // One linked project and one that never was — `server_project_id` is
+        // set on exactly one of them.
+        exec(pool, &format!(
+            "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked, server_project_id, created_at, updated_at)
+             VALUES ('{PROJECT_LINKED}', 'linked', '/fixture/linked/.git', 'github.com/acme/linked', 1, '{SERVER_PROJECT}', '{T0}', '{T1}'),
+                    ('{PROJECT_UNLINKED}', 'unlinked', '/fixture/unlinked/.git', NULL, 0, NULL, '{T0}', '{T0}')"
+        )).await;
+
+        // Criteria arrays as they really occur: empty, duplicated, ordinary,
+        // and one on a tombstoned task that must produce no criterion rows.
+        exec(pool, &format!(
+            "INSERT INTO tasks (id, project_id, title, goal, acceptance_criteria, status, created_at, updated_at, deleted_at)
+             VALUES ('{TASK_EMPTY_CRITERIA}', '{PROJECT_LINKED}', 'No criteria', 'Ship it', '[]', 'todo', '{T0}', '{T0}', NULL),
+                    ('{TASK_DUPLICATE_CRITERIA}', '{PROJECT_LINKED}', 'Repeated criteria', 'Ship it twice',
+                     '[\"Do the thing\",\"Do the thing\",\"Then stop\"]', 'in_progress', '{T0}', '{T1}', NULL),
+                    ('{TASK_NORMAL}', '{PROJECT_LINKED}', 'Ordinary', 'Ship it once',
+                     '[\"Parse the input\",\"Emit the output\"]', 'todo', '{T1}', '{T1}', NULL),
+                    ('{TASK_DELETED}', '{PROJECT_LINKED}', '', '', '[\"Gone\",\"Also gone\"]', 'done', '{T0}', '{T2}', '{T2}')"
+        )).await;
+
+        exec(pool, &format!(
+            "INSERT INTO sessions (id, project_id, task_id, user_id, agent, branch, commit_sha, worktree_path,
+                                   agent_session_key, previous_session_id, status, started_at, ended_at, last_event_at,
+                                   last_turn_ended_at, daemon_run_id, end_reason, handoff_pending, handoff_attempts,
+                                   handoff_error, deleted_at)
+             VALUES ('{SESSION_ACTIVE}', '{PROJECT_LINKED}', '{TASK_NORMAL}', '{USER}', 'claude-code', 'main', 'aaaa111',
+                     '/fixture/linked', 'agent-key-active', NULL, 'active', '{T1}', NULL, '{T2}', '{T2}',
+                     '{SESSION_ACTIVE}', NULL, 0, 0, NULL, NULL),
+                    ('{SESSION_OWED_HANDOFF}', '{PROJECT_LINKED}', '{TASK_DUPLICATE_CRITERIA}', '{USER}', 'codex', 'main', 'aaaa111',
+                     '/fixture/linked', 'agent-key-owed', NULL, 'completed', '{T0}', '{T1}', '{T1}', NULL,
+                     '{SESSION_OWED_HANDOFF}', 'session_end', 1, 2, 'synthesis deferred', NULL),
+                    ('{SESSION_INTERRUPTED}', '{PROJECT_LINKED}', NULL, '{USER}', 'opencode', 'feature/x', 'bbbb222',
+                     '/fixture/linked', 'agent-key-interrupted', '{SESSION_OWED_HANDOFF}', 'interrupted', '{T0}', '{T1}', '{T1}', NULL,
+                     '{SESSION_INTERRUPTED}', 'idle', 0, 0, NULL, NULL),
+                    ('{SESSION_DELETED}', '{PROJECT_UNLINKED}', NULL, '{USER}', 'claude-code', 'main', NULL,
+                     '/fixture/unlinked', 'agent-key-deleted', NULL, 'completed', '{T0}', '{T0}', '{T0}', NULL,
+                     '{SESSION_DELETED}', NULL, 0, 0, NULL, '{T2}')"
+        )).await;
+
+        exec(pool, &format!(
+            "INSERT INTO observations (id, session_id, type, occurred_at, branch, commit_sha, path, command, exit_code,
+                                       outcome, summary, details, payload_bytes, truncated, vendor_tool, deleted_at)
+             VALUES ('{OBS_LIVE}', '{SESSION_ACTIVE}', 'test_run', '{T1}', 'main', 'aaaa111', NULL,
+                     'cargo test', 0, 'passed', 'suite green', NULL, 32, 0, 'Bash', NULL),
+                    ('{OBS_DELETED}', '{SESSION_OWED_HANDOFF}', 'file_changed', '{T0}', 'main', 'aaaa111', 'src/lib.rs',
+                     NULL, NULL, NULL, '', NULL, 0, 0, NULL, '{T2}')"
+        )).await;
+
+        // The supersession chain is inserted newest-first so each
+        // `superseded_by_id` points at a row that already exists.
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_4}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is CockroachDB.', 'active', NULL, '{SESSION_ACTIVE}', 0, '{T3}', '{T3}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_3}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is MySQL.', 'superseded', '{MEM_CHAIN_4}', '{SESSION_OWED_HANDOFF}', 0, '{T2}', '{T3}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_2}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is SQLite.', 'superseded', '{MEM_CHAIN_3}', '{SESSION_OWED_HANDOFF}', 0, '{T1}', '{T2}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_1}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is PostgreSQL.', 'superseded', '{MEM_CHAIN_2}', '{SESSION_OWED_HANDOFF}', 0, '{T0}', '{T1}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_ACTIVE_A}', '{PROJECT_LINKED}', 'convention', 'project', '{PROJECT_LINKED}',
+                     'Errors are returned, never logged and swallowed.', 'active', NULL, '{SESSION_ACTIVE}', 0, '{T0}', '{T0}', NULL),
+                    ('{MEM_ACTIVE_B}', '{PROJECT_LINKED}', 'fact', 'branch', 'feature/x',
+                     'The fixture branch pins the API to port 8080.', 'active', NULL, '{SESSION_INTERRUPTED}', 0, '{T1}', '{T1}', NULL),
+                    ('{MEM_STALE}', '{PROJECT_LINKED}', 'fact', 'branch', 'branch/gone',
+                     'A branch that no longer resolves recorded this.', 'stale', NULL, '{SESSION_INTERRUPTED}', 0, '{T0}', '{T2}', NULL),
+                    ('{MEM_LOCAL_ONLY}', '{PROJECT_LINKED}', 'failure', 'project', '{PROJECT_LINKED}',
+                     'A local-only note that must never reach the server.', 'active', NULL, '{SESSION_ACTIVE}', 1, '{T1}', '{T1}', NULL)"
+        )).await;
+
+        // One reference to a live observation and one to a tombstoned one.
+        exec(pool, &format!(
+            "INSERT INTO memory_evidence (memory_id, observation_id, content_digest)
+             VALUES ('{MEM_ACTIVE_A}', '{OBS_LIVE}', 'digest-live'),
+                    ('{MEM_CHAIN_1}', '{OBS_DELETED}', 'digest-deleted')"
+        )).await;
+
+        exec(pool, &format!(
+            "INSERT INTO handoffs (id, session_id, trigger, goal, progress, completed_work, remaining_work, changed_files,
+                                   decisions, failures, tests_executed, repository_state, next_step, agent_note, evidence,
+                                   created_at, deleted_at)
+             VALUES ('{HANDOFF_PRE_COMPACT}', '{SESSION_ACTIVE}', 'pre_compact', 'Ship it once', 'parsing done',
+                     '[\"parser\"]', '[\"emitter\"]', '[\"src/lib.rs\"]', '[]', '[]', '[]', '{{}}', 'write the emitter', NULL, '[\"{OBS_LIVE}\"]', '{T1}', NULL),
+                    ('{HANDOFF_SESSION_END}', '{SESSION_OWED_HANDOFF}', 'session_end', 'Ship it twice', 'stopped',
+                     '[]', '[]', '[]', '[]', '[]', '[]', '{{}}', 'resume', 'an agent note', '[]', '{T1}', NULL),
+                    ('{HANDOFF_RECOVERED}', '{SESSION_INTERRUPTED}', 'recovered', '', 'interrupted',
+                     '[]', '[]', '[]', '[]', '[]', '[]', '{{}}', 'unknown', NULL, '[]', '{T1}', NULL)"
+        )).await;
+
+        // All four outbox states, including a claimed `in_flight` row.
+        exec(pool, &format!(
+            "INSERT INTO outbox (id, project_id, server_project_id, entity_type, entity_id, operation,
+                                 idempotency_key, payload, state, attempts, last_error, created_at, delivered_at, claimed_at)
+             VALUES ('{OUTBOX_PENDING}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'memory', '{MEM_ACTIVE_A}', 'upsert',
+                     'idem-pending', '{{\"id\":\"{MEM_ACTIVE_A}\"}}', 'pending', 0, NULL, '{T1}', NULL, NULL),
+                    ('{OUTBOX_IN_FLIGHT}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'memory', '{MEM_ACTIVE_B}', 'upsert',
+                     'idem-in-flight', '{{\"id\":\"{MEM_ACTIVE_B}\"}}', 'in_flight', 1, NULL, '{T1}', NULL, '{T2}'),
+                    ('{OUTBOX_DELIVERED}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'task', '{TASK_NORMAL}', 'upsert',
+                     'idem-delivered', '{{\"id\":\"{TASK_NORMAL}\"}}', 'delivered', 1, NULL, '{T0}', '{T1}', NULL),
+                    ('{OUTBOX_FAILED}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'handoff', '{HANDOFF_SESSION_END}', 'upsert',
+                     'idem-failed', '{{\"id\":\"{HANDOFF_SESSION_END}\"}}', 'failed', 5, 'server refused the content', '{T0}', NULL, NULL)"
+        )).await;
+
+        // A cursor part-way through a pull.
+        exec(
+            pool,
+            &format!(
+                "INSERT INTO sync_meta (project_id, last_success_at, pull_cursor)
+                 VALUES ('{PROJECT_LINKED}', '{T1}', '{T1}')"
+            ),
+        )
+        .await;
+    }
+}
+
+/// The pre-feature baseline (`tests/knowledge/baseline/`).
+///
+/// Two later suites need to know what Cairn produced **before** Feature 003
+/// existed: `us10_min_safe_context::no_regression` (metric 13, SC-308) and
+/// `mcp_backward_compatibility` (metric 36, SC-323). Both are no-regression
+/// claims, and a no-regression claim measured against output recaptured after
+/// the change proves nothing — so the baseline is captured once, committed, and
+/// never regenerated against a Feature 003 build.
+///
+/// # Why normalized rather than raw
+///
+/// A response carries identifiers, timestamps and sandbox paths that differ
+/// every run. Comparing those would fail for reasons that have nothing to do
+/// with regression. [`normalize`] replaces exactly those, by shape, and leaves
+/// every other value — including every field *name* — untouched. What survives
+/// the normalization is what the comparison is actually about.
+pub mod baseline {
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    pub fn dir() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("knowledge")
+            .join("baseline")
+    }
+
+    pub fn path(name: &str) -> PathBuf {
+        dir().join(name)
+    }
+
+    /// Read a recorded baseline. Absent means the capture step never ran, which
+    /// is a broken checkout rather than a passing test.
+    pub fn load(name: &str) -> Value {
+        let p = path(name);
+        let text = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+            panic!(
+                "baseline {} is missing ({e}); it is committed, not generated at test time",
+                p.display()
+            )
+        });
+        serde_json::from_str(&text).expect("baseline is valid JSON")
+    }
+
+    /// Write a baseline. Only the ignored capture test calls this.
+    pub fn record(name: &str, value: &Value) {
+        std::fs::create_dir_all(dir()).expect("baseline dir");
+        let text = serde_json::to_string_pretty(value).expect("serializes");
+        std::fs::write(path(name), format!("{text}\n")).expect("write baseline");
+    }
+
+    /// Replace values that legitimately differ between two runs.
+    ///
+    /// Field *names* are never touched: a renamed or dropped field is exactly
+    /// the regression these baselines exist to catch.
+    pub fn normalize(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => Value::Object(
+                map.iter()
+                    .map(|(k, v)| (k.clone(), normalize(v)))
+                    .collect(),
+            ),
+            Value::Array(items) => Value::Array(items.iter().map(normalize).collect()),
+            Value::String(s) => Value::String(normalize_string(s)),
+            other => other.clone(),
+        }
+    }
+
+    fn normalize_string(s: &str) -> String {
+        if is_uuid(s) {
+            return "<uuid>".into();
+        }
+        if is_rfc3339(s) {
+            return "<timestamp>".into();
+        }
+        if is_absolute_path(s) {
+            return "<path>".into();
+        }
+        if is_commit_sha(s) {
+            return "<commit>".into();
+        }
+        if is_sandbox_name(s) {
+            return "<sandbox>".into();
+        }
+        // A string that *contains* one of the above: a rendered briefing, or a
+        // response whose text block embeds a whole JSON document. Replace each
+        // volatile token in place, preserving every delimiter, so the
+        // surrounding prose and every field name still take part in the
+        // comparison.
+        //
+        // Token characters are the ones a volatile value is built from — a
+        // UUID's hyphens, a timestamp's colons, a path's separators — so a
+        // quoted or bracketed value is still seen whole.
+        const IN_TOKEN: fn(char) -> bool =
+            |c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '+' | '/' | '\\');
+
+        let mut out = String::with_capacity(s.len());
+        let mut token = String::new();
+        for ch in s.chars() {
+            if IN_TOKEN(ch) {
+                token.push(ch);
+                continue;
+            }
+            push_token(&mut out, &token);
+            token.clear();
+            out.push(ch);
+        }
+        push_token(&mut out, &token);
+        out
+    }
+
+    fn push_token(out: &mut String, token: &str) {
+        if token.is_empty() {
+            return;
+        }
+        if is_uuid(token) {
+            out.push_str("<uuid>");
+        } else if is_rfc3339(token) {
+            out.push_str("<timestamp>");
+        } else if is_absolute_path(token) {
+            out.push_str("<path>");
+        } else if is_commit_sha(token) {
+            out.push_str("<commit>");
+        } else if is_sandbox_name(token) {
+            out.push_str("<sandbox>");
+        } else {
+            out.push_str(token);
+        }
+    }
+
+    fn is_uuid(s: &str) -> bool {
+        s.len() == 36
+            && s.as_bytes()
+                .iter()
+                .enumerate()
+                .all(|(i, b)| match i {
+                    8 | 13 | 18 | 23 => *b == b'-',
+                    _ => b.is_ascii_hexdigit(),
+                })
+    }
+
+    fn is_rfc3339(s: &str) -> bool {
+        // `2026-01-02T03:04:05Z` and its offset and fractional forms.
+        s.len() >= 20
+            && s.as_bytes().get(4) == Some(&b'-')
+            && s.as_bytes().get(7) == Some(&b'-')
+            && s.as_bytes().get(10).is_some_and(|b| *b == b'T')
+            && s.chars().take(4).all(|c| c.is_ascii_digit())
+    }
+
+    fn is_absolute_path(s: &str) -> bool {
+        s.starts_with('/')
+            || s.starts_with("\\\\")
+            || (s.len() > 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic())
+    }
+
+    /// A full Git object name. The sandbox commits its own fixture, so this
+    /// differs every run and says nothing about regression.
+    fn is_commit_sha(s: &str) -> bool {
+        s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// The project name a sandbox derives from its temporary directory —
+    /// `.tmpAb3xY9`. Its *length* is fixed, so the token estimate it
+    /// contributes to stays comparable while the name itself does not.
+    fn is_sandbox_name(s: &str) -> bool {
+        s.len() == 10
+            && s.starts_with(".tmp")
+            && s[4..].bytes().all(|b| b.is_ascii_alphanumeric())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn field_names_survive_normalization() {
+            let v = json!({"id": "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b", "count": 3});
+            let n = normalize(&v);
+            assert_eq!(n["id"], "<uuid>");
+            assert_eq!(n["count"], 3);
+            assert!(n.as_object().unwrap().contains_key("id"));
+        }
+
+        #[test]
+        fn timestamps_and_paths_are_replaced() {
+            let v = json!(["2026-01-02T03:04:05Z", "/tmp/x/y", "src/lib.rs"]);
+            let n = normalize(&v);
+            assert_eq!(n[0], "<timestamp>");
+            assert_eq!(n[1], "<path>");
+            assert_eq!(n[2], "src/lib.rs", "a relative path is content, not noise");
+        }
+
+        #[test]
+        fn a_volatile_token_inside_a_sentence_is_replaced_in_place() {
+            let v = json!("session 018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b ended");
+            assert_eq!(normalize(&v), json!("session <uuid> ended"));
+        }
+    }
 }

@@ -1,0 +1,28 @@
+{
+  "briefing": {
+    "decisions": [],
+    "known_failures": [],
+    "memory": {
+      "branch": [],
+      "project": [],
+      "task": []
+    },
+    "no_prior_history": true,
+    "project": {
+      "id": "<uuid>",
+      "linked": false,
+      "name": "<sandbox>",
+      "server_project_id": null
+    },
+    "repository": {
+      "branch": "main",
+      "commit_sha": "<commit>",
+      "staged": 0,
+      "unstaged": 0,
+      "untracked": 0
+    }
+  },
+  "estimated_tokens": 37,
+  "omitted_sections": [],
+  "truncated": false
+}

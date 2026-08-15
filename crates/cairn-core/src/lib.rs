@@ -7,6 +7,7 @@ pub mod bound;
 pub mod budget;
 pub mod config;
 pub mod context;
+pub mod corpus;
 pub mod domain;
 pub mod handoff;
 pub mod lifecycle;

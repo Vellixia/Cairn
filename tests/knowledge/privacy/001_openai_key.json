@@ -1,0 +1,44 @@
+{
+  "description": "An OpenAI-shaped key pasted into the approach.",
+  "input": {
+    "extra": {
+      "project": {
+        "name": "Helios Ledger",
+        "repository_remote": "github.com/acme/helios-ledger",
+        "server_project_id": "6b1f2c34-0000-7000-8000-00000000abcd",
+        "git_common_dir": "/Users/dev/src/helios-ledger/.git",
+        "user_email": "dev@acme.example"
+      },
+      "candidate": {
+        "type": "procedure",
+        "title": "Recover a stuck migration lock",
+        "problem": "A schema migration aborts and leaves an advisory lock held, so every later migration blocks forever.",
+        "signals": [
+          "could not obtain advisory lock for migration",
+          "migration blocked waiting on lock"
+        ],
+        "applicability": [
+          "the migration runner uses a database advisory lock",
+          "no migration process is still running"
+        ],
+        "root_cause": "The aborted process never released the advisory lock.",
+        "approach": "Confirm no runner is alive, then release the lock explicitly and rerun the migration. sk-CORPUSFIXTURE-not-a-real-key",
+        "constraints": [
+          "releasing a lock a live runner holds corrupts the migration"
+        ]
+      },
+      "seeded_field": "approach",
+      "seeded_class": "provider_key_sk",
+      "seeded_value": "sk-CORPUSFIXTURE-not-a-real-key"
+    }
+  },
+  "expect": {
+    "refusals": [
+      "possible_secret"
+    ],
+    "extra": {
+      "must_not_echo": "sk-CORPUSFIXTURE-not-a-real-key",
+      "partial_pattern_written": false
+    }
+  }
+}
