@@ -147,6 +147,14 @@ fn refused(code: &'static str, message: impl Into<String>) -> StoreError {
 // The one write path
 // ---------------------------------------------------------------------------
 
+async fn current_revision(tx: &mut sqlx::SqliteConnection, task_id: Uuid) -> Result<i64> {
+    sqlx::query_scalar("SELECT local_revision FROM tasks WHERE id = ?1")
+        .bind(task_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| StoreError::NotFound(format!("task {task_id}")))
+}
+
 /// What a single change records.
 struct Change {
     kind: TaskChangeKind,
@@ -169,6 +177,15 @@ async fn commit_changes(
     session: Uuid,
     changes: &[Change],
 ) -> Result<i64> {
+    // Nothing changed, so nothing is recorded and the counter does not move.
+    // `local_revision` answers "has anything changed since I read this, here" —
+    // advancing it for an update that set every field to the value it already
+    // held would make that answer a false positive, and would refuse a caller's
+    // still-valid `expected_revision` (FR-488).
+    if changes.is_empty() {
+        return current_revision(&mut *tx, task_id).await;
+    }
+
     let revision: i64 = sqlx::query_scalar(
         "UPDATE tasks SET local_revision = local_revision + 1, updated_at = ?2
          WHERE id = ?1 RETURNING local_revision",
@@ -1156,4 +1173,32 @@ pub async fn divergence(store: &Store, task_id: Uuid, snapshot: &str) -> Result<
     }
 
     Ok(out)
+}
+
+/// Criteria currently `verified`, oldest task first, capped.
+///
+/// What the bounded verification pass re-checks. A criterion that nothing
+/// re-examines would stay `verified` — and its task `ready` — indefinitely after
+/// the evidence it rests on moved, which is the one thing readiness must never
+/// do (`contracts/task-model.md` §Completion readiness).
+pub async fn verified_criteria_for_project(
+    store: &Store,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<Uuid>> {
+    let rows = sqlx::query_scalar::<_, String>(
+        "SELECT c.id FROM task_criteria c
+           JOIN tasks t ON t.id = c.task_id
+          WHERE t.project_id = ?1
+            AND c.deleted_at IS NULL
+            AND t.deleted_at IS NULL
+            AND c.verification = 'verified'
+          ORDER BY c.updated_at ASC
+          LIMIT ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?;
+    Ok(rows.iter().filter_map(|s| Uuid::from_str(s).ok()).collect())
 }

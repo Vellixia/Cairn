@@ -400,12 +400,19 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 );
             }
             if let Some(text) = text {
-                // A second change in the same call compares against the
-                // revision the first one produced, not the caller's — the
-                // caller's token was already honoured.
-                let expected = c
-                    .as_ref()
-                    .map(|c: &cairn_store::criteria::Criterion| c.revision);
+                // A second change in the same call compares against the revision
+                // the first one produced, because the caller's token was already
+                // honoured by that write.
+                //
+                // Only when the caller supplied one, though. A caller that
+                // supplied none is making a blind write, and *both* halves must
+                // be recorded as blind — otherwise `cairn task history` shows
+                // half an overwrite while the other half reads as checked
+                // (FR-490).
+                let expected = expected_revision.and(
+                    c.as_ref()
+                        .map(|c: &cairn_store::criteria::Criterion| c.revision),
+                );
                 c = Some(
                     cairn_store::criteria::set_criterion_text(
                         &d.store,

@@ -873,3 +873,178 @@ fn a_bound_session_learns_what_changed() {
         "the snapshot is the converged state, not this machine's counter"
     );
 }
+
+// ---------------------------------------------------------------------------
+// The self-certification hole, closed
+// ---------------------------------------------------------------------------
+
+/// A historical `cairn` run must not license a later attested verification
+/// (FR-484, D69).
+///
+/// The first implementation derived the criterion's *state* from the newest run
+/// while deriving its *authority* from every run ever recorded. One genuine
+/// Cairn-verified run therefore supplied the authority permanently: after the
+/// evidence drifted, an agent could attach its own attested "pass" and the gate
+/// would admit it — reporting `authority: cairn` for a check Cairn never ran,
+/// and moving the task to `ready`.
+///
+/// Readiness is the one derived value with an incentive attached, so the window
+/// the gate sees is the window that matters.
+#[test]
+fn a_past_cairn_run_does_not_license_a_later_attestation() {
+    let s = Sandbox::new();
+    s.write_file("config/app.yml", "server:\n  port: 8080\n");
+    s.git(&["add", "."]);
+    s.git(&["commit", "-m", "config", "--no-gpg-sign"]);
+
+    let task = task_with(&s, &["the port is 8080"]);
+    let a = session(&s, "sess-a");
+    let ac1 = criterion_id(&s, &task, "AC-1");
+
+    // A genuine Cairn-collected check establishes the criterion.
+    let cairn_fact = s.json(&[
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "API port",
+        "--value",
+        "8080",
+        "--locator",
+        "config/app.yml#server.port",
+        "--collector",
+        "cairn",
+        "--session",
+        &a,
+    ]);
+    let cairn_id = cairn_fact["evidence"]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    let ok = s.json(&[
+        "task",
+        "criterion",
+        "verify",
+        &ac1,
+        "--evidence",
+        &cairn_id,
+        "--session",
+        &a,
+    ]);
+    assert_eq!(
+        ok["criterion"]["verification"], "verified",
+        "a Cairn-collected check must establish the criterion: {ok}"
+    );
+
+    // The world moves out from under it.
+    s.write_file("config/app.yml", "server:\n  port: 9000\n");
+    let drifted = s.json_err(&["task", "criterion", "verify", &ac1, "--session", &a]);
+    assert!(
+        !drifted["code"].as_str().unwrap_or("").is_empty(),
+        "a drifted check must not report success: {drifted}"
+    );
+    assert_eq!(
+        criterion(&s, &task, "AC-1")["verification"],
+        "unverified",
+        "a criterion whose evidence drifted returns to unverified"
+    );
+
+    // Now the agent attests that everything is fine.
+    let attested = s.json(&[
+        "evidence",
+        "add",
+        "--type",
+        "runtime_state",
+        "--subject",
+        "API port",
+        "--value",
+        "passed",
+        "--locator",
+        "config/app.yml#server.port",
+        "--collector",
+        "agent",
+        "--session",
+        &a,
+    ]);
+    let attested_id = attested["evidence"]["id"].as_str().expect("id").to_string();
+    let refused = s.json_err(&[
+        "task",
+        "criterion",
+        "verify",
+        &ac1,
+        "--evidence",
+        &attested_id,
+        "--session",
+        &a,
+    ]);
+
+    assert!(
+        refused["code"].is_string(),
+        "an attestation must not verify a criterion whose Cairn check drifted: {refused}"
+    );
+    let after = criterion(&s, &task, "AC-1");
+    assert_eq!(
+        after["verification"], "unverified",
+        "the criterion must stay unverified — this is the self-certification the \
+         gate exists to prevent: {after}"
+    );
+
+    let readiness = s.json(&["task", "readiness", &task]);
+    assert_ne!(
+        readiness["completion_readiness"], "ready",
+        "a task must not reach `ready` on an agent's own attestation: {readiness}"
+    );
+}
+
+/// A blind write is blind in both halves of a two-field change (FR-490).
+#[test]
+fn a_two_field_blind_write_is_recorded_as_blind_throughout() {
+    let s = Sandbox::new();
+    let task = task_with(&s, &["one"]);
+    let a = session(&s, "sess-a");
+    let ac1 = criterion_id(&s, &task, "AC-1");
+
+    s.must(&[
+        "task",
+        "criterion",
+        "set",
+        &ac1,
+        "--state",
+        "satisfied",
+        "--text",
+        "reworded",
+        "--session",
+        &a,
+    ]);
+
+    let history = s.json(&["task", "history", &task]);
+    let changes = history["changes"].as_array().expect("a change log");
+    for kind in ["criterion_state", "criterion_text"] {
+        let row = changes
+            .iter()
+            .find(|c| c["kind"] == kind)
+            .unwrap_or_else(|| panic!("no {kind} row in {changes:?}"));
+        assert_eq!(
+            row["blind_write"], true,
+            "{kind} was written with no expected_revision and must be recorded as blind: {row}"
+        );
+    }
+}
+
+/// A task update that changes nothing does not move the counter (FR-488).
+#[test]
+fn a_no_op_update_does_not_advance_the_counter() {
+    let s = Sandbox::new();
+    let task = task_with(&s, &["one"]);
+    let before = task_get(&s, &task)["local_revision"].as_i64().expect("rev");
+
+    s.must(&["task", "update", &task, "--title", "Add rate limiting"]);
+
+    assert_eq!(
+        task_get(&s, &task)["local_revision"].as_i64().expect("rev"),
+        before,
+        "setting a field to the value it already held is not a change; the counter \
+         must not report one"
+    );
+}

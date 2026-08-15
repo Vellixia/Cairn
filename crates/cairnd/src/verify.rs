@@ -15,8 +15,8 @@
 use crate::state::Daemon;
 use cairn_core::config::CairnConfig;
 use cairn_core::domain::{
-    CriterionVerification, EvidenceCollector, VerificationAuthority, VerificationState,
-    VerifierKind, VerifyResult, VerifyTrigger,
+    CriterionVerification, EvidenceCollector, VerificationAuthority, VerifierKind, VerifyResult,
+    VerifyTrigger,
 };
 use cairn_core::verify::{fingerprint, Observed};
 use cairn_store::evidence::{self, EvidenceFact, NewRun};
@@ -408,7 +408,85 @@ pub async fn bounded_pass(d: &Daemon, project_id: Uuid, worktree: &Path) -> Pass
     if report.facts_examined >= config.verify_pass_evidence_max {
         report.yielded = true;
     }
+
+    // Criteria are re-checked on the same tick, within what is left of the same
+    // caps. Without this a criterion stays `verified` — and its task `ready` —
+    // indefinitely after the evidence it rests on moved, which is the one thing
+    // readiness must never do (`contracts/task-model.md` §Completion readiness).
+    if !report.yielded {
+        recheck_criteria(d, project_id, worktree, &config, &mut report, started).await;
+    }
     report
+}
+
+/// Re-check the criteria this project holds `verified`.
+///
+/// Bounded by what the memory pass left of `verify_pass_runs_max` and
+/// `verify_pass_wall_ms`, and attributed to no session: a background pass is
+/// Cairn's own act, not any agent's.
+async fn recheck_criteria(
+    d: &Daemon,
+    project_id: Uuid,
+    worktree: &Path,
+    config: &CairnConfig,
+    report: &mut PassReport,
+    started: std::time::Instant,
+) {
+    let remaining = config
+        .verify_pass_runs_max
+        .saturating_sub(report.runs_recorded);
+    if remaining == 0 {
+        report.yielded = true;
+        return;
+    }
+
+    let criteria = match cairn_store::criteria::verified_criteria_for_project(
+        &d.store,
+        project_id,
+        remaining as i64,
+    )
+    .await
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "the criterion pass could not read candidates");
+            return;
+        }
+    };
+
+    for criterion_id in criteria {
+        if report.runs_recorded >= config.verify_pass_runs_max
+            || started.elapsed().as_millis() as u64 >= config.verify_pass_wall_ms
+        {
+            report.yielded = true;
+            break;
+        }
+        // The same gate the explicit path uses, so a background pass can never
+        // establish something an explicit verification could not. It downgrades
+        // on its own; it never promotes on attested evidence.
+        let before = cairn_store::criteria::criterion_by_id(&d.store, criterion_id)
+            .await
+            .ok();
+        let outcome = verify_criterion(
+            d,
+            project_id,
+            worktree,
+            criterion_id,
+            Uuid::nil(),
+            crate::state::sync_policy_for_project(d, project_id).await,
+        )
+        .await;
+        report.runs_recorded += 1;
+        if let (Some(before), Ok(after)) = (
+            before,
+            cairn_store::criteria::criterion_by_id(&d.store, criterion_id).await,
+        ) {
+            if before.verification != after.verification {
+                report.memories_updated += 1;
+            }
+        }
+        let _ = outcome;
+    }
 }
 
 /// The memories owed a check, in the documented order.
@@ -960,6 +1038,8 @@ pub async fn verify_criterion(
         .map(|s| s.branch)
         .unwrap_or_else(|_| "unknown".into());
     let mut runs_recorded = 0usize;
+    // What *this* pass established, per fact. The gate below reads only these.
+    let mut this_pass: Vec<(VerifyResult, EvidenceCollector)> = Vec::new();
 
     for fact in &facts {
         let Some(verifier) = verifier_for(fact) else {
@@ -989,77 +1069,66 @@ pub async fn verify_criterion(
         .is_ok()
         {
             runs_recorded += 1;
+            this_pass.push((outcome.result, fact.collector));
         }
     }
 
-    // Derive the state and the authority from the recorded runs, exactly as a
-    // memory's are derived — never from what any caller asserted.
-    let runs = evidence::runs_for_criterion(&d.store, criterion_id)
-        .await
-        .map_err(crate::state::storage_err)?;
-    let mut run_facts = Vec::new();
-    for run in &runs {
-        let collector = match run.evidence_id {
-            Some(id) => evidence::fact(&d.store, id).await.ok().map(|f| f.collector),
-            None => None,
-        };
-        run_facts.push(cairn_core::verify::RunFacts {
-            verifier: run.verifier,
-            result: run.result,
-            evidence_collector: collector,
-        });
-    }
+    // Everything below reads **only the runs this pass recorded**.
+    //
+    // Deriving the state from the newest run while deriving the authority from
+    // every run ever recorded is a self-certification hole: one genuine
+    // `cairn`-verified run in a criterion's history would permanently supply the
+    // authority, so a later attested "pass" would satisfy the gate and report
+    // `authority: cairn` for a check Cairn never ran. A criterion's readiness is
+    // a claim about the check that just ran, so that is the only window the gate
+    // may see (FR-484, D69).
+    //
+    // A memory's authority is derived over its whole history on purpose — there,
+    // strongest-basis-wins across accumulated evidence is the intended rule
+    // (`contracts/evidence-verification.md` §Authority). A criterion is the
+    // strict consumer, and the two must not be confused.
+    let cairn_results: Vec<VerifyResult> = this_pass
+        .iter()
+        .filter(|(_, collector)| *collector == EvidenceCollector::Cairn)
+        .map(|(result, _)| *result)
+        .collect();
 
-    let established = runs
-        .first()
-        .map(|r| match r.result {
-            VerifyResult::Verified => VerificationState::Verified,
-            VerifyResult::Drifted => VerificationState::Drifted,
-            VerifyResult::Inconclusive => VerificationState::Unverified,
-        })
-        .unwrap_or(VerificationState::Unverified);
+    let disagreed = cairn_results.contains(&VerifyResult::Drifted);
+    let established_by_cairn = !disagreed && cairn_results.contains(&VerifyResult::Verified);
 
-    let authority = cairn_core::verify::derive_authority(established, &run_facts);
-
-    // The one gate. `satisfies_deterministic_requirement` is the same question
-    // cross-project promotion asks, asked in the same place, so the two strict
-    // consumers can never drift apart.
-    if !cairn_core::verify::satisfies_deterministic_requirement(authority) {
-        let code = match cairn_core::verify::deterministic_refusal_code(authority) {
-            // `attested_not_sufficient` and `imported_not_sufficient` already
-            // name the reason exactly.
-            Some(c) if c != codes::SOURCE_UNVERIFIED => c,
-            // Nothing established it. When the only evidence offered was
-            // attested, *that* is why — and saying so names the actual reason
-            // rather than the generic one. Cairn never re-collects an agent's
-            // observation, so an attested fact yields an inconclusive run and
-            // would otherwise be reported as if no evidence existed (FR-370).
-            _ if !facts.is_empty()
-                && facts
-                    .iter()
-                    .all(|f| f.collector == EvidenceCollector::Agent) =>
-            {
-                codes::ATTESTED_NOT_SUFFICIENT
-            }
-            Some(c) => c,
-            None => codes::VERIFICATION_INCONCLUSIVE,
-        };
-        // A criterion whose check ran and disagreed is `failed`; one that could
-        // not be established at all stays `unverified`. Both are honest, and
-        // neither is `verified`.
-        let landed = if established == VerificationState::Drifted {
-            CriterionVerification::Failed
+    if !established_by_cairn {
+        // A drifted check means the evidence moved, not that the criterion is
+        // false — a fingerprint mismatch cannot tell those apart. The contract
+        // names exactly one outcome for it: "a criterion whose evidence fact
+        // drifted returns to `unverified` on the next pass". Claiming `failed`
+        // would assert something no check established.
+        let landed = CriterionVerification::Unverified;
+        let _ = disagreed;
+        let code = if disagreed {
+            codes::VERIFICATION_INCONCLUSIVE
+        } else if facts
+            .iter()
+            .all(|f| f.collector == EvidenceCollector::Agent)
+        {
+            // Cairn never re-collects an agent's observation, so an attested
+            // fact yields an inconclusive run. Reporting that as "no evidence"
+            // would hide the actual reason (FR-370).
+            codes::ATTESTED_NOT_SUFFICIENT
         } else {
-            CriterionVerification::Unverified
+            codes::VERIFICATION_INCONCLUSIVE
         };
         set_criterion_verification_if_changed(d, criterion_id, landed, session, policy).await?;
         return Err(WireError::new(
             code,
-            format!(
-                "that criterion is not verified: {} evidence cannot establish a \
-                 criterion's readiness",
-                authority.map(|a| a.as_str()).unwrap_or("no")
-            ),
+            if disagreed {
+                "that criterion is not verified: the deterministic check ran and \
+                 disagreed with the recorded evidence"
+                    .to_string()
+            } else {
+                "that criterion is not verified: no deterministic check this machine \
+                 ran over Cairn-collected evidence established it"
+                    .to_string()
+            },
         ));
     }
 
@@ -1074,7 +1143,9 @@ pub async fn verify_criterion(
     Ok(CriterionVerdict {
         criterion_id,
         verification: CriterionVerification::Verified,
-        authority,
+        // Established by a deterministic check this machine ran in this pass —
+        // the only way a criterion reaches `verified`.
+        authority: Some(VerificationAuthority::Cairn),
         runs_recorded,
     })
 }
