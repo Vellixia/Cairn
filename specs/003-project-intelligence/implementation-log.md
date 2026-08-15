@@ -246,26 +246,69 @@ duplication does **not** catch the commonest accidental repeat without a key. Th
 mitigations — the usage contract, the Skill, the tool descriptions, and the adoption metric on
 `cairn status` (FR-499) — are unaffected. This is a product finding, not a defect.
 
+### Checkpoint C — Phase 4 (T024–T043) complete: canonical knowledge
+
+| | |
+|---|---|
+| Commit | `42c005f` — pushed |
+| Suite | `cargo test --workspace` green, 57 suites, 0 failures |
+
+The first shippable slice. Duplicate accumulation stops, disagreement is visible, a coarse value key
+merges nothing, and history is answerable.
+
+**What landed beyond the storage layer already recorded**
+
+- `cairn-store::knowledge` — `reinforce`, `reconcile`, `reconcile_as`, `supersedes_transitively`,
+  `branch_scoped_subjects`, and the two rebuild procedures.
+- `repo::supersede_memory` now records the `supersedes` relation, sets `superseded_at` and clears the
+  predecessor's pin, all in one transaction.
+- `repo::mark_stale_scopes` records `stale_at` going forward.
+- `search` gained `topic_key` (exact or prefix), `as_of`, `conflicted` and `corroborated`, plus the
+  `temporal` block on a result.
+- `cairn-git` gained `is_merged_into`, `resolve_ref` and `commit_present`.
+- Wire: `MemorySubject`, `MemoryReinforce`, `MemoryReconcile`; `topic_key`/`value_key`/`importance`
+  on create and supersede; `Temporal` and `Applicability`.
+- CLI: `memory subject`, `memory reinforce`, `memory reconcile`, and the new flags on
+  `memory add`/`supersede`/`search`. `render::subject` explains an answer, or why there is not one.
+- Tests: `us1_reconciliation` (10), `us2_temporal` (11), `us3_conflict` (6),
+  `rebuild_equivalence` (6).
+
+**Decisions taken while implementing**
+
+1. **`reconcile` refuses three contradictions** rather than letting the derivation clean up after
+   them: a supersession that closes a cycle (directly or through a chain, bounded walk), a second
+   successor for a memory that already has one, and a self-reference. Without the second,
+   `rebuild_supersession` would pick a successor arbitrarily.
+2. **A conflict cannot be *declared*.** `memory reconcile --relation conflicts_with` is refused with
+   `not_conflicted`: a conflict is detected automatically and left standing until a supersession, a
+   narrowing, or a distinguishing verification resolves it.
+3. **`cairn memory add` still defaults to branch or task scope**, unchanged from Feature 001, while
+   `cairn memory subject` defaults to project scope. The tests say which scope they mean rather than
+   relying on a default that differs between the two commands.
+4. **A derived subject filter reads candidates and derives**, bounded by `SUBJECT_FILTER_SCAN_MAX`
+   (512), because a subject state cannot be a SQL predicate. The limit is applied after derivation,
+   or it would cut the set the derivation is computed over.
+
 ## Where the run stands
 
-**28 of 148 tasks complete**, each with its named evidence passing. Phases 1–3 are complete; Phase 4
-is part-done.
+**43 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
 | 1 Setup | T001–T005 | complete |
 | 2 Foundational | T006–T017 | complete |
 | 3 Local migration | T018–T023 | complete |
-| 4 Canonical knowledge | T024–T043 | T024, T027, T029–T031 complete |
+| 4 Canonical knowledge | T024–T043 | complete |
 | 5–16 | T044–T148 | not started |
 
 ## Next action
 
-**T025 and T026** — the two named e2e negatives, `tests/tests/us1_reconciliation.rs` and
-`tests/tests/us3_conflict.rs`. Their tier-2 equivalents already pass (`no_automatic_reinforcement`,
-`corroboration`, and the clock-inversion unit test in `knowledge.rs`); what is missing is the
-end-to-end form against a real store and daemon.
+**Phase 5 (US4 — evidence, verification and authority), starting at T044**: populate
+`tests/knowledge/verification/authority/` with a case per authority value and per strict-consumer
+refusal. The test-first cluster is T044–T047, and all four are `[P]` — separate files, no shared
+module.
 
-Then T028's `as_of` expectations (which need T036), T032–T038 (explicit reinforce, supersession,
-stale_at, search filters, merged-branch elevation, the rebuild-equivalence suite), and T039–T043
-(the CLI surfaces and the end-to-end tests that close the phase).
+`contracts/evidence-verification.md` has already been read and governs the phase. The pure half is
+already implemented and tested (`cairn-core::verify`): the total state machine, `derive_authority`,
+the fingerprint forms, and `satisfies_deterministic_requirement`. Phase 5 is the storage, the
+verifiers in `cairnd`, the bounded background pass, and the surfaces.
