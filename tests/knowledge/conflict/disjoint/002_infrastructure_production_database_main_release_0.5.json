@@ -1,0 +1,31 @@
+{
+  "description": "branch:main against branch:release/0.5. A single working context never selects both, so they do not interact at all — which falls out of the scope key rather than out of a heuristic.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The production database is PostgreSQL.",
+        "scope": "branch",
+        "scope_key": "main",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The production database is CockroachDB.",
+        "scope": "branch",
+        "scope_key": "release/0.5",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "cockroachdb",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

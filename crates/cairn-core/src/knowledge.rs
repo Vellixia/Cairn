@@ -254,6 +254,165 @@ pub fn normalize_relation_endpoints(kind: RelationKind, a: Uuid, b: Uuid) -> (Uu
 }
 
 // ---------------------------------------------------------------------------
+// Automatic reconciliation (D46, FR-316, FR-321, FR-327)
+// ---------------------------------------------------------------------------
+
+/// What a new proposal turned out to be, relative to the subject it joins.
+///
+/// Returned to the writer so the party that can read both statements can decide
+/// what Cairn deliberately will not: whether a corroborating member is the same
+/// claim (FR-327).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum ProposalOutcome {
+    /// Nothing in the subject matched.
+    Created,
+    /// Identical after normalization to an existing member. A `duplicates`
+    /// relation is recorded and the proposal stays individually retrievable
+    /// with its own provenance (FR-321).
+    Duplicate { of: Uuid },
+    /// Agrees on the value with an existing member and differs in content. **No
+    /// relation is recorded** — the value is agreed and the statements are
+    /// several. The matched member is named so the writer can collapse them
+    /// with one explicit call if they really are one claim (FR-327, D77).
+    Corroborating { member: Uuid },
+    /// Incompatible with one or more simultaneously applicable members. The
+    /// conflict is recorded; it is never resolved (FR-334).
+    ConflictDetected { with: Vec<Uuid> },
+    /// The subject has more members than the per-write bound allows. The write
+    /// completes, the relation is deferred to the maintenance tick, and the
+    /// response says so (FR-474).
+    Deferred,
+}
+
+/// Decide what a new proposal is, and which relations follow automatically.
+///
+/// **Exactly one merging case** exists, and it is the only one Cairn can decide
+/// without inference: content that is identical after normalization. Everything
+/// else is surfaced and never merged (D46).
+///
+/// | Condition | Outcome | Relation |
+/// |---|---|---|
+/// | same subject, equal `content_norm_digest` | duplicate | `duplicates` new→existing |
+/// | same subject, equal `value_key`, differing content | corroboration | **none** |
+/// | same subject, differing `value_key`, same scope and scope key | conflict | `conflicts_with` |
+/// | different scope precedence rank | scope exception | none |
+/// | same scope, different scope key | unrelated | none |
+/// | either side has no `topic_key` | nothing | none |
+///
+/// The last row is why a free-form proposal never merges. FR-321 scopes
+/// duplication to "an existing member of **the same subject**", and a subject
+/// requires a topic key (FR-315); FR-313 requires a free-form memory to behave
+/// exactly as it does in Feature 001, where two identical memories are two
+/// memories. `plan.md`'s risk table describes exact-content duplication as
+/// working "without any key at all", which overstates what the requirements
+/// permit — and the conservative reading is the one that cannot suppress a
+/// claim.
+///
+/// `members` are the existing members of the subject the proposal joins.
+/// Bounded by `reconcile_members_max`: beyond it the write completes and the
+/// decision defers rather than scanning (FR-474).
+pub fn classify_proposal(
+    proposal: &MemoryFacts,
+    members: &[MemoryFacts],
+    reconcile_members_max: usize,
+) -> (ProposalOutcome, Vec<Relation>) {
+    // Without a subject there is nothing to reconcile against. The proposal is
+    // stored, searchable and briefable exactly as in Feature 001.
+    let Some(topic) = proposal.topic_key.as_deref() else {
+        return (ProposalOutcome::Created, Vec::new());
+    };
+
+    let applicable: Vec<&MemoryFacts> = members
+        .iter()
+        .filter(|m| m.id != proposal.id)
+        .filter(|m| m.state == MemoryState::Active)
+        .filter(|m| m.topic_key.as_deref() == Some(topic))
+        .filter(|m| {
+            scope_overlap(proposal.scope, &proposal.scope_key, m.scope, &m.scope_key)
+                == ScopeOverlap::Simultaneous
+        })
+        .collect();
+
+    if applicable.len() > reconcile_members_max {
+        return (ProposalOutcome::Deferred, Vec::new());
+    }
+
+    // 1. Identical content. The one case decidable without inference.
+    if let Some(digest) = proposal.content_norm_digest.as_deref() {
+        let mut identical: Vec<&MemoryFacts> = applicable
+            .iter()
+            .filter(|m| m.content_norm_digest.as_deref() == Some(digest))
+            .copied()
+            .collect();
+        if !identical.is_empty() {
+            // The existing memory a duplicate points at is the
+            // highest-precedence active member; where several are equally
+            // applicable, the lowest identifier, for stability.
+            identical.sort_by_key(|m| (m.scope.bucket(), m.id));
+            let target = identical[0];
+            return (
+                ProposalOutcome::Duplicate { of: target.id },
+                vec![Relation::new(
+                    RelationKind::Duplicates,
+                    proposal.id,
+                    target.id,
+                    RelationBasis::DeterministicRule,
+                )],
+            );
+        }
+    }
+
+    // 2. A shared value key with differing content. Agreement about the value,
+    //    and nothing more — so nothing is written.
+    if let Some(value) = proposal.value_key.as_deref() {
+        let mut agreeing: Vec<&MemoryFacts> = applicable
+            .iter()
+            .filter(|m| m.value_key.as_deref() == Some(value))
+            .copied()
+            .collect();
+        if !agreeing.is_empty() {
+            agreeing.sort_by_key(|m| m.id);
+            return (
+                ProposalOutcome::Corroborating {
+                    member: agreeing[0].id,
+                },
+                Vec::new(),
+            );
+        }
+
+        // 3. A different value key in an overlapping scope: they disagree.
+        let mut disagreeing: Vec<&MemoryFacts> = applicable
+            .iter()
+            .filter(|m| m.value_key.is_some() && m.value_key.as_deref() != Some(value))
+            .copied()
+            .collect();
+        if !disagreeing.is_empty() {
+            disagreeing.sort_by_key(|m| m.id);
+            let relations = disagreeing
+                .iter()
+                .map(|m| {
+                    Relation::new(
+                        RelationKind::ConflictsWith,
+                        proposal.id,
+                        m.id,
+                        RelationBasis::DeterministicRule,
+                    )
+                })
+                .collect();
+            return (
+                ProposalOutcome::ConflictDetected {
+                    with: disagreeing.iter().map(|m| m.id).collect(),
+                },
+                relations,
+            );
+        }
+    }
+
+    (ProposalOutcome::Created, Vec::new())
+}
+
+// ---------------------------------------------------------------------------
 // The derivation (FR-302, FR-303, FR-327, FR-334)
 // ---------------------------------------------------------------------------
 
@@ -1156,5 +1315,161 @@ mod tests {
         assert_eq!(v.accounting[0].duplicates, vec![newer.id]);
         assert_eq!(v.accounting[0].distinct_origins, 2);
         assert_eq!(v.reconciliation, Reconciliation::Reinforced);
+    }
+}
+
+#[cfg(test)]
+mod proposal_tests {
+    use super::*;
+
+    fn id(n: u128) -> Uuid {
+        Uuid::from_u128(n)
+    }
+
+    fn keyed(n: u128, topic: &str, value: &str, content: &str) -> MemoryFacts {
+        MemoryFacts {
+            topic_key: normalize_topic_key(topic),
+            value_key: normalize_value_key(value),
+            content_norm_digest: Some(content_norm_digest(content)),
+            origin_session_id: id(1000 + n),
+            ..MemoryFacts::active(id(n), MemoryScope::Project, "p1")
+        }
+    }
+
+    const MAX: usize = 64;
+
+    #[test]
+    fn identical_content_is_the_one_automatic_merge() {
+        let existing = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
+        let proposal = keyed(2, "infra.db", "postgresql", "the production   database is postgresql!");
+        let (outcome, relations) = classify_proposal(&proposal, &[existing.clone()], MAX);
+        assert_eq!(outcome, ProposalOutcome::Duplicate { of: existing.id });
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].kind, RelationKind::Duplicates);
+        assert_eq!(relations[0].from, proposal.id, "new points at existing");
+        assert_eq!(relations[0].basis, RelationBasis::DeterministicRule);
+    }
+
+    #[test]
+    fn an_equal_value_key_with_differing_content_records_nothing() {
+        // Metric 2a: zero unrequested `reinforces` relations, ever. And metric
+        // 2b: the writer is told which member it matched, so the party that can
+        // read both statements can decide.
+        let existing = keyed(1, "auth.strategy", "jwt", "JWT uses HS256 with a shared secret.");
+        let proposal = keyed(2, "auth.strategy", "jwt", "JWT uses RS256 with rotating public keys.");
+        let (outcome, relations) = classify_proposal(&proposal, &[existing.clone()], MAX);
+        assert_eq!(
+            outcome,
+            ProposalOutcome::Corroborating {
+                member: existing.id
+            }
+        );
+        assert!(relations.is_empty(), "corroboration writes nothing");
+    }
+
+    #[test]
+    fn a_differing_value_key_in_one_scope_detects_a_conflict() {
+        let existing = keyed(1, "infra.db", "postgresql", "PostgreSQL.");
+        let proposal = keyed(2, "infra.db", "cockroachdb", "CockroachDB.");
+        let (outcome, relations) = classify_proposal(&proposal, &[existing.clone()], MAX);
+        assert_eq!(
+            outcome,
+            ProposalOutcome::ConflictDetected {
+                with: vec![existing.id]
+            }
+        );
+        assert_eq!(relations.len(), 1);
+        assert_eq!(relations[0].kind, RelationKind::ConflictsWith);
+        // Symmetric endpoints are normalized at construction, so the row two
+        // machines write independently is the same row.
+        assert_eq!((relations[0].from, relations[0].to), (existing.id, proposal.id));
+    }
+
+    #[test]
+    fn a_scope_exception_is_never_a_conflict() {
+        // Scenario B: project PostgreSQL, task SQLite fixture.
+        let project = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
+        let mut task = keyed(2, "infra.db", "sqlite", "This integration fixture uses SQLite.");
+        task.scope = MemoryScope::Task;
+        task.scope_key = "T1".into();
+        let (outcome, relations) = classify_proposal(&task, &[project], MAX);
+        assert_eq!(outcome, ProposalOutcome::Created);
+        assert!(relations.is_empty());
+    }
+
+    #[test]
+    fn two_branches_never_interact() {
+        let mut main = keyed(1, "api.style", "rest", "The API is REST.");
+        main.scope = MemoryScope::Branch;
+        main.scope_key = "main".into();
+        let mut feature = keyed(2, "api.style", "graphql", "The API is GraphQL.");
+        feature.scope = MemoryScope::Branch;
+        feature.scope_key = "feature/graphql".into();
+        let (outcome, relations) = classify_proposal(&feature, &[main], MAX);
+        assert_eq!(outcome, ProposalOutcome::Created);
+        assert!(relations.is_empty());
+    }
+
+    #[test]
+    fn a_free_form_proposal_reconciles_against_nothing() {
+        // FR-313 and FR-317. Even with byte-identical content: a subject
+        // requires a topic key, and without one there is no subject to join.
+        let mut existing = MemoryFacts::active(id(1), MemoryScope::Project, "p1");
+        existing.content_norm_digest = Some(content_norm_digest("The same sentence."));
+        let mut proposal = MemoryFacts::active(id(2), MemoryScope::Project, "p1");
+        proposal.content_norm_digest = Some(content_norm_digest("The same sentence."));
+
+        let (outcome, relations) = classify_proposal(&proposal, &[existing], MAX);
+        assert_eq!(outcome, ProposalOutcome::Created);
+        assert!(relations.is_empty(), "no relation is invented for a free-form pair");
+    }
+
+    #[test]
+    fn a_superseded_member_is_not_reconciled_against() {
+        let mut old = keyed(1, "infra.db", "postgresql", "PostgreSQL.");
+        old.state = MemoryState::Superseded;
+        let proposal = keyed(2, "infra.db", "cockroachdb", "CockroachDB.");
+        let (outcome, relations) = classify_proposal(&proposal, &[old], MAX);
+        assert_eq!(outcome, ProposalOutcome::Created, "history does not conflict");
+        assert!(relations.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_subject_defers_rather_than_scanning() {
+        // FR-474: the write completes and the relation is deferred to the
+        // maintenance tick. Never unbounded work on a write path.
+        let members: Vec<MemoryFacts> = (10..40)
+            .map(|n| keyed(n, "infra.db", "postgresql", &format!("statement {n}")))
+            .collect();
+        let proposal = keyed(1, "infra.db", "cockroachdb", "CockroachDB.");
+        let (outcome, relations) = classify_proposal(&proposal, &members, 8);
+        assert_eq!(outcome, ProposalOutcome::Deferred);
+        assert!(relations.is_empty());
+        // And within the bound it decides normally.
+        let (decided, _) = classify_proposal(&proposal, &members, MAX);
+        assert!(matches!(decided, ProposalOutcome::ConflictDetected { .. }));
+    }
+
+    #[test]
+    fn duplication_outranks_corroboration_and_conflict() {
+        // Order matters: a proposal identical to one member and differing from
+        // another is a duplicate of the first, not a conflict with the second.
+        let same = keyed(1, "infra.db", "postgresql", "PostgreSQL.");
+        let other = keyed(2, "infra.db", "cockroachdb", "CockroachDB.");
+        let proposal = keyed(3, "infra.db", "postgresql", "postgresql");
+        let (outcome, _) = classify_proposal(&proposal, &[same.clone(), other], MAX);
+        assert_eq!(outcome, ProposalOutcome::Duplicate { of: same.id });
+    }
+
+    #[test]
+    fn a_proposal_with_no_value_key_conflicts_with_nothing() {
+        // A value key is what makes two claims comparable. Without one there is
+        // nothing to disagree about that Cairn could decide.
+        let existing = keyed(1, "infra.db", "postgresql", "PostgreSQL.");
+        let mut proposal = keyed(2, "infra.db", "x", "Something else entirely.");
+        proposal.value_key = None;
+        let (outcome, relations) = classify_proposal(&proposal, &[existing], MAX);
+        assert_eq!(outcome, ProposalOutcome::Created);
+        assert!(relations.is_empty());
     }
 }

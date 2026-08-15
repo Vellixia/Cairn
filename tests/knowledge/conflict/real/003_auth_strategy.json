@@ -1,0 +1,40 @@
+{
+  "description": "Two applicable answers for auth.strategy in one scope disagree. Both stay active, neither is marked superseded, and no single canonical answer is emitted.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Authentication uses JWT bearer tokens.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "auth.strategy",
+        "value_key": "jwt",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Authentication uses opaque session cookies.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "auth.strategy",
+        "value_key": "session_cookie",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ]
+  }
+}

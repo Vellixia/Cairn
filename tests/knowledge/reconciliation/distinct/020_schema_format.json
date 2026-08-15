@@ -1,0 +1,43 @@
+{
+  "description": "The paired negative for schema.format: the same subject, a different value, and a statement that reads similarly. Merging these would suppress a claim.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The schema is plain SQL.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "schema.format",
+        "value_key": "sql",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The schema is defined in an ORM.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "schema.format",
+        "value_key": "orm",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "conflict_detected"
+    }
+  }
+}

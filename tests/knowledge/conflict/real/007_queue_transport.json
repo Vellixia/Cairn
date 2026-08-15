@@ -1,0 +1,40 @@
+{
+  "description": "Two applicable answers for queue.transport in one scope disagree. Both stay active, neither is marked superseded, and no single canonical answer is emitted.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The job queue speaks AMQP.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "queue.transport",
+        "value_key": "amqp",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The job queue speaks Kafka.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "queue.transport",
+        "value_key": "kafka",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ]
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "description": "The same claim about infrastructure.production_database, with a trailing exclamation. Normalization collapses case, whitespace runs and trailing punctuation, so the digests are equal and the duplication is recorded.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The production database is PostgreSQL.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The production database is PostgreSQL!",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "reinforced",
+    "answers": [
+      "a"
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "duplicates",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "duplicate"
+    }
+  }
+}

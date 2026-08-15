@@ -1,0 +1,43 @@
+{
+  "description": "Two sessions record deploy.target identically after normalization. Its sibling in ../distinct/ differs in exactly the way that matters: a different value.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Deployment goes through Dokploy.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "deploy.target",
+        "value_key": "dokploy",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "  DEPLOYMENT GOES THROUGH DOKPLOY!!  ",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "deploy.target",
+        "value_key": "dokploy",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "reinforced",
+    "answers": [
+      "a"
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "duplicates",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "duplicate",
+      "distinct_origins": 2
+    }
+  }
+}

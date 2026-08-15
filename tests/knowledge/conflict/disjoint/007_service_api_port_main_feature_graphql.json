@@ -1,0 +1,31 @@
+{
+  "description": "branch:main against branch:feature/graphql. A single working context never selects both, so they do not interact at all — which falls out of the scope key rather than out of a heuristic.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The API listens on port 8080.",
+        "scope": "branch",
+        "scope_key": "main",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The API listens on port 9000.",
+        "scope": "branch",
+        "scope_key": "feature/graphql",
+        "topic_key": "service.api_port",
+        "value_key": "9000",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

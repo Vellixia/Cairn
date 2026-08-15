@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about api.style. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The REST API versions by URL prefix.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "api.style",
+        "value_key": "rest",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The REST API versions by request header.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "api.style",
+        "value_key": "rest",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

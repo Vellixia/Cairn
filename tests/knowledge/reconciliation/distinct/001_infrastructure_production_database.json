@@ -1,0 +1,43 @@
+{
+  "description": "The paired negative for infrastructure.production_database: the same subject, a different value, and a statement that reads similarly. Merging these would suppress a claim.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The production database is PostgreSQL.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The production database is CockroachDB.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "cockroachdb",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "conflict_detected"
+    }
+  }
+}

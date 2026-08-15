@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about service.api_port. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The API listens on TCP port 8080.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The API listens on UDP port 8080.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

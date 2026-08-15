@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about runtime.language. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Rust is pinned to the stable toolchain.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "runtime.language",
+        "value_key": "rust",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Rust is pinned to a specific nightly for one crate.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "runtime.language",
+        "value_key": "rust",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

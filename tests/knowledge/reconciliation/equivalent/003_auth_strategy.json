@@ -1,0 +1,43 @@
+{
+  "description": "Two sessions record auth.strategy identically after normalization. Its sibling in ../distinct/ differs in exactly the way that matters: a different value.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Authentication uses JWT bearer tokens.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "auth.strategy",
+        "value_key": "jwt",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "  AUTHENTICATION USES JWT BEARER TOKENS!!  ",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "auth.strategy",
+        "value_key": "jwt",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "reinforced",
+    "answers": [
+      "a"
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "duplicates",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "duplicate",
+      "distinct_origins": 2
+    }
+  }
+}

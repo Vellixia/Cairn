@@ -1,0 +1,43 @@
+{
+  "description": "The paired negative for runtime.language: the same subject, a different value, and a statement that reads similarly. Merging these would suppress a claim.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The service is written in Rust.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "runtime.language",
+        "value_key": "rust",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The service is written in Go.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "runtime.language",
+        "value_key": "go",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "conflict_detected"
+    }
+  }
+}

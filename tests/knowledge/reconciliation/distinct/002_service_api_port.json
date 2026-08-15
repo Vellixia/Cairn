@@ -1,0 +1,43 @@
+{
+  "description": "The paired negative for service.api_port: the same subject, a different value, and a statement that reads similarly. Merging these would suppress a claim.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The API listens on port 8080.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The API listens on port 9000.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "9000",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "conflict_detected"
+    }
+  }
+}

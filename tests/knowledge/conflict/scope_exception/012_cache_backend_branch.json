@@ -1,0 +1,31 @@
+{
+  "description": "A project-scoped answer for cache.backend and a branch-scoped one that disagrees. They are never simultaneously applicable, so this is a scope exception and not a conflict: the narrower applies in its own context and the broader is the answer it narrows.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The cache backend is Redis.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "cache.backend",
+        "value_key": "redis",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The cache backend is Memcached.",
+        "scope": "branch",
+        "scope_key": "main",
+        "topic_key": "cache.backend",
+        "value_key": "memcached",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

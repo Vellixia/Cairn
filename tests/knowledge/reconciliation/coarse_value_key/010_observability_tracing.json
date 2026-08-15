@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about observability.tracing. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "OpenTelemetry exports traces only.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "observability.tracing",
+        "value_key": "opentelemetry",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "OpenTelemetry exports traces, metrics and logs.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "observability.tracing",
+        "value_key": "opentelemetry",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

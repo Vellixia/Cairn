@@ -1,0 +1,31 @@
+{
+  "description": "session:S1 against session:S2. A single working context never selects both, so they do not interact at all — which falls out of the scope key rather than out of a heuristic.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The production database is PostgreSQL.",
+        "scope": "session",
+        "scope_key": "S1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The production database is CockroachDB.",
+        "scope": "session",
+        "scope_key": "S2",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "cockroachdb",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

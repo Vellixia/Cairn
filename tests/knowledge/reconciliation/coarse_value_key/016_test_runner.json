@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about test.runner. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "cargo test runs the whole workspace on every push.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "test.runner",
+        "value_key": "cargo_test",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "cargo test runs only the changed crate on every push.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "test.runner",
+        "value_key": "cargo_test",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

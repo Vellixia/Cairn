@@ -1,0 +1,33 @@
+{
+  "description": "A conflict resolved by recording a scope exception rather than by picking a winner. The narrower proposal is reported as narrowing the broader one.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The production database is PostgreSQL.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "origin_session": "s1"
+      }
+    ],
+    "relations": [
+      {
+        "from": "z",
+        "to": "a",
+        "kind": "narrows",
+        "basis": "explicit_agent"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "settled",
+    "answers": [
+      "a"
+    ],
+    "narrowed_by": [
+      "z"
+    ]
+  }
+}

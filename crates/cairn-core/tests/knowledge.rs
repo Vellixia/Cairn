@@ -10,7 +10,85 @@
 //! loader itself: every fixture in the tree parses, and every directory the
 //! corpus contract names exists.
 
-use cairn_core::corpus;
+use cairn_core::corpus::{self, Case, MemoryCase};
+use cairn_core::knowledge::{
+    classify_proposal, content_norm_digest, derive_subject, normalize_topic_key,
+    normalize_value_key, MemoryFacts, ProposalOutcome, Relation,
+};
+use cairn_core::{
+    Importance, MemoryScope, MemoryState, RelationBasis, RelationKind, VerificationAuthority,
+    VerificationState,
+};
+use std::str::FromStr;
+use uuid::Uuid;
+
+/// A deterministic identifier for a session label.
+///
+/// Distinct-origin accounting counts distinct sessions, so a fixture needs
+/// distinct labels to become distinct identifiers — and the same label in two
+/// cases must not accidentally collide with a member id.
+fn session_id(label: &str) -> Uuid {
+    let d = cairn_core::digest(&format!("corpus-session:{label}"));
+    let bytes: [u8; 16] = hex_prefix(&d);
+    Uuid::from_bytes(bytes)
+}
+
+fn hex_prefix(hex: &str) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).unwrap_or(0);
+    }
+    out
+}
+
+/// Turn a fixture's memory into the facts the derivation reads.
+///
+/// Keys are normalized here because that is what storage does before the
+/// derivation ever sees them: a fixture writes what an agent would write, not
+/// what the column holds.
+fn facts(case: &Case, m: &MemoryCase) -> MemoryFacts {
+    MemoryFacts {
+        id: case.id(&m.label),
+        state: MemoryState::from_str(&m.state)
+            .unwrap_or_else(|e| panic!("{}", case.context(e.to_string()))),
+        scope: MemoryScope::from_str(&m.scope)
+            .unwrap_or_else(|e| panic!("{}", case.context(e.to_string()))),
+        scope_key: m.scope_key.clone(),
+        topic_key: m.topic_key.as_deref().and_then(normalize_topic_key),
+        value_key: m.value_key.as_deref().and_then(normalize_value_key),
+        content_norm_digest: (!m.content.is_empty()).then(|| content_norm_digest(&m.content)),
+        verification: VerificationState::from_str(&m.verification)
+            .unwrap_or_else(|e| panic!("{}", case.context(e.to_string()))),
+        verification_authority: m
+            .verification_authority
+            .as_deref()
+            .map(|a| VerificationAuthority::from_str(a).expect("authority")),
+        evidence_fact_count: m.evidence_fact_count,
+        pinned: m.pinned,
+        importance: Importance::from_str(&m.importance).expect("importance"),
+        origin_session_id: session_id(&m.origin_session),
+    }
+}
+
+fn relations(case: &Case) -> Vec<Relation> {
+    case.input
+        .relations
+        .iter()
+        .map(|r| {
+            Relation::new(
+                RelationKind::from_str(&r.kind)
+                    .unwrap_or_else(|e| panic!("{}", case.context(e.to_string()))),
+                case.id(&r.from),
+                case.id(&r.to),
+                RelationBasis::from_str(&r.basis).expect("basis"),
+            )
+        })
+        .collect()
+}
+
+fn labels(case: &Case, ids: &[Uuid]) -> Vec<String> {
+    ids.iter().map(|id| case.label(*id)).collect()
+}
 
 /// Every directory `contracts/evaluation.md` §The corpus names.
 const REQUIRED_GROUPS: &[&str] = &[
@@ -147,5 +225,285 @@ fn every_group_loads_independently() {
     for group in REQUIRED_GROUPS {
         corpus::load_group(&root, group)
             .unwrap_or_else(|e| panic!("group {group} failed to load: {e}"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The reconciliation corpus (SC-301, SC-302, SC-305)
+// ---------------------------------------------------------------------------
+
+/// Directories whose cases are derivation cases.
+const DERIVATION_GROUPS: &[&str] = &[
+    "reconciliation/equivalent",
+    "reconciliation/distinct",
+    "reconciliation/coarse_value_key",
+    "reconciliation/duplicate_content",
+    "reconciliation/free_form",
+    "conflict/real",
+    "conflict/scope_exception",
+    "conflict/disjoint",
+    "supersession",
+];
+
+fn derivation_cases() -> Vec<Case> {
+    let root = corpus::root();
+    let mut all = Vec::new();
+    for group in DERIVATION_GROUPS {
+        all.extend(
+            corpus::load_group(&root, group)
+                .unwrap_or_else(|e| panic!("group {group} failed to load: {e}")),
+        );
+    }
+    all
+}
+
+/// Every derivation case produces exactly the `SubjectView` it states.
+#[test]
+fn the_corpus_derives_what_it_says() {
+    let cases = derivation_cases();
+    assert!(!cases.is_empty(), "the derivation corpus is empty");
+
+    for case in &cases {
+        if case.expect.reconciliation.is_none() && case.expect.answers.is_empty() {
+            continue;
+        }
+        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(case, m)).collect();
+        let view = derive_subject(&members, &relations(case));
+
+        if let Some(expected_state) = case.expect.reconciliation.as_deref() {
+            assert_eq!(
+                view.reconciliation.as_str(),
+                expected_state,
+                "{}",
+                case.context(format!(
+                    "expected {expected_state}, derived {} with answers {:?}",
+                    view.reconciliation,
+                    labels(case, &view.answers)
+                ))
+            );
+        }
+
+        if !case.expect.answers.is_empty() {
+            assert_eq!(
+                labels(case, &view.answers),
+                case.expect.answers,
+                "{}",
+                case.context("answers differ")
+            );
+        }
+        if !case.expect.narrowed_by.is_empty() {
+            assert_eq!(
+                labels(case, &view.narrowed_by),
+                case.expect.narrowed_by,
+                "{}",
+                case.context("narrowed_by differs")
+            );
+        }
+    }
+}
+
+/// Metric 2 — zero false merges across the paired negative corpus.
+///
+/// A `distinct/`, `free_form/` or `coarse_value_key/` case that produced one
+/// answer for two materially different statements would suppress a claim, which
+/// is the failure this corpus exists to make measurable.
+#[test]
+fn no_case_that_must_not_merge_ever_merges() {
+    let root = corpus::root();
+    let mut false_merges = Vec::new();
+
+    for group in [
+        "reconciliation/distinct",
+        "reconciliation/free_form",
+        "reconciliation/coarse_value_key",
+    ] {
+        for case in corpus::load_group(&root, group).expect("group loads") {
+            let members: Vec<MemoryFacts> =
+                case.input.memories.iter().map(|m| facts(&case, m)).collect();
+            let active = members
+                .iter()
+                .filter(|m| m.state == MemoryState::Active)
+                .count();
+            let view = derive_subject(&members, &relations(&case));
+
+            if active > 1 && view.answers.len() < active {
+                // Some collapse is legitimate — two members of a `distinct/`
+                // case may genuinely duplicate a third. The corpus states the
+                // expected count, so a shortfall against *that* is the defect.
+                if view.answers.len() != case.expect.answers.len() {
+                    false_merges.push(format!(
+                        "{}: {active} active members collapsed to {} answers",
+                        case.path.display(),
+                        view.answers.len()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        false_merges.is_empty(),
+        "false merges: {false_merges:#?}"
+    );
+}
+
+/// Metric 2a — no automatic path writes a `reinforces` relation, ever.
+///
+/// `reinforces` was demoted to explicit-only when the coarse-value-key
+/// false-merge path was closed. Nothing but an explicit act may record one.
+#[test]
+fn no_automatic_reinforcement() {
+    for case in derivation_cases() {
+        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(&case, m)).collect();
+        for (i, proposal) in members.iter().enumerate() {
+            let existing: Vec<MemoryFacts> = members
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, m)| m.clone())
+                .collect();
+            let (_, recorded) = classify_proposal(proposal, &existing, 64);
+            for r in &recorded {
+                assert_ne!(
+                    r.kind,
+                    RelationKind::Reinforces,
+                    "{}",
+                    case.context("an automatic path recorded a reinforcement")
+                );
+            }
+        }
+    }
+}
+
+/// Metric 2b — every `coarse_value_key/` case corroborates, records nothing,
+/// and retains every statement.
+#[test]
+fn corroboration() {
+    let cases = corpus::load_group(&corpus::root(), "reconciliation/coarse_value_key")
+        .expect("the coarse-value-key corpus loads");
+    assert!(
+        cases.len() >= 15,
+        "the corpus contract asks for at least 15 adversarial cases, found {}",
+        cases.len()
+    );
+
+    for case in &cases {
+        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(case, m)).collect();
+        let view = derive_subject(&members, &relations(case));
+
+        assert_eq!(
+            view.reconciliation.as_str(),
+            "corroborated",
+            "{}",
+            case.context("a shared value key with differing content must corroborate")
+        );
+        assert_eq!(
+            view.answers.len(),
+            members.len(),
+            "{}",
+            case.context("a statement was dropped from the answer set")
+        );
+
+        // And the write path records nothing at all for it.
+        let (outcome, recorded) = classify_proposal(
+            members.last().expect("members"),
+            &members[..members.len() - 1],
+            64,
+        );
+        assert!(
+            matches!(outcome, ProposalOutcome::Corroborating { .. }),
+            "{}",
+            case.context(format!("expected corroboration, got {outcome:?}"))
+        );
+        assert!(
+            recorded.is_empty(),
+            "{}",
+            case.context("corroboration recorded a relation")
+        );
+    }
+}
+
+/// Metric 3 and 4 — every real conflict is visible, and neither negative
+/// directory ever produces one.
+#[test]
+fn conflicts_are_real_and_the_negatives_are_not() {
+    let root = corpus::root();
+
+    let real = corpus::load_group(&root, "conflict/real").expect("loads");
+    assert!(real.len() >= 15, "conflict/real has {} cases", real.len());
+    for case in &real {
+        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(case, m)).collect();
+        let view = derive_subject(&members, &relations(case));
+        assert_eq!(
+            view.reconciliation.as_str(),
+            "conflicted",
+            "{}",
+            case.context("a real conflict did not surface")
+        );
+        assert!(
+            view.answers.len() >= 2,
+            "{}",
+            case.context("a conflict emitted a single answer — a silent winner")
+        );
+        // Every member stays active. Nothing is marked superseded to resolve it.
+        assert!(
+            members.iter().all(|m| m.state == MemoryState::Active),
+            "{}",
+            case.context("a conflict case seeded a non-active member")
+        );
+    }
+
+    for group in ["conflict/scope_exception", "conflict/disjoint"] {
+        let cases = corpus::load_group(&root, group).expect("loads");
+        assert!(cases.len() >= 10, "{group} has {} cases", cases.len());
+        for case in &cases {
+            let members: Vec<MemoryFacts> =
+                case.input.memories.iter().map(|m| facts(case, m)).collect();
+            // The two are not members of one subject at all: the scope key
+            // differs, so a single working context never selects both. Asserted
+            // through the write path, which is where a false conflict would be
+            // recorded.
+            let (outcome, recorded) = classify_proposal(
+                members.last().expect("members"),
+                &members[..members.len() - 1],
+                64,
+            );
+            assert!(
+                !matches!(outcome, ProposalOutcome::ConflictDetected { .. }),
+                "{}",
+                case.context(format!("false conflict: {outcome:?}"))
+            );
+            assert!(
+                recorded.is_empty(),
+                "{}",
+                case.context("a relation was recorded between memories that never interact")
+            );
+        }
+    }
+}
+
+/// The corpus meets the sizes the contract states.
+///
+/// A corpus that quietly shrank would make every metric above pass while
+/// measuring less, which is the failure mode a count catches and an assertion
+/// does not.
+#[test]
+fn the_corpus_is_at_least_the_size_the_contract_asks_for() {
+    let root = corpus::root();
+    for (group, minimum) in [
+        ("reconciliation/equivalent", 20),
+        ("reconciliation/distinct", 20),
+        ("reconciliation/coarse_value_key", 15),
+        ("reconciliation/duplicate_content", 20),
+        ("reconciliation/free_form", 20),
+        ("conflict/real", 15),
+        ("conflict/scope_exception", 10),
+        ("conflict/disjoint", 10),
+        ("supersession", 5),
+    ] {
+        let count = corpus::load_group(&root, group).expect("loads").len();
+        assert!(
+            count >= minimum,
+            "{group}: {count} cases, contract asks for at least {minimum}"
+        );
     }
 }

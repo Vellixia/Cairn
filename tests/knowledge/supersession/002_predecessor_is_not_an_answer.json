@@ -1,0 +1,40 @@
+{
+  "description": "The superseded proposal is history: it is never a canonical answer.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The API listens on 8080.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "state": "superseded",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The API listens on 9000.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "9000",
+        "origin_session": "s2"
+      }
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "supersedes",
+        "basis": "explicit_user"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "settled",
+    "answers": [
+      "b"
+    ]
+  }
+}

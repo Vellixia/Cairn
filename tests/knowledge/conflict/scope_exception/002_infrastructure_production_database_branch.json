@@ -1,0 +1,31 @@
+{
+  "description": "A project-scoped answer for infrastructure.production_database and a branch-scoped one that disagrees. They are never simultaneously applicable, so this is a scope exception and not a conflict: the narrower applies in its own context and the broader is the answer it narrows.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The production database is PostgreSQL.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The production database is CockroachDB.",
+        "scope": "branch",
+        "scope_key": "main",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "cockroachdb",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

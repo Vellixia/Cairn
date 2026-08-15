@@ -1,0 +1,43 @@
+{
+  "description": "The paired negative for build.tool: the same subject, a different value, and a statement that reads similarly. Merging these would suppress a claim.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The workspace is built with Cargo.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "build.tool",
+        "value_key": "cargo",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The workspace is built with Bazel.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "build.tool",
+        "value_key": "bazel",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "conflict_detected"
+    }
+  }
+}

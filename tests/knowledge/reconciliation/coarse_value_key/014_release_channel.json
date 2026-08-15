@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about release.channel. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Prereleases are cut from main on every merge.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "release.channel",
+        "value_key": "prerelease",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Prereleases are cut by hand when a milestone closes.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "release.channel",
+        "value_key": "prerelease",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

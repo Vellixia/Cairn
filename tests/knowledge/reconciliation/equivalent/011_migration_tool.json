@@ -1,0 +1,43 @@
+{
+  "description": "Two sessions record migration.tool identically after normalization. Its sibling in ../distinct/ differs in exactly the way that matters: a different value.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Migrations are applied by sqlx.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "migration.tool",
+        "value_key": "sqlx",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "  MIGRATIONS ARE APPLIED BY SQLX!!  ",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "migration.tool",
+        "value_key": "sqlx",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "reinforced",
+    "answers": [
+      "a"
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "duplicates",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "duplicate",
+      "distinct_origins": 2
+    }
+  }
+}

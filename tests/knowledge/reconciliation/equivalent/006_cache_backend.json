@@ -1,0 +1,43 @@
+{
+  "description": "Two sessions record cache.backend identically after normalization. Its sibling in ../distinct/ differs in exactly the way that matters: a different value.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The cache backend is Redis.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "cache.backend",
+        "value_key": "redis",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "  THE CACHE BACKEND IS REDIS!!  ",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "cache.backend",
+        "value_key": "redis",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "reinforced",
+    "answers": [
+      "a"
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "duplicates",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "duplicate",
+      "distinct_origins": 2
+    }
+  }
+}
