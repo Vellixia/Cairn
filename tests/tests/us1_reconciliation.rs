@@ -42,10 +42,7 @@ fn no_automatic_reinforcement() {
                 // members never reconcile against another's.
                 let namespace = case.name.replace(['-'], "_");
                 for m in &case.input.memories {
-                    let topic = m
-                        .topic_key
-                        .as_deref()
-                        .map(|t| format!("{namespace}.{t}"));
+                    let topic = m.topic_key.as_deref().map(|t| format!("{namespace}.{t}"));
                     f.propose(
                         Uuid::now_v7(),
                         topic.as_deref(),
@@ -68,12 +65,11 @@ fn no_automatic_reinforcement() {
 
         // And the relations it *did* write are only the two kinds automatic
         // reconciliation may decide.
-        let kinds: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT kind FROM memory_relations ORDER BY kind",
-        )
-        .fetch_all(f.store.pool())
-        .await
-        .expect("kinds");
+        let kinds: Vec<String> =
+            sqlx::query_scalar("SELECT DISTINCT kind FROM memory_relations ORDER BY kind")
+                .fetch_all(f.store.pool())
+                .await
+                .expect("kinds");
         for kind in &kinds {
             assert!(
                 kind == "duplicates" || kind == "conflicts_with",
@@ -105,7 +101,9 @@ fn corroboration() {
             for (i, m) in case.input.memories.iter().enumerate() {
                 let topic = format!(
                     "{namespace}.{}",
-                    m.topic_key.as_deref().expect("a coarse-value case is keyed")
+                    m.topic_key
+                        .as_deref()
+                        .expect("a coarse-value case is keyed")
                 );
                 let out = f
                     .propose(
@@ -361,21 +359,33 @@ fn the_cli_reports_a_corroborating_member() {
     let s = cairn_e2e::Sandbox::new();
 
     let first = s.cairn(&[
-        "memory", "add", "JWT uses HS256 with a shared secret.",
-        "--scope", "project", "--topic-key", "auth.strategy", "--value-key", "jwt", "--json",
+        "memory",
+        "add",
+        "JWT uses HS256 with a shared secret.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "auth.strategy",
+        "--value-key",
+        "jwt",
+        "--json",
     ]);
     assert!(first.ok(), "{}", first.stderr);
 
     let second = s.cairn(&[
-        "memory", "add", "JWT uses RS256 with rotating public keys.",
-        "--scope", "project", "--topic-key", "auth.strategy", "--value-key", "jwt", "--json",
+        "memory",
+        "add",
+        "JWT uses RS256 with rotating public keys.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "auth.strategy",
+        "--value-key",
+        "jwt",
+        "--json",
     ]);
     assert!(second.ok(), "{}", second.stderr);
-    assert!(
-        second.stdout.contains("corroborating"),
-        "{}",
-        second.stdout
-    );
+    assert!(second.stdout.contains("corroborating"), "{}", second.stdout);
     assert!(
         second.stdout.contains("corroborating_member"),
         "the note that prompts an explicit decision is missing: {}",
@@ -383,7 +393,11 @@ fn the_cli_reports_a_corroborating_member() {
     );
 
     let subject = s.cairn(&["memory", "subject", "auth.strategy"]);
-    assert!(subject.stdout.contains("corroborated"), "{}", subject.stdout);
+    assert!(
+        subject.stdout.contains("corroborated"),
+        "{}",
+        subject.stdout
+    );
     assert!(
         subject.stdout.contains("statements are several"),
         "{}",
@@ -396,14 +410,22 @@ fn the_cli_reports_a_corroborating_member() {
 fn the_cli_stores_a_memory_whose_key_cannot_be_represented() {
     let s = cairn_e2e::Sandbox::new();
     let out = s.cairn(&[
-        "memory", "add", "A claim with an unusable key.",
-        "--topic-key", "데이터베이스", "--json",
+        "memory",
+        "add",
+        "A claim with an unusable key.",
+        "--topic-key",
+        "데이터베이스",
+        "--json",
     ]);
     assert!(out.ok(), "the memory was rejected: {}", out.stderr);
     assert!(out.stdout.contains("invalid_topic_key"), "{}", out.stdout);
 
     let found = s.cairn(&["memory", "search", "unusable", "--json"]);
-    assert!(found.stdout.contains("A claim with an unusable key."), "{}", found.stdout);
+    assert!(
+        found.stdout.contains("A claim with an unusable key."),
+        "{}",
+        found.stdout
+    );
 }
 
 /// Reinforcement is explicit, and its counts are never called verifications.
@@ -412,24 +434,46 @@ fn the_cli_reinforces_only_when_asked() {
     let s = cairn_e2e::Sandbox::new();
 
     let target = s.cairn(&[
-        "memory", "add", "Errors are returned, never logged and swallowed.",
-        "--type", "convention", "--scope", "project", "--topic-key", "error.handling",
-        "--value-key", "returned", "--json",
+        "memory",
+        "add",
+        "Errors are returned, never logged and swallowed.",
+        "--type",
+        "convention",
+        "--scope",
+        "project",
+        "--topic-key",
+        "error.handling",
+        "--value-key",
+        "returned",
+        "--json",
     ]);
     assert!(target.ok(), "{}", target.stderr);
     let target_id = extract_id(&target.stdout);
 
     let confirming = s.cairn(&[
-        "memory", "add", "Confirmed while reviewing the retry path.",
-        "--type", "fact", "--json",
+        "memory",
+        "add",
+        "Confirmed while reviewing the retry path.",
+        "--type",
+        "fact",
+        "--json",
     ]);
     let confirming_id = extract_id(&confirming.stdout);
 
     let out = s.cairn(&[
-        "memory", "reinforce", &target_id, "--from", &confirming_id, "--json",
+        "memory",
+        "reinforce",
+        &target_id,
+        "--from",
+        &confirming_id,
+        "--json",
     ]);
     assert!(out.ok(), "{}", out.stderr);
-    assert!(out.stdout.contains("\"reinforcements\": 1"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("\"reinforcements\": 1"),
+        "{}",
+        out.stdout
+    );
     assert!(
         out.stdout.contains("distinct_origins"),
         "the accounting does not distinguish origins: {}",
@@ -448,13 +492,29 @@ fn the_cli_resolves_a_conflict_by_superseding() {
     let s = cairn_e2e::Sandbox::new();
 
     let old = s.cairn(&[
-        "memory", "add", "The API listens on 8080.",
-        "--scope", "project", "--topic-key", "service.api_port", "--value-key", "8080", "--json",
+        "memory",
+        "add",
+        "The API listens on 8080.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "service.api_port",
+        "--value-key",
+        "8080",
+        "--json",
     ]);
     let old_id = extract_id(&old.stdout);
     let new = s.cairn(&[
-        "memory", "add", "The API listens on 9000.",
-        "--scope", "project", "--topic-key", "service.api_port", "--value-key", "9000", "--json",
+        "memory",
+        "add",
+        "The API listens on 9000.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "service.api_port",
+        "--value-key",
+        "9000",
+        "--json",
     ]);
     let new_id = extract_id(&new.stdout);
 
@@ -462,8 +522,17 @@ fn the_cli_resolves_a_conflict_by_superseding() {
     assert!(before.stdout.contains("conflicted"), "{}", before.stdout);
 
     let resolved = s.cairn(&[
-        "memory", "reconcile", "--from", &new_id, "--to", &old_id,
-        "--relation", "supersedes", "--basis", "explicit_user", "--json",
+        "memory",
+        "reconcile",
+        "--from",
+        &new_id,
+        "--to",
+        &old_id,
+        "--relation",
+        "supersedes",
+        "--basis",
+        "explicit_user",
+        "--json",
     ]);
     assert!(resolved.ok(), "{}", resolved.stderr);
 
@@ -472,12 +541,25 @@ fn the_cli_resolves_a_conflict_by_superseding() {
 
     // And the reverse decision is refused rather than creating a cycle.
     let cycle = s.cairn(&[
-        "memory", "reconcile", "--from", &old_id, "--to", &new_id,
-        "--relation", "supersedes", "--basis", "explicit_user", "--json",
+        "memory",
+        "reconcile",
+        "--from",
+        &old_id,
+        "--to",
+        &new_id,
+        "--relation",
+        "supersedes",
+        "--basis",
+        "explicit_user",
+        "--json",
     ]);
     assert!(!cycle.ok(), "a mutual supersession was accepted");
-    assert!(cycle.stdout.contains("relation_conflict") || cycle.stderr.contains("relation_conflict"),
-            "stdout={} stderr={}", cycle.stdout, cycle.stderr);
+    assert!(
+        cycle.stdout.contains("relation_conflict") || cycle.stderr.contains("relation_conflict"),
+        "stdout={} stderr={}",
+        cycle.stdout,
+        cycle.stderr
+    );
 }
 
 fn extract_id(json: &str) -> String {

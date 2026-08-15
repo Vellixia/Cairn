@@ -351,9 +351,69 @@ merges nothing, and history is answerable.
    *different* commit. Marking every commit-pinned fact on a branch would recheck things that have
    not moved.
 
+### Checkpoint F — Phase 7 (T065–T075) complete: evidence-aware tasks
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace --all-targets` green, 914 tests, 0 failures |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+**What landed**
+
+- `cairn-store::criteria` — the `task_criteria` and `task_blockers` repositories, the local
+  counter, the change log, the retained projection, derived progress and readiness, the bind
+  snapshot and the divergence derivation. Every mutation funnels through one `commit_changes`
+  helper inside one transaction, which is why `local_revision`, `task_changes` and
+  `tasks.acceptance_criteria` cannot disagree with the criterion rows.
+- `repo::update_task` now delegates to `criteria::update_task`, so there is exactly one task write
+  path. `repo::create_task` seeds criterion rows in its own transaction, and `bind_task` and
+  `start_session` record `task_snapshot_at_bind`.
+- `cairnd::verify::verify_criterion` — criterion verification admitting only a local
+  `cairn`-authority result over `collector = cairn` evidence.
+- `cairn task criterion add|set|verify|remove`, `task blocker open|clear`, `task readiness`,
+  `task history`, and `task update --acceptance-criteria`; `task get` gained `local_revision`,
+  `state_digest`, criteria, blockers, progress and readiness.
+- Corpus: `tasks/` — 28 cases across the criterion state × verification matrix, derived readiness
+  and the action order, checked against the real pure functions, plus an exhaustiveness test that
+  enumerates the product from the enums themselves.
+- Tests: `us11_task_criteria` (9), `rebuild_equivalence::rebuild_criteria_projection_equals_the_stored_array`,
+  `cairn-core::knowledge` (2 new).
+
+**Decisions**
+
+1. **`StoreError::Refused { code, message }`.** The store now carries a refusal's stable wire code
+   instead of the daemon matching on message text, which is how `revision_conflict` stays
+   distinguishable from `storage_unavailable` at the agent surface.
+2. **Ordinals are allocated over every row including tombstoned ones.** The unique index is partial
+   (`WHERE deleted_at IS NULL`), so a maximum over live rows alone would reissue AC-3 after AC-3 was
+   removed and never trip the constraint — silently minting a second AC-3 (FR-481).
+3. **Task-model writes resolve an author without creating one** (`authoring_session`).
+   `ensure_session_for_memory` starts a `cairn-cli` session when there is none, which is right for a
+   memory and wrong here: `cairn task new` has never needed a session, and inventing one leaves a
+   second active session in the worktree that makes the next agent's `cairn_context` ambiguous. The
+   nil UUID means "no session" and renders as an unattributed change.
+4. **Attested evidence is refused by name, not by derived authority alone.** Cairn never re-collects
+   an agent's observation, so an attested fact yields an *inconclusive* run and would otherwise be
+   reported as `source_unverified` — as if no evidence existed. When the only evidence offered is
+   attested, that is the reason, and `attested_not_sufficient` says so (FR-370).
+5. **Divergence is reported on `context` for now.** T072 requires the derivation and a handler; Phase
+   8 places it in the Level 0 tier. It is attached as `task_divergence` so no session is presented as
+   having worked against the current state in the meantime.
+6. **Criteria and blockers are not yet on the wire.** Sync of the rows themselves is Phase 10
+   (T099, T103). Phase 7 enqueues only the task's own payload, which carries the retained projection.
+
+**Two pre-existing gate failures fixed**
+
+`6a33f85` did not pass `cargo fmt --all -- --check` or
+`cargo clippy --workspace --all-targets -- -D warnings`. Both were failing before any Phase 7 work:
+a stranded `#[allow(clippy::too_many_arguments)]` and an orphaned doc comment in
+`cairnd/src/handlers.rs`, several `sort_by` calls that clippy wants as `sort_by_key`, and unformatted
+files across `cairn-core`, `cairn-store`, `cairnd` and the test crate. They are fixed here rather
+than carried forward, which is why the diff touches files Phase 7 otherwise has no business in.
+
 ## Where the run stands
 
-**64 of 148 tasks complete**, each with its named evidence passing.
+**75 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
@@ -363,9 +423,22 @@ merges nothing, and history is answerable.
 | 4 Canonical knowledge | T024–T043 | complete |
 | 5 Evidence & authority | T044–T059 | complete |
 | 6 Drift | T060–T064 | complete |
-| 7–16 | T065–T148 | not started |
+| 7 Evidence-aware tasks | T065–T075 | complete |
+| 8–16 | T076–T148 | not started |
 
 ## Next action
+
+**Phase 8 (US10 — minimum-safe context, pins and explainability), starting at T076**: the test-first
+cluster T076–T078 — the `tests/knowledge/budget/` corpus across memory populations 0, 10, 500 and
+5,000 × budgets 200…12,000 plus `budget/oversized_task/`, then `us10_min_safe_context::budget` as a
+property test and `::no_regression` against the T004 baseline — then T079–T085.
+
+Phase 8 consumes Phase 7's output directly: Tier 0a is task work state, and `action_order` is what
+Level 0 admits criteria in. Both are in place and tested.
+
+`contracts/continuity-context.md` governs the phase and has **not** been read yet in this run.
+
+### Superseded next-action note
 
 **Phase 7 (US11 — evidence-aware tasks), starting at T065**: the test-first cluster T065–T067
 (`no_silent_overwrite`, `attested_is_not_enough` / `no_percentage_field`, and the
@@ -378,16 +451,3 @@ repositories, the local counter and change log, the retained projection, criteri
 restricted to `cairn` authority, the bind snapshot, and the `cairn task` surfaces.
 
 `contracts/task-model.md` has already been read and governs the phase.
-
-### Superseded next-action note
-
-**Phase 6 (US5 — drift), starting at T060**: populate `tests/knowledge/drift/` with the full
-transition set, then `us5_drift::marks_only_verification` (T061) before the marking code (T062).
-
-Drift is small because the pieces are already in place: the state machine and its triggers are in
-`cairn-core::verify`, the `(project_id, source_locator)` index and `facts_by_locator` are in
-`cairn-store::evidence`, and `set_verification` already writes exactly `verification` and nothing
-else. T062 is the capture-path lookup in a new `cairnd/src/drift.rs`; T063 wires it into
-`capture.rs` inside the 250 ms deadline.
-
-`contracts/evidence-verification.md` §Drift governs it and has already been read.

@@ -148,8 +148,13 @@ fn as_of_returns_what_was_effective_then() {
 fn a_historical_query_writes_nothing() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
-        f.propose(Uuid::now_v7(), Some("infra.db"), Some("postgresql"), "PostgreSQL.")
-            .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("infra.db"),
+            Some("postgresql"),
+            "PostgreSQL.",
+        )
+        .await;
 
         async fn fingerprint(f: &Fixture) -> Vec<String> {
             sqlx::query_scalar(
@@ -222,7 +227,11 @@ fn unknown_applicability() {
         .await
         .expect("search");
 
-        assert_eq!(results.len(), 1, "the proposal was effective at that instant");
+        assert_eq!(
+            results.len(),
+            1,
+            "the proposal was effective at that instant"
+        );
         let t = results[0].temporal.as_ref().expect("temporal");
         assert_eq!(
             t.applicability,
@@ -277,13 +286,10 @@ fn staleness_is_recorded_going_forward_and_never_inferred() {
             .await
             .expect("pre-stale");
 
-        let marked = cairn_store::repo::mark_stale_scopes(
-            &f.store,
-            f.project,
-            &["main".to_string()],
-        )
-        .await
-        .expect("mark stale");
+        let marked =
+            cairn_store::repo::mark_stale_scopes(&f.store, f.project, &["main".to_string()])
+                .await
+                .expect("mark stale");
         assert_eq!(marked, 1, "only the branch that is gone");
 
         let row: (String, Option<String>) =
@@ -293,7 +299,10 @@ fn staleness_is_recorded_going_forward_and_never_inferred() {
                 .await
                 .expect("doomed");
         assert_eq!(row.0, "stale");
-        assert!(row.1.is_some(), "the instant Cairn performed it was not recorded");
+        assert!(
+            row.1.is_some(),
+            "the instant Cairn performed it was not recorded"
+        );
 
         // The live one is untouched.
         let live_state: String = sqlx::query_scalar("SELECT state FROM memories WHERE id = ?1")
@@ -325,8 +334,13 @@ fn the_topic_key_filter_matches_exactly_or_by_prefix() {
             ("infrastructure.cache", "redis"),
             ("service.api_port", "8080"),
         ] {
-            f.propose(Uuid::now_v7(), Some(topic), Some(value), &format!("{topic} is {value}."))
-                .await;
+            f.propose(
+                Uuid::now_v7(),
+                Some(topic),
+                Some(value),
+                &format!("{topic} is {value}."),
+            )
+            .await;
         }
 
         let exact = search(
@@ -377,15 +391,30 @@ fn the_conflicted_and_corroborated_filters_read_the_derivation() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
         // Conflicted.
-        f.propose(Uuid::now_v7(), Some("infra.db"), Some("postgresql"), "PostgreSQL.")
-            .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("infra.db"),
+            Some("postgresql"),
+            "PostgreSQL.",
+        )
+        .await;
         f.propose(Uuid::now_v7(), Some("infra.db"), Some("mysql"), "MySQL.")
             .await;
         // Corroborated.
-        f.propose(Uuid::now_v7(), Some("auth.strategy"), Some("jwt"), "JWT with HS256.")
-            .await;
-        f.propose(Uuid::now_v7(), Some("auth.strategy"), Some("jwt"), "JWT with RS256.")
-            .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("auth.strategy"),
+            Some("jwt"),
+            "JWT with HS256.",
+        )
+        .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("auth.strategy"),
+            Some("jwt"),
+            "JWT with RS256.",
+        )
+        .await;
         // Settled.
         f.propose(Uuid::now_v7(), Some("build.tool"), Some("cargo"), "Cargo.")
             .await;
@@ -439,7 +468,12 @@ fn a_drifted_memory_is_still_returned_by_default() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
         let m = f
-            .propose(Uuid::now_v7(), Some("service.api_port"), Some("8080"), "Port 8080.")
+            .propose(
+                Uuid::now_v7(),
+                Some("service.api_port"),
+                Some("8080"),
+                "Port 8080.",
+            )
             .await;
         sqlx::query("UPDATE memories SET verification = 'drifted' WHERE id = ?1")
             .bind(m.memory.id.to_string())
@@ -557,24 +591,23 @@ fn no_automatic_elevation() {
         );
 
         // The branch goes away. Its knowledge becomes history, not nothing.
-        let marked = cairn_store::repo::mark_stale_scopes(
-            &f.store,
-            f.project,
-            &["main".to_string()],
-        )
-        .await
-        .expect("mark stale");
+        let marked =
+            cairn_store::repo::mark_stale_scopes(&f.store, f.project, &["main".to_string()])
+                .await
+                .expect("mark stale");
         assert_eq!(marked, 1);
 
-        let row: (String, Option<String>, String) = sqlx::query_as(
-            "SELECT state, stale_at, content FROM memories WHERE id = ?1",
-        )
-        .bind(branch_memory.memory.id.to_string())
-        .fetch_one(f.store.pool())
-        .await
-        .expect("row");
+        let row: (String, Option<String>, String) =
+            sqlx::query_as("SELECT state, stale_at, content FROM memories WHERE id = ?1")
+                .bind(branch_memory.memory.id.to_string())
+                .fetch_one(f.store.pool())
+                .await
+                .expect("row");
         assert_eq!(row.0, "stale", "branch deletion deleted the memory");
-        assert!(row.1.is_some(), "the instant was not recorded going forward");
+        assert!(
+            row.1.is_some(),
+            "the instant was not recorded going forward"
+        );
         assert_eq!(
             row.2, "The API on this branch is GraphQL.",
             "the content was rewritten"

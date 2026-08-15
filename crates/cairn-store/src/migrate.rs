@@ -115,10 +115,7 @@ pub async fn run_to(pool: &SqlitePool, target: i64) -> Result<i64, MigrateError>
 ///
 /// Runs inside the migration's own transaction, after its script and before its
 /// `schema_migrations` row, so the two are atomic together.
-async fn finish(
-    version: i64,
-    tx: &mut sqlx::SqliteConnection,
-) -> Result<(), MigrateError> {
+async fn finish(version: i64, tx: &mut sqlx::SqliteConnection) -> Result<(), MigrateError> {
     match version {
         5 => criteria_from_acceptance_arrays(tx).await,
         _ => Ok(()),

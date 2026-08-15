@@ -24,7 +24,15 @@ fn no_verification_at_session_open() {
     // One session, opened first, so every later call resolves to it. Two open
     // sessions in one worktree is an ambiguity Cairn reports rather than
     // guesses at, and it would be measuring the wrong thing here.
-    let started = s.cairn(&["session", "start", "--agent", "claude-code", "--key", "perf-1", "--json"]);
+    let started = s.cairn(&[
+        "session",
+        "start",
+        "--agent",
+        "claude-code",
+        "--key",
+        "perf-1",
+        "--json",
+    ]);
     assert!(
         started.ok(),
         "session start failed: code={} stdout={} stderr={}",
@@ -44,9 +52,18 @@ fn no_verification_at_session_open() {
     // A memory with real, checkable evidence attached: exactly the shape a
     // background pass would pick up.
     let m = s.cairn(&[
-        "memory", "add", "The API listens on port 8080.",
-        "--scope", "project", "--topic-key", "service.api_port",
-        "--value-key", "8080", "--session", &session_id, "--json",
+        "memory",
+        "add",
+        "The API listens on port 8080.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "service.api_port",
+        "--value-key",
+        "8080",
+        "--session",
+        &session_id,
+        "--json",
     ]);
     assert!(m.ok(), "{}", m.stderr);
     let memory_id: String = {
@@ -58,18 +75,28 @@ fn no_verification_at_session_open() {
     };
 
     let e = s.cairn(&[
-        "evidence", "add",
-        "--type", "configuration",
-        "--subject", "API port",
-        "--value", "8080",
-        "--locator", "config/app.yml#server.port",
-        "--memory", &memory_id,
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "API port",
+        "--value",
+        "8080",
+        "--locator",
+        "config/app.yml#server.port",
+        "--memory",
+        &memory_id,
         "--json",
     ]);
     assert!(e.ok(), "{}", e.stderr);
 
     let runs_before = s.query_column("SELECT CAST(COUNT(*) AS TEXT) FROM verification_runs");
-    assert_eq!(runs_before, vec!["0".to_string()], "nothing has verified yet");
+    assert_eq!(
+        runs_before,
+        vec!["0".to_string()],
+        "nothing has verified yet"
+    );
 
     // Take the briefing — the whole session-open path.
     let context = s.cairn(&["context", "--session", &session_id, "--json"]);
@@ -119,18 +146,34 @@ fn session_open_is_not_slowed_by_evidence_present() {
 
     for i in 0..25 {
         let m = s.cairn(&[
-            "memory", "add", &format!("Claim number {i}."),
-            "--scope", "project", "--topic-key", &format!("topic.number_{i}"),
-            "--value-key", &format!("v{i}"), "--json",
+            "memory",
+            "add",
+            &format!("Claim number {i}."),
+            "--scope",
+            "project",
+            "--topic-key",
+            &format!("topic.number_{i}"),
+            "--value-key",
+            &format!("v{i}"),
+            "--json",
         ]);
         assert!(m.ok(), "{}", m.stderr);
         let v: serde_json::Value = serde_json::from_str(&m.stdout).expect("json");
         let id = v["data"]["memory"]["id"].as_str().expect("id");
         let e = s.cairn(&[
-            "evidence", "add", "--type", "configuration",
-            "--subject", "API port", "--value", "8080",
-            "--locator", "config/app.yml#server.port",
-            "--memory", id, "--json",
+            "evidence",
+            "add",
+            "--type",
+            "configuration",
+            "--subject",
+            "API port",
+            "--value",
+            "8080",
+            "--locator",
+            "config/app.yml#server.port",
+            "--memory",
+            id,
+            "--json",
         ]);
         assert!(e.ok(), "{}", e.stderr);
     }

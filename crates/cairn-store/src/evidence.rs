@@ -84,9 +84,7 @@ impl LocatorRefusal {
     pub fn code(&self) -> &'static str {
         match self {
             LocatorRefusal::Absolute => cairn_core::wire::codes::ABSOLUTE_LOCATOR,
-            LocatorRefusal::OutsideWorktree => {
-                cairn_core::wire::codes::EVIDENCE_OUTSIDE_WORKTREE
-            }
+            LocatorRefusal::OutsideWorktree => cairn_core::wire::codes::EVIDENCE_OUTSIDE_WORKTREE,
         }
     }
 }
@@ -146,7 +144,10 @@ pub async fn record(
     // Redact first, bound second. Bounding first would cut a credential into a
     // fragment redaction no longer recognizes — and then store the fragment.
     let subject = bound(&cairn_core::redact::redact(e.subject), 128);
-    let observed_value = bound(&cairn_core::redact::redact(e.observed_value), value_max_bytes);
+    let observed_value = bound(
+        &cairn_core::redact::redact(e.observed_value),
+        value_max_bytes,
+    );
     let source_locator = bound(
         &cairn_core::redact::redact(e.source_locator),
         locator_max_bytes,
@@ -231,12 +232,11 @@ pub async fn fact(store: &Store, id: Uuid) -> Result<EvidenceFact> {
 }
 
 pub async fn facts_for_project(store: &Store, project_id: Uuid) -> Result<Vec<EvidenceFact>> {
-    let rows = sqlx::query(
-        "SELECT * FROM evidence_facts WHERE project_id = ?1 ORDER BY collected_at, id",
-    )
-    .bind(project_id.to_string())
-    .fetch_all(store.pool())
-    .await?;
+    let rows =
+        sqlx::query("SELECT * FROM evidence_facts WHERE project_id = ?1 ORDER BY collected_at, id")
+            .bind(project_id.to_string())
+            .fetch_all(store.pool())
+            .await?;
     rows.iter().map(fact_from_row).collect()
 }
 
@@ -590,11 +590,13 @@ pub async fn set_verification(
         verification_authority: authority,
         ..Default::default()
     })?;
-    sqlx::query("UPDATE memories SET verification = ?2, verification_authority = NULL WHERE id = ?1")
-        .bind(memory_id.to_string())
-        .bind(state.as_str())
-        .execute(store.pool())
-        .await?;
+    sqlx::query(
+        "UPDATE memories SET verification = ?2, verification_authority = NULL WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .bind(state.as_str())
+    .execute(store.pool())
+    .await?;
     Ok(())
 }
 
@@ -670,8 +672,13 @@ mod tests {
     const VALUE_MAX: usize = 256;
     const LOCATOR_MAX: usize = 256;
 
-    async fn evidence(f: &Fixture, kind: EvidenceKind, collector: EvidenceCollector,
-                      value: &str, locator: &str) -> EvidenceFact {
+    async fn evidence(
+        f: &Fixture,
+        kind: EvidenceKind,
+        collector: EvidenceCollector,
+        value: &str,
+        locator: &str,
+    ) -> EvidenceFact {
         record(
             &f.store,
             NewEvidence {
@@ -758,7 +765,10 @@ mod tests {
         .expect_err("an absolute locator must be refused")
         .to_string();
         assert!(err.contains("absolute_locator"), "{err}");
-        assert_eq!(f.store_count("SELECT COUNT(*) FROM evidence_facts").await, 0);
+        assert_eq!(
+            f.store_count("SELECT COUNT(*) FROM evidence_facts").await,
+            0
+        );
     }
 
     #[tokio::test]
@@ -814,7 +824,10 @@ mod tests {
         .expect("record");
         let stored = fact.observed_value.expect("value");
         assert!(stored.len() <= VALUE_MAX);
-        assert!(!stored.is_empty(), "a multi-byte value was truncated to nothing");
+        assert!(
+            !stored.is_empty(),
+            "a multi-byte value was truncated to nothing"
+        );
     }
 
     #[tokio::test]
@@ -822,7 +835,14 @@ mod tests {
         // FR-358, FR-505. Identity, kind, timestamps and provenance survive;
         // the value, digest, locator and fingerprint are cleared.
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
         let e = evidence(
             &f,
             EvidenceKind::Configuration,
@@ -831,9 +851,15 @@ mod tests {
             "config/database.yml",
         )
         .await;
-        attach_to_memory(&f.store, m.memory.id, e.id, EvidenceRole::Supports, f.session_a)
-            .await
-            .expect("attach");
+        attach_to_memory(
+            &f.store,
+            m.memory.id,
+            e.id,
+            EvidenceRole::Supports,
+            f.session_a,
+        )
+        .await
+        .expect("attach");
 
         forget(&f.store, e.id).await.expect("forget");
 
@@ -850,7 +876,9 @@ mod tests {
 
         // And the link is still there, reporting a deleted fact rather than
         // disappearing.
-        let linked = facts_for_memory(&f.store, m.memory.id).await.expect("links");
+        let linked = facts_for_memory(&f.store, m.memory.id)
+            .await
+            .expect("links");
         assert_eq!(linked.len(), 1);
         assert!(linked[0].1.deleted);
     }
@@ -898,7 +926,14 @@ mod tests {
     async fn a_run_never_rewrites_an_earlier_one() {
         // FR-364. Only the cached state moves.
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
         let e = evidence(
             &f,
             EvidenceKind::Configuration,
@@ -908,7 +943,11 @@ mod tests {
         )
         .await;
 
-        for result in [VerifyResult::Verified, VerifyResult::Drifted, VerifyResult::Verified] {
+        for result in [
+            VerifyResult::Verified,
+            VerifyResult::Drifted,
+            VerifyResult::Verified,
+        ] {
             record_run(
                 &f.store,
                 NewRun {
@@ -941,7 +980,14 @@ mod tests {
     #[tokio::test]
     async fn a_cairn_collected_check_yields_cairn_authority() {
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
         let e = evidence(
             &f,
             EvidenceKind::Configuration,
@@ -992,7 +1038,9 @@ mod tests {
     #[tokio::test]
     async fn an_attested_check_yields_attested_authority_and_the_deterministic_one_wins() {
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("api.port"), Some("8080"), "Port 8080.").await;
+        let m = f
+            .propose(f.session_a, Some("api.port"), Some("8080"), "Port 8080.")
+            .await;
 
         let attested = evidence(
             &f,
@@ -1002,15 +1050,29 @@ mod tests {
             "runtime/health",
         )
         .await;
-        record_run(&f.store, NewRun {
-            project_id: f.project, memory_id: Some(m.memory.id), criterion_id: None,
-            verifier: VerifierKind::RuntimeState, evidence_id: Some(attested.id),
-            expected_digest: None, observed_digest: None, result: VerifyResult::Verified,
-            detail: None, repo_branch: "main", repo_commit: None,
-            trigger: VerifyTrigger::Attach,
-        }).await.expect("run");
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::RuntimeState,
+                evidence_id: Some(attested.id),
+                expected_digest: None,
+                observed_digest: None,
+                result: VerifyResult::Verified,
+                detail: None,
+                repo_branch: "main",
+                repo_commit: None,
+                trigger: VerifyTrigger::Attach,
+            },
+        )
+        .await
+        .expect("run");
 
-        let (_, authority) = rebuild_verification(&f.store, m.memory.id).await.expect("rebuild");
+        let (_, authority) = rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild");
         assert_eq!(authority, Some(VerificationAuthority::Attested));
 
         // A deterministic check over Cairn-collected evidence now stands too:
@@ -1023,15 +1085,29 @@ mod tests {
             "config/app.yml",
         )
         .await;
-        record_run(&f.store, NewRun {
-            project_id: f.project, memory_id: Some(m.memory.id), criterion_id: None,
-            verifier: VerifierKind::Configuration, evidence_id: Some(collected.id),
-            expected_digest: Some("aaa"), observed_digest: Some("aaa"),
-            result: VerifyResult::Verified, detail: None, repo_branch: "main",
-            repo_commit: None, trigger: VerifyTrigger::OnDemand,
-        }).await.expect("run");
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::Configuration,
+                evidence_id: Some(collected.id),
+                expected_digest: Some("aaa"),
+                observed_digest: Some("aaa"),
+                result: VerifyResult::Verified,
+                detail: None,
+                repo_branch: "main",
+                repo_commit: None,
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .expect("run");
 
-        let (state, authority) = rebuild_verification(&f.store, m.memory.id).await.expect("rebuild");
+        let (state, authority) = rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild");
         assert_eq!(state, VerificationState::Verified);
         assert_eq!(
             authority,
@@ -1044,16 +1120,37 @@ mod tests {
     async fn an_inconclusive_run_establishes_nothing() {
         // FR-366: the memory becomes neither verified nor drifted.
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
-        record_run(&f.store, NewRun {
-            project_id: f.project, memory_id: Some(m.memory.id), criterion_id: None,
-            verifier: VerifierKind::FileDigest, evidence_id: None,
-            expected_digest: None, observed_digest: None, result: VerifyResult::Inconclusive,
-            detail: Some("the file could not be read"), repo_branch: "main",
-            repo_commit: None, trigger: VerifyTrigger::OnDemand,
-        }).await.expect("run");
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::FileDigest,
+                evidence_id: None,
+                expected_digest: None,
+                observed_digest: None,
+                result: VerifyResult::Inconclusive,
+                detail: Some("the file could not be read"),
+                repo_branch: "main",
+                repo_commit: None,
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .expect("run");
 
-        let (state, authority) = rebuild_verification(&f.store, m.memory.id).await.expect("rebuild");
+        let (state, authority) = rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild");
         assert_eq!(state, VerificationState::Unverified);
         assert_eq!(authority, None);
     }
@@ -1061,7 +1158,14 @@ mod tests {
     #[tokio::test]
     async fn a_verified_state_cannot_be_set_without_a_run() {
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
         assert!(
             set_verification(&f.store, m.memory.id, VerificationState::Verified)
                 .await
@@ -1078,7 +1182,14 @@ mod tests {
         // FR-502: what a shared memory may say about evidence is the state, its
         // authority, the instant, a count, and verifier kinds. Nothing else.
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
         let e = evidence(
             &f,
             EvidenceKind::Configuration,
@@ -1087,17 +1198,37 @@ mod tests {
             "config/database.yml",
         )
         .await;
-        attach_to_memory(&f.store, m.memory.id, e.id, EvidenceRole::Supports, f.session_a)
+        attach_to_memory(
+            &f.store,
+            m.memory.id,
+            e.id,
+            EvidenceRole::Supports,
+            f.session_a,
+        )
+        .await
+        .expect("attach");
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::Configuration,
+                evidence_id: Some(e.id),
+                expected_digest: Some("aaa"),
+                observed_digest: Some("aaa"),
+                result: VerifyResult::Verified,
+                detail: None,
+                repo_branch: "main",
+                repo_commit: None,
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .expect("run");
+        rebuild_verification(&f.store, m.memory.id)
             .await
-            .expect("attach");
-        record_run(&f.store, NewRun {
-            project_id: f.project, memory_id: Some(m.memory.id), criterion_id: None,
-            verifier: VerifierKind::Configuration, evidence_id: Some(e.id),
-            expected_digest: Some("aaa"), observed_digest: Some("aaa"),
-            result: VerifyResult::Verified, detail: None, repo_branch: "main",
-            repo_commit: None, trigger: VerifyTrigger::OnDemand,
-        }).await.expect("run");
-        rebuild_verification(&f.store, m.memory.id).await.expect("rebuild");
+            .expect("rebuild");
 
         let s = summary(&f.store, m.memory.id).await.expect("summary");
         assert_eq!(s.state, VerificationState::Verified);
@@ -1117,11 +1248,22 @@ mod tests {
         keys.sort();
         assert_eq!(
             keys,
-            vec!["authority", "basis", "fact_count", "last_verified_at", "state"],
+            vec![
+                "authority",
+                "basis",
+                "fact_count",
+                "last_verified_at",
+                "state"
+            ],
             "the payload shape changed"
         );
         let text = serde_json::to_string(&s).expect("serializes");
-        for forbidden in ["postgresql", "config/database.yml", "observed_value", "source_locator"] {
+        for forbidden in [
+            "postgresql",
+            "config/database.yml",
+            "observed_value",
+            "source_locator",
+        ] {
             assert!(
                 !text.contains(forbidden),
                 "the summary leaked {forbidden}: {text}"
@@ -1134,7 +1276,14 @@ mod tests {
         // A peer learns what kind of check stands behind the state, not that
         // this machine imported it (T104).
         let f = fixture().await;
-        let m = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
         sqlx::query(
             "UPDATE memories SET verification = 'verified', verification_authority = 'remote_attested'
              WHERE id = ?1",

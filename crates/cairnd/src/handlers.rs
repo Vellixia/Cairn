@@ -295,7 +295,18 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         Request::TaskGet { cwd, task_id } => {
             d.resolve(&cwd).await?;
             let t = repo::task(&d.store, task_id).await.map_err(storage_err)?;
-            Ok(json!({ "task": t }))
+            let mut out = json!({ "task": t });
+            // The new read-only fields. `local_revision` is what an agent
+            // passes back as `expected_revision`; `state_digest` is what two
+            // machines compare. They answer different questions and are never
+            // interchangeable (D80).
+            let detail = task_detail(d, task_id).await?;
+            if let (Some(o), Some(m)) = (out.as_object_mut(), detail.as_object()) {
+                for (k, v) in m {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+            Ok(out)
         }
         Request::TaskCreate {
             cwd,
@@ -304,12 +315,16 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             acceptance_criteria,
         } => {
             let r = d.resolve(&cwd).await?;
+            // The seeded criteria are attributed in the change log. Resolving
+            // without creating is deliberate: see `authoring_session`.
+            let session = authoring_session(d, &r, None, None).await?;
             let t = repo::create_task(
                 &d.store,
                 r.project.id,
                 &title,
                 &goal,
                 &acceptance_criteria,
+                session,
                 r.policy,
             )
             .await
@@ -325,6 +340,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             status,
         } => {
             let r = d.resolve(&cwd).await?;
+            let session = authoring_session(d, &r, None, None).await?;
             let t = repo::update_task(
                 &d.store,
                 task_id,
@@ -332,11 +348,183 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 goal.as_deref(),
                 acceptance_criteria.as_deref(),
                 status,
+                session,
                 r.policy,
             )
             .await
             .map_err(storage_err)?;
             Ok(json!({ "task": t }))
+        }
+
+        Request::TaskCriterionAdd {
+            cwd,
+            agent_session_key,
+            session_id,
+            task_id,
+            text,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            let c = cairn_store::criteria::add_criterion(&d.store, task_id, &text, s, r.policy)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "criterion": criterion_json(&c) }))
+        }
+        Request::TaskCriterionSet {
+            cwd,
+            agent_session_key,
+            session_id,
+            criterion_id,
+            state,
+            text,
+            expected_revision,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            if state.is_none() && text.is_none() {
+                return Err(WireError::invalid("pass --state or --text"));
+            }
+            let mut c = None;
+            if let Some(state) = state {
+                c = Some(
+                    cairn_store::criteria::set_criterion_state(
+                        &d.store,
+                        criterion_id,
+                        state,
+                        expected_revision,
+                        s,
+                        r.policy,
+                    )
+                    .await
+                    .map_err(storage_err)?,
+                );
+            }
+            if let Some(text) = text {
+                // A second change in the same call compares against the
+                // revision the first one produced, not the caller's — the
+                // caller's token was already honoured.
+                let expected = c
+                    .as_ref()
+                    .map(|c: &cairn_store::criteria::Criterion| c.revision);
+                c = Some(
+                    cairn_store::criteria::set_criterion_text(
+                        &d.store,
+                        criterion_id,
+                        &text,
+                        expected.or(expected_revision),
+                        s,
+                        r.policy,
+                    )
+                    .await
+                    .map_err(storage_err)?,
+                );
+            }
+            Ok(json!({ "criterion": c.as_ref().map(criterion_json) }))
+        }
+        Request::TaskCriterionVerify {
+            cwd,
+            agent_session_key,
+            session_id,
+            criterion_id,
+            evidence_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            if let Some(evidence_id) = evidence_id {
+                cairn_store::evidence::attach_to_criterion(&d.store, criterion_id, evidence_id, s)
+                    .await
+                    .map_err(storage_err)?;
+            }
+            let verdict = crate::verify::verify_criterion(
+                d,
+                r.project.id,
+                std::path::Path::new(&r.worktree()),
+                criterion_id,
+                s,
+                r.policy,
+            )
+            .await?;
+            let c = cairn_store::criteria::criterion_by_id(&d.store, criterion_id)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "criterion": criterion_json(&c), "verdict": verdict }))
+        }
+        Request::TaskCriterionRemove {
+            cwd,
+            agent_session_key,
+            session_id,
+            criterion_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            cairn_store::criteria::remove_criterion(&d.store, criterion_id, s, r.policy)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "removed": criterion_id }))
+        }
+        Request::TaskBlockerOpen {
+            cwd,
+            agent_session_key,
+            session_id,
+            task_id,
+            description,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            let b =
+                cairn_store::criteria::open_blocker(&d.store, task_id, &description, s, r.policy)
+                    .await
+                    .map_err(storage_err)?;
+            Ok(json!({ "blocker": blocker_json(&b) }))
+        }
+        Request::TaskBlockerClear {
+            cwd,
+            agent_session_key,
+            session_id,
+            blocker_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            let b = cairn_store::criteria::clear_blocker(&d.store, blocker_id, s, r.policy)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "blocker": blocker_json(&b) }))
+        }
+        Request::TaskReadiness { cwd, task_id } => {
+            d.resolve(&cwd).await?;
+            let readiness = cairn_store::criteria::readiness(&d.store, task_id)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({
+                "progress": readiness.progress,
+                "open_blockers": readiness.open_blockers,
+                "completion_readiness": readiness.completion_readiness,
+            }))
+        }
+        Request::TaskHistory {
+            cwd,
+            task_id,
+            limit,
+        } => {
+            d.resolve(&cwd).await?;
+            let changes = cairn_store::criteria::history(&d.store, task_id, limit.unwrap_or(100))
+                .await
+                .map_err(storage_err)?;
+            let changes: Vec<serde_json::Value> = changes
+                .iter()
+                .map(|c| {
+                    json!({
+                        "local_revision": c.local_revision,
+                        "kind": c.kind,
+                        "subject_id": c.subject_id,
+                        "session_id": c.session_id,
+                        "prior_value": c.prior_value,
+                        "new_value": c.new_value,
+                        "blind_write": c.blind_write,
+                    })
+                })
+                .collect();
+            Ok(json!({ "changes": changes }))
         }
 
         Request::MemoryCreate {
@@ -419,8 +607,17 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             session_id,
             memory_id,
             from_memory_id,
-        } => memory_reinforce(d, &cwd, agent_session_key, session_id, memory_id, from_memory_id)
-            .await,
+        } => {
+            memory_reinforce(
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                memory_id,
+                from_memory_id,
+            )
+            .await
+        }
         Request::MemoryReconcile {
             cwd,
             agent_session_key,
@@ -460,8 +657,18 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             role,
         } => {
             evidence_add(
-                d, &cwd, agent_session_key, session_id, kind, collector, subject,
-                observed_value, source_locator, observation_id, memory_id, role,
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                kind,
+                collector,
+                subject,
+                observed_value,
+                source_locator,
+                observation_id,
+                memory_id,
+                role,
             )
             .await
         }
@@ -927,7 +1134,51 @@ async fn context(
     let session = session_for_read(d, &r, session_id, agent_session_key.as_deref()).await?;
 
     let payload = briefing::build(d, &r, session.as_ref(), budget, false).await?;
-    Ok(serde_json::to_value(payload).unwrap_or(json!({})))
+    let mut out = serde_json::to_value(payload).unwrap_or(json!({}));
+
+    // Whether the task advanced since this session bound to it (FR-489, D80).
+    //
+    // Derived by diffing the bound snapshot against the current records — never
+    // read from `task_changes`, which is local and would silently omit a
+    // criterion another machine changed even though the row itself arrived.
+    // Phase 8 places this in the Level 0 tier; it is reported here so a session
+    // is never presented as having worked against the current state.
+    if let Some(divergence) = task_divergence(d, session.as_ref()).await {
+        if let Some(o) = out.as_object_mut() {
+            o.insert("task_divergence".into(), divergence);
+        }
+    }
+    Ok(out)
+}
+
+/// What materially changed on the bound task since the session bound to it.
+///
+/// `None` when there is no bound task, no snapshot (a session that bound before
+/// this feature existed genuinely does not know, and synthesizing one would
+/// produce a false report), or nothing changed.
+async fn task_divergence(d: &Daemon, session: Option<&Session>) -> Option<serde_json::Value> {
+    let session = session?;
+    let task_id = session.task_id?;
+    let snapshot: Option<String> =
+        sqlx::query_scalar("SELECT task_snapshot_at_bind FROM sessions WHERE id = ?1")
+            .bind(session.id.to_string())
+            .fetch_optional(d.store.pool())
+            .await
+            .ok()
+            .flatten();
+    let snapshot = snapshot?;
+
+    let changes = cairn_store::criteria::divergence(&d.store, task_id, &snapshot)
+        .await
+        .ok()?;
+    if changes.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "task_id": task_id,
+        "advanced": true,
+        "changes": changes,
+    }))
 }
 
 /// The session a read-only request applies to.
@@ -1009,8 +1260,6 @@ async fn most_recent_session(d: &Daemon, r: &Resolved) -> Result<Session, WireEr
 // Memory
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments)]
-
 /// The subject identity a caller proposed, carried as one value so the create
 /// path does not grow three more positional arguments.
 ///
@@ -1022,8 +1271,6 @@ pub struct SubjectProposal {
     pub value_key: Option<String>,
     pub importance: Option<Importance>,
 }
-
-/// Inspect a subject and the decisions that produced its answer (FR-307).
 
 // ---------------------------------------------------------------------------
 // Evidence and verification (T057)
@@ -1312,9 +1559,10 @@ async fn memory_subject(
     })?;
 
     let cap = d.config.read().await.reconcile_members_max;
-    let read = cairn_store::knowledge::subject(&d.store, r.project.id, scope, &key, &normalized, cap)
-        .await
-        .map_err(storage_err)?;
+    let read =
+        cairn_store::knowledge::subject(&d.store, r.project.id, scope, &key, &normalized, cap)
+            .await
+            .map_err(storage_err)?;
 
     if read.members.is_empty() {
         return Err(WireError::new(
@@ -1404,9 +1652,7 @@ async fn memory_reinforce(
     // endpoint. The session's own most recent memory is not a substitute — it
     // may be about something else entirely — so the caller supplies one.
     let from = from_memory_id.ok_or_else(|| {
-        WireError::invalid(
-            "reinforcement needs the memory that carries the confirming statement",
-        )
+        WireError::invalid("reinforcement needs the memory that carries the confirming statement")
     })?;
 
     let wrote = cairn_store::knowledge::reinforce(
@@ -1497,6 +1743,7 @@ async fn memory_reconcile(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn memory_create(
     d: &Daemon,
     cwd: &str,
@@ -1556,8 +1803,8 @@ async fn memory_create(
             // corroborating member the writer should look at (FR-312, FR-327,
             // FR-474).
             let mut body = json!({ "memory": out.memory });
-            body["reconciliation"] = serde_json::to_value(&out.reconciliation)
-                .unwrap_or(serde_json::Value::Null);
+            body["reconciliation"] =
+                serde_json::to_value(&out.reconciliation).unwrap_or(serde_json::Value::Null);
             if !out.notes.is_empty() {
                 body["notes"] = json!(out.notes);
             }
@@ -1574,6 +1821,33 @@ async fn memory_create(
 /// got a throwaway session — worsening the ambiguity for everyone else and
 /// stamping the memory with an origin that never did the work. Ambiguity is the
 /// caller's to resolve, exactly as it is for `cairn context`.
+/// Who a task-model change is attributed to, **without creating a session**.
+///
+/// `ensure_session_for_memory` starts a `cairn-cli` session when there is none,
+/// which is right for a memory — a memory must belong to a session's provenance.
+/// It is wrong here: `cairn task new` has never needed a session, and inventing
+/// one leaves a second active session in the worktree that makes the next
+/// agent's `cairn_context` ambiguous.
+///
+/// The nil UUID means "no session", and is what `cairn task history` renders as
+/// an unattributed change. That is honest: a CLI invocation outside any session
+/// genuinely has no author to name, and naming a throwaway one would be worse
+/// than naming none.
+async fn authoring_session(
+    d: &Daemon,
+    r: &Resolved,
+    session_id: Option<Uuid>,
+    key: Option<&str>,
+) -> Result<Uuid, WireError> {
+    match resolve_session(d, r, session_id, key).await {
+        Ok(s) => Ok(s.id),
+        Err(e) if e.code == codes::NO_ACTIVE_SESSION || e.code == codes::AMBIGUOUS_SESSION => {
+            Ok(Uuid::nil())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 async fn ensure_session_for_memory(
     d: &Daemon,
     r: &Resolved,
@@ -1727,6 +2001,103 @@ async fn delete(
         }
     }
     Ok(json!({ "deleted": id, "target": target, "with_memories": with_memories }))
+}
+
+// ---------------------------------------------------------------------------
+// Task work state rendering (`contracts/task-model.md`)
+// ---------------------------------------------------------------------------
+
+/// One criterion, as every surface reports it.
+///
+/// Note what has no key here: a percentage. Progress is counts, derived on
+/// read, and there is nowhere for an agent to write a number of its own
+/// (FR-486).
+fn criterion_json(c: &cairn_store::criteria::Criterion) -> serde_json::Value {
+    json!({
+        "id": c.id,
+        "ordinal": c.ordinal,
+        "label": c.label,
+        "text": c.text,
+        "state": c.state,
+        "verification": c.verification,
+        "revision": c.revision,
+        "deleted": c.deleted,
+    })
+}
+
+fn blocker_json(b: &cairn_store::criteria::Blocker) -> serde_json::Value {
+    json!({
+        "id": b.id,
+        "task_id": b.task_id,
+        "description": b.description,
+        "state": b.state,
+        "opened_by_session": b.opened_by_session,
+        "cleared_by_session": b.cleared_by_session,
+    })
+}
+
+/// The read-only fields `task get` gained.
+///
+/// `local_revision` and `state_digest` sit side by side deliberately: the first
+/// answers "has anything changed since I read this, **here**", the second
+/// answers "do two machines hold the same task state". Conflating them was a
+/// real defect in the first design (D80).
+async fn task_detail(d: &Daemon, task_id: Uuid) -> Result<serde_json::Value, WireError> {
+    let t = repo::task(&d.store, task_id).await.map_err(storage_err)?;
+    let local_revision: i64 = sqlx::query_scalar("SELECT local_revision FROM tasks WHERE id = ?1")
+        .bind(task_id.to_string())
+        .fetch_one(d.store.pool())
+        .await
+        .map_err(|e| storage_err(cairn_store::StoreError::from(e)))?;
+
+    let criteria = cairn_store::criteria::criteria(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+    let blockers = cairn_store::criteria::blockers(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+    let readiness = cairn_store::criteria::readiness(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+    let digest = cairn_store::criteria::state_digest(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+
+    // Evidence counts per criterion, so a reader can see what a verification
+    // rests on without the evidence content crossing any boundary.
+    let mut rendered = Vec::new();
+    for c in criteria.iter().filter(|c| !c.deleted) {
+        let facts = cairn_store::evidence::facts_for_criterion(&d.store, c.id)
+            .await
+            .unwrap_or_default();
+        let mut v = criterion_json(c);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("evidence_count".into(), json!(facts.len()));
+            o.insert(
+                "authority".into(),
+                json!(facts
+                    .iter()
+                    .map(|f| f.collector.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()),
+            );
+        }
+        rendered.push(v);
+    }
+
+    let _ = &t;
+    Ok(json!({
+        "local_revision": local_revision,
+        "state_digest": digest,
+        "criteria": rendered,
+        "blockers": blockers
+            .iter()
+            .filter(|b| !b.deleted)
+            .map(blocker_json)
+            .collect::<Vec<_>>(),
+        "progress": readiness.progress,
+        "open_blockers": readiness.open_blockers,
+        "completion_readiness": readiness.completion_readiness,
+    }))
 }
 
 #[cfg(test)]

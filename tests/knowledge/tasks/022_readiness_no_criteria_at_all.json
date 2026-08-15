@@ -1,0 +1,23 @@
+{
+  "description": "A task with no criteria has nothing unsatisfied and no open blocker. Ready is the honest answer; it still changes no status.",
+  "input": {
+    "extra": {
+      "criteria": [],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 0,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 0,
+        "total": 0
+      },
+      "readiness": "ready",
+      "action_order": null
+    }
+  }
+}

@@ -86,9 +86,8 @@ pub fn derive_task_state_digest(facts: &TaskStateFacts) -> String {
     buf.push_str(facts.status.as_str());
     buf.push(RECORD);
 
-    let mut criteria: Vec<&CriterionFacts> =
-        facts.criteria.iter().filter(|c| !c.deleted).collect();
-    criteria.sort_by(|a, b| (a.ordinal, a.id).cmp(&(b.ordinal, b.id)));
+    let mut criteria: Vec<&CriterionFacts> = facts.criteria.iter().filter(|c| !c.deleted).collect();
+    criteria.sort_by_key(|c| (c.ordinal, c.id));
     for c in criteria {
         buf.push_str(&c.id.to_string());
         buf.push(FIELD);
@@ -216,7 +215,7 @@ pub fn action_order(criteria: &[CriterionFacts]) -> Vec<&CriterionFacts> {
 /// `rebuild_criteria_projection` asserts the equality (I11, SC-324).
 pub fn criteria_projection(criteria: &[CriterionFacts]) -> Vec<String> {
     let mut ordered: Vec<&CriterionFacts> = criteria.iter().filter(|c| !c.deleted).collect();
-    ordered.sort_by(|a, b| (a.ordinal, a.id).cmp(&(b.ordinal, b.id)));
+    ordered.sort_by_key(|c| (c.ordinal, c.id));
     ordered.into_iter().map(|c| c.text.clone()).collect()
 }
 
@@ -345,7 +344,9 @@ mod tests {
         assert_ne!(derive_task_state_digest(&blocker), base);
 
         let mut added = task();
-        added.criteria.push(criterion(3, 3, CriterionState::Pending));
+        added
+            .criteria
+            .push(criterion(3, 3, CriterionState::Pending));
         assert_ne!(derive_task_state_digest(&added), base);
     }
 
@@ -524,8 +525,14 @@ mod tests {
         assert_eq!(criterion_label(3), "AC-3");
         // Removing AC-2 leaves AC-1 and AC-3; AC-3 keeps its name, which is
         // what a handoff or a checkpoint naming it depends on.
-        let remaining = [criterion(1, 1, CriterionState::Pending), criterion(3, 3, CriterionState::Pending)];
-        let labels: Vec<String> = remaining.iter().map(|c| criterion_label(c.ordinal)).collect();
+        let remaining = [
+            criterion(1, 1, CriterionState::Pending),
+            criterion(3, 3, CriterionState::Pending),
+        ];
+        let labels: Vec<String> = remaining
+            .iter()
+            .map(|c| criterion_label(c.ordinal))
+            .collect();
         assert_eq!(labels, vec!["AC-1", "AC-3"]);
     }
 }

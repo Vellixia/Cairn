@@ -1,0 +1,32 @@
+{
+  "description": "The agent says it is done and nothing has checked. Counted separately from verified rather than folded into it - this is the combination the separate bucket exists for (FR-483).",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "unverified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 0,
+        "satisfied_unverified": 1,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 0,
+        "total": 1
+      },
+      "readiness": null,
+      "action_order": null
+    }
+  }
+}

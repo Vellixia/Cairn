@@ -102,8 +102,7 @@ pub async fn relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<Relat
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let placeholders = std::iter::repeat("?")
-        .take(ids.len())
+    let placeholders = std::iter::repeat_n("?", ids.len())
         .collect::<Vec<_>>()
         .join(",");
     let sql = format!(
@@ -234,7 +233,10 @@ pub async fn subject(
 
 /// Every subject identity in a project, for the adoption metric and for
 /// `doctor`.
-pub async fn subject_keys(store: &Store, project_id: Uuid) -> Result<Vec<(MemoryScope, String, String)>> {
+pub async fn subject_keys(
+    store: &Store,
+    project_id: Uuid,
+) -> Result<Vec<(MemoryScope, String, String)>> {
     let rows = sqlx::query(
         "SELECT DISTINCT scope, scope_key, topic_key FROM memories
           WHERE project_id = ?1 AND topic_key IS NOT NULL AND deleted_at IS NULL
@@ -357,7 +359,10 @@ pub async fn rebuild_supersession(store: &Store, project_id: Uuid) -> Result<usi
     // predecessors is fine; a memory with several *successors* is a conflict
     // the derivation reports rather than one this rebuild resolves.
     let mut successor: std::collections::BTreeMap<Uuid, Uuid> = Default::default();
-    for r in relations.iter().filter(|r| r.kind == RelationKind::Supersedes) {
+    for r in relations
+        .iter()
+        .filter(|r| r.kind == RelationKind::Supersedes)
+    {
         successor.entry(r.to).or_insert(r.from);
     }
 
@@ -388,14 +393,12 @@ pub async fn rebuild_supersession(store: &Store, project_id: Uuid) -> Result<usi
 
         if link != expected_link || state != expected_state {
             differed += 1;
-            sqlx::query(
-                "UPDATE memories SET state = ?2, superseded_by_id = ?3 WHERE id = ?1",
-            )
-            .bind(id.to_string())
-            .bind(expected_state)
-            .bind(expected_link)
-            .execute(store.pool())
-            .await?;
+            sqlx::query("UPDATE memories SET state = ?2, superseded_by_id = ?3 WHERE id = ?1")
+                .bind(id.to_string())
+                .bind(expected_state)
+                .bind(expected_link)
+                .execute(store.pool())
+                .await?;
         }
     }
     Ok(differed)
@@ -510,6 +513,7 @@ async fn supersedes_transitively(
 /// A `conflicts_with` is *detected* automatically and *resolved* never, so it
 /// is not accepted here: leaving a conflict requires a supersession, a
 /// narrowing, or a verification result that distinguishes the members.
+#[allow(clippy::too_many_arguments)]
 pub async fn reconcile(
     store: &Store,
     project_id: Uuid,
@@ -520,9 +524,7 @@ pub async fn reconcile(
     basis_evidence_id: Option<Uuid>,
     rationale: Option<&str>,
 ) -> Result<bool> {
-    let refuse = |why: &str| {
-        crate::StoreError::Corrupt(format!("relation_conflict: {why}"))
-    };
+    let refuse = |why: &str| crate::StoreError::Corrupt(format!("relation_conflict: {why}"));
 
     if from == to {
         return Err(refuse("a memory cannot relate to itself"));
@@ -621,16 +623,8 @@ pub async fn reconcile_as(
             "UPDATE memory_relations SET decided_by_session = ?4
               WHERE from_memory_id = ?1 AND to_memory_id = ?2 AND kind = ?3",
         )
-        .bind(
-            normalize_relation_endpoints(kind, from, to)
-                .0
-                .to_string(),
-        )
-        .bind(
-            normalize_relation_endpoints(kind, from, to)
-                .1
-                .to_string(),
-        )
+        .bind(normalize_relation_endpoints(kind, from, to).0.to_string())
+        .bind(normalize_relation_endpoints(kind, from, to).1.to_string())
         .bind(kind.as_str())
         .bind(session.to_string())
         .execute(store.pool())
@@ -704,7 +698,9 @@ pub(crate) mod tests_support {
 
     pub async fn fixture() -> Fixture {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("cairn.sqlite3")).await.unwrap();
+        let store = Store::open(&dir.path().join("cairn.sqlite3"))
+            .await
+            .unwrap();
         let project = Uuid::now_v7();
         let now = rows::now_text();
         sqlx::query(
@@ -751,7 +747,10 @@ pub(crate) mod tests_support {
                     value_key: value,
                     importance: Importance::Normal,
                 },
-                SyncPolicy { linked: false, server_project_id: None },
+                SyncPolicy {
+                    linked: false,
+                    server_project_id: None,
+                },
                 64,
             )
             .await
@@ -779,7 +778,6 @@ pub(crate) mod tests_support {
             .expect("subject")
         }
     }
-
 }
 
 #[cfg(test)]
@@ -797,8 +795,17 @@ mod tests {
         // is what lets a caller tell "decided" from "already decided" without
         // making the second call an error.
         let f = fixture().await;
-        let a = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
-        let b = f.propose(f.session_b, Some("infra.db"), Some("mysql"), "MySQL.").await;
+        let a = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
+        let b = f
+            .propose(f.session_b, Some("infra.db"), Some("mysql"), "MySQL.")
+            .await;
 
         let decision = |from, to| NewRelation {
             project_id: f.project,
@@ -811,9 +818,11 @@ mod tests {
             rationale: Some("a documented scope exception"),
         };
 
-        assert!(record_relation(&f.store, decision(a.memory.id, b.memory.id))
-            .await
-            .unwrap());
+        assert!(
+            record_relation(&f.store, decision(a.memory.id, b.memory.id))
+                .await
+                .unwrap()
+        );
         assert!(
             !record_relation(&f.store, decision(a.memory.id, b.memory.id))
                 .await
@@ -837,8 +846,17 @@ mod tests {
         // D78: what makes two offline machines detecting one conflict converge
         // to one durable record rather than two facing opposite ways.
         let f = fixture().await;
-        let a = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
-        let b = f.propose(f.session_b, Some("infra.db"), Some("mysql"), "MySQL.").await;
+        let a = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
+        let b = f
+            .propose(f.session_b, Some("infra.db"), Some("mysql"), "MySQL.")
+            .await;
 
         // The proposal path already recorded the conflict. Recording it again
         // from the other direction must not add a second row.
@@ -872,20 +890,38 @@ mod tests {
         // US1 scenario A, through the store.
         let f = fixture().await;
         let first = f
-            .propose(f.session_a, Some("infra.db"), Some("postgresql"),
-                     "The production database is PostgreSQL.")
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "The production database is PostgreSQL.",
+            )
             .await;
         let second = f
-            .propose(f.session_b, Some("infra.db"), Some("postgresql"),
-                     "the production   database is postgresql!")
+            .propose(
+                f.session_b,
+                Some("infra.db"),
+                Some("postgresql"),
+                "the production   database is postgresql!",
+            )
             .await;
         let third = f
-            .propose(Uuid::now_v7(), Some("infra.db"), Some("postgresql"),
-                     "THE PRODUCTION DATABASE IS POSTGRESQL")
+            .propose(
+                Uuid::now_v7(),
+                Some("infra.db"),
+                Some("postgresql"),
+                "THE PRODUCTION DATABASE IS POSTGRESQL",
+            )
             .await;
 
-        assert!(matches!(second.reconciliation, ProposalOutcome::Duplicate { .. }));
-        assert!(matches!(third.reconciliation, ProposalOutcome::Duplicate { .. }));
+        assert!(matches!(
+            second.reconciliation,
+            ProposalOutcome::Duplicate { .. }
+        ));
+        assert!(matches!(
+            third.reconciliation,
+            ProposalOutcome::Duplicate { .. }
+        ));
 
         let read = f.subject_of("infra.db").await;
         assert_eq!(read.view.reconciliation.as_str(), "reinforced");
@@ -906,12 +942,20 @@ mod tests {
         // The false-merge path R12 closed, through the store this time.
         let f = fixture().await;
         let first = f
-            .propose(f.session_a, Some("auth.strategy"), Some("jwt"),
-                     "JWT uses HS256 with a shared secret.")
+            .propose(
+                f.session_a,
+                Some("auth.strategy"),
+                Some("jwt"),
+                "JWT uses HS256 with a shared secret.",
+            )
             .await;
         let second = f
-            .propose(f.session_b, Some("auth.strategy"), Some("jwt"),
-                     "JWT uses RS256 with rotating public keys.")
+            .propose(
+                f.session_b,
+                Some("auth.strategy"),
+                Some("jwt"),
+                "JWT uses RS256 with rotating public keys.",
+            )
             .await;
 
         assert_eq!(
@@ -922,7 +966,10 @@ mod tests {
         );
         assert!(second.notes.contains(&"corroborating_member"));
         assert!(
-            relations_for_project(&f.store, f.project).await.unwrap().is_empty(),
+            relations_for_project(&f.store, f.project)
+                .await
+                .unwrap()
+                .is_empty(),
             "corroboration wrote a relation"
         );
 
@@ -934,8 +981,22 @@ mod tests {
     #[tokio::test]
     async fn incompatible_values_conflict_with_no_winner() {
         let f = fixture().await;
-        let a = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
-        let b = f.propose(f.session_b, Some("infra.db"), Some("cockroachdb"), "CockroachDB.").await;
+        let a = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
+        let b = f
+            .propose(
+                f.session_b,
+                Some("infra.db"),
+                Some("cockroachdb"),
+                "CockroachDB.",
+            )
+            .await;
 
         assert_eq!(
             b.reconciliation,
@@ -948,10 +1009,7 @@ mod tests {
         assert_eq!(read.view.reconciliation.as_str(), "conflicted");
         assert_eq!(read.view.answers.len(), 2);
         // Neither is marked superseded to resolve it.
-        assert!(read
-            .members
-            .iter()
-            .all(|m| m.state == MemoryState::Active));
+        assert!(read.members.iter().all(|m| m.state == MemoryState::Active));
     }
 
     #[tokio::test]
@@ -959,7 +1017,12 @@ mod tests {
         // FR-312: the memory is stored regardless, and the reason is reported.
         let f = fixture().await;
         let out = f
-            .propose(f.session_a, Some("데이터베이스"), None, "A claim with an unusable key.")
+            .propose(
+                f.session_a,
+                Some("데이터베이스"),
+                None,
+                "A claim with an unusable key.",
+            )
             .await;
         assert!(out.notes.contains(&"invalid_topic_key"));
         assert_eq!(out.reconciliation, ProposalOutcome::Created);
@@ -977,7 +1040,9 @@ mod tests {
     #[tokio::test]
     async fn a_value_key_without_a_topic_key_is_dropped_not_refused() {
         let f = fixture().await;
-        let out = f.propose(f.session_a, None, Some("postgresql"), "A claim.").await;
+        let out = f
+            .propose(f.session_a, None, Some("postgresql"), "A claim.")
+            .await;
         assert!(out.notes.contains(&"value_without_topic"));
         let stored: Option<String> =
             sqlx::query_scalar("SELECT value_key FROM memories WHERE id = ?1")
@@ -994,8 +1059,13 @@ mod tests {
         let f = fixture().await;
         let key = f.project.to_string();
         for i in 0..4 {
-            f.propose(Uuid::now_v7(), Some("infra.db"), Some(&format!("v{i}")), &format!("Claim {i}."))
-                .await;
+            f.propose(
+                Uuid::now_v7(),
+                Some("infra.db"),
+                Some(&format!("v{i}")),
+                &format!("Claim {i}."),
+            )
+            .await;
         }
         let out = repo::create_memory_reconciled(
             &f.store,
@@ -1012,7 +1082,10 @@ mod tests {
                 value_key: Some("v9"),
                 importance: Importance::Normal,
             },
-            SyncPolicy { linked: false, server_project_id: None },
+            SyncPolicy {
+                linked: false,
+                server_project_id: None,
+            },
             2,
         )
         .await
@@ -1020,29 +1093,50 @@ mod tests {
 
         assert_eq!(out.reconciliation, ProposalOutcome::Deferred);
         assert!(out.notes.contains(&"reconciliation_deferred"));
-        assert!(repo::memory(&f.store, out.memory.id).await.is_ok(), "the write still completed");
+        assert!(
+            repo::memory(&f.store, out.memory.id).await.is_ok(),
+            "the write still completed"
+        );
     }
 
     #[tokio::test]
     async fn a_free_form_proposal_reconciles_against_nothing() {
         let f = fixture().await;
-        f.propose(f.session_a, None, None, "The same sentence.").await;
-        let second = f.propose(f.session_b, None, None, "The same sentence.").await;
+        f.propose(f.session_a, None, None, "The same sentence.")
+            .await;
+        let second = f
+            .propose(f.session_b, None, None, "The same sentence.")
+            .await;
         assert_eq!(second.reconciliation, ProposalOutcome::Created);
-        assert!(relations_for_project(&f.store, f.project).await.unwrap().is_empty());
+        assert!(relations_for_project(&f.store, f.project)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
     async fn the_subject_read_reports_when_it_hits_its_bound() {
         let f = fixture().await;
         for i in 0..5 {
-            f.propose(Uuid::now_v7(), Some("infra.db"), Some(&format!("v{i}")), &format!("Claim {i}."))
-                .await;
+            f.propose(
+                Uuid::now_v7(),
+                Some("infra.db"),
+                Some(&format!("v{i}")),
+                &format!("Claim {i}."),
+            )
+            .await;
         }
         let key = f.project.to_string();
-        let read = subject(&f.store, f.project, MemoryScope::Project, &key, "infra.db", 3)
-            .await
-            .unwrap();
+        let read = subject(
+            &f.store,
+            f.project,
+            MemoryScope::Project,
+            &key,
+            "infra.db",
+            3,
+        )
+        .await
+        .unwrap();
         assert!(read.degraded, "the bound bound and was not reported");
         assert_eq!(read.members.len(), 3);
 
@@ -1057,14 +1151,32 @@ mod tests {
         // confirmation count.
         let f = fixture().await;
         let first = f
-            .propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.")
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
             .await;
         // The same session says it twice, and a second session says it once.
-        f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "postgresql").await;
-        f.propose(f.session_b, Some("infra.db"), Some("postgresql"), "  POSTGRESQL  ").await;
+        f.propose(
+            f.session_a,
+            Some("infra.db"),
+            Some("postgresql"),
+            "postgresql",
+        )
+        .await;
+        f.propose(
+            f.session_b,
+            Some("infra.db"),
+            Some("postgresql"),
+            "  POSTGRESQL  ",
+        )
+        .await;
 
-        let (reinforcements, origins) =
-            rebuild_reinforcement(&f.store, first.memory.id).await.unwrap();
+        let (reinforcements, origins) = rebuild_reinforcement(&f.store, first.memory.id)
+            .await
+            .unwrap();
         assert_eq!(reinforcements, 2, "two duplicating decisions");
         assert_eq!(origins, 2, "but only two distinct origin sessions");
     }
@@ -1074,8 +1186,22 @@ mod tests {
         // I7 and the rebuild equality: the Feature 001 columns are a view of the
         // relation, so discarding them and recomputing must give them back.
         let f = fixture().await;
-        let old = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
-        let new = f.propose(f.session_b, Some("infra.db"), Some("cockroachdb"), "CockroachDB.").await;
+        let old = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
+        let new = f
+            .propose(
+                f.session_b,
+                Some("infra.db"),
+                Some("cockroachdb"),
+                "CockroachDB.",
+            )
+            .await;
 
         record_relation(
             &f.store,
@@ -1122,7 +1248,12 @@ mod explicit_decision_tests {
         // and its accounting distinguishes repetition from independent origin.
         let f = fixture().await;
         let target = f
-            .propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.")
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
             .await;
         let confirming = f
             .propose(f.session_b, Some("api.style"), Some("rest"), "Still true.")
@@ -1186,10 +1317,20 @@ mod explicit_decision_tests {
         // it does not bring it back and it does not decrement the successor.
         let f = fixture().await;
         let old = f
-            .propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.")
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
             .await;
         let new = f
-            .propose(f.session_b, Some("infra.db"), Some("cockroachdb"), "CockroachDB.")
+            .propose(
+                f.session_b,
+                Some("infra.db"),
+                Some("cockroachdb"),
+                "CockroachDB.",
+            )
             .await;
         reconcile(
             &f.store,
@@ -1205,7 +1346,12 @@ mod explicit_decision_tests {
         .unwrap();
 
         let late = f
-            .propose(Uuid::now_v7(), Some("api.style"), Some("rest"), "Late note.")
+            .propose(
+                Uuid::now_v7(),
+                Some("api.style"),
+                Some("rest"),
+                "Late note.",
+            )
             .await;
         reinforce(
             &f.store,
@@ -1235,7 +1381,12 @@ mod explicit_decision_tests {
         // pin all move in one transaction (FR-323, FR-341, FR-456).
         let f = fixture().await;
         let old = f
-            .propose(f.session_a, Some("service.api_port"), Some("8080"), "Port 8080.")
+            .propose(
+                f.session_a,
+                Some("service.api_port"),
+                Some("8080"),
+                "Port 8080.",
+            )
             .await;
         crate::repo::set_memory_intelligence(
             &f.store,
@@ -1252,7 +1403,12 @@ mod explicit_decision_tests {
         .unwrap();
 
         let new = f
-            .propose(f.session_b, Some("service.api_port"), Some("9000"), "Port 9000.")
+            .propose(
+                f.session_b,
+                Some("service.api_port"),
+                Some("9000"),
+                "Port 9000.",
+            )
             .await;
         reconcile(
             &f.store,
@@ -1287,19 +1443,44 @@ mod explicit_decision_tests {
         // `contracts/records-and-rebuild.md` §Fail-closed. The derivation
         // reports a cycle it finds; this is what stops one being created.
         let f = fixture().await;
-        let a = f.propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.").await;
-        let b = f.propose(f.session_b, Some("infra.db"), Some("mysql"), "MySQL.").await;
+        let a = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
+        let b = f
+            .propose(f.session_b, Some("infra.db"), Some("mysql"), "MySQL.")
+            .await;
 
-        reconcile(&f.store, f.project, a.memory.id, b.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .expect("the first supersession lands");
+        reconcile(
+            &f.store,
+            f.project,
+            a.memory.id,
+            b.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .expect("the first supersession lands");
 
-        let err = reconcile(&f.store, f.project, b.memory.id, a.memory.id,
-                            RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .expect_err("the reverse must be refused")
-            .to_string();
+        let err = reconcile(
+            &f.store,
+            f.project,
+            b.memory.id,
+            a.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .expect_err("the reverse must be refused")
+        .to_string();
         assert!(err.contains("relation_conflict"), "{err}");
         assert!(err.contains("already supersedes"), "{err}");
 
@@ -1315,24 +1496,54 @@ mod explicit_decision_tests {
     async fn a_longer_supersession_cycle_is_refused_too() {
         // A → B, B → C, and then C → A would close a three-link cycle.
         let f = fixture().await;
-        let a = f.propose(f.session_a, Some("infra.db"), Some("v1"), "One.").await;
-        let b = f.propose(f.session_b, Some("infra.db"), Some("v2"), "Two.").await;
-        let c = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.").await;
+        let a = f
+            .propose(f.session_a, Some("infra.db"), Some("v1"), "One.")
+            .await;
+        let b = f
+            .propose(f.session_b, Some("infra.db"), Some("v2"), "Two.")
+            .await;
+        let c = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.")
+            .await;
 
-        reconcile(&f.store, f.project, a.memory.id, b.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .unwrap();
-        reconcile(&f.store, f.project, b.memory.id, c.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .unwrap();
+        reconcile(
+            &f.store,
+            f.project,
+            a.memory.id,
+            b.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        reconcile(
+            &f.store,
+            f.project,
+            b.memory.id,
+            c.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
-        let err = reconcile(&f.store, f.project, c.memory.id, a.memory.id,
-                            RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .expect_err("closing the cycle must be refused")
-            .to_string();
+        let err = reconcile(
+            &f.store,
+            f.project,
+            c.memory.id,
+            a.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .expect_err("closing the cycle must be refused")
+        .to_string();
         assert!(err.contains("relation_conflict"), "{err}");
     }
 
@@ -1341,19 +1552,41 @@ mod explicit_decision_tests {
         // Which memory replaced it would otherwise be arbitrary, and
         // `rebuild_supersession` would have to pick one.
         let f = fixture().await;
-        let old = f.propose(f.session_a, Some("infra.db"), Some("v1"), "One.").await;
-        let first = f.propose(f.session_b, Some("infra.db"), Some("v2"), "Two.").await;
-        let second = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.").await;
+        let old = f
+            .propose(f.session_a, Some("infra.db"), Some("v1"), "One.")
+            .await;
+        let first = f
+            .propose(f.session_b, Some("infra.db"), Some("v2"), "Two.")
+            .await;
+        let second = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.")
+            .await;
 
-        reconcile(&f.store, f.project, first.memory.id, old.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .unwrap();
-        let err = reconcile(&f.store, f.project, second.memory.id, old.memory.id,
-                            RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .expect_err("a second successor must be refused")
-            .to_string();
+        reconcile(
+            &f.store,
+            f.project,
+            first.memory.id,
+            old.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let err = reconcile(
+            &f.store,
+            f.project,
+            second.memory.id,
+            old.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .expect_err("a second successor must be refused")
+        .to_string();
         assert!(err.contains("already superseded by another"), "{err}");
     }
 
@@ -1363,20 +1596,37 @@ mod explicit_decision_tests {
         // scope narrowing is one of the three.
         let f = fixture().await;
         let broad = f
-            .propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.")
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
             .await;
         let narrow = f
-            .propose(f.session_b, Some("infra.db"), Some("sqlite"), "SQLite in fixtures.")
+            .propose(
+                f.session_b,
+                Some("infra.db"),
+                Some("sqlite"),
+                "SQLite in fixtures.",
+            )
             .await;
 
         let read = f.subject_of("infra.db").await;
         assert_eq!(read.view.reconciliation.as_str(), "conflicted");
 
-        reconcile(&f.store, f.project, narrow.memory.id, broad.memory.id,
-                  RelationKind::Narrows, RelationBasis::ExplicitAgent, None,
-                  Some("the fixture is a narrower context"))
-            .await
-            .unwrap();
+        reconcile(
+            &f.store,
+            f.project,
+            narrow.memory.id,
+            broad.memory.id,
+            RelationKind::Narrows,
+            RelationBasis::ExplicitAgent,
+            None,
+            Some("the fixture is a narrower context"),
+        )
+        .await
+        .unwrap();
 
         // The narrowing is recorded and reported; the conflict itself is not
         // erased, because both proposals are still active in one scope. What
@@ -1393,50 +1643,96 @@ mod explicit_decision_tests {
     #[tokio::test]
     async fn evidence_basis_requires_the_evidence_it_names() {
         let f = fixture().await;
-        let a = f.propose(f.session_a, Some("infra.db"), Some("v1"), "One.").await;
-        let b = f.propose(f.session_b, Some("infra.db"), Some("v2"), "Two.").await;
-        let err = reconcile(&f.store, f.project, a.memory.id, b.memory.id,
-                            RelationKind::Supersedes, RelationBasis::Evidence, None, None)
-            .await
-            .expect_err("basis = evidence with no evidence")
-            .to_string();
+        let a = f
+            .propose(f.session_a, Some("infra.db"), Some("v1"), "One.")
+            .await;
+        let b = f
+            .propose(f.session_b, Some("infra.db"), Some("v2"), "Two.")
+            .await;
+        let err = reconcile(
+            &f.store,
+            f.project,
+            a.memory.id,
+            b.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::Evidence,
+            None,
+            None,
+        )
+        .await
+        .expect_err("basis = evidence with no evidence")
+        .to_string();
         assert!(err.contains("basis_evidence_id"), "{err}");
     }
 
     #[tokio::test]
     async fn a_memory_cannot_relate_to_itself() {
         let f = fixture().await;
-        let a = f.propose(f.session_a, Some("infra.db"), Some("v1"), "One.").await;
+        let a = f
+            .propose(f.session_a, Some("infra.db"), Some("v1"), "One.")
+            .await;
         for kind in [RelationKind::Supersedes, RelationKind::Narrows] {
-            assert!(reconcile(&f.store, f.project, a.memory.id, a.memory.id, kind,
-                              RelationBasis::ExplicitUser, None, None)
-                .await
-                .is_err());
-        }
-        assert!(reinforce(&f.store, f.project, a.memory.id, a.memory.id,
-                          f.session_a, RelationBasis::ExplicitAgent)
+            assert!(reconcile(
+                &f.store,
+                f.project,
+                a.memory.id,
+                a.memory.id,
+                kind,
+                RelationBasis::ExplicitUser,
+                None,
+                None
+            )
             .await
             .is_err());
+        }
+        assert!(reinforce(
+            &f.store,
+            f.project,
+            a.memory.id,
+            a.memory.id,
+            f.session_a,
+            RelationBasis::ExplicitAgent
+        )
+        .await
+        .is_err());
     }
 
     #[tokio::test]
     async fn an_explicit_supersession_settles_the_subject() {
         let f = fixture().await;
         let old = f
-            .propose(f.session_a, Some("infra.db"), Some("postgresql"), "PostgreSQL.")
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
             .await;
         let new = f
-            .propose(f.session_b, Some("infra.db"), Some("cockroachdb"), "CockroachDB.")
+            .propose(
+                f.session_b,
+                Some("infra.db"),
+                Some("cockroachdb"),
+                "CockroachDB.",
+            )
             .await;
         assert!(matches!(
             new.reconciliation,
             ProposalOutcome::ConflictDetected { .. }
         ));
 
-        reconcile(&f.store, f.project, new.memory.id, old.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .unwrap();
+        reconcile(
+            &f.store,
+            f.project,
+            new.memory.id,
+            old.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
 
         let read = f.subject_of("infra.db").await;
         assert_eq!(read.view.reconciliation.as_str(), "settled");

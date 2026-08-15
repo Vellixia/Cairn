@@ -1,0 +1,32 @@
+{
+  "description": "Asserted done and established by a Cairn-collected check. The only combination that counts as verified.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 1,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 0,
+        "total": 1
+      },
+      "readiness": null,
+      "action_order": null
+    }
+  }
+}

@@ -15,7 +15,8 @@
 use crate::state::Daemon;
 use cairn_core::config::CairnConfig;
 use cairn_core::domain::{
-    EvidenceCollector, VerifierKind, VerifyResult, VerifyTrigger,
+    CriterionVerification, EvidenceCollector, VerificationAuthority, VerificationState,
+    VerifierKind, VerifyResult, VerifyTrigger,
 };
 use cairn_core::verify::{fingerprint, Observed};
 use cairn_store::evidence::{self, EvidenceFact, NewRun};
@@ -95,9 +96,9 @@ pub fn run_verifier(
                 "no captured observation matches at or after the claimed commit",
             ),
         },
-        VerifierKind::RuntimeState => Outcome::inconclusive(
-            "runtime state is attested by an agent, never read by Cairn",
-        ),
+        VerifierKind::RuntimeState => {
+            Outcome::inconclusive("runtime state is attested by an agent, never read by Cairn")
+        }
     }
 }
 
@@ -257,9 +258,7 @@ pub fn read_key(text: &str, key: &str) -> Option<String> {
         }
         let value = value
             .trim()
-            .trim_end_matches(|c: char| {
-                c.is_whitespace() || matches!(c, '}' | ']' | ',' | ';')
-            })
+            .trim_end_matches(|c: char| c.is_whitespace() || matches!(c, '}' | ']' | ',' | ';'))
             .trim()
             .trim_matches(['"', '\''])
             .to_string();
@@ -397,7 +396,10 @@ pub async fn bounded_pass(d: &Daemon, project_id: Uuid, worktree: &Path) -> Pass
         .is_ok()
         {
             report.runs_recorded += 1;
-            if evidence::rebuild_verification(&d.store, memory_id).await.is_ok() {
+            if evidence::rebuild_verification(&d.store, memory_id)
+                .await
+                .is_ok()
+            {
                 report.memories_updated += 1;
             }
         }
@@ -474,18 +476,17 @@ async fn captured_for(d: &Daemon, fact: &EvidenceFact) -> Option<CapturedOutcome
 pub async fn sweep_projects(d: &Daemon) -> PassReport {
     let mut total = PassReport::default();
 
-    let projects: Vec<(String, String)> = match sqlx::query_as(
-        "SELECT id, git_common_dir FROM projects WHERE deleted_at IS NULL",
-    )
-    .fetch_all(d.store.pool())
-    .await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::warn!(error = %e, "verification sweep could not list projects");
-            return total;
-        }
-    };
+    let projects: Vec<(String, String)> =
+        match sqlx::query_as("SELECT id, git_common_dir FROM projects WHERE deleted_at IS NULL")
+            .fetch_all(d.store.pool())
+            .await
+        {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(error = %e, "verification sweep could not list projects");
+                return total;
+            }
+        };
 
     for (id, git_common_dir) in projects {
         let Ok(project_id) = Uuid::parse_str(&id) else {
@@ -527,9 +528,12 @@ mod tests {
     use super::*;
     use cairn_core::domain::EvidenceKind;
 
-    fn fact(kind: EvidenceKind, collector: EvidenceCollector, locator: &str, fp: &str)
-        -> EvidenceFact
-    {
+    fn fact(
+        kind: EvidenceKind,
+        collector: EvidenceCollector,
+        locator: &str,
+        fp: &str,
+    ) -> EvidenceFact {
         EvidenceFact {
             id: Uuid::now_v7(),
             project_id: Uuid::now_v7(),
@@ -552,8 +556,11 @@ mod tests {
         let d = tempfile::tempdir().expect("dir");
         std::fs::write(d.path().join("app.yml"), "server:\n  port: 8080\n").expect("write");
         std::fs::create_dir_all(d.path().join("config")).expect("mkdir");
-        std::fs::write(d.path().join("config/database.yml"), "backend: postgresql\n")
-            .expect("write");
+        std::fs::write(
+            d.path().join("config/database.yml"),
+            "backend: postgresql\n",
+        )
+        .expect("write");
         d
     }
 
@@ -561,7 +568,12 @@ mod tests {
     fn a_file_digest_verifies_and_then_drifts() {
         let d = worktree();
         let digest = cairn_core::digest("server:\n  port: 8080\n");
-        let f = fact(EvidenceKind::File, EvidenceCollector::Cairn, "app.yml", &digest);
+        let f = fact(
+            EvidenceKind::File,
+            EvidenceCollector::Cairn,
+            "app.yml",
+            &digest,
+        );
         let c = CairnConfig::default();
 
         let out = run_verifier(d.path(), &c, &f, VerifierKind::FileDigest, None);
@@ -577,8 +589,19 @@ mod tests {
     fn an_unreadable_target_is_inconclusive_not_drifted() {
         // FR-366: the memory becomes neither verified nor drifted.
         let d = worktree();
-        let f = fact(EvidenceKind::File, EvidenceCollector::Cairn, "missing.yml", "aaa");
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::FileDigest, None);
+        let f = fact(
+            EvidenceKind::File,
+            EvidenceCollector::Cairn,
+            "missing.yml",
+            "aaa",
+        );
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::FileDigest,
+            None,
+        );
         assert_eq!(out.result, VerifyResult::Inconclusive);
         assert!(out.observed.is_none());
     }
@@ -610,8 +633,19 @@ mod tests {
     fn a_locator_escaping_the_worktree_is_refused() {
         let d = worktree();
         for escaping in ["../outside.yml", "/etc/passwd"] {
-            let f = fact(EvidenceKind::File, EvidenceCollector::Cairn, escaping, "aaa");
-            let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::FileDigest, None);
+            let f = fact(
+                EvidenceKind::File,
+                EvidenceCollector::Cairn,
+                escaping,
+                "aaa",
+            );
+            let out = run_verifier(
+                d.path(),
+                &CairnConfig::default(),
+                &f,
+                VerifierKind::FileDigest,
+                None,
+            );
             assert_eq!(out.result, VerifyResult::Inconclusive, "{escaping}");
         }
     }
@@ -626,7 +660,13 @@ mod tests {
             "config/database.yml#backend",
             &digest,
         );
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::Configuration, None);
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::Configuration,
+            None,
+        );
         assert_eq!(out.result, VerifyResult::Verified);
     }
 
@@ -639,7 +679,13 @@ mod tests {
             "config/database.yml#nothing_here",
             "aaa",
         );
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::Configuration, None);
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::Configuration,
+            None,
+        );
         assert_eq!(out.result, VerifyResult::Inconclusive);
     }
 
@@ -656,8 +702,16 @@ mod tests {
             Some("8080"),
             "a dotted key matches on its last segment"
         );
-        assert_eq!(read_key("# port: 8080\n", "port"), None, "a comment is not a value");
-        assert_eq!(read_key("port:\n", "port"), None, "an empty value is not a value");
+        assert_eq!(
+            read_key("# port: 8080\n", "port"),
+            None,
+            "a comment is not a value"
+        );
+        assert_eq!(
+            read_key("port:\n", "port"),
+            None,
+            "an empty value is not a value"
+        );
     }
 
     #[test]
@@ -671,12 +725,16 @@ mod tests {
             "runtime/health",
             "aaa",
         );
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::RuntimeState, None);
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::RuntimeState,
+            None,
+        );
         assert_eq!(out.result, VerifyResult::Inconclusive);
         assert!(
-            out.detail
-                .unwrap_or_default()
-                .contains("must attest again"),
+            out.detail.unwrap_or_default().contains("must attest again"),
             "the reason should say what would resolve it"
         );
     }
@@ -695,7 +753,12 @@ mod tests {
             },
         )
         .expect("fingerprint");
-        let f = fact(EvidenceKind::TestOutcome, EvidenceCollector::Cairn, "cargo test", &fp);
+        let f = fact(
+            EvidenceKind::TestOutcome,
+            EvidenceCollector::Cairn,
+            "cargo test",
+            &fp,
+        );
         let captured = CapturedOutcome {
             outcome: "passed".into(),
             exit_code: 0,
@@ -728,17 +791,39 @@ mod tests {
     #[test]
     fn a_test_outcome_with_no_captured_observation_is_inconclusive() {
         let d = worktree();
-        let f = fact(EvidenceKind::TestOutcome, EvidenceCollector::Cairn, "cargo test", "aaa");
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::TestOutcome, None);
+        let f = fact(
+            EvidenceKind::TestOutcome,
+            EvidenceCollector::Cairn,
+            "cargo test",
+            "aaa",
+        );
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::TestOutcome,
+            None,
+        );
         assert_eq!(out.result, VerifyResult::Inconclusive);
     }
 
     #[test]
     fn a_deleted_fact_verifies_nothing() {
         let d = worktree();
-        let mut f = fact(EvidenceKind::File, EvidenceCollector::Cairn, "app.yml", "aaa");
+        let mut f = fact(
+            EvidenceKind::File,
+            EvidenceCollector::Cairn,
+            "app.yml",
+            "aaa",
+        );
         f.deleted = true;
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::FileDigest, None);
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::FileDigest,
+            None,
+        );
         assert_eq!(out.result, VerifyResult::Inconclusive);
     }
 
@@ -750,7 +835,12 @@ mod tests {
             payload_cap_bytes: 1024,
             ..Default::default()
         };
-        let f = fact(EvidenceKind::File, EvidenceCollector::Cairn, "big.bin", "aaa");
+        let f = fact(
+            EvidenceKind::File,
+            EvidenceCollector::Cairn,
+            "big.bin",
+            "aaa",
+        );
         let out = run_verifier(d.path(), &c, &f, VerifierKind::FileDigest, None);
         assert_eq!(out.result, VerifyResult::Inconclusive);
     }
@@ -762,22 +852,258 @@ mod tests {
             VerifierKind::FileExists,
             &Observed::FileExistence {
                 exists: true,
-                size: std::fs::metadata(d.path().join("app.yml")).expect("meta").len(),
+                size: std::fs::metadata(d.path().join("app.yml"))
+                    .expect("meta")
+                    .len(),
             },
         )
         .expect("fingerprint");
-        let f = fact(EvidenceKind::File, EvidenceCollector::Cairn, "app.yml", &present);
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::FileExists, None);
+        let f = fact(
+            EvidenceKind::File,
+            EvidenceCollector::Cairn,
+            "app.yml",
+            &present,
+        );
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::FileExists,
+            None,
+        );
         assert_eq!(out.result, VerifyResult::Verified);
 
         std::fs::remove_file(d.path().join("app.yml")).expect("remove");
-        let out = run_verifier(d.path(), &CairnConfig::default(), &f, VerifierKind::FileExists, None);
-        assert_eq!(out.result, VerifyResult::Drifted, "a file that has gone has drifted");
+        let out = run_verifier(
+            d.path(),
+            &CairnConfig::default(),
+            &f,
+            VerifierKind::FileExists,
+            None,
+        );
+        assert_eq!(
+            out.result,
+            VerifyResult::Drifted,
+            "a file that has gone has drifted"
+        );
     }
 
     #[test]
     fn an_observation_kind_has_no_verifier_of_its_own() {
-        let f = fact(EvidenceKind::Observation, EvidenceCollector::Cairn, "x", "aaa");
+        let f = fact(
+            EvidenceKind::Observation,
+            EvidenceCollector::Cairn,
+            "x",
+            "aaa",
+        );
         assert_eq!(verifier_for(&f), None);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Criterion verification (`contracts/task-model.md`, FR-484)
+// ---------------------------------------------------------------------------
+
+/// What a criterion's verification attempt established.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CriterionVerdict {
+    pub criterion_id: Uuid,
+    pub verification: CriterionVerification,
+    /// The authority the runs established, named so a reader can see *why* the
+    /// criterion is where it is rather than only that it is there.
+    pub authority: Option<VerificationAuthority>,
+    pub runs_recorded: usize,
+}
+
+/// Verify a criterion from the evidence attached to it.
+///
+/// `verification = 'verified'` requires an authority of `cairn` — a
+/// deterministic check **this machine ran** over `collector = 'cairn'` evidence
+/// (D69, FR-370, FR-484). Everything else is refused by name:
+///
+/// * attested evidence may be attached and is labelled, but leaves the
+///   criterion `unverified` — `attested_not_sufficient`;
+/// * an imported verification is refused whatever its authority —
+///   `imported_not_sufficient`. A criterion's readiness is a claim about *this*
+///   machine's work, and another machine's check is not a substitute (FR-368).
+///
+/// This is not pedantry. Completion readiness is the one derived value with an
+/// incentive attached: if an agent could attest its way to `verified`, readiness
+/// would become self-certification. The path stays open because Cairn collects
+/// test and command outcomes itself through Feature 001's hooks.
+pub async fn verify_criterion(
+    d: &Daemon,
+    project_id: Uuid,
+    worktree: &Path,
+    criterion_id: Uuid,
+    session: Uuid,
+    policy: cairn_store::outbox::SyncPolicy,
+) -> Result<CriterionVerdict, cairn_core::wire::WireError> {
+    use cairn_core::wire::{codes, WireError};
+
+    let config = d.config.read().await.clone();
+    let facts = evidence::facts_for_criterion(&d.store, criterion_id)
+        .await
+        .map_err(crate::state::storage_err)?;
+
+    // Nothing attached is not a failed check; it is the absence of one, and it
+    // leaves the criterion exactly where it was.
+    if facts.is_empty() {
+        return Err(WireError::new(
+            codes::NO_EVIDENCE,
+            "no evidence is attached to that criterion; attach a Cairn-collected \
+             fact before asking for a verification",
+        ));
+    }
+
+    let branch = cairn_git::status(worktree)
+        .map(|s| s.branch)
+        .unwrap_or_else(|_| "unknown".into());
+    let mut runs_recorded = 0usize;
+
+    for fact in &facts {
+        let Some(verifier) = verifier_for(fact) else {
+            continue;
+        };
+        let captured = captured_for(d, fact).await;
+        let outcome = run_verifier(worktree, &config, fact, verifier, captured.as_ref());
+        let commit = fact.repo_commit.clone();
+        if evidence::record_run(
+            &d.store,
+            NewRun {
+                project_id,
+                memory_id: None,
+                criterion_id: Some(criterion_id),
+                verifier,
+                evidence_id: Some(fact.id),
+                expected_digest: fact.fingerprint.as_deref(),
+                observed_digest: outcome.observed.as_deref(),
+                result: outcome.result,
+                detail: outcome.detail.as_deref(),
+                repo_branch: &branch,
+                repo_commit: commit.as_deref(),
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .is_ok()
+        {
+            runs_recorded += 1;
+        }
+    }
+
+    // Derive the state and the authority from the recorded runs, exactly as a
+    // memory's are derived — never from what any caller asserted.
+    let runs = evidence::runs_for_criterion(&d.store, criterion_id)
+        .await
+        .map_err(crate::state::storage_err)?;
+    let mut run_facts = Vec::new();
+    for run in &runs {
+        let collector = match run.evidence_id {
+            Some(id) => evidence::fact(&d.store, id).await.ok().map(|f| f.collector),
+            None => None,
+        };
+        run_facts.push(cairn_core::verify::RunFacts {
+            verifier: run.verifier,
+            result: run.result,
+            evidence_collector: collector,
+        });
+    }
+
+    let established = runs
+        .first()
+        .map(|r| match r.result {
+            VerifyResult::Verified => VerificationState::Verified,
+            VerifyResult::Drifted => VerificationState::Drifted,
+            VerifyResult::Inconclusive => VerificationState::Unverified,
+        })
+        .unwrap_or(VerificationState::Unverified);
+
+    let authority = cairn_core::verify::derive_authority(established, &run_facts);
+
+    // The one gate. `satisfies_deterministic_requirement` is the same question
+    // cross-project promotion asks, asked in the same place, so the two strict
+    // consumers can never drift apart.
+    if !cairn_core::verify::satisfies_deterministic_requirement(authority) {
+        let code = match cairn_core::verify::deterministic_refusal_code(authority) {
+            // `attested_not_sufficient` and `imported_not_sufficient` already
+            // name the reason exactly.
+            Some(c) if c != codes::SOURCE_UNVERIFIED => c,
+            // Nothing established it. When the only evidence offered was
+            // attested, *that* is why — and saying so names the actual reason
+            // rather than the generic one. Cairn never re-collects an agent's
+            // observation, so an attested fact yields an inconclusive run and
+            // would otherwise be reported as if no evidence existed (FR-370).
+            _ if !facts.is_empty()
+                && facts
+                    .iter()
+                    .all(|f| f.collector == EvidenceCollector::Agent) =>
+            {
+                codes::ATTESTED_NOT_SUFFICIENT
+            }
+            Some(c) => c,
+            None => codes::VERIFICATION_INCONCLUSIVE,
+        };
+        // A criterion whose check ran and disagreed is `failed`; one that could
+        // not be established at all stays `unverified`. Both are honest, and
+        // neither is `verified`.
+        let landed = if established == VerificationState::Drifted {
+            CriterionVerification::Failed
+        } else {
+            CriterionVerification::Unverified
+        };
+        set_criterion_verification_if_changed(d, criterion_id, landed, session, policy).await?;
+        return Err(WireError::new(
+            code,
+            format!(
+                "that criterion is not verified: {} evidence cannot establish a \
+                 criterion's readiness",
+                authority.map(|a| a.as_str()).unwrap_or("no")
+            ),
+        ));
+    }
+
+    set_criterion_verification_if_changed(
+        d,
+        criterion_id,
+        CriterionVerification::Verified,
+        session,
+        policy,
+    )
+    .await?;
+    Ok(CriterionVerdict {
+        criterion_id,
+        verification: CriterionVerification::Verified,
+        authority,
+        runs_recorded,
+    })
+}
+
+/// Write the verification axis only when it actually moves.
+///
+/// A no-op write would still advance `local_revision` and log a change, which
+/// would make a background pass look like an edit.
+async fn set_criterion_verification_if_changed(
+    d: &Daemon,
+    criterion_id: Uuid,
+    verification: CriterionVerification,
+    session: Uuid,
+    policy: cairn_store::outbox::SyncPolicy,
+) -> Result<(), cairn_core::wire::WireError> {
+    let current = cairn_store::criteria::criterion_by_id(&d.store, criterion_id)
+        .await
+        .map_err(crate::state::storage_err)?;
+    if current.verification == verification {
+        return Ok(());
+    }
+    cairn_store::criteria::set_criterion_verification(
+        &d.store,
+        criterion_id,
+        verification,
+        session,
+        policy,
+    )
+    .await
+    .map_err(crate::state::storage_err)?;
+    Ok(())
 }

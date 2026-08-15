@@ -1,0 +1,40 @@
+{
+  "description": "Every non-waived criterion is satisfied and verified and no blocker is open. This is the only route to `ready` - and reaching it still changes no task status (FR-487).",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 2,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 0,
+        "total": 2
+      },
+      "readiness": "ready",
+      "action_order": null
+    }
+  }
+}

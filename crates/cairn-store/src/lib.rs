@@ -5,6 +5,7 @@
 //! the network.
 
 pub mod constraints;
+pub mod criteria;
 pub mod diag;
 pub mod evidence;
 pub mod integrations;
@@ -31,6 +32,14 @@ pub enum StoreError {
     NotFound(String),
     #[error("invalid stored value: {0}")]
     Corrupt(String),
+    /// A refusal the caller can act on, carrying its stable wire code.
+    ///
+    /// Distinct from `Corrupt` and from a bare `Sqlx` error: a refusal means the
+    /// store understood the request and declined it for a reason the contract
+    /// names, so the daemon can surface that code verbatim rather than matching
+    /// on message text.
+    #[error("{code}: {message}")]
+    Refused { code: &'static str, message: String },
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

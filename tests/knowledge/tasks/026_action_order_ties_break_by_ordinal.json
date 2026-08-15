@@ -1,0 +1,52 @@
+{
+  "description": "Criteria at the same rank keep their ordinal order, so the sequence is stable across reads and a label never moves for a reason the reader cannot see.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "pending",
+          "verification": "unverified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "pending",
+          "verification": "unverified",
+          "deleted": false
+        },
+        {
+          "ordinal": 3,
+          "label": "AC-3",
+          "text": "criterion 3",
+          "state": "pending",
+          "verification": "unverified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 0,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 3,
+        "waived": 0,
+        "total": 3
+      },
+      "readiness": "not_ready",
+      "action_order": [
+        "AC-1",
+        "AC-2",
+        "AC-3"
+      ]
+    }
+  }
+}

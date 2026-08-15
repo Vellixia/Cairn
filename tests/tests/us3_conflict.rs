@@ -93,15 +93,29 @@ fn a_conflict_leaves_every_member_active_and_attributed() {
         let one = Uuid::now_v7();
         let two = Uuid::now_v7();
         let a = f
-            .propose(one, Some("service.api_port"), Some("8080"), "The API listens on 8080.")
+            .propose(
+                one,
+                Some("service.api_port"),
+                Some("8080"),
+                "The API listens on 8080.",
+            )
             .await;
         let b = f
-            .propose(two, Some("service.api_port"), Some("9000"), "The API listens on 9000.")
+            .propose(
+                two,
+                Some("service.api_port"),
+                Some("9000"),
+                "The API listens on 9000.",
+            )
             .await;
 
         let read = f.subject("service.api_port").await;
         assert_eq!(read.view.reconciliation.as_str(), "conflicted");
-        assert_eq!(read.view.answers.len(), 2, "both competing answers returned");
+        assert_eq!(
+            read.view.answers.len(),
+            2,
+            "both competing answers returned"
+        );
 
         // Neither was marked superseded to make the conflict go away.
         assert_eq!(
@@ -110,12 +124,11 @@ fn a_conflict_leaves_every_member_active_and_attributed() {
             0
         );
         // And each keeps the session that proposed it.
-        let origins: Vec<String> = sqlx::query_scalar(
-            "SELECT origin_session_id FROM memories ORDER BY id",
-        )
-        .fetch_all(f.store.pool())
-        .await
-        .expect("origins");
+        let origins: Vec<String> =
+            sqlx::query_scalar("SELECT origin_session_id FROM memories ORDER BY id")
+                .fetch_all(f.store.pool())
+                .await
+                .expect("origins");
         assert_eq!(origins, vec![one.to_string(), two.to_string()]);
         assert!(read.members.iter().any(|m| m.id == a.memory.id));
         assert!(read.members.iter().any(|m| m.id == b.memory.id));
@@ -133,8 +146,13 @@ fn a_semantic_conflict_and_a_concurrent_write_are_different_things() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
         // Semantic: two disagreeing proposals, recorded as a conflict.
-        f.propose(Uuid::now_v7(), Some("cache.backend"), Some("redis"), "Redis.")
-            .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("cache.backend"),
+            Some("redis"),
+            "Redis.",
+        )
+        .await;
         f.propose(
             Uuid::now_v7(),
             Some("cache.backend"),
@@ -184,10 +202,20 @@ fn a_semantic_conflict_and_a_concurrent_write_are_different_things() {
 fn a_standing_conflict_never_resolves_itself() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
-        f.propose(Uuid::now_v7(), Some("deploy.target"), Some("dokploy"), "Dokploy.")
-            .await;
-        f.propose(Uuid::now_v7(), Some("deploy.target"), Some("flyio"), "Fly.io.")
-            .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("deploy.target"),
+            Some("dokploy"),
+            "Dokploy.",
+        )
+        .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("deploy.target"),
+            Some("flyio"),
+            "Fly.io.",
+        )
+        .await;
 
         for _ in 0..5 {
             let read = f.subject("deploy.target").await;
@@ -236,7 +264,10 @@ fn concurrent_proposals() {
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().expect("thread")).collect()
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect()
     });
 
     let failed: Vec<&cairn_e2e::CliResult> = outcomes.iter().filter(|o| !o.ok()).collect();
@@ -296,20 +327,34 @@ fn concurrent_proposals() {
 fn the_outcome_does_not_depend_on_commit_order() {
     let shape = |reversed: bool| -> (String, usize) {
         let s = cairn_e2e::Sandbox::new();
-        let mut values = vec![("postgresql", "PostgreSQL."), ("mysql", "MySQL."), ("cockroachdb", "CockroachDB.")];
+        let mut values = vec![
+            ("postgresql", "PostgreSQL."),
+            ("mysql", "MySQL."),
+            ("cockroachdb", "CockroachDB."),
+        ];
         if reversed {
             values.reverse();
         }
         for (value, content) in values {
             let out = s.cairn(&[
-                "memory", "add", content, "--scope", "project",
-                "--topic-key", "infrastructure.production_database",
-                "--value-key", value, "--json",
+                "memory",
+                "add",
+                content,
+                "--scope",
+                "project",
+                "--topic-key",
+                "infrastructure.production_database",
+                "--value-key",
+                value,
+                "--json",
             ]);
             assert!(out.ok(), "{}", out.stderr);
         }
         let subject = s.cairn(&[
-            "memory", "subject", "infrastructure.production_database", "--json",
+            "memory",
+            "subject",
+            "infrastructure.production_database",
+            "--json",
         ]);
         let v: serde_json::Value = serde_json::from_str(&subject.stdout).expect("json");
         let view = &v["data"]["subject"];

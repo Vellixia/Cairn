@@ -1,0 +1,32 @@
+{
+  "description": "Nothing asserted and nothing checked. The ordinary starting state.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "pending",
+          "verification": "unverified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 0,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 1,
+        "waived": 0,
+        "total": 1
+      },
+      "readiness": null,
+      "action_order": null
+    }
+  }
+}

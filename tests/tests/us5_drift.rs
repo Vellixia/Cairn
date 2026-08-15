@@ -29,9 +29,7 @@ fn marks_only_verification() {
 
     // A change to the very file the claim rests on.
     s.write_file("config/app.yml", "server:\n  port: 9000\n");
-    let observed = s.cairn(&[
-        "hook", "PostToolUse", "--agent", "claude-code",
-    ]);
+    let observed = s.cairn(&["hook", "PostToolUse", "--agent", "claude-code"]);
     // The hook path is fail-soft and always exits 0; whether it recorded
     // anything depends on the payload, so the marking is driven directly
     // below. What matters here is that nothing it does can fail a session.
@@ -111,9 +109,16 @@ fn the_api_port_walkthrough() {
 
     // 5. The replacement is an explicit act, and only then.
     let replacement = s.cairn(&[
-        "memory", "add", "The API listens on port 9000.",
-        "--scope", "project", "--topic-key", "service.api_port",
-        "--value-key", "9000", "--json",
+        "memory",
+        "add",
+        "The API listens on port 9000.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "service.api_port",
+        "--value-key",
+        "9000",
+        "--json",
     ]);
     assert!(replacement.ok(), "{}", replacement.stderr);
     let new_id = {
@@ -121,8 +126,17 @@ fn the_api_port_walkthrough() {
         v["data"]["memory"]["id"].as_str().expect("id").to_string()
     };
     let superseded = s.cairn(&[
-        "memory", "reconcile", "--from", &new_id, "--to", &memory_id,
-        "--relation", "supersedes", "--basis", "explicit_user", "--json",
+        "memory",
+        "reconcile",
+        "--from",
+        &new_id,
+        "--to",
+        &memory_id,
+        "--relation",
+        "supersedes",
+        "--basis",
+        "explicit_user",
+        "--json",
     ]);
     assert!(superseded.ok(), "{}", superseded.stderr);
 
@@ -176,7 +190,11 @@ fn a_drifted_claim_is_surfaced_rather_than_hidden() {
 
     // Default retrieval still returns it.
     let all = s.cairn(&["memory", "search", "--json"]);
-    assert!(all.stdout.contains("The API listens on port 8080."), "{}", all.stdout);
+    assert!(
+        all.stdout.contains("The API listens on port 8080."),
+        "{}",
+        all.stdout
+    );
 
     // And it is findable *as* drifted, which is what a warning reads.
     let drifted = s.cairn(&["memory", "search", "--verification", "drifted", "--json"]);
@@ -198,9 +216,16 @@ fn a_drifted_claim_is_surfaced_rather_than_hidden() {
 /// A memory, its evidence and one verified check. Returns the memory id.
 fn verified_claim(s: &Sandbox) -> String {
     let m = s.cairn(&[
-        "memory", "add", "The API listens on port 8080.",
-        "--scope", "project", "--topic-key", "service.api_port",
-        "--value-key", "8080", "--json",
+        "memory",
+        "add",
+        "The API listens on port 8080.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "service.api_port",
+        "--value-key",
+        "8080",
+        "--json",
     ]);
     assert!(m.ok(), "{}", m.stderr);
     let memory_id = {
@@ -209,12 +234,18 @@ fn verified_claim(s: &Sandbox) -> String {
     };
 
     let e = s.cairn(&[
-        "evidence", "add",
-        "--type", "configuration",
-        "--subject", "API port",
-        "--value", "8080",
-        "--locator", "config/app.yml#server.port",
-        "--memory", &memory_id,
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "API port",
+        "--value",
+        "8080",
+        "--locator",
+        "config/app.yml#server.port",
+        "--memory",
+        &memory_id,
         "--json",
     ]);
     assert!(e.ok(), "{}", e.stderr);

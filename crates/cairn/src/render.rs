@@ -194,135 +194,6 @@ pub fn status(s: &StatusPayload) -> String {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cairn_core::domain::{HandoffTrigger, RepositoryState};
-    use cairn_core::wire::{
-        Briefing, BriefingMemory, ContextPayload, ProjectSummary, StatusPayload,
-    };
-    use uuid::Uuid;
-
-    fn project_summary() -> ProjectSummary {
-        ProjectSummary {
-            id: Uuid::nil(),
-            name: "demo".to_string(),
-            linked: false,
-            server_project_id: None,
-        }
-    }
-
-    fn clean_repo() -> RepositoryState {
-        RepositoryState {
-            branch: "main".to_string(),
-            commit_sha: Some("abc".to_string()),
-            staged: 0,
-            unstaged: 0,
-            untracked: 0,
-        }
-    }
-
-    #[test]
-    fn briefing_reports_no_prior_history_when_set() {
-        let p = ContextPayload {
-            briefing: Briefing {
-                project: project_summary(),
-                repository: clean_repo(),
-                task: None,
-                previous_handoff: None,
-                decisions: vec![],
-                known_failures: vec![],
-                memory: BriefingMemory::default(),
-                no_prior_history: true,
-            },
-            estimated_tokens: 100,
-            budget: 1000,
-            truncated: false,
-            omitted_sections: vec![],
-            degraded: false,
-        };
-        let text = briefing(&p);
-        assert!(text.contains("no prior history"), "missing no-history line");
-        assert!(text.contains("Project**: demo"));
-    }
-
-    #[test]
-    fn briefing_notes_truncated_omitted_sections() {
-        let p = ContextPayload {
-            briefing: Briefing {
-                project: project_summary(),
-                repository: clean_repo(),
-                task: None,
-                previous_handoff: None,
-                decisions: vec![],
-                known_failures: vec![],
-                memory: BriefingMemory::default(),
-                no_prior_history: false,
-            },
-            estimated_tokens: 999,
-            budget: 1000,
-            truncated: true,
-            omitted_sections: vec!["decisions".to_string()],
-            degraded: false,
-        };
-        let text = briefing(&p);
-        assert!(
-            text.contains("omitted: decisions"),
-            "missing omitted sections"
-        );
-    }
-
-    #[test]
-    fn handoff_shows_trigger_and_next_step() {
-        let h = Handoff {
-            id: Uuid::nil(),
-            session_id: Uuid::nil(),
-            trigger: HandoffTrigger::SessionEnd,
-            goal: "ship".to_string(),
-            progress: "halfway".to_string(),
-            completed_work: vec![],
-            remaining_work: vec![],
-            changed_files: vec![],
-            decisions: vec![],
-            failures: vec![],
-            tests_executed: vec![],
-            repository_state: clean_repo(),
-            next_step: "run tests".to_string(),
-            agent_note: None,
-            evidence: vec![],
-            created_at: chrono::Utc::now(),
-            deleted_at: None,
-        };
-        let text = handoff(&h);
-        assert!(text.contains("session_end"), "missing trigger");
-        assert!(text.contains("Next step**: run tests"));
-        assert!(text.contains("0 supporting observation(s)"));
-    }
-
-    #[test]
-    fn status_local_only_sharing_line() {
-        let s = StatusPayload {
-            project: project_summary(),
-            repository: clean_repo(),
-            worktree_path: "/tmp/wt".to_string(),
-            sessions: vec![],
-            integration_mode: "manual".to_string(),
-            daemon: "running".to_string(),
-            observation_count: 0,
-            memory_count: 0,
-            server_url: None,
-            authenticated: false,
-            version: None,
-            local_schema_version: 0,
-            sessions_awaiting_handoff: 0,
-            handoff_synthesis_failures: vec![],
-        };
-        let text = status(&s);
-        assert!(text.contains("Sharing      local only"));
-        assert!(text.contains("Sessions     none active"));
-    }
-}
-
 /// Render a subject: its answer or answers, and why (FR-307).
 ///
 /// The reconciliation state leads, because it is the thing a reader needs
@@ -531,4 +402,236 @@ pub fn evidence_list(v: &serde_json::Value) -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Task work state (`contracts/task-model.md` §Surfaces)
+// ---------------------------------------------------------------------------
+
+/// One criterion, with both axes named.
+///
+/// `satisfied` and `unverified` are printed side by side rather than folded
+/// into one word, because "the agent says it is done and nothing has checked"
+/// is exactly what a reader needs to be able to see (FR-483).
+pub fn criterion_line(c: &serde_json::Value) -> String {
+    let label = c["label"].as_str().unwrap_or("?");
+    let state = c["state"].as_str().unwrap_or("?");
+    let verification = c["verification"].as_str().unwrap_or("?");
+    let text = c["text"].as_str().unwrap_or("");
+    let revision = c["revision"].as_i64().unwrap_or(0);
+    format!("{label}  {state} · {verification}  (rev {revision})  {text}\n")
+}
+
+/// The derived counts, the open blockers and the readiness.
+pub fn readiness(v: &serde_json::Value) -> String {
+    let p = &v["progress"];
+    let n = |k: &str| p[k].as_u64().unwrap_or(0);
+    let mut out = format!(
+        "PROGRESS  {} verified · {} satisfied but unverified · {} blocked · {} pending",
+        n("verified"),
+        n("satisfied_unverified"),
+        n("blocked"),
+        n("pending")
+    );
+    if n("waived") > 0 {
+        out.push_str(&format!(" · {} waived", n("waived")));
+    }
+    out.push('\n');
+    let open = v["open_blockers"].as_u64().unwrap_or(0);
+    if open > 0 {
+        out.push_str(&format!("BLOCKERS  {open} open\n"));
+    }
+    out.push_str(&format!(
+        "READINESS {}\n",
+        v["completion_readiness"].as_str().unwrap_or("?")
+    ));
+    out
+}
+
+/// `cairn task get`'s work-state block.
+pub fn task_work_state(v: &serde_json::Value) -> String {
+    let mut out = String::new();
+    if let Some(rev) = v["local_revision"].as_i64() {
+        out.push_str(&format!("Revision: {rev} (local)\n"));
+    }
+    if let Some(d) = v["state_digest"].as_str() {
+        out.push_str(&format!("State:    {}\n", &d[..d.len().min(16)]));
+    }
+    if let Some(cs) = v["criteria"].as_array() {
+        if !cs.is_empty() {
+            out.push_str("Acceptance criteria:\n");
+            for c in cs {
+                out.push_str("  ");
+                out.push_str(&criterion_line(c));
+            }
+        }
+    }
+    if let Some(bs) = v["blockers"].as_array() {
+        for b in bs.iter().filter(|b| b["state"] == "open") {
+            out.push_str(&format!(
+                "BLOCKER   {}\n",
+                b["description"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    if v["progress"].is_object() {
+        out.push_str(&readiness(v));
+    }
+    out
+}
+
+/// The change log, including the blind writes.
+pub fn task_history(v: &serde_json::Value) -> String {
+    let Some(changes) = v["changes"].as_array() else {
+        return "No changes recorded.\n".into();
+    };
+    if changes.is_empty() {
+        return "No changes recorded.\n".into();
+    }
+    let mut out = String::new();
+    for c in changes {
+        let blind = if c["blind_write"].as_bool().unwrap_or(false) {
+            "  [blind write — no expected_revision supplied]"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "r{}  {}  {} → {}{}\n",
+            c["local_revision"].as_i64().unwrap_or(0),
+            c["kind"].as_str().unwrap_or("?"),
+            c["prior_value"].as_str().unwrap_or("—"),
+            c["new_value"].as_str().unwrap_or("—"),
+            blind
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cairn_core::domain::{HandoffTrigger, RepositoryState};
+    use cairn_core::wire::{
+        Briefing, BriefingMemory, ContextPayload, ProjectSummary, StatusPayload,
+    };
+    use uuid::Uuid;
+
+    fn project_summary() -> ProjectSummary {
+        ProjectSummary {
+            id: Uuid::nil(),
+            name: "demo".to_string(),
+            linked: false,
+            server_project_id: None,
+        }
+    }
+
+    fn clean_repo() -> RepositoryState {
+        RepositoryState {
+            branch: "main".to_string(),
+            commit_sha: Some("abc".to_string()),
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+        }
+    }
+
+    #[test]
+    fn briefing_reports_no_prior_history_when_set() {
+        let p = ContextPayload {
+            briefing: Briefing {
+                project: project_summary(),
+                repository: clean_repo(),
+                task: None,
+                previous_handoff: None,
+                decisions: vec![],
+                known_failures: vec![],
+                memory: BriefingMemory::default(),
+                no_prior_history: true,
+            },
+            estimated_tokens: 100,
+            budget: 1000,
+            truncated: false,
+            omitted_sections: vec![],
+            degraded: false,
+        };
+        let text = briefing(&p);
+        assert!(text.contains("no prior history"), "missing no-history line");
+        assert!(text.contains("Project**: demo"));
+    }
+
+    #[test]
+    fn briefing_notes_truncated_omitted_sections() {
+        let p = ContextPayload {
+            briefing: Briefing {
+                project: project_summary(),
+                repository: clean_repo(),
+                task: None,
+                previous_handoff: None,
+                decisions: vec![],
+                known_failures: vec![],
+                memory: BriefingMemory::default(),
+                no_prior_history: false,
+            },
+            estimated_tokens: 999,
+            budget: 1000,
+            truncated: true,
+            omitted_sections: vec!["decisions".to_string()],
+            degraded: false,
+        };
+        let text = briefing(&p);
+        assert!(
+            text.contains("omitted: decisions"),
+            "missing omitted sections"
+        );
+    }
+
+    #[test]
+    fn handoff_shows_trigger_and_next_step() {
+        let h = Handoff {
+            id: Uuid::nil(),
+            session_id: Uuid::nil(),
+            trigger: HandoffTrigger::SessionEnd,
+            goal: "ship".to_string(),
+            progress: "halfway".to_string(),
+            completed_work: vec![],
+            remaining_work: vec![],
+            changed_files: vec![],
+            decisions: vec![],
+            failures: vec![],
+            tests_executed: vec![],
+            repository_state: clean_repo(),
+            next_step: "run tests".to_string(),
+            agent_note: None,
+            evidence: vec![],
+            created_at: chrono::Utc::now(),
+            deleted_at: None,
+        };
+        let text = handoff(&h);
+        assert!(text.contains("session_end"), "missing trigger");
+        assert!(text.contains("Next step**: run tests"));
+        assert!(text.contains("0 supporting observation(s)"));
+    }
+
+    #[test]
+    fn status_local_only_sharing_line() {
+        let s = StatusPayload {
+            project: project_summary(),
+            repository: clean_repo(),
+            worktree_path: "/tmp/wt".to_string(),
+            sessions: vec![],
+            integration_mode: "manual".to_string(),
+            daemon: "running".to_string(),
+            observation_count: 0,
+            memory_count: 0,
+            server_url: None,
+            authenticated: false,
+            version: None,
+            local_schema_version: 0,
+            sessions_awaiting_handoff: 0,
+            handoff_synthesis_failures: vec![],
+        };
+        let text = status(&s);
+        assert!(text.contains("Sharing      local only"));
+        assert!(text.contains("Sessions     none active"));
+    }
 }

@@ -87,7 +87,10 @@ impl PathFingerprint {
 /// `unchanged`. "I could not look" and "nothing moved" are different answers,
 /// and conflating them is exactly how a stale checkpoint would read as current
 /// (FR-432, metric 15b).
-pub fn compare_path_fingerprint(recorded: &PathFingerprint, current: &PathFingerprint) -> PathOutcome {
+pub fn compare_path_fingerprint(
+    recorded: &PathFingerprint,
+    current: &PathFingerprint,
+) -> PathOutcome {
     match (recorded.exists, current.exists) {
         (false, false) => PathOutcome::Unchanged,
         (false, true) => PathOutcome::Added,

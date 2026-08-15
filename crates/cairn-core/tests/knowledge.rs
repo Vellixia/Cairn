@@ -267,7 +267,8 @@ fn the_corpus_derives_what_it_says() {
         if case.expect.reconciliation.is_none() && case.expect.answers.is_empty() {
             continue;
         }
-        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(case, m)).collect();
+        let members: Vec<MemoryFacts> =
+            case.input.memories.iter().map(|m| facts(case, m)).collect();
         let view = derive_subject(&members, &relations(case));
 
         if let Some(expected_state) = case.expect.reconciliation.as_deref() {
@@ -318,8 +319,12 @@ fn no_case_that_must_not_merge_ever_merges() {
         "reconciliation/coarse_value_key",
     ] {
         for case in corpus::load_group(&root, group).expect("group loads") {
-            let members: Vec<MemoryFacts> =
-                case.input.memories.iter().map(|m| facts(&case, m)).collect();
+            let members: Vec<MemoryFacts> = case
+                .input
+                .memories
+                .iter()
+                .map(|m| facts(&case, m))
+                .collect();
             let active = members
                 .iter()
                 .filter(|m| m.state == MemoryState::Active)
@@ -340,10 +345,7 @@ fn no_case_that_must_not_merge_ever_merges() {
             }
         }
     }
-    assert!(
-        false_merges.is_empty(),
-        "false merges: {false_merges:#?}"
-    );
+    assert!(false_merges.is_empty(), "false merges: {false_merges:#?}");
 }
 
 /// Metric 2a — no automatic path writes a `reinforces` relation, ever.
@@ -353,7 +355,12 @@ fn no_case_that_must_not_merge_ever_merges() {
 #[test]
 fn no_automatic_reinforcement() {
     for case in derivation_cases() {
-        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(&case, m)).collect();
+        let members: Vec<MemoryFacts> = case
+            .input
+            .memories
+            .iter()
+            .map(|m| facts(&case, m))
+            .collect();
         for (i, proposal) in members.iter().enumerate() {
             let existing: Vec<MemoryFacts> = members
                 .iter()
@@ -387,7 +394,8 @@ fn corroboration() {
     );
 
     for case in &cases {
-        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(case, m)).collect();
+        let members: Vec<MemoryFacts> =
+            case.input.memories.iter().map(|m| facts(case, m)).collect();
         let view = derive_subject(&members, &relations(case));
 
         assert_eq!(
@@ -431,7 +439,8 @@ fn conflicts_are_real_and_the_negatives_are_not() {
     let real = corpus::load_group(&root, "conflict/real").expect("loads");
     assert!(real.len() >= 15, "conflict/real has {} cases", real.len());
     for case in &real {
-        let members: Vec<MemoryFacts> = case.input.memories.iter().map(|m| facts(case, m)).collect();
+        let members: Vec<MemoryFacts> =
+            case.input.memories.iter().map(|m| facts(case, m)).collect();
         let view = derive_subject(&members, &relations(case));
         assert_eq!(
             view.reconciliation.as_str(),
@@ -668,10 +677,8 @@ fn the_drift_corpus_matches_the_state_machine() {
     assert!(cases.len() >= 10, "{} cases", cases.len());
 
     for case in &cases {
-        let from = VerificationState::from_str(
-            case.input.extra["from"].as_str().expect("from"),
-        )
-        .expect("state");
+        let from = VerificationState::from_str(case.input.extra["from"].as_str().expect("from"))
+            .expect("state");
 
         let trigger = match case.input.extra["trigger"].as_str().expect("trigger") {
             "fingerprint_changed" => VerificationTrigger::FingerprintChanged,
@@ -681,12 +688,8 @@ fn the_drift_corpus_matches_the_state_machine() {
             "last_supporting_evidence_deleted" => {
                 VerificationTrigger::LastSupportingEvidenceDeleted
             }
-            "contradicting_evidence_attached" => {
-                VerificationTrigger::ContradictingEvidenceAttached
-            }
-            "contradicting_evidence_removed" => {
-                VerificationTrigger::ContradictingEvidenceRemoved
-            }
+            "contradicting_evidence_attached" => VerificationTrigger::ContradictingEvidenceAttached,
+            "contradicting_evidence_removed" => VerificationTrigger::ContradictingEvidenceRemoved,
             "superseded" => VerificationTrigger::Superseded,
             "marked_stale" => VerificationTrigger::MarkedStale,
             "imported" => VerificationTrigger::Imported,
@@ -703,5 +706,145 @@ fn the_drift_corpus_matches_the_state_machine() {
             "{}",
             case.context("the transition differs from what the case states")
         );
+    }
+}
+
+/// Every task case names a set of criteria and blockers, and the progress,
+/// readiness and action order the contract derives from them.
+///
+/// Three families in one group: the criterion **state × verification** matrix,
+/// derived **readiness**, and the **action order** Level 0 admits. What the
+/// matrix exists to hold down is that the two axes never collapse —
+/// `satisfied` + `unverified` is counted separately from `verified`, because it
+/// is the honest description of "the agent says it is done and nothing has
+/// checked" (FR-482, FR-483, FR-486, FR-487).
+#[test]
+fn the_tasks_corpus_matches_the_derivations() {
+    use cairn_core::tasks::{
+        action_order, completion_readiness, progress, BlockerFacts, CriterionFacts,
+    };
+    use cairn_core::{BlockerState, CompletionReadiness, CriterionState, CriterionVerification};
+
+    let cases = corpus::load_group(&corpus::root(), "tasks").expect("the tasks corpus loads");
+    assert!(cases.len() >= 20, "{} cases", cases.len());
+
+    for case in &cases {
+        let criteria: Vec<CriterionFacts> = case.input.extra["criteria"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{}", case.context("input.extra.criteria must be an array")))
+            .iter()
+            .map(|c| {
+                let ordinal = c["ordinal"].as_i64().expect("ordinal");
+                CriterionFacts {
+                    // Ordinals are distinct within a case, so a tie never falls
+                    // through to the id and the expected order is fully
+                    // determined by the contract rather than by this mapping.
+                    id: Uuid::from_u128(ordinal as u128),
+                    ordinal,
+                    text: c["text"].as_str().expect("text").to_string(),
+                    state: CriterionState::from_str(c["state"].as_str().expect("state"))
+                        .expect("criterion state"),
+                    verification: CriterionVerification::from_str(
+                        c["verification"].as_str().expect("verification"),
+                    )
+                    .expect("criterion verification"),
+                    deleted: c["deleted"].as_bool().unwrap_or(false),
+                }
+            })
+            .collect();
+
+        let blockers: Vec<BlockerFacts> = case.input.extra["blockers"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{}", case.context("input.extra.blockers must be an array")))
+            .iter()
+            .enumerate()
+            .map(|(i, b)| BlockerFacts {
+                id: Uuid::from_u128(i as u128 + 1),
+                state: BlockerState::from_str(b["state"].as_str().expect("state"))
+                    .expect("blocker state"),
+                deleted: b["deleted"].as_bool().unwrap_or(false),
+            })
+            .collect();
+
+        // Progress — counts by state, and never a percentage. Compared field by
+        // field through the serialized form so a new bucket cannot be added
+        // without a case naming it.
+        let expected_progress = &case.expect.extra["progress"];
+        let actual = serde_json::to_value(progress(&criteria)).expect("progress serializes");
+        assert_eq!(
+            &actual,
+            expected_progress,
+            "{}",
+            case.context("derived progress differs from what the case states")
+        );
+
+        // Readiness, where the case states one. `null` means the case is about
+        // progress or ordering and does not constrain readiness.
+        if let Some(want) = case.expect.extra["readiness"].as_str() {
+            let want = CompletionReadiness::from_str(want).expect("readiness");
+            assert_eq!(
+                completion_readiness(&criteria, &blockers),
+                want,
+                "{}",
+                case.context("derived readiness differs from what the case states")
+            );
+        }
+
+        // The action order Level 0 consumes, named by label so the expectation
+        // reads the way the briefing does.
+        if let Some(want) = case.expect.extra["action_order"].as_array() {
+            let want: Vec<String> = want
+                .iter()
+                .map(|v| v.as_str().expect("label").to_string())
+                .collect();
+            let got: Vec<String> = action_order(&criteria)
+                .into_iter()
+                .map(|c| cairn_core::tasks::criterion_label(c.ordinal))
+                .collect();
+            assert_eq!(
+                got,
+                want,
+                "{}",
+                case.context("the action order differs from what the case states")
+            );
+        }
+    }
+}
+
+/// The corpus covers the whole criterion `state × verification` product.
+///
+/// Twelve combinations, all twelve present. An absence assertion written the
+/// only way that holds: enumerate the product from the enums themselves, so a
+/// value added to either axis fails this test until a case names it.
+#[test]
+fn the_tasks_corpus_covers_the_whole_matrix() {
+    use cairn_core::{CriterionState, CriterionVerification};
+
+    let cases = corpus::load_group(&corpus::root(), "tasks").expect("the tasks corpus loads");
+    let seen: std::collections::BTreeSet<(String, String)> = cases
+        .iter()
+        .filter(|c| c.name.contains("matrix_"))
+        .filter_map(|c| {
+            let first = c.input.extra["criteria"].as_array()?.first()?;
+            Some((
+                first["state"].as_str()?.to_string(),
+                first["verification"].as_str()?.to_string(),
+            ))
+        })
+        .collect();
+
+    for state in CriterionState::ALL {
+        for verification in CriterionVerification::ALL {
+            let pair = (
+                state.as_str().to_string(),
+                verification.as_str().to_string(),
+            );
+            assert!(
+                seen.contains(&pair),
+                "the corpus names no case for {} + {}; the matrix must be exhaustive",
+                pair.0,
+                pair.1
+            );
+        }
     }
 }

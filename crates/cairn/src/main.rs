@@ -289,6 +289,98 @@ enum TaskAction {
         id: Uuid,
         status: String,
     },
+    /// Feature 001's whole-list form. Still works: the list is diffed by text,
+    /// so unchanged entries keep their ids and labels.
+    Update {
+        id: Uuid,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        goal: Option<String>,
+        /// Repeatable. The whole list, as Feature 001 has always taken it.
+        #[arg(long = "acceptance-criteria")]
+        acceptance_criteria: Option<Vec<String>>,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Acceptance criteria with stable identity.
+    #[command(subcommand)]
+    Criterion(CriterionAction),
+    /// Blockers — append-only, one `open → cleared` transition.
+    #[command(subcommand)]
+    Blocker(BlockerAction),
+    /// Derived progress and completion readiness. Changes no status.
+    Readiness {
+        id: Uuid,
+    },
+    /// The local change log, including blind-write markers.
+    History {
+        id: Uuid,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CriterionAction {
+    Add {
+        task_id: Uuid,
+        #[arg(long)]
+        text: String,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    Set {
+        criterion_id: Uuid,
+        /// `pending`, `satisfied`, `blocked` or `waived`. Independent of
+        /// verification, which only Cairn writes.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        /// The revision you read. Supplying it is how you are protected from
+        /// losing someone else's assertion; omitting it applies the write and
+        /// records it as a blind write.
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<i64>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Ask Cairn to verify the criterion from its evidence.
+    ///
+    /// There is no flag that asserts a verification: a criterion reaches
+    /// `verified` only on a deterministic check this machine ran over evidence
+    /// Cairn collected itself.
+    Verify {
+        criterion_id: Uuid,
+        #[arg(long)]
+        evidence: Option<Uuid>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Tombstone it. Ordinals are not renumbered, so no label changes meaning.
+    Remove {
+        criterion_id: Uuid,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlockerAction {
+    Open {
+        task_id: Uuid,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// The only transition, and terminal: reopening creates a new blocker.
+    Clear {
+        blocker_id: Uuid,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -328,7 +420,9 @@ enum EvidenceAction {
         #[arg(long)]
         memory: Option<Uuid>,
     },
-    Show { id: Uuid },
+    Show {
+        id: Uuid,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1029,12 +1123,7 @@ async fn task(action: &TaskAction) -> Result<Output, WireError> {
             let t: Task = serde_json::from_value(v["task"].clone())
                 .map_err(|e| WireError::invalid(e.to_string()))?;
             let mut text = format!("{}\n{}\nStatus: {}\n", t.title, t.goal, t.status);
-            if !t.acceptance_criteria.is_empty() {
-                text.push_str("Acceptance criteria:\n");
-                for c in &t.acceptance_criteria {
-                    text.push_str(&format!("- {c}\n"));
-                }
-            }
+            text.push_str(&render::task_work_state(&v));
             Ok(Output::with(v, text))
         }
         TaskAction::New {
@@ -1066,6 +1155,168 @@ async fn task(action: &TaskAction) -> Result<Output, WireError> {
             })
             .await?;
             Ok(Output::with(v, format!("Task is now {status}.\n")))
+        }
+        TaskAction::Update {
+            id,
+            title,
+            goal,
+            acceptance_criteria,
+            status,
+        } => {
+            let status: Option<TaskStatus> = match status {
+                Some(s) => Some(parse_enum("status", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::TaskUpdate {
+                cwd: cwd(),
+                task_id: *id,
+                title: title.clone(),
+                goal: goal.clone(),
+                acceptance_criteria: acceptance_criteria.clone(),
+                status,
+            })
+            .await?;
+            Ok(Output::with(v, "Task updated.\n".to_string()))
+        }
+        TaskAction::Criterion(action) => criterion(action).await,
+        TaskAction::Blocker(action) => blocker(action).await,
+        TaskAction::Readiness { id } => {
+            let v = client::send(&Request::TaskReadiness {
+                cwd: cwd(),
+                task_id: *id,
+            })
+            .await?;
+            let text = render::readiness(&v);
+            Ok(Output::with(v, text))
+        }
+        TaskAction::History { id, limit } => {
+            let v = client::send(&Request::TaskHistory {
+                cwd: cwd(),
+                task_id: *id,
+                limit: *limit,
+            })
+            .await?;
+            let text = render::task_history(&v);
+            Ok(Output::with(v, text))
+        }
+    }
+}
+
+async fn criterion(action: &CriterionAction) -> Result<Output, WireError> {
+    match action {
+        CriterionAction::Add {
+            task_id,
+            text,
+            session,
+        } => {
+            let v = client::send(&Request::TaskCriterionAdd {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                task_id: *task_id,
+                text: text.clone(),
+            })
+            .await?;
+            Ok(Output::with(
+                v.clone(),
+                format!(
+                    "{} added.\n",
+                    v["criterion"]["label"].as_str().unwrap_or("?")
+                ),
+            ))
+        }
+        CriterionAction::Set {
+            criterion_id,
+            state,
+            text,
+            expected_revision,
+            session,
+        } => {
+            let state: Option<CriterionState> = match state {
+                Some(s) => Some(parse_enum("state", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::TaskCriterionSet {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                criterion_id: *criterion_id,
+                state,
+                text: text.clone(),
+                expected_revision: *expected_revision,
+            })
+            .await?;
+            Ok(Output::with(
+                v.clone(),
+                render::criterion_line(&v["criterion"]),
+            ))
+        }
+        CriterionAction::Verify {
+            criterion_id,
+            evidence,
+            session,
+        } => {
+            let v = client::send(&Request::TaskCriterionVerify {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                criterion_id: *criterion_id,
+                evidence_id: *evidence,
+            })
+            .await?;
+            Ok(Output::with(
+                v.clone(),
+                render::criterion_line(&v["criterion"]),
+            ))
+        }
+        CriterionAction::Remove {
+            criterion_id,
+            session,
+        } => {
+            let v = client::send(&Request::TaskCriterionRemove {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                criterion_id: *criterion_id,
+            })
+            .await?;
+            Ok(Output::with(
+                v,
+                "Criterion removed. Ordinals are not renumbered.\n".to_string(),
+            ))
+        }
+    }
+}
+
+async fn blocker(action: &BlockerAction) -> Result<Output, WireError> {
+    match action {
+        BlockerAction::Open {
+            task_id,
+            description,
+            session,
+        } => {
+            let v = client::send(&Request::TaskBlockerOpen {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                task_id: *task_id,
+                description: description.clone(),
+            })
+            .await?;
+            Ok(Output::with(v, "Blocker opened.\n".to_string()))
+        }
+        BlockerAction::Clear {
+            blocker_id,
+            session,
+        } => {
+            let v = client::send(&Request::TaskBlockerClear {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                blocker_id: *blocker_id,
+            })
+            .await?;
+            Ok(Output::with(v, "Blocker cleared.\n".to_string()))
         }
     }
 }
@@ -1199,8 +1450,12 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             .await?;
             let counts = format!(
                 "Reinforced. reinforcements {} · distinct origins {}\n",
-                v.get("reinforcements").and_then(|n| n.as_i64()).unwrap_or(0),
-                v.get("distinct_origins").and_then(|n| n.as_i64()).unwrap_or(1),
+                v.get("reinforcements")
+                    .and_then(|n| n.as_i64())
+                    .unwrap_or(0),
+                v.get("distinct_origins")
+                    .and_then(|n| n.as_i64())
+                    .unwrap_or(1),
             );
             Ok(Output::with(v, counts))
         }
@@ -1246,9 +1501,7 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 Some(t) => Some(
                     chrono::DateTime::parse_from_rfc3339(t)
                         .map_err(|e| {
-                            WireError::invalid(format!(
-                                "--as-of must be an RFC 3339 instant: {e}"
-                            ))
+                            WireError::invalid(format!("--as-of must be an RFC 3339 instant: {e}"))
                         })?
                         .with_timezone(&chrono::Utc),
                 ),

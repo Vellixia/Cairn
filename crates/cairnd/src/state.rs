@@ -238,6 +238,10 @@ pub fn git_err(e: cairn_git::GitError) -> WireError {
 pub fn storage_err(e: cairn_store::StoreError) -> WireError {
     match e {
         cairn_store::StoreError::NotFound(what) => WireError::not_found(what),
+        // A refusal already carries the contract's stable code. Passing it
+        // through is what keeps `revision_conflict` distinguishable from
+        // `storage_unavailable` at the agent surface.
+        cairn_store::StoreError::Refused { code, message } => WireError::new(code, message),
         other => WireError::new(codes::STORAGE_UNAVAILABLE, other.to_string()),
     }
 }

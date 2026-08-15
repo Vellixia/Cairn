@@ -275,7 +275,10 @@ pub fn is_merged_into(worktree: &Path, branch: &str, target: &str) -> Result<boo
         .arg(worktree)
         .args(["merge-base", "--is-ancestor", &branch_tip, &target_tip])
         .output()
-        .map_err(|e| GitError::CommandFailed { command: "rev-parse".into(), stderr: e.to_string() })?;
+        .map_err(|e| GitError::CommandFailed {
+            command: "rev-parse".into(),
+            stderr: e.to_string(),
+        })?;
     match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -291,9 +294,17 @@ pub fn resolve_ref(worktree: &Path, name: &str) -> Result<Option<String>, GitErr
     let out = Command::new("git")
         .arg("-C")
         .arg(worktree)
-        .args(["rev-parse", "--verify", "--quiet", &format!("{name}^{{commit}}")])
+        .args([
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{name}^{{commit}}"),
+        ])
         .output()
-        .map_err(|e| GitError::CommandFailed { command: "rev-parse".into(), stderr: e.to_string() })?;
+        .map_err(|e| GitError::CommandFailed {
+            command: "rev-parse".into(),
+            stderr: e.to_string(),
+        })?;
     if !out.status.success() {
         return Ok(None);
     }
@@ -537,7 +548,17 @@ mod merge_tests {
         assert!(!is_merged_into(p, "feature/x", "main").expect("check"));
 
         git(p, &["checkout", "main"]);
-        git(p, &["merge", "--no-ff", "feature/x", "-m", "merge", "--no-gpg-sign"]);
+        git(
+            p,
+            &[
+                "merge",
+                "--no-ff",
+                "feature/x",
+                "-m",
+                "merge",
+                "--no-gpg-sign",
+            ],
+        );
         assert!(is_merged_into(p, "feature/x", "main").expect("check"));
     }
 
@@ -554,13 +575,18 @@ mod merge_tests {
         let dir = repo();
         assert!(!is_merged_into(dir.path(), "branch/gone", "main").expect("check"));
         assert!(!is_merged_into(dir.path(), "main", "branch/gone").expect("check"));
-        assert_eq!(resolve_ref(dir.path(), "branch/gone").expect("resolve"), None);
+        assert_eq!(
+            resolve_ref(dir.path(), "branch/gone").expect("resolve"),
+            None
+        );
     }
 
     #[test]
     fn a_ref_resolves_to_a_commit_and_a_missing_commit_is_absent() {
         let dir = repo();
-        let head = resolve_ref(dir.path(), "HEAD").expect("resolve").expect("head");
+        let head = resolve_ref(dir.path(), "HEAD")
+            .expect("resolve")
+            .expect("head");
         assert_eq!(head.len(), 40, "{head}");
         assert!(commit_present(dir.path(), &head).expect("present"));
         assert!(

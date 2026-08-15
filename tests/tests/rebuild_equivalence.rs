@@ -16,7 +16,7 @@ use cairn_core::{CriterionState, CriterionVerification, MemoryScope, RelationBas
 use cairn_e2e::alpha4::Alpha4Store;
 use cairn_e2e::store_fixture::Fixture;
 use cairn_store::knowledge::{
-    reconcile, rebuild_reinforcement, rebuild_supersession, reinforce, relations_for_project,
+    rebuild_reinforcement, rebuild_supersession, reconcile, reinforce, relations_for_project,
     subject,
 };
 use uuid::Uuid;
@@ -30,19 +30,41 @@ fn view_json(v: &SubjectView) -> String {
 fn rebuild_supersession_equals_the_stored_state() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
-        let a = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v1"), "One.").await;
-        let b = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.").await;
-        let c = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.").await;
+        let a = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v1"), "One.")
+            .await;
+        let b = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.")
+            .await;
+        let c = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.")
+            .await;
 
         // A chain: c supersedes b supersedes a.
-        reconcile(&f.store, f.project, b.memory.id, a.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .expect("b supersedes a");
-        reconcile(&f.store, f.project, c.memory.id, b.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .expect("c supersedes b");
+        reconcile(
+            &f.store,
+            f.project,
+            b.memory.id,
+            a.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .expect("b supersedes a");
+        reconcile(
+            &f.store,
+            f.project,
+            c.memory.id,
+            b.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .expect("c supersedes b");
 
         let stored: Vec<String> = sqlx::query_scalar(
             "SELECT id || '=' || state || '=' || COALESCE(superseded_by_id, 'none')
@@ -69,12 +91,17 @@ fn rebuild_supersession_equals_the_stored_state() {
         .fetch_all(f.store.pool())
         .await
         .expect("rebuilt");
-        assert_eq!(rebuilt, stored, "the rebuild does not equal what was stored");
+        assert_eq!(
+            rebuilt, stored,
+            "the rebuild does not equal what was stored"
+        );
 
         // Idempotent: a second run finds nothing to correct. A difference is a
         // bug report, not a normal outcome.
         assert_eq!(
-            rebuild_supersession(&f.store, f.project).await.expect("again"),
+            rebuild_supersession(&f.store, f.project)
+                .await
+                .expect("again"),
             0
         );
     });
@@ -86,14 +113,29 @@ fn rebuild_reinforcement_equals_the_stored_counts() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
         let target = f
-            .propose(Uuid::now_v7(), Some("infra.db"), Some("postgresql"), "PostgreSQL.")
+            .propose(
+                Uuid::now_v7(),
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
             .await;
         // One duplicate from a second session, and one explicit reinforcement
         // from a third.
-        f.propose(Uuid::now_v7(), Some("infra.db"), Some("postgresql"), "postgresql")
-            .await;
+        f.propose(
+            Uuid::now_v7(),
+            Some("infra.db"),
+            Some("postgresql"),
+            "postgresql",
+        )
+        .await;
         let confirming = f
-            .propose(Uuid::now_v7(), Some("api.style"), Some("rest"), "Still true.")
+            .propose(
+                Uuid::now_v7(),
+                Some("api.style"),
+                Some("rest"),
+                "Still true.",
+            )
             .await;
         reinforce(
             &f.store,
@@ -113,7 +155,11 @@ fn rebuild_reinforcement_equals_the_stored_counts() {
         .fetch_one(f.store.pool())
         .await
         .expect("stored");
-        assert_eq!(stored, (2, 3), "one duplicate and one reinforcement, three origins");
+        assert_eq!(
+            stored,
+            (2, 3),
+            "one duplicate and one reinforcement, three origins"
+        );
 
         // Discard and rebuild.
         sqlx::query(
@@ -137,14 +183,30 @@ fn relation_order_invariance() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
         // A subject with every relation kind the derivation reads.
-        let a = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v1"), "One.").await;
-        let b = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.").await;
-        let c = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.").await;
-        let d = f.propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.").await;
-        reconcile(&f.store, f.project, d.memory.id, a.memory.id,
-                  RelationKind::Supersedes, RelationBasis::ExplicitUser, None, None)
-            .await
-            .expect("supersede");
+        let a = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v1"), "One.")
+            .await;
+        let b = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.")
+            .await;
+        let c = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.")
+            .await;
+        let d = f
+            .propose(Uuid::now_v7(), Some("infra.db"), Some("v3"), "Three.")
+            .await;
+        reconcile(
+            &f.store,
+            f.project,
+            d.memory.id,
+            a.memory.id,
+            RelationKind::Supersedes,
+            RelationBasis::ExplicitUser,
+            None,
+            None,
+        )
+        .await
+        .expect("supersede");
 
         let read = subject(
             &f.store,
@@ -203,8 +265,10 @@ fn relation_order_invariance() {
 fn deriving_a_subject_is_a_pure_read() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
-        f.propose(Uuid::now_v7(), Some("infra.db"), Some("v1"), "One.").await;
-        f.propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.").await;
+        f.propose(Uuid::now_v7(), Some("infra.db"), Some("v1"), "One.")
+            .await;
+        f.propose(Uuid::now_v7(), Some("infra.db"), Some("v2"), "Two.")
+            .await;
 
         let mut seen: Option<String> = None;
         for _ in 0..5 {
@@ -242,7 +306,9 @@ fn rebuild_matches_migration_except_superseded_at() {
         .build()
         .expect("runtime");
     let differed = rt.block_on(async {
-        let s = cairn_store::Store::open(&store.db_path()).await.expect("open");
+        let s = cairn_store::Store::open(&store.db_path())
+            .await
+            .expect("open");
         let n = rebuild_supersession(&s, project.parse().expect("uuid"))
             .await
             .expect("rebuild");
@@ -274,9 +340,7 @@ fn rebuild_matches_migration_except_superseded_at() {
         "the rebuild rewrote the documented approximation"
     );
     assert!(
-        superseded_at_before
-            .iter()
-            .any(|r| !r.ends_with("=none")),
+        superseded_at_before.iter().any(|r| !r.ends_with("=none")),
         "the fixture has a superseded memory for the approximation to apply to"
     );
 }
@@ -319,4 +383,118 @@ fn the_criteria_projection_equals_its_rebuild() {
             "task {task_id}: the rebuilt projection differs from the stored array"
         );
     }
+}
+
+/// `rebuild_criteria_projection` equals the stored array after live edits
+/// (T070, I11, SC-324).
+///
+/// The test above proves the migration's backfill agrees with the projection.
+/// This one proves the *repository* keeps agreeing after adds, state changes,
+/// removals and the whole-list form — which is the case that can actually rot,
+/// because every one of those writes the array in the same transaction as the
+/// rows and a single missed call would leave the two silently apart.
+#[test]
+fn rebuild_criteria_projection_equals_the_stored_array() {
+    let (rt, f) = Fixture::blocking();
+    rt.block_on(async {
+        const LOCAL: cairn_store::outbox::SyncPolicy = cairn_store::outbox::SyncPolicy {
+            linked: false,
+            server_project_id: None,
+        };
+        let session = Uuid::now_v7();
+        let task = cairn_store::repo::create_task(
+            &f.store,
+            f.project,
+            "Add rate limiting",
+            "Requests over the limit get 429",
+            &["alpha".to_string(), "beta".to_string(), "gamma".to_string()],
+            session,
+            LOCAL,
+        )
+        .await
+        .expect("a task is created");
+
+        let assert_agrees = |label: &'static str| {
+            let store = f.store.clone();
+            let id = task.id;
+            async move {
+                let stored = cairn_store::repo::task(&store, id)
+                    .await
+                    .expect("task")
+                    .acceptance_criteria;
+                let rebuilt = cairn_store::criteria::rebuild_criteria_projection(&store, id)
+                    .await
+                    .expect("rebuild");
+                assert_eq!(
+                    stored, rebuilt,
+                    "{label}: the stored projection differs from its rebuild"
+                );
+            }
+        };
+
+        assert_agrees("at creation").await;
+
+        // An add.
+        cairn_store::criteria::add_criterion(&f.store, task.id, "delta", session, LOCAL)
+            .await
+            .expect("add");
+        assert_agrees("after an add").await;
+
+        // A state change, which must move the counter and leave the text alone.
+        let criteria = cairn_store::criteria::criteria(&f.store, task.id)
+            .await
+            .expect("criteria");
+        let beta = criteria
+            .iter()
+            .find(|c| c.text == "beta")
+            .expect("beta exists");
+        cairn_store::criteria::set_criterion_state(
+            &f.store,
+            beta.id,
+            CriterionState::Satisfied,
+            Some(beta.revision),
+            session,
+            LOCAL,
+        )
+        .await
+        .expect("set state");
+        assert_agrees("after a state change").await;
+
+        // A removal — the tombstone must leave the projection, not the rows.
+        cairn_store::criteria::remove_criterion(&f.store, beta.id, session, LOCAL)
+            .await
+            .expect("remove");
+        assert_agrees("after a removal").await;
+        let stored = cairn_store::repo::task(&f.store, task.id)
+            .await
+            .expect("task")
+            .acceptance_criteria;
+        assert_eq!(stored, vec!["alpha", "gamma", "delta"]);
+
+        // The Feature 001 whole-list form.
+        cairn_store::repo::update_task(
+            &f.store,
+            task.id,
+            None,
+            None,
+            Some(&["alpha".to_string(), "epsilon".to_string()]),
+            None,
+            session,
+            LOCAL,
+        )
+        .await
+        .expect("update");
+        assert_agrees("after the whole-list form").await;
+
+        // The counter advanced with every one of those, and never left.
+        let revision: i64 = sqlx::query_scalar("SELECT local_revision FROM tasks WHERE id = ?1")
+            .bind(task.id.to_string())
+            .fetch_one(f.store.pool())
+            .await
+            .expect("local_revision");
+        assert!(
+            revision > 1,
+            "the local counter must advance with every criterion change"
+        );
+    });
 }

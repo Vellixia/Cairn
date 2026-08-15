@@ -179,7 +179,9 @@ fn new_columns_carry_their_documented_defaults() {
         "0"
     );
     assert_eq!(
-        store.scalar("SELECT CAST(COUNT(*) AS TEXT) FROM memories WHERE verification <> 'unverified'"),
+        store.scalar(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM memories WHERE verification <> 'unverified'"
+        ),
         "0",
         "no evidence exists, so nothing is verified"
     );
@@ -203,7 +205,8 @@ fn new_columns_carry_their_documented_defaults() {
         "0"
     );
     assert_eq!(
-        store.scalar("SELECT CAST(COUNT(*) AS TEXT) FROM memories WHERE distinct_origin_count <> 1"),
+        store
+            .scalar("SELECT CAST(COUNT(*) AS TEXT) FROM memories WHERE distinct_origin_count <> 1"),
         "0",
         "exactly one origin session, which is true"
     );
@@ -323,12 +326,15 @@ fn every_pre_existing_supersession_becomes_exactly_one_relation() {
 fn criteria_become_rows_and_the_projection_is_unchanged() {
     let store = Alpha4Store::build();
 
-    let arrays: Vec<String> = store.query_column(
-        "SELECT acceptance_criteria FROM tasks WHERE deleted_at IS NULL ORDER BY id",
-    );
+    let arrays: Vec<String> = store
+        .query_column("SELECT acceptance_criteria FROM tasks WHERE deleted_at IS NULL ORDER BY id");
     let expected_total: usize = arrays
         .iter()
-        .map(|a| serde_json::from_str::<Vec<String>>(a).unwrap_or_default().len())
+        .map(|a| {
+            serde_json::from_str::<Vec<String>>(a)
+                .unwrap_or_default()
+                .len()
+        })
         .sum();
 
     store.migrate_to_latest();
@@ -489,7 +495,9 @@ fn the_outbox_is_untouched_and_nothing_becomes_blocked() {
         "a cursor part-way through a pull is not disturbed"
     );
     assert_eq!(
-        store.scalar("SELECT CAST(COUNT(*) AS TEXT) FROM sync_meta WHERE server_capability IS NOT NULL"),
+        store.scalar(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM sync_meta WHERE server_capability IS NOT NULL"
+        ),
         "0",
         "no capability has been observed yet"
     );
@@ -518,7 +526,10 @@ fn full_text_search_returns_the_same_rows_in_the_same_order() {
                   WHERE memory_fts MATCH 'database'
                   ORDER BY rank, m.id";
     let before = store.query_column(query);
-    assert!(!before.is_empty(), "the fixture is searchable to begin with");
+    assert!(
+        !before.is_empty(),
+        "the fixture is searchable to begin with"
+    );
 
     let triggers_before =
         store.query_column("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
@@ -539,9 +550,8 @@ fn running_the_migration_twice_changes_nothing() {
     let store = Alpha4Store::build();
     assert_eq!(store.migrate_to_latest(), 5);
 
-    let snapshot: Vec<String> = store.query_column(
-        "SELECT id || '=' || text FROM task_criteria ORDER BY task_id, ordinal",
-    );
+    let snapshot: Vec<String> =
+        store.query_column("SELECT id || '=' || text FROM task_criteria ORDER BY task_id, ordinal");
     let relations = store.row_count("memory_relations");
     let criteria = store.row_count("task_criteria");
 
@@ -613,7 +623,9 @@ fn an_older_build_refuses_a_newer_store_and_a_newer_build_migrates_an_older_one(
 
     // A build that supports only schema 4 refuses it rather than writing
     // against a schema it does not understand.
-    let refused = store.migrate_to(4).expect_err("a schema-4 build must refuse");
+    let refused = store
+        .migrate_to(4)
+        .expect_err("a schema-4 build must refuse");
     assert!(
         refused.contains("newer than this build supports"),
         "the refusal does not name the version guard: {refused}"

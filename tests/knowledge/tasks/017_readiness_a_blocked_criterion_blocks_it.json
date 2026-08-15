@@ -1,0 +1,40 @@
+{
+  "description": "A blocked criterion is not satisfied, so the task is not ready.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "blocked",
+          "verification": "unverified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 1,
+        "satisfied_unverified": 0,
+        "blocked": 1,
+        "pending": 0,
+        "waived": 0,
+        "total": 2
+      },
+      "readiness": "not_ready",
+      "action_order": null
+    }
+  }
+}

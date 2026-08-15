@@ -160,12 +160,19 @@ pub async fn unlink_project(store: &Store, id: Uuid) -> Result<Project> {
 // Tasks
 // ---------------------------------------------------------------------------
 
+/// Create a task, with a criterion row for each acceptance criterion.
+///
+/// `session` attributes the seeded criteria in the change log. Seeding happens
+/// in this transaction rather than afterwards because a task whose projection
+/// held criteria that no row backed would lose them the first time anything
+/// rewrote the projection (FR-481, FR-492).
 pub async fn create_task(
     store: &Store,
     project_id: Uuid,
     title: &str,
     goal: &str,
     criteria: &[String],
+    session: Uuid,
     policy: SyncPolicy,
 ) -> Result<Task> {
     let id = new_id();
@@ -184,6 +191,8 @@ pub async fn create_task(
     .bind(&now)
     .execute(&mut *tx)
     .await?;
+
+    crate::criteria::seed_criteria_tx(&mut tx, id, criteria, session).await?;
 
     let created = Task {
         id,
@@ -249,7 +258,14 @@ pub async fn list_tasks(
 }
 
 /// Update whichever fields were supplied. Status transitions are unrestricted
-/// and simply recorded (FR-037); there is no revision history (FR-039).
+/// and simply recorded (FR-037).
+///
+/// Feature 003 moved the body to [`crate::criteria::update_task`], which does
+/// the same job plus the criteria diff, the local counter and the change log —
+/// all in one transaction. This stays as the name Feature 001's callers use.
+/// There is deliberately no second write path: a task edit that bypassed the
+/// counter would leave `expected_revision` unsound.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_task(
     store: &Store,
     id: Uuid,
@@ -257,40 +273,10 @@ pub async fn update_task(
     goal: Option<&str>,
     criteria: Option<&[String]>,
     status: Option<TaskStatus>,
+    session: Uuid,
     policy: SyncPolicy,
 ) -> Result<Task> {
-    let current = task(store, id).await?;
-    sqlx::query(
-        "UPDATE tasks SET title = ?1, goal = ?2, acceptance_criteria = ?3, status = ?4,
-                          updated_at = ?5
-         WHERE id = ?6",
-    )
-    .bind(title.unwrap_or(&current.title))
-    .bind(goal.unwrap_or(&current.goal))
-    .bind(
-        serde_json::to_string(criteria.unwrap_or(&current.acceptance_criteria))
-            .unwrap_or_else(|_| "[]".into()),
-    )
-    .bind(status.unwrap_or(current.status).as_str())
-    .bind(rows::now_text())
-    .bind(id.to_string())
-    .execute(store.pool())
-    .await?;
-
-    let updated = task(store, id).await?;
-    let mut tx = tx::begin(store, "update_task").await?;
-    outbox::enqueue(
-        &mut *tx,
-        policy,
-        updated.project_id,
-        OutboxEntityType::Task,
-        id,
-        OutboxOperation::Upsert,
-        &outbox::task_payload(&updated),
-    )
-    .await?;
-    tx::commit(tx, "update_task").await?;
-    Ok(updated)
+    crate::criteria::update_task(store, id, title, goal, criteria, status, session, policy).await
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +337,19 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
     .execute(&mut *tx)
     .await?;
     tx::commit(tx, "start_session").await?;
+
+    // A session that starts already bound to a task records the state it bound
+    // at, exactly as `bind_task` does — otherwise a session started with
+    // `--task` could never be told the task advanced under it (FR-489).
+    if let Some(task_id) = input.task_id {
+        if let Ok(snapshot) = crate::criteria::bind_snapshot(store, task_id).await {
+            sqlx::query("UPDATE sessions SET task_snapshot_at_bind = ?2 WHERE id = ?1")
+                .bind(id.to_string())
+                .bind(snapshot)
+                .execute(store.pool())
+                .await?;
+        }
+    }
 
     let created = session(store, id).await?;
     enqueue_session(store, input.policy, &created).await?;
@@ -486,13 +485,24 @@ pub async fn turn_checkpoint(store: &Store, id: Uuid) -> Result<Session> {
     session(store, id).await
 }
 
+/// Bind a session to a task, recording the task state it bound at.
+///
+/// `task_snapshot_at_bind` is what makes a divergence report possible without
+/// synchronizing the local change log: on refresh the snapshot is diffed
+/// against the current records, so a criterion another machine changed shows up
+/// as readily as one this machine changed (FR-489, D80).
 pub async fn bind_task(store: &Store, id: Uuid, task_id: Uuid) -> Result<Session> {
-    sqlx::query("UPDATE sessions SET task_id = ?1, last_event_at = ?2 WHERE id = ?3")
-        .bind(task_id.to_string())
-        .bind(rows::now_text())
-        .bind(id.to_string())
-        .execute(store.pool())
-        .await?;
+    let snapshot = crate::criteria::bind_snapshot(store, task_id).await?;
+    sqlx::query(
+        "UPDATE sessions SET task_id = ?1, task_snapshot_at_bind = ?4, last_event_at = ?2
+         WHERE id = ?3",
+    )
+    .bind(task_id.to_string())
+    .bind(rows::now_text())
+    .bind(id.to_string())
+    .bind(snapshot)
+    .execute(store.pool())
+    .await?;
     session(store, id).await
 }
 
@@ -685,6 +695,7 @@ pub struct NewMemory<'a> {
 
 impl<'a> NewMemory<'a> {
     /// A proposal with no subject identity — Feature 001's shape.
+    #[allow(clippy::too_many_arguments)]
     pub fn free_form(
         project_id: Uuid,
         kind: MemoryType,
@@ -726,9 +737,11 @@ pub struct CreateOutcome {
 }
 
 pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) -> Result<Memory> {
-    Ok(create_memory_reconciled(store, m, policy, DEFAULT_RECONCILE_MEMBERS_MAX)
-        .await?
-        .memory)
+    Ok(
+        create_memory_reconciled(store, m, policy, DEFAULT_RECONCILE_MEMBERS_MAX)
+            .await?
+            .memory,
+    )
 }
 
 /// The per-write bound, when the caller has no configuration to hand.
@@ -1740,7 +1753,9 @@ mod intelligence_constraint_tests {
 
     async fn store_with_memory() -> (tempfile::TempDir, Store, Uuid) {
         let dir = tempfile::tempdir().unwrap();
-        let store = Store::open(&dir.path().join("cairn.sqlite3")).await.unwrap();
+        let store = Store::open(&dir.path().join("cairn.sqlite3"))
+            .await
+            .unwrap();
 
         let project = Uuid::now_v7();
         let now = chrono::Utc::now().to_rfc3339();

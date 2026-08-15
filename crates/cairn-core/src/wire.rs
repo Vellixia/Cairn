@@ -645,6 +645,86 @@ pub enum Request {
         status: Option<TaskStatus>,
     },
 
+    // -----------------------------------------------------------------------
+    // Feature 003 task work state (`contracts/task-model.md`).
+    //
+    // Note what is absent from every one of these: any field in which a caller
+    // could store a completion percentage, and any sprint, epic, point,
+    // assignee, estimate, board or inter-task dependency (FR-486, FR-491).
+    // -----------------------------------------------------------------------
+    TaskCriterionAdd {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        task_id: Uuid,
+        text: String,
+    },
+    TaskCriterionSet {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        criterion_id: Uuid,
+        #[serde(default)]
+        state: Option<CriterionState>,
+        #[serde(default)]
+        text: Option<String>,
+        /// What the caller read. Supplying it is how a caller is protected;
+        /// omitting it applies the write and records `blind_write` (FR-490).
+        #[serde(default)]
+        expected_revision: Option<i64>,
+    },
+    /// Ask Cairn to verify a criterion from its evidence. There is no field in
+    /// which a caller can *assert* a verification — that is the whole point.
+    TaskCriterionVerify {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        criterion_id: Uuid,
+        #[serde(default)]
+        evidence_id: Option<Uuid>,
+    },
+    TaskCriterionRemove {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        criterion_id: Uuid,
+    },
+    TaskBlockerOpen {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        task_id: Uuid,
+        description: String,
+    },
+    TaskBlockerClear {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        blocker_id: Uuid,
+    },
+    TaskReadiness {
+        cwd: String,
+        task_id: Uuid,
+    },
+    TaskHistory {
+        cwd: String,
+        task_id: Uuid,
+        #[serde(default)]
+        limit: Option<i64>,
+    },
+
     MemoryCreate {
         cwd: String,
         #[serde(default)]
@@ -1029,7 +1109,6 @@ pub struct Temporal {
     pub applicability: Applicability,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchPayload {
     pub results: Vec<MemoryResult>,
@@ -1281,7 +1360,9 @@ mod feature_003_code_tests {
         // FR-445: a briefing is truncated to fit, never rejected for size. A
         // code for the rejection would invite one.
         assert!(!INTELLIGENCE_CODES.contains(&"budget_exceeded"));
-        assert!(!INTELLIGENCE_CODES.iter().any(|c| c.contains("budget_exceeded")));
+        assert!(!INTELLIGENCE_CODES
+            .iter()
+            .any(|c| c.contains("budget_exceeded")));
     }
 
     #[test]
@@ -1298,7 +1379,10 @@ mod feature_003_code_tests {
         assert_eq!(PROMOTION_REFUSALS[7], PROJECT_IDENTIFYING);
         assert_eq!(PROMOTION_REFUSALS[9], DUPLICATE_PATTERN);
         for code in PROMOTION_REFUSALS {
-            assert!(INTELLIGENCE_CODES.contains(code), "{code} is not in the set");
+            assert!(
+                INTELLIGENCE_CODES.contains(code),
+                "{code} is not in the set"
+            );
         }
     }
 

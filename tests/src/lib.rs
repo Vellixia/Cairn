@@ -1508,11 +1508,15 @@ pub mod alpha4 {
         )).await;
 
         // One reference to a live observation and one to a tombstoned one.
-        exec(pool, &format!(
-            "INSERT INTO memory_evidence (memory_id, observation_id, content_digest)
+        exec(
+            pool,
+            &format!(
+                "INSERT INTO memory_evidence (memory_id, observation_id, content_digest)
              VALUES ('{MEM_ACTIVE_A}', '{OBS_LIVE}', 'digest-live'),
                     ('{MEM_CHAIN_1}', '{OBS_DELETED}', 'digest-deleted')"
-        )).await;
+            ),
+        )
+        .await;
 
         exec(pool, &format!(
             "INSERT INTO handoffs (id, session_id, trigger, goal, progress, completed_work, remaining_work, changed_files,
@@ -1608,11 +1612,9 @@ pub mod baseline {
     /// the regression these baselines exist to catch.
     pub fn normalize(value: &Value) -> Value {
         match value {
-            Value::Object(map) => Value::Object(
-                map.iter()
-                    .map(|(k, v)| (k.clone(), normalize(v)))
-                    .collect(),
-            ),
+            Value::Object(map) => {
+                Value::Object(map.iter().map(|(k, v)| (k.clone(), normalize(v))).collect())
+            }
             Value::Array(items) => Value::Array(items.iter().map(normalize).collect()),
             Value::String(s) => Value::String(normalize_string(s)),
             other => other.clone(),
@@ -1683,13 +1685,10 @@ pub mod baseline {
 
     fn is_uuid(s: &str) -> bool {
         s.len() == 36
-            && s.as_bytes()
-                .iter()
-                .enumerate()
-                .all(|(i, b)| match i {
-                    8 | 13 | 18 | 23 => *b == b'-',
-                    _ => b.is_ascii_hexdigit(),
-                })
+            && s.as_bytes().iter().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => *b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
     }
 
     fn is_rfc3339(s: &str) -> bool {
@@ -1717,9 +1716,7 @@ pub mod baseline {
     /// `.tmpAb3xY9`. Its *length* is fixed, so the token estimate it
     /// contributes to stays comparable while the name itself does not.
     fn is_sandbox_name(s: &str) -> bool {
-        s.len() == 10
-            && s.starts_with(".tmp")
-            && s[4..].bytes().all(|b| b.is_ascii_alphanumeric())
+        s.len() == 10 && s.starts_with(".tmp") && s[4..].bytes().all(|b| b.is_ascii_alphanumeric())
     }
 
     #[cfg(test)]

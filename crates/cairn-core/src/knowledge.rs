@@ -876,7 +876,7 @@ fn distinct_content_answers(
         let (evidence, verification, id) = answer.representative_key();
         ranked.push((evidence, verification, id, accounting));
     }
-    ranked.sort_by(|a, b| (a.0, a.1, a.2).cmp(&(b.0, b.1, b.2)));
+    ranked.sort_by_key(|r| (r.0, r.1, r.2));
 
     let answers = ranked.iter().map(|(_, _, id, _)| *id).collect();
     let accounting = ranked.into_iter().map(|(_, _, _, acc)| acc).collect();
@@ -943,7 +943,10 @@ mod tests {
 
     #[test]
     fn topic_key_bounds_are_enforced() {
-        assert_eq!(normalize_topic_key("a.b.c.d.e.f").as_deref(), Some("a.b.c.d.e.f"));
+        assert_eq!(
+            normalize_topic_key("a.b.c.d.e.f").as_deref(),
+            Some("a.b.c.d.e.f")
+        );
         assert_eq!(normalize_topic_key("a.b.c.d.e.f.g"), None);
         assert_eq!(normalize_topic_key(""), None);
         assert_eq!(normalize_topic_key("..."), None);
@@ -951,7 +954,10 @@ mod tests {
 
         let long = "a".repeat(TOPIC_KEY_MAX_CHARS);
         assert_eq!(normalize_topic_key(&long).as_deref(), Some(long.as_str()));
-        assert_eq!(normalize_topic_key(&"a".repeat(TOPIC_KEY_MAX_CHARS + 1)), None);
+        assert_eq!(
+            normalize_topic_key(&"a".repeat(TOPIC_KEY_MAX_CHARS + 1)),
+            None
+        );
     }
 
     #[test]
@@ -960,7 +966,10 @@ mod tests {
             normalize_topic_key("  service - - api  port  ").as_deref(),
             Some("service_api_port")
         );
-        assert_eq!(normalize_topic_key("_leading.trailing_").as_deref(), Some("leading.trailing"));
+        assert_eq!(
+            normalize_topic_key("_leading.trailing_").as_deref(),
+            Some("leading.trailing")
+        );
     }
 
     #[test]
@@ -982,7 +991,10 @@ mod tests {
             normalize_value_key(&"v".repeat(VALUE_KEY_MAX_CHARS)).as_deref(),
             Some("v".repeat(VALUE_KEY_MAX_CHARS).as_str())
         );
-        assert_eq!(normalize_value_key(&"v".repeat(VALUE_KEY_MAX_CHARS + 1)), None);
+        assert_eq!(
+            normalize_value_key(&"v".repeat(VALUE_KEY_MAX_CHARS + 1)),
+            None
+        );
     }
 
     #[test]
@@ -992,7 +1004,12 @@ mod tests {
             "the production database is postgresql",
             "  The   production database  is PostgreSQL!  ",
             "THE PRODUCTION DATABASE IS POSTGRESQL???",
-            "The production\tproduction".replace("production\tproduction", "production database is PostgreSQL;").as_str(),
+            "The production\tproduction"
+                .replace(
+                    "production\tproduction",
+                    "production database is PostgreSQL;",
+                )
+                .as_str(),
         ] {
             assert_eq!(
                 content_norm_digest(equivalent),
@@ -1015,7 +1032,10 @@ mod tests {
         let composed = "the caf\u{e9} service is deployed";
         let decomposed = "the cafe\u{301} service is deployed";
         assert_ne!(composed, decomposed, "the inputs really do differ in bytes");
-        assert_eq!(content_norm_digest(composed), content_norm_digest(decomposed));
+        assert_eq!(
+            content_norm_digest(composed),
+            content_norm_digest(decomposed)
+        );
     }
 
     #[test]
@@ -1099,8 +1119,13 @@ mod tests {
 
     #[test]
     fn a_lone_active_member_is_settled() {
-        let m = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
-        let v = derive_subject(&[m.clone()], &[]);
+        let m = keyed(
+            1,
+            "infra.db",
+            "postgresql",
+            "The production database is PostgreSQL.",
+        );
+        let v = derive_subject(std::slice::from_ref(&m), &[]);
         assert_eq!(v.reconciliation, Reconciliation::Settled);
         assert_eq!(v.answers, vec![m.id]);
         assert_eq!(v.accounting[0].distinct_origins, 1);
@@ -1120,13 +1145,31 @@ mod tests {
     #[test]
     fn identical_content_reinforces_into_one_answer() {
         // Three sessions recording the same thing (US1 scenario A).
-        let a = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
-        let b = keyed(2, "infra.db", "postgresql", "the production   database is postgresql!");
-        let c = keyed(3, "infra.db", "postgresql", "THE PRODUCTION DATABASE IS POSTGRESQL");
+        let a = keyed(
+            1,
+            "infra.db",
+            "postgresql",
+            "The production database is PostgreSQL.",
+        );
+        let b = keyed(
+            2,
+            "infra.db",
+            "postgresql",
+            "the production   database is postgresql!",
+        );
+        let c = keyed(
+            3,
+            "infra.db",
+            "postgresql",
+            "THE PRODUCTION DATABASE IS POSTGRESQL",
+        );
         let v = derive_subject(&[a.clone(), b.clone(), c.clone()], &[]);
         assert_eq!(v.reconciliation, Reconciliation::Reinforced);
         assert_eq!(v.answers.len(), 1);
-        assert_eq!(v.accounting[0].distinct_origins, 3, "three distinct origins");
+        assert_eq!(
+            v.accounting[0].distinct_origins, 3,
+            "three distinct origins"
+        );
         assert_eq!(v.accounting[0].duplicates.len(), 2);
     }
 
@@ -1135,8 +1178,18 @@ mod tests {
         // The false-merge path R12 closed. Both statements are honest and
         // materially different; merging would suppress one and report a
         // reinforcement that never happened (FR-327, D77).
-        let hs = keyed(1, "auth.strategy", "jwt", "JWT uses HS256 with a shared secret.");
-        let rs = keyed(2, "auth.strategy", "jwt", "JWT uses RS256 with rotating public keys.");
+        let hs = keyed(
+            1,
+            "auth.strategy",
+            "jwt",
+            "JWT uses HS256 with a shared secret.",
+        );
+        let rs = keyed(
+            2,
+            "auth.strategy",
+            "jwt",
+            "JWT uses RS256 with rotating public keys.",
+        );
         let v = derive_subject(&[hs.clone(), rs.clone()], &[]);
         assert_eq!(v.reconciliation, Reconciliation::Corroborated);
         assert_eq!(v.answers.len(), 2, "every statement is retained");
@@ -1152,12 +1205,31 @@ mod tests {
         // Two members say the same thing, a third differs. The subject is still
         // Corroborated — the value is agreed, the statements are several — and
         // the identical pair becomes one answer.
-        let a = keyed(1, "auth.strategy", "jwt", "JWT uses HS256 with a shared secret.");
-        let b = keyed(2, "auth.strategy", "jwt", "jwt uses hs256 with a shared secret");
-        let c = keyed(3, "auth.strategy", "jwt", "JWT uses RS256 with rotating public keys.");
+        let a = keyed(
+            1,
+            "auth.strategy",
+            "jwt",
+            "JWT uses HS256 with a shared secret.",
+        );
+        let b = keyed(
+            2,
+            "auth.strategy",
+            "jwt",
+            "jwt uses hs256 with a shared secret",
+        );
+        let c = keyed(
+            3,
+            "auth.strategy",
+            "jwt",
+            "JWT uses RS256 with rotating public keys.",
+        );
         let v = derive_subject(&[a.clone(), b.clone(), c.clone()], &[]);
         assert_eq!(v.reconciliation, Reconciliation::Corroborated);
-        assert_eq!(v.answers.len(), 2, "distinct *content*, not distinct member");
+        assert_eq!(
+            v.answers.len(),
+            2,
+            "distinct *content*, not distinct member"
+        );
         let collapsed = v
             .accounting
             .iter()
@@ -1168,8 +1240,18 @@ mod tests {
 
     #[test]
     fn differing_value_keys_in_one_scope_conflict_with_no_winner() {
-        let pg = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
-        let cr = keyed(2, "infra.db", "cockroachdb", "The production database is CockroachDB.");
+        let pg = keyed(
+            1,
+            "infra.db",
+            "postgresql",
+            "The production database is PostgreSQL.",
+        );
+        let cr = keyed(
+            2,
+            "infra.db",
+            "cockroachdb",
+            "The production database is CockroachDB.",
+        );
         let v = derive_subject(&[pg.clone(), cr.clone()], &[]);
         assert_eq!(v.reconciliation, Reconciliation::Conflicted);
         assert_eq!(v.answers, vec![pg.id, cr.id], "sorted by id, both returned");
@@ -1199,8 +1281,18 @@ mod tests {
         let a = keyed(1, "infra.db", "postgresql", "PostgreSQL.");
         let b = keyed(2, "infra.db", "cockroachdb", "CockroachDB.");
         let relations = [
-            Relation::new(RelationKind::Supersedes, a.id, b.id, RelationBasis::ExplicitAgent),
-            Relation::new(RelationKind::Supersedes, b.id, a.id, RelationBasis::ExplicitAgent),
+            Relation::new(
+                RelationKind::Supersedes,
+                a.id,
+                b.id,
+                RelationBasis::ExplicitAgent,
+            ),
+            Relation::new(
+                RelationKind::Supersedes,
+                b.id,
+                a.id,
+                RelationBasis::ExplicitAgent,
+            ),
         ];
         let v = derive_subject(&[a.clone(), b.clone()], &relations);
         assert_eq!(v.reconciliation, Reconciliation::Conflicted);
@@ -1209,7 +1301,12 @@ mod tests {
 
     #[test]
     fn a_recorded_narrowing_is_reported_as_a_scope_exception() {
-        let broad = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
+        let broad = keyed(
+            1,
+            "infra.db",
+            "postgresql",
+            "The production database is PostgreSQL.",
+        );
         let narrow_id = id(2);
         let r = Relation::new(
             RelationKind::Narrows,
@@ -1217,7 +1314,7 @@ mod tests {
             broad.id,
             RelationBasis::ExplicitAgent,
         );
-        let v = derive_subject(&[broad.clone()], &[r]);
+        let v = derive_subject(std::slice::from_ref(&broad), &[r]);
         assert_eq!(v.reconciliation, Reconciliation::Settled);
         assert_eq!(v.narrowed_by, vec![narrow_id]);
     }
@@ -1271,8 +1368,18 @@ mod tests {
         let b = keyed(2, "infra.db", "mysql", "MySQL.");
         let c = keyed(3, "infra.db", "cockroachdb", "CockroachDB.");
         let relations = vec![
-            Relation::new(RelationKind::Supersedes, c.id, b.id, RelationBasis::ExplicitUser),
-            Relation::new(RelationKind::Supersedes, b.id, a.id, RelationBasis::ExplicitUser),
+            Relation::new(
+                RelationKind::Supersedes,
+                c.id,
+                b.id,
+                RelationBasis::ExplicitUser,
+            ),
+            Relation::new(
+                RelationKind::Supersedes,
+                b.id,
+                a.id,
+                RelationBasis::ExplicitUser,
+            ),
         ];
         let forward = derive_subject(&[a.clone(), b.clone(), c.clone()], &relations);
         let reversed: Vec<Relation> = relations.iter().rev().copied().collect();
@@ -1340,9 +1447,20 @@ mod proposal_tests {
 
     #[test]
     fn identical_content_is_the_one_automatic_merge() {
-        let existing = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
-        let proposal = keyed(2, "infra.db", "postgresql", "the production   database is postgresql!");
-        let (outcome, relations) = classify_proposal(&proposal, &[existing.clone()], MAX);
+        let existing = keyed(
+            1,
+            "infra.db",
+            "postgresql",
+            "The production database is PostgreSQL.",
+        );
+        let proposal = keyed(
+            2,
+            "infra.db",
+            "postgresql",
+            "the production   database is postgresql!",
+        );
+        let (outcome, relations) =
+            classify_proposal(&proposal, std::slice::from_ref(&existing), MAX);
         assert_eq!(outcome, ProposalOutcome::Duplicate { of: existing.id });
         assert_eq!(relations.len(), 1);
         assert_eq!(relations[0].kind, RelationKind::Duplicates);
@@ -1355,9 +1473,20 @@ mod proposal_tests {
         // Metric 2a: zero unrequested `reinforces` relations, ever. And metric
         // 2b: the writer is told which member it matched, so the party that can
         // read both statements can decide.
-        let existing = keyed(1, "auth.strategy", "jwt", "JWT uses HS256 with a shared secret.");
-        let proposal = keyed(2, "auth.strategy", "jwt", "JWT uses RS256 with rotating public keys.");
-        let (outcome, relations) = classify_proposal(&proposal, &[existing.clone()], MAX);
+        let existing = keyed(
+            1,
+            "auth.strategy",
+            "jwt",
+            "JWT uses HS256 with a shared secret.",
+        );
+        let proposal = keyed(
+            2,
+            "auth.strategy",
+            "jwt",
+            "JWT uses RS256 with rotating public keys.",
+        );
+        let (outcome, relations) =
+            classify_proposal(&proposal, std::slice::from_ref(&existing), MAX);
         assert_eq!(
             outcome,
             ProposalOutcome::Corroborating {
@@ -1371,7 +1500,8 @@ mod proposal_tests {
     fn a_differing_value_key_in_one_scope_detects_a_conflict() {
         let existing = keyed(1, "infra.db", "postgresql", "PostgreSQL.");
         let proposal = keyed(2, "infra.db", "cockroachdb", "CockroachDB.");
-        let (outcome, relations) = classify_proposal(&proposal, &[existing.clone()], MAX);
+        let (outcome, relations) =
+            classify_proposal(&proposal, std::slice::from_ref(&existing), MAX);
         assert_eq!(
             outcome,
             ProposalOutcome::ConflictDetected {
@@ -1382,14 +1512,27 @@ mod proposal_tests {
         assert_eq!(relations[0].kind, RelationKind::ConflictsWith);
         // Symmetric endpoints are normalized at construction, so the row two
         // machines write independently is the same row.
-        assert_eq!((relations[0].from, relations[0].to), (existing.id, proposal.id));
+        assert_eq!(
+            (relations[0].from, relations[0].to),
+            (existing.id, proposal.id)
+        );
     }
 
     #[test]
     fn a_scope_exception_is_never_a_conflict() {
         // Scenario B: project PostgreSQL, task SQLite fixture.
-        let project = keyed(1, "infra.db", "postgresql", "The production database is PostgreSQL.");
-        let mut task = keyed(2, "infra.db", "sqlite", "This integration fixture uses SQLite.");
+        let project = keyed(
+            1,
+            "infra.db",
+            "postgresql",
+            "The production database is PostgreSQL.",
+        );
+        let mut task = keyed(
+            2,
+            "infra.db",
+            "sqlite",
+            "This integration fixture uses SQLite.",
+        );
         task.scope = MemoryScope::Task;
         task.scope_key = "T1".into();
         let (outcome, relations) = classify_proposal(&task, &[project], MAX);
@@ -1421,7 +1564,10 @@ mod proposal_tests {
 
         let (outcome, relations) = classify_proposal(&proposal, &[existing], MAX);
         assert_eq!(outcome, ProposalOutcome::Created);
-        assert!(relations.is_empty(), "no relation is invented for a free-form pair");
+        assert!(
+            relations.is_empty(),
+            "no relation is invented for a free-form pair"
+        );
     }
 
     #[test]
@@ -1430,7 +1576,11 @@ mod proposal_tests {
         old.state = MemoryState::Superseded;
         let proposal = keyed(2, "infra.db", "cockroachdb", "CockroachDB.");
         let (outcome, relations) = classify_proposal(&proposal, &[old], MAX);
-        assert_eq!(outcome, ProposalOutcome::Created, "history does not conflict");
+        assert_eq!(
+            outcome,
+            ProposalOutcome::Created,
+            "history does not conflict"
+        );
         assert!(relations.is_empty());
     }
 

@@ -170,7 +170,10 @@ mod tests {
             ..ok()
         };
         let err = check_memory_columns(bad).unwrap_err().to_string();
-        assert!(err.contains("value_key IS NULL OR topic_key IS NOT NULL"), "{err}");
+        assert!(
+            err.contains("value_key IS NULL OR topic_key IS NOT NULL"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -215,7 +218,10 @@ mod tests {
                 ..ok()
             };
             let err = check_memory_columns(bad).unwrap_err().to_string();
-            assert!(err.contains("implies verification_authority IS NULL"), "{state}: {err}");
+            assert!(
+                err.contains("implies verification_authority IS NULL"),
+                "{state}: {err}"
+            );
         }
         check_memory_columns(MemoryColumns {
             verification: Some("verified"),
@@ -252,9 +258,24 @@ mod tests {
         // the write would set `pinned = 1` and clear the metadata columns,
         // erasing a previous pin's author in the process.
         for missing in [
-            MemoryColumns { pinned: Some(1), pinned_by_session: Some("s1"), pin_reason: Some("r"), ..ok() },
-            MemoryColumns { pinned: Some(1), pinned_at: Some("2026-01-01T00:00:00Z"), pin_reason: Some("r"), ..ok() },
-            MemoryColumns { pinned: Some(1), pinned_at: Some("2026-01-01T00:00:00Z"), pinned_by_session: Some("s1"), ..ok() },
+            MemoryColumns {
+                pinned: Some(1),
+                pinned_by_session: Some("s1"),
+                pin_reason: Some("r"),
+                ..ok()
+            },
+            MemoryColumns {
+                pinned: Some(1),
+                pinned_at: Some("2026-01-01T00:00:00Z"),
+                pin_reason: Some("r"),
+                ..ok()
+            },
+            MemoryColumns {
+                pinned: Some(1),
+                pinned_at: Some("2026-01-01T00:00:00Z"),
+                pinned_by_session: Some("s1"),
+                ..ok()
+            },
         ] {
             let err = check_memory_columns(missing).unwrap_err().to_string();
             assert!(err.contains("pinned = 1 requires"), "{err}");
@@ -288,7 +309,10 @@ mod tests {
         }
         check_supersession("superseded", Some("2026-01-01T00:00:00Z")).expect("the normal case");
         check_supersession("active", None).expect("an active memory has no end instant");
-        assert!(check_supersession("archived", None).is_err(), "unknown state accepted");
+        assert!(
+            check_supersession("archived", None).is_err(),
+            "unknown state accepted"
+        );
     }
 
     #[test]

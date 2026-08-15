@@ -1,0 +1,32 @@
+{
+  "description": "A waived criterion that happens to carry a verification stays waived. Waiving is terminal.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "waived",
+          "verification": "verified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 0,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 1,
+        "total": 1
+      },
+      "readiness": null,
+      "action_order": null
+    }
+  }
+}

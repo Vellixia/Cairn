@@ -299,7 +299,10 @@ mod tests {
         let c: CairnConfig = serde_json::from_str(tuned).expect("parses");
         assert_eq!(c.warnings_in_context_max, 2);
         assert_eq!(c.pattern_signals_min, 3);
-        assert_eq!(c.pins_in_context_max, 4, "untouched bounds keep their default");
+        assert_eq!(
+            c.pins_in_context_max, 4,
+            "untouched bounds keep their default"
+        );
     }
 
     #[test]

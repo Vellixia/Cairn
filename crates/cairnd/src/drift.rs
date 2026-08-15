@@ -227,9 +227,15 @@ mod tests {
         .await
         .expect("evidence");
 
-        evidence::attach_to_memory(&d.store, m.memory.id, fact.id, EvidenceRole::Supports, session)
-            .await
-            .expect("attach");
+        evidence::attach_to_memory(
+            &d.store,
+            m.memory.id,
+            fact.id,
+            EvidenceRole::Supports,
+            session,
+        )
+        .await
+        .expect("attach");
         evidence::record_run(
             &d.store,
             NewRun {
@@ -285,7 +291,10 @@ mod tests {
         .fetch_one(fx.store.pool())
         .await
         .expect("after");
-        assert_eq!(before, after, "marking changed something other than verification");
+        assert_eq!(
+            before, after,
+            "marking changed something other than verification"
+        );
 
         let verification: String =
             sqlx::query_scalar("SELECT verification FROM memories WHERE id = ?1")
@@ -344,7 +353,10 @@ mod tests {
         // The default cap is 8, so twelve facts defer rather than scanning.
         let report = mark_for_path(&fx, project, "config/app.yml").await;
         assert_eq!(report.facts_examined, 8, "the cap did not bind");
-        assert!(report.deferred, "exceeding the cap must defer, not continue");
+        assert!(
+            report.deferred,
+            "exceeding the cap must defer, not continue"
+        );
     }
 
     #[tokio::test]

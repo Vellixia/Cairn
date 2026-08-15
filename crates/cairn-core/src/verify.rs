@@ -15,7 +15,9 @@
 //! and on every surface, because collapsing them anywhere is enough to lose the
 //! distinction everywhere.
 
-use crate::domain::{EvidenceCollector, VerificationAuthority, VerificationState, VerifierKind, VerifyResult};
+use crate::domain::{
+    EvidenceCollector, VerificationAuthority, VerificationState, VerifierKind, VerifyResult,
+};
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -243,7 +245,9 @@ pub fn satisfies_deterministic_requirement(authority: Option<VerificationAuthori
 }
 
 /// Why a strict consumer refused, as a stable wire code.
-pub fn deterministic_refusal_code(authority: Option<VerificationAuthority>) -> Option<&'static str> {
+pub fn deterministic_refusal_code(
+    authority: Option<VerificationAuthority>,
+) -> Option<&'static str> {
     match authority {
         Some(VerificationAuthority::Cairn) => None,
         Some(VerificationAuthority::Attested) => Some("attested_not_sufficient"),
@@ -570,7 +574,10 @@ mod tests {
             VerificationAuthority::RemoteCairn,
             VerificationAuthority::RemoteAttested,
         ] {
-            assert!(!satisfies_deterministic_requirement(Some(weaker)), "{weaker}");
+            assert!(
+                !satisfies_deterministic_requirement(Some(weaker)),
+                "{weaker}"
+            );
         }
         assert!(!satisfies_deterministic_requirement(None));
 

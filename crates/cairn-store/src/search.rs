@@ -127,7 +127,10 @@ pub async fn search(
     }
     if let Some(topic) = &q.topic_key {
         if let Some(prefix) = topic.strip_suffix('.') {
-            let escaped = prefix.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            let escaped = prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
             query = query.bind(format!("{escaped}.%"));
         } else {
             query = query.bind(topic.clone());
@@ -162,7 +165,11 @@ pub async fn search(
     // A derived filter has to see every candidate before the limit is applied,
     // or the limit would cut the set the derivation is computed over.
     let subject_filter = q.conflicted || q.corroborated;
-    query = query.bind(if subject_filter { SUBJECT_FILTER_SCAN_MAX } else { limit });
+    query = query.bind(if subject_filter {
+        SUBJECT_FILTER_SCAN_MAX
+    } else {
+        limit
+    });
 
     let raw = query.fetch_all(store.pool()).await?;
     let keep = if subject_filter {
@@ -357,9 +364,17 @@ mod tests {
         let p = ensure_project(&store, "/tmp/x/.git", "x", None)
             .await
             .unwrap();
-        let t = create_task(&store, p.id, "Rate limit", "429 over limit", &[], LOCAL)
-            .await
-            .unwrap();
+        let t = create_task(
+            &store,
+            p.id,
+            "Rate limit",
+            "429 over limit",
+            &[],
+            new_id(),
+            LOCAL,
+        )
+        .await
+        .unwrap();
         let s = start_session(
             &store,
             StartSession {

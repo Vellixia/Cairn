@@ -79,12 +79,7 @@ async fn run(
 fn authority_is_never_collapsed() {
     // Every rendering differs, pairwise.
     let mut rendered = std::collections::BTreeSet::new();
-    for authority in [
-        "cairn",
-        "attested",
-        "remote_cairn",
-        "remote_attested",
-    ] {
+    for authority in ["cairn", "attested", "remote_cairn", "remote_attested"] {
         let line = cairn_e2e::render_authority("verified", Some(authority));
         assert!(
             rendered.insert(line.clone()),
@@ -96,9 +91,7 @@ fn authority_is_never_collapsed() {
     // And the two that rest on attestation say so in words, not only in a
     // machine field: a person reading the line has to be able to tell.
     assert!(cairn_e2e::render_authority("verified", Some("attested")).contains("attested"));
-    assert!(
-        cairn_e2e::render_authority("verified", Some("remote_attested")).contains("attested")
-    );
+    assert!(cairn_e2e::render_authority("verified", Some("remote_attested")).contains("attested"));
     assert!(
         cairn_e2e::render_authority("verified", Some("remote_cairn")).contains("elsewhere"),
         "an imported check must not read as a local one"
@@ -108,7 +101,12 @@ fn authority_is_never_collapsed() {
     rt.block_on(async {
         // A verified state always carries an authority in storage.
         let m = f
-            .propose(Uuid::now_v7(), Some("infra.db"), Some("postgresql"), "PostgreSQL.")
+            .propose(
+                Uuid::now_v7(),
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
             .await;
         let e = fact(
             &f,
@@ -118,7 +116,14 @@ fn authority_is_never_collapsed() {
             "config/database.yml",
         )
         .await;
-        run(&f, m.memory.id, e.id, VerifierKind::Configuration, VerifyResult::Verified).await;
+        run(
+            &f,
+            m.memory.id,
+            e.id,
+            VerifierKind::Configuration,
+            VerifyResult::Verified,
+        )
+        .await;
         evidence::rebuild_verification(&f.store, m.memory.id)
             .await
             .expect("rebuild");
@@ -153,7 +158,12 @@ fn state_machine() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
         let m = f
-            .propose(Uuid::now_v7(), Some("service.api_port"), Some("8080"), "Port 8080.")
+            .propose(
+                Uuid::now_v7(),
+                Some("service.api_port"),
+                Some("8080"),
+                "Port 8080.",
+            )
             .await;
         let e = fact(
             &f,
@@ -165,7 +175,14 @@ fn state_machine() {
         .await;
 
         // unverified → verified
-        run(&f, m.memory.id, e.id, VerifierKind::Configuration, VerifyResult::Verified).await;
+        run(
+            &f,
+            m.memory.id,
+            e.id,
+            VerifierKind::Configuration,
+            VerifyResult::Verified,
+        )
+        .await;
         let (state, _) = evidence::rebuild_verification(&f.store, m.memory.id)
             .await
             .expect("rebuild");
@@ -185,16 +202,33 @@ fn state_machine() {
 
         // needs_recheck → drifted
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        run(&f, m.memory.id, e.id, VerifierKind::Configuration, VerifyResult::Drifted).await;
+        run(
+            &f,
+            m.memory.id,
+            e.id,
+            VerifierKind::Configuration,
+            VerifyResult::Drifted,
+        )
+        .await;
         let (state, authority) = evidence::rebuild_verification(&f.store, m.memory.id)
             .await
             .expect("rebuild");
         assert_eq!(state, VerificationState::Drifted);
-        assert_eq!(authority, None, "a drifted claim has nothing to be authoritative about");
+        assert_eq!(
+            authority, None,
+            "a drifted claim has nothing to be authoritative about"
+        );
 
         // drifted → verified, only on a run.
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        run(&f, m.memory.id, e.id, VerifierKind::Configuration, VerifyResult::Verified).await;
+        run(
+            &f,
+            m.memory.id,
+            e.id,
+            VerifierKind::Configuration,
+            VerifyResult::Verified,
+        )
+        .await;
         let (state, authority) = evidence::rebuild_verification(&f.store, m.memory.id)
             .await
             .expect("rebuild");
@@ -205,7 +239,12 @@ fn state_machine() {
         // its last verification, which is what lets a historical query say what
         // was verified then.
         let successor = f
-            .propose(Uuid::now_v7(), Some("service.api_port"), Some("9000"), "Port 9000.")
+            .propose(
+                Uuid::now_v7(),
+                Some("service.api_port"),
+                Some("9000"),
+                "Port 9000.",
+            )
             .await;
         cairn_store::knowledge::reconcile(
             &f.store,
@@ -227,7 +266,10 @@ fn state_machine() {
         .fetch_one(f.store.pool())
         .await
         .expect("row");
-        assert_eq!(kept.0, "verified", "supersession moved the verification state");
+        assert_eq!(
+            kept.0, "verified",
+            "supersession moved the verification state"
+        );
         assert_eq!(kept.1.as_deref(), Some("cairn"));
     });
 }
@@ -248,8 +290,7 @@ async fn memory_row(f: &Fixture, id: Uuid) -> (String, String, String, String) {
 #[test]
 fn cairn_runs_nothing() {
     let source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../crates/cairnd/src/verify.rs"),
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../crates/cairnd/src/verify.rs"),
     )
     .expect("the verifier module is readable");
 
@@ -293,21 +334,34 @@ fn a_configuration_value_verifies_with_its_authority_named() {
     s.write_file("config/app.yml", "server:\n  port: 8080\n");
 
     let m = s.cairn(&[
-        "memory", "add", "The API listens on port 8080.",
-        "--scope", "project", "--topic-key", "service.api_port",
-        "--value-key", "8080", "--json",
+        "memory",
+        "add",
+        "The API listens on port 8080.",
+        "--scope",
+        "project",
+        "--topic-key",
+        "service.api_port",
+        "--value-key",
+        "8080",
+        "--json",
     ]);
     assert!(m.ok(), "{}", m.stderr);
     let memory_id = extract(&m.stdout, &["memory", "id"]);
 
     // The value Cairn can read for itself, named by its key.
     let e = s.cairn(&[
-        "evidence", "add",
-        "--type", "configuration",
-        "--subject", "API port",
-        "--value", "8080",
-        "--locator", "config/app.yml#server.port",
-        "--memory", &memory_id,
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "API port",
+        "--value",
+        "8080",
+        "--locator",
+        "config/app.yml#server.port",
+        "--memory",
+        &memory_id,
         "--json",
     ]);
     assert!(e.ok(), "{}", e.stderr);
@@ -318,7 +372,12 @@ fn a_configuration_value_verifies_with_its_authority_named() {
     assert!(v.ok(), "{}", v.stderr);
     let body: serde_json::Value = serde_json::from_str(&v.stdout).expect("json");
     let data = &body["data"];
-    assert_eq!(data["verification"].as_str(), Some("verified"), "{}", v.stdout);
+    assert_eq!(
+        data["verification"].as_str(),
+        Some("verified"),
+        "{}",
+        v.stdout
+    );
     assert_eq!(
         data["authority"].as_str(),
         Some("cairn"),
@@ -358,8 +417,14 @@ fn a_configuration_value_verifies_with_its_authority_named() {
 fn an_assertion_of_importance_leaves_the_memory_unverified() {
     let s = cairn_e2e::Sandbox::new();
     let m = s.cairn(&[
-        "memory", "add", "This one really matters.",
-        "--scope", "project", "--importance", "high", "--json",
+        "memory",
+        "add",
+        "This one really matters.",
+        "--scope",
+        "project",
+        "--importance",
+        "high",
+        "--json",
     ]);
     assert!(m.ok(), "{}", m.stderr);
     let memory_id = extract(&m.stdout, &["memory", "id"]);
@@ -383,11 +448,16 @@ fn a_credential_never_reaches_storage() {
     s.write_file("config/database.yml", &format!("url: {secret}\n"));
 
     let e = s.cairn(&[
-        "evidence", "add",
-        "--type", "configuration",
-        "--subject", "database url",
-        "--value", secret,
-        "--locator", "config/database.yml#url",
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "database url",
+        "--value",
+        secret,
+        "--locator",
+        "config/database.yml#url",
         "--json",
     ]);
     assert!(e.ok(), "{}", e.stderr);
@@ -404,7 +474,11 @@ fn a_credential_never_reaches_storage() {
         listed.stdout
     );
     // The safe fact, its digest and its locator are what remain.
-    assert!(listed.stdout.contains("config/database.yml"), "{}", listed.stdout);
+    assert!(
+        listed.stdout.contains("config/database.yml"),
+        "{}",
+        listed.stdout
+    );
 }
 
 /// An absolute locator is refused, and nothing is written.
@@ -412,11 +486,16 @@ fn a_credential_never_reaches_storage() {
 fn an_absolute_locator_is_refused() {
     let s = cairn_e2e::Sandbox::new();
     let e = s.cairn(&[
-        "evidence", "add",
-        "--type", "configuration",
-        "--subject", "database backend",
-        "--value", "postgresql",
-        "--locator", "/etc/cairn/database.yml",
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "database backend",
+        "--value",
+        "postgresql",
+        "--locator",
+        "/etc/cairn/database.yml",
         "--json",
     ]);
     assert!(!e.ok(), "an absolute locator was accepted");
@@ -441,7 +520,12 @@ fn attested_evidence_is_usable_and_visibly_weaker() {
     let (rt, f) = Fixture::blocking();
     rt.block_on(async {
         let m = f
-            .propose(Uuid::now_v7(), Some("service.health"), Some("ok"), "The service is healthy.")
+            .propose(
+                Uuid::now_v7(),
+                Some("service.health"),
+                Some("ok"),
+                "The service is healthy.",
+            )
             .await;
         let e = fact(
             &f,
@@ -460,17 +544,30 @@ fn attested_evidence_is_usable_and_visibly_weaker() {
         )
         .await
         .expect("attach");
-        run(&f, m.memory.id, e.id, VerifierKind::RuntimeState, VerifyResult::Verified).await;
+        run(
+            &f,
+            m.memory.id,
+            e.id,
+            VerifierKind::RuntimeState,
+            VerifyResult::Verified,
+        )
+        .await;
 
         let (state, authority) = evidence::rebuild_verification(&f.store, m.memory.id)
             .await
             .expect("rebuild");
-        assert_eq!(state, VerificationState::Verified, "attested evidence is usable");
+        assert_eq!(
+            state,
+            VerificationState::Verified,
+            "attested evidence is usable"
+        );
         assert_eq!(authority, Some(VerificationAuthority::Attested));
 
         // And it does not satisfy a consumer that requires a deterministic
         // check (SC-328's half that lives here).
-        assert!(!cairn_core::verify::satisfies_deterministic_requirement(authority));
+        assert!(!cairn_core::verify::satisfies_deterministic_requirement(
+            authority
+        ));
         assert_eq!(
             cairn_core::verify::deterministic_refusal_code(authority),
             Some("attested_not_sufficient")

@@ -1,0 +1,70 @@
+{
+  "description": "blocked, then satisfied-but-unverified, then pending, then verified, then waived. The ones an agent must act on arrive first: blocked is what stops progress and satisfied-but-unverified is what needs a check, while verified and waived are what an agent least needs to re-read.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "waived",
+          "verification": "unverified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        },
+        {
+          "ordinal": 3,
+          "label": "AC-3",
+          "text": "criterion 3",
+          "state": "pending",
+          "verification": "unverified",
+          "deleted": false
+        },
+        {
+          "ordinal": 4,
+          "label": "AC-4",
+          "text": "criterion 4",
+          "state": "satisfied",
+          "verification": "unverified",
+          "deleted": false
+        },
+        {
+          "ordinal": 5,
+          "label": "AC-5",
+          "text": "criterion 5",
+          "state": "blocked",
+          "verification": "unverified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 1,
+        "satisfied_unverified": 1,
+        "blocked": 1,
+        "pending": 1,
+        "waived": 1,
+        "total": 5
+      },
+      "readiness": "not_ready",
+      "action_order": [
+        "AC-5",
+        "AC-4",
+        "AC-3",
+        "AC-2",
+        "AC-1"
+      ]
+    }
+  }
+}
