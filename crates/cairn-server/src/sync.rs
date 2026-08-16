@@ -24,6 +24,50 @@ const FORBIDDEN_OBSERVATION_FIELDS: &[&str] = &[
     "outcome",
     "exit_code",
     "observations",
+    // ---- Feature 003 (FR-506) -------------------------------------------
+    //
+    // Field names that would carry evidence, diagnostic or checkpoint content.
+    // Refused **on the wire** rather than trusted not to exist: the boundary is
+    // enforced by the server, not only by what the client happens to send.
+    "observed_value",
+    "source_locator",
+    "value_digest",
+    "fingerprint",
+    "relevant_paths",
+    "criteria_snapshot",
+    "sanitization_report",
+    "origin_ref",
+    "alternative_cause",
+    "signal_digest",
+    "pin_reason",
+    "rationale",
+    "basis_evidence_id",
+    "path_fingerprints",
+    "task_snapshot_at_bind",
+    "detail",
+    "prior_value",
+    "new_value",
+    "content_norm_digest",
+    // A task's local concurrency token. Meaningless on another machine, and
+    // unsound if it travelled (D80).
+    "local_revision",
+];
+
+/// Entity types the server refuses outright, by name.
+///
+/// This list **is** the privacy boundary, stated once. A payload naming one of
+/// these is rejected exactly as `observation` is — so a malformed or malicious
+/// client cannot create a table's worth of local-only content by asking nicely.
+const FORBIDDEN_ENTITY_TYPES: &[&str] = &[
+    "observation",
+    "observation_ref",
+    "evidence_fact",
+    "verification_run",
+    "continuity_checkpoint",
+    "reusable_pattern",
+    "pattern_application",
+    "task_change",
+    "criterion_evidence",
 ];
 
 /// Session fields that are local-only (contracts/server-api.md).
@@ -135,6 +179,9 @@ async fn apply_item(
         ("session", "upsert") => upsert_session(&mut tx, project_id, user_id, item).await?,
         ("memory", "upsert") => upsert_memory(&mut tx, project_id, item).await?,
         ("handoff", "upsert") => upsert_handoff(&mut tx, project_id, item).await?,
+        ("memory_relation", "upsert") => upsert_relation(&mut tx, project_id, item).await?,
+        ("task_criterion", "upsert") => upsert_criterion(&mut tx, project_id, item).await?,
+        ("task_blocker", "upsert") => upsert_blocker(&mut tx, project_id, item).await?,
         (entity, "delete") => tombstone(&mut tx, entity, item.entity_id).await?,
         (entity, op) => {
             return Err(ApiError::invalid(format!("unsupported {entity}/{op}")));
@@ -147,10 +194,11 @@ async fn apply_item(
 
 /// The allowlist enforced on the wire.
 fn reject_forbidden_fields(item: &SyncItem) -> Result<(), ApiError> {
-    if item.entity_type == "observation" || item.entity_type == "observation_ref" {
-        return Err(ApiError::invalid(
-            "observations are local; the server does not accept them",
-        ));
+    if FORBIDDEN_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
+        return Err(ApiError::invalid(format!(
+            "`{}` is local to the machine that produced it; the server does not accept it",
+            item.entity_type
+        )));
     }
     let Some(object) = item.payload.as_object() else {
         return Ok(());
@@ -465,6 +513,131 @@ pub async fn sync_changes(
         .collect();
 
     Ok(Json(json!({ "memories": memories, "cursor": cursor })))
+}
+
+// ---------------------------------------------------------------------------
+// Feature 003 entities (`contracts/privacy-sync.md`)
+// ---------------------------------------------------------------------------
+
+/// A reconciliation decision.
+///
+/// `INSERT ... ON CONFLICT DO NOTHING` on the endpoint-pair primary key, so the
+/// same decision arriving from two machines is absorbed rather than duplicated —
+/// idempotent by construction, with no clock consulted (D78, FR-411).
+async fn upsert_relation(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    item: &SyncItem,
+) -> ApiResult<()> {
+    let from = opt_uuid(&item.payload, "from_memory_id")
+        .ok_or_else(|| ApiError::invalid("a relation must name from_memory_id"))?;
+    let to = opt_uuid(&item.payload, "to_memory_id")
+        .ok_or_else(|| ApiError::invalid("a relation must name to_memory_id"))?;
+
+    sqlx::query(
+        "INSERT INTO memory_relations
+            (from_memory_id, to_memory_id, kind, project_id, decided_by_session, basis, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now())
+         ON CONFLICT (from_memory_id, to_memory_id, kind) DO NOTHING",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(text(&item.payload, "kind"))
+    .bind(project_id)
+    .bind(
+        opt_uuid(&item.payload, "decided_by_session")
+            .ok_or_else(|| ApiError::invalid("a relation must name its author"))?,
+    )
+    .bind(text(&item.payload, "basis"))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// One acceptance criterion, by stable id.
+///
+/// Upserted per criterion rather than per task, which is the whole mechanism
+/// behind "two sessions edit different criteria and both survive": different
+/// criteria are different rows and cannot collide (FR-413, SC-317).
+async fn upsert_criterion(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    item: &SyncItem,
+) -> ApiResult<()> {
+    let task_id = opt_uuid(&item.payload, "task_id")
+        .ok_or_else(|| ApiError::invalid("a criterion must name its task"))?;
+
+    sqlx::query(
+        "INSERT INTO task_criteria
+            (id, task_id, project_id, ordinal, label, text, state, verification,
+             updated_at, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
+         ON CONFLICT (id) DO UPDATE SET
+             ordinal = EXCLUDED.ordinal, label = EXCLUDED.label, text = EXCLUDED.text,
+             state = EXCLUDED.state, verification = EXCLUDED.verification,
+             deleted_at = EXCLUDED.deleted_at, updated_at = now()",
+    )
+    .bind(item.entity_id)
+    .bind(task_id)
+    .bind(project_id)
+    .bind(
+        item.payload
+            .get("ordinal")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1) as i32,
+    )
+    .bind(text(&item.payload, "label"))
+    .bind(text(&item.payload, "text"))
+    .bind(text(&item.payload, "state"))
+    .bind(text(&item.payload, "verification"))
+    .bind(deleted_at(&item.payload))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// One blocker. Append-only with a single transition, both ends attributed.
+async fn upsert_blocker(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    item: &SyncItem,
+) -> ApiResult<()> {
+    let task_id = opt_uuid(&item.payload, "task_id")
+        .ok_or_else(|| ApiError::invalid("a blocker must name its task"))?;
+
+    sqlx::query(
+        "INSERT INTO task_blockers
+            (id, task_id, project_id, description, state, opened_by_session,
+             cleared_by_session, updated_at, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
+         ON CONFLICT (id) DO UPDATE SET
+             state = EXCLUDED.state,
+             cleared_by_session = EXCLUDED.cleared_by_session,
+             deleted_at = EXCLUDED.deleted_at, updated_at = now()",
+    )
+    .bind(item.entity_id)
+    .bind(task_id)
+    .bind(project_id)
+    .bind(text(&item.payload, "description"))
+    .bind(text(&item.payload, "state"))
+    .bind(
+        opt_uuid(&item.payload, "opened_by_session")
+            .ok_or_else(|| ApiError::invalid("a blocker must name who opened it"))?,
+    )
+    .bind(opt_uuid(&item.payload, "cleared_by_session"))
+    .bind(deleted_at(&item.payload))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// A tombstone timestamp for a payload that reports itself deleted.
+fn deleted_at(payload: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    payload
+        .get("deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        .then(chrono::Utc::now)
 }
 
 #[cfg(test)]

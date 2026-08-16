@@ -252,6 +252,39 @@ async fn enqueue_task(
 ) -> Result<()> {
     let t = task_tx(&mut *tx, task_id).await?;
     let _ = store;
+    // The criteria and blockers themselves, by stable id, so disjoint edits on
+    // two machines both land and converge by identity rather than by whichever
+    // arrived last (FR-413).
+    //
+    // Read through the caller's transaction, never the pool: a pool query while
+    // this transaction is open deadlocks whenever the pool has fewer free
+    // connections than nested readers, which the in-memory store (one
+    // connection) makes certain.
+    for c in criteria_tx(&mut *tx, task_id).await? {
+        outbox::enqueue(
+            &mut *tx,
+            policy,
+            t.project_id,
+            cairn_core::domain::OutboxEntityType::TaskCriterion,
+            c.id,
+            OutboxOperation::Upsert,
+            &outbox::criterion_payload(&c),
+        )
+        .await?;
+    }
+    for b in blockers_tx(&mut *tx, task_id).await? {
+        outbox::enqueue(
+            &mut *tx,
+            policy,
+            t.project_id,
+            cairn_core::domain::OutboxEntityType::TaskBlocker,
+            b.id,
+            OutboxOperation::Upsert,
+            &outbox::blocker_payload(&b),
+        )
+        .await?;
+    }
+
     // `enqueue` returns whether a row was written — false when the project is
     // not linked, which is the ordinary local-only case and not a failure.
     outbox::enqueue(
@@ -1201,4 +1234,109 @@ pub async fn verified_criteria_for_project(
     .fetch_all(store.pool())
     .await?;
     Ok(rows.iter().filter_map(|s| Uuid::from_str(s).ok()).collect())
+}
+
+/// Upsert a criterion that arrived from a peer, by its stable id.
+///
+/// Two machines that changed *different* criteria offline both land, because
+/// different criteria are different rows and cannot collide. The local
+/// `revision` is **not** taken from the payload: it is a local concurrency
+/// token, and an arriving row must not be able to move it (D80).
+///
+/// The projection and the task's own counter are rebuilt afterwards from the
+/// converged rows, so `tasks.acceptance_criteria` and the derived digest agree
+/// with what actually arrived.
+#[allow(clippy::too_many_arguments)]
+pub async fn import_criterion(
+    store: &Store,
+    id: Uuid,
+    task_id: Uuid,
+    ordinal: i64,
+    label: &str,
+    text: &str,
+    state: CriterionState,
+    verification: CriterionVerification,
+    deleted: bool,
+) -> Result<()> {
+    let mut tx = tx::begin(store, "import_criterion").await?;
+    let now = rows::now_text();
+    sqlx::query(
+        "INSERT INTO task_criteria
+            (id, task_id, ordinal, label, text, state, verification, revision,
+             created_at, updated_at, deleted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?8, ?9)
+         ON CONFLICT (id) DO UPDATE SET
+             ordinal = excluded.ordinal, label = excluded.label, text = excluded.text,
+             state = excluded.state, verification = excluded.verification,
+             updated_at = excluded.updated_at, deleted_at = excluded.deleted_at",
+    )
+    .bind(id.to_string())
+    .bind(task_id.to_string())
+    .bind(ordinal)
+    .bind(label)
+    .bind(text)
+    .bind(state.as_str())
+    .bind(verification.as_str())
+    .bind(&now)
+    .bind(deleted.then(|| now.clone()))
+    .execute(&mut *tx)
+    .await?;
+
+    rewrite_projection(&mut tx, task_id).await?;
+    tx::commit(tx, "import_criterion").await
+}
+
+/// Upsert a blocker that arrived from a peer.
+#[allow(clippy::too_many_arguments)]
+pub async fn import_blocker(
+    store: &Store,
+    id: Uuid,
+    task_id: Uuid,
+    description: &str,
+    state: BlockerState,
+    opened_by_session: Uuid,
+    cleared_by_session: Option<Uuid>,
+    deleted: bool,
+) -> Result<()> {
+    let mut tx = tx::begin(store, "import_blocker").await?;
+    let now = rows::now_text();
+    sqlx::query(
+        "INSERT INTO task_blockers
+            (id, task_id, description, state, opened_by_session, opened_at,
+             cleared_by_session, deleted_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT (id) DO UPDATE SET
+             state = excluded.state,
+             cleared_by_session = excluded.cleared_by_session,
+             deleted_at = excluded.deleted_at",
+    )
+    .bind(id.to_string())
+    .bind(task_id.to_string())
+    .bind(description)
+    .bind(state.as_str())
+    .bind(opened_by_session.to_string())
+    .bind(&now)
+    .bind(cleared_by_session.map(|s| s.to_string()))
+    .bind(deleted.then(|| now.clone()))
+    .execute(&mut *tx)
+    .await?;
+    tx::commit(tx, "import_blocker").await
+}
+
+/// `criteria`, read through a caller's transaction.
+async fn criteria_tx(tx: &mut sqlx::SqliteConnection, task_id: Uuid) -> Result<Vec<Criterion>> {
+    let rs = sqlx::query("SELECT * FROM task_criteria WHERE task_id = ?1 ORDER BY ordinal, id")
+        .bind(task_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+    rs.iter().map(criterion).collect()
+}
+
+/// `blockers`, read through a caller's transaction.
+async fn blockers_tx(tx: &mut sqlx::SqliteConnection, task_id: Uuid) -> Result<Vec<Blocker>> {
+    let rs = sqlx::query("SELECT * FROM task_blockers WHERE task_id = ?1 ORDER BY id")
+        .bind(task_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+    rs.iter().map(blocker).collect()
 }

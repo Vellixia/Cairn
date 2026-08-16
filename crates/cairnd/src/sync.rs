@@ -433,14 +433,20 @@ async fn backfill(d: &Daemon, project: &Project) -> Result<(), WireError> {
         }
     }
     for m in shared_memories(d, project.id).await? {
-        enqueue_one(
-            d,
-            policy,
-            project.id,
-            OutboxEntityType::Memory,
-            m.id,
-            outbox::memory_payload(&m),
-        )
+        enqueue_one(d, policy, project.id, OutboxEntityType::Memory, m.id, {
+            // No transaction is open here, so a pooled connection is taken
+            // for the read. A payload that cannot be enriched still syncs
+            // its Feature 001 shape rather than being dropped.
+            let mut conn = d
+                .store
+                .pool()
+                .acquire()
+                .await
+                .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
+            outbox::memory_payload_for(&mut conn, &m)
+                .await
+                .unwrap_or_else(|_| outbox::memory_payload(&m))
+        })
         .await?;
     }
     Ok(())
@@ -703,6 +709,40 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
             count += 1;
         }
     }
+
+    // Memories first, then the decisions about them: a relation whose memory has
+    // not arrived is held and retried rather than dropped, and importing in this
+    // order means it usually does not have to be.
+    for r in body
+        .get("relations")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        import_relation(d, project_id, r).await;
+        count += 1;
+    }
+
+    // Criteria and blockers upsert by stable id, so two machines that changed
+    // different criteria offline both land — neither overwrites the other.
+    for c in body
+        .get("criteria")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        if import_criterion(d, c).await {
+            count += 1;
+        }
+    }
+    for b in body
+        .get("blockers")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        if import_blocker(d, b).await {
+            count += 1;
+        }
+    }
+
     if let Some(cursor) = body.get("cursor").and_then(|c| c.as_str()) {
         repo::set_pull_cursor(&d.store, project_id, cursor)
             .await
@@ -772,7 +812,187 @@ async fn import_memory(
     .execute(d.store.pool())
     .await
     .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
+
+    import_verification(d, id, value).await;
     Ok(())
+}
+
+/// Record what a peer said about a memory's verification, wearing the peer's
+/// badge (FR-368, FR-370, SC-329).
+///
+/// `cairn` → `remote_cairn`, `attested` → `remote_attested`. The sender's value
+/// is **never** stored verbatim. "Verified here" is a claim only the local
+/// machine can make, and an imported verification counts towards neither local
+/// readiness nor promotion — it is rendered as verified *elsewhere*, with the
+/// peer's authority named.
+///
+/// Without this an attested claim from a peer would arrive as
+/// `{state: verified, basis: ["test_outcome"]}` and be rendered exactly like a
+/// peer that had really run the tests.
+async fn import_verification(d: &Daemon, memory_id: Uuid, value: &serde_json::Value) {
+    let Some(verification) = value.get("verification") else {
+        return;
+    };
+    let state = verification.get("state").and_then(|v| v.as_str());
+    let Some(state) = state else { return };
+
+    let authority = match verification.get("authority").and_then(|v| v.as_str()) {
+        Some("cairn") => Some("remote_cairn"),
+        Some("attested") => Some("remote_attested"),
+        // A peer relaying a third machine's authority is not something this
+        // machine can act on, so it is not recorded as an authority at all.
+        _ => None,
+    };
+
+    let _ = sqlx::query(
+        "UPDATE memories
+            SET verification = ?2, verification_authority = ?3,
+                last_verified_at = COALESCE(?4, last_verified_at)
+          WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .bind(state)
+    .bind(authority)
+    .bind(
+        verification
+            .get("last_verified_at")
+            .and_then(|v| v.as_str()),
+    )
+    .execute(d.store.pool())
+    .await;
+}
+
+/// Import a reconciliation decision.
+///
+/// `INSERT OR IGNORE` on the normalized primary key, then re-derive. This is the
+/// correction research B2 found: today `import_memory` returns early when the
+/// row exists, so a supersession decided on another machine never lands. The
+/// *decision* is what travels, and deriving from it fixes the defect without
+/// introducing row overwriting (D67, R5).
+async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value) {
+    let uuid = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    };
+    let (Some(from), Some(to)) = (uuid("from_memory_id"), uuid("to_memory_id")) else {
+        return;
+    };
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let basis = value
+        .get("basis")
+        .and_then(|v| v.as_str())
+        .unwrap_or("explicit_user");
+
+    let (Ok(kind), Ok(basis)) = (kind.parse(), basis.parse()) else {
+        return;
+    };
+
+    // A relation whose memory has not arrived is held rather than dropped: the
+    // foreign key would refuse it, and the next pull carries it again.
+    if repo::memory(&d.store, from).await.is_err() || repo::memory(&d.store, to).await.is_err() {
+        return;
+    }
+
+    let _ = cairn_store::knowledge::record_relation(
+        &d.store,
+        cairn_store::knowledge::NewRelation {
+            project_id,
+            from,
+            to,
+            kind,
+            decided_by_session: uuid("decided_by_session").unwrap_or_else(new_id),
+            basis,
+            // Stripped on the wire, and correctly absent here.
+            basis_evidence_id: None,
+            rationale: None,
+        },
+    )
+    .await;
+
+    // The decision changed what is canonical, so the derived state is rebuilt
+    // from the records rather than patched.
+    let _ = cairn_store::knowledge::rebuild_supersession(&d.store, project_id).await;
+    let _ = cairn_store::knowledge::rebuild_reinforcement(&d.store, project_id).await;
+}
+
+/// Import one criterion that arrived from a peer.
+async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> bool {
+    let uuid = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    };
+    let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
+        return false;
+    };
+    // A criterion for a task that has not arrived is held, not invented.
+    if repo::task(&d.store, task_id).await.is_err() {
+        return false;
+    }
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let (Ok(state), Ok(verification)) = (str_of("state").parse(), str_of("verification").parse())
+    else {
+        return false;
+    };
+
+    cairn_store::criteria::import_criterion(
+        &d.store,
+        id,
+        task_id,
+        value.get("ordinal").and_then(|v| v.as_i64()).unwrap_or(1),
+        str_of("label"),
+        str_of("text"),
+        state,
+        verification,
+        value
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .await
+    .is_ok()
+}
+
+/// Import one blocker that arrived from a peer.
+async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> bool {
+    let uuid = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    };
+    let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
+        return false;
+    };
+    if repo::task(&d.store, task_id).await.is_err() {
+        return false;
+    }
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let Ok(state) = str_of("state").parse() else {
+        return false;
+    };
+
+    cairn_store::criteria::import_blocker(
+        &d.store,
+        id,
+        task_id,
+        str_of("description"),
+        state,
+        uuid("opened_by_session").unwrap_or_else(Uuid::nil),
+        uuid("cleared_by_session"),
+        value
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .await
+    .is_ok()
 }
 
 #[cfg(test)]

@@ -465,12 +465,21 @@ fn run_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Run> {
 
 /// Every run for a memory, newest first.
 pub async fn runs_for_memory(store: &Store, memory_id: Uuid) -> Result<Vec<Run>> {
+    let mut conn = store.pool().acquire().await?;
+    runs_for_memory_tx(&mut conn, memory_id).await
+}
+
+/// The same, through a caller's transaction.
+pub async fn runs_for_memory_tx(
+    tx: &mut sqlx::SqliteConnection,
+    memory_id: Uuid,
+) -> Result<Vec<Run>> {
     let rows = sqlx::query(
         "SELECT * FROM verification_runs WHERE memory_id = ?1
           ORDER BY checked_at DESC, id DESC",
     )
     .bind(memory_id.to_string())
-    .fetch_all(store.pool())
+    .fetch_all(&mut *tx)
     .await?;
     rows.iter().map(run_from_row).collect()
 }
@@ -617,12 +626,24 @@ pub struct VerificationSummary {
 
 /// Build the summary a memory's sync payload may carry.
 pub async fn summary(store: &Store, memory_id: Uuid) -> Result<VerificationSummary> {
+    let mut conn = store.pool().acquire().await?;
+    summary_tx(&mut conn, memory_id).await
+}
+
+/// The same, through a caller's transaction.
+///
+/// The sync payload is built inside the transaction that wrote the memory, and
+/// a pool query there would wait on a connection that transaction is holding.
+pub async fn summary_tx(
+    tx: &mut sqlx::SqliteConnection,
+    memory_id: Uuid,
+) -> Result<VerificationSummary> {
     let row = sqlx::query(
         "SELECT verification, verification_authority, last_verified_at
            FROM memories WHERE id = ?1",
     )
     .bind(memory_id.to_string())
-    .fetch_optional(store.pool())
+    .fetch_optional(&mut *tx)
     .await?
     .ok_or_else(|| StoreError::NotFound(format!("memory {memory_id}")))?;
 
@@ -643,10 +664,10 @@ pub async fn summary(store: &Store, memory_id: Uuid) -> Result<VerificationSumma
           WHERE l.memory_id = ?1 AND l.role = 'supports' AND f.deleted_at IS NULL",
     )
     .bind(memory_id.to_string())
-    .fetch_one(store.pool())
+    .fetch_one(&mut *tx)
     .await? as usize;
 
-    let mut basis: Vec<VerifierKind> = runs_for_memory(store, memory_id)
+    let mut basis: Vec<VerifierKind> = runs_for_memory_tx(&mut *tx, memory_id)
         .await?
         .into_iter()
         .filter(|r| r.result == VerifyResult::Verified)

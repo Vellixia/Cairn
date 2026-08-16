@@ -871,6 +871,9 @@ pub async fn create_memory_reconciled(
             updated_at: Utc::now(),
             deleted_at: None,
         };
+        // Built before the enqueue, not inside its argument list: both need the
+        // transaction, and only one may borrow it at a time.
+        let payload = outbox::memory_payload_for(&mut tx, &staged).await?;
         outbox::enqueue(
             &mut *tx,
             policy,
@@ -878,7 +881,7 @@ pub async fn create_memory_reconciled(
             OutboxEntityType::Memory,
             id,
             OutboxOperation::Upsert,
-            &outbox::memory_payload(&staged),
+            &payload,
         )
         .await?;
     }
@@ -1039,6 +1042,7 @@ pub async fn supersede_memory(
     let updated = memory(store, original_id).await?;
     if !updated.local_only {
         let mut tx = tx::begin(store, "supersede_memory").await?;
+        let payload = outbox::memory_payload_for(&mut tx, &updated).await?;
         outbox::enqueue(
             &mut *tx,
             policy,
@@ -1046,7 +1050,7 @@ pub async fn supersede_memory(
             OutboxEntityType::Memory,
             updated.id,
             OutboxOperation::Upsert,
-            &outbox::memory_payload(&updated),
+            &payload,
         )
         .await?;
         tx::commit(tx, "supersede_memory").await?;

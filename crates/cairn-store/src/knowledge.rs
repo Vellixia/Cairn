@@ -91,6 +91,31 @@ pub async fn record_relation_tx(
     .bind(r.rationale)
     .execute(&mut *tx)
     .await?;
+
+    // The decision itself travels, stripped of its evidence identifier and its
+    // rationale. Importing the *decision* is what makes a supersession decided
+    // on another machine finally land here — the defect research B2 found
+    // (FR-413, D67, R5).
+    // The policy is read here rather than threaded through every caller: the
+    // project row already holds it, and this transaction already has it open.
+    let policy = crate::outbox::policy_for_project_tx(&mut *tx, r.project_id).await?;
+    crate::outbox::enqueue(
+        &mut *tx,
+        policy,
+        r.project_id,
+        cairn_core::domain::OutboxEntityType::MemoryRelation,
+        crate::outbox::relation_identity(from, to, r.kind.as_str()),
+        cairn_core::domain::OutboxOperation::Upsert,
+        &crate::outbox::relation_payload(
+            from,
+            to,
+            r.kind.as_str(),
+            r.decided_by_session,
+            &rows::now_text(),
+            r.basis.as_str(),
+        ),
+    )
+    .await?;
     Ok(result.rows_affected() > 0)
 }
 

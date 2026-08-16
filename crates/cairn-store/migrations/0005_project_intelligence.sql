@@ -433,3 +433,60 @@ SELECT s.id, m.id, 'supersedes', m.project_id,
 -- transaction**, immediately after these statements. An interruption still
 -- rolls the whole migration back (migration.md §Proof, assertion 12).
 -- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Step 7 — the three new outbox entity types, and the `blocked` state
+-- ---------------------------------------------------------------------------
+--
+-- SQLite cannot alter a CHECK constraint in place, so the table is rebuilt. The
+-- rebuild is what lets `memory_relation`, `task_criterion` and `task_blocker`
+-- be queued at all — and, just as deliberately, it is what keeps every other
+-- Feature 003 record *unqueueable*. The list below is the privacy boundary
+-- expressed as a constraint the database enforces, not a rule a writer must
+-- remember (FR-503, I8).
+--
+-- `blocked` joins the state set for the same reason: a capability rejection from
+-- an older server is recoverable, and a row in that state keeps its idempotency
+-- key and its payload (D81, FR-418).
+
+CREATE TABLE outbox_new (
+    id                    TEXT PRIMARY KEY,
+    project_id            TEXT NOT NULL REFERENCES projects(id),
+    server_project_id     TEXT NOT NULL,
+    entity_type           TEXT NOT NULL
+        CHECK (entity_type IN (
+            'project', 'task', 'session', 'memory', 'handoff',
+            'memory_relation', 'task_criterion', 'task_blocker')),
+    entity_id             TEXT NOT NULL,
+    operation             TEXT NOT NULL CHECK (operation IN ('upsert', 'delete')),
+    idempotency_key       TEXT NOT NULL UNIQUE,
+    payload               TEXT NOT NULL,
+    state                 TEXT NOT NULL DEFAULT 'pending'
+        CHECK (state IN ('pending', 'in_flight', 'delivered', 'failed', 'blocked')),
+    attempts              INTEGER NOT NULL DEFAULT 0,
+    last_error            TEXT,
+    created_at            TEXT NOT NULL,
+    delivered_at          TEXT,
+    -- Added by migration 0003. Carried across the rebuild deliberately: without
+    -- it every abandoned claim would become permanent, because the staleness
+    -- check has nothing to compare.
+    claimed_at            TEXT,
+    blocked_reason        TEXT,
+    blocked_at_capability TEXT
+);
+
+INSERT INTO outbox_new
+    (id, project_id, server_project_id, entity_type, entity_id, operation,
+     idempotency_key, payload, state, attempts, last_error, created_at,
+     delivered_at, claimed_at, blocked_reason, blocked_at_capability)
+SELECT id, project_id, server_project_id, entity_type, entity_id, operation,
+       idempotency_key, payload, state, attempts, last_error, created_at,
+       delivered_at, claimed_at, blocked_reason, blocked_at_capability
+  FROM outbox;
+
+DROP TABLE outbox;
+ALTER TABLE outbox_new RENAME TO outbox;
+
+CREATE INDEX IF NOT EXISTS outbox_pending ON outbox (state, created_at);
+CREATE INDEX IF NOT EXISTS outbox_claimable
+    ON outbox (project_id, state, created_at);

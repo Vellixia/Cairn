@@ -352,6 +352,207 @@ pub fn delete_payload(entity_id: Uuid) -> serde_json::Value {
     serde_json::json!({ "id": entity_id, "deleted": true })
 }
 
+/// The memory payload a linked project actually sends (FR-413, FR-502, D66).
+///
+/// Reads the Feature 003 columns and the verification summary from the store,
+/// because they are not on the `Memory` domain struct. One place builds the wire
+/// shape, which is where the privacy boundary is enforced.
+///
+/// What is deliberately absent, and why:
+///
+/// * `content_norm_digest` — a local index, useful to nobody else;
+/// * `pin_reason` — free text a session wrote about local context;
+/// * `local_revision` — a task's local concurrency token, meaningless elsewhere
+///   and unsound if it travelled (D80);
+/// * the memory's *local* authority when it is `remote_*` — relaying a third
+///   machine's authority would be a claim this machine cannot support (FR-368).
+///
+/// Takes a connection rather than the `Store` because every caller builds this
+/// **inside the transaction that wrote the memory**. Querying the pool there
+/// would wait for a connection the open transaction is holding — a deadlock the
+/// single-connection in-memory store makes certain and the file-backed one makes
+/// intermittent.
+pub async fn memory_payload_for(
+    tx: &mut sqlx::SqliteConnection,
+    m: &Memory,
+) -> Result<serde_json::Value> {
+    let mut payload = memory_payload(m);
+
+    let row = sqlx::query(
+        "SELECT topic_key, value_key, importance, effective_from, superseded_at,
+                stale_at, pinned, reinforcement_count, distinct_origin_count
+           FROM memories WHERE id = ?1",
+    )
+    .bind(m.id.to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let (Some(row), Some(obj)) = (row.as_ref(), payload.as_object_mut()) {
+        use sqlx::Row as _;
+        let topic: Option<String> = row.try_get("topic_key").unwrap_or(None);
+        let value: Option<String> = row.try_get("value_key").unwrap_or(None);
+        obj.insert("topic_key".into(), serde_json::json!(topic));
+        obj.insert("value_key".into(), serde_json::json!(value));
+        obj.insert(
+            "importance".into(),
+            serde_json::json!(row.try_get::<String, _>("importance").ok()),
+        );
+        obj.insert(
+            "effective_from".into(),
+            serde_json::json!(row
+                .try_get::<Option<String>, _>("effective_from")
+                .ok()
+                .flatten()),
+        );
+        obj.insert(
+            "superseded_at".into(),
+            serde_json::json!(row
+                .try_get::<Option<String>, _>("superseded_at")
+                .ok()
+                .flatten()),
+        );
+        obj.insert(
+            "stale_at".into(),
+            serde_json::json!(row.try_get::<Option<String>, _>("stale_at").ok().flatten()),
+        );
+        obj.insert(
+            "pinned".into(),
+            serde_json::json!(row.try_get::<i64, _>("pinned").unwrap_or(0) == 1),
+        );
+        obj.insert(
+            "reinforcement_count".into(),
+            serde_json::json!(row.try_get::<i64, _>("reinforcement_count").unwrap_or(0)),
+        );
+        obj.insert(
+            "distinct_origin_count".into(),
+            serde_json::json!(row.try_get::<i64, _>("distinct_origin_count").unwrap_or(0)),
+        );
+    }
+
+    // The five-key verification object. `authority` is sent only as `cairn` or
+    // `attested`: a receiver derives `remote_*` for itself, because "verified
+    // here" is a claim only the local machine can make.
+    if let Ok(summary) = crate::evidence::summary_tx(&mut *tx, m.id).await {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "verification".into(),
+                serde_json::json!({
+                    "state": summary.state,
+                    "authority": summary.authority.and_then(|a| match a {
+                        cairn_core::domain::VerificationAuthority::Cairn => Some("cairn"),
+                        cairn_core::domain::VerificationAuthority::Attested => Some("attested"),
+                        // Never relayed. A peer's verification is that peer's
+                        // claim, and this machine cannot vouch for it.
+                        _ => None,
+                    }),
+                    "last_verified_at": summary.last_verified_at,
+                    "fact_count": summary.fact_count,
+                    "basis": summary.basis,
+                }),
+            );
+        }
+    }
+    Ok(payload)
+}
+
+/// One `memory_relations` row on the wire (FR-413).
+///
+/// `basis_evidence_id` and `rationale` are **stripped**. A peer receiving
+/// `basis: "evidence"` with no identifier reads it correctly — the decision was
+/// evidence-backed on another machine — and learns nothing about the evidence
+/// itself.
+pub fn relation_payload(
+    from: Uuid,
+    to: Uuid,
+    kind: &str,
+    decided_by_session: Uuid,
+    decided_at: &str,
+    basis: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "from_memory_id": from,
+        "to_memory_id": to,
+        "kind": kind,
+        "decided_by_session": decided_by_session,
+        "decided_at": decided_at,
+        "basis": basis,
+    })
+}
+
+/// One criterion on the wire.
+///
+/// Carries the stable id and both axes, so disjoint edits converge by identity.
+/// The per-criterion `revision` is local, like the task counter, and is absent.
+pub fn criterion_payload(c: &crate::criteria::Criterion) -> serde_json::Value {
+    serde_json::json!({
+        "id": c.id,
+        "task_id": c.task_id,
+        "ordinal": c.ordinal,
+        "label": c.label,
+        "text": c.text,
+        "state": c.state,
+        "verification": c.verification,
+        "deleted": c.deleted,
+    })
+}
+
+/// One blocker on the wire. Both ends attributed; append-only.
+pub fn blocker_payload(b: &crate::criteria::Blocker) -> serde_json::Value {
+    serde_json::json!({
+        "id": b.id,
+        "task_id": b.task_id,
+        "description": b.description,
+        "state": b.state,
+        "opened_by_session": b.opened_by_session,
+        "cleared_by_session": b.cleared_by_session,
+        "deleted": b.deleted,
+    })
+}
+
+/// A stable identity for a relation, for the outbox's entity id.
+///
+/// A relation has no id column of its own — its primary key is the endpoint
+/// pair and the kind. Deriving the outbox identity from the same three values
+/// keeps the enqueue idempotent: the same decision recorded twice claims the
+/// same row rather than queuing a duplicate.
+pub fn relation_identity(from: Uuid, to: Uuid, kind: &str) -> Uuid {
+    let digest = cairn_core::digest(&format!("{from}\u{1f}{to}\u{1f}{kind}"));
+    let bytes = digest.as_bytes();
+    let mut raw = [0u8; 16];
+    for (i, slot) in raw.iter_mut().enumerate() {
+        *slot = bytes.get(i).copied().unwrap_or(0);
+    }
+    Uuid::from_bytes(raw)
+}
+
+/// A project's sync policy, read inside a transaction.
+///
+/// Lets a write path decide whether to enqueue without every caller threading a
+/// policy it does not otherwise need. An unreadable project is treated as
+/// unlinked: failing to enqueue is recoverable, and refusing the write is not.
+pub async fn policy_for_project_tx(
+    tx: &mut sqlx::SqliteConnection,
+    project_id: Uuid,
+) -> Result<SyncPolicy> {
+    use sqlx::Row as _;
+    let row = sqlx::query("SELECT linked, server_project_id FROM projects WHERE id = ?1")
+        .bind(project_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(row) = row else {
+        return Ok(SyncPolicy {
+            linked: false,
+            server_project_id: None,
+        });
+    };
+    let linked: i64 = row.try_get("linked").unwrap_or(0);
+    let server: Option<String> = row.try_get("server_project_id").unwrap_or(None);
+    Ok(SyncPolicy {
+        linked: linked == 1,
+        server_project_id: server.and_then(|s| Uuid::parse_str(&s).ok()),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

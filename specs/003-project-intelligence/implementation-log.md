@@ -526,9 +526,71 @@ tombstones, transaction integrity, and `derive_task_state_digest`'s inputs.
    capability `LifecyclePreCompaction` contains the substring `PreCompact`, so referring to it inside
    the guarded source region trips a real guard. The new code moved out of that region instead.
 
+### Checkpoint I — Phase 10 (T096–T105) **in progress**, not complete
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace --all-targets` green, 934 tests, 0 failures |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+**No Phase 10 task is marked complete.** What follows landed and is green, but several tasks are
+only partly done and their named evidence does not exist yet. Marking them would be a lie the next
+session would have to discover.
+
+**What landed**
+
+- `outbox::memory_payload_for` — the extended memory payload with `topic_key`, `value_key`,
+  `importance`, the timestamps, `pinned`, the two counts, and the five-key `verification` object.
+  `relation_payload`, `criterion_payload`, `blocker_payload`, and `relation_identity`.
+- The three new entity types are enqueued: relations from `record_relation_tx`, criteria and
+  blockers from `criteria::enqueue_task`.
+- Migration 0005 step 7 rebuilds the local `outbox` table to widen its `entity_type` CHECK to the
+  three new types and its `state` CHECK to include `blocked`.
+- `cairn-server/migrations/0002_project_intelligence.sql` — the additive server schema, with **no**
+  column on `tasks`.
+- Server: the extended wire allowlist (nineteen new forbidden field names, `FORBIDDEN_ENTITY_TYPES`
+  refused by name) and upserts for `memory_relation`, `task_criterion` and `task_blocker`.
+- Daemon import: `import_verification` (authority mapped to `remote_*`, never stored verbatim),
+  `import_relation` (then re-derive supersession and reinforcement), `import_criterion` and
+  `import_blocker` (upsert by stable id, projection rebuilt).
+- Tests: `us7_sync_payloads` (3).
+
+**What is NOT done — the exact remainder of Phase 10**
+
+| Task | State |
+|---|---|
+| T096 `tests/knowledge/merge/` corpus with clock-reversed twins | not started |
+| T097 `clock_swap_invariance.rs` against two real stores | not started |
+| T098 `us11_task_criteria::offline_convergence` | not started |
+| T099 | **complete** in substance, evidenced by `a_shared_memory_says_five_things_about_evidence` |
+| T100 server migration | written; **never run against a real Postgres**, so unproven |
+| T101 | the three entity upserts and the allowlist are done; the **extended memory upsert** (writing the new `memories` columns) is not |
+| T102 `GET /api/sync/changes` emitting `relations`/`criteria`/`blockers` under one cursor | not started — the daemon imports these arrays, but nothing serves them yet |
+| T103, T104 | done in substance; their named evidence is T105 and T098, which do not exist |
+| T105 `us7_offline_merge.rs` against two stores and a real server | not started |
+
+**Decisions**
+
+1. **A pool query inside an open transaction is a deadlock.** Building the sync payload called
+   `store.pool()` while `tx::begin` was held. It surfaced 30 seconds later as `PoolTimedOut` in
+   `search::tests::*` and `concurrent_proposals` — far from the cause. `memory_payload_for`,
+   `evidence::summary_tx`, `runs_for_memory_tx`, `criteria_tx` and `blockers_tx` now take the
+   connection. `Store::open_memory` uses one connection, which makes it certain rather than rare.
+2. **The outbox CHECK constraint had to be widened before anything could be queued.** The
+   constraint is the privacy boundary expressed as something the database enforces; extending it is
+   deliberately a visible schema change rather than a silent one.
+3. **The `us7_sync_payloads` tests restart the daemon after marking the project linked.** The daemon
+   caches the project row, so without the restart the outbox stays empty and all three assertions
+   pass vacuously. The first version of the file did exactly that, and only the third test — which
+   asserted a payload was present — revealed it.
+4. **`NewRelation` did not gain a `policy` field.** `record_relation_tx` reads the project's policy
+   from the row it already has in the open transaction, so no caller had to thread a value it does
+   not otherwise need.
+
 ## Where the run stands
 
-**95 of 148 tasks complete**, each with its named evidence passing.
+**95 of 148 tasks complete**, each with its named evidence passing. Phase 10 is in progress with
+none of its tasks marked.
 
 | Phase | Tasks | State |
 |---|---|---|
@@ -541,33 +603,34 @@ tombstones, transaction integrity, and `derive_task_state_digest`'s inputs.
 | 7 Evidence-aware tasks | T065–T075 | complete |
 | 8 Minimum-safe context | T076–T085 | complete |
 | 9 Compression-safe continuity | T086–T095 | complete |
-| 10–16 | T096–T148 | not started |
+| 10 Multi-device sync | T096–T105 | **in progress** — see the table above |
+| 11–16 | T106–T148 | not started |
 
 ## Next action
 
-**Phase 10 (US7 — multi-device synchronization), starting at T096**: the test-first cluster
-T096–T098 — the `tests/knowledge/merge/` corpus with a clock-reversed twin for every scenario, plus
-`merge/symmetric_relation/` and `merge/task_divergence/`; then `clock_swap_invariance.rs` against
-**two real stores**; then `us11_task_criteria::offline_convergence`, which appends to the file
-Phase 7 created and can reuse its free-function helpers.
+**Finish Phase 10.** In order:
 
-Phase 10 is where the second writer of `task_criteria.verification` appears (T103's criteria upsert),
-and where two attribution weaknesses in `criteria::divergence` become reachable and must be fixed:
-`origin()` currently tests "was this criterion ever touched locally" rather than "was *this change*
-local", and title/goal/status divergences are hardcoded `this_machine`. Both are correct today
-because nothing arrives inbound; neither survives T103.
+1. **T102** — extend `GET /api/sync/changes` in `crates/cairn-server/src/sync.rs` with the
+   `relations`, `criteria` and `blockers` arrays under one cursor over `updated_at`. The daemon
+   already consumes them; nothing serves them, so no two-store test can pass until it does.
+2. **T101's remainder** — the extended memory upsert, writing the new `memories` columns the
+   migration added.
+3. **T096** — the `merge/` corpus, every scenario with a clock-reversed twin, plus
+   `merge/symmetric_relation/` and `merge/task_divergence/`.
+4. **T097, T098, T105** — the two-store tests. `us11_task_criteria.rs` already exposes free-function
+   helpers (`task_with`, `criterion_id`, `session`, `state_digest`) for T098 to reuse.
+5. **T100** — decide how the server migration is proven. No existing test runs a real Postgres, so
+   either one is added or the task's evidence is honestly recorded as review-only.
 
-`contracts/privacy-sync.md` governs the phase and has **not** been read yet in this run.
+Two attribution weaknesses in `criteria::divergence` become reachable the moment T103's imports are
+exercised by a test, and must be fixed as part of this phase: `origin()` tests "was this criterion
+ever touched locally" rather than "was *this change* local", and title/goal/status divergences are
+hardcoded `this_machine`.
+
+`contracts/privacy-sync.md` governs the phase and **has** been read in this run.
 
 ### Superseded next-action note
 
-**Phase 9 (US6 — compression-safe continuity), starting at T086**: the test-first cluster
-T086–T088 — the `tests/knowledge/staleness/` corpus covering every divergence class alone and in
-combination plus `staleness/external_edit/`, then `us6_continuity::staleness_is_never_current` and
-the ten-compaction test — then T089–T095.
-
-Phase 8 left two things Phase 9 consumes directly: `Level0::previous_next_action` is already
-threaded through the assembler and is simply `None` until checkpoints exist, and Tier 0a already
-reserves its place in the admission order.
-
-`contracts/continuity-context.md` Part 1 governs the phase and **has** been read in this run.
+**Phase 10 (US7 — multi-device synchronization), starting at T096**: the test-first cluster
+T096–T098, then `clock_swap_invariance.rs` against two real stores, then
+`us11_task_criteria::offline_convergence`.
