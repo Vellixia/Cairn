@@ -135,6 +135,10 @@ enum Command {
         /// Which session to brief, when more than one is open here.
         #[arg(long)]
         session: Option<Uuid>,
+        /// Why the briefing is being assembled. `post_compaction` restores the
+        /// session's checkpoint.
+        #[arg(long)]
+        reason: Option<String>,
         /// Show why each item was selected and why each omission was left out.
         ///
         /// Costs no budget when absent: the diagnostics are computed but only
@@ -251,6 +255,15 @@ enum ExportAction {
 enum SessionAction {
     /// Every session in this project, newest first.
     List,
+    /// Record a continuity checkpoint now.
+    ///
+    /// Derives the boundary record first when none exists, rather than
+    /// refusing: asking for a checkpoint is reasonable at any point, and
+    /// producing the handoff it anchors to is Cairn's job (FR-425).
+    Checkpoint {
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
     Start {
         #[arg(long, default_value = "cairn-cli")]
         agent: String,
@@ -871,13 +884,24 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         Command::Context {
             budget,
             session,
+            reason,
             explain,
         } => {
+            let reason = match reason {
+                Some(r) => Some(match r.as_str() {
+                    "session_start" => ContextReason::SessionStart,
+                    "continuation" => ContextReason::Continuation,
+                    "refresh" => ContextReason::Refresh,
+                    "post_compaction" => ContextReason::PostCompaction,
+                    other => return Err(WireError::invalid(format!("unknown reason `{other}`"))),
+                }),
+                None => Some(ContextReason::Refresh),
+            };
             let v = client::send(&Request::Context {
                 cwd: cwd(),
                 agent_session_key: None,
                 session_id: *session,
-                reason: Some(ContextReason::Refresh),
+                reason,
                 token_budget: *budget,
                 explain: *explain,
             })
@@ -988,6 +1012,19 @@ async fn session(action: &SessionAction) -> Result<Output, WireError> {
                     "{}\n",
                     serde_json::to_string_pretty(&v["session"]).unwrap_or_default()
                 ),
+            ))
+        }
+        SessionAction::Checkpoint { session } => {
+            let v = client::send(&Request::SessionCheckpoint {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+            })
+            .await?;
+            let paths = v["checkpoint"]["relevant_paths"].as_u64().unwrap_or(0);
+            Ok(Output::with(
+                v,
+                format!("Checkpoint recorded over {paths} relevant paths.\n"),
             ))
         }
         SessionAction::End {

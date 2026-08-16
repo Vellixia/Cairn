@@ -1,0 +1,47 @@
+{
+  "description": "The same oversized file at a different length. Detected, by the weaker comparison, and still reported as a change.",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "vendor/large.bin",
+            "class": "size",
+            "exists": true,
+            "value": "10485760"
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_exists": true,
+        "worktree_exists": true,
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "vendor/large.bin",
+            "class": "size",
+            "exists": true,
+            "value": "10485761"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "diverged",
+      "divergences": [
+        "files"
+      ],
+      "path_outcomes": {
+        "vendor/large.bin": "changed"
+      }
+    }
+  }
+}

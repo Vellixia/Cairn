@@ -1,0 +1,46 @@
+{
+  "description": "A relevant path recorded as absent now exists.",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/new.rs",
+            "class": "unknown",
+            "exists": false
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_exists": true,
+        "worktree_exists": true,
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/new.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "diverged",
+      "divergences": [
+        "files"
+      ],
+      "path_outcomes": {
+        "src/new.rs": "added"
+      }
+    }
+  }
+}

@@ -578,6 +578,45 @@ impl CapabilityProfile {
     }
 }
 
+impl CapabilityProfile {
+    /// What Cairn can honestly promise this agent about compression-safe
+    /// continuity (FR-426, FR-427, D57).
+    ///
+    /// ```text
+    /// pre     post                  mode
+    /// ------  --------------------  ----------------------
+    /// present present               automatic
+    /// present absent / conditional  agent_initiated
+    /// absent  any                   unavailable_automatic
+    /// ```
+    ///
+    /// A **derived read** over the capability profile Feature 002 already
+    /// maintains. No new canonical event and no new capability: a mode that
+    /// needed its own signal would be a second source of truth about the same
+    /// thing, and would drift from it.
+    ///
+    /// Cairn never reports a rehydration guarantee an adapter cannot provide.
+    /// Claiming `automatic` for an agent whose post-compaction hook is
+    /// experimental would be exactly the false promise US6 #4 is about.
+    pub fn continuity_mode(&self) -> cairn_core::domain::ContinuityMode {
+        let pre = self.get(Capability::LifecyclePreCompaction);
+        let post = self.get(Capability::LifecyclePostCompaction);
+
+        use cairn_core::domain::ContinuityMode;
+        if pre.availability == Availability::Absent
+            || pre.availability == Availability::PendingActivation
+        {
+            return ContinuityMode::UnavailableAutomatic;
+        }
+        match post.availability {
+            Availability::Guaranteed => ContinuityMode::Automatic,
+            // Conditional and unavailable both mean the same thing to an agent
+            // that must act: it cannot rely on being called back.
+            _ => ContinuityMode::AgentInitiated,
+        }
+    }
+}
+
 /// Everything level derivation needs beyond the profile itself.
 #[derive(Debug, Clone, Default)]
 pub struct LevelInputs {

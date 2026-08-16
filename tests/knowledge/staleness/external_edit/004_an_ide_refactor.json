@@ -1,0 +1,48 @@
+{
+  "description": "A relevant path changed by an IDE refactor touching the file, with the commit unmoved and **no Cairn session involved**. The change is still detected, because the checkpoint compares the fingerprint it recorded rather than looking for another session's observation. The earlier design missed every one of these (D79).",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_exists": true,
+        "worktree_exists": true,
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "2222222222222222222222222222222222222222222222222222222222222222"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "diverged",
+      "divergences": [
+        "files"
+      ],
+      "path_outcomes": {
+        "src/retry.rs": "changed"
+      },
+      "next_action_is_live": false
+    }
+  }
+}

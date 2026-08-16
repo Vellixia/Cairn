@@ -290,6 +290,10 @@ pub enum ContextReason {
     SessionStart,
     Continuation,
     Refresh,
+    /// The agent is back from a compaction and is asking for its checkpoint.
+    /// This is where a checkpoint is **restored**; it is never where one is
+    /// written (`contracts/continuity-context.md` §When one is written).
+    PostCompaction,
 }
 
 /// What a capture hook observed, before the daemon filters and stores it.
@@ -594,6 +598,14 @@ pub enum Request {
         /// is why it is opt-in rather than always present (FR-463).
         #[serde(default)]
         explain: bool,
+    },
+
+    SessionCheckpoint {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
     },
 
     HandoffGenerate {

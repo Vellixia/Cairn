@@ -1,0 +1,43 @@
+{
+  "description": "Branch, commit, task state and every relevant path are as recorded. This is the only case in which the recorded next action may be presented as the action to take.",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_exists": true,
+        "worktree_exists": true,
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "current",
+      "divergences": [],
+      "next_action_is_live": true
+    }
+  }
+}

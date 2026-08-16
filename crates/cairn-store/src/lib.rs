@@ -5,6 +5,7 @@
 //! the network.
 
 pub mod constraints;
+pub mod continuity;
 pub mod criteria;
 pub mod diag;
 pub mod evidence;

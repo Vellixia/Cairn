@@ -411,6 +411,7 @@ dependencies = [
  "anyhow",
  "cairn-core",
  "cairn-git",
+ "cairn-integrate",
  "cairn-store",
  "chrono",
  "clap",

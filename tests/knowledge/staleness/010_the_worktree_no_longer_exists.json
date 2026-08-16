@@ -1,0 +1,42 @@
+{
+  "description": "The worktree the checkpoint was taken in is gone.",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_exists": true,
+        "worktree_exists": false,
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "unresolvable",
+      "next_action_is_live": false
+    }
+  }
+}

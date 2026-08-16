@@ -6,6 +6,7 @@
 
 mod briefing;
 mod capture;
+mod continuity;
 mod drift;
 mod handlers;
 mod handoffs;

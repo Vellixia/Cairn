@@ -848,3 +848,96 @@ fn the_tasks_corpus_covers_the_whole_matrix() {
         }
     }
 }
+
+/// Every staleness case classifies as the contract says, and a diverged
+/// checkpoint never presents its recorded action as the one to take
+/// (FR-431, FR-432, FR-434, SC-311).
+#[test]
+fn the_staleness_corpus_classifies_as_it_says() {
+    use cairn_core::continuity::{classify_checkpoint, Assumptions, CurrentState};
+    use cairn_core::DivergenceKind;
+
+    let root = corpus::root();
+    let mut cases = corpus::load_group(&root, "staleness").expect("the staleness corpus loads");
+    cases
+        .extend(corpus::load_group(&root, "staleness/external_edit").expect("external edits load"));
+    assert!(cases.len() >= 18, "{} cases", cases.len());
+
+    for case in &cases {
+        let assumed: Assumptions =
+            serde_json::from_value(case.input.extra["assumed"].clone()).expect("assumptions");
+        let current: CurrentState =
+            serde_json::from_value(case.input.extra["current"].clone()).expect("current state");
+        let got = classify_checkpoint(&assumed, &current);
+
+        if let Some(want) = case.expect.extra.get("state").and_then(|v| v.as_str()) {
+            assert_eq!(
+                got.state.as_str(),
+                want,
+                "{}",
+                case.context("the classification differs from what the case states")
+            );
+        }
+
+        if let Some(want) = case
+            .expect
+            .extra
+            .get("divergences")
+            .and_then(|v| v.as_array())
+        {
+            for kind in want {
+                let kind = DivergenceKind::from_str(kind.as_str().expect("a kind"))
+                    .expect("divergence kind");
+                assert!(
+                    got.has(kind),
+                    "{}",
+                    case.context(format!("{} was not detected", kind.as_str()))
+                );
+            }
+            assert_eq!(
+                got.divergences.len(),
+                want.len(),
+                "{}",
+                case.context("a divergence was reported that the case does not name")
+            );
+        }
+
+        // The whole point of the phase: a stale action is never the live one.
+        if let Some(live) = case
+            .expect
+            .extra
+            .get("next_action_is_live")
+            .and_then(|v| v.as_bool())
+        {
+            assert_eq!(
+                got.next_action_is_live(),
+                live,
+                "{}",
+                case.context(
+                    "a diverged checkpoint must emit previous_next_action, never next_action"
+                )
+            );
+        }
+
+        if let Some(outcomes) = case
+            .expect
+            .extra
+            .get("path_outcomes")
+            .and_then(|v| v.as_object())
+        {
+            for (path, want) in outcomes {
+                let found = got
+                    .paths
+                    .iter()
+                    .find(|p| &p.path == path)
+                    .unwrap_or_else(|| panic!("{}", case.context(format!("no result for {path}"))));
+                assert_eq!(
+                    found.outcome.as_str(),
+                    want.as_str().expect("an outcome"),
+                    "{}",
+                    case.context(format!("{path} compared differently"))
+                );
+            }
+        }
+    }
+}

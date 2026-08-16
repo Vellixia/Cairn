@@ -485,9 +485,50 @@ tombstones, transaction integrity, and `derive_task_state_digest`'s inputs.
    contract's "bounded worst case fits the minimum budget" is arithmetically true rather than
    asserted.
 
+### Checkpoint H — Phase 9 (T086–T095) complete: compression-safe continuity
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace --all-targets` green, 931 tests, 0 failures |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+**What landed**
+
+- `cairn-store::continuity` — the append-only checkpoint repository anchored to a handoff, carrying
+  the assumption set, the bounded relevant paths and their fingerprints, the criteria snapshot, open
+  blockers, pinned constraints, the derived next action and the restore counters.
+- `cairnd::continuity` — bounded per-path fingerprint capture (`digest`, `size` above the payload
+  cap, `unknown` when excluded or unreadable), recomputation over exactly the paths a checkpoint
+  named, and restoration that classifies and counts.
+- Checkpoints are written inside the same step that produces the handoff, so the existing
+  pending-handoff sweep covers both. A turn checkpoint gets none.
+- `continuity_mode` derived from Feature 002's capability profile — no new event, no new capability.
+- `cairn session checkpoint` and `cairn context --reason post_compaction`.
+- Corpus: `staleness/` — 10 divergence cases and 10 external-edit cases.
+- Tests: `us6_continuity` (5), `cairn-core::knowledge` (1 new).
+
+**Decisions**
+
+1. **A recovered handoff writes no checkpoint.** A handoff synthesized at daemon-start
+   reconciliation describes a boundary that already passed; the worktree state now is not what that
+   session assumed, and recording it as an assumption set would manufacture a false comparison.
+2. **`cairn session checkpoint` derives its boundary record without a checkpoint of its own**
+   (`generate_boundary_record`). The single command would otherwise write two checkpoints for one
+   boundary — caught by the ten-cycle test finding eleven records.
+3. **`cairnd` gained a dependency on `cairn-integrate`** so `continuity_mode` reads the real
+   capability profile rather than a second copy of the same truth. No cycle: `cairn-integrate`
+   depends only on `cairn-core`.
+4. **The `not_fingerprintable` test was rewritten after its first premise proved wrong.** An
+   excluded path never becomes a relevant path at all — capture drops it — so the honest case is a
+   path fingerprinted at checkpoint time that becomes unreadable afterwards. The first version
+   passed for the wrong reason.
+5. **`no_vendor_event_name_appears_in_the_derivation` was respected, not weakened.** The Cairn
+   capability `LifecyclePreCompaction` contains the substring `PreCompact`, so referring to it inside
+   the guarded source region trips a real guard. The new code moved out of that region instead.
+
 ## Where the run stands
 
-**85 of 148 tasks complete**, each with its named evidence passing.
+**95 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
@@ -499,9 +540,26 @@ tombstones, transaction integrity, and `derive_task_state_digest`'s inputs.
 | 6 Drift | T060–T064 | complete |
 | 7 Evidence-aware tasks | T065–T075 | complete |
 | 8 Minimum-safe context | T076–T085 | complete |
-| 9–16 | T086–T148 | not started |
+| 9 Compression-safe continuity | T086–T095 | complete |
+| 10–16 | T096–T148 | not started |
 
 ## Next action
+
+**Phase 10 (US7 — multi-device synchronization), starting at T096**: the test-first cluster
+T096–T098 — the `tests/knowledge/merge/` corpus with a clock-reversed twin for every scenario, plus
+`merge/symmetric_relation/` and `merge/task_divergence/`; then `clock_swap_invariance.rs` against
+**two real stores**; then `us11_task_criteria::offline_convergence`, which appends to the file
+Phase 7 created and can reuse its free-function helpers.
+
+Phase 10 is where the second writer of `task_criteria.verification` appears (T103's criteria upsert),
+and where two attribution weaknesses in `criteria::divergence` become reachable and must be fixed:
+`origin()` currently tests "was this criterion ever touched locally" rather than "was *this change*
+local", and title/goal/status divergences are hardcoded `this_machine`. Both are correct today
+because nothing arrives inbound; neither survives T103.
+
+`contracts/privacy-sync.md` governs the phase and has **not** been read yet in this run.
+
+### Superseded next-action note
 
 **Phase 9 (US6 — compression-safe continuity), starting at T086**: the test-first cluster
 T086–T088 — the `tests/knowledge/staleness/` corpus covering every divergence class alone and in
@@ -510,20 +568,6 @@ the ten-compaction test — then T089–T095.
 
 Phase 8 left two things Phase 9 consumes directly: `Level0::previous_next_action` is already
 threaded through the assembler and is simply `None` until checkpoints exist, and Tier 0a already
-reserves its place in the admission order. Writing a checkpoint's `previous_next_action` is
-therefore a store and daemon change, not an assembler change.
+reserves its place in the admission order.
 
 `contracts/continuity-context.md` Part 1 governs the phase and **has** been read in this run.
-
-### Superseded next-action note
-
-**Phase 8 (US10 — minimum-safe context, pins and explainability), starting at T076**: the
-test-first cluster T076–T078 — the `tests/knowledge/budget/` corpus across memory populations 0,
-10, 500 and 5,000 × budgets 200…12,000 plus `budget/oversized_task/`, then
-`us10_min_safe_context::budget` as a property test and `::no_regression` against the T004
-baseline — then T079–T085.
-
-Phase 8 consumes Phase 7's output directly: Tier 0a is task work state, and `action_order` is what
-Level 0 admits criteria in. Both are in place and tested.
-
-`contracts/continuity-context.md` governs the phase and has **not** been read yet in this run.

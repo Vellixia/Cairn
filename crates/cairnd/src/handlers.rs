@@ -258,6 +258,52 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             .await
         }
 
+        Request::SessionCheckpoint {
+            cwd,
+            agent_session_key,
+            session_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+
+            // A checkpoint anchors to a handoff. When none exists yet, one is
+            // derived first rather than refusing with `no_boundary_record` —
+            // asking for a checkpoint is a reasonable thing to do at any point,
+            // and the boundary record is Cairn's job to produce (FR-425).
+            let handoff = match repo::latest_handoff(&d.store, s.id)
+                .await
+                .map_err(storage_err)?
+            {
+                Some(h) => h,
+                None => {
+                    handoffs::generate_boundary_record(d, &s, HandoffTrigger::PreCompact, r.policy)
+                        .await?
+                }
+            };
+
+            let worktree = std::path::PathBuf::from(r.worktree());
+            let checkpoint = crate::continuity::write(
+                d,
+                &s,
+                handoff.id,
+                CheckpointTrigger::Explicit,
+                &worktree,
+                &handoff.next_step,
+            )
+            .await?;
+
+            Ok(json!({
+                "checkpoint": {
+                    "id": checkpoint.id,
+                    "handoff_id": checkpoint.handoff_id,
+                    "trigger": checkpoint.trigger,
+                    "assumed": checkpoint.assumed,
+                    "next_action": checkpoint.next_action,
+                    "relevant_paths": checkpoint.assumed.path_fingerprints.len(),
+                }
+            }))
+        }
+
         Request::HandoffGenerate {
             cwd,
             session_id,
@@ -1180,6 +1226,23 @@ async fn context(
 
     let payload = briefing::build(d, &r, session.as_ref(), budget, false, explain).await?;
     let mut out = serde_json::to_value(payload).unwrap_or(json!({}));
+
+    // The mode Cairn can honestly promise this agent — derived from Feature
+    // 002's capability profile, never from a capability of its own (FR-426).
+    if let Some(mode) = continuity_mode(d, session.as_ref()).await {
+        if let Some(o) = out.as_object_mut() {
+            o.insert("continuity_mode".into(), json!(mode));
+        }
+    }
+
+    // A post-compaction refresh is where a checkpoint is restored.
+    if _reason == Some(ContextReason::PostCompaction) {
+        if let Some(restored) = restore_checkpoint(d, &r, session.as_ref()).await {
+            if let Some(o) = out.as_object_mut() {
+                o.insert("checkpoint".into(), restored);
+            }
+        }
+    }
 
     // Whether the task advanced since this session bound to it (FR-489, D80).
     //
@@ -2143,6 +2206,54 @@ async fn task_detail(d: &Daemon, task_id: Uuid) -> Result<serde_json::Value, Wir
         "open_blockers": readiness.open_blockers,
         "completion_readiness": readiness.completion_readiness,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Continuity (`contracts/continuity-context.md` Part 1)
+// ---------------------------------------------------------------------------
+
+/// What Cairn can honestly promise this agent about compression-safe continuity.
+///
+/// Derived from Feature 002's capability profile (D57). `None` when the session's
+/// agent has no profile — a mode invented for an unknown agent would be a claim
+/// with nothing behind it.
+async fn continuity_mode(d: &Daemon, session: Option<&Session>) -> Option<String> {
+    let _ = d;
+    let agent = session.map(|s| s.agent.as_str())?;
+    let agent = cairn_integrate::AgentId::parse(agent)?;
+    let adapter = cairn_integrate::adapter_for(agent);
+    // The declared profile, not a detected one: the mode is a statement about
+    // what this agent's lifecycle can do, which does not depend on whether its
+    // configuration happens to be installed right now.
+    let profile = adapter.capabilities(&cairn_integrate::Detection::found(None, None));
+    Some(profile.continuity_mode().as_str().to_string())
+}
+
+/// Restore the checkpoint this session should resume from.
+///
+/// The session's own newest checkpoint, else the newest on this branch — a
+/// session that compacted before it had one still resumes informed.
+async fn restore_checkpoint(
+    d: &Daemon,
+    r: &Resolved,
+    session: Option<&Session>,
+) -> Option<serde_json::Value> {
+    let checkpoint = match session {
+        Some(s) => match cairn_store::continuity::latest(&d.store, s.id).await {
+            Ok(Some(c)) => Some(c),
+            _ => cairn_store::continuity::latest_on_branch(&d.store, r.project.id, &s.branch)
+                .await
+                .ok()
+                .flatten(),
+        },
+        None => None,
+    }?;
+
+    let worktree = std::path::PathBuf::from(r.worktree());
+    let restored = crate::continuity::restore(d, &checkpoint, &worktree)
+        .await
+        .ok()?;
+    serde_json::to_value(restored).ok()
 }
 
 #[cfg(test)]

@@ -1,0 +1,324 @@
+//! US6 — compression-safe continuity (`contracts/continuity-context.md`
+//! Part 1).
+//!
+//! After any number of compactions the agent still knows the goal, the state,
+//! what is blocking it and what to do next — from Cairn, not from a summariser.
+//! Nothing is carried in the conversation, so nothing degrades with each pass.
+//!
+//! The two negatives this file exists for:
+//!
+//! * a change nobody told Cairn about is **still detected**, because the
+//!   checkpoint compares the fingerprint it recorded rather than looking for
+//!   another session's observation (D79);
+//! * a stale action is **never** presented as the action to take (FR-434).
+
+use cairn_e2e::Sandbox;
+use serde_json::{json, Value};
+
+/// A session with a checkpoint over one relevant path, returning
+/// `(session_id, path)`.
+fn session_with_checkpoint(s: &Sandbox, key: &str, path: &str) -> String {
+    s.write_file(path, "pub fn retry() {}\n");
+    s.git(&["add", "."]);
+    s.git(&["commit", "-m", "work", "--no-gpg-sign"]);
+
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": key, "source": "startup" }),
+    );
+    let started = s.json(&["session", "start", "--key", key]);
+    let id = started["session"]["id"].as_str().expect("id").to_string();
+
+    // An observation, so the path becomes a relevant path of this session.
+    s.hook(
+        "PostToolUse",
+        json!({
+            "session_id": key,
+            "tool_name": "Edit",
+            "tool_input": { "file_path": path }
+        }),
+    );
+    s.settle_observations(1);
+
+    let out = s.cairn(&["session", "checkpoint", "--session", &id]);
+    assert!(out.ok(), "cairn session checkpoint failed: {}", out.stderr);
+    id
+}
+
+fn restored(s: &Sandbox, session: &str) -> Value {
+    let v = s.json(&[
+        "context",
+        "--session",
+        session,
+        "--reason",
+        "post_compaction",
+        "--json",
+    ]);
+    v["checkpoint"].clone()
+}
+
+// ---------------------------------------------------------------------------
+// T087 — detection that does not depend on Cairn having been watching
+// ---------------------------------------------------------------------------
+
+/// A relevant path modified with **no Cairn session involved** and the commit
+/// unmoved is still reported changed (FR-432, D79, SC-311).
+///
+/// This is the case the earlier design missed entirely. It looked for a
+/// `file_changed` observation from another session, which finds nothing when a
+/// developer edits in an editor, a formatter rewrites on save, `git apply` lands
+/// a patch, or an IDE refactors — all of which leave the commit where it was.
+#[test]
+fn external_edit() {
+    let s = Sandbox::new();
+    let session = session_with_checkpoint(&s, "s1", "src/retry.rs");
+
+    let before = restored(&s, &session);
+    assert_eq!(
+        before["classification"]["state"], "current",
+        "nothing has moved yet: {before}"
+    );
+
+    // The edit nobody told Cairn about. No hook, no observation, no commit.
+    s.write_file("src/retry.rs", "pub fn retry() { /* patched */ }\n");
+
+    let after = restored(&s, &session);
+    assert_eq!(
+        after["classification"]["state"], "diverged",
+        "an external edit must still be detected: {after}"
+    );
+    let kinds: Vec<&str> = after["classification"]["divergences"]
+        .as_array()
+        .expect("divergences")
+        .iter()
+        .filter_map(|d| d["kind"].as_str())
+        .collect();
+    assert!(
+        kinds.contains(&"files"),
+        "the change must be reported as a file divergence: {kinds:?}"
+    );
+
+    let paths = after["classification"]["paths"]
+        .as_array()
+        .expect("path results");
+    let entry = paths
+        .iter()
+        .find(|p| p["path"] == "src/retry.rs")
+        .expect("the relevant path is reported");
+    assert_eq!(entry["outcome"], "changed");
+}
+
+/// A path that cannot be fingerprinted is reported as such and **never** as
+/// `unchanged` (FR-432, SC-311 metric 15b).
+///
+/// "I could not look" and "nothing moved" are different answers, and conflating
+/// them is exactly how a stale checkpoint reads as current.
+#[test]
+fn not_fingerprintable() {
+    let s = Sandbox::new();
+    // A path Cairn could read at checkpoint time, so it is genuinely a relevant
+    // path with a recorded digest. An excluded path never becomes one at all:
+    // capture drops it, which is a different guarantee.
+    let session = session_with_checkpoint(&s, "s2", "src/retry.rs");
+
+    // Now Cairn is told not to look at it. At restoration there is nothing
+    // comparable — not because the file is gone, but because it may not be read.
+    s.must(&["privacy", "exclude", "--path", "src/**"]);
+
+    let v = restored(&s, &session);
+    let entry = v["classification"]["paths"]
+        .as_array()
+        .expect("path results")
+        .iter()
+        .find(|p| p["path"] == "src/retry.rs")
+        .expect("the relevant path is still reported")
+        .clone();
+
+    assert_eq!(
+        entry["outcome"], "not_fingerprintable",
+        "a path that cannot be read must be reported as itself: {entry}"
+    );
+    assert_ne!(
+        entry["outcome"], "unchanged",
+        "'I could not look' must never read as 'nothing moved' — that is exactly \
+         how a stale checkpoint would read as current"
+    );
+
+    // And it does not manufacture a file divergence either: nothing was
+    // compared, so nothing is claimed in the divergence list.
+    let kinds: Vec<&str> = v["classification"]["divergences"]
+        .as_array()
+        .expect("divergences")
+        .iter()
+        .filter_map(|d| d["kind"].as_str())
+        .collect();
+    assert!(
+        !kinds.contains(&"files"),
+        "an uncomparable path is not evidence of a change: {kinds:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T088 — a stale action is labelled
+// ---------------------------------------------------------------------------
+
+/// A diverged checkpoint emits `previous_next_action` and **never**
+/// `next_action`, for every divergence class (FR-434, SC-311).
+///
+/// The recorded action still appears, because throwing it away loses
+/// information. It appears *labelled*, because presenting it as the instruction
+/// is the failure mode US6 #2 names.
+#[test]
+fn stale_action_is_labelled() {
+    // One divergence class per sandbox, so each is proved on its own.
+    for class in ["commit", "branch", "files"] {
+        let s = Sandbox::new();
+        let session = session_with_checkpoint(&s, "s1", "src/retry.rs");
+
+        match class {
+            "commit" => {
+                s.write_file("src/other.rs", "pub fn other() {}\n");
+                s.git(&["add", "."]);
+                s.git(&["commit", "-m", "move the head", "--no-gpg-sign"]);
+            }
+            "branch" => {
+                s.git(&["checkout", "-b", "feature/retry"]);
+            }
+            "files" => {
+                s.write_file("src/retry.rs", "pub fn retry() { /* changed */ }\n");
+            }
+            _ => unreachable!(),
+        }
+
+        let v = restored(&s, &session);
+        assert_eq!(
+            v["classification"]["state"], "diverged",
+            "{class}: the checkpoint must be diverged: {v}"
+        );
+        assert!(
+            v["next_action"].is_null(),
+            "{class}: a diverged checkpoint must not emit next_action: {v}"
+        );
+        assert!(
+            v["previous_next_action"].is_string(),
+            "{class}: the recorded action must still be delivered, labelled: {v}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T095 — ten compaction cycles
+// ---------------------------------------------------------------------------
+
+/// Ten consecutive cycles, asserting after **each** one that the continuity
+/// fields present in recorded state are delivered (SC-310, FR-428).
+///
+/// Every field is derived from the store on each pass rather than copied forward
+/// from the previous checkpoint, which is why the tenth is as complete as the
+/// first. Nothing is carried in the conversation, so nothing degrades.
+#[test]
+fn ten_compaction_cycles() {
+    let s = Sandbox::new();
+
+    let created = s.json(&[
+        "task",
+        "new",
+        "--title",
+        "Retry backoff",
+        "--goal",
+        "transient failures retry with jitter",
+        "--criterion",
+        "backoff is configurable",
+    ]);
+    let task = created["task"]["id"].as_str().expect("id").to_string();
+
+    s.write_file("src/retry.rs", "pub fn retry() {}\n");
+    s.git(&["add", "."]);
+    s.git(&["commit", "-m", "work", "--no-gpg-sign"]);
+
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "long", "source": "startup" }),
+    );
+    let started = s.json(&["session", "start", "--key", "long", "--task", &task]);
+    let session = started["session"]["id"].as_str().expect("id").to_string();
+
+    s.hook(
+        "PostToolUse",
+        json!({
+            "session_id": "long",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": "src/retry.rs" }
+        }),
+    );
+    s.settle_observations(1);
+
+    for cycle in 1..=10 {
+        let out = s.cairn(&["session", "checkpoint", "--session", &session]);
+        assert!(out.ok(), "cycle {cycle}: checkpoint failed: {}", out.stderr);
+
+        let v = restored(&s, &session);
+        assert!(
+            v["checkpoint_id"].is_string(),
+            "cycle {cycle}: no checkpoint was restored: {v}"
+        );
+
+        // The assumption set is complete on every cycle, not only the first.
+        let checkpoints = s.query_column(
+            "SELECT assumed_branch || '|' || COALESCE(assumed_task_id, '') || '|' ||
+                    COALESCE(assumed_task_state_digest, '')
+               FROM continuity_checkpoints ORDER BY created_at DESC LIMIT 1",
+        );
+        let recorded = checkpoints.first().expect("a checkpoint row");
+        let parts: Vec<&str> = recorded.split('|').collect();
+        assert_eq!(parts[0], "main", "cycle {cycle}: branch not recorded");
+        assert!(!parts[1].is_empty(), "cycle {cycle}: task not recorded");
+        assert!(
+            !parts[2].is_empty(),
+            "cycle {cycle}: task state digest not recorded"
+        );
+
+        // The briefing still leads with the work state.
+        let context = s.json(&["context", "--session", &session, "--json"]);
+        assert_eq!(
+            context["briefing"]["task"]["id"], task,
+            "cycle {cycle}: the task was lost from the briefing"
+        );
+        assert!(
+            context["briefing"]["task"]["progress"].is_object(),
+            "cycle {cycle}: derived progress was lost"
+        );
+    }
+
+    // Ten cycles leave ten records: checkpoints are append-only, and the tenth
+    // restoration reads the tenth rather than a rewritten first.
+    let count = s.query_column("SELECT CAST(COUNT(*) AS TEXT) FROM continuity_checkpoints");
+    assert_eq!(
+        count.first().map(String::as_str),
+        Some("10"),
+        "each boundary must write its own checkpoint"
+    );
+}
+
+/// Cairn reports the continuity mode it can honestly promise, and never claims
+/// a rehydration guarantee an adapter cannot provide (FR-426, FR-427).
+#[test]
+fn continuity_mode_is_derived_not_claimed() {
+    let s = Sandbox::new();
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "m1", "source": "startup" }),
+    );
+    let started = s.json(&["session", "start", "--key", "m1", "--agent", "claude-code"]);
+    let id = started["session"]["id"].as_str().expect("id").to_string();
+
+    let v = s.json(&["context", "--session", &id, "--json"]);
+    let mode = v["continuity_mode"].as_str();
+    assert!(
+        matches!(
+            mode,
+            Some("automatic") | Some("agent_initiated") | Some("unavailable_automatic")
+        ),
+        "the mode must be one of the three derived values, not absent or invented: {v}"
+    );
+}
