@@ -1,0 +1,60 @@
+{
+  "description": "No surface presents any of these numbers as independent verifications. The reported shape is fixed, and says applications, distinct projects, independently validated in, and counterexamples (FR-406).",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "A",
+          "sessions": 4,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        },
+        {
+          "project": "B",
+          "sessions": 4,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        },
+        {
+          "project": "C",
+          "sessions": 4,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        },
+        {
+          "project": "D",
+          "sessions": 1,
+          "outcome": "not_applicable",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        },
+        {
+          "project": "E",
+          "sessions": 1,
+          "outcome": "failed",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "trust": "contested",
+      "applications": 5,
+      "distinct_projects_applied": 5,
+      "qualifying_successes": 3,
+      "counterexamples": 2,
+      "rendered": "applications 5 \u00b7 distinct projects 5 \u00b7 independently validated in 3 \u00b7 counterexamples 2",
+      "renders_verification_count": false
+    }
+  }
+}

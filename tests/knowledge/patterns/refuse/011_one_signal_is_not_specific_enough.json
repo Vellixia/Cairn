@@ -1,0 +1,42 @@
+{
+  "description": "A pattern that matches on one token matches too much. Two is the minimum a signal set may normalize to (`pattern_signals_min`).",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "cairn",
+        "evidence_facts": 1,
+        "local_only": false,
+        "subject_reconciliation": "settled",
+        "type": "procedure"
+      },
+      "candidate": {
+        "title": "Docker cannot allocate a non-overlapping bridge network",
+        "problem": "Container creation fails because Docker cannot allocate a bridge subnet that does not overlap an existing one.",
+        "signals": [
+          "docker network failure"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The daemon's default-address-pools are fully allocated.",
+        "approach": "Expand default-address-pools in the daemon configuration and restart.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": false,
+      "refusal": "insufficient_specificity",
+      "partial_pattern_written": false,
+      "echoes_offending_value": false
+    }
+  }
+}

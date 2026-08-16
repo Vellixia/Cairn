@@ -19,6 +19,14 @@ const WORKER_TICK: Duration = Duration::from_millis(500);
 /// Backoff after a transient failure: doubles to a ceiling, then holds.
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// How often a project holding **only** retained work asks the server whether
+/// it has been upgraded (FR-418).
+///
+/// Slower than the worker tick on purpose. There is nothing to send, so this is
+/// a single small request every few seconds rather than one every half second —
+/// and noticing an upgrade a few seconds late costs nothing, while never
+/// noticing it costs the whole promise.
+const CAPABILITY_PROBE: Duration = Duration::from_secs(5);
 
 type Reply = Result<serde_json::Value, WireError>;
 
@@ -30,6 +38,9 @@ type Reply = Result<serde_json::Value, WireError>;
 /// rejections are already recorded as `failed` by `drain` and are not retried.
 pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
     let mut backoff = BACKOFF_MIN;
+    // Due immediately, so a daemon starting up next to an already-upgraded
+    // server does not wait an interval before noticing.
+    let mut last_probe = std::time::Instant::now() - CAPABILITY_PROBE;
     loop {
         tokio::time::sleep(WORKER_TICK).await;
 
@@ -41,6 +52,8 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
             }
         };
 
+        let probe_due = last_probe.elapsed() >= CAPABILITY_PROBE;
+        let mut probed = false;
         let mut hit_transient = false;
         for project in projects.iter().filter(|p| p.linked) {
             let Some(server_project_id) = project.server_project_id else {
@@ -53,7 +66,23 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
                 Err(_) => continue,
             };
             if pending == 0 {
-                continue;
+                // Retained work is **not** pending, and a project holding only
+                // retained work would otherwise never enter a drain again — so
+                // the capability probe would never run, and the upgrade this
+                // machine is waiting for would never be noticed. "Delivered
+                // automatically when the server is upgraded" is the promise
+                // FR-418 makes and `sync status` repeats to the user; without
+                // this it would need a manual `cairn sync now` to come true.
+                //
+                // Rarely, though. There is nothing to send, so this is one
+                // small request per interval, not one per tick.
+                let blocked = outbox::blocked_count(&daemon.store, project.id)
+                    .await
+                    .unwrap_or(0);
+                if blocked == 0 || !probe_due {
+                    continue;
+                }
+                probed = true;
             }
 
             match drain(&daemon, project.id, server_project_id).await {
@@ -78,6 +107,9 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
             }
         }
 
+        if probed {
+            last_probe = std::time::Instant::now();
+        }
         if hit_transient {
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(BACKOFF_MAX);
@@ -523,8 +555,53 @@ pub async fn status(d: &Daemon, cwd: &str) -> Reply {
         failures: outbox::failures(&d.store, r.project.id)
             .await
             .map_err(storage_err)?,
+        degradation: degradation(d, r.project.id).await,
     };
     Ok(serde_json::to_value(payload).unwrap_or(json!({})))
+}
+
+/// What this project is holding back, and why (T112, FR-415).
+///
+/// `None` when nothing is blocked, so an ordinary deployment reports nothing
+/// and the field costs a reader nothing. When something is blocked the answer
+/// names the gap and says the work will be delivered automatically — a count
+/// with no explanation would read as data loss.
+pub async fn degradation(d: &Daemon, project_id: Uuid) -> Option<SyncDegradation> {
+    let items = outbox::blocked(&d.store, project_id).await.ok()?;
+    if items.is_empty() {
+        return None;
+    }
+    let capability = repo::server_capability(&d.store, project_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+
+    let mut missing: Vec<String> = items
+        .iter()
+        .filter_map(|i| {
+            ENTITY_CAPABILITIES
+                .iter()
+                .find(|(entity, _)| *entity == i.entity_type)
+                .map(|(_, needs)| needs.join(" or "))
+        })
+        .collect();
+    missing.sort();
+    missing.dedup();
+
+    let (pending, _) = outbox::counts(&d.store, project_id).await.ok()?;
+    Some(SyncDegradation {
+        blocked: items.len() as i64,
+        server_capability: capability,
+        note: format!(
+            "{} item(s) are waiting for this server to gain {}. Everything else \
+             syncs normally ({pending} queued), nothing has been lost, and the \
+             retained work is delivered automatically once the server is upgraded.",
+            items.len(),
+            missing.join(", ")
+        ),
+        missing_capabilities: missing,
+    })
 }
 
 /// Drain the outbox, then pull shared records produced by other members.
@@ -574,7 +651,13 @@ async fn drain(
     // emptied the queue rather than having emptied its own share of it.
     let _drain_guard = d.sync_drain.lock().await;
 
-    let (mut applied, mut duplicate, mut rejected) = (0, 0, 0);
+    // Once per drain cycle, not once per item and not once per tick with an
+    // empty queue: the probe is cheap, but a request per row against a server
+    // that just refused everything is exactly the futile traffic `blocked`
+    // exists to avoid (FR-418).
+    let capability = refresh_capability(d, project_id).await;
+
+    let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
     let mut connection: Option<Client> = None;
 
     loop {
@@ -644,15 +727,36 @@ async fn drain(
                     duplicate += 1;
                 }
                 Some(SyncItemStatus::Rejected) => {
-                    // Permanent. Surfaced with its identity, not retried forever.
-                    let msg = result
-                        .and_then(|r| r.error.as_ref())
+                    let error = result.and_then(|r| r.error.as_ref());
+                    let msg = error
                         .map(|e| e.message.clone())
                         .unwrap_or_else(|| "rejected".into());
-                    outbox::mark_failed(&d.store, *row_id, &msg)
-                        .await
-                        .map_err(storage_err)?;
-                    rejected += 1;
+
+                    // Two kinds of "no", and they must not share a state.
+                    //
+                    // A **content** rejection is permanent: an observation
+                    // identifier where none may go will never become
+                    // acceptable, and retaining it would turn a privacy refusal
+                    // into a pending delivery. A **capability** rejection says
+                    // the server cannot hold this *yet*; failing it strands
+                    // work that an upgrade would deliver, which is the
+                    // behaviour this corrects (FR-415, FR-418, D81).
+                    match error.map(|e| e.code.as_str()) {
+                        Some(code) if codes::CAPABILITY_REFUSALS.contains(&code) => {
+                            outbox::mark_blocked(&d.store, *row_id, code, &capability, &msg)
+                                .await
+                                .map_err(storage_err)?;
+                            blocked += 1;
+                        }
+                        _ => {
+                            // Permanent. Surfaced with its identity, not
+                            // retried forever.
+                            outbox::mark_failed(&d.store, *row_id, &msg)
+                                .await
+                                .map_err(storage_err)?;
+                            rejected += 1;
+                        }
+                    }
                 }
                 None => {
                     outbox::mark_retryable(&d.store, *row_id, "no result for item")
@@ -665,8 +769,114 @@ async fn drain(
             break;
         }
     }
+    if blocked > 0 {
+        tracing::info!(
+            project = %project_id, blocked, capability = %capability,
+            "work retained for a server that cannot hold it yet"
+        );
+    }
     Ok((applied, duplicate, rejected))
 }
+
+/// Ask the server what it can hold, and release anything it now can (T111).
+///
+/// Returns the capability as an opaque string, which is what a blocked row
+/// records so a person can see *what* it is waiting for.
+///
+/// A server that answers without `capabilities` is a server from before the
+/// field existed, and its silence is the answer: it can hold none of this. That
+/// is why there is no probe endpoint and no negotiation — `GET /api/version`
+/// already existed, and adding to it additively meant an old server needed no
+/// change at all (D81).
+async fn refresh_capability(d: &Daemon, project_id: Uuid) -> String {
+    let Ok(client) = client(d).await else {
+        // Offline. Whatever was last known still describes the server better
+        // than nothing does.
+        return repo::server_capability(&d.store, project_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+    };
+    let Ok(body) = client.get("/api/version").await else {
+        return repo::server_capability(&d.store, project_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+    };
+
+    let schema = body
+        .get("schema_version")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let mut names: Vec<String> = body
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    let capability = format!("schema={schema};capabilities={}", names.join(","));
+
+    let previous = repo::server_capability(&d.store, project_id)
+        .await
+        .ok()
+        .flatten();
+    if previous.as_deref() == Some(capability.as_str()) {
+        return capability;
+    }
+
+    // The capability changed. Anything the server can now hold goes back into
+    // the ordinary queue with its original idempotency key, and the ordinary
+    // drain — the one about to run — delivers it. Nothing here sends anything
+    // itself, so there is no second delivery path to keep exactly-once.
+    let releasable: Vec<OutboxEntityType> = ENTITY_CAPABILITIES
+        .iter()
+        // Every capability the type can wait on must be present. Releasing a
+        // memory on `memory_subject_identity` alone would put an attested one
+        // back in front of a server that still has no column for it.
+        .filter(|(_, needs)| needs.iter().all(|need| names.iter().any(|n| n == need)))
+        .map(|(entity, _)| *entity)
+        .collect();
+    match outbox::release_blocked(&d.store, project_id, &releasable).await {
+        Ok(n) if n > 0 => tracing::info!(
+            project = %project_id, released = n, capability = %capability,
+            "the server gained a capability; retained work returns to the queue"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not release retained work"),
+    }
+    let _ = repo::set_server_capability(&d.store, project_id, &capability).await;
+    capability
+}
+
+/// What a server has never answered about.
+const UNKNOWN_CAPABILITY: &str = "schema=unknown;capabilities=";
+
+/// The capabilities each retainable entity type may be waiting for.
+///
+/// A `memory` lists **two**, because a schema-1 server refuses one by field
+/// rather than by type and there is more than one field it can refuse on: a
+/// subject identity, or a verification. Either is enough to hold the memory
+/// back, and it is released when the server can hold whichever it carries.
+///
+/// A memory is retained whole rather than sent stripped: delivering a claim
+/// without the thing that makes it comparable, or without what established it,
+/// is worse than delivering it a migration later.
+const ENTITY_CAPABILITIES: &[(OutboxEntityType, &[&str])] = &[
+    (OutboxEntityType::MemoryRelation, &["memory_relations"]),
+    (OutboxEntityType::TaskCriterion, &["task_criteria"]),
+    (OutboxEntityType::TaskBlocker, &["task_blockers"]),
+    (
+        OutboxEntityType::Memory,
+        &["memory_subject_identity", "memory_verification"],
+    ),
+];
 
 /// Hand a claimed batch back to the queue after a transient failure.
 ///

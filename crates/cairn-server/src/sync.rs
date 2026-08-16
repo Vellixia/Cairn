@@ -9,7 +9,9 @@ use crate::auth::{self, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::Json;
+use cairn_core::wire::codes;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -113,7 +115,15 @@ pub async fn sync_batch(
     let mut results = Vec::with_capacity(body.items.len());
     for item in &body.items {
         // Items are applied independently: one rejection does not fail a batch.
-        match apply_item(&state.pool, body.project_id, user.id, item).await {
+        match apply_item(
+            &state.pool,
+            state.schema_version,
+            body.project_id,
+            user.id,
+            item,
+        )
+        .await
+        {
             Ok(status) => {
                 results.push(json!({ "idempotency_key": item.idempotency_key, "status": status }))
             }
@@ -139,11 +149,13 @@ pub async fn sync_batch(
 
 async fn apply_item(
     pool: &PgPool,
+    schema_version: i64,
     project_id: Uuid,
     user_id: Uuid,
     item: &SyncItem,
 ) -> Result<&'static str, ApiError> {
     reject_forbidden_fields(item)?;
+    reject_beyond_capability(schema_version, item)?;
 
     // Applied at most once, and the claim on the key is what decides it.
     //
@@ -177,7 +189,7 @@ async fn apply_item(
         ("project", "upsert") => upsert_project(&mut tx, project_id, item).await?,
         ("task", "upsert") => upsert_task(&mut tx, project_id, item).await?,
         ("session", "upsert") => upsert_session(&mut tx, project_id, user_id, item).await?,
-        ("memory", "upsert") => upsert_memory(&mut tx, project_id, item).await?,
+        ("memory", "upsert") => upsert_memory(&mut tx, schema_version, project_id, item).await?,
         ("handoff", "upsert") => upsert_handoff(&mut tx, project_id, item).await?,
         ("memory_relation", "upsert") => upsert_relation(&mut tx, project_id, item).await?,
         ("task_criterion", "upsert") => upsert_criterion(&mut tx, project_id, item).await?,
@@ -190,6 +202,94 @@ async fn apply_item(
 
     tx.commit().await?;
     Ok("applied")
+}
+
+/// Entity types this server can only hold once migration 2 has run.
+const SCHEMA_2_ENTITY_TYPES: &[&str] = &["memory_relation", "task_criterion", "task_blocker"];
+
+/// Memory fields migration 2 adds, and what each looks like when it says
+/// nothing.
+///
+/// Every memory payload carries all of these, because the payload builder does
+/// not vary its shape. Refusing on their mere presence would refuse every
+/// memory a Feature 003 daemon sends — including a plain Feature 001 fact — and
+/// SC-326 requires exactly the opposite: ordinary work keeps flowing while the
+/// work this server cannot hold waits.
+///
+/// So the test is whether accepting the memory would **discard** something. A
+/// field at its default discards nothing.
+fn carries_meaning(field: &str, value: &Value) -> bool {
+    match field {
+        "topic_key" | "value_key" => value.is_string(),
+        "importance" => value.as_str().is_some_and(|s| s != "normal"),
+        "pinned" => value.as_bool().unwrap_or(false),
+        "reinforcement_count" => value.as_i64().unwrap_or(0) > 0,
+        // One distinct origin is the memory's own session. Anything a
+        // reinforcement added is what this server would lose.
+        "distinct_origin_count" => value.as_i64().unwrap_or(0) > 1,
+        // The five-key object exists on every payload; what matters is whether
+        // it reports a verification that happened.
+        "verification" => value
+            .get("state")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s != "unverified"),
+        _ => !value.is_null(),
+    }
+}
+
+const SCHEMA_2_MEMORY_FIELDS: &[&str] = &[
+    "topic_key",
+    "value_key",
+    "importance",
+    "pinned",
+    "reinforcement_count",
+    "distinct_origin_count",
+    "verification",
+];
+
+/// Work this deployment cannot hold **yet** — as distinct from work it will
+/// never accept (FR-415, FR-418, D81).
+///
+/// The refusal names its class, so the daemon can retain the item and deliver
+/// it after the migration runs instead of marking it permanently failed. A
+/// generic `invalid_request` here would be indistinguishable from a privacy
+/// refusal, and retaining those would be exactly wrong.
+fn reject_beyond_capability(schema_version: i64, item: &SyncItem) -> Result<(), ApiError> {
+    if schema_version >= 2 {
+        return Ok(());
+    }
+    if SCHEMA_2_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            codes::UNKNOWN_ENTITY_TYPE,
+            format!(
+                "this deployment is at schema {schema_version} and has nowhere to put \
+                 a `{}`; it will be accepted once the migration runs",
+                item.entity_type
+            ),
+        ));
+    }
+    if item.entity_type == "memory" {
+        if let Some(object) = item.payload.as_object() {
+            for field in SCHEMA_2_MEMORY_FIELDS {
+                if object
+                    .get(*field)
+                    .is_some_and(|v| carries_meaning(field, v))
+                {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        codes::UNKNOWN_FIELD,
+                        format!(
+                            "this deployment is at schema {schema_version} and has no \
+                             column for `{field}`; it will be accepted once the \
+                             migration runs"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The allowlist enforced on the wire.
@@ -333,6 +433,7 @@ async fn upsert_session(
 
 async fn upsert_memory(
     tx: &mut Transaction<'_, Postgres>,
+    schema_version: i64,
     project_id: Uuid,
     item: &SyncItem,
 ) -> ApiResult<()> {
@@ -360,6 +461,41 @@ async fn upsert_memory(
         .get("verification")
         .cloned()
         .unwrap_or_else(|| json!({}));
+
+    // A schema-1 database has none of the columns below, and naming one is a
+    // hard SQL error rather than a rejection the daemon could act on — which
+    // would strand *every* memory, including the Feature 001 ones this server
+    // can hold perfectly well. `reject_beyond_capability` has already refused
+    // anything that would lose meaning here, so what reaches this branch is a
+    // memory whose Feature 003 fields are all at their defaults (SC-326).
+    if schema_version < 2 {
+        sqlx::query(
+            "INSERT INTO memories
+                (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                 origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+             ON CONFLICT (id) DO UPDATE SET
+                 content = EXCLUDED.content, state = EXCLUDED.state,
+                 superseded_by_id = EXCLUDED.superseded_by_id,
+                 observation_ids = EXCLUDED.observation_ids,
+                 evidence_count = EXCLUDED.evidence_count, updated_at = now()",
+        )
+        .bind(item.entity_id)
+        .bind(project_id)
+        .bind(text(&item.payload, "type"))
+        .bind(text(&item.payload, "scope"))
+        .bind(text(&item.payload, "scope_key"))
+        .bind(text(&item.payload, "content"))
+        .bind(text(&item.payload, "state"))
+        .bind(opt_uuid(&item.payload, "superseded_by_id"))
+        .bind(origin)
+        .bind(observation_ids)
+        .bind(evidence_count)
+        .bind(opt_text(&provenance, "digest"))
+        .execute(&mut **tx)
+        .await?;
+        return Ok(());
+    }
 
     sqlx::query(
         "INSERT INTO memories

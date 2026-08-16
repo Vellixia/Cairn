@@ -29,13 +29,27 @@ pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// A server that predates this field answers without it, and its **absence** is
 /// the answer: no relations, no criteria, no blockers, no subject identity. The
 /// daemon needs no probe endpoint and no version table (D81).
-pub const CAPABILITIES: &[&str] = &[
+pub const SCHEMA_2_CAPABILITIES: &[&str] = &[
     "memory_relations",
     "task_criteria",
     "task_blockers",
     "memory_subject_identity",
     "memory_verification",
 ];
+
+/// What a deployment at `schema_version` can hold.
+///
+/// Derived from the schema the database **applied**, so a server held at an
+/// earlier migration advertises what it really has rather than what its binary
+/// could do. Advertising a capability whose table is absent would make the
+/// daemon queue work that then fails on every attempt.
+pub fn capabilities_for(schema_version: i64) -> &'static [&'static str] {
+    if schema_version >= 2 {
+        SCHEMA_2_CAPABILITIES
+    } else {
+        &[]
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionPayload {
@@ -78,7 +92,7 @@ impl ReleaseCache {
     /// A failed lookup is not an error for the caller: the deployment still
     /// knows its own version, and "we could not reach GitHub" is a better
     /// answer than a 500.
-    pub async fn payload(&self) -> VersionPayload {
+    pub async fn payload(&self, schema_version: i64) -> VersionPayload {
         if self.is_stale().await {
             self.refresh().await;
         }
@@ -92,8 +106,11 @@ impl ReleaseCache {
             latest: cached.release.clone(),
             update_available,
             checked_at: cached.checked_at,
-            schema_version: crate::db::SCHEMA_VERSION,
-            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            schema_version,
+            capabilities: capabilities_for(schema_version)
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
         }
     }
 
@@ -167,7 +184,10 @@ mod tests {
             update_available: false,
             checked_at: None,
             schema_version: crate::db::SCHEMA_VERSION,
-            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            capabilities: SCHEMA_2_CAPABILITIES
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"current\":\"0.1.0\""));
@@ -187,7 +207,10 @@ mod tests {
             update_available: true,
             checked_at: Some(chrono::Utc::now()),
             schema_version: crate::db::SCHEMA_VERSION,
-            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
+            capabilities: SCHEMA_2_CAPABILITIES
+                .iter()
+                .map(|c| c.to_string())
+                .collect(),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"tag\":\"v0.2.0\""));

@@ -1619,6 +1619,40 @@ pub async fn set_pull_cursor(store: &Store, project_id: Uuid, cursor: &str) -> R
     Ok(())
 }
 
+/// What the server last said it could hold, verbatim.
+///
+/// Cached so the probe runs at most once per drain cycle rather than once per
+/// item, and compared as an opaque string: a change of any kind is a reason to
+/// look again at what is blocked, and interpreting the value is the caller's
+/// job (FR-418).
+pub async fn server_capability(store: &Store, project_id: Uuid) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT server_capability FROM sync_meta WHERE project_id = ?1")
+        .bind(project_id.to_string())
+        .fetch_optional(store.pool())
+        .await?;
+    Ok(row.and_then(|r| {
+        r.try_get::<Option<String>, _>("server_capability")
+            .ok()
+            .flatten()
+    }))
+}
+
+pub async fn set_server_capability(
+    store: &Store,
+    project_id: Uuid,
+    capability: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO sync_meta (project_id, server_capability) VALUES (?1, ?2)
+         ON CONFLICT(project_id) DO UPDATE SET server_capability = ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(capability)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
 /// Seal a session's termination, durably, before anything is acknowledged
 /// (FR-240 clause 1, D22).
 ///

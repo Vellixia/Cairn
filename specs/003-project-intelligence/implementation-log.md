@@ -666,33 +666,99 @@ what convergence means.
 additively. It was written here rather than in Phase 11 because `db::SCHEMA_VERSION` existed the
 moment migration 2 was registered, and an unused constant is a worse record than a used one.
 
+### Checkpoint J — Phase 11 (T106–T113) complete: mixed-version recovery
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` green against a real PostgreSQL, 0 failures |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+| Also closed | T137, whose subject is the reverse direction and belongs with this test file |
+
+**What "an older server" had to mean before any of this could be tested**
+
+A server is older because of the schema its database has **applied**, not because
+of the binary that applied it. So `cairn-server` gained `--max-schema-version`,
+which is an ordinary staged-rollout control — the code ships first, the
+migration runs when the operator is ready — and `GET /api/version` now reports
+`db::applied_version` rather than the compiled-in maximum. A held-back
+deployment therefore advertises what it really has, and the test fixture's
+"older server" is the real product running one migration short rather than a
+mock of one.
+
+`Server::start_at_schema` gives that server a database of its own, because a
+schema is a property of a database and there is no such thing as downgrading the
+shared one. `Server::upgraded` runs the migration against the same data and
+takes ownership of the database with it.
+
+**Three defects found by running the evidence**
+
+1. **The background worker would never have noticed the upgrade.** `run_worker`
+   skips a project whose `pending` count is zero, and retained work is
+   deliberately not counted as pending — so a project holding *only* retained
+   work never entered a drain again, never probed, and would have waited
+   forever while `sync status` told the user the work "is delivered
+   automatically once the server is upgraded". The first end-to-end test did not
+   catch it because it called `cairn sync now`, which routes around the worker.
+   `the_background_worker_delivers_retained_work_after_an_upgrade` runs no
+   command after the upgrade at all.
+
+2. **Importing a relation re-queued it.** `record_relation_tx` enqueued
+   unconditionally, so a peer's relation arriving, being recorded as a no-op,
+   and going straight back out was a loop with nothing to stop it: the
+   idempotency key covers the payload and `decided_at` moved on every pass. The
+   enqueue now follows the write, and the payload carries the row's own
+   `decided_at` rather than a second `now()`.
+
+3. **A schema-1 server could not store any memory at all.** `upsert_memory`
+   names the Feature 003 columns, which a schema-1 database does not have, so
+   every memory — including a plain Feature 001 one — failed with a hard SQL
+   error rather than a rejection the daemon could act on. There is now a
+   schema-1 branch that writes the Feature 001 columns only, reached solely by
+   memories whose Feature 003 fields are all at their defaults.
+
+**The refusal test is about meaning, not presence**
+
+Every memory payload carries all seven Feature 003 fields, because the payload
+builder does not vary its shape. Refusing on presence would refuse every memory
+and turn SC-326 — 100% of the Feature 001 payload delivered throughout — into
+its opposite. `carries_meaning` asks instead whether accepting the memory would
+**discard** something: a `topic_key` that is a string, an `importance` other
+than `normal`, a `pinned` that is true, a verification state other than
+`unverified`, a `distinct_origin_count` above one. One distinct origin is the
+memory's own session and says nothing a schema-1 server would lose.
+
+**What a blocked row records**
+
+`blocked_reason` is the class (`unknown_entity_type`, `unknown_field`,
+`schema_older`), `blocked_at_capability` is what the server said it could do at
+the time, and `last_error` is the sentence naming the missing table or column.
+The class drives the release; the sentence is what someone diagnosing an
+unexpected hold actually needs.
+
+A memory can be waiting on **either** of two capabilities — a subject identity
+or a verification — so `ENTITY_CAPABILITIES` lists both for it and releases only
+when the server can hold both. Releasing on one would put an attested memory
+back in front of a server that still has no column for it.
+
 ## Where the run stands
 
-**106 of 148 tasks complete**, each with its named evidence passing.
+**114 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
-| 1 Setup | T001–T005 | complete |
-| 2 Foundational | T006–T017 | complete |
-| 3 Local migration | T018–T023 | complete |
-| 4 Canonical knowledge | T024–T043 | complete |
-| 5 Evidence & authority | T044–T059 | complete |
-| 6 Drift | T060–T064 | complete |
-| 7 Evidence-aware tasks | T065–T075 | complete |
-| 8 Minimum-safe context | T076–T085 | complete |
-| 9 Compression-safe continuity | T086–T095 | complete |
-| 10 Multi-device sync | T096–T105 | complete |
-| 11 Mixed-version recovery | T106–T113 | T110 done; T106–T109, T111–T113 open |
+| 1–10 | T001–T105 | complete |
+| 11 Mixed-version recovery | T106–T113 | complete |
 | 12 Reusable patterns | T114–T124 | not started |
 | 13 Agent surface | T125–T131 | not started |
-| 14 Privacy & compatibility evidence | T132–T138 | not started |
+| 14 Privacy & compatibility evidence | T132–T138 | T137 done; T132–T136, T138 open |
 | 15 Corpus & performance | T139–T143 | not started |
 | 16 Convergence & release | T144–T148 | not started |
 
 ### How to run the server suite
 
-Every US7 test skips silently without a database, which is how a whole phase's evidence can appear
-to pass. It does not skip on CI, and it must not be allowed to skip here either:
+Every US7 test skips silently without a database, which is how a whole phase's
+evidence can appear to pass. It does not skip on CI, and it must not be allowed
+to skip here either:
 
 ```
 colima start
@@ -702,25 +768,24 @@ docker run -d --name cairn-test-pg \
 export CAIRN_TEST_DATABASE_URL=postgres://cairn:cairn@localhost:5433/cairn
 ```
 
-The image, port and credentials match `.github/workflows/ci.yml`. Without the variable the suite
-reports ~935 passing and proves nothing about US7.
+The image, port and credentials match `.github/workflows/ci.yml`. Without the
+variable the suite reports ~935 passing and proves nothing about US7.
 
 ## Next action
 
-**Phase 11 — mixed-version recovery, starting at T106.** T110 is already done. In order:
+**Phase 12 — reusable cross-project patterns, starting at T114.** No PostgreSQL
+is needed for it; the container stays up for T138 and T141.
 
-1. **T106** — `tests/knowledge/merge/blocked_recovery/`: the capability-refusal scenario, its
-   upgrade step, and the expected delivery outcome. The directory exists and is empty.
-2. **T107** — `sync_degradation.rs::no_futile_retry` and `::never_permanently_failed`, which must
-   fail for the right reason before T108 and T109 land.
-3. **T108** — the `blocked` outbox state: `mark_blocked`, `claim` excluding it by an explicit
-   predicate, `release_blocked` preserving the original idempotency key and payload.
-4. **T109** — classify rejections: content stays `failed`, capability becomes `blocked`.
-5. **T111** — the capability probe against `GET /api/version`, cached in
-   `sync_meta.server_capability`, releasing blocked rows when the capability appears.
-6. **T112, T113** — the report, then the end-to-end run against a schema-1 and then a schema-2
-   server.
+1. **T114, T115** — the `patterns/{promote,refuse}` and
+   `patterns/{independence,counterexample}` corpora. `patterns/` exists with the
+   T005 adversarial privacy cases beside it.
+2. **T116, T117** — `privacy_promotion.rs` over the T005 corpus, and
+   `us9_counterexamples.rs`'s two negatives.
+3. **T118, T119** — `crates/cairn-store/src/patterns.rs`: the repository with
+   **no `project_id`**, then the ten-check gate in its fixed order.
+4. **T120** — `pattern_applications` and the staged trust ladder, with
+   `contested` evaluated **before** `validated`.
+5. **T121–T124** — suggestion in the briefing, deletion and origin, the CLI, and
+   the two end-to-end tests.
 
-For T113's schema-1 half, note that the server applies migrations on start from a compiled-in list;
-running an "older" server means running one whose list stops at 1, so the test needs a way to hold
-the database at version 1 rather than a second binary.
+`contracts/patterns.md` governs the phase and has **not** been read in this run.

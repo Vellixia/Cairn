@@ -1,0 +1,42 @@
+{
+  "description": "A `convention` is transferable only when it is not bound to project configuration \u2014 the gate reads its topic key to decide, rather than the type alone (check 6).",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "cairn",
+        "evidence_facts": 1,
+        "local_only": false,
+        "subject_reconciliation": "settled",
+        "type": "convention",
+        "topic_key": null
+      },
+      "candidate": {
+        "title": "Name a migration after what it does, not when it ran",
+        "problem": "Timestamp-named migrations make review order meaningless.",
+        "signals": [
+          "migration named only by timestamp",
+          "reviewer cannot tell what a migration does"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The generator's default name carries no intent.",
+        "approach": "Rename migrations to state their effect and keep the ordinal prefix.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": true,
+      "trust": "sanitized"
+    }
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "description": "The check that earns its place. \"The production database is PostgreSQL\" is true, verified, evidence-backed \u2014 and says nothing any other project can use. A pattern describes a problem and its resolution, never a project's configuration.",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "cairn",
+        "evidence_facts": 1,
+        "local_only": false,
+        "subject_reconciliation": "settled",
+        "type": "fact"
+      },
+      "candidate": {
+        "title": "The production database is PostgreSQL",
+        "problem": "Knowing which database production runs.",
+        "signals": [
+          "which database does production use",
+          "database backend question"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The project chose PostgreSQL.",
+        "approach": "Use PostgreSQL.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": false,
+      "refusal": "not_transferable",
+      "partial_pattern_written": false,
+      "echoes_offending_value": false
+    }
+  }
+}

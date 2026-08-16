@@ -1,0 +1,37 @@
+{
+  "description": "Project B saw the same symptom from a different cause. The pattern is retained, nothing is decreased, and its trust becomes `contested` \u2014 which is evaluated **before** `validated`, so a pattern carrying both a success and a counterexample reports both sides (FR-404, FR-405, D64).",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "B",
+          "sessions": 1,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        },
+        {
+          "project": "C",
+          "sessions": 1,
+          "outcome": "not_applicable",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false,
+          "alternative_cause": "A VPN route collision produced the same symptom."
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "trust": "contested",
+      "qualifying_successes": 1,
+      "counterexamples": 1,
+      "deleted": false,
+      "successes_decreased": false,
+      "suggestion_carries_alternative_cause": true,
+      "suggestion_carries_check_this_first": true
+    }
+  }
+}

@@ -972,6 +972,11 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
     let mut snap = snapshot().await?;
     let owed = boundary_owed().await;
     let status = client::send(&Request::Status { cwd: cwd() }).await.ok();
+    // Sync degradation belongs in doctor: it is a condition of the
+    // installation, it resolves without the developer doing anything, and
+    // discovering it only through a count in `sync status` would make retained
+    // work look like a queue that stopped moving (FR-415, FR-499).
+    let sync = client::send(&Request::SyncStatus { cwd: cwd() }).await.ok();
 
     // Doctor is where an agent upgrade is noticed. Re-recording each connected
     // agent's detected version discards observation evidence that belonged to
@@ -1019,6 +1024,10 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             .as_ref()
             .map(|s| s["handoff_synthesis_failures"].clone())
             .unwrap_or(json!([])),
+        "sync_degradation": sync
+            .as_ref()
+            .map(|s| s["degradation"].clone())
+            .unwrap_or(json!(null)),
     });
     text.push_str(&format!(
         "core        cli {} · daemon {} · schema {} · {}\n\n",
@@ -1034,6 +1043,23 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             "daemon unreachable"
         }
     ));
+    if let Some(d) = core["sync_degradation"].as_object() {
+        text.push_str(&format!(
+            "sync        {} item(s) retained for a server that cannot hold them yet\n\
+                          waiting for: {}\n\
+                          {}\n\n",
+            d.get("blocked").and_then(|v| v.as_i64()).unwrap_or(0),
+            d.get("missing_capabilities")
+                .and_then(|v| v.as_array())
+                .map(|a| a
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default(),
+            d.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
+        ));
+    }
 
     let targets: Vec<AgentId> = match agent {
         Some(a) => vec![a],

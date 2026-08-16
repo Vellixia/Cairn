@@ -835,10 +835,67 @@ impl Drop for Mcp {
 /// rather than passing vacuously.
 pub struct Server {
     pub base: String,
+    /// The database this server is serving.
+    ///
+    /// Usually the shared test database. A server pinned to an older schema
+    /// gets one of its own, because a schema is a property of the database and
+    /// a "downgrade" of the shared one is not a thing that exists.
+    pub database_url: String,
+    /// True when this server created its database and should drop it.
+    owns_database: bool,
     child: std::process::Child,
 }
 
 impl Server {
+    /// A server pinned below its own build's schema, on a database of its own
+    /// (T113).
+    ///
+    /// What makes a server "older" is the schema it applied, not the binary
+    /// that applied it, so this is an honest older peer rather than a mock of
+    /// one: the same code paths run, and they refuse the work they have no
+    /// tables for.
+    ///
+    /// Call [`Server::upgraded`] to run the migration against the same data.
+    pub fn start_at_schema(max_version: i64) -> Option<Self> {
+        let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let name = format!("cairn_schema_{}", unique());
+        create_database(&admin, &name);
+        let url = replace_database(&admin, &name);
+        Some(Self::spawn(&url, max_version, true))
+    }
+
+    /// The same database, served by a server that applies every migration.
+    ///
+    /// The upgrade an operator performs: the data stays, the schema moves.
+    ///
+    /// Ownership of the database moves with it, so dropping the old server —
+    /// which is what an upgrade does — does not take the data with it.
+    pub fn upgraded(&mut self) -> Self {
+        let owned = std::mem::take(&mut self.owns_database);
+        Self::spawn(&self.database_url, i64::MAX, owned)
+    }
+
+    /// One scalar count against this server's database.
+    pub fn count(&self, sql: &str) -> i64 {
+        let url = self.database_url.clone();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            let n: i64 = sqlx::query_scalar(&sql)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("query {sql:?} failed: {e}"));
+            pool.close().await;
+            n
+        })
+    }
+
     /// `None` when no test database is configured.
     // The child is owned by `Server` and reaped in `Drop`; it must outlive
     // `start`, which is exactly what clippy's lint cannot see.
@@ -853,17 +910,21 @@ impl Server {
         // sandboxes can be handed the same port between closing the probe and
         // the server binding it — and the loser exits instead of serving.
         // Retrying with a fresh port is the whole remedy.
+        Some(Self::spawn(&url, i64::MAX, false))
+    }
+
+    fn spawn(url: &str, max_version: i64, owns_database: bool) -> Self {
         let mut last = String::new();
         for _ in 0..4 {
-            match Self::try_start(&url) {
-                Ok(server) => return Some(server),
+            match Self::try_start(url, max_version, owns_database) {
+                Ok(server) => return server,
                 Err(e) => last = e,
             }
         }
         panic!("cairn-server would not start: {last}");
     }
 
-    fn try_start(url: &str) -> Result<Self, String> {
+    fn try_start(url: &str, max_version: i64, owns_database: bool) -> Result<Self, String> {
         let port = {
             let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
             let port = probe.local_addr().expect("addr").port();
@@ -877,6 +938,7 @@ impl Server {
         // connections each exhausts it once enough of them run in parallel —
         // the later servers then never come up, failing tests that have nothing
         // wrong with them.
+        let schema = max_version.to_string();
         let mut child = Command::new(binary("cairn-server"))
             .args([
                 "--addr",
@@ -885,6 +947,8 @@ impl Server {
                 url,
                 "--max-connections",
                 "4",
+                "--max-schema-version",
+                &schema,
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -899,7 +963,12 @@ impl Server {
                 return Err(format!("cairn-server at {base} exited early ({status})"));
             }
             if ureq_get(&format!("{base}/api/health")).is_some() {
-                return Ok(Self { base, child });
+                return Ok(Self {
+                    base,
+                    database_url: url.to_string(),
+                    owns_database,
+                    child,
+                });
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
@@ -915,7 +984,7 @@ impl Server {
     /// server that stored something and merely declined to serve it back
     /// (SC-119, SC-133).
     pub fn dump(&self) -> String {
-        let url = std::env::var("CAIRN_TEST_DATABASE_URL").expect("a test database");
+        let url = self.database_url.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1052,7 +1121,63 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if self.owns_database {
+            drop_database(&self.database_url);
+        }
     }
+}
+
+/// Swap the database name in a PostgreSQL URL.
+fn replace_database(url: &str, name: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((prefix, tail)) => match tail.split_once('?') {
+            Some((_, query)) => format!("{prefix}/{name}?{query}"),
+            None => format!("{prefix}/{name}"),
+        },
+        None => url.to_string(),
+    }
+}
+
+fn create_database(admin_url: &str, name: &str) {
+    run_sql(admin_url, &format!("CREATE DATABASE \"{name}\""));
+}
+
+/// Best effort: a database still holding a connection cannot be dropped, and
+/// the container these tests run against is discarded anyway.
+fn drop_database(url: &str) {
+    let Some((prefix, name)) = url.rsplit_once('/') else {
+        return;
+    };
+    let name = name.split('?').next().unwrap_or(name).to_string();
+    let admin = format!("{prefix}/postgres");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async move {
+        if let Ok(pool) = sqlx::PgPool::connect(&admin).await {
+            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+                .execute(&pool)
+                .await;
+            pool.close().await;
+        }
+    });
+}
+
+fn run_sql(url: &str, sql: &str) {
+    let (url, sql) = (url.to_string(), sql.to_string());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async move {
+        let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+        sqlx::query(&sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        pool.close().await;
+    });
 }
 
 fn split_response(raw: &str) -> (serde_json::Value, Vec<(String, String)>) {

@@ -24,6 +24,8 @@ pub struct AppState {
     pub releases: version::ReleaseCache,
     /// Whether the session cookie may only travel over HTTPS.
     pub secure_cookies: bool,
+    /// The highest migration this database has applied (FR-415).
+    pub schema_version: i64,
 }
 
 impl AppState {
@@ -83,6 +85,14 @@ struct Args {
     /// Display name for the environment-defined account.
     #[arg(long, env = "CAIRN_ADMIN_DISPLAY_NAME", default_value = "Admin")]
     admin_display_name: String,
+    /// Highest migration to apply, for a staged rollout.
+    ///
+    /// The binary ships first and the schema moves when the operator is ready.
+    /// A held-back deployment advertises the capabilities of the schema it
+    /// actually applied, so a peer queues only work this server can hold and
+    /// retains the rest until the migration runs (FR-415).
+    #[arg(long, env = "CAIRN_MAX_SCHEMA_VERSION", default_value_t = db::SCHEMA_VERSION)]
+    max_schema_version: i64,
 }
 
 #[tokio::main]
@@ -91,8 +101,24 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     // Migrations run on start, so a fresh deployment needs no separate step.
-    let pool = db::connect(&args.database_url, args.max_connections).await?;
+    let pool = db::connect(
+        &args.database_url,
+        args.max_connections,
+        args.max_schema_version,
+    )
+    .await?;
     seed_admin(&pool, &args).await?;
+
+    // What the database actually holds, not what this binary could apply. A
+    // held-back deployment must advertise the smaller answer.
+    let schema_version = db::applied_version(&pool).await?;
+    if schema_version < db::SCHEMA_VERSION {
+        tracing::warn!(
+            schema_version,
+            binary_supports = db::SCHEMA_VERSION,
+            "running below this build's schema; peers will retain work this server cannot hold"
+        );
+    }
 
     let secure_cookies = args
         .web_origin
@@ -107,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         pool,
         secure_cookies,
         releases: version::ReleaseCache::new(),
+        schema_version,
     };
 
     // A credentialed browser request cannot be paired with wildcard headers or

@@ -1,0 +1,43 @@
+{
+  "description": "The other way. `remote_cairn` means another machine checked it against evidence this machine cannot see, so this machine cannot vouch for it and must not export it as though it could (FR-368, SC-328).",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "remote_cairn",
+        "evidence_facts": 1,
+        "local_only": false,
+        "subject_reconciliation": "settled",
+        "type": "procedure"
+      },
+      "candidate": {
+        "title": "Docker cannot allocate a non-overlapping bridge network",
+        "problem": "Container creation fails because Docker cannot allocate a bridge subnet that does not overlap an existing one.",
+        "signals": [
+          "could not find an available non-overlapping ipv4 address pool",
+          "docker bridge network create failure"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The daemon's default-address-pools are fully allocated.",
+        "approach": "Expand default-address-pools in the daemon configuration and restart.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": false,
+      "refusal": "imported_not_sufficient",
+      "partial_pattern_written": false,
+      "echoes_offending_value": false
+    }
+  }
+}

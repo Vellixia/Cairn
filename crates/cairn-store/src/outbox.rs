@@ -114,6 +114,11 @@ pub async fn claim(store: &Store, project_id: Uuid, limit: i64) -> Result<Vec<(U
           WHERE id IN (
               SELECT id FROM outbox
                WHERE project_id = ?2
+                 -- Spelled out rather than left implied by the two states
+                 -- below. A `blocked` row must never be claimed, and a
+                 -- predicate that says so survives someone adding a third
+                 -- claimable state (FR-418).
+                 AND state != 'blocked'
                  AND (state = 'pending'
                       OR (state = 'in_flight'
                           AND (claimed_at IS NULL OR claimed_at < ?3)))
@@ -197,6 +202,117 @@ pub async fn mark_failed(store: &Store, id: Uuid, error: &str) -> Result<()> {
     Ok(())
 }
 
+/// Work this server cannot hold yet (FR-418).
+///
+/// Neither a failure nor a delivery. The row keeps its idempotency key and its
+/// payload, records the refusal class and the capability the server had at the
+/// time, and is **not** claimable — so it is retried zero times against a
+/// server known to lack the capability, rather than burning a drain cycle each
+/// tick on work that cannot succeed.
+///
+/// The attempt counter is rolled back, because claiming a row that could never
+/// have been delivered is not an attempt at delivering it. Leaving it counted
+/// would make `attempts` read as futile retries when there were none.
+pub async fn mark_blocked(
+    store: &Store,
+    id: Uuid,
+    reason: &str,
+    at_capability: &str,
+    detail: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE outbox
+            SET state = 'blocked', claimed_at = NULL,
+                attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                blocked_reason = ?1, blocked_at_capability = ?2, last_error = ?3
+          WHERE id = ?4",
+    )
+    .bind(reason)
+    .bind(at_capability)
+    // What the server actually said. `blocked_reason` is the class; this is
+    // the sentence that names the missing table or column, which is what
+    // someone diagnosing an unexpected hold needs.
+    .bind(detail)
+    .bind(id.to_string())
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// Return blocked rows the server can now hold to the ordinary queue.
+///
+/// `entity_types` names what the upgraded server can hold. A row whose kind is
+/// still unsupported **stays blocked**: releasing everything on any capability
+/// change would put work back in front of a server that still cannot take it,
+/// and the futile retry the state exists to prevent would happen anyway.
+///
+/// The idempotency key and the payload are untouched, so the delivery that
+/// follows is **the one that was waiting** rather than a second one. The
+/// server's `sync_state` recognises the key and delivery stays exactly-once
+/// with no change to the claim mechanism (SC-331).
+pub async fn release_blocked(
+    store: &Store,
+    project_id: Uuid,
+    entity_types: &[OutboxEntityType],
+) -> Result<u64> {
+    let mut released = 0;
+    for entity_type in entity_types {
+        let n = sqlx::query(
+            "UPDATE outbox
+                SET state = 'pending', blocked_reason = NULL, blocked_at_capability = NULL
+              WHERE project_id = ?1 AND state = 'blocked' AND entity_type = ?2",
+        )
+        .bind(project_id.to_string())
+        .bind(entity_type.as_str())
+        .execute(store.pool())
+        .await?
+        .rows_affected();
+        released += n;
+    }
+    Ok(released)
+}
+
+/// Blocked rows, and the capability gap each is waiting on.
+pub async fn blocked(store: &Store, project_id: Uuid) -> Result<Vec<BlockedItem>> {
+    let rs = sqlx::query(
+        "SELECT entity_type, entity_id, blocked_reason, blocked_at_capability, attempts
+           FROM outbox
+          WHERE project_id = ?1 AND state = 'blocked'
+          ORDER BY created_at",
+    )
+    .bind(project_id.to_string())
+    .fetch_all(store.pool())
+    .await?;
+    rs.iter()
+        .map(|r| {
+            Ok(BlockedItem {
+                entity_type: rows::enum_val(r, "entity_type")?,
+                entity_id: rows::uuid(r, "entity_id")?,
+                reason: r
+                    .try_get::<Option<String>, _>("blocked_reason")?
+                    .unwrap_or_default(),
+                at_capability: r
+                    .try_get::<Option<String>, _>("blocked_at_capability")?
+                    .unwrap_or_default(),
+                attempts: r.try_get("attempts")?,
+            })
+        })
+        .collect()
+}
+
+/// One item the server could not hold.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlockedItem {
+    pub entity_type: cairn_core::domain::OutboxEntityType,
+    pub entity_id: Uuid,
+    /// `unknown_entity_type`, `unknown_field` or `schema_older`.
+    pub reason: String,
+    /// What the server reported it could do when the work was refused.
+    pub at_capability: String,
+    /// Always zero for a row that was never retried, which is the point.
+    pub attempts: i64,
+}
+
 /// A transient failure: release the claim so the next drain retries it.
 ///
 /// The attempt was already counted when the row was claimed.
@@ -232,6 +348,20 @@ pub async fn counts(store: &Store, project_id: Uuid) -> Result<(i64, i64)> {
     .fetch_one(store.pool())
     .await?;
     Ok((pending, failed))
+}
+
+/// Work retained for a server that cannot hold it yet.
+///
+/// Reported separately from `pending` and from `failed`, because it is neither:
+/// counting it as pending would make the queue look stuck, and counting it as
+/// failed would tell the user work was lost that is in fact waiting (FR-415).
+pub async fn blocked_count(store: &Store, project_id: Uuid) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox WHERE project_id = ?1 AND state = 'blocked'",
+    )
+    .bind(project_id.to_string())
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub async fn failures(store: &Store, project_id: Uuid) -> Result<Vec<SyncFailure>> {

@@ -1,0 +1,43 @@
+{
+  "description": "The source **is** verified \u2014 by the agent's own attestation. This is one of the two ways an agent could launder its own claim into shared knowledge: attest a fact, watch it reach `verified`, promote it. Promotion requires a deterministic check Cairn ran itself (FR-370, SC-328).",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "attested",
+        "evidence_facts": 1,
+        "local_only": false,
+        "subject_reconciliation": "settled",
+        "type": "procedure"
+      },
+      "candidate": {
+        "title": "Docker cannot allocate a non-overlapping bridge network",
+        "problem": "Container creation fails because Docker cannot allocate a bridge subnet that does not overlap an existing one.",
+        "signals": [
+          "could not find an available non-overlapping ipv4 address pool",
+          "docker bridge network create failure"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The daemon's default-address-pools are fully allocated.",
+        "approach": "Expand default-address-pools in the daemon configuration and restart.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": false,
+      "refusal": "attested_not_sufficient",
+      "partial_pattern_written": false,
+      "echoes_offending_value": false
+    }
+  }
+}

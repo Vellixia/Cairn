@@ -1799,6 +1799,18 @@ async fn sync(action: &SyncAction) -> Result<Output, WireError> {
                     f.entity_type, f.entity_id, f.error
                 ));
             }
+            // Retained work is reported on its own line, never folded into
+            // `Failed`: it is waiting, not lost, and saying so is the whole
+            // point of the state (FR-415).
+            if let Some(d) = &s.degradation {
+                text.push_str(&format!(
+                    "Blocked      {} (waiting for: {})\n  server: {}\n  {}\n",
+                    d.blocked,
+                    d.missing_capabilities.join(", "),
+                    d.server_capability,
+                    d.note
+                ));
+            }
             Ok(Output::with(v, text))
         }
         SyncAction::Now => {

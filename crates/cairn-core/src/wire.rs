@@ -158,6 +158,25 @@ pub mod codes {
         DUPLICATE_PATTERN,
     ];
 
+    // What a server says when it cannot hold the work — as opposed to when it
+    // will not (`contracts/privacy-sync.md` §Mixed versions, D81).
+    //
+    // These are **server** codes, and deliberately not part of
+    // `INTELLIGENCE_CODES`: they never reach a CLI exit status. They classify a
+    // rejection so the daemon can tell "upgrade the server and this delivers"
+    // from "this will never be acceptable", which is the difference between
+    // retained work and lost work (FR-418).
+    pub const UNKNOWN_ENTITY_TYPE: &str = "unknown_entity_type";
+    pub const UNKNOWN_FIELD: &str = "unknown_field";
+    pub const SCHEMA_OLDER: &str = "schema_older";
+
+    /// The refusals that mean *not yet*, rather than *never*.
+    ///
+    /// A rejection outside this set is a content rejection and stays a
+    /// permanent failure exactly as it is today — which is what stops a privacy
+    /// refusal from being retained as a pending delivery.
+    pub const CAPABILITY_REFUSALS: &[&str] = &[UNKNOWN_ENTITY_TYPE, UNKNOWN_FIELD, SCHEMA_OLDER];
+
     /// Feature 003 codes that are **not failures**.
     ///
     /// Each rides an `ok: true` envelope in a `notes` array, because the
@@ -1307,6 +1326,26 @@ pub struct SyncStatusPayload {
     pub failed: i64,
     pub last_success_at: Option<DateTime<Utc>>,
     pub failures: Vec<SyncFailure>,
+    /// Work retained for a server that cannot hold it yet (FR-415, FR-418).
+    ///
+    /// Reported apart from `pending` and from `failed` because it is neither.
+    /// Defaulted so a Feature 001 consumer reading an older payload still
+    /// parses, and so this payload still satisfies an older consumer.
+    #[serde(default)]
+    pub degradation: Option<SyncDegradation>,
+}
+
+/// What a server cannot hold, and what happens next.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncDegradation {
+    pub blocked: i64,
+    /// What the server last said it could do.
+    pub server_capability: String,
+    /// The capabilities the retained work is waiting for, named.
+    pub missing_capabilities: Vec<String>,
+    /// One line for a person: what is still syncing, and what happens on
+    /// upgrade. Degradation must never read as data loss (FR-415).
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

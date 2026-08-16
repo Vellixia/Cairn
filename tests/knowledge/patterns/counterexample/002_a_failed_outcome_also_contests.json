@@ -1,0 +1,24 @@
+{
+  "description": "`failed` and `not_applicable` are both counterexamples: the approach was tried and did not resolve it, or it did not apply. Either way the pattern must stop presenting itself as settled.",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "C",
+          "sessions": 1,
+          "outcome": "failed",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "trust": "contested",
+      "counterexamples": 1,
+      "deleted": false
+    }
+  }
+}

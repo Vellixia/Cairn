@@ -1,0 +1,43 @@
+{
+  "description": "The memory was marked never to travel. A pattern derived from it would be that memory travelling under another name.",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "cairn",
+        "evidence_facts": 1,
+        "local_only": true,
+        "subject_reconciliation": "settled",
+        "type": "procedure"
+      },
+      "candidate": {
+        "title": "Docker cannot allocate a non-overlapping bridge network",
+        "problem": "Container creation fails because Docker cannot allocate a bridge subnet that does not overlap an existing one.",
+        "signals": [
+          "could not find an available non-overlapping ipv4 address pool",
+          "docker bridge network create failure"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The daemon's default-address-pools are fully allocated.",
+        "approach": "Expand default-address-pools in the daemon configuration and restart.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": false,
+      "refusal": "local_only_memory",
+      "partial_pattern_written": false,
+      "echoes_offending_value": false
+    }
+  }
+}

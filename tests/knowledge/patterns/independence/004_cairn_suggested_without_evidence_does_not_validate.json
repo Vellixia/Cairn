@@ -1,0 +1,26 @@
+{
+  "description": "An agent read Cairn's own suggestion and agreed with it. That is Cairn confirming Cairn. It counts as an application and not as a validation; with deterministic local evidence it would count as both (FR-403).",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "B",
+          "sessions": 1,
+          "outcome": "resolved",
+          "discovery": "cairn_suggested",
+          "evidence": false,
+          "is_origin": false
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "rows": 1,
+      "applications": 1,
+      "distinct_projects_applied": 1,
+      "qualifying_successes": 0,
+      "trust": "sanitized"
+    }
+  }
+}

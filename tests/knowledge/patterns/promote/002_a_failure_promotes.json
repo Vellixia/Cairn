@@ -1,0 +1,41 @@
+{
+  "description": "A `failure` memory is transferable for the same reason a `procedure` is: it describes something going wrong and how it was resolved, not what this project happens to be configured with.",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "cairn",
+        "evidence_facts": 1,
+        "local_only": false,
+        "subject_reconciliation": "settled",
+        "type": "failure"
+      },
+      "candidate": {
+        "title": "A test suite deadlocks on a pool query inside an open transaction",
+        "problem": "A query taken from the pool while a transaction is held blocks until the pool times out.",
+        "signals": [
+          "pool timed out while waiting for connection",
+          "test hangs then fails far from the cause"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The code path takes a second connection while holding the first.",
+        "approach": "Pass the open connection down instead of reaching for the pool.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": true,
+      "trust": "sanitized"
+    }
+  }
+}

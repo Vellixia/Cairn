@@ -74,6 +74,7 @@ pub async fn record_relation_tx(
     if r.kind == RelationKind::Supersedes {
         crate::repo::clear_pin_tx(&mut *tx, to).await?;
     }
+    let decided_at = rows::now_text();
     let result = sqlx::query(
         "INSERT OR IGNORE INTO memory_relations
             (from_memory_id, to_memory_id, kind, project_id, decided_by_session,
@@ -85,38 +86,54 @@ pub async fn record_relation_tx(
     .bind(r.kind.as_str())
     .bind(r.project_id.to_string())
     .bind(r.decided_by_session.to_string())
-    .bind(rows::now_text())
+    .bind(&decided_at)
     .bind(r.basis.as_str())
     .bind(r.basis_evidence_id.map(|id| id.to_string()))
     .bind(r.rationale)
     .execute(&mut *tx)
     .await?;
+    let wrote = result.rows_affected() > 0;
 
-    // The decision itself travels, stripped of its evidence identifier and its
-    // rationale. Importing the *decision* is what makes a supersession decided
-    // on another machine finally land here — the defect research B2 found
-    // (FR-413, D67, R5).
-    // The policy is read here rather than threaded through every caller: the
-    // project row already holds it, and this transaction already has it open.
-    let policy = crate::outbox::policy_for_project_tx(&mut *tx, r.project_id).await?;
-    crate::outbox::enqueue(
-        &mut *tx,
-        policy,
-        r.project_id,
-        cairn_core::domain::OutboxEntityType::MemoryRelation,
-        crate::outbox::relation_identity(from, to, r.kind.as_str()),
-        cairn_core::domain::OutboxOperation::Upsert,
-        &crate::outbox::relation_payload(
-            from,
-            to,
-            r.kind.as_str(),
-            r.decided_by_session,
-            &rows::now_text(),
-            r.basis.as_str(),
-        ),
-    )
-    .await?;
-    Ok(result.rows_affected() > 0)
+    // Only a decision this store actually recorded is queued.
+    //
+    // Recording an existing decision is a no-op, and so is sending it. Queuing
+    // regardless would echo: a peer's relation arrives, `import_relation`
+    // records it, the record is already there — and a fresh outbox row goes
+    // back to the server, which serves it to the peer again, forever. The
+    // idempotency key covers the payload and `decided_at` moves every time, so
+    // even the key would not stop it (FR-413).
+    if wrote {
+        // The decision itself travels, stripped of its evidence identifier and
+        // its rationale. Importing the *decision* is what makes a supersession
+        // decided on another machine finally land here — the defect research B2
+        // found (FR-413, D67, R5).
+        //
+        // The policy is read here rather than threaded through every caller:
+        // the project row already holds it, and this transaction already has it
+        // open.
+        let policy = crate::outbox::policy_for_project_tx(&mut *tx, r.project_id).await?;
+        crate::outbox::enqueue(
+            &mut *tx,
+            policy,
+            r.project_id,
+            cairn_core::domain::OutboxEntityType::MemoryRelation,
+            crate::outbox::relation_identity(from, to, r.kind.as_str()),
+            cairn_core::domain::OutboxOperation::Upsert,
+            // The row's own `decided_at`, not a second `now()`. Two calls a
+            // microsecond apart would otherwise build two different payloads
+            // for one decision.
+            &crate::outbox::relation_payload(
+                from,
+                to,
+                r.kind.as_str(),
+                r.decided_by_session,
+                &decided_at,
+                r.basis.as_str(),
+            ),
+        )
+        .await?;
+    }
+    Ok(wrote)
 }
 
 fn relation_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Relation> {

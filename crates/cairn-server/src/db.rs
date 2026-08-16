@@ -15,25 +15,50 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
 
 /// The highest migration this build carries.
 ///
-/// What `GET /api/version` reports, and what a daemon compares its own work
-/// against before deciding whether the server can hold it (FR-415).
+/// Not what the server advertises: a deployment can be held at a lower schema
+/// deliberately, and what it can actually hold is the schema it **applied**.
+/// See [`applied_version`].
 pub const SCHEMA_VERSION: i64 = 2;
 
 /// The pool size a single server takes from PostgreSQL.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 
-pub async fn connect(url: &str, max_connections: u32) -> anyhow::Result<PgPool> {
+/// Connect, applying migrations up to `max_version`.
+///
+/// Holding the schema back while running a current binary is an ordinary
+/// staged-rollout position: the code ships first, the migration runs when the
+/// operator is ready. It is also the only honest way to exercise a server an
+/// upgraded peer has to cope with, because what makes a server "older" is the
+/// schema it applied and not the binary that applied it (FR-415).
+pub async fn connect(url: &str, max_connections: u32, max_version: i64) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(max_connections.max(1))
         .acquire_timeout(Duration::from_secs(10))
         .connect(url)
         .await?;
-    migrate(&pool).await?;
+    migrate(&pool, max_version).await?;
     Ok(pool)
 }
 
+/// The highest migration this database has actually applied.
+///
+/// What `GET /api/version` reports, and what a daemon compares its own work
+/// against before deciding whether the server can hold it. Reporting the
+/// compiled-in maximum instead would make a held-back deployment advertise
+/// tables it does not have (FR-415).
+pub async fn applied_version(pool: &PgPool) -> anyhow::Result<i64> {
+    Ok(
+        sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_migrations")
+            .fetch_one(pool)
+            .await?,
+    )
+}
+
 /// Apply migrations on start, so a fresh deployment needs no separate step.
-pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
+///
+/// Stops at `max_version`, which is [`SCHEMA_VERSION`] unless an operator held
+/// the deployment back.
+pub async fn migrate(pool: &PgPool, max_version: i64) -> anyhow::Result<()> {
     pool.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
              version    BIGINT PRIMARY KEY,
@@ -49,7 +74,7 @@ pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
             .await?;
 
     for (version, name, sql) in MIGRATIONS {
-        if *version <= current {
+        if *version <= current || *version > max_version {
             continue;
         }
         let mut tx = pool.begin().await?;

@@ -1,0 +1,24 @@
+{
+  "description": "The sibling of the case above, differing in exactly the way that matters. The agent was shown the pattern **and** collected deterministic evidence in its own project, which is confirmation rather than agreement.",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "B",
+          "sessions": 1,
+          "outcome": "resolved",
+          "discovery": "cairn_suggested",
+          "evidence": true,
+          "is_origin": false
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "rows": 1,
+      "qualifying_successes": 1,
+      "trust": "validated"
+    }
+  }
+}

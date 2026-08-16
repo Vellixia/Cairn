@@ -1,0 +1,26 @@
+{
+  "description": "Ten sessions in one project describing one incident. The unique key `(pattern_id, project_id, signal_digest)` is the whole anti-poisoning mechanism: they are one row, the distinct-project count is 1, and repetition has bought nothing (FR-402, SC-314).",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "A",
+          "sessions": 10,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "rows": 1,
+      "applications": 1,
+      "distinct_projects_applied": 1,
+      "qualifying_successes": 1,
+      "trust": "validated"
+    }
+  }
+}

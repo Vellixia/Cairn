@@ -1,0 +1,62 @@
+{
+  "description": "The same signals and the same root cause is the same pattern. The unique index on `(signal_digest, root_cause_digest)` makes this structural, so a race cannot produce what the check refuses.",
+  "input": {
+    "extra": {
+      "source": {
+        "state": "active",
+        "verification": "verified",
+        "verification_authority": "cairn",
+        "evidence_facts": 1,
+        "local_only": false,
+        "subject_reconciliation": "settled",
+        "type": "procedure"
+      },
+      "candidate": {
+        "title": "Docker cannot allocate a non-overlapping bridge network",
+        "problem": "Container creation fails because Docker cannot allocate a bridge subnet that does not overlap an existing one.",
+        "signals": [
+          "could not find an available non-overlapping ipv4 address pool",
+          "docker bridge network create failure"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The daemon's default-address-pools are fully allocated.",
+        "approach": "Expand default-address-pools in the daemon configuration and restart.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      },
+      "already_promoted": {
+        "title": "Docker cannot allocate a non-overlapping bridge network",
+        "problem": "Container creation fails because Docker cannot allocate a bridge subnet that does not overlap an existing one.",
+        "signals": [
+          "could not find an available non-overlapping ipv4 address pool",
+          "docker bridge network create failure"
+        ],
+        "applicability": [
+          "Docker bridge networking in use",
+          "the error names address-pool allocation",
+          "the configured default address pools are actually exhausted"
+        ],
+        "root_cause": "The daemon's default-address-pools are fully allocated.",
+        "approach": "Expand default-address-pools in the daemon configuration and restart.",
+        "constraints": [
+          "existing networks are not migrated to the new pool",
+          "verify the ranges are genuinely exhausted before changing daemon config"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "promoted": false,
+      "refusal": "duplicate_pattern",
+      "partial_pattern_written": false,
+      "echoes_offending_value": false
+    }
+  }
+}
