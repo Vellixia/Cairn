@@ -571,6 +571,14 @@ pub async fn rebuild_verification(
     .execute(store.pool())
     .await?;
 
+    // The **memory's** verification is a shared field, and the evidence behind
+    // it is not. Re-queuing the memory is what carries "this was verified, and
+    // here is what established it" to a peer; the runs and the facts stay here.
+    //
+    // Without this the outbox would keep the snapshot taken before the check,
+    // and a peer would render a verified memory as unverified indefinitely.
+    let _ = crate::repo::enqueue_memory_upsert(store, memory_id).await;
+
     Ok((state, authority))
 }
 
@@ -606,6 +614,11 @@ pub async fn set_verification(
     .bind(state.as_str())
     .execute(store.pool())
     .await?;
+
+    // Losing a verification travels for the same reason gaining one does: a
+    // peer still showing `remote_cairn verified` for a memory this machine now
+    // knows has drifted is being told something false.
+    let _ = crate::repo::enqueue_memory_upsert(store, memory_id).await;
     Ok(())
 }
 

@@ -4,8 +4,20 @@ use sqlx::postgres::PgPoolOptions;
 use sqlx::{Executor, PgPool};
 use std::time::Duration;
 
-pub const MIGRATIONS: &[(i64, &str, &str)] =
-    &[(1, "init", include_str!("../migrations/0001_init.sql"))];
+pub const MIGRATIONS: &[(i64, &str, &str)] = &[
+    (1, "init", include_str!("../migrations/0001_init.sql")),
+    (
+        2,
+        "project_intelligence",
+        include_str!("../migrations/0002_project_intelligence.sql"),
+    ),
+];
+
+/// The highest migration this build carries.
+///
+/// What `GET /api/version` reports, and what a daemon compares its own work
+/// against before deciding whether the server can hold it (FR-415).
+pub const SCHEMA_VERSION: i64 = 2;
 
 /// The pool size a single server takes from PostgreSQL.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
@@ -51,4 +63,84 @@ pub async fn migrate(pool: &PgPool) -> anyhow::Result<()> {
         tx.commit().await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every migration file this crate ships is registered.
+    ///
+    /// A migration that exists on disk and not in `MIGRATIONS` is dead: the
+    /// server starts, reports success, and serves a schema missing every table
+    /// the file would have created — which is how a whole feature's columns can
+    /// be absent while every unit test passes.
+    #[test]
+    fn every_migration_file_is_registered() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("migrations directory")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".sql"))
+            .collect();
+        on_disk.sort();
+
+        assert_eq!(
+            on_disk.len(),
+            MIGRATIONS.len(),
+            "{} migration files on disk, {} registered: {on_disk:?}",
+            on_disk.len(),
+            MIGRATIONS.len()
+        );
+        for (i, (version, _, _)) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(*version, i as i64 + 1, "migrations are numbered from 1");
+            assert!(
+                on_disk[i].starts_with(&format!("{version:04}_")),
+                "registration {version} does not match {}",
+                on_disk[i]
+            );
+        }
+    }
+
+    #[test]
+    fn the_reported_schema_version_is_the_last_migration() {
+        assert_eq!(
+            SCHEMA_VERSION,
+            MIGRATIONS.last().expect("a migration").0,
+            "the version the server advertises must be the one it actually applied"
+        );
+    }
+
+    /// The server accepts exactly the relation kinds the local store writes.
+    ///
+    /// A kind missing from the server's CHECK is not a degraded feature: it is
+    /// a constraint violation that fails the whole push, so the vocabularies
+    /// cannot be allowed to drift apart.
+    #[test]
+    fn the_relation_kinds_match_the_domain() {
+        let sql = include_str!("../migrations/0002_project_intelligence.sql");
+        let check = sql
+            .split("CREATE TABLE IF NOT EXISTS memory_relations")
+            .nth(1)
+            .and_then(|s| {
+                s.split("kind               TEXT NOT NULL CHECK (kind IN (")
+                    .nth(1)
+            })
+            .and_then(|s| s.split("))").next())
+            .expect("the memory_relations kind CHECK");
+
+        for kind in cairn_core::domain::RelationKind::ALL {
+            assert!(
+                check.contains(&format!("'{}'", kind.as_str())),
+                "the server would reject a `{}` relation: {check}",
+                kind.as_str()
+            );
+        }
+        assert_eq!(
+            check.matches('\'').count() / 2,
+            cairn_core::domain::RelationKind::ALL.len(),
+            "the server accepts a relation kind the domain does not define: {check}"
+        );
+    }
 }

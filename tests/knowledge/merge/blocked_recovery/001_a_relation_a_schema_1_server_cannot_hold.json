@@ -1,0 +1,31 @@
+{
+  "description": "A `memory_relation` is queued against a server whose schema stops at 1. The server has no table to put it in and says so by entity type. The row becomes `blocked` with the refusal class recorded, and is retried zero times: there is nothing to retry against a server that is missing the capability, and retrying would spend the drain cycle on work that cannot succeed (FR-418).",
+  "input": {
+    "extra": {
+      "server": {
+        "schema_version": 1,
+        "capabilities": []
+      },
+      "queued": [
+        {
+          "entity_type": "memory_relation",
+          "operation": "upsert"
+        }
+      ],
+      "rejection": {
+        "code": "unknown_entity_type",
+        "class": "capability"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "blocked",
+      "blocked_reason": "unknown_entity_type",
+      "blocked_at_capability": "schema_version=1",
+      "retries": 0,
+      "never_failed": true,
+      "never_reported_delivered": true
+    }
+  }
+}

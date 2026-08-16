@@ -20,6 +20,23 @@ const CACHE_FOR: Duration = Duration::from_secs(6 * 60 * 60);
 /// The version this binary was built as.
 pub const CURRENT: &str = env!("CARGO_PKG_VERSION");
 
+/// What a Feature 003 daemon must know before it queues work here (FR-415).
+///
+/// Named rather than inferred from the version string, because a deployment can
+/// be newer and still lack a capability, and because the daemon must be able to
+/// ask about one thing without matching on releases.
+///
+/// A server that predates this field answers without it, and its **absence** is
+/// the answer: no relations, no criteria, no blockers, no subject identity. The
+/// daemon needs no probe endpoint and no version table (D81).
+pub const CAPABILITIES: &[&str] = &[
+    "memory_relations",
+    "task_criteria",
+    "task_blockers",
+    "memory_subject_identity",
+    "memory_verification",
+];
+
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionPayload {
     /// What is running here.
@@ -31,6 +48,13 @@ pub struct VersionPayload {
     /// Absent when the lookup has never succeeded — the UI says so rather than
     /// implying this deployment is up to date.
     pub checked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// The highest migration this deployment has applied (FR-415).
+    ///
+    /// Added additively: every field a Feature 001 or 002 consumer reads keeps
+    /// its name, its type and its value.
+    pub schema_version: i64,
+    /// What kinds of Feature 003 record this deployment can hold.
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Default)]
@@ -68,6 +92,8 @@ impl ReleaseCache {
             latest: cached.release.clone(),
             update_available,
             checked_at: cached.checked_at,
+            schema_version: crate::db::SCHEMA_VERSION,
+            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
         }
     }
 
@@ -140,6 +166,8 @@ mod tests {
             latest: None,
             update_available: false,
             checked_at: None,
+            schema_version: crate::db::SCHEMA_VERSION,
+            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"current\":\"0.1.0\""));
@@ -158,6 +186,8 @@ mod tests {
             latest: Some(r),
             update_available: true,
             checked_at: Some(chrono::Utc::now()),
+            schema_version: crate::db::SCHEMA_VERSION,
+            capabilities: CAPABILITIES.iter().map(|c| c.to_string()).collect(),
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"tag\":\"v0.2.0\""));

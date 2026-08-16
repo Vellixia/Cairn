@@ -1,0 +1,30 @@
+{
+  "description": "The negative that gives `blocked` its meaning. A payload the server refuses on its **content** - an observation identifier where none may go - is a permanent failure exactly as it is today, and no upgrade will ever make it acceptable. Retaining it would turn a privacy refusal into a pending delivery (FR-418, D81).",
+  "input": {
+    "extra": {
+      "server": {
+        "schema_version": 2,
+        "capabilities": [
+          "memory_relations"
+        ]
+      },
+      "queued": [
+        {
+          "entity_type": "memory",
+          "operation": "upsert"
+        }
+      ],
+      "rejection": {
+        "code": "forbidden_field",
+        "class": "content"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "failed",
+      "never_blocked": true,
+      "released_by_upgrade": false
+    }
+  }
+}

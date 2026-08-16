@@ -1,0 +1,28 @@
+{
+  "description": "A memory marked local_only stays put, whatever else merges. The boundary is the memory's own flag, checked where the payload is built.",
+  "input": {
+    "extra": {
+      "store_a": {
+        "proposals": [
+          {
+            "topic": "infra.db",
+            "value": "postgresql",
+            "local_only": true
+          }
+        ]
+      },
+      "store_b": {
+        "proposals": []
+      },
+      "clocks": [
+        "2026-01-01T00:00:00Z",
+        "2026-06-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "memories_on_b": 0
+    }
+  }
+}

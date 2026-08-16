@@ -1,0 +1,36 @@
+{
+  "description": "The sibling of the case above, differing in exactly the way that matters: the two machines wrote the *same statement*, not merely the same value. Identical content after normalization is the one merging case Cairn can decide without inference (D46), so this is one reinforced claim rather than several corroborating ones. The same scenario with the two machines' clocks swapped: identical merged state, because nothing in the merge consults a clock.",
+  "input": {
+    "extra": {
+      "store_a": {
+        "proposals": [
+          {
+            "topic": "infra.db",
+            "value": "postgresql",
+            "content": "The primary datastore is PostgreSQL"
+          }
+        ]
+      },
+      "store_b": {
+        "proposals": [
+          {
+            "topic": "infra.db",
+            "value": "postgresql",
+            "content": "the primary datastore is postgresql."
+          }
+        ]
+      },
+      "clocks": [
+        "2026-06-01T00:00:00Z",
+        "2026-01-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "memories": 2,
+      "reconciliation": "reinforced",
+      "relations": 0
+    }
+  }
+}

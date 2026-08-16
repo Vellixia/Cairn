@@ -1,0 +1,41 @@
+{
+  "description": "A blocked relation must not block the queue. Everything a schema-1 server can hold - memories, sessions, handoffs, tasks - is delivered in full while the refused work waits. Degradation that stopped ordinary sync would be an outage dressed as a compatibility feature (SC-326).",
+  "input": {
+    "extra": {
+      "server": {
+        "schema_version": 1,
+        "capabilities": []
+      },
+      "queued": [
+        {
+          "entity_type": "memory_relation",
+          "operation": "upsert"
+        },
+        {
+          "entity_type": "memory",
+          "operation": "upsert"
+        },
+        {
+          "entity_type": "session",
+          "operation": "upsert"
+        },
+        {
+          "entity_type": "handoff",
+          "operation": "upsert"
+        }
+      ],
+      "rejection": {
+        "code": "unknown_entity_type",
+        "class": "capability"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "blocked": 1,
+      "delivered": 3,
+      "feature_001_delivery_share": 1.0,
+      "never_failed": true
+    }
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "description": "Machine A records a supersession while B holds both memories unsuperseded. The decision travels and B re-derives from it. This is the defect research B2 found: importing only the memory row left the decision stranded, so a supersession decided on another machine never landed (D67, R5).",
+  "input": {
+    "extra": {
+      "store_a": {
+        "proposals": [
+          {
+            "topic": "api.port",
+            "value": "8080"
+          },
+          {
+            "topic": "api.port",
+            "value": "9000"
+          }
+        ],
+        "relations": [
+          {
+            "kind": "supersedes",
+            "from": 1,
+            "to": 0
+          }
+        ]
+      },
+      "store_b": {
+        "proposals": []
+      },
+      "clocks": [
+        "2026-01-01T00:00:00Z",
+        "2026-06-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "memories": 2,
+      "reconciliation": "settled",
+      "relations": 2,
+      "superseded": 1
+    }
+  }
+}

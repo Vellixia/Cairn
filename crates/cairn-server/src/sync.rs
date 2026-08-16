@@ -349,16 +349,42 @@ async fn upsert_memory(
         .and_then(|v| v.as_i64())
         .unwrap_or(0) as i32;
 
+    // The Feature 003 columns, from the payload the sender built.
+    //
+    // `authority` is taken as sent — `cairn` or `attested`. The sender never
+    // transmits `remote_*`, and the *receiving daemon* is what maps it, so the
+    // server stores what established the state on the machine that ran the
+    // check rather than a claim about anyone else's (FR-368, D76).
+    let verification = item
+        .payload
+        .get("verification")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
     sqlx::query(
         "INSERT INTO memories
             (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
-             origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+             origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at,
+             topic_key, value_key, importance, pinned, reinforcement_count,
+             distinct_origin_count, verification, verification_authority,
+             last_verified_at, verification_basis, evidence_fact_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(),
+                 $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
          ON CONFLICT (id) DO UPDATE SET
              content = EXCLUDED.content, state = EXCLUDED.state,
              superseded_by_id = EXCLUDED.superseded_by_id,
              observation_ids = EXCLUDED.observation_ids,
-             evidence_count = EXCLUDED.evidence_count, updated_at = now()",
+             evidence_count = EXCLUDED.evidence_count,
+             topic_key = EXCLUDED.topic_key, value_key = EXCLUDED.value_key,
+             importance = EXCLUDED.importance, pinned = EXCLUDED.pinned,
+             reinforcement_count = EXCLUDED.reinforcement_count,
+             distinct_origin_count = EXCLUDED.distinct_origin_count,
+             verification = EXCLUDED.verification,
+             verification_authority = EXCLUDED.verification_authority,
+             last_verified_at = EXCLUDED.last_verified_at,
+             verification_basis = EXCLUDED.verification_basis,
+             evidence_fact_count = EXCLUDED.evidence_fact_count,
+             updated_at = now()",
     )
     .bind(item.entity_id)
     .bind(project_id)
@@ -372,9 +398,38 @@ async fn upsert_memory(
     .bind(observation_ids)
     .bind(evidence_count)
     .bind(opt_text(&provenance, "digest"))
+    .bind(opt_text(&item.payload, "topic_key"))
+    .bind(opt_text(&item.payload, "value_key"))
+    .bind(opt_text(&item.payload, "importance").unwrap_or_else(|| "normal".to_string()))
+    .bind(
+        item.payload
+            .get("pinned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .bind(int(&item.payload, "reinforcement_count"))
+    .bind(int(&item.payload, "distinct_origin_count"))
+    .bind(opt_text(&verification, "state"))
+    .bind(opt_text(&verification, "authority"))
+    .bind(
+        opt_text(&verification, "last_verified_at")
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc)),
+    )
+    .bind(
+        verification
+            .get("basis")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .bind(int(&verification, "fact_count"))
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn int(payload: &Value, key: &str) -> i32 {
+    payload.get(key).and_then(|v| v.as_i64()).unwrap_or(0) as i32
 }
 
 async fn upsert_handoff(
@@ -478,20 +533,13 @@ pub async fn sync_changes(
     let rows = sqlx::query(
         "SELECT * FROM memories
          WHERE project_id = $1 AND updated_at > $2 AND deleted_at IS NULL
-         ORDER BY updated_at ASC LIMIT 500",
+         ORDER BY updated_at ASC LIMIT $3",
     )
     .bind(q.project_id)
     .bind(since)
+    .bind(PAGE)
     .fetch_all(&state.pool)
     .await?;
-
-    let cursor = rows
-        .last()
-        .map(|r| {
-            r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
-                .to_rfc3339()
-        })
-        .unwrap_or_else(|| since.to_rfc3339());
 
     let memories: Vec<Value> = rows
         .iter()
@@ -508,11 +556,183 @@ pub async fn sync_changes(
                     "observation_ids": r.get::<Value, _>("observation_ids"),
                     "evidence_count": r.get::<i32, _>("evidence_count"),
                 },
+                // Feature 003. Absent columns read as null on a server whose
+                // 0002 migration has not run, which is what an older peer sees.
+                "topic_key": r.try_get::<Option<String>, _>("topic_key").ok().flatten(),
+                "value_key": r.try_get::<Option<String>, _>("value_key").ok().flatten(),
+                "importance": r.try_get::<Option<String>, _>("importance").ok().flatten(),
+                "pinned": r.try_get::<Option<bool>, _>("pinned").ok().flatten(),
+                "verification": {
+                    "state": r.try_get::<Option<String>, _>("verification").ok().flatten(),
+                    "authority": r
+                        .try_get::<Option<String>, _>("verification_authority")
+                        .ok()
+                        .flatten(),
+                    "last_verified_at": r
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_verified_at")
+                        .ok()
+                        .flatten()
+                        .map(|t| t.to_rfc3339()),
+                    "fact_count": r
+                        .try_get::<Option<i32>, _>("evidence_fact_count")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0),
+                    "basis": r
+                        .try_get::<Option<Value>, _>("verification_basis")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| json!([])),
+                },
             })
         })
         .collect();
 
-    Ok(Json(json!({ "memories": memories, "cursor": cursor })))
+    // The three Feature 003 arrays, read under the **same** cursor as the
+    // memories (FR-413).
+    //
+    // One cursor over `updated_at` across all four is what stops a partial read
+    // leaving a relation whose memory has not arrived: the client holds a
+    // relation it cannot place and retries it, rather than the server handing
+    // out a consistent-looking page that is not.
+    let relations = read_after(&state.pool, q.project_id, since, RELATIONS_SQL).await?;
+    let criteria = read_after(&state.pool, q.project_id, since, CRITERIA_SQL).await?;
+    let blockers = read_after(&state.pool, q.project_id, since, BLOCKERS_SQL).await?;
+
+    let cursor = page_cursor(&[&rows, &relations, &criteria, &blockers], since).to_rfc3339();
+
+    Ok(Json(json!({
+        "memories": memories,
+        "relations": relations.iter().map(relation_json).collect::<Vec<_>>(),
+        "criteria": criteria.iter().map(criterion_json).collect::<Vec<_>>(),
+        "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
+        "cursor": cursor,
+    })))
+}
+
+/// One read-back page. The four arrays share it, and the cursor respects it.
+const PAGE: i64 = 500;
+
+const RELATIONS_SQL: &str = "SELECT * FROM memory_relations
+     WHERE project_id = $1 AND updated_at > $2 AND deleted_at IS NULL
+     ORDER BY updated_at ASC LIMIT $3";
+const CRITERIA_SQL: &str = "SELECT * FROM task_criteria
+     WHERE project_id = $1 AND updated_at > $2
+     ORDER BY updated_at ASC LIMIT $3";
+const BLOCKERS_SQL: &str = "SELECT * FROM task_blockers
+     WHERE project_id = $1 AND updated_at > $2
+     ORDER BY updated_at ASC LIMIT $3";
+
+/// PostgreSQL's `undefined_table`.
+const UNDEFINED_TABLE: &str = "42P01";
+
+/// Rows a project changed after `since`.
+///
+/// A table the 0002 migration has not created yields an empty list: an older
+/// deployment simply has nothing of this kind to hand out, and read-back must
+/// not fail because of it. **Only** that error is absorbed — a dropped
+/// connection or a permission failure must not read as "this deployment has no
+/// relations", because the cursor would then advance past records nobody ever
+/// received.
+async fn read_after(
+    pool: &PgPool,
+    project_id: Uuid,
+    since: chrono::DateTime<chrono::Utc>,
+    sql: &str,
+) -> ApiResult<Vec<sqlx::postgres::PgRow>> {
+    match sqlx::query(sql)
+        .bind(project_id)
+        .bind(since)
+        .bind(PAGE)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => Ok(rows),
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some(UNDEFINED_TABLE) => {
+            tracing::debug!(error = %e, "read-back skipped a table this deployment lacks");
+            Ok(Vec::new())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// How far the cursor may advance after a page.
+///
+/// A table that filled its page still has rows the client has not seen, and
+/// some of them may carry an `updated_at` earlier than another table's newest
+/// row. Advancing to the newest row across all four would step over them
+/// permanently, so a full page pins the cursor to its own last row and the
+/// smallest such bound wins. When nothing truncated, every table is exhausted
+/// and the newest row any of them returned is safe.
+///
+/// Re-delivery is the cost, and it is free: every importer is idempotent —
+/// `INSERT OR IGNORE` for memories and relations, upsert by id for criteria and
+/// blockers.
+fn page_cursor(
+    pages: &[&[sqlx::postgres::PgRow]],
+    since: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    let pinned = pages
+        .iter()
+        .filter(|p| p.len() as i64 >= PAGE)
+        .filter_map(|p| newest(p))
+        .min();
+    pinned
+        .or_else(|| pages.iter().filter_map(|p| newest(p)).max())
+        .unwrap_or(since)
+}
+
+fn newest(rows: &[sqlx::postgres::PgRow]) -> Option<chrono::DateTime<chrono::Utc>> {
+    rows.last().and_then(|r| {
+        r.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+            .ok()
+    })
+}
+
+fn relation_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "from_memory_id": r.get::<Uuid, _>("from_memory_id"),
+        "to_memory_id": r.get::<Uuid, _>("to_memory_id"),
+        "kind": r.get::<String, _>("kind"),
+        "decided_by_session": r.get::<Uuid, _>("decided_by_session"),
+        "basis": r.get::<String, _>("basis"),
+    })
+}
+
+fn criterion_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": r.get::<Uuid, _>("id"),
+        "task_id": r.get::<Uuid, _>("task_id"),
+        "ordinal": r.get::<i32, _>("ordinal"),
+        "label": r.get::<String, _>("label"),
+        "text": r.get::<String, _>("text"),
+        "state": r.get::<String, _>("state"),
+        "verification": r.get::<String, _>("verification"),
+        "deleted": r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
+            .ok()
+            .flatten()
+            .is_some(),
+    })
+}
+
+fn blocker_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": r.get::<Uuid, _>("id"),
+        "task_id": r.get::<Uuid, _>("task_id"),
+        "description": r.get::<String, _>("description"),
+        "state": r.get::<String, _>("state"),
+        "opened_by_session": r.get::<Uuid, _>("opened_by_session"),
+        "cleared_by_session": r
+            .try_get::<Option<Uuid>, _>("cleared_by_session")
+            .ok()
+            .flatten(),
+        "deleted": r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
+            .ok()
+            .flatten()
+            .is_some(),
+    })
 }
 
 // ---------------------------------------------------------------------------

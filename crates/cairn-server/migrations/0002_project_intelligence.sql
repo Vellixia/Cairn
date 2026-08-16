@@ -53,8 +53,12 @@ CREATE INDEX IF NOT EXISTS memories_subject
 CREATE TABLE IF NOT EXISTS memory_relations (
     from_memory_id     UUID NOT NULL,
     to_memory_id       UUID NOT NULL,
-    kind               TEXT NOT NULL
-        CHECK (kind IN ('supersedes', 'reinforces', 'contradicts', 'narrows', 'duplicates')),
+    -- The same six the local store accepts, spelled the same way. A kind the
+    -- server does not know is a CHECK violation that fails the whole push, so
+    -- this list is not a shorter summary of the local one — it is the local one.
+    kind               TEXT NOT NULL CHECK (kind IN (
+        'reinforces', 'duplicates', 'supersedes',
+        'conflicts_with', 'narrows', 'not_applicable_to')),
     project_id         UUID NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     decided_by_session UUID NOT NULL,
     decided_at         TIMESTAMPTZ NOT NULL DEFAULT now(),

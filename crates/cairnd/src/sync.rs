@@ -766,9 +766,12 @@ async fn import_memory(
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| WireError::invalid("shared memory without an id"))?;
 
-    if repo::memory(&d.store, id).await.is_ok() {
-        return Ok(());
-    }
+    // A memory this store already holds is **not** skipped. `import_memory`
+    // never overwrites a local row — `INSERT OR IGNORE` is the whole rule — but
+    // a peer re-sends a memory precisely when something shareable about it
+    // changed, and the one such thing is its verification. Returning early here
+    // meant a peer's later check never arrived, so `remote_cairn` and
+    // `remote_attested` could not occur (FR-368, SC-329).
     let content = value
         .get("content")
         .and_then(|v| v.as_str())
@@ -795,25 +798,38 @@ async fn import_memory(
         .and_then(|s| Uuid::parse_str(s).ok())
         .unwrap_or_else(new_id);
 
-    sqlx::query(
-        "INSERT OR IGNORE INTO memories
-            (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
-             origin_session_id, local_only, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, 0, ?8, ?8)",
+    // The subject identity the sender proposed travels with the row. Without it
+    // the proposal arrives free-form, no subject read can ever see it, and a
+    // value another machine proposed for a subject this machine already holds
+    // is invisible rather than corroborating or conflicting — which is the
+    // whole of US7 (FR-411).
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str());
+    repo::import_memory(
+        &d.store,
+        repo::ImportedMemory {
+            id,
+            project_id,
+            kind,
+            scope,
+            scope_key: &scope_key,
+            content,
+            origin_session_id: origin,
+            topic_key: str_of("topic_key"),
+            value_key: str_of("value_key"),
+            importance: str_of("importance")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(Importance::Normal),
+            effective_from: str_of("effective_from"),
+        },
     )
-    .bind(id.to_string())
-    .bind(project_id.to_string())
-    .bind(kind.as_str())
-    .bind(scope.as_str())
-    .bind(scope_key)
-    .bind(content)
-    .bind(origin.to_string())
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(d.store.pool())
     .await
     .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
 
     import_verification(d, id, value).await;
+
+    // The arriving proposal changes what this subject's members are, so the
+    // counts derived from them are rebuilt rather than assumed unchanged.
+    let _ = cairn_store::knowledge::rebuild_reinforcement(&d.store, id).await;
     Ok(())
 }
 
@@ -916,8 +932,15 @@ async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value
 
     // The decision changed what is canonical, so the derived state is rebuilt
     // from the records rather than patched.
+    //
+    // Supersession is rebuilt per project, because one `supersedes` relation
+    // can move a whole chain. Reinforcement is rebuilt per **memory** — it is
+    // keyed by memory id, and passing the project id here silently rebuilt
+    // nothing at all, leaving an imported `reinforces` uncounted.
     let _ = cairn_store::knowledge::rebuild_supersession(&d.store, project_id).await;
-    let _ = cairn_store::knowledge::rebuild_reinforcement(&d.store, project_id).await;
+    for endpoint in [to, from] {
+        let _ = cairn_store::knowledge::rebuild_reinforcement(&d.store, endpoint).await;
+    }
 }
 
 /// Import one criterion that arrived from a peer.

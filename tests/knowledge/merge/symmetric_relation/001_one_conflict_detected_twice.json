@@ -1,0 +1,45 @@
+{
+  "description": "Both machines notice the same disagreement while offline and each records a `conflicts_with` relation. The endpoints are normalized before the key is written, so the two decisions are the same primary key and the merge absorbs the second exactly as it absorbs a local duplicate - converging to exactly one durable relation, not two mirror images (D78, SC-304).",
+  "input": {
+    "extra": {
+      "store_a": {
+        "proposals": [
+          {
+            "topic": "deploy.queue_backend",
+            "value": "sqs"
+          },
+          {
+            "topic": "deploy.queue_backend",
+            "value": "rabbitmq"
+          }
+        ],
+        "relations": [
+          {
+            "kind": "conflicts_with",
+            "from": 0,
+            "to": 1
+          }
+        ]
+      },
+      "store_b": {
+        "relations": [
+          {
+            "kind": "conflicts_with",
+            "from": 1,
+            "to": 0
+          }
+        ]
+      },
+      "clocks": [
+        "2026-01-01T00:00:00Z",
+        "2026-06-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "relations": 1,
+      "reconciliation": "conflicted"
+    }
+  }
+}

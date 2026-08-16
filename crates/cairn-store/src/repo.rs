@@ -750,6 +750,139 @@ pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) 
 /// two agree.
 pub const DEFAULT_RECONCILE_MEMBERS_MAX: usize = 64;
 
+/// Re-queue a memory whose syncable fields changed after it was first sent.
+///
+/// The outbox holds a **snapshot**, taken when the row was queued. A memory
+/// verified after it synced would otherwise keep its peers on the payload from
+/// before the check forever — and `remote_cairn` and `remote_attested`, the
+/// whole point of transmitting an authority, would be unreachable in practice
+/// (FR-368, SC-329).
+///
+/// The idempotency key covers the payload, so re-queuing an unchanged memory is
+/// a no-op rather than a duplicate delivery.
+pub async fn enqueue_memory_upsert(store: &Store, memory_id: Uuid) -> Result<bool> {
+    let m = memory(store, memory_id).await?;
+    // The boundary is the memory's own flag, checked wherever a payload is
+    // built (FR-051).
+    if m.local_only {
+        return Ok(false);
+    }
+    let mut tx = tx::begin(store, "enqueue_memory_upsert").await?;
+    let policy = outbox::policy_for_project_tx(&mut tx, m.project_id).await?;
+    let payload = outbox::memory_payload_for(&mut tx, &m).await?;
+    let queued = outbox::enqueue(
+        &mut *tx,
+        policy,
+        m.project_id,
+        OutboxEntityType::Memory,
+        m.id,
+        OutboxOperation::Upsert,
+        &payload,
+    )
+    .await?;
+    tx::commit(tx, "enqueue_memory_upsert").await?;
+    Ok(queued)
+}
+
+/// A proposal that arrived from another machine (FR-411).
+#[derive(Debug, Clone)]
+pub struct ImportedMemory<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub kind: MemoryType,
+    pub scope: MemoryScope,
+    pub scope_key: &'a str,
+    pub content: &'a str,
+    pub origin_session_id: Uuid,
+    /// As the sender proposed it. Normalized here, not trusted.
+    pub topic_key: Option<&'a str>,
+    pub value_key: Option<&'a str>,
+    pub importance: Importance,
+    pub effective_from: Option<&'a str>,
+}
+
+/// Store a proposal another machine produced, without ever overwriting a local
+/// row.
+///
+/// `INSERT OR IGNORE` is the whole merge rule for a proposal: two machines that
+/// wrote different things wrote **different rows**, and the id is the same only
+/// when it is the same record. Nothing here consults a clock, so which machine's
+/// copy arrives first cannot change the result (FR-411, SC-304).
+///
+/// What is deliberately not taken from the sender:
+///
+/// * `reinforcement_count` and `distinct_origin_count` — derived from the
+///   records this store holds, and rebuilt by the caller after the arriving
+///   decisions land;
+/// * `superseded_at` and `state` — a view of the `supersedes` relations, which
+///   `rebuild_supersession` recomputes when the decision itself arrives (D67);
+/// * `stale_at` — drift is what *this* machine observed about its own worktree;
+/// * `pinned` — an attention decision governed by this project's local pin
+///   budget (D75), which adopting a peer's pins would silently exceed.
+///
+/// Returns whether a row was written, so a caller can tell an arrival from a
+/// record it already had.
+pub async fn import_memory(store: &Store, m: ImportedMemory<'_>) -> Result<bool> {
+    // A project-scoped memory is scoped to *the project*, and each machine
+    // names that project with its own local id. Storing the sender's id would
+    // file the arriving proposal under a scope key this store's own reads never
+    // look at: present, searchable by text, and invisible to every subject
+    // read — so two machines could never converge on a project-scoped subject
+    // at all, which is most of them.
+    //
+    // Only `project` needs the mapping. A branch key is a branch name, a task
+    // key is a task id that travels with the task, and a session key belongs to
+    // the machine that opened the session.
+    let scope_key = match m.scope {
+        MemoryScope::Project => m.project_id.to_string(),
+        _ => m.scope_key.to_string(),
+    };
+
+    // Normalized again rather than trusted: the sender's normalizer is the
+    // sender's, and a key this store cannot represent must be dropped rather
+    // than stored in a shape its own reads would miss (FR-312).
+    let topic_key = m
+        .topic_key
+        .and_then(cairn_core::knowledge::normalize_topic_key);
+    // A value key means nothing without a topic key to compare within, so it
+    // is dropped along with one this store could not represent (FR-311).
+    let value_key = topic_key
+        .as_ref()
+        .and(m.value_key)
+        .and_then(cairn_core::knowledge::normalize_value_key);
+
+    let now = rows::now_text();
+    let wrote = sqlx::query(
+        "INSERT OR IGNORE INTO memories
+            (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+             origin_session_id, local_only, created_at, updated_at,
+             topic_key, value_key, content_norm_digest, importance, effective_from)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, 0, ?8, ?8,
+                 ?9, ?10, ?11, ?12, ?13)",
+    )
+    .bind(m.id.to_string())
+    .bind(m.project_id.to_string())
+    .bind(m.kind.as_str())
+    .bind(m.scope.as_str())
+    .bind(&scope_key)
+    .bind(m.content)
+    .bind(m.origin_session_id.to_string())
+    .bind(&now)
+    .bind(topic_key.as_deref())
+    .bind(value_key.as_deref())
+    // Derived here, never sent: it is a local index, and FR-506 forbids it on
+    // the wire.
+    .bind(cairn_core::knowledge::content_norm_digest(m.content))
+    .bind(m.importance.as_str())
+    .bind(m.effective_from.unwrap_or(&now))
+    .execute(store.pool())
+    .await?
+    .rows_affected()
+        > 0;
+
+    Ok(wrote)
+}
+
 /// Create a proposal and run bounded reconciliation in the same transaction.
 ///
 /// The proposal and any relation it implies commit together

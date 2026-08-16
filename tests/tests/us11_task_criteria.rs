@@ -9,6 +9,7 @@
 
 use cairn_e2e::Sandbox;
 use serde_json::{json, Value};
+use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Helpers — free functions, so Phase 10's `offline_convergence` can reuse them
@@ -1047,4 +1048,430 @@ fn a_no_op_update_does_not_advance_the_counter() {
         "setting a field to the value it already held is not a change; the counter \
          must not report one"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T098 — offline convergence across two real stores
+// ---------------------------------------------------------------------------
+
+/// Machine A changes AC-1 offline; machine B changes AC-2 offline. Both changes
+/// are present on both, neither is overwritten, and the two machines compute an
+/// identical `task_state_digest` while their local counters differ and are never
+/// compared (FR-490, FR-493, SC-330).
+///
+/// Run against **two real stores** rather than one store with two sessions,
+/// because the property under test is about what converges between machines. A
+/// single store cannot exhibit the failure this guards against.
+#[test]
+fn offline_convergence() {
+    use cairn_core::domain::{CriterionState, CriterionVerification};
+    use cairn_store::criteria;
+    use cairn_store::outbox::SyncPolicy;
+
+    const LOCAL: SyncPolicy = SyncPolicy {
+        linked: false,
+        server_project_id: None,
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    rt.block_on(async {
+        let dir_a = tempfile::tempdir().expect("dir");
+        let dir_b = tempfile::tempdir().expect("dir");
+        let store_a = cairn_store::Store::open(&dir_a.path().join("a.sqlite3"))
+            .await
+            .expect("store a");
+        let store_b = cairn_store::Store::open(&dir_b.path().join("b.sqlite3"))
+            .await
+            .expect("store b");
+
+        // The same project and task on both machines — the state they were both
+        // holding before they went offline.
+        let project = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let session = Uuid::now_v7();
+        for store in [&store_a, &store_b] {
+            seed_project_and_task(store, project, task_id).await;
+        }
+
+        // Identical starting state means an identical digest. If this fails,
+        // nothing after it means anything.
+        let start_a = criteria::state_digest(&store_a, task_id)
+            .await
+            .expect("digest");
+        let start_b = criteria::state_digest(&store_b, task_id)
+            .await
+            .expect("digest");
+        assert_eq!(
+            start_a, start_b,
+            "two machines holding the same task must start from the same digest"
+        );
+
+        let ac = |store: &cairn_store::Store, label: &'static str| {
+            let store = store.clone();
+            async move {
+                criteria::criteria(&store, task_id)
+                    .await
+                    .expect("criteria")
+                    .into_iter()
+                    .find(|c| c.label == label)
+                    .expect("criterion")
+            }
+        };
+
+        // --- Offline, in parallel. Different criteria on each machine.
+        let a1 = ac(&store_a, "AC-1").await;
+        criteria::set_criterion_state(
+            &store_a,
+            a1.id,
+            CriterionState::Satisfied,
+            Some(a1.revision),
+            session,
+            LOCAL,
+        )
+        .await
+        .expect("A changes AC-1");
+
+        let b2 = ac(&store_b, "AC-2").await;
+        criteria::set_criterion_state(
+            &store_b,
+            b2.id,
+            CriterionState::Blocked,
+            Some(b2.revision),
+            session,
+            LOCAL,
+        )
+        .await
+        .expect("B changes AC-2");
+
+        // The two have diverged, and each holds only its own change.
+        assert_ne!(
+            criteria::state_digest(&store_a, task_id)
+                .await
+                .expect("digest"),
+            criteria::state_digest(&store_b, task_id)
+                .await
+                .expect("digest"),
+            "before syncing, the two machines must disagree"
+        );
+
+        // --- Sync, both ways.
+        //
+        // Each machine transmits **the criteria it changed**, which is what the
+        // outbox queues: a change enqueues that criterion, not a snapshot of the
+        // whole task. Copying every row instead would have each machine's stale
+        // copy of the other's criterion overwrite the change that machine just
+        // made — which is not what sync does, and would make this test assert
+        // the opposite of the property.
+        let deliver = |from: &cairn_store::Store, to: &cairn_store::Store, label: &'static str| {
+            let (from, to) = (from.clone(), to.clone());
+            async move {
+                let c = criteria::criteria(&from, task_id)
+                    .await
+                    .expect("criteria")
+                    .into_iter()
+                    .find(|c| c.label == label)
+                    .expect("criterion");
+                criteria::import_criterion(
+                    &to,
+                    c.id,
+                    c.task_id,
+                    c.ordinal,
+                    &c.label,
+                    &c.text,
+                    c.state,
+                    c.verification,
+                    c.deleted,
+                )
+                .await
+                .expect("import");
+            }
+        };
+        deliver(&store_a, &store_b, "AC-1").await;
+        deliver(&store_b, &store_a, "AC-2").await;
+
+        // --- Both changes are present on both machines, neither overwritten.
+        for (name, store) in [("A", &store_a), ("B", &store_b)] {
+            let all = criteria::criteria(store, task_id).await.expect("criteria");
+            let by = |label: &str| {
+                all.iter()
+                    .find(|c| c.label == label)
+                    .unwrap_or_else(|| panic!("{name} lost {label}"))
+                    .clone()
+            };
+            assert_eq!(
+                by("AC-1").state,
+                CriterionState::Satisfied,
+                "{name} must hold A's change to AC-1"
+            );
+            assert_eq!(
+                by("AC-2").state,
+                CriterionState::Blocked,
+                "{name} must hold B's change to AC-2"
+            );
+            assert_eq!(
+                by("AC-1").verification,
+                CriterionVerification::Unverified,
+                "{name}: an arriving row must not invent a verification"
+            );
+        }
+
+        // --- The digests agree; the counters do not, and were never compared.
+        let digest_a = criteria::state_digest(&store_a, task_id)
+            .await
+            .expect("digest");
+        let digest_b = criteria::state_digest(&store_b, task_id)
+            .await
+            .expect("digest");
+        assert_eq!(
+            digest_a, digest_b,
+            "two machines holding the converged records must compute the same \
+             task_state_digest — that is what makes it an identity"
+        );
+        assert_ne!(
+            digest_a, start_a,
+            "the digest must have moved: the task did advance"
+        );
+
+        let counter = |store: &cairn_store::Store| {
+            let store = store.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>("SELECT local_revision FROM tasks WHERE id = ?1")
+                    .bind(task_id.to_string())
+                    .fetch_one(store.pool())
+                    .await
+                    .expect("local_revision")
+            }
+        };
+        let (rev_a, rev_b) = (counter(&store_a).await, counter(&store_b).await);
+        assert!(
+            rev_a > 1 && rev_b > 1,
+            "each machine advanced its own counter: {rev_a}, {rev_b}"
+        );
+
+        // The counter is local by construction: it is absent from the criterion
+        // payload, so there is nothing for a peer to compare it against.
+        let payload = cairn_store::outbox::criterion_payload(&ac(&store_a, "AC-1").await);
+        assert!(
+            payload.get("revision").is_none() && payload.get("local_revision").is_none(),
+            "a criterion payload must carry no counter: {payload}"
+        );
+    });
+}
+
+/// The same project and task on a fresh store.
+async fn seed_project_and_task(store: &cairn_store::Store, project: Uuid, task_id: Uuid) {
+    let now = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked,
+                               server_project_id, created_at, updated_at, deleted_at)
+         VALUES (?1, 'merge-fixture', ?2, NULL, 0, NULL, ?3, ?3, NULL)",
+    )
+    .bind(project.to_string())
+    .bind(format!("/fixture/{project}/.git"))
+    .bind(&now)
+    .execute(store.pool())
+    .await
+    .expect("project");
+
+    // Deterministic criterion ids on both machines: they are the same records,
+    // which is exactly the premise — two machines holding one task.
+    sqlx::query(
+        "INSERT INTO tasks (id, project_id, title, goal, acceptance_criteria, status,
+                            created_at, updated_at)
+         VALUES (?1, ?2, 'Retry backoff', 'transient failures retry',
+                 '[\"one\",\"two\"]', 'in_progress', ?3, ?3)",
+    )
+    .bind(task_id.to_string())
+    .bind(project.to_string())
+    .bind(&now)
+    .execute(store.pool())
+    .await
+    .expect("task");
+
+    for (i, text) in ["one", "two"].iter().enumerate() {
+        sqlx::query(
+            "INSERT INTO task_criteria
+                (id, task_id, ordinal, label, text, state, verification, revision,
+                 created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 'unverified', 1, ?6, ?6)",
+        )
+        .bind(Uuid::from_u128(i as u128 + 1).to_string())
+        .bind(task_id.to_string())
+        .bind(i as i64 + 1)
+        .bind(format!("AC-{}", i + 1))
+        .bind(text)
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .expect("criterion");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// T103 — a divergence names the machine that made *this* change
+// ---------------------------------------------------------------------------
+
+/// A change that arrived from a peer is reported as another machine's, even for
+/// a criterion this machine has edited before, and even for the task's own
+/// title (FR-490).
+///
+/// Attribution answers a question the agent acts on: "is this my own change I
+/// already know about, or news?" Reporting an imported change as local because
+/// the criterion was once touched here turns news into a no-op. The task's
+/// title, goal and status are attributed the same way rather than assumed local.
+#[test]
+fn an_imported_change_is_not_attributed_here() {
+    use cairn_core::domain::CriterionState;
+    use cairn_store::criteria;
+    use cairn_store::outbox::SyncPolicy;
+
+    const LOCAL: SyncPolicy = SyncPolicy {
+        linked: false,
+        server_project_id: None,
+    };
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+
+    rt.block_on(async {
+        let dir = tempfile::tempdir().expect("dir");
+        let store = cairn_store::Store::open(&dir.path().join("a.sqlite3"))
+            .await
+            .expect("store");
+        let project = Uuid::now_v7();
+        let task_id = Uuid::now_v7();
+        let session = Uuid::now_v7();
+        seed_project_and_task(&store, project, task_id).await;
+
+        let snapshot = criteria::bind_snapshot(&store, task_id)
+            .await
+            .expect("snapshot");
+
+        let ac = |label: &'static str| {
+            let store = store.clone();
+            async move {
+                criteria::criteria(&store, task_id)
+                    .await
+                    .expect("criteria")
+                    .into_iter()
+                    .find(|c| c.label == label)
+                    .expect("criterion")
+            }
+        };
+
+        // This machine satisfies AC-1 — a change it genuinely made.
+        let a1 = ac("AC-1").await;
+        criteria::set_criterion_state(
+            &store,
+            a1.id,
+            CriterionState::Satisfied,
+            Some(a1.revision),
+            session,
+            LOCAL,
+        )
+        .await
+        .expect("local change");
+
+        // Then a peer blocks the same criterion, and satisfies AC-2. Both
+        // arrive as imports, which write no local change log.
+        let a1 = ac("AC-1").await;
+        criteria::import_criterion(
+            &store,
+            a1.id,
+            task_id,
+            a1.ordinal,
+            &a1.label,
+            &a1.text,
+            CriterionState::Blocked,
+            a1.verification,
+            false,
+        )
+        .await
+        .expect("import AC-1");
+        let a2 = ac("AC-2").await;
+        criteria::import_criterion(
+            &store,
+            a2.id,
+            task_id,
+            a2.ordinal,
+            &a2.label,
+            &a2.text,
+            CriterionState::Satisfied,
+            a2.verification,
+            false,
+        )
+        .await
+        .expect("import AC-2");
+
+        // And the task's title arrives changed, the way a converged row does:
+        // written, with nothing in this machine's change log to claim it.
+        sqlx::query("UPDATE tasks SET title = 'Retry backoff, bounded' WHERE id = ?1")
+            .bind(task_id.to_string())
+            .execute(store.pool())
+            .await
+            .expect("title");
+
+        let report = criteria::divergence(&store, task_id, &snapshot)
+            .await
+            .expect("divergence");
+        let origin_of = |subject: &str| {
+            report
+                .iter()
+                .find(|d| d.subject == subject)
+                .unwrap_or_else(|| panic!("a divergence for {subject}: {report:?}"))
+                .origin
+                .clone()
+        };
+
+        assert_eq!(
+            origin_of("AC-1"),
+            "another_machine",
+            "the state AC-1 now holds was set elsewhere — this machine set a \
+             different one, and having touched the criterion does not make the \
+             peer's change local: {report:?}"
+        );
+        assert_eq!(
+            origin_of("AC-2"),
+            "another_machine",
+            "AC-2 was never changed here: {report:?}"
+        );
+        assert_eq!(
+            origin_of("title"),
+            "another_machine",
+            "the title changed with no local change recording it, so it must \
+             not be reported as this machine's: {report:?}"
+        );
+
+        // A change this machine does make is still its own — the fix must not
+        // have turned attribution into a constant the other way.
+        let a2 = ac("AC-2").await;
+        criteria::set_criterion_state(
+            &store,
+            a2.id,
+            CriterionState::Waived,
+            Some(a2.revision),
+            session,
+            LOCAL,
+        )
+        .await
+        .expect("local change");
+        let report = criteria::divergence(&store, task_id, &snapshot)
+            .await
+            .expect("divergence");
+        assert_eq!(
+            report
+                .iter()
+                .find(|d| d.subject == "AC-2")
+                .expect("a divergence for AC-2")
+                .origin,
+            "this_machine",
+            "the value AC-2 now holds was set here: {report:?}"
+        );
+    });
 }

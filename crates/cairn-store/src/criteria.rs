@@ -1068,9 +1068,39 @@ pub struct Divergence {
     /// `AC-2`, or the blocker's description.
     pub subject: String,
     pub what: String,
-    /// `this_machine` where the change is attributable to a session this store
-    /// knows, and `another_machine` otherwise.
+    /// `this_machine` where **this change** is the one a session on this store
+    /// made, and `another_machine` otherwise.
     pub origin: String,
+}
+
+/// The latest value this store recorded itself setting, per changed thing.
+///
+/// Keyed by `(kind, subject_id)` because one criterion has a state, a
+/// verification and a text, each changed independently. The last local write
+/// wins, which is why the rows are read in `local_revision` order.
+type LocalWrites = std::collections::BTreeMap<(TaskChangeKind, Option<Uuid>), Option<String>>;
+
+/// Whether **this** change is one this machine made.
+///
+/// Attribution compares the value the change arrived at against the last value
+/// a local session set for the same thing. Asking only "has this criterion ever
+/// been touched here" — which is what this did before — reports a criterion
+/// created locally and then changed on another machine as local, which is the
+/// one report a divergence must never get wrong: the agent is deciding whether
+/// to trust its own understanding of the change.
+fn made_here(writes: &LocalWrites, kind: TaskChangeKind, subject: Option<Uuid>, now: &str) -> bool {
+    matches!(writes.get(&(kind, subject)), Some(Some(v)) if v == now)
+}
+
+/// Whether a one-time event — a creation, a removal, a blocker opening or
+/// clearing — happened here.
+///
+/// These carry no competing value: an id is created once, by one machine, and
+/// removal and clearing are terminal. Presence of the local record is the whole
+/// answer, and comparing values would wrongly disown a criterion created here
+/// whose text another machine later edited.
+fn happened_here(writes: &LocalWrites, kind: TaskChangeKind, subject: Option<Uuid>) -> bool {
+    writes.contains_key(&(kind, subject))
 }
 
 /// Derive what changed since a session bound, by **diffing the snapshot against
@@ -1090,20 +1120,28 @@ pub async fn divergence(store: &Store, task_id: Uuid, snapshot: &str) -> Result<
     };
     let now = task_state_facts(store, task_id).await?;
 
-    // Which criteria this store can attribute to a session it knows.
-    let local: std::collections::BTreeSet<Uuid> = sqlx::query_scalar::<_, String>(
-        "SELECT DISTINCT subject_id FROM task_changes
-         WHERE task_id = ?1 AND subject_id IS NOT NULL",
+    // What a session on this store recorded itself setting, latest write last.
+    //
+    // The log is read for **attribution only** — never to decide *what*
+    // changed, which stays a diff of converged records (D80). A change this
+    // machine never made leaves no row here and is reported as another
+    // machine's, which is exactly right for an imported one.
+    let mut writes = LocalWrites::new();
+    let rows = sqlx::query(
+        "SELECT kind, subject_id, new_value FROM task_changes
+         WHERE task_id = ?1 ORDER BY local_revision ASC",
     )
     .bind(task_id.to_string())
     .fetch_all(store.pool())
-    .await?
-    .iter()
-    .filter_map(|s| Uuid::from_str(s).ok())
-    .collect();
+    .await?;
+    for row in &rows {
+        let kind: TaskChangeKind = rows::enum_val(row, "kind")?;
+        let subject = rows::opt_uuid(row, "subject_id")?;
+        writes.insert((kind, subject), row.try_get("new_value")?);
+    }
 
-    let origin = |id: &Uuid| {
-        if local.contains(id) {
+    let attribute = |made: bool| {
+        if made {
             "this_machine".to_string()
         } else {
             "another_machine".to_string()
@@ -1115,21 +1153,36 @@ pub async fn divergence(store: &Store, task_id: Uuid, snapshot: &str) -> Result<
         out.push(Divergence {
             subject: "title".into(),
             what: format!("{:?} → {:?}", before.title, now.title),
-            origin: "this_machine".into(),
+            origin: attribute(made_here(
+                &writes,
+                TaskChangeKind::TitleChanged,
+                None,
+                &now.title,
+            )),
         });
     }
     if before.goal != now.goal {
         out.push(Divergence {
             subject: "goal".into(),
             what: "the goal changed".into(),
-            origin: "this_machine".into(),
+            origin: attribute(made_here(
+                &writes,
+                TaskChangeKind::GoalChanged,
+                None,
+                &now.goal,
+            )),
         });
     }
     if before.status != now.status {
         out.push(Divergence {
             subject: "status".into(),
             what: format!("{} → {}", before.status.as_str(), now.status.as_str()),
-            origin: "this_machine".into(),
+            origin: attribute(made_here(
+                &writes,
+                TaskChangeKind::StatusChanged,
+                None,
+                now.status.as_str(),
+            )),
         });
     }
 
@@ -1139,33 +1192,61 @@ pub async fn divergence(store: &Store, task_id: Uuid, snapshot: &str) -> Result<
             None => out.push(Divergence {
                 subject: label.clone(),
                 what: format!("criterion added — {:?}", c.text),
-                origin: origin(&c.id),
+                origin: attribute(happened_here(
+                    &writes,
+                    TaskChangeKind::CriterionAdded,
+                    Some(c.id),
+                )),
             }),
             Some(b) if b.deleted => out.push(Divergence {
                 subject: label.clone(),
                 what: format!("criterion added — {:?}", c.text),
-                origin: origin(&c.id),
+                origin: attribute(happened_here(
+                    &writes,
+                    TaskChangeKind::CriterionAdded,
+                    Some(c.id),
+                )),
             }),
             Some(b) => {
                 if b.state != c.state {
                     out.push(Divergence {
                         subject: label.clone(),
                         what: format!("{} → {}", b.state.as_str(), c.state.as_str()),
-                        origin: origin(&c.id),
+                        origin: attribute(made_here(
+                            &writes,
+                            TaskChangeKind::CriterionState,
+                            Some(c.id),
+                            c.state.as_str(),
+                        )),
                     });
                 }
                 if b.verification != c.verification {
                     out.push(Divergence {
                         subject: label.clone(),
                         what: format!("{} → {}", b.verification.as_str(), c.verification.as_str()),
-                        origin: origin(&c.id),
+                        origin: attribute(made_here(
+                            &writes,
+                            TaskChangeKind::CriterionVerification,
+                            Some(c.id),
+                            c.verification.as_str(),
+                        )),
                     });
                 }
                 if b.text != c.text {
+                    // A criterion's text can have been set by the write that
+                    // created it, so both kinds answer for it.
                     out.push(Divergence {
                         subject: label.clone(),
                         what: "the text changed".into(),
-                        origin: origin(&c.id),
+                        origin: attribute(
+                            made_here(&writes, TaskChangeKind::CriterionText, Some(c.id), &c.text)
+                                || made_here(
+                                    &writes,
+                                    TaskChangeKind::CriterionAdded,
+                                    Some(c.id),
+                                    &c.text,
+                                ),
+                        ),
                     });
                 }
             }
@@ -1183,7 +1264,11 @@ pub async fn divergence(store: &Store, task_id: Uuid, snapshot: &str) -> Result<
             out.push(Divergence {
                 subject: criterion_label(b.ordinal),
                 what: format!("criterion removed — {:?}", b.text),
-                origin: origin(&b.id),
+                origin: attribute(happened_here(
+                    &writes,
+                    TaskChangeKind::CriterionRemoved,
+                    Some(b.id),
+                )),
             });
         }
     }
@@ -1194,12 +1279,21 @@ pub async fn divergence(store: &Store, task_id: Uuid, snapshot: &str) -> Result<
             None => out.push(Divergence {
                 subject: blk.description.clone(),
                 what: format!("blocker {}", blk.state.as_str()),
-                origin: origin(&blk.id),
+                origin: attribute(happened_here(
+                    &writes,
+                    TaskChangeKind::BlockerOpened,
+                    Some(blk.id),
+                )),
             }),
             Some(b) if b.state != blk.state => out.push(Divergence {
                 subject: blk.description.clone(),
                 what: format!("blocker {} → {}", b.state.as_str(), blk.state.as_str()),
-                origin: origin(&blk.id),
+                origin: attribute(happened_here(
+                    &writes,
+                    // The only state change a blocker has.
+                    TaskChangeKind::BlockerCleared,
+                    Some(blk.id),
+                )),
             }),
             Some(_) => {}
         }

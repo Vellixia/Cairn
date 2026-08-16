@@ -526,7 +526,7 @@ tombstones, transaction integrity, and `derive_task_state_digest`'s inputs.
    capability `LifecyclePreCompaction` contains the substring `PreCompact`, so referring to it inside
    the guarded source region trips a real guard. The new code moved out of that region instead.
 
-### Checkpoint I — Phase 10 (T096–T105) **in progress**, not complete
+### Checkpoint I(i) — Phase 10 (T096–T105) as the prior session left it: in progress
 
 | | |
 |---|---|
@@ -587,10 +587,88 @@ session would have to discover.
    from the row it already has in the open transaction, so no caller had to thread a value it does
    not otherwise need.
 
+### Checkpoint I(ii) — Phase 10 (T096–T105) complete: multi-device synchronization
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` green against a **real PostgreSQL**, 0 failures |
+| Server | `postgres:17-alpine` on `:5433`, the same image and credentials CI uses |
+| Gates | `cargo fmt --all -- --check` clean |
+
+The previous session left Phase 10 correctly unmarked: what had landed was green, but its named
+evidence did not exist, and running it turned up five defects that no unit test could have found.
+
+**The five defects, each found by running the evidence rather than reviewing the code**
+
+1. **Server migration `0002` was never registered.** The file existed and was reviewed; `db.rs`
+   still listed only `0001`. Every deployment started clean, reported success, and served a schema
+   with none of the Feature 003 columns or tables — so the extended memory upsert failed, the row
+   stayed `pending`, and `privacy_integration::integration_state_never_reaches_the_shared_server`
+   failed on an assertion about pending count that named nothing about migrations. `db.rs` now
+   carries `every_migration_file_is_registered`, which fails if a file on disk is not registered.
+
+2. **The server's `memory_relations` CHECK used a vocabulary the domain does not have** —
+   `contradicts` rather than `conflicts_with`, and no `not_applicable_to`. A conflict relation would
+   have been a constraint violation failing the whole push. `db.rs::the_relation_kinds_match_the_domain`
+   compares the CHECK against `RelationKind::ALL` in both directions. The same stale spelling was in
+   the `merge/symmetric_relation/` fixtures and their generator, and is corrected there too.
+
+3. **A project-scoped memory could never converge between two machines.** The scope key for
+   `project` scope is the **local** project id, and each machine has its own. An imported memory was
+   filed under the sender's id, which is a bucket the receiver's own subject reads never look at:
+   present, searchable by text, invisible to every derivation. `repo::import_memory` now maps
+   `project` scope to the receiver's project id. Branch, task and session keys need no mapping, and
+   get none.
+
+4. **A verification never reached a peer.** The outbox holds a payload **snapshot** taken when the
+   row was queued, and nothing re-queued a memory when its verification changed — so
+   `remote_cairn` and `remote_attested`, the whole point of transmitting an authority, were
+   unreachable. `repo::enqueue_memory_upsert` re-queues on `rebuild_verification` and on
+   `set_verification`; the idempotency key already covers the payload, so an unchanged memory is a
+   no-op. The daemon's `import_memory` also returned early for a memory it already held, which
+   skipped `import_verification` for exactly the update that mattered.
+
+5. **`rebuild_reinforcement` was called with a project id.** Its parameter is a **memory** id, so
+   the call after importing a relation rebuilt nothing at all and an imported `reinforces` stayed
+   uncounted. It now runs for both endpoints of the arriving relation.
+
+**Two attribution weaknesses in `criteria::divergence`, fixed as the phase required**
+
+`origin()` asked "has this criterion ever been touched here", so a criterion created locally and
+then changed by a peer was reported as this machine's change — the one report a divergence must not
+get wrong, because the agent uses it to decide whether the change is news. Title, goal and status
+were hardcoded `this_machine`. Attribution is now per change: the last local write for
+`(kind, subject_id)` is compared against the value the record now holds, with one-time events
+(creation, removal, blocker open and clear) attributed by presence.
+`us11_task_criteria::an_imported_change_is_not_attributed_here` covers both directions.
+
+**Three corpus corrections, each proved before it was made**
+
+- `the_same_value_from_both_corroborates` gave both machines identical content, which is
+  `Reinforced` — the one merging case Cairn may decide without inference (D46). The case now gives
+  the two machines the same value in **their own words**, which is what `Corroborated` means, and a
+  new sibling `the_same_statement_from_both_reinforces` holds the identical-content case. The pair
+  is the FR-327/D77 distinction the corpus rule asks for.
+- `a_supersession_decided_elsewhere_lands` expected one relation. Proposing a second value for a
+  subject that already has one **is** a conflict, and Cairn detects it itself, so the settled
+  subject carries two durable relations: what disagreed, and how it was resolved.
+
+**One accepted property, recorded so it is not rediscovered as a bug**
+
+Two machines can hold the same relation with **different `basis`**. The primary key is
+`(from, to, kind)`, so a conflict Cairn detected here and an agent asserted there collapses to one
+row on each machine, keeping whichever basis that machine wrote first. `clock_swap_invariance`
+therefore renders the decision set as kind plus endpoints and not basis: requiring the bases to
+match would be requiring the two machines to have had the same history, which is the opposite of
+what convergence means.
+
+**What T110 gained early.** `GET /api/version` now carries `schema_version` and `capabilities`,
+additively. It was written here rather than in Phase 11 because `db::SCHEMA_VERSION` existed the
+moment migration 2 was registered, and an unused constant is a worse record than a used one.
+
 ## Where the run stands
 
-**95 of 148 tasks complete**, each with its named evidence passing. Phase 10 is in progress with
-none of its tasks marked.
+**106 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
@@ -603,34 +681,46 @@ none of its tasks marked.
 | 7 Evidence-aware tasks | T065–T075 | complete |
 | 8 Minimum-safe context | T076–T085 | complete |
 | 9 Compression-safe continuity | T086–T095 | complete |
-| 10 Multi-device sync | T096–T105 | **in progress** — see the table above |
-| 11–16 | T106–T148 | not started |
+| 10 Multi-device sync | T096–T105 | complete |
+| 11 Mixed-version recovery | T106–T113 | T110 done; T106–T109, T111–T113 open |
+| 12 Reusable patterns | T114–T124 | not started |
+| 13 Agent surface | T125–T131 | not started |
+| 14 Privacy & compatibility evidence | T132–T138 | not started |
+| 15 Corpus & performance | T139–T143 | not started |
+| 16 Convergence & release | T144–T148 | not started |
+
+### How to run the server suite
+
+Every US7 test skips silently without a database, which is how a whole phase's evidence can appear
+to pass. It does not skip on CI, and it must not be allowed to skip here either:
+
+```
+colima start
+docker run -d --name cairn-test-pg \
+  -e POSTGRES_USER=cairn -e POSTGRES_PASSWORD=cairn -e POSTGRES_DB=cairn \
+  -p 5433:5432 postgres:17-alpine
+export CAIRN_TEST_DATABASE_URL=postgres://cairn:cairn@localhost:5433/cairn
+```
+
+The image, port and credentials match `.github/workflows/ci.yml`. Without the variable the suite
+reports ~935 passing and proves nothing about US7.
 
 ## Next action
 
-**Finish Phase 10.** In order:
+**Phase 11 — mixed-version recovery, starting at T106.** T110 is already done. In order:
 
-1. **T102** — extend `GET /api/sync/changes` in `crates/cairn-server/src/sync.rs` with the
-   `relations`, `criteria` and `blockers` arrays under one cursor over `updated_at`. The daemon
-   already consumes them; nothing serves them, so no two-store test can pass until it does.
-2. **T101's remainder** — the extended memory upsert, writing the new `memories` columns the
-   migration added.
-3. **T096** — the `merge/` corpus, every scenario with a clock-reversed twin, plus
-   `merge/symmetric_relation/` and `merge/task_divergence/`.
-4. **T097, T098, T105** — the two-store tests. `us11_task_criteria.rs` already exposes free-function
-   helpers (`task_with`, `criterion_id`, `session`, `state_digest`) for T098 to reuse.
-5. **T100** — decide how the server migration is proven. No existing test runs a real Postgres, so
-   either one is added or the task's evidence is honestly recorded as review-only.
+1. **T106** — `tests/knowledge/merge/blocked_recovery/`: the capability-refusal scenario, its
+   upgrade step, and the expected delivery outcome. The directory exists and is empty.
+2. **T107** — `sync_degradation.rs::no_futile_retry` and `::never_permanently_failed`, which must
+   fail for the right reason before T108 and T109 land.
+3. **T108** — the `blocked` outbox state: `mark_blocked`, `claim` excluding it by an explicit
+   predicate, `release_blocked` preserving the original idempotency key and payload.
+4. **T109** — classify rejections: content stays `failed`, capability becomes `blocked`.
+5. **T111** — the capability probe against `GET /api/version`, cached in
+   `sync_meta.server_capability`, releasing blocked rows when the capability appears.
+6. **T112, T113** — the report, then the end-to-end run against a schema-1 and then a schema-2
+   server.
 
-Two attribution weaknesses in `criteria::divergence` become reachable the moment T103's imports are
-exercised by a test, and must be fixed as part of this phase: `origin()` tests "was this criterion
-ever touched locally" rather than "was *this change* local", and title/goal/status divergences are
-hardcoded `this_machine`.
-
-`contracts/privacy-sync.md` governs the phase and **has** been read in this run.
-
-### Superseded next-action note
-
-**Phase 10 (US7 — multi-device synchronization), starting at T096**: the test-first cluster
-T096–T098, then `clock_swap_invariance.rs` against two real stores, then
-`us11_task_criteria::offline_convergence`.
+For T113's schema-1 half, note that the server applies migrations on start from a compiled-in list;
+running an "older" server means running one whose list stops at 1, so the test needs a way to hold
+the database at version 1 rather than a second binary.

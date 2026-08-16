@@ -1,0 +1,30 @@
+{
+  "description": "The entity type is one the server has, and a **field** is not. That is the same class of answer - the server cannot hold this work - and it is retained the same way. Treating it as a content rejection would strand a memory's subject identity permanently on the machine that wrote it.",
+  "input": {
+    "extra": {
+      "server": {
+        "schema_version": 1,
+        "capabilities": []
+      },
+      "queued": [
+        {
+          "entity_type": "memory",
+          "operation": "upsert"
+        }
+      ],
+      "rejection": {
+        "code": "unknown_field",
+        "class": "capability"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "blocked",
+      "blocked_reason": "unknown_field",
+      "retries": 0,
+      "never_failed": true,
+      "never_reported_delivered": true
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "description": "Both machines move the same criterion. One value ends up current - that is what work state is - and neither assertion is lost: both are in each machine's local change log, and the digests agree once the rows converge. The same scenario with the two machines' clocks swapped: identical merged state, because nothing in the merge consults a clock.",
+  "input": {
+    "extra": {
+      "task": {
+        "criteria": [
+          "one"
+        ]
+      },
+      "store_a": {
+        "criterion_changes": [
+          {
+            "label": "AC-1",
+            "state": "satisfied"
+          }
+        ]
+      },
+      "store_b": {
+        "criterion_changes": [
+          {
+            "label": "AC-1",
+            "state": "blocked"
+          }
+        ]
+      },
+      "clocks": [
+        "2026-06-01T00:00:00Z",
+        "2026-01-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "digests_match": true,
+      "assertions_lost": 0
+    }
+  }
+}
