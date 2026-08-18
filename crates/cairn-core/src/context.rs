@@ -46,6 +46,10 @@ pub const SECTION_ORDER: &[&str] = &[
     "task_memory",
     "branch_memory",
     "project_memory",
+    // Last, deliberately. A prior pattern from another project is the least
+    // authoritative thing in a briefing, so it is the first thing a tight
+    // budget drops (FR-398).
+    "patterns",
 ];
 
 /// Sections whose loss means the briefing is materially degraded (SC-003).
@@ -62,6 +66,8 @@ pub struct ContextInputs<'a> {
     pub task_memory: &'a [String],
     pub branch_memory: &'a [String],
     pub project_memory: &'a [String],
+    /// Signal-matched prior patterns, already capped and ordered by the caller.
+    pub patterns: &'a [BriefingPattern],
     /// False for a project Cairn has never seen before (FR-031).
     pub has_history: bool,
     /// True when assembly ran out of time or storage was unavailable (FR-046).
@@ -140,6 +146,7 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         warnings: Vec::new(),
         constraints: Vec::new(),
         previous_next_action: None,
+        patterns: Vec::new(),
     };
 
     // ---- Level 0 -----------------------------------------------------------
@@ -189,6 +196,11 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
                     .take_while_fits(input.project_memory.iter().cloned(), |s| estimate(s) + 1);
                 briefing.memory.project.len() == input.project_memory.len()
             }
+            "patterns" => {
+                briefing.patterns =
+                    budget.take_while_fits(input.patterns.iter().cloned(), pattern_cost);
+                briefing.patterns.len() == input.patterns.len()
+            }
             _ => true,
         };
         if !admitted {
@@ -205,6 +217,22 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         briefing,
         selection: input.level0.explain.then_some(selection),
     }
+}
+
+/// What a suggestion costs, including the labelling that makes it honest.
+///
+/// The label is not optional and so is not free: a pattern rendered without
+/// "unverified in this project" is a different, worse thing than a pattern that
+/// did not fit.
+fn pattern_cost(p: &BriefingPattern) -> usize {
+    estimate(&p.title)
+        + estimate(&p.approach)
+        + p.applicability.iter().map(|a| estimate(a)).sum::<usize>()
+        + p.constraints.iter().map(|c| estimate(c)).sum::<usize>()
+        + p.alternative_cause.as_deref().map(estimate).unwrap_or(0)
+        + p.check_this_first.as_deref().map(estimate).unwrap_or(0)
+        // The label, the trust word and the field names.
+        + 12
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +620,7 @@ mod tests {
             task_memory: &[],
             branch_memory: &[],
             project_memory: mem,
+            patterns: &[],
             has_history: true,
             degraded: false,
             level0: Level0::default(),

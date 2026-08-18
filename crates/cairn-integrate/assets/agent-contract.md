@@ -38,3 +38,19 @@ mcp = Bind work to a Cairn task when one applies.
 [rule depth]
 block = For deeper workflows, use the Cairn Skill.
 mcp = For deeper workflows, call `cairn_handoff` for what the last session left you.
+
+[rule subject]
+block = Give a durable project fact a topic key and a value key specific enough to state the whole claim.
+mcp = Give a durable project fact a `topic_key` and a `value_key` specific enough to state the whole claim.
+
+[rule evidence_over_importance]
+block = Attach evidence instead of asserting importance.
+mcp = Attach evidence instead of asserting importance.
+
+[rule corroboration]
+block = If Cairn names a corroborating member and it is the same claim, reinforce it.
+mcp = If Cairn names a corroborating member and it is the same claim, reinforce it.
+
+[rule outcome]
+block = Record a pattern's outcome, including when it did not apply.
+mcp = Record a pattern's outcome, including when it did not apply.

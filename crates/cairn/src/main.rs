@@ -1,5 +1,11 @@
 //! `cairn` — the developer's interface, the hook runtime, and the MCP server.
 
+// The MCP tool definitions are one `json!` literal per tool, and
+// `cairn_remember` now carries every Feature 003 action's parameters. The
+// macro expands recursively once per node, so the default limit is reached
+// by a schema that is merely long rather than deep.
+#![recursion_limit = "512"]
+
 mod client;
 mod hook;
 mod integrate;
@@ -63,6 +69,13 @@ enum Command {
     },
     /// Inspect integration health. Makes no change.
     Doctor { agent: Option<String> },
+    /// Reusable cross-project patterns (`contracts/patterns.md`).
+    ///
+    /// A pattern is local to this machine and never synchronizes.
+    Pattern {
+        #[command(subcommand)]
+        action: PatternAction,
+    },
     /// Restore Cairn-owned state only.
     Repair {
         agent: Option<String>,
@@ -403,6 +416,70 @@ enum BlockerAction {
 }
 
 #[derive(Subcommand)]
+enum PatternAction {
+    /// List promoted patterns with their counters.
+    List {
+        /// `candidate`, `sanitized`, `validated` or `contested`.
+        #[arg(long)]
+        trust: Option<String>,
+        /// Only patterns matching this signal token.
+        #[arg(long)]
+        signal: Option<String>,
+    },
+    /// Full text, applications, counterexamples and the sanitization report.
+    Show { id: Uuid },
+    /// Propose promoting a project memory to a reusable pattern.
+    ///
+    /// Runs the ten-check gate. Any failure refuses, names the class and writes
+    /// nothing.
+    Promote {
+        #[arg(long)]
+        memory: Uuid,
+        /// A symptom token or error signature. Repeatable; at least two must
+        /// survive normalization.
+        #[arg(long = "signal")]
+        signals: Vec<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        problem: Option<String>,
+        /// A condition under which the pattern applies. Repeatable.
+        #[arg(long = "applies-when")]
+        applicability: Vec<String>,
+        #[arg(long)]
+        root_cause: Option<String>,
+        #[arg(long)]
+        approach: Option<String>,
+        /// What the approach does *not* do. Repeatable.
+        #[arg(long = "caveat")]
+        constraints: Vec<String>,
+        /// Report the gate outcome without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Record what happened when a pattern was applied here.
+    Outcome {
+        id: Uuid,
+        /// `resolved`, `not_applicable` or `failed`.
+        #[arg(long)]
+        outcome: String,
+        /// The signals this project saw. Repeatable — one incident, one set.
+        #[arg(long = "signal")]
+        signals: Vec<String>,
+        /// The cause found instead, on a `not_applicable` outcome.
+        #[arg(long)]
+        alternative_cause: Option<String>,
+        /// Deterministic evidence collected in **this** project.
+        #[arg(long)]
+        evidence: Option<Uuid>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Tombstone a pattern. Its applications survive as history.
+    Forget { id: Uuid },
+}
+
+#[derive(Subcommand)]
 enum EvidenceAction {
     /// Record a fact, optionally attaching it to a memory.
     Add {
@@ -561,6 +638,9 @@ enum MemoryAction {
         /// `unverified`, `verified`, `needs_recheck`, `drifted`, `conflicted`.
         #[arg(long)]
         verification: Option<String>,
+        /// Also return signal-matched prior patterns, in a separate array.
+        #[arg(long)]
+        include_patterns: bool,
         /// What established it: `cairn`, `attested`, `remote_cairn`,
         /// `remote_attested`.
         #[arg(long)]
@@ -821,6 +901,7 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             integrate::connect(&opts).await
         }
         Command::Doctor { agent } => integrate::doctor(parse_agent_opt(agent)?).await,
+        Command::Pattern { action } => pattern(action).await,
         Command::Repair {
             agent,
             dry_run,
@@ -1584,6 +1665,7 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             as_of,
             conflicted,
             corroborated,
+            include_patterns,
             verification,
             authority,
             session,
@@ -1618,6 +1700,7 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 as_of,
                 conflicted: *conflicted,
                 corroborated: *corroborated,
+                include_patterns: *include_patterns,
                 verification: match verification {
                     Some(v) => Some(parse_enum("verification", v)?),
                     None => None,
@@ -1774,6 +1857,138 @@ async fn auth(action: &AuthAction) -> Result<Output, WireError> {
                 if authenticated { "stored" } else { "none" },
             );
             Ok(Output::with(v, text))
+        }
+    }
+}
+
+/// `cairn pattern …` (`contracts/patterns.md` §Surfaces).
+async fn pattern(action: &PatternAction) -> Result<Output, WireError> {
+    match action {
+        PatternAction::List { trust, signal } => {
+            let trust = match trust {
+                Some(t) => Some(parse_enum::<PatternTrust>("trust", t)?),
+                None => None,
+            };
+            let v = client::send(&Request::PatternList {
+                cwd: cwd(),
+                trust,
+                signal: signal.clone(),
+            })
+            .await?;
+            let mut text = String::new();
+            for p in v["patterns"].as_array().unwrap_or(&Vec::new()) {
+                text.push_str(&format!(
+                    "{}  {}\n  trust {} · {}\n",
+                    p["id"].as_str().unwrap_or(""),
+                    p["title"].as_str().unwrap_or(""),
+                    p["trust"].as_str().unwrap_or(""),
+                    p["counts"].as_str().unwrap_or("")
+                ));
+            }
+            if text.is_empty() {
+                text.push_str("no patterns\n");
+            }
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Show { id } => {
+            let v = client::send(&Request::PatternShow {
+                cwd: cwd(),
+                id: *id,
+            })
+            .await?;
+            let p = &v["pattern"];
+            let mut text = format!(
+                "{}\n  trust {} · unverified in any project but where it was applied\n  {}\n",
+                p["title"].as_str().unwrap_or(""),
+                p["trust"].as_str().unwrap_or(""),
+                v["counts"].as_str().unwrap_or("")
+            );
+            text.push_str(&format!(
+                "  problem   {}\n  cause     {}\n  approach  {}\n",
+                p["problem"].as_str().unwrap_or(""),
+                p["root_cause"].as_str().unwrap_or(""),
+                p["approach"].as_str().unwrap_or("")
+            ));
+            for c in v["alternative_causes"].as_array().unwrap_or(&Vec::new()) {
+                text.push_str(&format!(
+                    "  ⚠ known alternative cause: {}\n",
+                    c.as_str().unwrap_or("")
+                ));
+            }
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Promote {
+            memory,
+            signals,
+            title,
+            problem,
+            applicability,
+            root_cause,
+            approach,
+            constraints,
+            dry_run,
+        } => {
+            let v = client::send(&Request::PatternPromote {
+                cwd: cwd(),
+                memory_id: *memory,
+                title: title.clone(),
+                problem: problem.clone(),
+                signals: signals.clone(),
+                applicability: applicability.clone(),
+                root_cause: root_cause.clone(),
+                approach: approach.clone(),
+                constraints: constraints.clone(),
+                dry_run: *dry_run,
+            })
+            .await?;
+            let text = if *dry_run {
+                format!(
+                    "would promote: {}\n(nothing was written)\n",
+                    v["pattern"]["title"].as_str().unwrap_or("")
+                )
+            } else {
+                format!(
+                    "promoted {}\n  {}\n",
+                    v["pattern"]["id"].as_str().unwrap_or(""),
+                    v["pattern"]["title"].as_str().unwrap_or("")
+                )
+            };
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Outcome {
+            id,
+            outcome,
+            signals,
+            alternative_cause,
+            evidence,
+            session,
+        } => {
+            let v = client::send(&Request::PatternOutcome {
+                cwd: cwd(),
+                id: *id,
+                outcome: parse_enum::<PatternOutcome>("outcome", outcome)?,
+                signals: signals.clone(),
+                alternative_cause: alternative_cause.clone(),
+                evidence_id: *evidence,
+                session: *session,
+            })
+            .await?;
+            let text = format!(
+                "recorded {} ({})\n  trust {} · {}\n",
+                v["outcome"].as_str().unwrap_or(""),
+                v["discovery"].as_str().unwrap_or(""),
+                v["trust"].as_str().unwrap_or(""),
+                v["counts"].as_str().unwrap_or("")
+            );
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Forget { id } => {
+            let v = client::send(&Request::PatternForget {
+                cwd: cwd(),
+                id: *id,
+            })
+            .await?;
+            Ok(Output::with(v, format!("forgotten {id}\n")))
         }
     }
 }

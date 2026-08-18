@@ -299,6 +299,25 @@ fn a_partial_upgrade_releases_only_what_it_covers() {
 // T113 — end to end, against a real schema-1 server and then a schema-2 one
 // ---------------------------------------------------------------------------
 
+/// The heavyweight tests run one at a time.
+///
+/// Each spins **two** servers against a database of its own — a schema-1 one
+/// and the upgraded one that replaces it — on top of every other server the
+/// suite is already running. PostgreSQL's connection limit is a fixed resource
+/// shared by the whole run, and exhausting it makes a server exit at startup:
+/// the failure lands in whichever test happened to ask next, and says nothing
+/// about the code it was testing.
+///
+/// The lock is taken rather than the pool made smaller because these tests are
+/// about a server's behaviour, and a server starved of connections is not the
+/// server under test.
+fn heavy() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // A test that panicked while holding it poisoned nothing that matters here:
+    // the guard protects a connection budget, not shared state.
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn schema_1_server() -> Option<Server> {
     match Server::start_at_schema(1) {
         Some(s) => Some(s),
@@ -313,6 +332,7 @@ fn schema_1_server() -> Option<Server> {
 /// SC-331).
 #[test]
 fn an_old_server_and_then_an_upgraded_one() {
+    let _serialized = heavy();
     let Some(mut old) = schema_1_server() else {
         return;
     };
@@ -490,6 +510,7 @@ fn an_old_server_and_then_an_upgraded_one() {
 /// treated as an error.
 #[test]
 fn older_daemon_newer_server() {
+    let _serialized = heavy();
     let Some(server) = Server::start() else {
         eprintln!("SKIPPED: set CAIRN_TEST_DATABASE_URL to run the server suite");
         return;
@@ -564,6 +585,7 @@ fn memory(s: &Sandbox, topic: &str, value: &str, content: &str) -> String {
 /// was waiting for nothing.
 #[test]
 fn the_background_worker_delivers_retained_work_after_an_upgrade() {
+    let _serialized = heavy();
     let Some(mut old) = schema_1_server() else {
         return;
     };

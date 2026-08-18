@@ -270,10 +270,14 @@ pub async fn agents() -> Result<Output, WireError> {
             continue;
         }
         text.push_str(&format!(
-            "{:<13} {:<9} {:<22} {}\n",
+            "{:<13} {:<9} {:<22} {:<21} {}\n",
             agent.as_str(),
             state.detection.version.as_deref().unwrap_or("-"),
             state.compatibility.as_str().replace('_', "-"),
+            // Derived from this agent's capability profile, never from a table
+            // someone maintains: a mode that over-claims is a defect, and a
+            // table is exactly how one comes to over-claim (FR-426, FR-427).
+            state.profile.continuity_mode().as_str().replace('_', "-"),
             level_line(&state)
         ));
         rows.push(agent_json(&state));
@@ -339,6 +343,26 @@ fn level_line(state: &AgentState) -> String {
     s
 }
 
+/// What a continuity mode means, in the words a developer needs.
+///
+/// The mode is derived; this is only its rendering. It says what the agent will
+/// do rather than naming a state, because "agent_initiated" tells someone
+/// nothing about whether their work survives a compaction.
+fn continuity_note(mode: cairn_core::domain::ContinuityMode) -> &'static str {
+    use cairn_core::domain::ContinuityMode::*;
+    match mode {
+        Automatic => "automatic — Cairn is called back before and after compaction",
+        AgentInitiated => {
+            "agent_initiated — Cairn is warned before compaction but not called back after; \
+             the agent must ask for context with reason=post_compaction"
+        }
+        UnavailableAutomatic => {
+            "unavailable_automatic — this agent reports no compaction event; write a \
+             checkpoint with cairn_session action=checkpoint before you compact"
+        }
+    }
+}
+
 fn agent_json(state: &AgentState) -> Value {
     let (guaranteed, conditional, absent) = state.profile.lifecycle_coverage();
     let mut caps = serde_json::Map::new();
@@ -365,6 +389,10 @@ fn agent_json(state: &AgentState) -> Value {
         "agent": state.agent.as_str(),
         "detected": state.detection.detected,
         "connected": state.connected,
+        // What this agent can honestly promise about surviving compaction
+        // (FR-426). `automatic` means Cairn is called back; `agent_initiated`
+        // means the agent must ask; `unavailable_automatic` means neither.
+        "continuity_mode": state.profile.continuity_mode().as_str(),
         "version": state.detection.version,
         "compatibility": state.compatibility.as_str(),
         "level": state.outcome.level.as_str(),
@@ -1072,6 +1100,10 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             continue;
         }
         text.push_str(&format!("{:<12} {}\n", a.as_str(), level_line(&state)));
+        text.push_str(&format!(
+            "             continuity: {}\n",
+            continuity_note(state.profile.continuity_mode())
+        ));
         // How sessions here actually end. A developer who reads nothing else
         // should still not believe a session is being completed when it is
         // being timed out (FR-229).

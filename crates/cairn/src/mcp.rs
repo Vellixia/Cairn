@@ -116,12 +116,19 @@ fn tool_definitions() -> Vec<Value> {
             "name": "cairn_context",
             "description": "Build the bounded briefing for the current repository: project, \
                             branch, commit, working tree, task goal, previous handoff, and \
-                            relevant scoped memory.",
+                            relevant scoped memory — plus the minimum safe continuity, drift \
+                            and conflict warnings, and whether your checkpoint diverged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "reason": { "type": "string", "enum": ["session_start", "continuation", "refresh"] },
+                    // `post_compaction` is how an agent whose adapter has no
+                    // post-compaction event restores continuity itself. An
+                    // unknown value still falls back to `refresh` (D57, FR-426).
+                    "reason": { "type": "string", "enum": ["session_start", "continuation", "refresh", "post_compaction"] },
+                    "depth": { "type": "string", "enum": ["minimum", "standard"], "description": "`minimum` is Level 0 only. Level 2 is never automatic." },
+                    "include_patterns": { "type": "boolean", "description": "Signal-matched patterns from other projects, always labelled unverified here" },
+                    "explain": { "type": "boolean", "description": "Return the selection diagnostics. Costs no budget when false." },
                     "token_budget": { "type": "integer", "description": "Cairn-estimated tokens" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier. Required when more than one session is open in this worktree." },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
@@ -133,7 +140,8 @@ fn tool_definitions() -> Vec<Value> {
             "name": "cairn_search",
             "description": "Search durable memory. Results are ranked scope-first — current \
                             task, then branch, then project — with lexical relevance and \
-                            recency breaking ties within a scope.",
+                            recency breaking ties within a scope. Filter by verification state \
+                            or subject; ask for reusable patterns explicitly.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -144,6 +152,16 @@ fn tool_definitions() -> Vec<Value> {
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "state": { "type": "string", "enum": ["active", "stale", "superseded"] },
                     "limit": { "type": "integer" },
+                    // A `drifted` memory is lifecycle-`active` and is returned
+                    // by default, with its verification state visible (FR-373).
+                    "verification": { "type": "string", "enum": ["unverified", "verified", "needs_recheck", "drifted", "conflicted"] },
+                    "authority": { "type": "string", "enum": ["cairn", "attested", "remote_cairn", "remote_attested"], "description": "What established the verification" },
+                    "corroborated": { "type": "boolean" },
+                    "conflicted": { "type": "boolean" },
+                    "topic_key": { "type": "string", "description": "Exact, or a prefix when it ends in a dot" },
+                    "as_of": { "type": "string", "description": "What was effective at this instant, RFC 3339" },
+                    "pinned": { "type": "boolean" },
+                    "include_patterns": { "type": "boolean", "description": "Patterns in a separate array, never mixed into results" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier, so scope precedence uses your task" },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
@@ -153,12 +171,21 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_remember",
             "description": "Record durable knowledge, replace it, or forget it. Supporting \
-                            observations are optional and are never invented.",
+                            observations are optional and are never invented. Give durable \
+                            project facts a `topic_key` and a `value_key` specific enough to \
+                            state the whole claim. Attach evidence rather than asserting \
+                            importance. If Cairn reports a corroborating member and it is the \
+                            same claim, reinforce it. Record a conflict rather than overwriting.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["create", "supersede", "forget"] },
+                    // One discriminator, and no action takes a sub-operation (D70).
+                    "action": { "type": "string", "enum": [
+                        "create", "supersede", "forget",
+                        "reinforce", "attach_evidence", "verify", "pin",
+                        "reconcile", "promote", "record_outcome"
+                    ] },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
                     "scope_key": { "type": "string" },
@@ -166,6 +193,39 @@ fn tool_definitions() -> Vec<Value> {
                     "evidence_observation_ids": { "type": "array", "items": { "type": "string" } },
                     "local_only": { "type": "boolean" },
                     "memory_id": { "type": "string" },
+                    // create / supersede
+                    "topic_key": { "type": "string", "description": "The subject this states something about. A key that will not normalize is reported and the memory is stored free-form." },
+                    "value_key": { "type": "string", "description": "The comparable value it asserts. Needs a topic_key." },
+                    "importance": { "type": "string", "enum": ["low", "normal", "high"], "description": "Ranks within a bucket, and nothing more" },
+                    // attach_evidence
+                    "kind": { "type": "string", "enum": ["observation", "file", "git_ref", "configuration", "test_outcome", "command_outcome", "runtime_state", "schema_version"] },
+                    "subject": { "type": "string" },
+                    "observed_value": { "type": "string" },
+                    "source_locator": { "type": "string", "description": "Repository-relative or a Git ref. Never absolute." },
+                    "observation_id": { "type": "string" },
+                    "role": { "type": "string", "enum": ["supports", "contradicts"] },
+                    "collector": { "type": "string", "enum": ["cairn", "agent"], "description": "`agent` when you are attesting rather than Cairn checking" },
+                    // pin
+                    "pinned": { "type": "boolean" },
+                    "reason": { "type": "string" },
+                    // reconcile
+                    "from_memory_id": { "type": "string" },
+                    "to_memory_id": { "type": "string" },
+                    "relation": { "type": "string", "enum": ["narrows", "not_applicable_to", "supersedes"] },
+                    "basis": { "type": "string", "enum": ["explicit_agent", "evidence"] },
+                    "basis_evidence_id": { "type": "string" },
+                    "rationale": { "type": "string" },
+                    // promote / record_outcome
+                    "signals": { "type": "array", "items": { "type": "string" } },
+                    "applicability": { "type": "array", "items": { "type": "string" } },
+                    "root_cause": { "type": "string" },
+                    "approach": { "type": "string" },
+                    "constraints": { "type": "array", "items": { "type": "string" } },
+                    "dry_run": { "type": "boolean" },
+                    "pattern_id": { "type": "string" },
+                    "outcome": { "type": "string", "enum": ["resolved", "not_applicable", "failed"] },
+                    "alternative_cause": { "type": "string" },
+                    "evidence_id": { "type": "string" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier. Required when more than one session is open in this worktree." },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
@@ -175,16 +235,21 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_session",
             "description": "Inspect or steer the current session. Starting is idempotent per \
-                            agent session, so two agents in one checkout get two sessions.",
+                            agent session, so two agents in one checkout get two sessions — or \
+                            write a continuity checkpoint before you compact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end"] },
+                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end", "checkpoint"] },
                     "agent": { "type": "string" },
                     "agent_session_key": { "type": "string" },
+                    "session_id": { "type": "string" },
                     "task_id": { "type": "string" },
-                    "status": { "type": "string", "enum": ["completed", "interrupted"] }
+                    "status": { "type": "string", "enum": ["completed", "interrupted"] },
+                    // checkpoint
+                    "next_action": { "type": "string", "description": "What you were about to do" },
+                    "relevant_paths": { "type": "array", "items": { "type": "string" }, "description": "Repository-relative paths this work depends on" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -192,17 +257,34 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_task",
             "description": "List, read, create or update tasks — title, goal, acceptance \
-                            criteria and status.",
+                            criteria and status. Update one criterion at a time and pass the \
+                            `expected_revision` you read.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["list", "get", "create", "update"] },
+                    "action": { "type": "string", "enum": [
+                        "list", "get", "create", "update",
+                        "add_criterion", "update_criterion", "blocker", "readiness"
+                    ] },
                     "task_id": { "type": "string" },
                     "title": { "type": "string" },
                     "goal": { "type": "string" },
                     "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
-                    "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"] }
+                    "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"] },
+                    // add_criterion / update_criterion
+                    "text": { "type": "string" },
+                    "criterion_id": { "type": "string" },
+                    "state": { "type": "string", "enum": ["pending", "satisfied", "blocked", "waived"] },
+                    "verification": { "type": "string", "enum": ["unverified", "verified", "failed"] },
+                    "evidence_observation_id": { "type": "string" },
+                    // This store's local concurrency token, read from `get`. It
+                    // is not a version anyone else shares (D80).
+                    "expected_revision": { "type": "integer" },
+                    // blocker
+                    "description": { "type": "string" },
+                    "blocker_id": { "type": "string" },
+                    "clear": { "type": "boolean" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -210,7 +292,8 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_handoff",
             "description": "Read the latest handoff, generate one at a boundary, or attach a \
-                            bounded note beside the derived record.",
+                            bounded note beside the derived record — optionally with its \
+                            continuity checkpoint.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -218,8 +301,11 @@ fn tool_definitions() -> Vec<Value> {
                     "action": { "type": "string", "enum": ["latest", "generate", "annotate"] },
                     "session_id": { "type": "string" },
                     "agent_session_key": { "type": "string" },
+                    // `stop` is deliberately absent: a turn checkpoint is not a
+                    // handoff boundary (Feature 001 D16).
                     "trigger": { "type": "string", "enum": ["pre_compact", "session_end"] },
-                    "note": { "type": "string" }
+                    "note": { "type": "string" },
+                    "include_checkpoint": { "type": "boolean", "description": "Add the anchored checkpoint and its staleness assessment" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -299,6 +385,10 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .unwrap_or(false),
                 corroborated: args
                     .get("corroborated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                include_patterns: args
+                    .get("include_patterns")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
                 verification: enum_arg(args, "verification"),

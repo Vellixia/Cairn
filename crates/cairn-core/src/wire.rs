@@ -408,6 +408,13 @@ pub struct MemoryQuery {
     /// Filter by what established the verification (FR-370).
     #[serde(default)]
     pub authority: Option<VerificationAuthority>,
+    /// Also return signal-matched prior patterns, in a **separate** array.
+    ///
+    /// Never merged into `results`: a pattern is not this project's knowledge,
+    /// and a caller that did not ask for one must not be handed one among its
+    /// own memories (FR-406, SC-312).
+    #[serde(default)]
+    pub include_patterns: bool,
 }
 
 /// Everything the daemon can be asked to do.
@@ -841,6 +848,67 @@ pub enum Request {
         query: MemoryQuery,
     },
 
+    // ---- Reusable cross-project patterns (`contracts/patterns.md`) --------
+    //
+    // A pattern is local to the machine and has no project identity, so none of
+    // these carries a project — `cwd` is here only to resolve *this* project for
+    // the promotion source and for an application's attribution.
+    /// List promoted patterns, with their counters.
+    PatternList {
+        cwd: String,
+        #[serde(default)]
+        trust: Option<PatternTrust>,
+        #[serde(default)]
+        signal: Option<String>,
+    },
+    /// One pattern in full: text, applications, counterexamples, and the
+    /// sanitization report.
+    PatternShow {
+        cwd: String,
+        id: Uuid,
+    },
+    /// Propose a promotion. Runs the ten-check gate; `dry_run` reports the
+    /// outcome without writing (FR-395).
+    PatternPromote {
+        cwd: String,
+        memory_id: Uuid,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        problem: Option<String>,
+        #[serde(default)]
+        signals: Vec<String>,
+        #[serde(default)]
+        applicability: Vec<String>,
+        #[serde(default)]
+        root_cause: Option<String>,
+        #[serde(default)]
+        approach: Option<String>,
+        #[serde(default)]
+        constraints: Vec<String>,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    /// Record what happened when a pattern was applied here (FR-401, FR-404).
+    PatternOutcome {
+        cwd: String,
+        id: Uuid,
+        outcome: PatternOutcome,
+        #[serde(default)]
+        signals: Vec<String>,
+        #[serde(default)]
+        alternative_cause: Option<String>,
+        #[serde(default)]
+        evidence_id: Option<Uuid>,
+        #[serde(default)]
+        session: Option<Uuid>,
+    },
+    /// Tombstone a pattern. Its applications survive as history.
+    PatternForget {
+        cwd: String,
+        id: Uuid,
+    },
+
     /// Inspect a subject: its members, its canonical answer or answers, its
     /// reconciliation state, and the decisions that produced it (FR-307).
     MemorySubject {
@@ -1016,6 +1084,11 @@ pub struct StatusPayload {
     /// the debt visible (FR-240 clause 3).
     #[serde(default)]
     pub sessions_awaiting_handoff: i64,
+    /// How far subject identity has actually reached in this project, and what
+    /// the mechanism is currently reporting (FR-499). Defaulted, so a Feature
+    /// 001 consumer reading an older payload still parses.
+    #[serde(default)]
+    pub knowledge: Option<KnowledgeHealth>,
     /// Boundaries whose synthesis has failed, with the redacted reason. They
     /// stay retryable and actionable; this is not a terminal outcome.
     #[serde(default)]
@@ -1187,6 +1260,43 @@ pub struct Briefing {
     /// `next_action` (FR-434). Absent until Phase 9 records checkpoints.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub previous_next_action: Option<String>,
+    /// Signal-matched prior patterns from other projects (FR-398, SC-312).
+    ///
+    /// A **separate array**, never merged into `memory`. A pattern is not this
+    /// project's knowledge and must not be readable as though it were; keeping
+    /// it in its own field is what makes that structural rather than a matter of
+    /// how it happens to be rendered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<BriefingPattern>,
+}
+
+/// A prior pattern offered to this project, with everything needed to rule it
+/// out cheaply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BriefingPattern {
+    pub id: Uuid,
+    pub title: String,
+    /// `sanitized`, `validated` or `contested`. Stated, never summarized into a
+    /// score.
+    pub trust: PatternTrust,
+    /// **Always false.** A pattern is never verified in the project being
+    /// briefed; it is offered, not asserted (SC-312).
+    pub verified_in_this_project: bool,
+    /// The conditions under which it applies, so the agent can rule it out
+    /// without trying it.
+    pub applicability: Vec<String>,
+    pub approach: String,
+    /// What the approach does *not* do.
+    pub constraints: Vec<String>,
+    /// A cause someone else found behind the same symptom. Present only when a
+    /// counterexample recorded one (FR-405).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative_cause: Option<String>,
+    /// What to rule out first, derived from the alternative cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_this_first: Option<String>,
+    /// How many of this project's own signals matched.
+    pub signal_overlap: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1336,6 +1446,25 @@ pub struct SyncStatusPayload {
 }
 
 /// What a server cannot hold, and what happens next.
+/// What `cairn status` says about the subject mechanism's reach.
+///
+/// Reported as counts and one share, never as a score. `subject_share_percent`
+/// is absent when the project has no project-scoped memory to have adopted
+/// anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeHealth {
+    pub project_memories: i64,
+    pub with_subject: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_share_percent: Option<i64>,
+    pub conflicted_subjects: i64,
+    pub needs_recheck: i64,
+    pub drifted: i64,
+    /// Present only when this project is retaining work for an older server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_degradation: Option<SyncDegradation>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SyncDegradation {
     pub blocked: i64,

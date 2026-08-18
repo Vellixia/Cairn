@@ -2255,3 +2255,168 @@ pub async fn applicable_pins(
         })
         .collect()
 }
+
+/// The summaries of a session's `error` observations, most recent first.
+///
+/// One of the two sources of the signals a pattern is matched against. Read
+/// from what Cairn already recorded rather than asked of the agent: an agent
+/// reporting its own symptoms would be reporting them after having read
+/// whatever was suggested last time (FR-398).
+///
+/// The previous session is included, because a symptom is often recorded in the
+/// session that hit it and worked on in the next one.
+pub async fn recent_error_summaries(
+    store: &Store,
+    session_id: Uuid,
+    limit: i64,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT summary FROM observations
+          WHERE type = 'error'
+            AND session_id IN (
+                ?1,
+                (SELECT previous_session_id FROM sessions WHERE id = ?1)
+            )
+          ORDER BY occurred_at DESC
+          LIMIT ?2",
+    )
+    .bind(session_id.to_string())
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?)
+}
+
+/// The text of `failure`-type memories in the applicable scopes.
+///
+/// The other signal source. Project- and branch-scoped only: a task-scoped
+/// failure belongs to work that may have nothing to do with what is happening
+/// now, and widening the read would widen what a pattern matches on.
+pub async fn failure_memory_text(
+    store: &Store,
+    project_id: Uuid,
+    branch: &str,
+    limit: i64,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT content FROM memories
+          WHERE project_id = ?1 AND type = 'failure' AND state = 'active'
+            AND deleted_at IS NULL
+            AND (scope = 'project' OR (scope = 'branch' AND scope_key = ?2))
+          ORDER BY updated_at DESC
+          LIMIT ?3",
+    )
+    .bind(project_id.to_string())
+    .bind(branch)
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?)
+}
+
+/// How many of a project's most recent sessions supply signals.
+///
+/// The contract scopes signals to "the current and previous session". The
+/// session-independent read keeps that bound rather than reading the project's
+/// whole history: a failure from months ago is not what this project is showing
+/// now, and suggesting a pattern for it would be worse than suggesting nothing
+/// (`contracts/patterns.md` §Suggestion).
+pub const SIGNAL_SESSIONS: i64 = 2;
+
+/// A project's recent `error` observations, most recent first.
+///
+/// The session-independent form of [`recent_error_summaries`]. `cairn memory
+/// search --include-patterns` is a developer command and must not require an
+/// open agent session to answer — but the signals it matches on are still what
+/// Cairn recorded, never what the caller asserts, and still only from what this
+/// project is currently working through.
+pub async fn recent_project_errors(
+    store: &Store,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT o.summary FROM observations o
+          WHERE o.type = 'error'
+            AND o.session_id IN (
+                SELECT id FROM sessions
+                 WHERE project_id = ?1 AND deleted_at IS NULL
+                 ORDER BY started_at DESC
+                 LIMIT ?3
+            )
+          ORDER BY o.occurred_at DESC
+          LIMIT ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(limit)
+    .bind(SIGNAL_SESSIONS)
+    .fetch_all(store.pool())
+    .await?)
+}
+
+/// How far the subject mechanism actually reaches in this project, and what it
+/// is currently reporting (FR-499).
+///
+/// Observable in **every** project without anyone running an evaluation: an
+/// adoption rate nobody can see is one nobody acts on, and the whole design
+/// rests on agents choosing to give facts a subject. A low share is a product
+/// finding about the usage contract and the tool descriptions — never a licence
+/// to start inferring subjects from content, which D46 rejects on correctness
+/// grounds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubjectAdoption {
+    /// Project-scoped, non-deleted memories.
+    pub project_memories: i64,
+    /// How many of them carry a subject identity.
+    pub with_subject: i64,
+    pub conflicted_subjects: i64,
+    pub needs_recheck: i64,
+    pub drifted: i64,
+}
+
+impl SubjectAdoption {
+    /// Whole percent, or `None` when there is nothing to divide by.
+    ///
+    /// `None` rather than zero: a project with no project-scoped memories has
+    /// no adoption rate, and reporting 0% would read as a failure where there
+    /// is nothing to have adopted.
+    pub fn percent(&self) -> Option<i64> {
+        (self.project_memories > 0).then(|| self.with_subject * 100 / self.project_memories)
+    }
+}
+
+pub async fn subject_adoption(store: &Store, project_id: Uuid) -> Result<SubjectAdoption> {
+    let one = |sql: &'static str| {
+        let id = project_id.to_string();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(id)
+                .fetch_one(store.pool())
+                .await
+        }
+    };
+
+    Ok(SubjectAdoption {
+        project_memories: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND scope = 'project' AND deleted_at IS NULL")
+        .await?,
+        with_subject: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND scope = 'project' AND deleted_at IS NULL
+                AND topic_key IS NOT NULL")
+        .await?,
+        // Counted by subject, not by memory: one disagreement between four
+        // proposals is one thing to resolve, not four.
+        conflicted_subjects: one("SELECT COUNT(*) FROM (
+                 SELECT scope, scope_key, topic_key FROM memories
+                  WHERE project_id = ?1 AND deleted_at IS NULL AND topic_key IS NOT NULL
+                    AND state = 'active'
+                  GROUP BY scope, scope_key, topic_key
+                 HAVING COUNT(DISTINCT value_key) > 1
+             ) conflicted")
+        .await?,
+        needs_recheck: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND deleted_at IS NULL AND verification = 'needs_recheck'")
+        .await?,
+        drifted: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND deleted_at IS NULL AND verification = 'drifted'")
+        .await?,
+    })
+}

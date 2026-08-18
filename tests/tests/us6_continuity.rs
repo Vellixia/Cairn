@@ -322,3 +322,67 @@ fn continuity_mode_is_derived_not_claimed() {
         "the mode must be one of the three derived values, not absent or invented: {v}"
     );
 }
+
+/// Each agent's mode is what the rule produces from its capabilities (T130,
+/// FR-426, FR-427).
+///
+/// Asserted against the **derivation**, not against a list. The values below
+/// are what Claude Code, Codex, OpenCode and a generic MCP client happen to
+/// come out as today; if one of them gained or lost a compaction event, this
+/// test should change because the *agent* changed — never because someone
+/// edited a table to make the output look right.
+///
+/// A mode that over-claims is a defect, not a note: an agent reported as
+/// `automatic` that is never called back loses the session's continuity
+/// silently, which is the failure this whole slice exists to prevent.
+#[test]
+fn each_agents_mode_is_the_rule_applied_to_its_capabilities() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::{Availability, Capability, CapabilityProfile};
+    use cairn_integrate::model::AgentId;
+
+    for (agent, expected) in [
+        (AgentId::ClaudeCode, ContinuityMode::Automatic),
+        (AgentId::Codex, ContinuityMode::Automatic),
+        (AgentId::Opencode, ContinuityMode::AgentInitiated),
+        (AgentId::GenericMcp, ContinuityMode::UnavailableAutomatic),
+    ] {
+        let profile = CapabilityProfile::base(agent);
+        let derived = profile.continuity_mode();
+        assert_eq!(
+            derived,
+            expected,
+            "{} derives {derived:?}, expected {expected:?} — pre-compaction is {:?}, \
+             post-compaction is {:?}",
+            agent.as_str(),
+            profile.get(Capability::LifecyclePreCompaction).availability,
+            profile
+                .get(Capability::LifecyclePostCompaction)
+                .availability,
+        );
+
+        // And the derivation is the rule, not a lookup: the answer follows the
+        // two capabilities it reads.
+        let pre = profile.get(Capability::LifecyclePreCompaction).availability;
+        let post = profile
+            .get(Capability::LifecyclePostCompaction)
+            .availability;
+        let by_rule = if matches!(pre, Availability::Absent | Availability::PendingActivation) {
+            // Nothing warns Cairn: the agent must checkpoint for itself.
+            ContinuityMode::UnavailableAutomatic
+        } else if pre == Availability::Guaranteed && post == Availability::Guaranteed {
+            // `automatic` promises Cairn is called back on both sides, and only
+            // two guarantees can keep that promise. A conditional warning is
+            // one an agent cannot plan around.
+            ContinuityMode::Automatic
+        } else {
+            ContinuityMode::AgentInitiated
+        };
+        assert_eq!(
+            derived,
+            by_rule,
+            "{} does not follow the documented rule",
+            agent.as_str()
+        );
+    }
+}

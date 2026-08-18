@@ -11,6 +11,7 @@ mod drift;
 mod handlers;
 mod handoffs;
 mod integrations;
+mod patterns;
 mod recover;
 mod state;
 mod sync;

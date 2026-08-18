@@ -82,11 +82,52 @@ pub fn daemon_log_path() -> PathBuf {
     home().join("cairnd.log")
 }
 
+/// The per-machine salt behind a pattern's `origin_ref` (FR-393).
+pub fn machine_salt_path() -> PathBuf {
+    home().join("machine-salt")
+}
+
 /// Create the state directory if it does not exist.
 pub fn ensure_home() -> std::io::Result<PathBuf> {
     let h = home();
     std::fs::create_dir_all(&h)?;
     Ok(h)
+}
+
+/// A stable random value this machine keeps to itself.
+///
+/// A reusable pattern holds **no project identity** — no name, no path, no
+/// remote, no id. What it holds instead is `origin_ref`, a digest of the source
+/// project salted with this value, which answers "did these two patterns come
+/// from the same project?" without answering "which project?".
+///
+/// Salted rather than a bare digest because a project id is a UUID and a bare
+/// digest of one is a lookup away from being reversed by anyone holding the
+/// projects table — and because two machines must not produce the same
+/// `origin_ref` for the same project, which would correlate them across a
+/// boundary patterns never cross (FR-508).
+///
+/// Created on first use, 0600 on Unix, and never transmitted. A machine that
+/// loses it produces new references for the same project, which makes older
+/// patterns' origins unmatched rather than wrong.
+pub fn machine_salt() -> std::io::Result<String> {
+    let path = machine_salt_path();
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+
+    ensure_home()?;
+    let salt = crate::domain::new_id().to_string() + &crate::domain::new_id().to_string();
+    std::fs::write(&path, &salt)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(salt)
 }
 
 #[cfg(test)]

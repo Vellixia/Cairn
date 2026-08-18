@@ -603,15 +603,29 @@ impl CapabilityProfile {
         let post = self.get(Capability::LifecyclePostCompaction);
 
         use cairn_core::domain::ContinuityMode;
-        if pre.availability == Availability::Absent
-            || pre.availability == Availability::PendingActivation
-        {
+
+        // Nothing warns Cairn at all: the agent must write its own checkpoint
+        // before compacting, because there is no moment Cairn can do it.
+        if matches!(
+            pre.availability,
+            Availability::Absent | Availability::PendingActivation
+        ) {
             return ContinuityMode::UnavailableAutomatic;
         }
-        match post.availability {
-            Availability::Guaranteed => ContinuityMode::Automatic,
-            // Conditional and unavailable both mean the same thing to an agent
-            // that must act: it cannot rely on being called back.
+
+        // `automatic` is a promise that Cairn is called back on both sides, and
+        // it is only keepable when **both** are guaranteed.
+        //
+        // A conditional pre-compaction is the case this originally got wrong.
+        // OpenCode's warning depends on the installed build exposing
+        // `experimental.session.compacting`, so on a build without it Cairn is
+        // never told compaction is coming and the checkpoint is never written —
+        // while the agent had been told continuity was automatic and did
+        // nothing. Conditional and unavailable mean the same thing to an agent
+        // that must act: it cannot rely on being called, so it must ask
+        // (FR-426).
+        match (pre.availability, post.availability) {
+            (Availability::Guaranteed, Availability::Guaranteed) => ContinuityMode::Automatic,
             _ => ContinuityMode::AgentInitiated,
         }
     }

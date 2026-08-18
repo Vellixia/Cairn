@@ -691,6 +691,61 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             scope,
             scope_key,
         } => memory_subject(d, &cwd, topic_key, scope, scope_key).await,
+        Request::PatternList { cwd, trust, signal } => {
+            crate::patterns::list(d, &cwd, trust, signal).await
+        }
+        Request::PatternShow { cwd, id } => crate::patterns::show(d, &cwd, id).await,
+        Request::PatternPromote {
+            cwd,
+            memory_id,
+            title,
+            problem,
+            signals,
+            applicability,
+            root_cause,
+            approach,
+            constraints,
+            dry_run,
+        } => {
+            crate::patterns::promote(
+                d,
+                &cwd,
+                crate::patterns::PromoteRequest {
+                    memory_id,
+                    title,
+                    problem,
+                    signals,
+                    applicability,
+                    root_cause,
+                    approach,
+                    constraints,
+                    dry_run,
+                },
+            )
+            .await
+        }
+        Request::PatternOutcome {
+            cwd,
+            id,
+            outcome,
+            signals,
+            alternative_cause,
+            evidence_id,
+            session,
+        } => {
+            crate::patterns::record_outcome(
+                d,
+                &cwd,
+                id,
+                outcome,
+                signals,
+                alternative_cause,
+                evidence_id,
+                session,
+            )
+            .await
+        }
+        Request::PatternForget { cwd, id } => crate::patterns::forget(d, &cwd, id).await,
         Request::MemoryReinforce {
             cwd,
             agent_session_key,
@@ -883,6 +938,7 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         local_schema_version: cairn_store::migrate::latest_version(),
         sessions_awaiting_handoff: debt.0,
+        knowledge: knowledge_health(d, r.project.id).await,
         handoff_synthesis_failures: debt
             .1
             .into_iter()
@@ -890,6 +946,26 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
             .collect(),
     };
     Ok(serde_json::to_value(payload).unwrap_or(json!({})))
+}
+
+/// The subject mechanism's reach in this project, and what it is reporting.
+///
+/// `None` only when the read fails: status must not fail because a metric could
+/// not be computed.
+async fn knowledge_health(
+    d: &Daemon,
+    project_id: Uuid,
+) -> Option<cairn_core::wire::KnowledgeHealth> {
+    let a = repo::subject_adoption(&d.store, project_id).await.ok()?;
+    Some(cairn_core::wire::KnowledgeHealth {
+        project_memories: a.project_memories,
+        with_subject: a.with_subject,
+        subject_share_percent: a.percent(),
+        conflicted_subjects: a.conflicted_subjects,
+        needs_recheck: a.needs_recheck,
+        drifted: a.drifted,
+        sync_degradation: crate::sync::degradation(d, project_id).await,
+    })
 }
 
 /// Mark memory whose scope key no longer resolves as `stale` (FR-018).
@@ -942,7 +1018,7 @@ async fn integration_mode(d: &Daemon) -> String {
 ///
 /// A worktree may hold several active sessions, so ambiguity is reported
 /// rather than guessed (FR-010).
-async fn resolve_session(
+pub(crate) async fn resolve_session(
     d: &Daemon,
     r: &Resolved,
     session_id: Option<Uuid>,
@@ -1956,7 +2032,7 @@ async fn authoring_session(
     }
 }
 
-async fn ensure_session_for_memory(
+pub(crate) async fn ensure_session_for_memory(
     d: &Daemon,
     r: &Resolved,
     session_id: Option<Uuid>,
@@ -2030,11 +2106,49 @@ async fn memory_search(
         task_id: session.as_ref().and_then(|s| s.task_id),
         session_id: session.as_ref().map(|s| s.id),
     };
+    let include_patterns = query.include_patterns;
     let results = search::search(&d.store, r.project.id, &query, &ctx)
         .await
         .map_err(storage_err)?;
     let total = results.len();
-    Ok(serde_json::to_value(SearchPayload { results, total }).unwrap_or(json!({})))
+    let mut payload = serde_json::to_value(SearchPayload { results, total }).unwrap_or(json!({}));
+
+    // A **separate** array, and only when asked for. Merging a pattern into
+    // `results` would hand a caller another project's knowledge among its own
+    // memories, with nothing in the shape to say which was which (SC-312).
+    if include_patterns {
+        let signals = crate::briefing::project_signals_for(d, r.project.id, &git.branch).await;
+        let config = d.config.read().await.clone();
+        let matched = cairn_store::patterns::matching(
+            &d.store,
+            &signals,
+            config.pattern_signals_min,
+            config.patterns_in_context_max,
+        )
+        .await
+        .unwrap_or_default();
+
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "patterns".into(),
+                json!(matched
+                    .into_iter()
+                    .map(|(p, overlap)| json!({
+                        "id": p.id,
+                        "title": p.title,
+                        "trust": p.trust,
+                        // Always. A pattern is offered, never asserted here.
+                        "verified_in_this_project": false,
+                        "applicability": p.applicability,
+                        "approach": p.approach,
+                        "constraints": p.constraints,
+                        "signal_overlap": overlap,
+                    }))
+                    .collect::<Vec<_>>()),
+            );
+        }
+    }
+    Ok(payload)
 }
 
 // ---------------------------------------------------------------------------

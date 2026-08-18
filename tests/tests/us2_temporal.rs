@@ -27,6 +27,7 @@ fn query() -> MemoryQuery {
         as_of: None,
         conflicted: false,
         corroborated: false,
+        include_patterns: false,
         verification: None,
         authority: None,
     }

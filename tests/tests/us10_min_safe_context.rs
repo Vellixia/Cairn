@@ -111,6 +111,7 @@ fn assemble_case(case_input: &serde_json::Map<String, Value>) -> Value {
         task_memory: &[],
         branch_memory: &[],
         project_memory: &mem,
+        patterns: &[],
         has_history: n("memories") > 0,
         degraded: false,
         level0: Level0 {
@@ -294,6 +295,7 @@ fn critical_content_survives() {
         task_memory: &[],
         branch_memory: &[],
         project_memory: &mem,
+        patterns: &[],
         has_history: true,
         degraded: false,
         level0: Level0 {
@@ -467,6 +469,7 @@ fn action_order() {
         task_memory: &[],
         branch_memory: &[],
         project_memory: &[],
+        patterns: &[],
         has_history: true,
         degraded: false,
         level0: Level0 {

@@ -12,9 +12,18 @@ use tempfile::TempDir;
 /// An isolated Cairn installation: its own state directory, socket, daemon and
 /// Git repository.
 pub struct Sandbox {
-    pub home: TempDir,
+    /// Shared by reference so a second repository on the same machine can be
+    /// given the same Cairn installation. See [`Sandbox::sibling_project`].
+    pub home: std::sync::Arc<TempDir>,
     pub repo: TempDir,
     pub socket: PathBuf,
+    /// False for a sibling project sharing another sandbox's installation.
+    ///
+    /// One daemon serves the home, so only the sandbox that created it may stop
+    /// it. Without this the first sibling to drop would take the daemon out
+    /// from under every sandbox still using it, and the failure would land in
+    /// whichever test happened to run next.
+    owns_daemon: bool,
 }
 
 impl Sandbox {
@@ -25,7 +34,12 @@ impl Sandbox {
         let socket = sandbox_socket();
 
         let home_path = home.path().to_path_buf();
-        let s = Self { home, repo, socket };
+        let s = Self {
+            home: std::sync::Arc::new(home),
+            repo,
+            socket,
+            owns_daemon: true,
+        };
         s.git(&["init", "--initial-branch=main"]);
         s.git(&["config", "user.email", "test@example.com"]);
         s.git(&["config", "user.name", "Cairn Test"]);
@@ -63,6 +77,32 @@ impl Sandbox {
 
     pub fn repo_path(&self) -> &Path {
         self.repo.path()
+    }
+
+    /// A second repository on the **same machine**: same `CAIRN_HOME`, same
+    /// daemon, same store, a different project.
+    ///
+    /// What cross-project behaviour needs. A second `Sandbox::new()` would be a
+    /// second machine — different state directory, different daemon — and a
+    /// pattern, which is local to a machine and carries no project identity,
+    /// would correctly be invisible there. Testing cross-project reach against
+    /// two machines would prove the opposite of what it looks like.
+    pub fn sibling_project(&self, name: &str) -> Self {
+        let repo = TempDir::new().expect("repo");
+        let sibling = Self {
+            home: std::sync::Arc::clone(&self.home),
+            repo,
+            socket: self.socket.clone(),
+            owns_daemon: false,
+        };
+        sibling.git(&["init", "--initial-branch=main"]);
+        sibling.git(&["config", "user.email", "test@example.com"]);
+        sibling.git(&["config", "user.name", "Cairn Test"]);
+        sibling.git(&["config", "commit.gpgsign", "false"]);
+        sibling.write_file("README.md", &format!("# {name}\n"));
+        sibling.git(&["add", "."]);
+        sibling.git(&["commit", "-m", "init", "--no-gpg-sign"]);
+        sibling
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -533,6 +573,9 @@ impl Drop for Sandbox {
         // assertion actually failed with a SIGABRT and a core dump. Shutting
         // the daemon down is best effort, so it is guarded rather than
         // asserted.
+        if !self.owns_daemon {
+            return;
+        }
         if let Some(exe) = try_binary("cairn") {
             let _ = Command::new(exe)
                 .args(["daemon", "stop"])
@@ -2043,4 +2086,27 @@ pub fn render_authority(state: &str, authority: Option<&str>) -> String {
         ("verified", None) => "✓ verified                      (authority: unknown)".into(),
         (other, _) => format!("· {other}"),
     }
+}
+
+/// One `CAIRN_HOME` for the whole test binary, set before any test reads it.
+///
+/// `CAIRN_HOME` is process-global and Rust runs a binary's tests on threads of
+/// one process, so a per-test `set_var` is a race: a test can promote a pattern
+/// under one home and record its outcome under another, which silently changes
+/// the machine salt between two halves of the same scenario. Anything derived
+/// from that salt — `origin_ref`, and so `is_origin` — then reads as a
+/// different machine's.
+///
+/// The directory is leaked deliberately. It must outlive every test in the
+/// binary, and the process is about to end anyway.
+pub fn shared_home() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<&'static std::path::Path> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = Box::leak(Box::new(
+            tempfile::tempdir().expect("a home for this test binary"),
+        ));
+        std::env::set_var("CAIRN_HOME", dir.path());
+        dir.path()
+    })
 }

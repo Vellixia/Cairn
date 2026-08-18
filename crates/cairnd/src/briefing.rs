@@ -6,7 +6,7 @@
 use crate::state::{repo_state, Daemon, Resolved};
 use cairn_core::context::{assemble, ContextInputs};
 use cairn_core::domain::*;
-use cairn_core::wire::{codes, ContextPayload, WireError};
+use cairn_core::wire::{codes, BriefingPattern, ContextPayload, WireError};
 use cairn_store::{repo, search};
 use uuid::Uuid;
 
@@ -85,6 +85,7 @@ pub async fn build(
     let pins = level0_pins(daemon, project.id, &git.branch, task.as_ref()).await;
 
     let config = daemon.config.read().await.clone();
+    let patterns = level1_patterns(daemon, project.id, session, &git.branch, &config).await;
     let caps = cairn_core::context::Caps {
         goal_max_tokens: config.goal_max_tokens,
         warnings_in_context_max: config.warnings_in_context_max,
@@ -113,12 +114,128 @@ pub async fn build(
             task_memory: &task_memory,
             branch_memory: &branch_memory,
             project_memory: &project_memory,
+            patterns: &patterns,
             has_history,
             degraded,
         },
         budget,
     ))
 }
+
+/// Prior patterns whose signals this project's own recorded signals match
+/// (FR-398, FR-405, SC-312).
+///
+/// The match is on **this project's** signals, never on the pattern's alone: a
+/// pattern is offered because the receiving project is showing the symptom, not
+/// because it exists. Every suggestion is labelled unverified here and carries
+/// its applicability, so an agent can rule it out without trying it.
+///
+/// Nothing here can fail the briefing. A pattern is the least authoritative
+/// thing in it, and no error reading one is worth degrading a session over.
+async fn level1_patterns(
+    daemon: &Daemon,
+    project_id: Uuid,
+    session: Option<&Session>,
+    branch: &str,
+    config: &cairn_core::CairnConfig,
+) -> Vec<BriefingPattern> {
+    let signals = project_signals(daemon, project_id, session, branch).await;
+    if signals.is_empty() {
+        return Vec::new();
+    }
+
+    let matched = cairn_store::patterns::matching(
+        &daemon.store,
+        &signals,
+        config.pattern_signals_min,
+        config.patterns_in_context_max,
+    )
+    .await
+    .unwrap_or_default();
+
+    let mut out = Vec::new();
+    for (p, overlap) in matched {
+        // A cause someone else found behind the same symptom, and what to rule
+        // out first because of it. Derived from the recorded counterexample,
+        // never invented.
+        let alternative_cause = cairn_store::patterns::alternative_causes(&daemon.store, p.id)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .next();
+        let check_this_first = alternative_cause.as_ref().map(|_| {
+            p.applicability
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "whether this pattern's conditions actually hold".to_string())
+        });
+
+        out.push(BriefingPattern {
+            id: p.id,
+            title: p.title,
+            trust: p.trust,
+            // Never anything else. A pattern is offered, not asserted.
+            verified_in_this_project: false,
+            applicability: p.applicability,
+            approach: p.approach,
+            constraints: p.constraints,
+            alternative_cause,
+            check_this_first,
+            signal_overlap: overlap,
+        });
+    }
+    out
+}
+
+/// What this project is currently showing, in comparable form.
+///
+/// Two sources, both already recorded: `error` observations from the current
+/// and previous session, and the text of `failure`-type memories in the
+/// applicable scopes. Nothing is inferred and nothing is asked of the agent.
+pub(crate) async fn project_signals_for(
+    daemon: &Daemon,
+    project_id: Uuid,
+    branch: &str,
+) -> Vec<String> {
+    let mut raw = repo::recent_project_errors(&daemon.store, project_id, ERROR_OBSERVATIONS_MAX)
+        .await
+        .unwrap_or_default();
+    raw.extend(
+        repo::failure_memory_text(&daemon.store, project_id, branch, FAILURE_MEMORIES_MAX)
+            .await
+            .unwrap_or_default(),
+    );
+    cairn_core::patterns::normalize_signals(&raw)
+}
+
+async fn project_signals(
+    daemon: &Daemon,
+    project_id: Uuid,
+    session: Option<&Session>,
+    branch: &str,
+) -> Vec<String> {
+    let mut raw: Vec<String> = Vec::new();
+
+    if let Some(s) = session {
+        raw.extend(
+            repo::recent_error_summaries(&daemon.store, s.id, ERROR_OBSERVATIONS_MAX)
+                .await
+                .unwrap_or_default(),
+        );
+    }
+    raw.extend(
+        repo::failure_memory_text(&daemon.store, project_id, branch, FAILURE_MEMORIES_MAX)
+            .await
+            .unwrap_or_default(),
+    );
+
+    cairn_core::patterns::normalize_signals(&raw)
+}
+
+/// How far back a session's errors are read for signals. Bounded because a
+/// briefing is bounded, and a noisy session must not make it unbounded.
+const ERROR_OBSERVATIONS_MAX: i64 = 20;
+const FAILURE_MEMORIES_MAX: i64 = 20;
 
 async fn scope_memory(
     daemon: &Daemon,

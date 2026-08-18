@@ -180,6 +180,37 @@ pub fn status(s: &StatusPayload) -> String {
         s.observation_count, s.memory_count
     ));
 
+    // How far subject identity actually reaches here, and what the mechanism
+    // is currently reporting (FR-499). Visible in every project, so nobody has
+    // to run an evaluation to find out whether any of this is being used.
+    if let Some(k) = &s.knowledge {
+        if let Some(share) = k.subject_share_percent {
+            out.push_str(&format!(
+                "Subjects     {share}% of project memory ({} of {})\n",
+                k.with_subject, k.project_memories
+            ));
+        }
+        let attention = [
+            (k.conflicted_subjects, "conflicted"),
+            (k.needs_recheck, "needs recheck"),
+            (k.drifted, "drifted"),
+        ]
+        .into_iter()
+        .filter(|(n, _)| *n > 0)
+        .map(|(n, label)| format!("{n} {label}"))
+        .collect::<Vec<_>>();
+        if !attention.is_empty() {
+            out.push_str(&format!("Attention    {}\n", attention.join(" · ")));
+        }
+        if let Some(d) = &k.sync_degradation {
+            out.push_str(&format!(
+                "Retained     {} item(s) waiting for: {}\n",
+                d.blocked,
+                d.missing_capabilities.join(", ")
+            ));
+        }
+    }
+
     if s.sessions.is_empty() {
         out.push_str("Sessions     none active\n");
     } else {
@@ -590,6 +621,7 @@ mod tests {
                 warnings: Vec::new(),
                 constraints: Vec::new(),
                 previous_next_action: None,
+                patterns: Vec::new(),
             },
             estimated_tokens: 100,
             budget: 1000,
@@ -618,6 +650,7 @@ mod tests {
                 warnings: Vec::new(),
                 constraints: Vec::new(),
                 previous_next_action: None,
+                patterns: Vec::new(),
             },
             estimated_tokens: 999,
             budget: 1000,
@@ -676,6 +709,7 @@ mod tests {
             version: None,
             local_schema_version: 0,
             sessions_awaiting_handoff: 0,
+            knowledge: None,
             handoff_synthesis_failures: vec![],
         };
         let text = status(&s);

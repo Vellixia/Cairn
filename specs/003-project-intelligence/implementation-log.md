@@ -740,52 +740,215 @@ or a verification — so `ENTITY_CAPABILITIES` lists both for it and releases on
 when the server can hold both. Releasing on one would put an attested memory
 back in front of a server that still has no column for it.
 
+### Checkpoint K — Phase 12 (T114–T124) complete: reusable cross-project patterns
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` green against a real PostgreSQL, 0 failures |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+`contracts/patterns.md` **has** been read in this run.
+
+**The ambiguity in the contract, and how it was resolved**
+
+§Anatomy says `signal_digest` is "used for matching **and** duplicate detection
+— one representation, so the two cannot disagree". Read literally that makes
+suggestion a digest comparison, which can only ever match a pattern against a
+signal set written character for character the same way. Nothing would ever be
+suggested, and the feature would look implemented while doing nothing.
+
+§Suggestion says what actually happens: "normalized **tokens** from `error`
+observations and `failure`-type memories … overlap ≥ `pattern_signals_min`
+tokens, lexically". So the two uses are different reads of one signal set:
+
+* `signal_digest` — over the whole normalized signals. Identity: the duplicate
+  key with `root_cause_digest`, and the `(pattern, project, signal_digest)` key
+  that makes one incident count once.
+* `signal_tokens` / `signal_overlap` — over the distinguishing words. Matching.
+
+Still not a similarity measure. Two tokens are the same string or unrelated: no
+stemming, no distance, no embedding. What makes a match meaningful is requiring
+several of them, not making any one of them fuzzy (FR-511, D46). A short fixed
+list of words that appear in almost every error message is excluded so that
+"could not" and "the file" cannot make two unrelated problems look alike.
+
+This was found by running T124, not by reading: the first implementation
+compared whole strings, and a real Docker error message matched nothing.
+
+**Where the boundary is enforced**
+
+* `reusable_patterns` has no `project_id` column, no outbox entity type and no
+  server table. "A pattern never synchronizes" is a property of the schema.
+* `origin_ref` is a digest of the source project salted with a per-machine
+  value in `~/.cairn/machine-salt`, created on first use and 0600. It answers
+  "did these come from the same project?" without answering "which project?",
+  and two machines produce different references for the same project.
+* Gate check 7 refuses on the text **as written** as well as after redaction.
+  Redacting a credential and promoting the remainder is the right answer for an
+  observation and the wrong one here: a candidate that contained a credential
+  was written somewhere it should not have been, and a pattern is the
+  furthest-travelling record Cairn produces. The thirty adversarial cases in
+  `privacy/` all refuse, none echoes the value it found, and none leaves a row
+  behind.
+
+**Three defects found by running the evidence**
+
+1. **`discovery` was decided from nothing the daemon could see.** It is now
+   derived in `cairnd::patterns::suggested_to` from whether this project's own
+   recorded errors match the pattern — never from the caller. An agent cannot
+   be asked to report honestly on whether it was influenced by something it
+   read. The e2e test that matters is
+   `a_project_that_was_shown_the_pattern_does_not_validate_it_by_agreeing`:
+   the store-level test supplies `discovery` directly, which is precisely the
+   thing the agent must not be able to do.
+2. **`Sandbox::sibling_project` shared a daemon that any sibling could stop.**
+   `Drop` runs `cairn daemon stop`, so the first sibling dropped would have
+   taken the daemon out from under the others and the failure would have landed
+   in whichever test ran next. Only the sandbox that created the installation
+   stops it now.
+3. **`CAIRN_HOME` was being set per test.** It is process-global and Rust runs a
+   binary's tests on threads of one process, so a test could promote a pattern
+   under one home and record its outcome under another — silently changing the
+   machine salt between two halves of one scenario, and with it `origin_ref` and
+   `is_origin`. `cairn_e2e::shared_home` sets it once per binary.
+
+**One bound worth naming.** The session-independent signal read is scoped to the
+project's two most recent sessions (`repo::SIGNAL_SESSIONS`), matching the
+contract's "current and previous session". A bare `LIMIT 20` over all history
+would keep suggesting patterns for problems solved months ago.
+
+### Checkpoint L — Phase 13 (T125–T131) complete: the agent surface
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` green against a real PostgreSQL: **987 passed, 0 failed** |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+`contracts/mcp-tools.md` **has** been read in this run.
+
+**Still exactly six tools.** Every capability considered as a tool of its own —
+`cairn_verify`, `cairn_evidence`, `cairn_pattern`, `cairn_subject`,
+`cairn_checkpoint` — is an action on one that already exists, and
+`mcp_backward_compatibility` now asserts each of those five names is **absent**
+as well as asserting the six are present.
+
+**What T127 had to decide, and why**
+
+The recorded corpus was captured before migration 0005 existed, and a literal
+equality check fails on things the contract *requires* to change. The test now
+encodes what compatibility actually means:
+
+* `tools/list` — every tool, parameter and enum value a Feature 001 caller knew
+  is still there with the same type; enum values may be **added** and never
+  removed; each description is **extended** rather than rewritten (the recorded
+  text, less its final full stop, still opens the current one); and a parameter
+  that was optional may not become required.
+* `tools/call` — `cairn_context` answers with one rendered blob of markdown plus
+  a fenced JSON document, so the document is pulled out and compared field by
+  field. Comparing the blob verbatim would forbid every addition, including the
+  Level 0 work state a task-bound session is now supposed to get.
+* One value may move: `estimated_tokens`, which *measures* the briefing that was
+  assembled. The no-regression guarantee that does not weaken is FR-442's, which
+  is about a project with no task, no warnings, no pins and no checkpoint —
+  nothing is added there, so nothing may move there. That is a different
+  baseline and a different test, and it compares the number exactly.
+
+**A defect found by running T130**
+
+`CapabilityProfile::continuity_mode` reported OpenCode as `automatic`. Its
+pre-compaction capability is **conditional** — the warning depends on the
+installed build exposing `experimental.session.compacting` — and the rule only
+checked whether pre-compaction was *absent*, then answered from post-compaction
+alone. On a build without it, Cairn is never told compaction is coming, the
+checkpoint is never written, and the agent had been told continuity was
+automatic and so did nothing.
+
+`automatic` is a promise that Cairn is called back on **both** sides, and only
+two guarantees can keep it. The rule now says so, and OpenCode derives
+`agent_initiated` — which is the honest answer and the one FR-426 requires. The
+module's own comment already contained the reasoning ("conditional and
+unavailable both mean the same thing to an agent that must act"); it had only
+been applied to one of the two capabilities.
+
+`us6_continuity::each_agents_mode_is_the_rule_applied_to_its_capabilities`
+asserts each agent's mode **and** re-derives it from the two capabilities, so a
+future change has to be a change to the agent rather than to a table.
+
+**The contract and the Skill**
+
+Four obligations were added to `assets/agent-contract.md`, which is the one
+canonical source both renderings come from: give a durable fact a topic and
+value key specific enough to state the whole claim; attach evidence instead of
+asserting importance; reinforce a corroborating member when it is the same
+claim; record a pattern's outcome, including when it did not apply.
+
+Both renderings stay inside the 1,200-character bound — the always-on block at
+1,081 and the MCP instructions at 1,154 — and the MCP bound is now asserted too,
+against the **running server** rather than the renderer, so a build that
+rendered correctly and served something else still fails.
+
+The Skill does not repeat the contract; it explains how to act on it. Four
+sections in `references/recording-knowledge.md` cover the same obligations with
+the reasoning the contract has no room for — including why a topic key can be
+too fine as well as too coarse, and why a negative pattern outcome is the most
+valuable one to record. `cairn_skill_revision` moved to `a602eb2cd702`.
+
+**T131** puts the mechanism's actual reach in `cairn status`: the share of
+project-scoped memory carrying a subject, the conflicted, needs-recheck and
+drifted counts, and any sync degradation. Conflicts are counted **by subject**
+rather than by memory — one disagreement between four proposals is one thing to
+resolve. The share is absent rather than zero when there is no project-scoped
+memory to have adopted anything.
+
+### A note on the test database
+
+Twenty-three server tests failed across two runs before anyone noticed the
+PostgreSQL container had exited hours earlier. Every failure was `cairn-server
+would not start` or `PoolTimedOut`, and every one of them was a server test —
+the shape of "no database", not of a defect.
+
+`Server::start` returning `None` skips silently when `CAIRN_TEST_DATABASE_URL`
+is **unset**; a variable that is set but unreachable is a fault and panics,
+which is right. Check the container before reading a red suite:
+
+```
+docker start cairn-test-pg   # or the `docker run` in Checkpoint J
+docker exec cairn-test-pg pg_isready -U cairn -d cairn
+```
+
+The three heaviest tests in `sync_degradation.rs` are serialized behind a mutex:
+each runs two servers against a database of its own, and PostgreSQL's connection
+limit is a fixed resource the whole run shares.
+
 ## Where the run stands
 
-**114 of 148 tasks complete**, each with its named evidence passing.
+**132 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
-| 1–10 | T001–T105 | complete |
-| 11 Mixed-version recovery | T106–T113 | complete |
-| 12 Reusable patterns | T114–T124 | not started |
-| 13 Agent surface | T125–T131 | not started |
+| 1–13 | T001–T131 | complete |
 | 14 Privacy & compatibility evidence | T132–T138 | T137 done; T132–T136, T138 open |
 | 15 Corpus & performance | T139–T143 | not started |
 | 16 Convergence & release | T144–T148 | not started |
 
-### How to run the server suite
-
-Every US7 test skips silently without a database, which is how a whole phase's
-evidence can appear to pass. It does not skip on CI, and it must not be allowed
-to skip here either:
-
-```
-colima start
-docker run -d --name cairn-test-pg \
-  -e POSTGRES_USER=cairn -e POSTGRES_PASSWORD=cairn -e POSTGRES_DB=cairn \
-  -p 5433:5432 postgres:17-alpine
-export CAIRN_TEST_DATABASE_URL=postgres://cairn:cairn@localhost:5433/cairn
-```
-
-The image, port and credentials match `.github/workflows/ci.yml`. Without the
-variable the suite reports ~935 passing and proves nothing about US7.
-
 ## Next action
 
-**Phase 12 — reusable cross-project patterns, starting at T114.** No PostgreSQL
-is needed for it; the container stays up for T138 and T141.
+**Phase 14 — the properties that span every story, starting at T132.** All of it
+is evidence rather than new behaviour, so it is where a wrong assumption from an
+earlier phase surfaces.
 
-1. **T114, T115** — the `patterns/{promote,refuse}` and
-   `patterns/{independence,counterexample}` corpora. `patterns/` exists with the
-   T005 adversarial privacy cases beside it.
-2. **T116, T117** — `privacy_promotion.rs` over the T005 corpus, and
-   `us9_counterexamples.rs`'s two negatives.
-3. **T118, T119** — `crates/cairn-store/src/patterns.rs`: the repository with
-   **no `project_id`**, then the ten-check gate in its fixed order.
-4. **T120** — `pattern_applications` and the staged trust ladder, with
-   `contested` evaluated **before** `validated`.
-5. **T121–T124** — suggestion in the briefing, deletion and origin, the CLI, and
-   the two end-to-end tests.
+1. **T132** — extend `privacy_payloads.rs` with a rejection case for each newly
+   forbidden field name and entity type. Both lists are already enforced in
+   `cairn-server/src/sync.rs`; this asserts the rejection **names the field**.
+2. **T133, T134** — `privacy_integration.rs`: nothing local escapes, and every
+   row of the deletion table reports deletion rather than dangling.
+3. **T135** — extend `scope_audit.rs` with the properties this feature
+   guarantees by **absence**: no new scope, no topic-key vocabulary anywhere in
+   source or assets, no valid-time table.
+4. **T136** — extend `ci_hermeticity.rs`: no model client, embedding library,
+   vector or graph database in any manifest, and **no required CI check reads a
+   model's judgement**.
+5. **T138** — the Feature 001 and 002 suites against a migrated alpha.4 store.
 
-`contracts/patterns.md` governs the phase and has **not** been read in this run.
+`contracts/privacy-sync.md` governs T132–T134 and **has** been read in this run
+(Phase 10). `contracts/evaluation.md` governs Phase 15 and has **not**.

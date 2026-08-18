@@ -14,6 +14,7 @@ pub mod handoff;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod paths;
+pub mod patterns;
 pub mod redact;
 pub mod release;
 pub mod startup;
