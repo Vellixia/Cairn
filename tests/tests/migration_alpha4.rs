@@ -18,6 +18,8 @@
 use cairn_core::tasks::{criteria_projection, CriterionFacts};
 use cairn_core::{CriterionState, CriterionVerification};
 use cairn_e2e::alpha4::{ids, Alpha4Store, PRE_EXISTING_TABLES, SCHEMA};
+use cairn_e2e::Sandbox;
+use serde_json::json;
 use uuid::Uuid;
 
 /// Every column the fixture's tables carried at schema 4, so the byte-identity
@@ -728,5 +730,211 @@ fn a_relation_may_reference_a_memory_that_has_not_arrived() {
             "SELECT CAST(COUNT(*) AS TEXT) FROM memory_relations WHERE to_memory_id = 'not-yet-synced'"
         ),
         "1"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T138 — the Feature 001 and 002 behaviours, on a migrated alpha.4 store
+// (FR-519, SC-323)
+// ---------------------------------------------------------------------------
+
+/// A sandbox whose database **is** a migrated alpha.4 store.
+///
+/// The daemon is stopped, the fixture is put in place of the empty store the
+/// sandbox created, and every later command starts the daemon again against
+/// it. What runs afterwards is the real CLI, the real daemon and the real MCP
+/// server — the point is not that migration succeeds in isolation but that a
+/// developer who upgrades keeps working.
+fn sandbox_on_migrated_alpha4() -> (Sandbox, Alpha4Store) {
+    let s = Sandbox::new();
+    let fixture = Alpha4Store::build();
+    let version = fixture.migrate_to_latest();
+    assert_eq!(
+        version,
+        cairn_store::migrate::latest_version(),
+        "the fixture must be migrated all the way before anything reads it"
+    );
+
+    let stopped = s.cairn(&["daemon", "stop"]);
+    assert!(
+        stopped.ok() || stopped.stderr.contains("not running"),
+        "could not stop the daemon before replacing its store: {}",
+        stopped.stderr
+    );
+
+    // The sidecars go too: a `-wal` from the empty store would contradict the
+    // database replacing it.
+    for suffix in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(s.sidecar(suffix));
+    }
+    std::fs::copy(fixture.db_path(), s.db_path()).expect("install the migrated store");
+
+    // The fixture's project belongs to the fixture's repository, and Cairn
+    // resolves a project by its Git common directory. Without this the daemon
+    // would come up, find no project for *this* worktree, register a second
+    // empty one, and every assertion below would be about a store that was
+    // migrated and then ignored — which is exactly the shape of an upgrade
+    // that looks successful and loses everything.
+    //
+    // The fixture holds more than one project and `git_common_dir` is unique,
+    // so the one that gets this worktree is the one that owns the memories —
+    // the project a developer upgrading would actually be standing in.
+    // Canonicalized: macOS reports the sandbox at `/var/folders/...` and
+    // resolves it to `/private/var/folders/...`, which is what the daemon
+    // stores. The two are the same directory and not the same string.
+    let git_common_dir = std::fs::canonicalize(s.repo_path())
+        .expect("the sandbox repository")
+        .join(".git")
+        .display()
+        .to_string();
+    s.exec_sql(&format!(
+        "UPDATE projects SET git_common_dir = '{}'
+          WHERE id = (SELECT project_id FROM memories
+                       GROUP BY project_id ORDER BY COUNT(*) DESC LIMIT 1)",
+        git_common_dir.replace('\'', "''")
+    ));
+
+    (s, fixture)
+}
+
+/// Every Feature 001 and 002 behaviour a developer depends on still holds
+/// (FR-519, SC-323).
+///
+/// Asserted against the surfaces rather than the schema. A migration that
+/// preserved every row and broke `cairn context` would pass every test in this
+/// file above this one.
+#[test]
+fn the_feature_001_and_002_surfaces_work_on_a_migrated_store() {
+    let (s, _fixture) = sandbox_on_migrated_alpha4();
+
+    // --- The daemon comes up against the migrated store and knows the schema.
+    let status = s.json(&["status"]);
+    assert_eq!(
+        status["local_schema_version"].as_i64(),
+        Some(cairn_store::migrate::latest_version()),
+        "{status}"
+    );
+    assert_eq!(status["daemon"], "running", "{status}");
+    assert!(
+        status["memory_count"].as_i64().unwrap_or(0) > 0,
+        "the alpha.4 memories did not survive: {status}"
+    );
+
+    // --- Feature 001: a session, a memory, a search, a briefing, a handoff.
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "migrated-1", "source": "startup" }),
+    );
+    s.settle_session_count(1);
+
+    let added = s.json(&[
+        "memory",
+        "add",
+        "A decision recorded after the upgrade",
+        "--type",
+        "decision",
+        "--scope",
+        "project",
+    ]);
+    assert!(added.get("error").is_none(), "{added}");
+
+    let found = s.json(&["memory", "search", "upgrade"]);
+    assert!(
+        found["total"].as_i64().unwrap_or(0) > 0,
+        "search stopped working on a migrated store: {found}"
+    );
+
+    let context = s.cairn(&["context", "--json"]);
+    assert!(context.ok(), "{}", context.stderr);
+    let briefing: serde_json::Value = serde_json::from_str(&context.stdout).expect("json");
+    let briefing = &briefing["data"]["briefing"];
+    for required in ["project", "repository", "memory"] {
+        assert!(
+            briefing.get(required).is_some(),
+            "the briefing lost `{required}`: {briefing}"
+        );
+    }
+
+    let task = s.json(&[
+        "task",
+        "new",
+        "--title",
+        "Post-upgrade work",
+        "--goal",
+        "prove the surfaces",
+        "--criterion",
+        "the suite runs",
+    ]);
+    let task_id = task["task"]["id"].as_str().expect("a task id").to_string();
+    let got = s.json(&["task", "show", &task_id]);
+    assert_eq!(
+        got["task"]["acceptance_criteria"][0], "the suite runs",
+        "the criteria projection is wrong after migration: {got}"
+    );
+
+    s.hook(
+        "SessionEnd",
+        json!({ "session_id": "migrated-1", "reason": "clear" }),
+    );
+    s.settle("the closed session's handoff", |s| {
+        s.json(&["status"])["sessions_awaiting_handoff"].as_i64() == Some(0)
+    });
+    let handoff = s.json(&["handoff", "show"]);
+    assert!(
+        handoff.get("error").is_none(),
+        "a handoff could not be read after migration: {handoff}"
+    );
+
+    // --- Feature 002: the integration surfaces answer.
+    let agents = s.cairn(&["--json", "agents"]);
+    assert!(agents.ok(), "{}", agents.stderr);
+    let doctor = s.cairn(&["--json", "doctor"]);
+    assert!(doctor.ok(), "{}", doctor.stderr);
+    assert!(
+        doctor.stdout.contains("local_schema_version"),
+        "doctor lost its core block: {}",
+        doctor.stdout
+    );
+
+    // --- And the pre-existing rows are still what they were, reachable
+    //     through the surface rather than only through SQL.
+    let historical = s.json(&["memory", "search", "--state", "superseded"]);
+    assert!(
+        historical["total"].as_i64().unwrap_or(0) > 0,
+        "the alpha.4 supersession chain is no longer retrievable: {historical}"
+    );
+}
+
+/// The Feature 003 surfaces work on the migrated store too, without any of the
+/// backfilled values being invented.
+///
+/// The migration deliberately leaves `topic_key`, `value_key` and
+/// `content_norm_digest` NULL, because inferring them is what FR-315 and FR-317
+/// forbid. A subject read must therefore find nothing rather than find
+/// something made up — and the memory must still be perfectly usable.
+#[test]
+fn a_migrated_memory_has_no_invented_subject_and_still_works() {
+    let (s, _fixture) = sandbox_on_migrated_alpha4();
+
+    let with_subject =
+        s.query_column("SELECT CAST(COUNT(*) AS TEXT) FROM memories WHERE topic_key IS NOT NULL");
+    assert_eq!(
+        with_subject,
+        vec!["0".to_string()],
+        "the migration invented a subject identity for a pre-existing memory"
+    );
+
+    // Free-form and fully usable: searchable, briefable, and syncable exactly
+    // as it was before the upgrade.
+    let found = s.json(&["memory", "search"]);
+    assert!(
+        found["total"].as_i64().unwrap_or(0) > 0,
+        "migrated memories are not retrievable: {found}"
+    );
+    let adoption = s.json(&["status"])["knowledge"].clone();
+    assert_eq!(
+        adoption["with_subject"].as_i64(),
+        Some(0),
+        "the adoption metric disagrees with the store: {adoption}"
     );
 }

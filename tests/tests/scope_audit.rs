@@ -308,3 +308,175 @@ fn cairn_introduces_no_second_service_and_no_second_datastore() {
         "a second service is listening: {sockets:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T135 — what Feature 003 guarantees by absence (FR-314, FR-345, FR-381,
+// SC-327)
+// ---------------------------------------------------------------------------
+
+/// Every `.rs`, `.sql` and asset file this workspace ships.
+fn source_files() -> Vec<(std::path::PathBuf, String)> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name == "target" || name == ".git" || name == "node_modules" {
+                continue;
+            }
+            if path.is_dir() {
+                walk(&path, out);
+            } else if matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("rs") | Some("sql") | Some("md") | Some("json")
+            ) {
+                if let Ok(text) = std::fs::read_to_string(&path) {
+                    out.push((path, text));
+                }
+            }
+        }
+    }
+    // `CARGO_MANIFEST_DIR` is `tests/`; the workspace root is its parent.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("a workspace root")
+        .to_path_buf();
+    let mut out = Vec::new();
+    for sub in ["crates", "tests/src", "skills"] {
+        walk(&root.join(sub), &mut out);
+    }
+    out
+}
+
+/// No scope, partition, ownership domain or retrieval filter was added beyond
+/// Feature 001's four (FR-381).
+///
+/// Feature 003 adds subject identity, verification, importance and pins, and
+/// **none** of them is a scope. The distinction is the whole reason the
+/// mechanism is safe to add: a subject narrows *within* a scope and never
+/// crosses one.
+#[test]
+fn feature_003_added_no_scope_and_no_precedence() {
+    use cairn_core::domain::MemoryScope;
+
+    let mut scopes: Vec<&str> = MemoryScope::ALL.iter().map(|s| s.as_str()).collect();
+    scopes.sort();
+    assert_eq!(
+        scopes,
+        vec!["branch", "project", "session", "task"],
+        "the scope vocabulary changed; every addition to it is a retrieval decision"
+    );
+
+    // And nothing Feature 003 added can change which scope wins. Scope
+    // precedence is a function of the scope alone: an `importance: high`
+    // branch memory must never outrank a task memory, or "narrowest correct
+    // scope" stops meaning anything.
+    let ranking = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("root")
+            .join("crates/cairn-store/src/search.rs"),
+    )
+    .expect("search.rs");
+    let bucket = ranking
+        .split("fn scope_bucket")
+        .nth(1)
+        .and_then(|s| s.split("\n}").next())
+        .unwrap_or_default();
+    for forbidden in [
+        "importance",
+        "pinned",
+        "verification",
+        "verification_authority",
+    ] {
+        assert!(
+            !bucket.contains(forbidden),
+            "`{forbidden}` takes part in scope precedence: {bucket}"
+        );
+    }
+}
+
+/// No vocabulary, taxonomy or registry of topic keys exists anywhere (FR-314).
+///
+/// A topic key is a *convention*, agreed by agents writing them, and not a
+/// controlled list. A registry would need someone to maintain it, would be
+/// wrong the moment a project did something new, and would turn an
+/// unrepresentable key from "stored free-form and reported" into a rejection.
+#[test]
+fn no_topic_key_vocabulary_exists() {
+    let suspicious = [
+        "TOPIC_KEYS",
+        "KNOWN_TOPICS",
+        "TOPIC_VOCABULARY",
+        "TOPIC_TAXONOMY",
+        "TOPIC_REGISTRY",
+        "ALLOWED_TOPIC",
+        "topic_keys.json",
+        "topics.toml",
+    ];
+    for (path, text) in source_files() {
+        for marker in suspicious {
+            assert!(
+                !text.contains(marker),
+                "{} names `{marker}`, which would make topic keys a controlled list",
+                path.display()
+            );
+        }
+    }
+
+    // The one place a list could hide is a CHECK constraint on the column.
+    let s = Sandbox::new();
+    s.must(&["init"]);
+    let sql = s
+        .query_column("SELECT sql FROM sqlite_master WHERE type='table' AND name='memories'")
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    let topic_line = sql
+        .lines()
+        .find(|l| l.contains("topic_key"))
+        .unwrap_or_default();
+    assert!(
+        !topic_line.to_uppercase().contains("CHECK"),
+        "`topic_key` is constrained to a fixed set: {topic_line}"
+    );
+}
+
+/// No valid-time table, retroactive correction or branching history exists
+/// (FR-345).
+///
+/// Cairn records when a proposal was *effective* and when it was superseded.
+/// It does not model when a fact was true in the world, and it cannot rewrite
+/// what an earlier session was told — a history that can be edited is not a
+/// history.
+#[test]
+fn no_valid_time_or_branching_history_exists() {
+    let s = Sandbox::new();
+    s.must(&["init"]);
+    let tables = s.query_column("SELECT name FROM sqlite_master WHERE type='table'");
+    for table in &tables {
+        let lower = table.to_lowercase();
+        for forbidden in ["valid_time", "valid_from", "bitemporal", "history_branch"] {
+            assert!(
+                !lower.contains(forbidden),
+                "a {forbidden} table exists: {table}"
+            );
+        }
+    }
+
+    // And no code path rewrites an interval after the fact.
+    for (path, text) in source_files() {
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        for forbidden in ["retroactive", "rewrite_history", "amend_interval"] {
+            assert!(
+                !text.contains(forbidden),
+                "{} names `{forbidden}`",
+                path.display()
+            );
+        }
+    }
+}

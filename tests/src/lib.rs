@@ -508,6 +508,29 @@ impl Sandbox {
     }
 
     /// Run a single-column query against the local store.
+    /// Run one statement against the sandbox's store.
+    ///
+    /// Read-write, unlike `query_column`. For the few tests that have to put a
+    /// store into a state the surfaces cannot reach — a database carried over
+    /// from an older release, most of all.
+    pub fn exec_sql(&self, sql: &str) {
+        let path = self.db_path();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let url = format!("sqlite://{}", path.display());
+            let pool = sqlx::SqlitePool::connect(&url).await.expect("open store");
+            sqlx::query(&sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+            pool.close().await;
+        });
+    }
+
     pub fn query_column(&self, sql: &str) -> Vec<String> {
         let path = self.db_path();
         let sql = sql.to_string();

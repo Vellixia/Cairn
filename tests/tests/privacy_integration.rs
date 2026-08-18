@@ -382,3 +382,278 @@ fn integration_state_never_reaches_the_shared_server() {
         "the worktree path reached the server"
     );
 }
+
+// ---------------------------------------------------------------------------
+// T133, T134 — the boundary as a property, and deletion as a report
+// ---------------------------------------------------------------------------
+
+/// Record kinds that are local to the machine that produced them (FR-503).
+const LOCAL_ONLY_KINDS: &[&str] = &[
+    "evidence_fact",
+    "verification_run",
+    "continuity_checkpoint",
+    "reusable_pattern",
+    "pattern_application",
+    "task_change",
+    "criterion_evidence",
+    "observation",
+];
+
+/// Nothing local can be queued, because there is no name to queue it under
+/// (FR-501, FR-502, FR-503, FR-508, SC-316).
+///
+/// Asserted **structurally**: `OutboxEntityType` has no variant for any of
+/// these, so an outbox row for one is not something the code declines to write
+/// — it is something that cannot be spelled. A rule enforced by a check can be
+/// forgotten at a new call site; a rule enforced by the type system cannot.
+#[test]
+fn nothing_local_escapes() {
+    use cairn_core::domain::OutboxEntityType;
+    use std::str::FromStr;
+
+    for kind in LOCAL_ONLY_KINDS {
+        assert!(
+            OutboxEntityType::from_str(kind).is_err(),
+            "`{kind}` can be named as an outbox entity type, so a row for it can be written"
+        );
+    }
+
+    // And the four that *are* syncable are still exactly the four.
+    let mut syncable: Vec<&str> = OutboxEntityType::ALL.iter().map(|t| t.as_str()).collect();
+    syncable.sort();
+    assert_eq!(
+        syncable,
+        vec![
+            "handoff",
+            "memory",
+            "memory_relation",
+            "project",
+            "session",
+            "task",
+            "task_blocker",
+            "task_criterion",
+        ],
+        "the syncable set changed; every addition to it is a privacy decision"
+    );
+}
+
+/// A `local_only` memory produces no outbox row, and neither does anything
+/// derived from it — including a pinned one (FR-457, FR-504).
+#[test]
+fn a_local_only_memory_produces_nothing_to_send() {
+    let s = Sandbox::new();
+    s.must(&["init"]);
+
+    // Linked, so anything that *could* be queued would be.
+    let local = s.json(&[
+        "memory",
+        "add",
+        "A note that never leaves this machine",
+        "--type",
+        "decision",
+        "--scope",
+        "project",
+        "--local-only",
+        "--topic-key",
+        "infra.local_note",
+        "--value-key",
+        "private",
+    ]);
+    let id = local["memory"]["id"].as_str().expect("id").to_string();
+
+    let queued = s.query_column(&format!(
+        "SELECT CAST(COUNT(*) AS TEXT) FROM outbox WHERE entity_id = '{id}'"
+    ));
+    assert_eq!(
+        queued,
+        vec!["0".to_string()],
+        "a local-only memory was queued for delivery"
+    );
+
+    // `pin_reason` is free text about local context and never travels, even
+    // though the `pinned` flag itself may (`contracts/privacy-sync.md`).
+    let payloads = s.query_column("SELECT COALESCE(GROUP_CONCAT(payload, ' '), '') FROM outbox");
+    let all = payloads.join(" ");
+    for forbidden in ["pin_reason", "content_norm_digest", "local_revision"] {
+        assert!(
+            !all.contains(forbidden),
+            "`{forbidden}` appears in a queued payload: {all}"
+        );
+    }
+}
+
+/// Every row of the deletion table: nothing dangles, and nothing is restored
+/// (FR-505, `contracts/privacy-sync.md` §Deletion).
+#[test]
+fn deleted_origin_reports_deletion() {
+    let s = Sandbox::new();
+    s.must(&["init"]);
+    s.write_file("config/app.yml", "server:\n  port: 8080\n");
+
+    let memory = s.json(&[
+        "memory",
+        "add",
+        "The API listens on port 8080",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+    ]);
+    let memory_id = memory["memory"]["id"].as_str().expect("id").to_string();
+
+    let evidence = s.json(&[
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "API port",
+        "--value",
+        "8080",
+        "--locator",
+        "config/app.yml#server.port",
+        "--collector",
+        "cairn",
+        "--memory",
+        &memory_id,
+    ]);
+    let evidence_id = evidence["evidence"]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("an evidence id: {evidence}"))
+        .to_string();
+
+    // --- Evidence fact: tombstoned, not erased. Identity and provenance
+    //     survive; the value, locator, digest and fingerprint do not.
+    // Driven through the store: forgetting an evidence fact has no CLI verb
+    // today, and what FR-505 constrains is the deletion itself rather than the
+    // command that reaches it.
+    forget_evidence(&s, &evidence_id);
+    let row = s.query_column(&format!(
+        "SELECT COALESCE(observed_value, '<cleared>') || '|' ||
+                COALESCE(source_locator, '<cleared>') || '|' ||
+                COALESCE(value_digest, '<cleared>') || '|' ||
+                COALESCE(fingerprint, '<cleared>') || '|' ||
+                CASE WHEN deleted_at IS NULL THEN 'live' ELSE 'tombstoned' END
+           FROM evidence_facts WHERE id = '{evidence_id}'"
+    ));
+    assert_eq!(
+        row,
+        vec!["<cleared>|<cleared>|<cleared>|<cleared>|tombstoned".to_string()],
+        "a deleted evidence fact must keep its identity and lose its content"
+    );
+
+    // The link survives and resolves to "evidence deleted" rather than to
+    // nothing — a dangling reference is what this rule exists to prevent.
+    let links = s.query_column(&format!(
+        "SELECT CAST(COUNT(*) AS TEXT) FROM memory_evidence_facts
+          WHERE evidence_id = '{evidence_id}'"
+    ));
+    assert_eq!(
+        links,
+        vec!["1".to_string()],
+        "the link from the memory was removed instead of resolving to deleted"
+    );
+    let listed = s.json(&["evidence", "list", "--memory", &memory_id]);
+    let text = listed.to_string();
+    assert!(
+        !text.contains("8080") || !text.contains("config/app.yml"),
+        "a deleted fact's content came back: {text}"
+    );
+
+    // --- Memory: tombstoned, and a relation naming it survives.
+    let other = s.json(&[
+        "memory",
+        "add",
+        "The API listens on port 9000",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+    ]);
+    let other_id = other["memory"]["id"].as_str().expect("id").to_string();
+    s.json(&[
+        "memory",
+        "reconcile",
+        "--from",
+        &other_id,
+        "--to",
+        &memory_id,
+        "--relation",
+        "supersedes",
+        "--basis",
+        "explicit_user",
+    ]);
+    s.must(&["delete", "memory", &memory_id]);
+
+    let relations = s.query_column(&format!(
+        "SELECT CAST(COUNT(*) AS TEXT) FROM memory_relations
+          WHERE to_memory_id = '{memory_id}' AND deleted_at IS NULL"
+    ));
+    assert_eq!(
+        relations,
+        vec!["1".to_string()],
+        "the decision naming a deleted memory was removed rather than kept"
+    );
+    let content = s.query_column(&format!(
+        "SELECT content FROM memories WHERE id = '{memory_id}'"
+    ));
+    assert_eq!(
+        content,
+        vec![String::new()],
+        "a deleted memory's content survived"
+    );
+
+    // --- Session: tombstoned, and the relations it decided survive.
+    //
+    // The decision above was made by a session; deleting that session must not
+    // take the decision with it. What the session recorded is a fact about the
+    // project, not a fact about the session.
+    let sessions = s.query_column("SELECT id FROM sessions ORDER BY started_at LIMIT 1");
+    if let Some(session_id) = sessions.first() {
+        s.must(&["delete", "session", session_id]);
+        let surviving = s.query_column(&format!(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM memory_relations
+              WHERE decided_by_session = '{session_id}' AND deleted_at IS NULL"
+        ));
+        assert_eq!(
+            surviving,
+            vec!["1".to_string()],
+            "deleting the deciding session removed the decision it made"
+        );
+    }
+
+    // Nothing anywhere is a reference to a row that is not there.
+    for (table, column, target) in [
+        ("memory_relations", "from_memory_id", "memories"),
+        ("memory_relations", "to_memory_id", "memories"),
+        ("memory_evidence_facts", "evidence_id", "evidence_facts"),
+        ("task_criteria", "task_id", "tasks"),
+        ("task_blockers", "task_id", "tasks"),
+    ] {
+        let dangling = s.query_column(&format!(
+            "SELECT CAST(COUNT(*) AS TEXT) FROM {table} t
+              WHERE NOT EXISTS (SELECT 1 FROM {target} x WHERE x.id = t.{column})"
+        ));
+        assert_eq!(
+            dangling,
+            vec!["0".to_string()],
+            "{table}.{column} points at a {target} row that does not exist"
+        );
+    }
+}
+
+/// Tombstone an evidence fact in a sandbox's store.
+fn forget_evidence(s: &Sandbox, id: &str) {
+    let id = uuid::Uuid::parse_str(id).expect("an evidence id");
+    let path = s.db_path();
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async move {
+            let store = cairn_store::Store::open(&path).await.expect("store");
+            cairn_store::evidence::forget(&store, id)
+                .await
+                .expect("forget");
+        });
+}

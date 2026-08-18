@@ -920,35 +920,113 @@ The three heaviest tests in `sync_degradation.rs` are serialized behind a mutex:
 each runs two servers against a database of its own, and PostgreSQL's connection
 limit is a fixed resource the whole run shares.
 
+### Checkpoint M — Phase 14 (T132–T138) complete: privacy, migration and compatibility evidence
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` green against a real PostgreSQL: **1,000 passed, 0 failed** |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+Every property this phase covers was already enforced somewhere. What it adds is
+the assertion, so a later change that quietly removes one fails a test rather
+than a review.
+
+**T132 — the wire refuses by name.** Nineteen forbidden field names and six
+forbidden entity types, each sent in a real batch to a real server, each refused
+with its own name in the message. Naming it is the part that matters: a generic
+`invalid_request` would be indistinguishable from a capability refusal, and a
+capability refusal is *retained and retried* rather than failed. The lists are
+restated in the test rather than imported, so removing one from the server's
+list fails here.
+
+**T133 — the boundary is structural.** `OutboxEntityType::from_str` refuses all
+eight local-only kinds, so a row for one is not something the code declines to
+write, it is something that cannot be spelled. The syncable set is pinned at
+eight names, and every addition to it is now a decision someone has to make on
+purpose.
+
+**T134 — deletion is a report.** One case per row of the deletion table. A
+deleted evidence fact keeps its identity and provenance and loses its value,
+locator, digest and fingerprint; the link from the memory survives and resolves
+to *evidence deleted*. A deleted memory keeps the relations naming it. A deleted
+session keeps the decisions it made — what a session recorded is a fact about
+the project, not about the session. And no reference anywhere points at a row
+that is not there.
+
+**T135 — what is guaranteed by absence.** No scope was added; nothing Feature
+003 introduced takes part in scope precedence (asserted against the body of
+`scope_bucket`, so an `importance: high` branch memory can never outrank a task
+memory); no topic-key vocabulary, taxonomy or registry exists in any source
+file, asset or CHECK constraint; and there is no valid-time table, retroactive
+correction or branching history.
+
+**T136 — no model decides anything.** No language-model client, embedding
+library, vector database or graph database is a dependency of anything, matched
+as manifest keys rather than as free text. No workflow references `evals/` or a
+provider key, and `evals/` is not a workspace member — a gate whose answer
+depends on a model is a gate that can change its mind about code that did not
+change. And `RelationBasis` has no `inferred` and no `model`: every basis names
+either a rule Cairn ran or a party that asserted it.
+
+**T138 — the surfaces, on a migrated alpha.4 store.** The sandbox's database is
+*replaced* by a migrated alpha.4 fixture and the daemon is restarted against it,
+so what runs afterwards is the real CLI, daemon and MCP server on a store
+carried over from the previous release. Sessions, memory, search, briefing,
+tasks, handoff, `agents` and `doctor` all answer.
+
+Two things that had to be got right for that test to mean anything:
+
+* Cairn resolves a project by its Git common directory, so the fixture's project
+  is re-pointed at the sandbox's worktree. Without it the daemon finds no
+  project, registers a second empty one, and every assertion is about a store
+  that was migrated and then ignored — the exact shape of an upgrade that looks
+  successful and loses everything.
+* The path is **canonicalized**: macOS reports the sandbox at `/var/folders/...`
+  and resolves it to `/private/var/folders/...`. The same directory, and not the
+  same string.
+
+`a_migrated_memory_has_no_invented_subject_and_still_works` closes the other
+half: the migration leaves `topic_key`, `value_key` and `content_norm_digest`
+NULL because inferring them is what FR-315 and FR-317 forbid, so a subject read
+finds nothing — and the memory is still searchable, briefable and syncable
+exactly as before. The adoption metric agrees with the store rather than with
+an assumption about it.
+
 ## Where the run stands
 
-**132 of 148 tasks complete**, each with its named evidence passing.
+**138 of 148 tasks complete**, each with its named evidence passing.
 
 | Phase | Tasks | State |
 |---|---|---|
-| 1–13 | T001–T131 | complete |
-| 14 Privacy & compatibility evidence | T132–T138 | T137 done; T132–T136, T138 open |
+| 1–14 | T001–T138 | complete |
 | 15 Corpus & performance | T139–T143 | not started |
 | 16 Convergence & release | T144–T148 | not started |
 
+The ten that remain are five measurement tasks and five release tasks, **three
+of which are `[MANUAL]`** and need a real repository with live agents:
+
+| Task | Blocking | Needs |
+|---|---|---|
+| T139–T143 | yes | the metric harness and the performance fixtures |
+| T144, T145 | yes | `doctor --rebuild-derived`, the changelog |
+| T146 | **yes** | the quickstart end to end on a real repository with a live agent |
+| T147 | **no** | topic-key effectiveness across three agents — informational, no threshold |
+| T148 | **yes** | a real compaction driven on Claude Code, Codex and OpenCode |
+
 ## Next action
 
-**Phase 14 — the properties that span every story, starting at T132.** All of it
-is evidence rather than new behaviour, so it is where a wrong assumption from an
-earlier phase surfaces.
+**Phase 15 — the metric table with numbers, starting at T139.**
+`contracts/evaluation.md` governs it and has **not** been read in this run.
 
-1. **T132** — extend `privacy_payloads.rs` with a rejection case for each newly
-   forbidden field name and entity type. Both lists are already enforced in
-   `cairn-server/src/sync.rs`; this asserts the rejection **names the field**.
-2. **T133, T134** — `privacy_integration.rs`: nothing local escapes, and every
-   row of the deletion table reports deletion rather than dangling.
-3. **T135** — extend `scope_audit.rs` with the properties this feature
-   guarantees by **absence**: no new scope, no topic-key vocabulary anywhere in
-   source or assets, no valid-time table.
-4. **T136** — extend `ci_hermeticity.rs`: no model client, embedding library,
-   vector or graph database in any manifest, and **no required CI check reads a
-   model's judgement**.
-5. **T138** — the Feature 001 and 002 suites against a migrated alpha.4 store.
+1. **T139** — the corpus metric harness: run every corpus directory, emit the
+   36-row table with actual numbers, fail if a required row misses its target.
+   The corpora are all in place; this is what turns them into a report.
+2. **T140** — assert each of the sixteen D75 bounds at its default, and that
+   exceeding it produces the documented deferral or refusal rather than
+   unbounded work.
+3. **T141–T143** — the loaded-project fixture and the three measurement groups.
+   Treat a saturated host as an invalid measurement rather than a failure: this
+   machine runs the whole suite in parallel and will not give a clean number
+   under load.
 
-`contracts/privacy-sync.md` governs T132–T134 and **has** been read in this run
-(Phase 10). `contracts/evaluation.md` governs Phase 15 and has **not**.
+Then Phase 16, where T146 and T148 are the release-blocking manual gates.
