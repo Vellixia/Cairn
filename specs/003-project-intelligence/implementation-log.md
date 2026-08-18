@@ -1365,12 +1365,18 @@ trust `validated` where it must be `sanitized`.
 A pattern's `origin_ref` is a digest of its source project salted with a
 per-machine value, and "did this come from here?" is answered by recomputing
 that digest and comparing. `machine_salt` read the file, and on finding nothing
-generated a salt and wrote it. The daemon and the CLI are separate processes
-over one state directory, so on a fresh machine both can reach "not there yet"
-at the same moment: both generate, the later write wins, and whoever computed an
-`origin_ref` from the losing salt holds a reference that no longer matches its
-own project. The pattern stops recognizing where it came from — and validates
-itself there, which is the one thing FR-402 exists to prevent.
+generated a salt and wrote it. Two callers reaching "not there yet" at the same
+moment both generate, the later write wins, and whoever computed an `origin_ref`
+from the losing salt holds a reference that no longer matches its own project.
+The pattern stops recognizing where it came from — and validates itself there,
+which is the one thing FR-402 exists to prevent.
+
+**What was observed, and what was not.** The race was reproduced between
+concurrent callers **within one process** — which is the shape the daemon has,
+being multi-threaded. `machine_salt` has exactly one caller, `origin_ref` on the
+pattern path; it is not touched at startup, so the cross-process version of this
+race is possible rather than demonstrated. The fix is correct either way, and
+the severity rests on the single-process case, which was seen.
 
 Creation is now atomic: the salt is written to a unique temporary file and
 **linked** into place, which fails rather than overwrites when somebody else got
