@@ -9,8 +9,11 @@
 //! payloads, content, paths or identifiers: a contention report is an
 //! operation name, a stage, and two integers.
 
+use crate::{Result, Store};
 use std::io::Write;
+use std::str::FromStr;
 use std::sync::OnceLock;
+use uuid::Uuid;
 
 /// Where in a write the contention appeared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,4 +196,157 @@ mod tests {
         assert!(codes(&err).is_none());
         assert!(!is_contention(&err));
     }
+}
+
+/// What one derived value's rebuild found.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RebuildOutcome {
+    /// The derived value, named as a developer would name it.
+    pub derived: &'static str,
+    /// How many records were recomputed.
+    pub checked: i64,
+    /// How many disagreed with their rebuild. A release where any of these is
+    /// non-zero ships a known inconsistency (FR-478, SC-324).
+    pub differed: i64,
+}
+
+/// Recompute **every** derived value in a project and report what differed
+/// (FR-478, FR-518, SC-324).
+///
+/// Six derived values, and the list is exhaustive on purpose: a rebuild that
+/// silently skips one is worse than no rebuild at all, because it reports "no
+/// differences" over a value it never looked at.
+///
+///   1. `memories.state` / `superseded_by_id` — a view of the `supersedes`
+///      relations
+///   2. `reinforcement_count` / `distinct_origin_count` — counted from the
+///      reinforcing and duplicating decisions
+///   3. `memories.verification` / `verification_authority` — derived from the
+///      recorded runs and the collectors behind them
+///   4. `tasks.acceptance_criteria` — the projection of the criteria rows
+///   5. the task state digest — derived from the criteria and blockers
+///   6. `reusable_patterns.trust` — derived from the applications
+pub async fn rebuild_derived(store: &Store, project_id: Uuid) -> Result<Vec<RebuildOutcome>> {
+    let mut out = Vec::new();
+
+    // 1. Supersession. The rebuild itself returns how many rows disagreed.
+    let differed = crate::knowledge::rebuild_supersession(store, project_id).await? as i64;
+    let memories: Vec<Uuid> = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM memories WHERE project_id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(project_id.to_string())
+    .fetch_all(store.pool())
+    .await?
+    .iter()
+    .filter_map(|s| Uuid::from_str(s).ok())
+    .collect();
+    out.push(RebuildOutcome {
+        derived: "memory lifecycle state",
+        checked: memories.len() as i64,
+        differed,
+    });
+
+    // 2 and 3. Per memory: the counts, then the verification.
+    let mut counts_differed = 0;
+    let mut verification_differed = 0;
+    for id in &memories {
+        let before: (i64, i64) = sqlx::query_as(
+            "SELECT reinforcement_count, distinct_origin_count FROM memories WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await?;
+        let after = crate::knowledge::rebuild_reinforcement(store, *id).await?;
+        if before != after {
+            counts_differed += 1;
+        }
+
+        let stored: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT verification, verification_authority FROM memories WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await?;
+        let (state, authority) = crate::evidence::rebuild_verification(store, *id).await?;
+        let rebuilt = (
+            Some(state.as_str().to_string()),
+            authority.map(|a| a.as_str().to_string()),
+        );
+        // A memory that never had a verification reads as NULL and rebuilds as
+        // `unverified`; that is the same answer written two ways, not a
+        // difference.
+        let same = stored.0.as_deref().unwrap_or("unverified")
+            == rebuilt.0.as_deref().unwrap_or("")
+            && stored.1 == rebuilt.1;
+        if !same {
+            verification_differed += 1;
+        }
+    }
+    out.push(RebuildOutcome {
+        derived: "reinforcement counts",
+        checked: memories.len() as i64,
+        differed: counts_differed,
+    });
+    out.push(RebuildOutcome {
+        derived: "verification state and authority",
+        checked: memories.len() as i64,
+        differed: verification_differed,
+    });
+
+    // 4 and 5. Per task: the criteria projection, then the state digest.
+    let tasks: Vec<Uuid> = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM tasks WHERE project_id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(project_id.to_string())
+    .fetch_all(store.pool())
+    .await?
+    .iter()
+    .filter_map(|s| Uuid::from_str(s).ok())
+    .collect();
+
+    let mut projection_differed = 0;
+    let mut digest_differed = 0;
+    for id in &tasks {
+        let before = crate::repo::task(store, *id).await?.acceptance_criteria;
+        let digest_before = crate::criteria::state_digest(store, *id).await?;
+
+        let after = crate::criteria::rebuild_criteria_projection(store, *id).await?;
+        let digest_after = crate::criteria::state_digest(store, *id).await?;
+
+        if before != after {
+            projection_differed += 1;
+        }
+        if digest_before != digest_after {
+            digest_differed += 1;
+        }
+    }
+    out.push(RebuildOutcome {
+        derived: "task criteria projection",
+        checked: tasks.len() as i64,
+        differed: projection_differed,
+    });
+    out.push(RebuildOutcome {
+        derived: "task state digest",
+        checked: tasks.len() as i64,
+        differed: digest_differed,
+    });
+
+    // 6. Patterns have no project, so they are rebuilt whole. A pattern's trust
+    // is derived from applications that may come from any project, and there is
+    // no per-project slice of it to rebuild.
+    let patterns = crate::patterns::list(store, None).await?;
+    let mut trust_differed = 0;
+    for p in &patterns {
+        let after = crate::patterns::rebuild_pattern_trust(store, p.id).await?;
+        if after != p.trust {
+            trust_differed += 1;
+        }
+    }
+    out.push(RebuildOutcome {
+        derived: "pattern trust",
+        checked: patterns.len() as i64,
+        differed: trust_differed,
+    });
+
+    Ok(out)
 }

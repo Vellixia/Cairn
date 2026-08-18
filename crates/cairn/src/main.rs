@@ -68,7 +68,18 @@ enum Command {
         apps: Vec<String>,
     },
     /// Inspect integration health. Makes no change.
-    Doctor { agent: Option<String> },
+    Doctor {
+        agent: Option<String>,
+        /// Recompute every derived value and report how many differed.
+        ///
+        /// Exits non-zero if any did: a release where a derived value
+        /// disagrees with its rebuild ships a known inconsistency.
+        #[arg(long)]
+        rebuild_derived: bool,
+        /// Restrict the rebuild to this project. Defaults to the one here.
+        #[arg(long)]
+        project: Option<Uuid>,
+    },
     /// Reusable cross-project patterns (`contracts/patterns.md`).
     ///
     /// A pattern is local to this machine and never synchronizes.
@@ -900,7 +911,17 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             };
             integrate::connect(&opts).await
         }
-        Command::Doctor { agent } => integrate::doctor(parse_agent_opt(agent)?).await,
+        Command::Doctor {
+            agent,
+            rebuild_derived,
+            project: _,
+        } => {
+            if *rebuild_derived {
+                rebuild_derived_command().await
+            } else {
+                integrate::doctor(parse_agent_opt(agent)?).await
+            }
+        }
         Command::Pattern { action } => pattern(action).await,
         Command::Repair {
             agent,
@@ -1859,6 +1880,40 @@ async fn auth(action: &AuthAction) -> Result<Output, WireError> {
             Ok(Output::with(v, text))
         }
     }
+}
+
+/// `cairn doctor --rebuild-derived` (FR-478, FR-518, SC-324).
+///
+/// Every derived value recomputed from the records behind it, and how many
+/// disagreed. A difference is a bug report rather than a normal outcome, so a
+/// non-zero count is a non-zero exit — this is a release gate, and a gate that
+/// reports a problem and exits 0 is not one.
+async fn rebuild_derived_command() -> Result<Output, WireError> {
+    let v = client::send(&Request::RebuildDerived { cwd: cwd() }).await?;
+
+    let mut text = String::new();
+    for outcome in v["derived"].as_array().unwrap_or(&Vec::new()) {
+        text.push_str(&format!(
+            "{:<34} {:>6} checked  {:>4} differed\n",
+            outcome["derived"].as_str().unwrap_or(""),
+            outcome["checked"].as_i64().unwrap_or(0),
+            outcome["differed"].as_i64().unwrap_or(0),
+        ));
+    }
+    let differed = v["differed"].as_i64().unwrap_or(0);
+    text.push_str(&if differed == 0 {
+        "\nevery derived value equals its rebuild\n".to_string()
+    } else {
+        format!("\n{differed} derived value(s) disagree with their rebuild\n")
+    });
+
+    if differed > 0 {
+        return Err(WireError::new(
+            "derived_inconsistent",
+            format!("{differed} derived value(s) disagree with their rebuild"),
+        ));
+    }
+    Ok(Output::with(v, text))
 }
 
 /// `cairn pattern …` (`contracts/patterns.md` §Surfaces).

@@ -354,3 +354,219 @@ fn a_clean_candidate_still_promotes() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// The promotion and refusal corpora, through the real gate (T114, T119,
+// metric 25a)
+// ---------------------------------------------------------------------------
+
+/// Load a corpus group.
+fn group(name: &str) -> Vec<(String, Value)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("knowledge/patterns")
+        .join(name);
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|p| {
+            let name = p
+                .file_name()
+                .expect("a name")
+                .to_string_lossy()
+                .into_owned();
+            let text = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{name}: {e}"));
+            (
+                name.clone(),
+                serde_json::from_str(&text).unwrap_or_else(|e| panic!("{name}: {e}")),
+            )
+        })
+        .collect()
+}
+
+/// Put the source memory into the state a case describes, then run the gate.
+async fn run_case(case: &Value) -> Promotion {
+    let given = &case["input"]["extra"];
+    let source = &given["source"];
+    let facts = serde_json::json!({
+        "name": "Helios Ledger",
+        "repository_remote": "github.com/acme/helios-ledger",
+        "server_project_id": "6b1f2c34-0000-7000-8000-00000000abcd",
+        "git_common_dir": "/Users/dev/src/helios-ledger/.git",
+    });
+    let b = bench(&facts).await;
+
+    // The bench builds a source that passes every check; each case varies
+    // exactly one thing from it, which is what makes the refusal attributable.
+    let set = |column: &str, value: String| {
+        let sql = format!("UPDATE memories SET {column} = ?1 WHERE id = ?2");
+        (sql, value)
+    };
+    let mut updates = Vec::new();
+    if let Some(state) = source["state"].as_str() {
+        updates.push(set("state", state.to_string()));
+    }
+    if let Some(kind) = source["type"].as_str() {
+        updates.push(set("type", kind.to_string()));
+    }
+    if let Some(v) = source["verification"].as_str() {
+        updates.push(set("verification", v.to_string()));
+    }
+    if source["verification_authority"].is_null() && source.get("verification_authority").is_some()
+    {
+        updates.push(set("verification_authority", String::new()));
+    } else if let Some(a) = source["verification_authority"].as_str() {
+        updates.push(set("verification_authority", a.to_string()));
+    }
+    if source["local_only"].as_bool() == Some(true) {
+        updates.push(set("local_only", "1".to_string()));
+    }
+    for (sql, value) in updates {
+        let bind: Option<String> = (!value.is_empty()).then_some(value);
+        sqlx::query(&sql)
+            .bind(bind)
+            .bind(b.memory.to_string())
+            .execute(b.store.pool())
+            .await
+            .expect("set the source's state");
+    }
+    if source["evidence_facts"].as_i64() == Some(0) {
+        sqlx::query("DELETE FROM memory_evidence_facts WHERE memory_id = ?1")
+            .bind(b.memory.to_string())
+            .execute(b.store.pool())
+            .await
+            .expect("detach evidence");
+    }
+
+    // A conflicted subject needs a subject to be conflicted about. The bench
+    // memory is free-form, and gate check 5 reads the subject a memory belongs
+    // to — so without this the case would skip the check it exists to exercise
+    // and be promoted for the wrong reason.
+    if source["subject_reconciliation"].as_str() == Some("conflicted") {
+        let (project, scope_key): (String, String) =
+            sqlx::query_as("SELECT project_id, scope_key FROM memories WHERE id = ?1")
+                .bind(b.memory.to_string())
+                .fetch_one(b.store.pool())
+                .await
+                .expect("the source memory");
+
+        sqlx::query(
+            "UPDATE memories SET topic_key = 'deploy.queue_backend', value_key = 'sqs'
+              WHERE id = ?1",
+        )
+        .bind(b.memory.to_string())
+        .execute(b.store.pool())
+        .await
+        .expect("give the source a subject");
+
+        // A second, incompatible answer in the same scope.
+        sqlx::query(
+            "INSERT INTO memories
+                (id, project_id, type, scope, scope_key, content, state, origin_session_id,
+                 local_only, created_at, updated_at, topic_key, value_key, importance)
+             VALUES (?1, ?2, 'decision', 'project', ?3, 'The queue runs on RabbitMQ',
+                     'active', ?4, 0, ?5, ?5, 'deploy.queue_backend', 'rabbitmq', 'normal')",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(&project)
+        .bind(&scope_key)
+        .bind(Uuid::now_v7().to_string())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(b.store.pool())
+        .await
+        .expect("a competing answer");
+    }
+
+    let c = &given["candidate"];
+    let signals = strings(c, "signals");
+    let applicability = strings(c, "applicability");
+    let constraints = strings(c, "constraints");
+    let candidate = Candidate {
+        title: text(c, "title"),
+        problem: text(c, "problem"),
+        signals: &signals,
+        applicability: &applicability,
+        root_cause: text(c, "root_cause"),
+        approach: text(c, "approach"),
+        constraints: &constraints,
+    };
+
+    // A duplicate case promotes the same candidate twice.
+    if given.get("already_promoted").is_some() {
+        let _ = patterns::promote(&b.store, b.memory, candidate.clone(), 2, false).await;
+    }
+    patterns::promote(&b.store, b.memory, candidate, 2, false)
+        .await
+        .expect("the gate runs")
+}
+
+/// Every candidate the gate must let through, does (T114).
+#[test]
+fn the_promote_corpus_passes_the_gate() {
+    let cases = group("promote");
+    assert!(!cases.is_empty(), "the promote corpus is empty");
+    runtime().block_on(async {
+        for (name, case) in cases {
+            match run_case(&case).await {
+                Promotion::Promoted(p) => assert_eq!(
+                    p.trust.as_str(),
+                    case["expect"]["extra"]["trust"]
+                        .as_str()
+                        .unwrap_or("sanitized"),
+                    "{name}: promoted with the wrong trust"
+                ),
+                Promotion::Refused { class, message } => {
+                    panic!("{name}: refused as `{class}` — {message}")
+                }
+            }
+        }
+    });
+}
+
+/// One case per refusal class, refused with **that** class (T114, SC-328).
+///
+/// Named `attested_source` in `contracts/evaluation.md` metric 25a because the
+/// row it exists for is the attestation one: a source verified only by an
+/// agent's own claim, and an imported verification, are the two ways an agent
+/// could otherwise launder its own assertion into cross-project knowledge.
+#[test]
+fn attested_source() {
+    let cases = group("refuse");
+    assert!(
+        cases.len() >= 12,
+        "the refusal corpus is short: {}",
+        cases.len()
+    );
+
+    let mut seen: Vec<String> = Vec::new();
+    runtime().block_on(async {
+        for (name, case) in cases {
+            let expected = case["expect"]["extra"]["refusal"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string();
+            match run_case(&case).await {
+                Promotion::Refused { class, message } => {
+                    assert_eq!(class, expected, "{name}: refused as `{class}` — {message}");
+                    seen.push(class.to_string());
+                }
+                Promotion::Promoted(p) => {
+                    panic!("{name}: promoted, expected `{expected}` — {}", p.title)
+                }
+            }
+        }
+    });
+
+    // The two that matter most for SC-328 are both covered.
+    for required in ["attested_not_sufficient", "imported_not_sufficient"] {
+        assert!(
+            seen.iter().any(|c| c == required),
+            "the corpus does not exercise `{required}`: {seen:?}"
+        );
+    }
+}

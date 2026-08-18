@@ -386,3 +386,151 @@ fn each_agents_mode_is_the_rule_applied_to_its_capabilities() {
         );
     }
 }
+
+/// Divergence detection, per class and in combination — and a diverged
+/// checkpoint never emits a live next action (metrics 15 and 16, FR-431,
+/// FR-434).
+///
+/// Every class on its own, so a missed one cannot hide behind another; then
+/// all of them at once, so a classifier that reported only the first still
+/// fails. The combination case is the one that matters in practice: a session
+/// resumed on a different branch, at a different commit, with the task moved
+/// and files edited, is the ordinary shape of coming back to work.
+#[test]
+fn staleness() {
+    use cairn_core::continuity::{classify_checkpoint, Assumptions, CurrentState, PathFingerprint};
+    use cairn_core::domain::{CheckpointState, DivergenceKind};
+    use uuid::Uuid;
+
+    let task = Uuid::now_v7();
+    let assumed = Assumptions {
+        branch: "feature/retry".into(),
+        commit: Some("abc123".into()),
+        task_id: Some(task),
+        task_state_digest: Some("3f9c".into()),
+        path_fingerprints: vec![PathFingerprint::digest("src/config.rs", "d1")],
+    };
+    let unchanged = CurrentState {
+        branch: "feature/retry".into(),
+        commit: Some("abc123".into()),
+        task_exists: true,
+        worktree_exists: true,
+        task_state_digest: Some("3f9c".into()),
+        path_fingerprints: vec![PathFingerprint::digest("src/config.rs", "d1")],
+    };
+
+    // Nothing moved: current, and the recorded next action is live.
+    let same = classify_checkpoint(&assumed, &unchanged);
+    assert_eq!(same.state, CheckpointState::Current, "{same:?}");
+    assert!(same.divergences.is_empty(), "{same:?}");
+    assert!(
+        same.next_action_is_live(),
+        "an unchanged checkpoint's next action is still the action to take"
+    );
+
+    // --- One class at a time.
+    let cases: Vec<(&str, DivergenceKind, CurrentState)> = vec![
+        (
+            "the branch moved",
+            DivergenceKind::Branch,
+            CurrentState {
+                branch: "main".into(),
+                ..unchanged.clone()
+            },
+        ),
+        (
+            "the commit moved",
+            DivergenceKind::Commit,
+            CurrentState {
+                commit: Some("def456".into()),
+                ..unchanged.clone()
+            },
+        ),
+        (
+            "the task state moved",
+            DivergenceKind::Task,
+            CurrentState {
+                task_state_digest: Some("8b21".into()),
+                ..unchanged.clone()
+            },
+        ),
+        (
+            "a relevant file changed",
+            DivergenceKind::Files,
+            CurrentState {
+                path_fingerprints: vec![PathFingerprint::digest("src/config.rs", "d2")],
+                ..unchanged.clone()
+            },
+        ),
+    ];
+
+    for (what, kind, current) in &cases {
+        let c = classify_checkpoint(&assumed, current);
+        assert!(
+            c.has(*kind),
+            "{what}: {kind:?} was not detected — {:?}",
+            c.divergences
+        );
+        assert_eq!(
+            c.state,
+            CheckpointState::Diverged,
+            "{what}: a difference must make the checkpoint diverged"
+        );
+        // Metric 16. A stale next action presented as the action to take is
+        // worse than no next action at all: the agent acts on it.
+        assert!(
+            !c.next_action_is_live(),
+            "{what}: a diverged checkpoint emitted a live next action"
+        );
+    }
+
+    // --- All of them at once.
+    let all = classify_checkpoint(
+        &assumed,
+        &CurrentState {
+            branch: "main".into(),
+            commit: Some("def456".into()),
+            task_state_digest: Some("8b21".into()),
+            path_fingerprints: vec![PathFingerprint::digest("src/config.rs", "d2")],
+            ..unchanged.clone()
+        },
+    );
+    for kind in [
+        DivergenceKind::Branch,
+        DivergenceKind::Commit,
+        DivergenceKind::Task,
+        DivergenceKind::Files,
+    ] {
+        assert!(
+            all.has(kind),
+            "{kind:?} was lost when four classes diverged at once: {:?}",
+            all.divergences
+        );
+    }
+    assert_eq!(all.state, CheckpointState::Diverged);
+    assert!(!all.next_action_is_live());
+
+    // --- And the two states that are not divergence at all.
+    let gone = classify_checkpoint(
+        &assumed,
+        &CurrentState {
+            task_exists: false,
+            ..unchanged.clone()
+        },
+    );
+    assert_eq!(
+        gone.state,
+        CheckpointState::Unresolvable,
+        "a checkpoint anchored to a task that no longer exists cannot be restored"
+    );
+    assert!(!gone.next_action_is_live());
+
+    let no_worktree = classify_checkpoint(
+        &assumed,
+        &CurrentState {
+            worktree_exists: false,
+            ..unchanged
+        },
+    );
+    assert_eq!(no_worktree.state, CheckpointState::Unresolvable);
+}

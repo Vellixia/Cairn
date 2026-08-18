@@ -853,6 +853,15 @@ pub enum Request {
     // A pattern is local to the machine and has no project identity, so none of
     // these carries a project — `cwd` is here only to resolve *this* project for
     // the promotion source and for an application's attribution.
+    /// Recompute every derived value and report what differed (FR-478,
+    /// FR-518).
+    ///
+    /// A release where a derived value disagrees with its rebuild ships a known
+    /// inconsistency, so this exits non-zero when any of them does.
+    RebuildDerived {
+        cwd: String,
+    },
+
     /// List promoted patterns, with their counters.
     PatternList {
         cwd: String,

@@ -589,3 +589,74 @@ fn extract(json: &str, path: &[&str]) -> String {
         .unwrap_or_else(|| panic!("no {path:?} in {json}"))
         .to_string()
 }
+
+/// The deterministic basis wins when both exist (metric 25c, FR-369, SC-329).
+///
+/// A memory can carry evidence Cairn collected **and** evidence an agent
+/// attested, each with its own successful run. The authority reported is the
+/// strongest, and `cairn` is stronger than `attested` — an attestation beside a
+/// real check does not weaken the check.
+///
+/// The order the runs happened in must not matter. If it did, the same memory
+/// would report a different authority depending on which verifier ran last,
+/// and two machines holding identical evidence could disagree about how well
+/// established the same fact is.
+#[test]
+fn authority() {
+    use cairn_core::domain::{
+        EvidenceCollector, VerificationAuthority, VerificationState, VerifierKind, VerifyResult,
+    };
+    use cairn_core::verify::{derive_authority, RunFacts};
+
+    let cairn_run = RunFacts {
+        verifier: VerifierKind::Configuration,
+        result: VerifyResult::Verified,
+        evidence_collector: Some(EvidenceCollector::Cairn),
+    };
+    let attested_run = RunFacts {
+        verifier: VerifierKind::RuntimeState,
+        result: VerifyResult::Verified,
+        evidence_collector: Some(EvidenceCollector::Agent),
+    };
+
+    for (order, runs) in [
+        ("cairn first", vec![cairn_run, attested_run]),
+        ("attested first", vec![attested_run, cairn_run]),
+    ] {
+        assert_eq!(
+            derive_authority(VerificationState::Verified, &runs),
+            Some(VerificationAuthority::Cairn),
+            "{order}: an attestation beside a deterministic check must not weaken it"
+        );
+    }
+
+    // Attestation alone is `attested`, and says so.
+    assert_eq!(
+        derive_authority(VerificationState::Verified, &[attested_run]),
+        Some(VerificationAuthority::Attested)
+    );
+
+    // A successful run that consulted no evidence establishes nothing: there is
+    // no authority to report, and `verified` with no authority is not a state
+    // any surface may render.
+    let no_evidence = RunFacts {
+        evidence_collector: None,
+        ..cairn_run
+    };
+    assert_eq!(
+        derive_authority(VerificationState::Verified, &[no_evidence]),
+        None
+    );
+
+    // And a failed deterministic run does not lend its authority to an
+    // attestation that succeeded.
+    let failed_cairn = RunFacts {
+        result: VerifyResult::Drifted,
+        ..cairn_run
+    };
+    assert_eq!(
+        derive_authority(VerificationState::Verified, &[failed_cairn, attested_run]),
+        Some(VerificationAuthority::Attested),
+        "a drifted Cairn run must not report `cairn` authority"
+    );
+}

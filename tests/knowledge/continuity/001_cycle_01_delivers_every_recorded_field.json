@@ -1,0 +1,40 @@
+{
+  "description": "Compaction cycle 1 of ten. Every FR-422 field that exists in recorded state is delivered again, and the restore count has reached 1. Nothing accumulates and nothing is dropped: the checkpoint is rebuilt from the same recorded state each time, so cycle ten costs what cycle one cost and says the same things.",
+  "input": {
+    "extra": {
+      "cycle": 1,
+      "recorded": {
+        "task_bound": true,
+        "commit": "abc123",
+        "branch": "feature/retry",
+        "relevant_paths": [
+          "src/retry.rs"
+        ],
+        "next_action": "finish the retry backoff in src/retry.rs"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "required_fields": [
+        "task_id",
+        "task_state_digest",
+        "branch",
+        "commit",
+        "relevant_paths",
+        "next_action",
+        "restore_count"
+      ],
+      "forbidden_fields": [
+        "summary",
+        "transcript",
+        "assistant_message",
+        "user_prompt",
+        "conversation"
+      ],
+      "restore_count": 1,
+      "checkpoint_state": "current",
+      "next_action_is_live": true
+    }
+  }
+}

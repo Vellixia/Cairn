@@ -331,7 +331,7 @@ fn schema_1_server() -> Option<Server> {
 /// The whole story: refuse, retain, upgrade, deliver exactly once (SC-326,
 /// SC-331).
 #[test]
-fn an_old_server_and_then_an_upgraded_one() {
+fn recovers_after_upgrade() {
     let _serialized = heavy();
     let Some(mut old) = schema_1_server() else {
         return;
@@ -573,7 +573,7 @@ fn memory(s: &Sandbox, topic: &str, value: &str, content: &str) -> String {
 
 /// The upgrade is noticed **without anyone running a command** (FR-418).
 ///
-/// `an_old_server_and_then_an_upgraded_one` calls `cairn sync now` after the
+/// `recovers_after_upgrade` calls `cairn sync now` after the
 /// upgrade, which proves the explicit path and routes around the promise the
 /// product actually makes: `sync status` tells the user the retained work "is
 /// delivered automatically once the server is upgraded".

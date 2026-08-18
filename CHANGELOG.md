@@ -7,6 +7,105 @@ All notable changes to Cairn are recorded here. The format follows
 Cairn is pre-1.0. Until 1.0.0, minor versions may change behaviour, storage
 schemas, and the wire protocol without a deprecation period.
 
+## [Unreleased]
+
+Project intelligence. Cairn stops being a place memories are kept and starts
+being a thing that knows what this project currently believes, what stands
+behind each belief, and when the world has moved out from under one.
+
+Nothing here needs a model, an embedding, a vector store or a graph database,
+and none was added. Every answer is a deterministic function of recorded state,
+which is what lets two machines that have never met agree.
+
+### Added
+
+- **Canonical project knowledge.** A durable fact can carry a `topic_key` and a
+  `value_key` — what it is about, and what it asserts. Cairn derives the current
+  answer for a subject on every read, from the proposals and the recorded
+  decisions between them. Nothing is overwritten and no row is "the truth": a
+  memory a session wrote is still exactly what that session wrote.
+- **Reconciliation that refuses to guess.** The one case Cairn merges
+  automatically is content identical after normalization. Agreeing on a value
+  and differing in words is reported as *corroborating*, with the member it
+  agrees with named and the one call that would collapse them — because only
+  the agent can read both and say whether they are one claim.
+- **Conflicts are shown, never resolved.** Two applicable answers that disagree
+  produce a conflict warning naming both, with no winner picked by a clock, an
+  identifier or an arrival order.
+- **Evidence and verification.** A memory can carry evidence facts — a file, a
+  configuration key, a Git ref, a command outcome — and Cairn re-checks them
+  itself. A check Cairn ran and a claim an agent attested are recorded as
+  different things and rendered differently, everywhere.
+- **Drift as a state.** When the evidence behind a verified memory moves, the
+  memory becomes `drifted`. It is never rewritten and never deleted: what a
+  session recorded stays what it recorded, and the disagreement with the world
+  is what gets reported.
+- **Minimum-safe context.** A reserved share of every briefing is held for the
+  work state and the warnings a session cannot safely proceed without, so a
+  tight budget drops history rather than the thing you needed.
+- **Compression-safe continuity.** A checkpoint records what was assumed —
+  branch, commit, task state, relevant paths — and validates all of it before
+  restoring. A checkpoint whose assumptions no longer hold reports its
+  divergences and does **not** hand back a next action that no longer applies.
+- **Evidence-aware tasks.** Acceptance criteria become stably identified records
+  with their own state, verification and evidence. Readiness is derived and
+  never sets a task's status by itself; a criterion is never `verified` on an
+  agent's own attestation.
+- **Multi-device convergence.** Proposals, decisions, criteria and blockers
+  merge between machines with no clock deciding anything. Reversing two
+  machines' clocks produces a byte-identical result — asserted, per case, by a
+  corpus in which every scenario has a clock-reversed twin.
+- **Mixed-version recovery.** Work an older server cannot hold is retained as
+  `blocked`, retried zero times, never marked failed, and delivered exactly once
+  after the server is upgraded — with no manual repair and no user action.
+- **Reusable cross-project patterns.** A verified, evidence-backed solution can
+  become a sanitized pattern with no project identity, offered in another
+  project and always labelled unverified *there*. Ten applications in one
+  project count once, an agent agreeing with Cairn's own suggestion is not
+  confirmation, and a counterexample contests a pattern without deleting it or
+  reducing what it has done elsewhere.
+- **`cairn pattern`**, `cairn evidence`, `cairn verify`, `cairn memory subject`,
+  `cairn memory reconcile`, `cairn memory pin`, `cairn task criterion`,
+  `cairn task blocker` and `cairn doctor --rebuild-derived`.
+- **`cairn status` reports the mechanism's reach**: the share of project memory
+  carrying a subject, the conflicted, needs-recheck and drifted counts, and any
+  sync degradation — so nobody has to run an evaluation to find out whether any
+  of this is being used.
+
+### Changed
+
+- **The MCP surface is still exactly six tools.** Every new capability is an
+  action on a tool that already exists. A Feature 001 call carrying only its
+  original arguments gets the same answer it always did, plus new read-only
+  fields — replayed against a corpus recorded before this feature existed.
+- **`GET /api/version`** additionally reports `schema_version` and a
+  `capabilities` array, so a peer can tell what a server can hold. A server that
+  predates the fields answers without them, and that silence is the answer.
+- **The always-on agent contract** gained four obligations: give a durable fact
+  a subject specific enough to state the whole claim, attach evidence rather
+  than asserting importance, reinforce a corroborating member when it is the
+  same claim, and record a pattern's outcome including a negative one.
+
+### Fixed
+
+- **OpenCode no longer reports `automatic` continuity.** Its pre-compaction
+  warning depends on the installed build exposing an experimental hook, so on a
+  build without it Cairn was never told compaction was coming — while the agent
+  had been told not to worry. It reports `agent_initiated`, which is the honest
+  answer.
+
+### Migration
+
+Additive. Migration 5 adds columns and tables and rewrites no existing value.
+`topic_key`, `value_key` and `content_norm_digest` are left NULL on existing
+memories: inferring a subject from content is the one thing this design
+refuses to do, and it refuses it at the migration too. Existing memories stay
+free-form, searchable, briefable and syncable exactly as before.
+
+One documented approximation: `superseded_at` for supersessions that happened
+before this release is taken from `updated_at`. See
+`specs/003-project-intelligence/migration.md` §Step 2(b).
+
 ## [0.1.0-alpha.4] — 2026-08-13
 
 The agent integration platform. Claude Code, Codex and OpenCode integrate

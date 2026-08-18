@@ -498,3 +498,203 @@ fn rebuild_criteria_projection_equals_the_stored_array() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// T144 — `doctor --rebuild-derived` covers every derived value (FR-478,
+// FR-518, SC-324)
+// ---------------------------------------------------------------------------
+
+/// The rebuild pass reports **all six** derived values.
+///
+/// The list is the point. A pass that silently skipped one would report "every
+/// derived value equals its rebuild" over a value it never looked at, which is
+/// worse than not having the command: a release would be told it was
+/// consistent by a check that had not run.
+#[test]
+fn the_rebuild_covers_every_derived_value() {
+    let s = cairn_e2e::Sandbox::new();
+    s.must(&["init"]);
+
+    let out = s.cairn(&["--json", "doctor", "--rebuild-derived"]);
+    assert!(out.ok(), "{}", out.stderr);
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).expect("json");
+    let derived = v["data"]["derived"].as_array().cloned().unwrap_or_default();
+
+    let mut names: Vec<&str> = derived
+        .iter()
+        .filter_map(|d| d["derived"].as_str())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "memory lifecycle state",
+            "pattern trust",
+            "reinforcement counts",
+            "task criteria projection",
+            "task state digest",
+            "verification state and authority",
+        ],
+        "the rebuild does not cover every derived value"
+    );
+    assert_eq!(v["data"]["differed"], 0, "{}", out.stdout);
+    assert_eq!(v["data"]["consistent"], true);
+}
+
+/// A store with real derived state rebuilds to the same answer, and the
+/// command exits zero (SC-324).
+#[test]
+fn a_populated_project_rebuilds_to_the_same_answer() {
+    let s = cairn_e2e::Sandbox::new();
+    s.must(&["init"]);
+    s.write_file("config/app.yml", "server:\n  port: 8080\n");
+
+    // A subject with two members and a decision between them.
+    let old = s.json(&[
+        "memory",
+        "add",
+        "The API listens on port 8080",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+        "--topic-key",
+        "api.port",
+        "--value-key",
+        "8080",
+    ]);
+    let new = s.json(&[
+        "memory",
+        "add",
+        "The API listens on port 9000",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+        "--topic-key",
+        "api.port",
+        "--value-key",
+        "9000",
+    ]);
+    let (old_id, new_id) = (
+        old["memory"]["id"].as_str().expect("id").to_string(),
+        new["memory"]["id"].as_str().expect("id").to_string(),
+    );
+    s.json(&[
+        "memory",
+        "reconcile",
+        "--from",
+        &new_id,
+        "--to",
+        &old_id,
+        "--relation",
+        "supersedes",
+        "--basis",
+        "explicit_user",
+    ]);
+
+    // A verified memory, and a task with criteria.
+    let evidence = s.json(&[
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "API port",
+        "--value",
+        "9000",
+        "--locator",
+        "config/app.yml#server.port",
+        "--collector",
+        "cairn",
+        "--memory",
+        &new_id,
+    ]);
+    assert!(evidence.get("error").is_none(), "{evidence}");
+    s.json(&["verify", "--memory", &new_id]);
+    s.json(&[
+        "task",
+        "new",
+        "--title",
+        "Rebuildable",
+        "--goal",
+        "have derived state",
+        "--criterion",
+        "one",
+        "--criterion",
+        "two",
+    ]);
+
+    let out = s.cairn(&["--json", "doctor", "--rebuild-derived"]);
+    assert!(
+        out.ok(),
+        "a populated project must rebuild to what it already held: {} {}",
+        out.stdout,
+        out.stderr
+    );
+    let v: serde_json::Value = serde_json::from_str(&out.stdout).expect("json");
+    assert_eq!(v["data"]["differed"], 0, "{}", out.stdout);
+
+    // And it actually looked at something, rather than finding nothing to check.
+    let checked: i64 = v["data"]["derived"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .map(|d| d["checked"].as_i64().unwrap_or(0))
+        .sum();
+    assert!(checked > 0, "the rebuild checked nothing: {}", out.stdout);
+}
+
+/// A derived value that disagrees with its records exits **non-zero**.
+///
+/// The negative that makes the command a gate. Without it, a rebuild that
+/// found a difference and reported it cheerfully would let a release ship a
+/// store nobody could trust.
+#[test]
+fn a_disagreeing_derived_value_fails_the_check() {
+    let s = cairn_e2e::Sandbox::new();
+    s.must(&["init"]);
+
+    let a = s.json(&[
+        "memory",
+        "add",
+        "A claim worth reinforcing",
+        "--type",
+        "fact",
+        "--scope",
+        "project",
+        "--topic-key",
+        "infra.db",
+        "--value-key",
+        "postgresql",
+    ]);
+    let id = a["memory"]["id"].as_str().expect("id").to_string();
+
+    // Corrupt the derived column directly: nothing recorded justifies this
+    // count, so the rebuild must notice.
+    s.exec_sql(&format!(
+        "UPDATE memories SET reinforcement_count = 7 WHERE id = '{id}'"
+    ));
+
+    let out = s.cairn(&["--json", "doctor", "--rebuild-derived"]);
+    assert!(
+        !out.ok(),
+        "a derived value disagreeing with its records must fail the check: {}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("derived_inconsistent") || out.stderr.contains("derived_inconsistent"),
+        "the failure must name what it is: {} {}",
+        out.stdout,
+        out.stderr
+    );
+
+    // And the rebuild corrected it, so a second run is clean — the command
+    // repairs as well as reports.
+    let again = s.cairn(&["--json", "doctor", "--rebuild-derived"]);
+    assert!(
+        again.ok(),
+        "the rebuild did not correct what it found: {}",
+        again.stdout
+    );
+}

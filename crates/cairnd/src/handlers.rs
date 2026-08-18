@@ -691,6 +691,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             scope,
             scope_key,
         } => memory_subject(d, &cwd, topic_key, scope, scope_key).await,
+        Request::RebuildDerived { cwd } => rebuild_derived(d, &cwd).await,
         Request::PatternList { cwd, trust, signal } => {
             crate::patterns::list(d, &cwd, trust, signal).await
         }
@@ -966,6 +967,22 @@ async fn knowledge_health(
         drifted: a.drifted,
         sync_degradation: crate::sync::degradation(d, project_id).await,
     })
+}
+
+/// Recompute every derived value in this project and report what differed.
+async fn rebuild_derived(d: &Daemon, cwd: &str) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let outcomes = cairn_store::diag::rebuild_derived(&d.store, r.project.id)
+        .await
+        .map_err(storage_err)?;
+    let differed: i64 = outcomes.iter().map(|o| o.differed).sum();
+    Ok(json!({
+        "derived": outcomes,
+        "differed": differed,
+        // The caller exits non-zero on this, so a release cannot ship a store
+        // whose derived values disagree with the records behind them.
+        "consistent": differed == 0,
+    }))
 }
 
 /// Mark memory whose scope key no longer resolves as `stale` (FR-018).

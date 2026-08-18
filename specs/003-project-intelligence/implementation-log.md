@@ -992,41 +992,96 @@ finds nothing — and the memory is still searchable, briefable and syncable
 exactly as before. The adoption metric agrees with the store rather than with
 an assumption about it.
 
+### Checkpoint N — Phases 15 and 16 (T139–T145): measurement and release readiness
+
+| | |
+|---|---|
+| Suite | `cargo test --workspace` against a real PostgreSQL: **1,021 passed, 0 failed, 1 ignored** |
+| Gates | `cargo fmt --all -- --check` clean, `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
+
+**The metric table was reconciled against reality before the harness was
+built.** `cargo test --workspace -- --list` against the 36 rows found six
+discrepancies, and they were three different things:
+
+* **A name that had drifted.** The end-to-end upgrade test was called
+  `an_old_server_and_then_an_upgraded_one`; the contract names
+  `recovers_after_upgrade`. The *test* was renamed — the contract is the
+  artifact a reader trusts, and matching it exactly is what lets T139 verify the
+  table mechanically rather than by eye.
+* **Three genuinely missing tests.** Nothing ran the `patterns/promote` and
+  `patterns/refuse` corpora at all: T119 built the gate and T116 ran the
+  *privacy* corpus, and the twelve refusal cases had no runner. Nothing asserted
+  that the deterministic basis wins when both exist (row 25c). Nothing named
+  `us6_continuity::staleness` covered divergence per class **and** in
+  combination (rows 15 and 16). All three now exist.
+* **An empty corpus group.** `continuity/` held a README and no cases. Twelve
+  were generated: ten cycles, one per cycle, plus the no-task-bound case and the
+  world-moved case. The rule is per cycle on purpose — a checkpoint that
+  survives one compaction and quietly loses its relevant paths on the sixth is
+  what this catches, and a single assertion after cycle ten would not see it.
+
+Had the harness been built first, all four would have surfaced as harness bugs.
+
+**T139** emits the table with real numbers and fails when a required row has no
+test behind it. It deliberately does **not** re-run the assertions: each named
+test already runs in the suite, and duplicating them would create a second place
+where the answer could be wrong. 341 corpus cases across 24 groups, every
+contract-stated minimum met.
+
+**T140** asserts each of the seventeen bound fields at its default and then
+shows each one *binding* — the second is the part that matters. A default that
+has not drifted is cheap to satisfy; that exceeding it produces the documented
+deferral or refusal rather than unbounded work is what the bound exists for.
+
+**T141–T143** measure against a loaded fixture with a **saturation guard**. A
+calibration loop of known cost runs first; if that is slow, the machine is not
+ours and every number after it is noise, so the measurement is reported as
+invalid rather than failed — `contracts/evaluation.md` §Performance measurement
+says exactly this. The population measured is printed beside the stated one, so
+nobody has to guess what a number was measured against. This run: a bounded
+subject read over 500 memories in 1.3 ms, a drift lookup in 132 µs, a
+supersession rebuild in 19 ms.
+
+**T144** — `cairn doctor --rebuild-derived` recomputes all six derived values
+and exits non-zero if any differs. The list is asserted **by name**, because a
+rebuild that silently skipped one would report "every derived value equals its
+rebuild" over a value it never looked at — worse than not having the command,
+since a release would be told it was consistent by a check that had not run.
+There is a negative too: a corrupted count fails the check, and the rebuild
+corrects it.
+
+**T145** — the changelog entry and `docs/feature-003-followups.md`, so the
+MEDIUM and LOW notes are not rediscovered from scratch.
+
 ## Where the run stands
 
-**138 of 148 tasks complete**, each with its named evidence passing.
+**145 of 148 tasks complete**, each with its named evidence passing.
 
-| Phase | Tasks | State |
+The three that remain are all `[MANUAL]`, and none can be performed in this
+environment. Each is annotated in `tasks.md` itself and written out with its
+exact prerequisites in
+[release-evidence.md](./release-evidence.md), so a reader can tell "nobody ran
+this" from "this ran and passed" without reading anything else.
+
+| Task | Blocking | State |
 |---|---|---|
-| 1–14 | T001–T138 | complete |
-| 15 Corpus & performance | T139–T143 | not started |
-| 16 Convergence & release | T144–T148 | not started |
+| T146 quickstart walkthrough | **yes** | **NOT RUN** — needs a live agent on a real repository |
+| T147 topic-key effectiveness | no | harness complete at `evals/topic-key-effectiveness/`, **results not collected** |
+| T148 live continuity walkthrough | **yes** | **NOT RUN** — needs Claude Code, Codex and OpenCode, and a real compaction in each |
 
-The ten that remain are five measurement tasks and five release tasks, **three
-of which are `[MANUAL]`** and need a real repository with live agents:
-
-| Task | Blocking | Needs |
-|---|---|---|
-| T139–T143 | yes | the metric harness and the performance fixtures |
-| T144, T145 | yes | `doctor --rebuild-derived`, the changelog |
-| T146 | **yes** | the quickstart end to end on a real repository with a live agent |
-| T147 | **no** | topic-key effectiveness across three agents — informational, no threshold |
-| T148 | **yes** | a real compaction driven on Claude Code, Codex and OpenCode |
+T147's harness is real work and it is finished: 26 corpus items across five
+project archetypes, with paired items for consistency and near-miss items that
+must not group, plus the protocol and the recording structure. What is missing
+is only what three live agents would produce. Its false-grouping count is
+**unknown, not zero** — no item has been run, so nothing has been observed
+either way, and that is stated wherever the number would otherwise appear.
 
 ## Next action
 
-**Phase 15 — the metric table with numbers, starting at T139.**
-`contracts/evaluation.md` governs it and has **not** been read in this run.
+**Run T146 and T148 on a machine with live agents**, then record their
+transcripts in `release-evidence.md`. Until both have run and passed, this
+feature is implementation-complete and not release-ready.
 
-1. **T139** — the corpus metric harness: run every corpus directory, emit the
-   36-row table with actual numbers, fail if a required row misses its target.
-   The corpora are all in place; this is what turns them into a report.
-2. **T140** — assert each of the sixteen D75 bounds at its default, and that
-   exceeding it produces the documented deferral or refusal rather than
-   unbounded work.
-3. **T141–T143** — the loaded-project fixture and the three measurement groups.
-   Treat a saturated host as an invalid measurement rather than a failure: this
-   machine runs the whole suite in parallel and will not give a clean number
-   under load.
-
-Then Phase 16, where T146 and T148 are the release-blocking manual gates.
+Nothing in the code is waiting on anything. The deterministic surface is
+finished, every gate passes, and the two open items are observations of real
+agent behaviour that no amount of further implementation can substitute for.

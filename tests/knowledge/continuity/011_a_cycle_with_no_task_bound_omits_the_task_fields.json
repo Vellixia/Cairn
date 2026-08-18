@@ -1,0 +1,39 @@
+{
+  "description": "A session with no task bound has no task state to record, so the task fields are absent rather than empty. An empty string for a task digest would compare unequal to itself on the next cycle and report a divergence that never happened.",
+  "input": {
+    "extra": {
+      "cycle": 1,
+      "recorded": {
+        "task_bound": false,
+        "commit": "abc123",
+        "branch": "main",
+        "relevant_paths": [
+          "src/main.rs"
+        ],
+        "next_action": "read the failing test"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "required_fields": [
+        "branch",
+        "commit",
+        "relevant_paths",
+        "next_action"
+      ],
+      "absent_fields": [
+        "task_id",
+        "task_state_digest"
+      ],
+      "forbidden_fields": [
+        "summary",
+        "transcript",
+        "assistant_message",
+        "user_prompt",
+        "conversation"
+      ],
+      "checkpoint_state": "current"
+    }
+  }
+}
