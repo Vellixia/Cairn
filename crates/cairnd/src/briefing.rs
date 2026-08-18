@@ -565,8 +565,12 @@ mod tests {
     // could pass while the function that *produces* them emitted a `conflict`
     // for nobody and looked drift up under the nil project.
 
-    /// Record a topic-keyed project memory and return nothing — these tests care
-    /// about what the subject becomes, not about the rows.
+    /// Record a topic-keyed project memory the way `cairn memory add` does.
+    ///
+    /// Through `create_memory_reconciled`, deliberately: the reconciling path is
+    /// the one that records relations between same-subject proposals, and a
+    /// warning that only appears for memories written the *other* way would be a
+    /// warning no real project ever sees.
     async fn keyed_memory(
         d: &Daemon,
         p: &cairn_core::domain::Project,
@@ -575,7 +579,7 @@ mod tests {
         value: &str,
         content: &str,
     ) -> Uuid {
-        repo::create_memory(
+        repo::create_memory_reconciled(
             &d.store,
             repo::NewMemory {
                 project_id: p.id,
@@ -591,9 +595,11 @@ mod tests {
                 importance: cairn_core::Importance::Normal,
             },
             cairn_store::outbox::SyncPolicy::from_project(p),
+            64,
         )
         .await
         .expect("memory")
+        .memory
         .id
     }
 

@@ -618,9 +618,13 @@ pub async fn rebuild_verification(
         state
     };
 
+    // Only a run that consulted evidence dates a verification. A successful run
+    // with none establishes nothing, and that includes establishing *when* — a
+    // memory reading `unverified` beside a `last_verified_at` would contradict
+    // itself on the wire, where `summary` sends both (FR-370).
     let last_verified_at = runs
         .iter()
-        .find(|r| r.result == VerifyResult::Verified)
+        .find(|r| r.result == VerifyResult::Verified && r.evidence_id.is_some())
         .map(|r| r.checked_at.clone());
 
     constraints::check_memory_columns(constraints::MemoryColumns {

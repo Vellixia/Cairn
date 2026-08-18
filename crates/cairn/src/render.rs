@@ -34,6 +34,40 @@ pub fn briefing(payload: &ContextPayload) -> String {
         }
     ));
 
+    // Level 0 first, and before the task: it is the tier defined as the content
+    // that is never dropped, and this text is what a `SessionStart` hook injects
+    // as the agent's context. A warning that reaches the payload and not the
+    // rendering has not reached the agent (FR-464, US3).
+    if !b.warnings.is_empty() {
+        out.push_str("\n## Warnings\n");
+        for w in &b.warnings {
+            // The summary warning carries the counts and names no subject of its
+            // own, so it reads as the lead line rather than as an item.
+            if w.kind == "summary" {
+                out.push_str(&format!("{}\n", w.subject));
+                continue;
+            }
+            out.push_str(&format!("⚠ {} {}", w.kind.to_uppercase(), w.subject));
+            if !w.detail.is_empty() {
+                out.push_str(&format!(" — {}", w.detail));
+            }
+            out.push('\n');
+        }
+    }
+
+    if !b.constraints.is_empty() {
+        out.push_str("\n## Constraints\n");
+        for c in &b.constraints {
+            out.push_str(&format!("- {}", c.text));
+            // A pin whose claim no longer holds keeps its pin and says so
+            // (FR-456).
+            if c.drifted {
+                out.push_str(" _(the evidence for this has drifted)_");
+            }
+            out.push('\n');
+        }
+    }
+
     if let Some(t) = &b.task {
         out.push_str(&format!(
             "\n## Task: {} ({})\n{}\n",
@@ -69,6 +103,30 @@ pub fn briefing(payload: &ContextPayload) -> String {
     section(&mut out, "Task memory", &b.memory.task);
     section(&mut out, "Branch memory", &b.memory.branch);
     section(&mut out, "Project memory", &b.memory.project);
+
+    // Last, and under their own heading. A pattern comes from another project
+    // and is offered rather than asserted, so it must not be readable as this
+    // project's own memory — which is why it is a separate array on the wire and
+    // stays a separate section here.
+    if !b.patterns.is_empty() {
+        out.push_str("\n## Patterns from other projects (unverified here)\n");
+        for p in &b.patterns {
+            out.push_str(&format!(
+                "- **{}** ({}, {} signal{} matched): {}\n",
+                p.title,
+                p.trust,
+                p.signal_overlap,
+                if p.signal_overlap == 1 { "" } else { "s" },
+                p.approach
+            ));
+            if let Some(cause) = &p.alternative_cause {
+                out.push_str(&format!("  - another cause found behind this: {cause}\n"));
+            }
+            if let Some(first) = &p.check_this_first {
+                out.push_str(&format!("  - check first: {first}\n"));
+            }
+        }
+    }
 
     out.push_str(&format!(
         "\n---\n{} of {} estimated tokens",
@@ -604,6 +662,105 @@ mod tests {
             unstaged: 0,
             untracked: 0,
         }
+    }
+
+    /// Level 0 reaches the rendered text, not just the payload (FR-464, US3).
+    ///
+    /// This text is what a `SessionStart` hook injects, so it *is* the agent's
+    /// context on that path. The renderer used to walk straight from the
+    /// repository line to the task, dropping every warning and every pinned
+    /// constraint on the floor — the tier defined as the one that is never
+    /// dropped.
+    #[test]
+    fn briefing_renders_level0_warnings_and_constraints() {
+        let p = ContextPayload {
+            briefing: Briefing {
+                project: project_summary(),
+                repository: clean_repo(),
+                task: None,
+                previous_handoff: None,
+                decisions: vec![],
+                known_failures: vec![],
+                memory: BriefingMemory::default(),
+                no_prior_history: false,
+                warnings: vec![
+                    cairn_core::wire::ContextWarning {
+                        kind: "summary".to_string(),
+                        subject: "1 conflict · 1 drift".to_string(),
+                        detail: String::new(),
+                    },
+                    cairn_core::wire::ContextWarning {
+                        kind: "conflict".to_string(),
+                        subject: "deploy.queue_backend".to_string(),
+                        detail: "2 competing answers (rabbitmq, sqs)".to_string(),
+                    },
+                    cairn_core::wire::ContextWarning {
+                        kind: "drift".to_string(),
+                        subject: "service.api_port".to_string(),
+                        detail: "drifted".to_string(),
+                    },
+                ],
+                constraints: vec![cairn_core::wire::PinnedConstraint {
+                    id: Uuid::nil(),
+                    text: "never log request bodies".to_string(),
+                    drifted: true,
+                }],
+                previous_next_action: None,
+                patterns: Vec::new(),
+            },
+            estimated_tokens: 100,
+            budget: 1000,
+            truncated: false,
+            omitted_sections: vec![],
+            degraded: false,
+            selection: None,
+        };
+
+        let text = briefing(&p);
+        // The line the quickstart documents, verbatim in shape.
+        assert!(
+            text.contains("⚠ CONFLICT deploy.queue_backend"),
+            "the conflict warning is not in the rendered briefing:\n{text}"
+        );
+        assert!(text.contains("⚠ DRIFT service.api_port"), "{text}");
+        assert!(text.contains("1 conflict · 1 drift"), "{text}");
+        assert!(text.contains("never log request bodies"), "{text}");
+        assert!(
+            text.contains("drifted"),
+            "a pin whose evidence moved must say so: {text}"
+        );
+    }
+
+    /// A project with no Level 0 content renders exactly what it always did —
+    /// the no-regression property, on the rendering side (FR-442).
+    #[test]
+    fn a_briefing_with_no_level0_content_gains_no_sections() {
+        let p = ContextPayload {
+            briefing: Briefing {
+                project: project_summary(),
+                repository: clean_repo(),
+                task: None,
+                previous_handoff: None,
+                decisions: vec![],
+                known_failures: vec![],
+                memory: BriefingMemory::default(),
+                no_prior_history: false,
+                warnings: Vec::new(),
+                constraints: Vec::new(),
+                previous_next_action: None,
+                patterns: Vec::new(),
+            },
+            estimated_tokens: 100,
+            budget: 1000,
+            truncated: false,
+            omitted_sections: vec![],
+            degraded: false,
+            selection: None,
+        };
+        let text = briefing(&p);
+        assert!(!text.contains("## Warnings"), "{text}");
+        assert!(!text.contains("## Constraints"), "{text}");
+        assert!(!text.contains("## Patterns"), "{text}");
     }
 
     #[test]
