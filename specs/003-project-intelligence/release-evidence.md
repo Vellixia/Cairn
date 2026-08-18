@@ -11,16 +11,22 @@ this" without reading anything else.
 | | |
 |---|---|
 | Suite | `CARGO_INCREMENTAL=0 cargo test --workspace` |
-| Result | **1,041 passed, 0 failed, 1 ignored** |
+| Result | **1,043 passed, 0 failed, 1 ignored** (run twice, identical) |
 | Database | PostgreSQL 17.10 (`postgres:17-alpine`), the image and credentials CI uses |
 | Server suite | **0 skipped** — `CAIRN_TEST_DATABASE_URL` was set, so every server test ran rather than early-returning |
 | Gates | `cargo fmt --all -- --check` clean · `cargo clippy --workspace --all-targets -- -D warnings` exit 0 · `git diff --check` clean |
 | Platform | macOS / aarch64. CI additionally runs Linux. |
 
 The count rose from the 1,022 of the first pass because the independent review
-(implementation-log Checkpoint O) added 17 regression tests and 1 renderer
-test — and because the one ignored test is `baseline_capture`, which
-regenerates a committed artifact on purpose and is not a skipped check.
+and the live-agent run (implementation-log Checkpoints O and P) added 21
+regression tests — one per defect found, each written to fail against the code
+as it was. The single ignored test is `baseline_capture`, which regenerates a
+committed artifact on purpose and is not a skipped check.
+
+**Run twice, with identical results.** The first attempt at this gate failed on
+`the_origin_project_does_not_validate_its_own_pattern` about one run in three.
+That was not a flaky test over sound code — it was a race in the machine salt
+(F11), and re-running until it passed would have shipped it.
 
 **"0 skipped" is the load-bearing detail.** The server tests early-return with a
 `SKIPPED:` line when `CAIRN_TEST_DATABASE_URL` is unset, and a run that skips
@@ -104,11 +110,10 @@ name, and asserted to fail when one disagrees.
 
 ---
 
-## Live-agent evidence — NOT RUN
+## Live-agent evidence — DOES NOT PASS
 
-The three tasks below cannot be performed in this environment. Each is written
-out so it can be run without re-deriving anything, and each states precisely
-what it needs.
+Each task below is written out so it can be run without re-deriving anything,
+and each states precisely what it needs and how far this run got.
 
 **None of the three passes.** One of them — T148 — was **partially run against a
 live agent in this environment**, and what it produced was a defect rather than
@@ -168,7 +173,7 @@ Those remain open, and a full T146 run will hit them.
 **What a passing run still needs.** An operator to drive an agent session per
 section, for all eleven, and read the output against the document.
 
-### T148 — the live-agent continuity walkthrough · BLOCKING · NOT RUN
+### T148 — the live-agent continuity walkthrough · BLOCKING · PARTIALLY RUN, DOES NOT PASS
 
 **What it is.** Drive a **real** compaction on Claude Code, Codex and OpenCode
 and confirm each one's reported `continuity_mode` matches what actually
@@ -274,11 +279,11 @@ here should be read as it having passed.
 | | |
 |---|---|
 | Automated tasks (T001–T145) | complete, with evidence |
-| Deterministic gates | passing — 1,041 passed, 0 failed, 0 skipped, against real PostgreSQL |
+| Deterministic gates | passing — 1,043 passed, 0 failed, 0 skipped, against real PostgreSQL, run twice |
 | Inherited Feature 001 / 002 regressions | passing, including against a migrated alpha.4 store |
 | Server migration and mixed-version recovery | verified against a real PostgreSQL and real held-back servers |
 | Independent adversarial review | **performed this run** — see implementation-log Checkpoints O and P |
-| Unresolved CRITICAL / HIGH findings | **none open.** Ten were found and fixed this run: F1–F8 by review, F9–F10 by driving a real agent |
+| Unresolved CRITICAL / HIGH findings | **none open.** Eleven were found and fixed this run: F1–F8 by review, F9–F10 by driving a real agent, F11 by the final gate |
 | Open deviations | D1–D4, documentation against implementation — recorded, not fixed |
 | **T146 — quickstart walkthrough** | **NOT RUN — needs an operator to drive all eleven sections with a live agent** |
 | **T148 — live continuity walkthrough** | **PARTIALLY RUN, DOES NOT PASS — Claude Code driven live and found over-claiming; Codex and OpenCode not connectable by this run** |
