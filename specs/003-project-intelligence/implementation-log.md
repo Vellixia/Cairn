@@ -1353,3 +1353,30 @@ test fires the hooks and asks for nothing.
 This is the case for tier 5 in one paragraph: 1,041 deterministic tests passed
 against a build that told Claude Code its continuity was automatic and then
 silently dropped it.
+
+## F11 (HIGH) — a racing machine salt let a pattern validate itself
+
+`crates/cairn-core/src/paths.rs::machine_salt`
+
+Found by the final gate, which failed about one run in three on
+`us9_counterexamples::the_origin_project_does_not_validate_its_own_pattern` —
+trust `validated` where it must be `sanitized`.
+
+A pattern's `origin_ref` is a digest of its source project salted with a
+per-machine value, and "did this come from here?" is answered by recomputing
+that digest and comparing. `machine_salt` read the file, and on finding nothing
+generated a salt and wrote it. The daemon and the CLI are separate processes
+over one state directory, so on a fresh machine both can reach "not there yet"
+at the same moment: both generate, the later write wins, and whoever computed an
+`origin_ref` from the losing salt holds a reference that no longer matches its
+own project. The pattern stops recognizing where it came from — and validates
+itself there, which is the one thing FR-402 exists to prevent.
+
+Creation is now atomic: the salt is written to a unique temporary file and
+**linked** into place, which fails rather than overwrites when somebody else got
+there first, and the loser reads the winner's value. The regression runs eight
+threads into a fresh home and asserts they all come back with the same salt,
+that it is the one on disk, and that no temporary file is left behind.
+
+Worth stating plainly: this was a real defect reached by a flaky test. Re-running
+until it passed would have shipped it.

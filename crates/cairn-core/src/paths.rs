@@ -110,24 +110,66 @@ pub fn ensure_home() -> std::io::Result<PathBuf> {
 /// Created on first use, 0600 on Unix, and never transmitted. A machine that
 /// loses it produces new references for the same project, which makes older
 /// patterns' origins unmatched rather than wrong.
+///
+/// Creation is atomic, and it has to be. The daemon and the CLI are separate
+/// processes over one state directory, so on a fresh machine two of them can
+/// reach "the salt is not there yet" at the same moment. A plain write lets both
+/// generate a salt and the later one win — leaving whoever computed an
+/// `origin_ref` from the losing salt with a reference that no longer matches its
+/// own project. A pattern would then stop recognizing the project it came from,
+/// and validate itself there (FR-402).
+///
+/// So the salt is written to a temporary file and **linked** into place, which
+/// fails rather than overwrites if somebody else got there first. The loser
+/// reads the winner's value, and every process agrees.
 pub fn machine_salt() -> std::io::Result<String> {
     let path = machine_salt_path();
-    if let Ok(existing) = std::fs::read_to_string(&path) {
+    let read_existing = || -> Option<String> {
+        let existing = std::fs::read_to_string(&path).ok()?;
         let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    if let Some(salt) = read_existing() {
+        return Ok(salt);
     }
 
     ensure_home()?;
     let salt = crate::domain::new_id().to_string() + &crate::domain::new_id().to_string();
-    std::fs::write(&path, &salt)?;
+
+    // Unique per attempt: a stale temporary file from a killed process must not
+    // make every later attempt fail.
+    let tmp = path.with_file_name(format!(
+        "machine-salt.{}.{}",
+        std::process::id(),
+        crate::domain::new_id()
+    ));
+    std::fs::write(&tmp, &salt)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    Ok(salt)
+
+    let won = std::fs::hard_link(&tmp, &path).is_ok();
+    let _ = std::fs::remove_file(&tmp);
+    if won {
+        return Ok(salt);
+    }
+
+    // Somebody else linked theirs in first — or the filesystem cannot link, in
+    // which case the pre-existing behaviour is still the best available.
+    read_existing().map_or_else(
+        || {
+            std::fs::write(&path, &salt)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            Ok(salt.clone())
+        },
+        Ok,
+    )
 }
 
 #[cfg(test)]
@@ -141,6 +183,59 @@ mod tests {
         std::env::set_var("CAIRN_HOME", "/tmp/cairn-test-home");
         assert_eq!(home(), PathBuf::from("/tmp/cairn-test-home"));
         assert!(db_path().starts_with("/tmp/cairn-test-home"));
+        match prev {
+            Some(v) => std::env::set_var("CAIRN_HOME", v),
+            None => std::env::remove_var("CAIRN_HOME"),
+        }
+    }
+
+    /// Every caller that races to create the salt ends up with the same one.
+    ///
+    /// The daemon and the CLI are separate processes over one state directory,
+    /// so on a fresh machine both can find no salt at the same moment. A plain
+    /// write let both invent one and the later win, and a caller holding the
+    /// losing salt computed an `origin_ref` that no longer matched its own
+    /// project — so a pattern stopped recognizing where it came from and
+    /// validated itself there (FR-402). It surfaced as a test that failed about
+    /// one run in three, which is exactly how long a race like this survives.
+    #[test]
+    fn a_racing_salt_creation_agrees_on_one_value() {
+        let prev = std::env::var("CAIRN_HOME").ok();
+        let dir = std::env::temp_dir().join(format!("cairn-salt-race-{}", crate::domain::new_id()));
+        std::env::set_var("CAIRN_HOME", &dir);
+
+        let salts: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| s.spawn(|| machine_salt().expect("salt")))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("joined"))
+                .collect()
+        });
+
+        let first = &salts[0];
+        assert!(
+            salts.iter().all(|s| s == first),
+            "racing callers produced different salts: {salts:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(machine_salt_path())
+                .expect("salt file")
+                .trim(),
+            first.as_str(),
+            "the stored salt is not the one the callers were given"
+        );
+        // No temporary file is left behind for the next caller to trip over.
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .expect("home")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "machine-salt")
+            .collect();
+        assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
+
+        let _ = std::fs::remove_dir_all(&dir);
         match prev {
             Some(v) => std::env::set_var("CAIRN_HOME", v),
             None => std::env::remove_var("CAIRN_HOME"),
