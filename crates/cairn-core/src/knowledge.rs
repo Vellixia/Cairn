@@ -867,57 +867,85 @@ fn representative<'a>(partition: &[&'a MemoryFacts]) -> &'a MemoryFacts {
 /// through others, at every other member — which is precisely the shape that
 /// carries no decision.
 ///
-/// Groups are returned smallest-identifier-first, and only groups of two or
-/// more: a single proposal is not a cycle.
+/// Only groups of two or more are returned: a single proposal is not a cycle,
+/// and self-relations are filtered out before this is called.
+///
+/// Kosaraju, in two linear passes, rather than asking "does each pair reach each
+/// other" — `rebuild_supersession` runs this over *every* supersession in a
+/// project, and pairwise reachability would make `doctor --rebuild-derived`
+/// quadratic in the size of the knowledge base. Both passes iterate ordered
+/// collections, so the grouping is deterministic and does not depend on the
+/// order relations arrived in.
 pub fn mutually_superseding(edges: &[(Uuid, Uuid)]) -> Vec<BTreeSet<Uuid>> {
     if edges.is_empty() {
         return Vec::new();
     }
-    let mut adjacency: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
+    let mut forward: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
+    let mut backward: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
     let mut nodes: BTreeSet<Uuid> = BTreeSet::new();
     for (from, to) in edges {
-        adjacency.entry(*from).or_default().push(*to);
+        forward.entry(*from).or_default().push(*to);
+        backward.entry(*to).or_default().push(*from);
         nodes.insert(*from);
         nodes.insert(*to);
     }
 
-    let reaches = |start: Uuid, goal: Uuid| -> bool {
-        let mut seen: BTreeSet<Uuid> = BTreeSet::new();
-        let mut stack = vec![start];
-        while let Some(n) = stack.pop() {
-            if n == goal {
-                return true;
-            }
-            if !seen.insert(n) {
+    // Pass one: finishing order on the forward graph. The `bool` marks a frame
+    // as already expanded, which is how an explicit stack records postorder —
+    // recursion here would be bounded only by the size of the project.
+    let mut visited: BTreeSet<Uuid> = BTreeSet::new();
+    let mut finished: Vec<Uuid> = Vec::new();
+    for start in &nodes {
+        if visited.contains(start) {
+            continue;
+        }
+        let mut stack: Vec<(Uuid, bool)> = vec![(*start, false)];
+        while let Some((node, expanded)) = stack.pop() {
+            if expanded {
+                finished.push(node);
                 continue;
             }
-            if let Some(next) = adjacency.get(&n) {
-                stack.extend(next.iter().copied());
+            if !visited.insert(node) {
+                continue;
+            }
+            stack.push((node, true));
+            if let Some(next) = forward.get(&node) {
+                for m in next {
+                    if !visited.contains(m) {
+                        stack.push((*m, false));
+                    }
+                }
             }
         }
-        false
-    };
+    }
 
+    // Pass two: on the reversed graph, in reverse finishing order. Each tree is
+    // one strongly connected component — a set of proposals that all reach each
+    // other, which is exactly a set whose relations decide nothing.
+    let mut assigned: BTreeSet<Uuid> = BTreeSet::new();
     let mut groups: Vec<BTreeSet<Uuid>> = Vec::new();
-    let mut placed: BTreeSet<Uuid> = BTreeSet::new();
-    for a in &nodes {
-        if placed.contains(a) {
+    for root in finished.iter().rev() {
+        if assigned.contains(root) {
             continue;
         }
         let mut group: BTreeSet<Uuid> = BTreeSet::new();
-        for b in &nodes {
-            if a != b && reaches(*a, *b) && reaches(*b, *a) {
-                group.insert(*b);
+        let mut stack = vec![*root];
+        while let Some(node) = stack.pop() {
+            if !assigned.insert(node) {
+                continue;
+            }
+            group.insert(node);
+            if let Some(next) = backward.get(&node) {
+                for m in next {
+                    if !assigned.contains(m) {
+                        stack.push(*m);
+                    }
+                }
             }
         }
-        if group.is_empty() {
-            continue;
+        if group.len() > 1 {
+            groups.push(group);
         }
-        group.insert(*a);
-        for id in &group {
-            placed.insert(*id);
-        }
-        groups.push(group);
     }
     groups
 }
