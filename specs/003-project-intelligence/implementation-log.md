@@ -1119,3 +1119,237 @@ feature is implementation-complete and not release-ready.
 Nothing in the code is waiting on anything. The deterministic surface is
 finished, every gate passes, and the two open items are observations of real
 agent behaviour that no amount of further implementation can substitute for.
+
+---
+
+# Checkpoint O — the fresh independent adversarial review
+
+The previous section said plainly that no separate review had been performed and
+that the suite had done that work instead. This checkpoint is the review the run
+was asked for, performed against the finished branch at `e0e6fa8`.
+
+It found eight defects. Two are CRITICAL. The suite was green throughout, so
+"1,022 passed / 0 failed" and "0 unresolved CRITICAL/HIGH" were both true
+statements about a codebase with two release-blocking bugs in it. That is the
+result worth recording: the earlier conclusion was not wrong about the tests, it
+was wrong to treat the tests as a substitute for the review.
+
+Every finding below was reproduced — by a failing counterexample, or by driving a
+real daemon on a real repository. None is inferred from reading.
+
+## F1 (CRITICAL) — a supersession cycle produces a silent winner
+
+`crates/cairn-core/src/knowledge.rs::derive_subject`
+
+Three competing values `{postgresql, cockroachdb, mysql}`. Two machines each
+record `supersedes` in the opposite direction between the first two — the
+ordinary offline case D78 contemplates. `derive_subject` drops every member any
+`supersedes` points at, so both are dropped and **MySQL becomes the single
+settled answer**. Nobody decided that.
+
+Violates FR-303 and SC-302 ("silent winners on `conflict/real` = 0").
+
+## F2 (HIGH) — a duplicate cycle reports two identical claims as conflicted
+
+Same function. Two byte-identical statements, each store having recorded
+`duplicates` pointing at the other. Both are dropped, no partition survives, and
+the subject reports **Conflicted** for two claims that are the same claim.
+Violates metric 2 (zero false conflicts on identical content).
+
+## F3 (HIGH) — self-supersession annihilates a subject
+
+Same function. `A supersedes A` drops A, so a subject whose only member
+superseded itself reports `Historical` with no answers. The write path accepts
+the relation, and the `relation_conflict` code that exists is never emitted.
+
+## F4 (HIGH) — a conflicted subject silently drops a statement
+
+Same function, step 5. The conflicted branch keeps one representative per value
+key and records as duplicates only members with *identical* content. A member
+sharing a value key but stating something different — `jwt`/HS256 beside
+`jwt`/RS256, with a third value `oauth` making the subject conflicted — appears
+neither as an answer nor as a duplicate. It vanishes.
+
+The single-partition `Corroborated` branch gets this right, via
+`distinct_content_answers`. Step 5 does not. Violates FR-334 and the
+coarse-value-key guarantee (metric 2b).
+
+## F5 (CRITICAL) — the rebuild silently clears verification it did not derive
+
+`crates/cairn-store/src/evidence.rs::rebuild_verification`
+
+`verification` is declared a derived value (D43): rebuildable from durable
+records, and on disagreement the records win (FR-478). But the column also holds
+two states that **no local run can express**, and the rebuild derives purely from
+local runs. So it does not resolve a disagreement — it destroys a record.
+
+Two distinct heads, same root cause:
+
+- **F5a — drift markers.** Drift marking (`cairnd/src/drift.rs::mark_supported`)
+  sets `needs_recheck` directly and records no run. The rebuild still sees the
+  last successful run and restores `verified`/`cairn`.
+- **F5b — imported verification.** `cairnd/src/sync.rs` writes an imported
+  memory's state with `remote_cairn`/`remote_attested` authority. Runs never
+  cross the wire, so an imported memory has **zero** local runs and the rebuild
+  derives `unverified`, wiping it.
+
+`cairn doctor --rebuild-derived` calls `rebuild_verification` for every memory
+with no filter, so **running the release-readiness check erases every drift
+marker and every imported verification in the project** — and then reports the
+damage it caused as `differed`. Violates "drift is a state, never silent memory
+rewriting" (FR-373, FR-478).
+
+## F6 (HIGH) — `verified` persisted with no authority
+
+`crates/cairn-core/src/verify.rs::derive_authority` +
+`rebuild_verification`
+
+`derive_authority` is correct: "a successful run that consulted no evidence
+establishes nothing", so it returns `None`. The caller writes the state anyway,
+producing `verified` with a NULL authority. FR-370 requires an authority whenever
+the state is verified, and `us4_evidence::authority_is_never_collapsed` asserts
+no path produces one without.
+
+## F7 (CRITICAL) — the `conflict` Level 0 warning is never emitted
+
+`crates/cairnd/src/briefing.rs::level0_warnings`
+
+`contracts/knowledge.md` §Warnings lists `conflict` as a **tier 0** warning,
+`contracts/mcp-tools.md` shows it in `warnings`, and the quickstart documents
+`⚠ CONFLICT deploy.queue_backend` coming out of `cairn context`. No code path
+emits `kind: "conflict"`. Reproduced live: a genuinely conflicted subject
+produced a briefing with no warnings at all.
+
+US3 is titled "Conflicts are visible". It is a P1 story, and its headline
+behaviour does not reach the briefing.
+
+## F8 (HIGH) — drift warnings look up the nil project
+
+Same function:
+
+```rust
+drifted_memories(&daemon.store, task.map(|t| t.project_id).unwrap_or_default(), 4)
+```
+
+With no task bound, `unwrap_or_default()` is `Uuid::nil()`, the query matches
+nothing, and **drift warnings never appear for a session without a task**. The
+project id is available on the resolved project and is simply not passed.
+Reproduced live: a drifted memory produced no warning.
+
+### Why the suite missed F7 and F8
+
+Only `us10_min_safe_context` asserts `warnings`, and it feeds hand-built fixtures
+straight to `assemble`. Nothing drove store state through `level0_warnings` into
+a briefing, so the function that *produces* warnings was never exercised. A
+regression test that calls `assemble` would reproduce the blind spot rather than
+close it; the ones added here go through `level0_warnings`.
+
+## Quickstart deviations — documentation against implementation
+
+Found by walking the real quickstart on a real repository with a real daemon.
+
+- **D1 (HIGH)** — `cairn memory supersede` does not exist. US2 documents it; the
+  CLI offers `pin add subject reinforce reconcile search show forget`. The
+  capability is there (`repo::supersede_memory`, and `supersede` is an MCP
+  action); the CLI verb is missing.
+- **D2 (HIGH)** — `cairn memory add` prints only `Remembered "<id>"`. The
+  reconciliation outcome, the corroborating member and the next step are all in
+  the JSON and never rendered, so the prompt FR-327 relies on never reaches a
+  human.
+- **D3 (MEDIUM)** — the `reconciliation` object omits contract fields:
+  `matched_value_key`, `subject`, `relation_recorded`, `conflict_detected`,
+  `next_step`; and it names `matched_memory_id` as `member`.
+- **D4 (MEDIUM)** — `cairn_search` results carry `topic_key` and `value_key` but
+  not `importance`, `pinned`, `verification`, `temporal`, `reinforcement` or
+  `subject`, which `contracts/mcp-tools.md` §`cairn_search` requires. A caller
+  cannot tell a verified result from a drifted one.
+
+## Handled correctly — negative results, recorded because they were checked
+
+A review that only lists what broke does not tell you what was examined.
+
+- A three-way conflict with no relations: `Conflicted`, three answers, no winner.
+- Identical content in one partition: `duplicates` recorded automatically,
+  `Reinforced`, both retained.
+- A coarse value key with two different statements and no third value:
+  `Corroborated`, both statements retained.
+- Scope exception: a project subject and a branch subject do not conflict.
+- Deterministic verification reaches `cairn` authority; an agent attestation does
+  not, and is not re-collected as though it had.
+- `cairn agents` reports continuity per agent, and an unconnected agent reports
+  `unavailable-automatic` rather than over-claiming.
+- `cairn connect codex` refused with `resource_modified` against a hand-edited
+  global `~/.codex/config.toml`, and left the file untouched — Feature 002's
+  ownership protection working as specified.
+
+---
+
+# Checkpoint P — what a real agent found that 1,041 tests could not
+
+Checkpoint O's review was performed against the code. This one was performed
+against a running agent, and it found the two defects that mattered most.
+
+## F9 (CRITICAL) — Level 0 never reached the agent
+
+`crates/cairn/src/render.rs`
+
+Verifying F7's fix on a real store turned up a larger version of it. The
+briefing payload carried the conflict warning; `cairn context` rendered none of
+it. The renderer walked from the repository line straight to the task, so every
+warning and every pinned constraint was dropped — and patterns with them.
+
+That text is what a `SessionStart` hook injects, so on the hook path it is not a
+convenience view, it is the agent's entire context. The tier defined as the one
+that is never dropped was the tier being dropped.
+
+Fixed, and confirmed on the live store — the quickstart's documented line, as
+documented:
+
+```text
+## Warnings
+1 conflict · 1 drift
+⚠ CONFLICT deploy.queue_backend — 2 competing answers (rabbitmq, sqs) and no recorded decision
+⚠ DRIFT service.api_port — drifted
+```
+
+## F10 (CRITICAL) — `automatic` continuity promised what it could not deliver
+
+`crates/cairnd/src/integrations.rs`, `crates/cairn-integrate/src/capability.rs`
+
+A real compaction was driven in Claude Code against a real Feature 003 store, by
+running the agent headlessly with a reduced auto-compact window over a large
+file. Cairn wrote the `context_compacting` checkpoint exactly as designed. Its
+`restore_count` was **0**.
+
+Two causes, both real:
+
+1. The `PostCompact` hook asked the daemon for a `continuation` briefing.
+   `post_compaction` is the only reason that restores a checkpoint — that is
+   what the reason *means* — so the checkpoint was written and never read.
+2. Fixing that alone is not enough. `context_compacted` is capture class, so the
+   hook fires one-way and the reply is discarded, and `delivers_context` is true
+   only for `session_opened`. The vendor confirms this cannot simply be widened:
+   `additionalContext` is unsupported on `PostCompact`, whose output is
+   documented as shown to the user only.
+
+So Claude Code cannot deliver `automatic`. It delivers `agent_initiated`, and
+that is now what it derives — `LifecyclePostCompaction` is the capability
+*context re-delivery after compaction*, and re-delivery is the half that is
+missing. The **rule is untouched**; the wrong input was `base()`, which
+blanket-set every capability to `guaranteed` for Claude Code and Codex from
+vendor facts that were never checked against this one.
+
+Codex is deliberately unchanged: its hook set is its own vendor's, no compaction
+has been driven in it, and transferring this finding would be inventing
+evidence.
+
+### Why the suite could not have caught it
+
+Every continuity test restores by calling `cairn context --reason
+post_compaction` itself. That is precisely the `agent_initiated` path — so the
+`automatic` path, the one with the stronger promise, had no test at all. The new
+test fires the hooks and asks for nothing.
+
+This is the case for tier 5 in one paragraph: 1,041 deterministic tests passed
+against a build that told Claude Code its continuity was automatic and then
+silently dropped it.
