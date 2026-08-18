@@ -26,8 +26,10 @@
 //! (FR-371, FR-372, I6).
 
 use crate::state::Daemon;
-use cairn_core::domain::VerificationState;
+use cairn_core::domain::{VerificationState, VerifierKind, VerifyResult, VerifyTrigger};
 use cairn_store::evidence;
+use sqlx::Row;
+use std::str::FromStr;
 use uuid::Uuid;
 
 /// What one marking pass did.
@@ -71,7 +73,15 @@ pub async fn mark_for_path(d: &Daemon, project_id: Uuid, path: &str) -> MarkRepo
 
     for fact in facts.into_iter().take(cap) {
         report.facts_examined += 1;
-        report.marked += mark_supported(d, fact.id).await;
+        report.marked += mark_supported(
+            d,
+            &MarkTarget {
+                fact_id: fact.id,
+                project_id,
+                repo_branch: fact.repo_branch,
+            },
+        )
+        .await;
     }
     report
 }
@@ -122,27 +132,71 @@ pub async fn mark_for_commit_change(
             continue;
         };
         report.facts_examined += 1;
-        report.marked += mark_supported(d, fact_id).await;
+        report.marked += mark_supported(
+            d,
+            &MarkTarget {
+                fact_id,
+                project_id,
+                // The fact is pinned to this branch: that is how it was
+                // selected.
+                repo_branch: branch.to_string(),
+            },
+        )
+        .await;
     }
     report
 }
 
-/// Set every memory this fact **supports** to `needs_recheck`.
+/// What one marking pass needs about the fact that moved.
+struct MarkTarget {
+    fact_id: Uuid,
+    project_id: Uuid,
+    repo_branch: String,
+}
+
+/// Set every memory this fact **supports** to `needs_recheck`, and record why.
 ///
-/// Writes exactly `verification`. Never content, type, scope, provenance or
-/// lifecycle state — and never creates a memory (FR-371, I6).
+/// Writes exactly `verification`, plus one appended verification run. Never
+/// content, type, scope, provenance or lifecycle state — and never creates a
+/// memory (FR-371, I6).
+///
+/// # Why marking appends a run
+///
+/// `verification` is a **derived** value: rebuildable from durable records, and
+/// on disagreement the records win (D43, FR-478). A state set with no record
+/// behind it is not derived, it is asserted — and `rebuild_verification`, which
+/// reads only the runs, would restore `verified` over it and call that
+/// consistency. `doctor --rebuild-derived` does exactly that for every memory,
+/// so an unrecorded marker meant the release-readiness check erased every drift
+/// marker in the project.
+///
+/// The appended run is `inconclusive`, and that is the literal truth: the claim
+/// was reopened because the evidence under it moved, and **no verifier ran**, so
+/// neither outcome was established (FR-366). Deciding whether the claim still
+/// holds remains `verify.rs`'s job — an `inconclusive` run cannot reach
+/// `verified` or `drifted`, which is the separation this module exists to keep.
+/// Recording it makes `needs_recheck` fall out of the runs on its own.
 ///
 /// A memory that is already `unverified` is left alone: there is nothing to
-/// recheck, and moving it would claim a verification it never had.
-async fn mark_supported(d: &Daemon, fact_id: Uuid) -> usize {
-    let memories: Vec<String> = match sqlx::query_scalar(
-        "SELECT l.memory_id FROM memory_evidence_facts l
+/// recheck, and moving it would claim a verification it never had. One that is
+/// already `drifted` is left alone too — "recheck owed" is weaker than "known
+/// to have drifted", and the background pass re-checks `drifted` anyway.
+async fn mark_supported(d: &Daemon, target: &MarkTarget) -> usize {
+    // The memory, and the verifier that last had anything to say about it. One
+    // indexed read: `verification_runs_memory` is `(memory_id, checked_at DESC)`.
+    let rows = match sqlx::query(
+        "SELECT l.memory_id AS memory_id,
+                (SELECT r.verifier FROM verification_runs r
+                  WHERE r.memory_id = l.memory_id
+                  ORDER BY r.checked_at DESC, r.id DESC
+                  LIMIT 1) AS verifier
+           FROM memory_evidence_facts l
            JOIN memories m ON m.id = l.memory_id
           WHERE l.evidence_id = ?1 AND l.role = 'supports'
             AND m.deleted_at IS NULL
-            AND m.verification IN ('verified', 'drifted', 'conflicted')",
+            AND m.verification = 'verified'",
     )
-    .bind(fact_id.to_string())
+    .bind(target.fact_id.to_string())
     .fetch_all(d.store.pool())
     .await
     {
@@ -151,10 +205,46 @@ async fn mark_supported(d: &Daemon, fact_id: Uuid) -> usize {
     };
 
     let mut marked = 0;
-    for id in memories {
+    for row in &rows {
+        let Ok(id) = row.try_get::<String, _>("memory_id") else {
+            continue;
+        };
         let Ok(memory_id) = Uuid::parse_str(&id) else {
             continue;
         };
+
+        // The verifier that established the claim is the one now owed again.
+        // Without one there is no run to describe, and nothing to record.
+        let verifier = row
+            .try_get::<Option<String>, _>("verifier")
+            .ok()
+            .flatten()
+            .and_then(|v| VerifierKind::from_str(&v).ok());
+        let Some(verifier) = verifier else { continue };
+
+        if evidence::record_run(
+            &d.store,
+            evidence::NewRun {
+                project_id: target.project_id,
+                memory_id: Some(memory_id),
+                criterion_id: None,
+                verifier,
+                evidence_id: Some(target.fact_id),
+                expected_digest: None,
+                observed_digest: None,
+                result: VerifyResult::Inconclusive,
+                detail: Some("the evidence under this claim changed; no verifier ran"),
+                repo_branch: &target.repo_branch,
+                repo_commit: None,
+                trigger: VerifyTrigger::Attach,
+            },
+        )
+        .await
+        .is_err()
+        {
+            continue;
+        }
+
         if evidence::set_verification(&d.store, memory_id, VerificationState::NeedsRecheck)
             .await
             .is_ok()
@@ -310,6 +400,48 @@ mod tests {
             .await
             .expect("count");
         assert_eq!(count, 1, "marking created a memory");
+    }
+
+    /// A drift marker is a *derived* state after marking, not an assertion
+    /// (D43, FR-478).
+    ///
+    /// Marking used to set `needs_recheck` and record nothing, so the last
+    /// successful run stayed the newest thing `rebuild_verification` could see
+    /// and it put `verified` straight back. `doctor --rebuild-derived` calls
+    /// that for every memory, which made the release-readiness check erase every
+    /// drift marker in the project.
+    #[tokio::test]
+    async fn a_marked_memory_survives_the_rebuild() {
+        let fx = crate::testsupport::daemon().await;
+        let p = crate::testsupport::project(&fx, "drift", None).await;
+        let project = p.id;
+        let session = crate::testsupport::session(&fx, &p, "drift-1").await.id;
+        let (memory, fact) = verified_claim(&fx, project, session, "config/app.yml").await;
+
+        assert_eq!(
+            mark_for_path(&fx, project, "config/app.yml").await.marked,
+            1
+        );
+
+        // The marking is on the record, as an `inconclusive` run against the
+        // fact that moved: no verifier ran, so neither outcome was established.
+        let runs = evidence::runs_for_memory(&fx.store, memory)
+            .await
+            .expect("runs");
+        let latest = runs.first().expect("a run");
+        assert_eq!(latest.result, VerifyResult::Inconclusive);
+        assert_eq!(latest.evidence_id, Some(fact));
+
+        // Which is why the rebuild agrees rather than overruling.
+        let (state, authority) = evidence::rebuild_verification(&fx.store, memory)
+            .await
+            .expect("rebuild");
+        assert_eq!(
+            state,
+            VerificationState::NeedsRecheck,
+            "the rebuild restored {state:?} over a recheck that was owed"
+        );
+        assert_eq!(authority, None);
     }
 
     #[tokio::test]

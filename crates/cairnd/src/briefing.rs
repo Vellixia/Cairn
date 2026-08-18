@@ -81,7 +81,7 @@ pub async fn build(
         None => (Vec::new(), Vec::new(), Vec::new()),
     };
 
-    let warnings = level0_warnings(daemon, session, task.as_ref()).await;
+    let warnings = level0_warnings(daemon, session, project.id, &git.branch, task.as_ref()).await;
     let pins = level0_pins(daemon, project.id, &git.branch, task.as_ref()).await;
 
     let config = daemon.config.read().await.clone();
@@ -316,6 +316,8 @@ async fn level0_task_state(
 async fn level0_warnings(
     daemon: &Daemon,
     session: Option<&Session>,
+    project_id: Uuid,
+    branch: &str,
     task: Option<&Task>,
 ) -> Vec<cairn_core::wire::ContextWarning> {
     let mut out = Vec::new();
@@ -344,13 +346,33 @@ async fn level0_warnings(
         }
     }
 
-    // Drifted memories — the claim moved out from under what was remembered.
-    if let Ok(drifted) = cairn_store::evidence::drifted_memories(
+    // Conflicted subjects — the project holds competing answers and has not
+    // decided between them. US3's headline behaviour: a conflict an agent is
+    // not shown is a conflict it will resolve by guessing (FR-303).
+    if let Ok(conflicts) = cairn_store::knowledge::conflicted_subjects(
         &daemon.store,
-        task.map(|t| t.project_id).unwrap_or_default(),
+        project_id,
+        branch,
+        task.map(|t| t.id),
         4,
     )
     .await
+    {
+        for (subject, detail) in conflicts {
+            out.push(cairn_core::wire::ContextWarning {
+                kind: "conflict".into(),
+                subject,
+                detail,
+            });
+        }
+    }
+
+    // Drifted memories — the claim moved out from under what was remembered.
+    //
+    // The project comes from the resolved project, never from the bound task: a
+    // session with no task would otherwise look drift-free by asking about the
+    // nil project.
+    if let Ok(drifted) = cairn_store::evidence::drifted_memories(&daemon.store, project_id, 4).await
     {
         for (subject, detail) in drifted {
             out.push(cairn_core::wire::ContextWarning {
@@ -534,5 +556,151 @@ mod tests {
             .await
             .expect("scope memory")
             .is_empty());
+    }
+
+    // -- Level 0 warnings (Checkpoint O) ----------------------------------
+    //
+    // These go through `level0_warnings`, not through `assemble`. The
+    // assembler's own tests hand it warnings already built, which is why it
+    // could pass while the function that *produces* them emitted a `conflict`
+    // for nobody and looked drift up under the nil project.
+
+    /// Record a topic-keyed project memory and return nothing — these tests care
+    /// about what the subject becomes, not about the rows.
+    async fn keyed_memory(
+        d: &Daemon,
+        p: &cairn_core::domain::Project,
+        s: &Session,
+        topic: &str,
+        value: &str,
+        content: &str,
+    ) -> Uuid {
+        repo::create_memory(
+            &d.store,
+            repo::NewMemory {
+                project_id: p.id,
+                kind: MemoryType::Fact,
+                scope: MemoryScope::Project,
+                scope_key: &p.id.to_string(),
+                content,
+                origin_session_id: s.id,
+                local_only: false,
+                evidence: &[],
+                topic_key: Some(topic),
+                value_key: Some(value),
+                importance: cairn_core::Importance::Normal,
+            },
+            cairn_store::outbox::SyncPolicy::from_project(p),
+        )
+        .await
+        .expect("memory")
+        .id
+    }
+
+    /// A conflicted subject reaches the briefing as a Level 0 warning (US3,
+    /// FR-303).
+    ///
+    /// `contracts/knowledge.md` lists `conflict` as a tier 0 warning and the
+    /// quickstart shows one coming out of `cairn context`, but no code path
+    /// emitted the kind: US3 is titled "Conflicts are visible" and its headline
+    /// behaviour did not reach the agent. A conflict nobody is shown is a
+    /// conflict the next session resolves by guessing.
+    #[tokio::test]
+    async fn a_conflicted_subject_becomes_a_level0_warning() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "conflicted", None).await;
+        let s = fx::session(&d, &p, "author").await;
+
+        keyed_memory(
+            &d,
+            &p,
+            &s,
+            "deploy.queue_backend",
+            "sqs",
+            "We deploy on SQS.",
+        )
+        .await;
+        keyed_memory(
+            &d,
+            &p,
+            &s,
+            "deploy.queue_backend",
+            "rabbitmq",
+            "We deploy on RabbitMQ.",
+        )
+        .await;
+
+        let warnings = level0_warnings(&d, Some(&s), p.id, "main", None).await;
+        let conflict = warnings
+            .iter()
+            .find(|w| w.kind == "conflict")
+            .unwrap_or_else(|| panic!("no conflict warning in {warnings:?}"));
+        assert_eq!(conflict.subject, "deploy.queue_backend");
+        assert!(
+            conflict.detail.contains("rabbitmq") && conflict.detail.contains("sqs"),
+            "the warning names the competing answers: {}",
+            conflict.detail
+        );
+    }
+
+    /// A subject with one answer is not warned about — the control, and the
+    /// reason the warning stays worth reading.
+    #[tokio::test]
+    async fn an_agreed_subject_produces_no_conflict_warning() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "agreed", None).await;
+        let s = fx::session(&d, &p, "author").await;
+
+        keyed_memory(
+            &d,
+            &p,
+            &s,
+            "deploy.queue_backend",
+            "sqs",
+            "We deploy on SQS.",
+        )
+        .await;
+
+        let warnings = level0_warnings(&d, Some(&s), p.id, "main", None).await;
+        assert!(
+            !warnings.iter().any(|w| w.kind == "conflict"),
+            "an agreed subject was reported as a conflict: {warnings:?}"
+        );
+    }
+
+    /// Drift is warned about with no task bound (FR-373).
+    ///
+    /// The project used to come from `task.map(|t| t.project_id)`, so a session
+    /// with no task asked about the nil project and every drifted memory in the
+    /// real one stayed invisible. Binding a task is optional; being told what
+    /// moved under you is not.
+    #[tokio::test]
+    async fn drift_is_warned_about_without_a_bound_task() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "drifting", None).await;
+        let s = fx::session(&d, &p, "author").await;
+
+        let id = keyed_memory(
+            &d,
+            &p,
+            &s,
+            "service.api_port",
+            "8080",
+            "The API is on 8080.",
+        )
+        .await;
+        cairn_store::evidence::set_verification(
+            &d.store,
+            id,
+            cairn_core::domain::VerificationState::NeedsRecheck,
+        )
+        .await
+        .expect("mark");
+
+        let warnings = level0_warnings(&d, Some(&s), p.id, "main", None).await;
+        assert!(
+            warnings.iter().any(|w| w.kind == "drift"),
+            "no drift warning without a bound task: {warnings:?}"
+        );
     }
 }

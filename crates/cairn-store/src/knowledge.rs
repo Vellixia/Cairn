@@ -412,12 +412,25 @@ pub async fn rebuild_supersession(store: &Store, project_id: Uuid) -> Result<usi
     // The successor of each superseded memory. A memory with several
     // predecessors is fine; a memory with several *successors* is a conflict
     // the derivation reports rather than one this rebuild resolves.
-    let mut successor: std::collections::BTreeMap<Uuid, Uuid> = Default::default();
-    for r in relations
+    //
+    // A self-supersession says nothing, and a *mutual* one — two machines that
+    // each recorded the opposite decision offline — settles nothing. Applying
+    // either would move a live memory to `superseded` with no author behind the
+    // move, and the derivation would then never see it at all: the subject would
+    // read as history rather than as the disagreement it is (FR-303, D78).
+    let edges: Vec<(Uuid, Uuid)> = relations
         .iter()
-        .filter(|r| r.kind == RelationKind::Supersedes)
-    {
-        successor.entry(r.to).or_insert(r.from);
+        .filter(|r| r.kind == RelationKind::Supersedes && r.from != r.to)
+        .map(|r| (r.from, r.to))
+        .collect();
+    let cycles = cairn_core::knowledge::mutually_superseding(&edges);
+
+    let mut successor: std::collections::BTreeMap<Uuid, Uuid> = Default::default();
+    for (from, to) in &edges {
+        if cairn_core::knowledge::in_one_cycle(&cycles, *from, *to) {
+            continue;
+        }
+        successor.entry(*to).or_insert(*from);
     }
 
     let existing = sqlx::query(
@@ -733,6 +746,90 @@ pub async fn branch_scoped_subjects(
             })
         })
         .collect()
+}
+
+/// The subjects that are genuinely conflicted and applicable here, as
+/// `(topic_key, detail)` for a Level 0 warning (`contracts/knowledge.md`
+/// §Warnings, FR-303, US3).
+///
+/// Scope matters: a project subject and a branch subject are different subjects
+/// and do not conflict, so only the scopes in force here are considered — the
+/// same rule `applicable_pins` follows.
+///
+/// Bounded twice over. The SQL applies the *necessary* condition for a conflict
+/// — two distinct value keys under one subject identity — which is an indexed
+/// group-by that returns nothing on the overwhelmingly common case. Only those
+/// few candidates are then derived, because whether they are *actually*
+/// conflicted is `derive_subject`'s answer and nobody else's: a recorded
+/// supersession or decision settles a subject that the value keys alone still
+/// look split on.
+pub async fn conflicted_subjects(
+    store: &Store,
+    project_id: Uuid,
+    branch: &str,
+    task_id: Option<Uuid>,
+    limit: usize,
+) -> Result<Vec<(String, String)>> {
+    /// How many members of one subject are read before deciding. Well past any
+    /// real conflict; a subject with more than this is degraded anyway.
+    const MEMBER_CAP: usize = 32;
+
+    let rows = sqlx::query(
+        "SELECT scope, scope_key, topic_key FROM memories
+          WHERE project_id = ?1 AND deleted_at IS NULL AND state = 'active'
+            AND topic_key IS NOT NULL AND value_key IS NOT NULL
+            AND (scope = 'project'
+                 OR (scope = 'branch' AND scope_key = ?2)
+                 OR (scope = 'task' AND scope_key = ?3))
+          GROUP BY scope, scope_key, topic_key
+         HAVING COUNT(DISTINCT value_key) > 1
+          ORDER BY topic_key
+          LIMIT ?4",
+    )
+    .bind(project_id.to_string())
+    .bind(branch)
+    .bind(task_id.map(|t| t.to_string()))
+    .bind((limit as i64).saturating_mul(2))
+    .fetch_all(store.pool())
+    .await?;
+
+    let mut out = Vec::new();
+    for r in &rows {
+        if out.len() >= limit {
+            break;
+        }
+        let scope = MemoryScope::from_str(r.try_get::<String, _>("scope")?.as_str())
+            .map_err(|e| crate::StoreError::Corrupt(e.to_string()))?;
+        let scope_key: String = r.try_get("scope_key")?;
+        let topic_key: String = r.try_get("topic_key")?;
+
+        let read = subject(store, project_id, scope, &scope_key, &topic_key, MEMBER_CAP).await?;
+        if read.view.reconciliation != cairn_core::domain::Reconciliation::Conflicted {
+            continue;
+        }
+
+        // The competing answers, by the value key each stands for — which is
+        // what makes the warning actionable rather than an alarm.
+        let mut values: Vec<String> = read
+            .view
+            .answers
+            .iter()
+            .filter_map(|id| read.members.iter().find(|m| m.id == *id))
+            .filter_map(|m| m.value_key.clone())
+            .collect();
+        values.sort();
+        values.dedup();
+
+        out.push((
+            topic_key,
+            format!(
+                "{} competing answers ({}) and no recorded decision",
+                read.view.answers.len(),
+                values.join(", ")
+            ),
+        ));
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

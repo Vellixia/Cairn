@@ -603,22 +603,58 @@ pub fn derive_subject(members: &[MemoryFacts], relations: &[Relation]) -> Subjec
     // no longer a candidate. Restricting to active endpoints matters: a
     // duplicate of a memory that has since been superseded is still a
     // candidate in its own right.
-    let mut superseded_targets: BTreeSet<Uuid> = BTreeSet::new();
-    let mut duplicate_of: BTreeMap<Uuid, Uuid> = BTreeMap::new();
+    let mut supersedes_edges: Vec<(Uuid, Uuid)> = Vec::new();
+    let mut duplicates_edges: Vec<(Uuid, Uuid)> = Vec::new();
     for r in &decisions {
         if !active_ids.contains(&r.from) || !active_ids.contains(&r.to) {
             continue;
         }
+        // A relation from a proposal to itself says nothing. Acting on it would
+        // let one malformed row delete the only answer a subject has.
+        if r.from == r.to {
+            continue;
+        }
         match r.kind {
-            RelationKind::Supersedes => {
-                superseded_targets.insert(r.to);
-            }
-            RelationKind::Duplicates => {
-                // `from` duplicates `to`: the newer proposal points at the
-                // member it duplicates, so `from` is the one that drops out.
-                duplicate_of.insert(r.from, r.to);
-            }
+            RelationKind::Supersedes => supersedes_edges.push((r.from, r.to)),
+            // `from` duplicates `to`: the newer proposal points at the member it
+            // duplicates, so `from` is the one that drops out.
+            RelationKind::Duplicates => duplicates_edges.push((r.from, r.to)),
             _ => {}
+        }
+    }
+
+    // Two machines that each recorded the opposite supersession — the ordinary
+    // offline case (D78) — decided nothing between them. Applying both drops
+    // both members, and any third value nobody argued about is left standing as
+    // the sole settled answer: a winner nobody chose. Inside a cycle the
+    // supersessions cancel, the members stay, and the subject reports the
+    // disagreement it actually is (FR-303, SC-302).
+    let supersedes_cycles = mutually_superseding(&supersedes_edges);
+    let mut superseded_targets: BTreeSet<Uuid> = BTreeSet::new();
+    for (from, to) in &supersedes_edges {
+        if !in_one_cycle(&supersedes_cycles, *from, *to) {
+            superseded_targets.insert(*to);
+        }
+    }
+
+    // A duplicate cycle is not a disagreement: the members say the same thing,
+    // and each store recorded that fact pointing the other way. Dropping both
+    // would report two identical claims as conflicting. One is the answer and
+    // the rest are its duplicates; which one is arbitrary, so it is settled by
+    // identifier — the one choice that cannot depend on arrival order.
+    let duplicate_cycles = mutually_superseding(&duplicates_edges);
+    let mut duplicate_of: BTreeMap<Uuid, Uuid> = BTreeMap::new();
+    for (from, to) in &duplicates_edges {
+        if !in_one_cycle(&duplicate_cycles, *from, *to) {
+            duplicate_of.insert(*from, *to);
+        }
+    }
+    for group in &duplicate_cycles {
+        let Some(survivor) = group.iter().next().copied() else {
+            continue;
+        };
+        for member in group.iter().skip(1) {
+            duplicate_of.insert(*member, survivor);
         }
     }
 
@@ -759,24 +795,21 @@ pub fn derive_subject(members: &[MemoryFacts], relations: &[Relation]) -> Subjec
     // Step 5 — several value keys in one scope: every competing answer, and no
     // winner. Nothing here picks one, which is why there is no branch that
     // could (FR-334, I4).
+    //
+    // Within a partition the same rule applies as in the corroborated branch:
+    // one answer per *distinct statement*, not one answer per value key. Keeping
+    // a single representative per key and recording only byte-identical members
+    // as its duplicates loses any member that shares the key and says something
+    // else — `jwt`/HS256 beside `jwt`/RS256 — which would make a statement
+    // disappear from a subject whose whole purpose is to show every competing
+    // one (FR-334, metric 2b).
     let mut answers: Vec<Uuid> = Vec::new();
     let mut accounting: Vec<AnswerAccounting> = Vec::new();
     for partition in partitions.values() {
-        let answer = representative(partition);
-        let mut dropped = duplicates_by_target(answer.id);
-        for m in partition {
-            if m.id != answer.id && same_content(answer, m) {
-                dropped.push(m.id);
-            }
-        }
-        dropped.sort();
-        dropped.dedup();
-        accounting.push(AnswerAccounting {
-            memory_id: answer.id,
-            duplicates: dropped.clone(),
-            distinct_origins: origins_for(answer, &dropped),
-        });
-        answers.push(answer.id);
+        let (part_answers, part_accounting) =
+            distinct_content_answers(partition, &duplicates_by_target, &origins_for);
+        answers.extend(part_answers);
+        accounting.extend(part_accounting);
     }
     // Sorted by identifier for stable rendering — and for nothing else.
     let mut paired: Vec<(Uuid, AnswerAccounting)> = answers.into_iter().zip(accounting).collect();
@@ -814,16 +847,6 @@ fn single_content_digest(partition: &[&MemoryFacts]) -> bool {
     seen.is_some()
 }
 
-fn same_content(a: &MemoryFacts, b: &MemoryFacts) -> bool {
-    match (
-        a.content_norm_digest.as_deref(),
-        b.content_norm_digest.as_deref(),
-    ) {
-        (Some(x), Some(y)) => x == y,
-        _ => false,
-    }
-}
-
 /// The member of a partition that stands for it.
 ///
 /// Most supporting evidence, then strongest verification, then lowest
@@ -834,6 +857,75 @@ fn representative<'a>(partition: &[&'a MemoryFacts]) -> &'a MemoryFacts {
         .min_by_key(|m| m.representative_key())
         .copied()
         .expect("a partition is never empty")
+}
+
+/// The groups of proposals that reach each other in both directions.
+///
+/// A relation graph built from two machines' independent decisions has no
+/// ordering authority behind it, so it can contain cycles that no single
+/// machine ever created. Every member of one of these groups points, directly or
+/// through others, at every other member — which is precisely the shape that
+/// carries no decision.
+///
+/// Groups are returned smallest-identifier-first, and only groups of two or
+/// more: a single proposal is not a cycle.
+pub fn mutually_superseding(edges: &[(Uuid, Uuid)]) -> Vec<BTreeSet<Uuid>> {
+    if edges.is_empty() {
+        return Vec::new();
+    }
+    let mut adjacency: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
+    let mut nodes: BTreeSet<Uuid> = BTreeSet::new();
+    for (from, to) in edges {
+        adjacency.entry(*from).or_default().push(*to);
+        nodes.insert(*from);
+        nodes.insert(*to);
+    }
+
+    let reaches = |start: Uuid, goal: Uuid| -> bool {
+        let mut seen: BTreeSet<Uuid> = BTreeSet::new();
+        let mut stack = vec![start];
+        while let Some(n) = stack.pop() {
+            if n == goal {
+                return true;
+            }
+            if !seen.insert(n) {
+                continue;
+            }
+            if let Some(next) = adjacency.get(&n) {
+                stack.extend(next.iter().copied());
+            }
+        }
+        false
+    };
+
+    let mut groups: Vec<BTreeSet<Uuid>> = Vec::new();
+    let mut placed: BTreeSet<Uuid> = BTreeSet::new();
+    for a in &nodes {
+        if placed.contains(a) {
+            continue;
+        }
+        let mut group: BTreeSet<Uuid> = BTreeSet::new();
+        for b in &nodes {
+            if a != b && reaches(*a, *b) && reaches(*b, *a) {
+                group.insert(*b);
+            }
+        }
+        if group.is_empty() {
+            continue;
+        }
+        group.insert(*a);
+        for id in &group {
+            placed.insert(*id);
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+/// Whether both ends of a relation sit in the same cycle, which is what makes
+/// that relation cancel.
+pub fn in_one_cycle(groups: &[BTreeSet<Uuid>], from: Uuid, to: Uuid) -> bool {
+    groups.iter().any(|g| g.contains(&from) && g.contains(&to))
 }
 
 /// One answer per distinct normalized content, ranked then sorted.

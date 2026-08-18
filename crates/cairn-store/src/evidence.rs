@@ -511,6 +511,44 @@ pub async fn rebuild_verification(
 ) -> Result<(VerificationState, Option<VerificationAuthority>)> {
     let runs = runs_for_memory(store, memory_id).await?;
 
+    // What the row said before, so an unchanged rebuild can tell it has nothing
+    // to say — and so an *imported* verification can be recognised before it is
+    // destroyed.
+    let previous: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT verification, verification_authority FROM memories WHERE id = ?1")
+            .bind(memory_id.to_string())
+            .fetch_optional(store.pool())
+            .await?
+            .unwrap_or((None, None));
+
+    // An imported verification is not derived here and must not be rebuilt
+    // here. Runs never cross the wire — a peer sends the *summary*, and this
+    // machine records the authority as `remote_*` — so an imported memory has
+    // no local run to derive from, and deriving anyway would silently rewrite
+    // every synced verification in the project to `unverified` (FR-478, T104).
+    //
+    // A local run on an imported memory changes that: local records exist, and
+    // they win. The condition is deliberately "remote authority *and* no local
+    // run", not "remote authority".
+    let imported = matches!(
+        previous.1.as_deref(),
+        Some("remote_cairn") | Some("remote_attested")
+    );
+    if runs.is_empty() && imported {
+        let state = previous
+            .0
+            .as_deref()
+            .and_then(|s| VerificationState::from_str(s).ok())
+            .unwrap_or(VerificationState::Unverified);
+        let authority = previous
+            .1
+            .as_deref()
+            .map(VerificationAuthority::from_str)
+            .transpose()
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        return Ok((state, authority));
+    }
+
     // The latest run sets the state. A memory with no run at all is unverified,
     // whatever the cache says.
     let state = match runs.first() {
@@ -546,7 +584,39 @@ pub async fn rebuild_verification(
             evidence_collector: collector,
         });
     }
+    // A recheck that is owed is never *un*-owed by a rebuild.
+    //
+    // Drift marking records the `inconclusive` run that makes `needs_recheck`
+    // derivable, so on that path this never fires. It fires for a caller that
+    // set the state without recording anything, and the answer there is still
+    // "do not resurrect": the only thing that could put `needs_recheck` on a row
+    // whose newest run is `verified` is a transition taken *after* that run,
+    // because every path that records a run rebuilds immediately after it.
+    //
+    // Deliberately narrow. `drifted` is derivable from a run and is **not**
+    // preserved here — a rebuild that could not overrule a recorded drift would
+    // stop being a rebuild (FR-478).
+    let state = if state == VerificationState::Verified
+        && previous.0.as_deref() == Some(VerificationState::NeedsRecheck.as_str())
+    {
+        VerificationState::NeedsRecheck
+    } else {
+        state
+    };
+
     let authority = derive_authority(state, &facts);
+
+    // `verified` with no authority is not a state Cairn may hold: FR-370 ties
+    // the two together, and `derive_authority` returns `None` precisely when
+    // the successful run consulted no evidence — which, as its own comment
+    // says, establishes nothing. Writing the pair anyway would put a claim on
+    // the row that nothing stands behind. The honest answer is the one the
+    // records support.
+    let state = if state == VerificationState::Verified && authority.is_none() {
+        VerificationState::Unverified
+    } else {
+        state
+    };
 
     let last_verified_at = runs
         .iter()
@@ -558,15 +628,6 @@ pub async fn rebuild_verification(
         verification_authority: authority.map(|a| a.as_str()),
         ..Default::default()
     })?;
-
-    // What the row said before, so an unchanged rebuild can tell it has nothing
-    // to say.
-    let previous: (Option<String>, Option<String>) =
-        sqlx::query_as("SELECT verification, verification_authority FROM memories WHERE id = ?1")
-            .bind(memory_id.to_string())
-            .fetch_optional(store.pool())
-            .await?
-            .unwrap_or((None, None));
 
     sqlx::query(
         "UPDATE memories SET verification = ?2, verification_authority = ?3,
