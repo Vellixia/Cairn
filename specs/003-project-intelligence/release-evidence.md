@@ -11,7 +11,7 @@ this" without reading anything else.
 | | |
 |---|---|
 | Suite | `cargo test --workspace` |
-| Result | **1,000+ passed, 0 failed, 1 ignored** |
+| Result | **1,022 passed, 0 failed, 1 ignored** |
 | Database | PostgreSQL 17 (`postgres:17-alpine`), the image and credentials CI uses |
 | Gates | `cargo fmt --all -- --check` clean · `cargo clippy --workspace --all-targets -- -D warnings` exit 0 |
 | Platform | macOS / aarch64. CI additionally runs Linux. |
@@ -153,7 +153,7 @@ here should be read as it having passed.
 | Automated tasks (T001–T145) | complete, with evidence |
 | Deterministic gates | passing |
 | Inherited Feature 001 / 002 regressions | passing, including against a migrated alpha.4 store |
-| Unresolved CRITICAL / HIGH findings | none |
+| Unresolved CRITICAL / HIGH findings | none — the eleven defects found this run were found by running the named evidence, not by a separate review pass |
 | **T146 — quickstart walkthrough** | **NOT RUN — needs a live agent on a real repository** |
 | **T148 — live continuity walkthrough** | **NOT RUN — needs Claude Code, Codex and OpenCode, and a real compaction in each** |
 | T147 — topic-key effectiveness | harness complete, results NOT COLLECTED — non-blocking |

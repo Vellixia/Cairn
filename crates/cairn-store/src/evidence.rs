@@ -559,6 +559,15 @@ pub async fn rebuild_verification(
         ..Default::default()
     })?;
 
+    // What the row said before, so an unchanged rebuild can tell it has nothing
+    // to say.
+    let previous: (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT verification, verification_authority FROM memories WHERE id = ?1")
+            .bind(memory_id.to_string())
+            .fetch_optional(store.pool())
+            .await?
+            .unwrap_or((None, None));
+
     sqlx::query(
         "UPDATE memories SET verification = ?2, verification_authority = ?3,
                              last_verified_at = COALESCE(?4, last_verified_at)
@@ -574,10 +583,20 @@ pub async fn rebuild_verification(
     // The **memory's** verification is a shared field, and the evidence behind
     // it is not. Re-queuing the memory is what carries "this was verified, and
     // here is what established it" to a peer; the runs and the facts stay here.
+    // Without it the outbox would keep the snapshot taken before the check, and
+    // a peer would render a verified memory as unverified indefinitely.
     //
-    // Without this the outbox would keep the snapshot taken before the check,
-    // and a peer would render a verified memory as unverified indefinitely.
-    let _ = crate::repo::enqueue_memory_upsert(store, memory_id).await;
+    // **Only when it changed.** This function is also the rebuild path, and
+    // `doctor --rebuild-derived` calls it once per memory: queuing regardless
+    // would make a release-readiness *check* generate sync traffic proportional
+    // to the project, on a project where nothing happened. An unchanged
+    // verification has nothing to tell a peer that the peer was not already
+    // told.
+    let unchanged = previous.0.as_deref().unwrap_or("unverified") == state.as_str()
+        && previous.1.as_deref() == authority.map(|a| a.as_str());
+    if !unchanged {
+        let _ = crate::repo::enqueue_memory_upsert(store, memory_id).await;
+    }
 
     Ok((state, authority))
 }

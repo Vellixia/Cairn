@@ -74,11 +74,13 @@ enum Command {
         ///
         /// Exits non-zero if any did: a release where a derived value
         /// disagrees with its rebuild ships a known inconsistency.
+        ///
+        /// Scoped to the project this directory resolves to, like every other
+        /// command. There is deliberately no `--project`: it would be a second
+        /// way to say what `cd` already says, and a flag with two meanings is
+        /// how the wrong project gets rebuilt.
         #[arg(long)]
         rebuild_derived: bool,
-        /// Restrict the rebuild to this project. Defaults to the one here.
-        #[arg(long)]
-        project: Option<Uuid>,
     },
     /// Reusable cross-project patterns (`contracts/patterns.md`).
     ///
@@ -914,7 +916,6 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         Command::Doctor {
             agent,
             rebuild_derived,
-            project: _,
         } => {
             if *rebuild_derived {
                 rebuild_derived_command().await

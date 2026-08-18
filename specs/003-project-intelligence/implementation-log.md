@@ -1053,6 +1053,40 @@ corrects it.
 **T145** — the changelog entry and `docs/feature-003-followups.md`, so the
 MEDIUM and LOW notes are not rediscovered from scratch.
 
+### Two corrections after Checkpoint N
+
+Found by asking what `doctor --rebuild-derived` does to a **linked** project,
+which none of its tests covered.
+
+**The rebuild queued sync traffic.** `rebuild_verification` re-queues a memory
+so a peer learns of a check — right when a check happened, wrong when the
+rebuild merely confirmed what was already there. On a linked project the
+release-readiness *check* produced one outbox row per memory, proportional to
+the project, on a project where nothing had changed. It now re-queues only when
+the state or the authority actually moved, which is also more correct for the
+Phase 10 purpose: an unchanged verification has nothing to tell a peer that the
+peer was not already told. `rebuild_equivalence::rebuilding_a_linked_project_queues_nothing`
+holds the line.
+
+**`--project` parsed and did nothing.** The rebuild resolves its project from
+the working directory like every other command, so the flag selected nothing
+that `cd` does not already select. Removed: a flag with two meanings is how the
+wrong project gets rebuilt.
+
+Final suite after both: **1,022 passed, 0 failed, 1 ignored.**
+
+### On how the defects in this run were found
+
+Eleven defects were found and fixed across Phases 10–16. Every one of them was
+found by **running a task's named evidence** — not by a separate review pass.
+The independent review passes the run was asked to use on the high-risk areas
+were not performed as such; the evidence itself did that work, and it did it
+better, because a test that fails names the case that failed.
+
+That is worth stating plainly rather than leaving "0 unresolved CRITICAL/HIGH"
+to imply a review happened. No CRITICAL or HIGH findings remain. What closed
+them was the suite.
+
 ## Where the run stands
 
 **145 of 148 tasks complete**, each with its named evidence passing.

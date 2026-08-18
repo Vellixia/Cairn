@@ -698,3 +698,70 @@ fn a_disagreeing_derived_value_fails_the_check() {
         again.stdout
     );
 }
+
+/// The rebuild is a **check**, not a write that syncs (FR-478).
+///
+/// `rebuild_verification` re-queues a memory so a peer learns of a check that
+/// happened — which is right when a check happened, and wrong here. A release
+/// gate that generated sync traffic proportional to the project size would be
+/// a command whose cost nobody expects, on a project where nothing changed.
+#[test]
+fn rebuilding_a_linked_project_queues_nothing() {
+    let s = cairn_e2e::Sandbox::new();
+    s.must(&["init"]);
+    s.write_file("config/app.yml", "server:\n  port: 8080\n");
+
+    for i in 0..5 {
+        let m = s.json(&[
+            "memory",
+            "add",
+            &format!("Claim number {i}"),
+            "--type",
+            "fact",
+            "--scope",
+            "project",
+            "--topic-key",
+            &format!("topic.number_{i}"),
+            "--value-key",
+            &format!("v{i}"),
+        ]);
+        let id = m["memory"]["id"].as_str().expect("id").to_string();
+        s.json(&[
+            "evidence",
+            "add",
+            "--type",
+            "configuration",
+            "--subject",
+            "API port",
+            "--value",
+            "8080",
+            "--locator",
+            "config/app.yml#server.port",
+            "--collector",
+            "cairn",
+            "--memory",
+            &id,
+        ]);
+        s.json(&["verify", "--memory", &id]);
+    }
+
+    // Linked, so anything queueable would be queued.
+    s.exec_sql("UPDATE projects SET linked = 1, server_project_id = id");
+
+    let queued = |s: &cairn_e2e::Sandbox| -> i64 {
+        s.query_column("SELECT CAST(COUNT(*) AS TEXT) FROM outbox")[0]
+            .parse()
+            .expect("a count")
+    };
+    let before = queued(&s);
+    let out = s.cairn(&["--json", "doctor", "--rebuild-derived"]);
+    assert!(out.ok(), "{} {}", out.stdout, out.stderr);
+    let after = queued(&s);
+
+    assert_eq!(
+        after,
+        before,
+        "the rebuild queued {} outbox row(s) on a project where nothing changed",
+        after - before
+    );
+}
