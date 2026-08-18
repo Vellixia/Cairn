@@ -60,9 +60,18 @@ Feature 002's capability profile (D57):
 | present | absent / conditional | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
 | absent | any | `unavailable_automatic` | Compression-safe continuity is not automatic for this agent; a checkpoint exists at session close and on demand |
 
-Under currently verified vendor behaviour: Claude Code `automatic`, Codex `automatic`, OpenCode
-`agent_initiated` (its compaction hook is experimental), generic MCP `unavailable_automatic`. These
-are outputs of the rule, not entries in a maintained table.
+Under currently verified vendor behaviour: Claude Code `agent_initiated`, Codex `automatic`,
+OpenCode `agent_initiated` (its compaction hook is experimental), generic MCP
+`unavailable_automatic`. These are outputs of the rule, not entries in a maintained table.
+
+**Claude Code was `automatic` until a real compaction was driven against a real store.** The
+`PostCompact` hook fires and Cairn restores the checkpoint — but the vendor does not support
+`additionalContext` on that event, and documents its output as shown to the user only. There is no
+channel through which the checkpoint reaches the session, so the agent is never *told* without
+asking. `LifecyclePostCompaction` is the capability "context re-delivery after compaction", and
+re-delivery is the part that is not available. The claim was corrected rather than the observation
+(FR-426); Codex is untouched because its hook set is its own vendor's and no compaction has been
+driven in it.
 
 Reported by `cairn agents`, `cairn doctor` and in the `cairn_context` response. Cairn never reports a
 rehydration guarantee an adapter cannot provide (FR-426, SC-311 companion).

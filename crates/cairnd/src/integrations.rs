@@ -196,6 +196,14 @@ async fn dispatch(
         }
         // Leaves the session active and produces no second handoff for the
         // same compaction (FR-119).
+        //
+        // The reason is `post_compaction`, and it has to be: restoring the
+        // checkpoint is what that reason *means*, and it is the only one that
+        // does it. Asking for a `continuation` here built an ordinary briefing
+        // and left the checkpoint written-and-never-read — so an agent deriving
+        // `automatic`, whose whole promise is that continuity is restored
+        // automatically after compaction, silently got no restoration at all.
+        // A mode that over-claims is a defect, not a note (FR-426).
         CanonicalEvent::ContextCompacted => {
             crate::handlers::handle(
                 d,
@@ -203,7 +211,7 @@ async fn dispatch(
                     cwd,
                     agent_session_key: key,
                     session_id: None,
-                    reason: Some(cairn_core::wire::ContextReason::Continuation),
+                    reason: Some(cairn_core::wire::ContextReason::PostCompaction),
                     token_budget,
                     explain: false,
                 },

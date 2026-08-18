@@ -372,7 +372,32 @@ impl CapabilityProfile {
             };
         }
         match agent {
-            AgentId::ClaudeCode | AgentId::Codex => {
+            AgentId::ClaudeCode => {
+                for k in Capability::ALL {
+                    set!(k, Guaranteed);
+                }
+                // The `PostCompact` hook fires, and that is not the same fact.
+                // This capability is *context re-delivery* after compaction,
+                // and Claude Code's hook cannot re-deliver: `additionalContext`
+                // is unsupported for `PostCompact`, whose output the vendor
+                // documents as "shows stderr to user only". Cairn is told the
+                // compaction happened and has no way to hand the checkpoint
+                // back through that channel.
+                //
+                // Recorded as `conditional` rather than `absent` because the
+                // signal is real and Cairn does act on it — it restores the
+                // checkpoint, so `cairn_context(reason=post_compaction)`
+                // answers immediately. What is not guaranteed is that the agent
+                // is *told* without asking, which is precisely the difference
+                // between `automatic` and `agent_initiated` (FR-426).
+                c.insert(
+                    LifecyclePostCompaction,
+                    CapabilityState::conditional(
+                        "Claude Code's PostCompact hook can return context to the session",
+                    ),
+                );
+            }
+            AgentId::Codex => {
                 for k in Capability::ALL {
                     set!(k, Guaranteed);
                 }

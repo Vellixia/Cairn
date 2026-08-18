@@ -57,6 +57,66 @@ fn restored(s: &Sandbox, session: &str) -> Value {
     v["checkpoint"].clone()
 }
 
+/// The post-compaction **hook** restores the checkpoint, with nobody asking
+/// (FR-426, T148).
+///
+/// Every other test in this file restores by calling
+/// `cairn context --reason post_compaction` itself. That is what an
+/// `agent_initiated` agent does — and testing only that way is how an agent
+/// deriving `automatic` came to promise a restoration it never performed: the
+/// `PostCompact` hook asked the daemon for a `continuation`, which builds an
+/// ordinary briefing and never touches the checkpoint. Written, never read.
+///
+/// Found by driving a real compaction in Claude Code against a real store: the
+/// `context_compacting` checkpoint was there and its `restore_count` was 0.
+/// So this test fires the hooks and asks nothing.
+#[test]
+fn the_post_compaction_hook_restores_without_being_asked() {
+    let s = Sandbox::new();
+    let session = session_with_checkpoint(&s, "compacted", "src/retry.rs");
+
+    let before = s.query_column(&format!(
+        "SELECT CAST(COALESCE(SUM(restore_count), 0) AS TEXT) FROM continuity_checkpoints
+          WHERE session_id = '{session}'"
+    ));
+    assert_eq!(before, vec!["0".to_string()], "nothing has restored yet");
+
+    // Exactly what the agent's adapter sends, and nothing else.
+    s.hook(
+        "PreCompact",
+        json!({ "session_id": "compacted", "trigger": "auto" }),
+    );
+    s.hook(
+        "PostCompact",
+        json!({ "session_id": "compacted", "trigger": "auto" }),
+    );
+
+    // `context_compacted` is capture class, so the hook returns before the
+    // daemon has finished with it. Poll rather than sleep a fixed time.
+    let restores = |s: &Sandbox| {
+        s.query_column(&format!(
+            "SELECT CAST(COALESCE(SUM(restore_count), 0) AS TEXT) FROM continuity_checkpoints
+              WHERE session_id = '{session}'"
+        ))
+        .first()
+        .cloned()
+        .unwrap_or_default()
+    };
+    for _ in 0..60 {
+        if restores(&s) != "0" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    assert_ne!(
+        restores(&s),
+        "0",
+        "the post-compaction hook did not restore the checkpoint: an agent whose mode is \
+         `automatic` was promised a rehydration it never got"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // T087 — detection that does not depend on Cairn having been watching
 // ---------------------------------------------------------------------------
@@ -342,7 +402,17 @@ fn each_agents_mode_is_the_rule_applied_to_its_capabilities() {
     use cairn_integrate::model::AgentId;
 
     for (agent, expected) in [
-        (AgentId::ClaudeCode, ContinuityMode::Automatic),
+        // Claude Code reported `automatic` until a real compaction was driven
+        // against a real store (T148). The checkpoint was written and its
+        // `restore_count` stayed 0: `PostCompact` fires, but the vendor does
+        // not support `additionalContext` on it, so there is no channel to hand
+        // the checkpoint back. `agent_initiated` is what it actually delivers —
+        // Cairn writes the checkpoint before compaction, and the agent asks for
+        // it with `cairn_context(reason=post_compaction)`.
+        (AgentId::ClaudeCode, ContinuityMode::AgentInitiated),
+        // Unchanged, and **unverified**: no compaction has been driven in Codex
+        // against a Feature 003 store. Its hook set is its own vendor's, so
+        // Claude Code's finding does not transfer to it either way.
         (AgentId::Codex, ContinuityMode::Automatic),
         (AgentId::Opencode, ContinuityMode::AgentInitiated),
         (AgentId::GenericMcp, ContinuityMode::UnavailableAutomatic),
