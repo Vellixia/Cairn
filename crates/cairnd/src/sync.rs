@@ -1104,6 +1104,41 @@ async fn import_verification(d: &Daemon, memory_id: Uuid, value: &serde_json::Va
         _ => None,
     };
 
+    // What a peer says is input, not truth, and this is the one place a state
+    // reaches the row without passing through `rebuild_verification`.
+    //
+    // Two rules that function enforces have to hold here as well, because the
+    // column carries no CHECK and this is the trust boundary:
+    //
+    //   * a state outside the enum is not storable at all — a malformed or
+    //     older peer must not be able to invent one;
+    //   * `verified` with no authority is not a pair Cairn may hold (FR-370).
+    //     A peer that sends one is telling us it was verified without saying
+    //     what verified it, and the honest local answer is `unverified`. Left
+    //     as-is it rendered as a bare `verified`, re-emitted itself to the next
+    //     peer through `summary`, and — having no local runs and no `remote_*`
+    //     authority to recognise — was silently rewritten by the next
+    //     `doctor --rebuild-derived` anyway.
+    //
+    // An authority without `verified` is dropped for the same reason: authority
+    // says what established the state, and nothing established a state that is
+    // not `verified`.
+    let Ok(state) = state.parse::<cairn_core::VerificationState>() else {
+        tracing::debug!(%memory_id, state, "ignored an unrecognised imported verification state");
+        return;
+    };
+    let (state, authority) = match (state, authority) {
+        (cairn_core::VerificationState::Verified, None) => {
+            tracing::debug!(%memory_id, "a peer sent `verified` with no authority; storing unverified");
+            (cairn_core::VerificationState::Unverified, None)
+        }
+        (cairn_core::VerificationState::Verified, some) => {
+            (cairn_core::VerificationState::Verified, some)
+        }
+        (other, _) => (other, None),
+    };
+    let state = state.as_str();
+
     let _ = sqlx::query(
         "UPDATE memories
             SET verification = ?2, verification_authority = ?3,
@@ -1311,6 +1346,103 @@ mod tests {
     /// it was not linked and pointed at `cairn link --create` — which would
     /// have made a second shared project for a repository that already had
     /// one — while `cairn status`, reading the same row, said the opposite.
+    /// A peer cannot put a state on a row that Cairn refuses to derive.
+    ///
+    /// `import_verification` is the one path a verification reaches a row
+    /// without passing `rebuild_verification`, the column carries no CHECK, and
+    /// what a peer sends is input rather than truth. Two pairs must not be
+    /// storable: a state outside the enum, and `verified` with no authority —
+    /// which rendered as a bare `verified` against FR-370, re-emitted itself to
+    /// the next peer, and was silently rewritten by the next rebuild anyway.
+    #[tokio::test]
+    async fn an_imported_verification_cannot_invent_a_state_or_drop_its_authority() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "importing", None).await;
+        let s = fx::session(&d, &p, "peer").await;
+
+        let stored = |d: &Daemon, id: Uuid| {
+            let store = d.store.clone();
+            async move {
+                sqlx::query_as::<_, (String, Option<String>)>(
+                    "SELECT verification, verification_authority FROM memories WHERE id = ?1",
+                )
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .expect("row")
+            }
+        };
+
+        let make = |content: &'static str| {
+            let store = d.store.clone();
+            let (project, session) = (p.id, s.id);
+            async move {
+                cairn_store::repo::create_memory(
+                    &store,
+                    cairn_store::repo::NewMemory::free_form(
+                        project,
+                        cairn_core::MemoryType::Fact,
+                        cairn_core::MemoryScope::Project,
+                        &project.to_string(),
+                        content,
+                        session,
+                        false,
+                        &[],
+                    ),
+                    cairn_store::outbox::SyncPolicy {
+                        linked: false,
+                        server_project_id: None,
+                    },
+                )
+                .await
+                .expect("memory")
+                .id
+            }
+        };
+
+        // `verified` with nothing standing behind it.
+        let bare = make("A peer said this was verified.").await;
+        import_verification(
+            &d,
+            bare,
+            &serde_json::json!({ "verification": { "state": "verified" } }),
+        )
+        .await;
+        assert_eq!(
+            stored(&d, bare).await,
+            ("unverified".to_string(), None),
+            "a peer stored `verified` with no authority"
+        );
+
+        // A state that is not a state.
+        let bogus = make("A peer invented a state for this.").await;
+        import_verification(
+            &d,
+            bogus,
+            &serde_json::json!({ "verification": { "state": "extremely_verified" } }),
+        )
+        .await;
+        assert_eq!(
+            stored(&d, bogus).await,
+            ("unverified".to_string(), None),
+            "a peer stored a state outside the enum"
+        );
+
+        // The ordinary case still lands, wearing the imported badge.
+        let good = make("A peer really did check this.").await;
+        import_verification(
+            &d,
+            good,
+            &serde_json::json!({ "verification": { "state": "verified", "authority": "cairn" } }),
+        )
+        .await;
+        assert_eq!(
+            stored(&d, good).await,
+            ("verified".to_string(), Some("remote_cairn".to_string())),
+            "an honest imported verification did not land"
+        );
+    }
+
     #[tokio::test]
     async fn link_status_reports_an_existing_link() {
         let d = fx::daemon().await;

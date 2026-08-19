@@ -755,12 +755,20 @@ fn sandbox_on_migrated_alpha4() -> (Sandbox, Alpha4Store) {
         "the fixture must be migrated all the way before anything reads it"
     );
 
-    let stopped = s.cairn(&["daemon", "stop"]);
-    assert!(
-        stopped.ok() || stopped.stderr.contains("not running"),
-        "could not stop the daemon before replacing its store: {}",
-        stopped.stderr
-    );
+    // Wait for it to actually be gone, not merely asked to go.
+    //
+    // `cairn daemon stop` returns as soon as the daemon accepts the request.
+    // Swapping the database file out from under a process that is still holding
+    // it is a race — and one Windows loses far more often than Unix, where an
+    // unlinked file stays readable by whoever has it open. When it is lost the
+    // daemon comes back up on the sandbox's own empty store, registers a second
+    // project for this worktree, and every assertion below is about a store that
+    // was migrated and then ignored: `memory_count: 0`, exactly the shape the
+    // comment further down warns about.
+    //
+    // `stop_daemon` polls the socket and panics if it is still listening, which
+    // is the precondition this fixture has always depended on.
+    s.stop_daemon();
 
     // The sidecars go too: a `-wal` from the empty store would contradict the
     // database replacing it.
