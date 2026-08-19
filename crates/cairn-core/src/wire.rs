@@ -810,6 +810,11 @@ pub enum Request {
         cwd: String,
         #[serde(default)]
         agent_session_key: Option<String>,
+        /// The session to attribute the replacement to, when the key is not to
+        /// hand. Without it a worktree running two agents cannot say which one
+        /// superseded the memory — the same ambiguity `MemoryCreate` resolves.
+        #[serde(default)]
+        session_id: Option<Uuid>,
         memory_id: Uuid,
         kind: MemoryType,
         #[serde(default)]
@@ -1216,6 +1221,64 @@ pub struct MemoryResult {
     pub value_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temporal: Option<Temporal>,
+    /// Ranks within a bucket and nothing more (FR-308).
+    pub importance: Importance,
+    pub pinned: bool,
+    pub verification: VerificationInfo,
+    pub reinforcement: Reinforcement,
+    /// Where this result stands in its subject. Absent on a free-form memory,
+    /// which belongs to no subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<SubjectInfo>,
+}
+
+/// The verification a **local** reader may see.
+///
+/// Deliberately not `VerificationSummary`, which is what the outbox transmits.
+/// That one collapses `remote_cairn` to `cairn`, because a peer must not learn
+/// that *this* machine imported a state rather than checking it (T104, FR-502).
+/// A local caller has the opposite need: without the `remote_` prefix it cannot
+/// tell a check this machine ran from one it was merely told about, which is
+/// the distinction FR-370 exists to preserve. Two readers, two truths, two
+/// types.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationInfo {
+    pub state: VerificationState,
+    /// Always present when the state is `verified` (FR-370).
+    pub authority: Option<VerificationAuthority>,
+    pub last_verified_at: Option<String>,
+    /// A count of supporting evidence facts. Never the facts themselves.
+    pub fact_count: usize,
+    /// Verifier **kinds** only — never a subject, value, locator or digest
+    /// (FR-502).
+    pub basis: Vec<VerifierKind>,
+}
+
+/// How many sessions confirmed a memory is still true.
+///
+/// A reinforcement is an explicit act by a session that read the memory
+/// (FR-321). It is **never** a verification, and must never be presented as one
+/// (FR-406) — which is why it is a field of its own rather than a number folded
+/// into `verification`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Reinforcement {
+    pub count: i64,
+    pub distinct_origins: i64,
+}
+
+/// Where a result stands among the other answers to its subject.
+///
+/// The two arrays are the same distinction the subject state rests on: an
+/// answer that asserts a *different* value competes, and one that asserts the
+/// *same* value with different words corroborates. Cairn never merges the
+/// second (D46), so a caller that wants one answer has to be told there are
+/// others and which kind they are.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubjectInfo {
+    pub reconciliation: Reconciliation,
+    pub is_canonical_answer: bool,
+    pub competing_answers: Vec<Uuid>,
+    pub corroborating_answers: Vec<Uuid>,
 }
 
 /// What Cairn can say about when a proposal applied.
@@ -1242,6 +1305,94 @@ pub struct Temporal {
 pub struct SearchPayload {
     pub results: Vec<MemoryResult>,
     pub total: usize,
+}
+
+/// What a `create` turned out to mean for the subject it joined
+/// (`contracts/mcp-tools.md` §`cairn_remember`).
+///
+/// The internal decision is `ProposalOutcome`, a tagged enum. This is its wire
+/// form: one flat object a caller can read field by field without matching on a
+/// tag, which is what the contract fixes and what an agent reading JSON needs.
+///
+/// Two fields are deliberately *not* what a lookup table would produce.
+/// `relation_recorded` is the kind the write actually recorded, carried out of
+/// the transaction that wrote it — never re-derived from the outcome, so it
+/// cannot drift from what is in the database. And `matched_memory_id` is null
+/// for a conflict: a conflict is intrinsically several, and naming one of them
+/// as *the* match would be arbitration by identifier, which nothing in Cairn
+/// does (FR-334). The full set is in `competing_memory_ids`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconciliationReport {
+    /// `created | duplicate | corroborating | conflict_detected | deferred`.
+    pub outcome: String,
+    /// The single member this proposal matched, where there is exactly one.
+    pub matched_memory_id: Option<Uuid>,
+    /// That member's value key.
+    pub matched_value_key: Option<String>,
+    /// The subject, normalized. Absent on a free-form memory.
+    pub subject: Option<String>,
+    /// The relation this write recorded, if any. `corroborating` records
+    /// nothing, and says so (FR-327).
+    pub relation_recorded: Option<RelationKind>,
+    pub conflict_detected: bool,
+    /// The one call that would settle this, where a caller — which can read
+    /// both statements — is the only party able to decide. Null where there is
+    /// nothing to settle.
+    pub next_step: Option<String>,
+    /// Every member the proposal disagrees with, in identifier order for a
+    /// stable rendering. Empty unless `conflict_detected`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub competing_memory_ids: Vec<Uuid>,
+}
+
+/// The verbatim prompt FR-327 relies on. A corroborating write merges nothing;
+/// this is how the party that *can* read both statements is told it may.
+pub const CORROBORATING_NEXT_STEP: &str =
+    "if this is the same claim, call action=reinforce with memory_id";
+
+/// A conflict is recorded and never resolved (FR-334). The caller is pointed at
+/// the explicit decision, not at a merge.
+pub const CONFLICT_NEXT_STEP: &str =
+    "both answers stand; record a decision with action=reconcile when you know which applies";
+
+impl ReconciliationReport {
+    /// Build the wire form from the decision and the facts the write held.
+    ///
+    /// `relation_recorded` and `matched_value_key` come from the caller because
+    /// only the write knows them: the first is what was inserted, the second is
+    /// a column of a member the classifier already had in hand.
+    pub fn build(
+        outcome: &crate::knowledge::ProposalOutcome,
+        subject: Option<&str>,
+        relation_recorded: Option<RelationKind>,
+        matched_value_key: Option<String>,
+    ) -> Self {
+        use crate::knowledge::ProposalOutcome as P;
+        let (matched, competing, next_step) = match outcome {
+            P::Duplicate { of } => (Some(*of), Vec::new(), None),
+            P::Corroborating { member } => (
+                Some(*member),
+                Vec::new(),
+                Some(CORROBORATING_NEXT_STEP.to_string()),
+            ),
+            P::ConflictDetected { with } => {
+                let mut with = with.clone();
+                with.sort();
+                (None, with, Some(CONFLICT_NEXT_STEP.to_string()))
+            }
+            P::Created | P::Deferred => (None, Vec::new(), None),
+        };
+        Self {
+            outcome: outcome.as_str().to_string(),
+            matched_memory_id: matched,
+            matched_value_key: matched.and(matched_value_key),
+            subject: subject.map(str::to_string),
+            relation_recorded,
+            conflict_detected: matches!(outcome, P::ConflictDetected { .. }),
+            next_step,
+            competing_memory_ids: competing,
+        }
+    }
 }
 
 /// The bounded briefing (FR-028).

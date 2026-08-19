@@ -782,6 +782,50 @@ pub async fn summary_tx(
     })
 }
 
+/// The verification a **local** caller may see, for a row it already read.
+///
+/// Not `summary`: that one is the sync payload's view and collapses
+/// `remote_cairn` to `cairn` so a peer never learns this machine imported the
+/// state (T104). A local reader needs precisely the fact that peer must not
+/// have — otherwise `verified` beside an imported authority is indistinguishable
+/// from a check this machine ran (FR-370).
+///
+/// The three stored columns come from the caller's row rather than a second
+/// read, so this costs exactly the two lookups the summary cannot avoid.
+pub async fn local_view(
+    store: &Store,
+    memory_id: Uuid,
+    state: VerificationState,
+    authority: Option<VerificationAuthority>,
+    last_verified_at: Option<String>,
+) -> Result<cairn_core::wire::VerificationInfo> {
+    let fact_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM memory_evidence_facts l
+           JOIN evidence_facts f ON f.id = l.evidence_id
+          WHERE l.memory_id = ?1 AND l.role = 'supports' AND f.deleted_at IS NULL",
+    )
+    .bind(memory_id.to_string())
+    .fetch_one(store.pool())
+    .await? as usize;
+
+    let mut basis: Vec<VerifierKind> = runs_for_memory(store, memory_id)
+        .await?
+        .into_iter()
+        .filter(|r| r.result == VerifyResult::Verified)
+        .map(|r| r.verifier)
+        .collect();
+    basis.sort();
+    basis.dedup();
+
+    Ok(cairn_core::wire::VerificationInfo {
+        state,
+        authority,
+        last_verified_at,
+        fact_count,
+        basis,
+    })
+}
+
 /// Drifted memories, for the Level 0 warning tier.
 ///
 /// Returns `(subject, detail)` per claim whose support moved. Drift is a

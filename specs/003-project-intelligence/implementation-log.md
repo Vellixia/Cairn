@@ -1386,3 +1386,120 @@ that it is the one on disk, and that no temporary file is left behind.
 
 Worth stating plainly: this was a real defect reached by a flaky test. Re-running
 until it passed would have shipped it.
+
+---
+
+# Checkpoint Q — the four quickstart deviations, closed
+
+Checkpoint O found D1–D4 by walking `quickstart.md` on a real repository. They
+were recorded and not fixed, because T146 could not proceed past them. This
+checkpoint fixes all four and blocks the way they got in.
+
+## How four contract fields went missing from a green branch
+
+The same blind spot produced all four. `ProposalOutcome` and `MemoryResult` are
+constructed under test hundreds of times and **serialized** under test nowhere.
+A wire object could therefore omit five contract fields, name a sixth wrongly,
+and 1,043 tests stayed green — because every one of them reached into the Rust
+struct, which was complete, rather than the JSON, which was not. D1 is the same
+miss with a different surface: the *capability* had tests, the CLI verb that was
+supposed to reach it did not exist.
+
+`tests/tests/contract_envelopes.rs` (11 tests) asserts the serialized envelope.
+A test written against the struct would reproduce the blind spot rather than
+close it.
+
+## D1 — `cairn memory supersede` (HIGH)
+
+`quickstart.md` documents the verb in two sections (US2, US7). The daemon
+request `MemorySupersede`, the MCP action `supersede`, and
+`repo::supersede_memory` all existed; the CLI verb did not. Implemented as a
+subcommand of the existing `cairn memory` group, mapping onto the existing
+request — no new daemon surface, no seventh MCP tool.
+
+`MemorySupersede` gained `session_id`, which `MemoryCreate` already had. Without
+it a worktree running two agents cannot say which one superseded the memory —
+the same ambiguity, in the same place, recorded in this repository's own memory
+as a live failure.
+
+## D2 — the reconciliation outcome now reaches a human (HIGH)
+
+`cairn memory add` printed `Remembered "<id>"` and nothing else. The
+corroborating member, the outcome and the next step were all in the JSON. FR-327
+rests on a *prompt* — Cairn deliberately declines to decide whether two
+differently worded statements are one claim, and asks the party that can read
+both — and that prompt was reaching the JSON and never a person.
+
+`render::reconciliation` renders it. A free-form write renders nothing: it took
+part in no reconciliation, and printing `created` would imply it did.
+
+## D3 — the `reconciliation` object, to contract (MEDIUM)
+
+Was `{"outcome": "corroborating", "member": "…"}`, a serde-tagged enum. Now the
+seven fields `contracts/mcp-tools.md` fixes, with two deliberate choices:
+
+- **`relation_recorded` is carried out of the write**, not derived from the
+  outcome. `CreateOutcome` gained the relation kinds the transaction actually
+  inserted. A report built from a lookup table can drift from the database; this
+  one cannot.
+- **`matched_memory_id` is null for a conflict**, and the full set is in
+  `competing_memory_ids`. A conflict is intrinsically several; naming one of them
+  as *the* match would be arbitration by identifier, which is the silent winner
+  FR-334 exists to prevent. `duplicate` and `corroborating` are single-match by
+  construction, so the singular field is honestly populated there and honestly
+  empty here.
+
+`next_step` is the contract's verbatim string for `corroborating`, points at
+`reconcile` for a conflict, and is **null** for `created`, `duplicate` and
+`deferred` — rather than inventing guidance that would hint Cairn might merge.
+
+## D4 — the search result, to contract (MEDIUM)
+
+`MemoryResult` gained `importance`, `pinned`, `verification`, `reinforcement`
+and `subject`. A caller could not previously tell a verified result from a
+drifted one.
+
+Three things worth recording about how:
+
+- **`verification` is a new type, not `VerificationSummary`.** That one is what
+  the outbox transmits, and it collapses `remote_cairn` to `cairn` so a peer
+  never learns this machine imported a state rather than checking it (T104,
+  FR-502). A local reader needs exactly the fact that peer must not have, or
+  `verified` beside an imported authority is indistinguishable from a check this
+  machine ran (FR-370). Two readers, two truths, two types — and `summary` was
+  left untouched, so the sync boundary is unchanged.
+- **Enrichment happens after the limit, not before.** A `--conflicted` search
+  reads up to 512 candidate rows to find ten; deriving as it went would have
+  derived five hundred subjects to return ten.
+- **No new bound was introduced.** A new numeric constant would trigger FR-500 —
+  documented default, configuration knob, asserted by test. `reconcile_members_max`
+  and the existing result limit already bound this work, and a filtered search now
+  *reuses* the derivations it already performed instead of repeating them.
+
+## What changed in `quickstart.md`, and why that is not a weakened requirement
+
+Four blocks were corrected to what the implementation actually prints, in every
+case because the code was right and the document was not:
+
+- `cairn memory reinforce <id>` gained `--from <id>`. The flag is required and
+  should be: reinforcement is one session stating *it* found the memory still
+  true, and `--from` names the statement doing the confirming (FR-321). The
+  document elided a flag that carries the meaning.
+- The `duplicate`, `created` and `conflict_detected` blocks now match the
+  rendered lines. `created  (no conflict — narrower scope)` became `created`
+  with the reason in prose: the parenthetical was an explanation, and printing
+  a reason Cairn does not compute would be an invention.
+
+Identifiers stay elided as `0192f4…` throughout. **The outcome vocabulary is
+normative; the elisions and column spacing are illustrative.** A later reader
+scoring T146 should not record a full UUID where the document shows an ellipsis
+as a deviation.
+
+## Gate after D1–D4
+
+`cargo test --workspace` green, `cargo fmt --all --check` clean,
+`cargo clippy --workspace --all-targets -- -D warnings` exit 0. Server tests were
+**not** exercised in this run: the Docker daemon was down, so
+`CAIRN_TEST_DATABASE_URL` was unset and the server tests early-returned. The
+authoritative gate in §8 re-runs everything against real PostgreSQL, and that is
+where the skipped count has to be zero.

@@ -582,6 +582,41 @@ enum MemoryAction {
         #[arg(long)]
         session: Option<Uuid>,
     },
+    /// Replace a memory, keeping the original and the link between them.
+    ///
+    /// The original is retained and marked superseded, and a `supersedes`
+    /// relation records *who* decided and *when* — which is what lets an
+    /// `--as-of` search still answer what the project believed in July
+    /// (FR-020, FR-323, FR-342).
+    Supersede {
+        content: String,
+        /// The memory this replaces.
+        #[arg(long = "memory-id")]
+        memory_id: Uuid,
+        #[arg(long = "type", default_value = "fact")]
+        kind: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        scope_key: Option<String>,
+        /// Never transmitted, even for a linked project.
+        #[arg(long)]
+        local_only: bool,
+        /// Supporting observation ids. Optional, and never invented.
+        #[arg(long = "evidence")]
+        evidence: Vec<Uuid>,
+        /// The subject the replacement states something about.
+        #[arg(long)]
+        topic_key: Option<String>,
+        /// The comparable value it asserts. Only meaningful with a topic key.
+        #[arg(long)]
+        value_key: Option<String>,
+        #[arg(long)]
+        importance: Option<String>,
+        /// Which session recorded this, when more than one is open here.
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
     /// Inspect a subject: its members, its answer or answers, and why.
     Subject {
         topic_key: String,
@@ -1609,10 +1644,56 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 local_only: *local_only,
             })
             .await?;
-            Ok(Output::with(
-                v.clone(),
-                format!("Remembered {}.\n", v["memory"]["id"]),
-            ))
+            let text = format!(
+                "Remembered {}.\n{}",
+                v["memory"]["id"],
+                render::reconciliation(&v)
+            );
+            Ok(Output::with(v, text))
+        }
+        MemoryAction::Supersede {
+            content,
+            memory_id,
+            kind,
+            scope,
+            scope_key,
+            local_only,
+            evidence,
+            topic_key,
+            value_key,
+            importance,
+            session,
+        } => {
+            let kind: MemoryType = parse_enum("type", kind)?;
+            let importance = match importance {
+                Some(i) => Some(parse_enum::<Importance>("importance", i)?),
+                None => None,
+            };
+            let scope = match scope {
+                Some(s) => Some(parse_enum::<MemoryScope>("scope", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::MemorySupersede {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                memory_id: *memory_id,
+                kind,
+                scope,
+                scope_key: scope_key.clone(),
+                content: content.clone(),
+                topic_key: topic_key.clone(),
+                value_key: value_key.clone(),
+                importance,
+                evidence_observation_ids: evidence.clone(),
+                local_only: *local_only,
+            })
+            .await?;
+            let text = format!(
+                "Remembered {}.\n  supersedes {}\n",
+                v["memory"]["id"], v["superseded"]
+            );
+            Ok(Output::with(v, text))
         }
         MemoryAction::Subject {
             topic_key,

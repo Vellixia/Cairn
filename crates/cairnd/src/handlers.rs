@@ -654,6 +654,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         Request::MemorySupersede {
             cwd,
             agent_session_key,
+            session_id,
             memory_id,
             kind,
             scope,
@@ -669,7 +670,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 d,
                 &cwd,
                 agent_session_key,
-                None,
+                session_id,
                 kind,
                 scope,
                 scope_key,
@@ -2005,7 +2006,7 @@ async fn memory_create(
             // FR-474).
             let mut body = json!({ "memory": out.memory });
             body["reconciliation"] =
-                serde_json::to_value(&out.reconciliation).unwrap_or(serde_json::Value::Null);
+                serde_json::to_value(out.report()).unwrap_or(serde_json::Value::Null);
             if !out.notes.is_empty() {
                 body["notes"] = json!(out.notes);
             }

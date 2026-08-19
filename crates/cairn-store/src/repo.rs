@@ -731,9 +731,34 @@ impl<'a> NewMemory<'a> {
 pub struct CreateOutcome {
     pub memory: Memory,
     pub reconciliation: ProposalOutcome,
+    /// The relation this write actually recorded, carried out of the
+    /// transaction that recorded it rather than re-derived from the outcome.
+    /// A report built from a lookup table can drift from the database; this
+    /// cannot (`contracts/mcp-tools.md` §`reconciliation`).
+    pub relation_recorded: Option<cairn_core::RelationKind>,
+    /// The matched member's value key, taken from the members the classifier
+    /// already held, so the report costs no extra query.
+    pub matched_value_key: Option<String>,
+    /// The subject this proposal joined, **after** normalization — so the
+    /// report names the key the store actually indexed, not the raw one the
+    /// caller typed. `None` for a free-form memory, and for a key that failed
+    /// normalization (FR-312).
+    pub subject: Option<String>,
     /// Notes for the `ok: true` envelope: `invalid_topic_key`,
     /// `corroborating_member`, `reconciliation_deferred` (FR-312, FR-474).
     pub notes: Vec<&'static str>,
+}
+
+impl CreateOutcome {
+    /// The wire form of what reconciliation decided.
+    pub fn report(&self) -> cairn_core::wire::ReconciliationReport {
+        cairn_core::wire::ReconciliationReport::build(
+            &self.reconciliation,
+            self.subject.as_deref(),
+            self.relation_recorded,
+            self.matched_value_key.clone(),
+        )
+    }
 }
 
 pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) -> Result<Memory> {
@@ -1021,6 +1046,8 @@ pub async fn create_memory_reconciled(
 
     // Bounded reconciliation, in this same transaction (FR-474).
     let mut reconciliation = ProposalOutcome::Created;
+    let mut relation_recorded: Option<cairn_core::RelationKind> = None;
+    let mut matched_value_key: Option<String> = None;
     if let Some(topic) = topic_key.as_deref() {
         let (members, over_bound) = crate::knowledge::subject_members_tx(
             &mut tx,
@@ -1054,7 +1081,9 @@ pub async fn create_memory_reconciled(
         } else {
             let (outcome, relations) =
                 knowledge_core::classify_proposal(&proposal, &members, reconcile_members_max);
+            let mut kinds: Vec<cairn_core::RelationKind> = Vec::new();
             for r in relations {
+                kinds.push(r.kind);
                 crate::knowledge::record_relation_tx(
                     &mut tx,
                     crate::knowledge::NewRelation {
@@ -1073,6 +1102,22 @@ pub async fn create_memory_reconciled(
             if matches!(outcome, ProposalOutcome::Corroborating { .. }) {
                 notes.push(cairn_core::wire::codes::CORROBORATING_MEMBER);
             }
+            // What the write recorded, not what an outcome implies. Every
+            // relation a single classification returns shares one kind.
+            relation_recorded = kinds.first().copied();
+            // The matched member is already in `members`; reading its value key
+            // here is what keeps the report free of an extra query.
+            matched_value_key = match &outcome {
+                ProposalOutcome::Duplicate { of } => members
+                    .iter()
+                    .find(|m| m.id == *of)
+                    .and_then(|m| m.value_key.clone()),
+                ProposalOutcome::Corroborating { member } => members
+                    .iter()
+                    .find(|m| m.id == *member)
+                    .and_then(|m| m.value_key.clone()),
+                _ => None,
+            };
             reconciliation = outcome;
         }
     }
@@ -1082,6 +1127,9 @@ pub async fn create_memory_reconciled(
     Ok(CreateOutcome {
         memory,
         reconciliation,
+        relation_recorded,
+        matched_value_key,
+        subject: topic_key,
         notes,
     })
 }

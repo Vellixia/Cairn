@@ -47,10 +47,13 @@ cairn memory add --type fact --scope project \
   "The production database is Postgres"
 #   reconciliation: corroborating
 #   agrees on value `postgresql` with memory 0192f4…, but the wording differs
-#   → if this is the same claim: cairn memory reinforce 0192f4…
+#   → if this is the same claim: cairn memory reinforce 0192f4… --from 0192f7…
 
-cairn memory reinforce 0192f4…
-#   reinforced  →  memory 0192f4…  (explicit, session 0192a1…)
+# `--from` names the statement doing the confirming — the memory just written.
+# Reinforcement is always one session saying *it* found the memory still true,
+# never an inference (FR-321).
+cairn memory reinforce 0192f4… --from 0192f7…
+#   Reinforced. reinforcements 1 · distinct origins 2
 ```
 
 Cairn will not decide for you that two differently-worded statements are one claim — that needs reading
@@ -64,7 +67,8 @@ An **identical** statement needs no call at all:
 cairn memory add --type fact --scope project \
   --topic-key infrastructure.production_database --value-key postgresql \
   "Production runs PostgreSQL 16"
-#   reconciliation: duplicate  →  memory 0192f4…   (content identical after normalization)
+#   reconciliation: duplicate
+#   identical to memory 0192f4… after normalization — recorded as a duplicate
 ```
 
 Ask what the project holds:
@@ -90,6 +94,7 @@ cairn memory add --type decision --scope project \
   --topic-key auth.strategy --value-key jwt "JWT uses RS256 with rotating public keys"
 #   reconciliation: corroborating
 #   agrees on value `jwt` with memory 0192h1…, but the wording differs
+#   → if this is the same claim: cairn memory reinforce 0192h1… --from 0192h2…
 
 cairn memory subject auth.strategy
 #   SUBJECT  auth.strategy  (project)
@@ -114,7 +119,13 @@ cairn task new --title "Integration fixtures" --goal "Fixtures run without Docke
 cairn memory add --type decision --scope task \
   --topic-key infrastructure.production_database --value-key sqlite \
   "This fixture suite uses SQLite in-memory"
-#   reconciliation: created  (no conflict — narrower scope)
+#   reconciliation: created
+```
+
+Nothing is reported, because nothing happened: a task-scoped answer and a project-scoped one are not
+simultaneously applicable, so there is no conflict to detect.
+
+```bash
 ```
 
 ```bash
@@ -166,6 +177,7 @@ cairn memory add --type fact --scope project \
   --topic-key deploy.queue_backend --value-key rabbitmq "Deploys queue through RabbitMQ"
 #   reconciliation: conflict_detected
 #   subject deploy.queue_backend now has 2 competing answers
+#   → both stand until somebody decides: cairn memory reconcile --from <id> --to <id> --relation supersedes
 ```
 
 ```bash

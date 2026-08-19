@@ -437,6 +437,7 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                         client::send(&Request::MemorySupersede {
                             cwd,
                             agent_session_key: key,
+                            session_id: uuid_opt(args, "session_id"),
                             memory_id: uuid_arg(args, "memory_id")?,
                             kind,
                             scope: enum_arg(args, "scope"),

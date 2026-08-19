@@ -285,6 +285,20 @@ pub enum ProposalOutcome {
     Deferred,
 }
 
+impl ProposalOutcome {
+    /// The wire vocabulary, which `contracts/mcp-tools.md` fixes as
+    /// `created | duplicate | corroborating | conflict_detected | deferred`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProposalOutcome::Created => "created",
+            ProposalOutcome::Duplicate { .. } => "duplicate",
+            ProposalOutcome::Corroborating { .. } => "corroborating",
+            ProposalOutcome::ConflictDetected { .. } => "conflict_detected",
+            ProposalOutcome::Deferred => "deferred",
+        }
+    }
+}
+
 /// Decide what a new proposal is, and which relations follow automatically.
 ///
 /// **Exactly one merging case** exists, and it is the only one Cairn can decide

@@ -178,19 +178,58 @@ pub async fn search(
         None
     };
     let now = Utc::now();
-    let mut out = Vec::with_capacity(raw.len());
+
+    // Which rows the caller will actually see, decided *before* anything is
+    // derived. A subject filter reads up to `SUBJECT_FILTER_SCAN_MAX` rows to
+    // find fifty; enriching as we go would derive five hundred subjects to
+    // return ten.
+    let mut kept: Vec<(&sqlx::sqlite::SqliteRow, Memory, Option<String>)> = Vec::new();
     for r in &raw {
         let m = rows::memory_bare(r)?;
         let topic_key: Option<String> = r.try_get("topic_key").unwrap_or(None);
         if let Some(keep) = &keep {
             match &topic_key {
-                Some(t) if keep.contains(&(m.scope, m.scope_key.clone(), t.clone())) => {}
+                Some(t) if keep.contains_key(&(m.scope, m.scope_key.clone(), t.clone())) => {}
                 _ => continue,
             }
         }
-        if out.len() >= limit as usize {
+        if kept.len() >= limit as usize {
             break;
         }
+        kept.push((r, m, topic_key));
+    }
+
+    // One derivation per distinct subject among the results, not one per
+    // result: several members of one subject are the common case, and the
+    // answer is the same for all of them. A filtered search has already derived
+    // exactly these, and that work is reused rather than repeated.
+    let mut subjects: std::collections::BTreeMap<
+        (MemoryScope, String, String),
+        crate::knowledge::SubjectRead,
+    > = keep.unwrap_or_default();
+    for (_, m, topic_key) in &kept {
+        if let Some(topic) = topic_key {
+            let key = (m.scope, m.scope_key.clone(), topic.clone());
+            // `entry` would need the derivation eagerly, and deriving a subject
+            // already in the map is the cost this cache exists to avoid.
+            if let std::collections::btree_map::Entry::Vacant(slot) = subjects.entry(key) {
+                slot.insert(
+                    crate::knowledge::subject(
+                        store,
+                        project_id,
+                        m.scope,
+                        &m.scope_key,
+                        topic,
+                        crate::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+                    )
+                    .await?,
+                );
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(kept.len());
+    for (r, m, topic_key) in kept {
         let evidence = repo::evidence_for(store, m.id).await?;
         let relevance: f64 = r.try_get("relevance").unwrap_or(0.0);
         let scope_bucket: i64 = r.try_get("scope_bucket").unwrap_or(3);
@@ -223,12 +262,71 @@ pub async fn search(
                 relevance,
                 age_days: (now - m.created_at).num_days(),
             },
+            subject: topic_key.as_ref().and_then(|t| {
+                subjects
+                    .get(&(m.scope, m.scope_key.clone(), t.clone()))
+                    .map(|read| subject_info(read, m.id))
+            }),
             topic_key,
             value_key: r.try_get("value_key").unwrap_or(None),
             temporal: q.as_of.map(|_| temporal_of(r, m.state)),
+            importance: rows::enum_val(r, "importance").unwrap_or(Importance::Normal),
+            pinned: rows::boolean(r, "pinned").unwrap_or(false),
+            verification: crate::evidence::local_view(
+                store,
+                m.id,
+                rows::enum_val(r, "verification").unwrap_or(VerificationState::Unverified),
+                r.try_get::<Option<String>, _>("verification_authority")
+                    .unwrap_or(None)
+                    .and_then(|a| a.parse::<VerificationAuthority>().ok()),
+                r.try_get("last_verified_at").unwrap_or(None),
+            )
+            .await?,
+            reinforcement: cairn_core::wire::Reinforcement {
+                count: r.try_get("reinforcement_count").unwrap_or(0),
+                distinct_origins: r.try_get("distinct_origin_count").unwrap_or(0),
+            },
         });
     }
     Ok(out)
+}
+
+/// Where one result stands among the other answers to its subject.
+///
+/// The split is the one the subject state itself rests on: an answer asserting
+/// a **different** value competes, and one asserting the **same** value in
+/// different words corroborates. Cairn merges neither (D46), so a caller that
+/// wants a single answer has to be told what else is there and which kind it
+/// is — otherwise it picks one and calls it the project's position, which is
+/// the silent winner this feature exists to prevent.
+fn subject_info(read: &crate::knowledge::SubjectRead, id: Uuid) -> cairn_core::wire::SubjectInfo {
+    let value_of = |m: Uuid| -> Option<String> {
+        read.members
+            .iter()
+            .find(|x| x.id == m)
+            .and_then(|x| x.value_key.clone())
+    };
+    let mine = value_of(id);
+    let mut competing = Vec::new();
+    let mut corroborating = Vec::new();
+    for answer in &read.view.answers {
+        if *answer == id {
+            continue;
+        }
+        // Two members with no value key at all agree about nothing in
+        // particular, so absence never counts as agreement.
+        if mine.is_some() && value_of(*answer) == mine {
+            corroborating.push(*answer);
+        } else {
+            competing.push(*answer);
+        }
+    }
+    cairn_core::wire::SubjectInfo {
+        reconciliation: read.view.reconciliation,
+        is_canonical_answer: read.view.answers.contains(&id),
+        competing_answers: competing,
+        corroborating_answers: corroborating,
+    }
 }
 
 /// How many rows a derived-subject filter may consider.
@@ -239,13 +337,19 @@ pub async fn search(
 const SUBJECT_FILTER_SCAN_MAX: i64 = 512;
 
 /// The subjects among the candidate rows whose derived state qualifies.
+///
+/// Returns the derivation, not just the key: every qualifying subject has just
+/// been derived, and every surviving row needs that same derivation for its
+/// `subject` field. Discarding it here only to recompute it twenty lines later
+/// would double the work the bound above exists to limit.
 async fn qualifying_subjects(
     store: &Store,
     project_id: Uuid,
     raw: &[sqlx::sqlite::SqliteRow],
     conflicted: bool,
     corroborated: bool,
-) -> Result<std::collections::BTreeSet<(MemoryScope, String, String)>> {
+) -> Result<std::collections::BTreeMap<(MemoryScope, String, String), crate::knowledge::SubjectRead>>
+{
     let mut subjects: std::collections::BTreeSet<(MemoryScope, String, String)> =
         Default::default();
     for r in raw {
@@ -256,7 +360,7 @@ async fn qualifying_subjects(
         }
     }
 
-    let mut keep = std::collections::BTreeSet::new();
+    let mut keep = std::collections::BTreeMap::new();
     for (scope, scope_key, topic) in subjects {
         let read = crate::knowledge::subject(
             store,
@@ -272,7 +376,7 @@ async fn qualifying_subjects(
             || (corroborated
                 && read.view.reconciliation == cairn_core::Reconciliation::Corroborated);
         if qualifies {
-            keep.insert((scope, scope_key, topic));
+            keep.insert((scope, scope_key, topic), read);
         }
     }
     Ok(keep)

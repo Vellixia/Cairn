@@ -283,6 +283,84 @@ pub fn status(s: &StatusPayload) -> String {
     out
 }
 
+/// What a write did to the subject it joined, and the one call that would
+/// settle it (FR-327, D2).
+///
+/// The daemon has always returned this; nothing rendered it, so the prompt
+/// FR-327 depends on reached the JSON and never a human. A corroborating write
+/// merges nothing on purpose — the value agrees and the statements differ, and
+/// only a reader can say whether they are one claim. That is a decision Cairn
+/// deliberately declines, so it has to be *asked for*, in the place the writer
+/// is already looking.
+///
+/// `created` with no subject renders nothing: a free-form memory took part in
+/// no reconciliation, and saying "created" would imply it did.
+pub fn reconciliation(v: &serde_json::Value) -> String {
+    let r = &v["reconciliation"];
+    let outcome = match r["outcome"].as_str() {
+        Some(o) => o,
+        None => return String::new(),
+    };
+    let subject = r["subject"].as_str();
+    if outcome == "created" && subject.is_none() {
+        return String::new();
+    }
+
+    let short = |value: &serde_json::Value| -> String { value.as_str().unwrap_or("?").to_string() };
+    let matched = short(&r["matched_memory_id"]);
+    let mut out = format!("  reconciliation: {outcome}\n");
+    match outcome {
+        "duplicate" => {
+            out.push_str(&format!(
+                "  identical to memory {matched} after normalization — recorded as a duplicate\n"
+            ));
+        }
+        "corroborating" => {
+            let value = r["matched_value_key"].as_str().unwrap_or("?");
+            out.push_str(&format!(
+                "  agrees on value `{value}` with memory {matched}, but the wording differs\n"
+            ));
+            // The complete command, not an abbreviation of one: `--from` names
+            // the statement doing the confirming, which is the memory just
+            // written.
+            out.push_str(&format!(
+                "  → if this is the same claim: cairn memory reinforce {matched} --from {}\n",
+                short(&v["memory"]["id"])
+            ));
+        }
+        "conflict_detected" => {
+            let competing = r["competing_memory_ids"].as_array().map_or(0, Vec::len);
+            out.push_str(&format!(
+                "  subject {} now has {} competing answers\n",
+                subject.unwrap_or("?"),
+                competing + 1
+            ));
+            out.push_str(
+                "  → both stand until somebody decides: cairn memory reconcile --from <id> --to <id> --relation supersedes\n",
+            );
+        }
+        "deferred" => {
+            out.push_str(
+                "  the subject exceeds reconcile_members_max; the decision runs at the next maintenance tick\n",
+            );
+        }
+        _ => {}
+    }
+    for note in v["notes"].as_array().into_iter().flatten() {
+        if let Some(note) = note.as_str() {
+            // `corroborating_member` and `reconciliation_deferred` are already
+            // said above, in words. The rest are why a key did not survive.
+            let reason = match note {
+                "invalid_topic_key" => "the topic key could not be normalized; stored free-form",
+                "value_without_topic" => "a value key needs a topic key; the value key was dropped",
+                _ => continue,
+            };
+            out.push_str(&format!("  note: {reason}\n"));
+        }
+    }
+    out
+}
+
 /// Render a subject: its answer or answers, and why (FR-307).
 ///
 /// The reconciliation state leads, because it is the thing a reader needs
