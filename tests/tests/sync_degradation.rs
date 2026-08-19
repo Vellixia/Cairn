@@ -633,10 +633,24 @@ fn the_background_worker_delivers_retained_work_after_an_upgrade() {
     drop(old);
     attach_server(&s, &new, &token);
 
+    // Released is not delivered, and the difference is a whole claim timeout.
+    //
+    // `drop(old)` kills the server the worker is still pointed at, so a drain
+    // that has already claimed its rows fails with them `in_flight`. Those rows
+    // are neither `blocked` nor `failed`; `outbox::counts` correctly reports
+    // them as pending, and they become claimable again only after
+    // `CLAIM_TIMEOUT_SECONDS`. Waiting on `blocked == 0` alone therefore
+    // returns while the work is still in the queue, and the assertion below
+    // reads a server that has not received it yet — which is what failed on CI
+    // under load while passing everywhere quieter.
+    //
+    // So wait for the queue itself to empty, and give it longer than the claim
+    // timeout it may have to sit out.
+    let queued = |s: &Sandbox| s.json(&["sync", "status"])["pending"].as_i64().unwrap_or(0);
     s.settle_within(
         "the background worker to notice the upgrade and deliver the retained work",
-        std::time::Duration::from_secs(45),
-        |s| blocked(s) == 0,
+        std::time::Duration::from_secs(120),
+        |s| blocked(s) == 0 && queued(s) == 0,
     );
 
     let status = s.json(&["sync", "status"]);
