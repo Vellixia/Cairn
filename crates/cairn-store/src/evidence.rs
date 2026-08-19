@@ -855,9 +855,22 @@ pub async fn drifted_memories(
             let topic: Option<String> = r.try_get("topic_key").ok().flatten();
             let content: String = r.try_get("content").unwrap_or_default();
             let verification: String = r.try_get("verification").unwrap_or_default();
+            // The state alone — "drifted" beside a subject named "drifted" —
+            // tells an agent nothing it can act on. What it needs is the claim
+            // that no longer holds, so it knows what to go and re-establish.
+            let claim: String = content.chars().take(96).collect();
+            let detail = match verification.as_str() {
+                "drifted" => format!("remembered \"{claim}\" — its evidence moved"),
+                "needs_recheck" => {
+                    format!(
+                        "remembered \"{claim}\" — its evidence changed, no verifier has run since"
+                    )
+                }
+                other => format!("{other}: \"{claim}\""),
+            };
             (
                 topic.unwrap_or_else(|| content.chars().take(48).collect()),
-                verification,
+                detail,
             )
         })
         .collect())

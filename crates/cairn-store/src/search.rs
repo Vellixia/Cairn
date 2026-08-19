@@ -230,65 +230,123 @@ pub async fn search(
 
     let mut out = Vec::with_capacity(kept.len());
     for (r, m, topic_key) in kept {
-        let evidence = repo::evidence_for(store, m.id).await?;
-        let relevance: f64 = r.try_get("relevance").unwrap_or(0.0);
-        let scope_bucket: i64 = r.try_get("scope_bucket").unwrap_or(3);
-        out.push(MemoryResult {
-            id: m.id,
-            kind: m.kind,
-            scope: m.scope,
-            scope_key: m.scope_key.clone(),
-            content: m.content.clone(),
-            state: m.state,
-            local_only: m.local_only,
-            superseded_by_id: m.superseded_by_id,
-            created_at: m.created_at,
-            provenance: Provenance {
-                session_id: m.origin_session_id,
-                agent: repo::session(store, m.origin_session_id)
-                    .await
-                    .ok()
-                    .map(|s| s.agent),
-                observation_ids: evidence.iter().map(|e| e.observation_id).collect(),
-                evidence_count: evidence.len(),
-                deleted_observation_ids: evidence
-                    .iter()
-                    .filter(|e| e.deleted)
-                    .map(|e| e.observation_id)
-                    .collect(),
-            },
-            rank: RankInfo {
-                scope_bucket,
-                relevance,
-                age_days: (now - m.created_at).num_days(),
-            },
-            subject: topic_key.as_ref().and_then(|t| {
-                subjects
-                    .get(&(m.scope, m.scope_key.clone(), t.clone()))
-                    .map(|read| subject_info(read, m.id))
-            }),
-            topic_key,
-            value_key: r.try_get("value_key").unwrap_or(None),
-            temporal: q.as_of.map(|_| temporal_of(r, m.state)),
-            importance: rows::enum_val(r, "importance").unwrap_or(Importance::Normal),
-            pinned: rows::boolean(r, "pinned").unwrap_or(false),
-            verification: crate::evidence::local_view(
-                store,
-                m.id,
-                rows::enum_val(r, "verification").unwrap_or(VerificationState::Unverified),
-                r.try_get::<Option<String>, _>("verification_authority")
-                    .unwrap_or(None)
-                    .and_then(|a| a.parse::<VerificationAuthority>().ok()),
-                r.try_get("last_verified_at").unwrap_or(None),
-            )
-            .await?,
-            reinforcement: cairn_core::wire::Reinforcement {
-                count: r.try_get("reinforcement_count").unwrap_or(0),
-                distinct_origins: r.try_get("distinct_origin_count").unwrap_or(0),
-            },
+        let subject = topic_key.as_ref().and_then(|t| {
+            subjects
+                .get(&(m.scope, m.scope_key.clone(), t.clone()))
+                .map(|read| subject_info(read, m.id))
         });
+        out.push(build_result(store, r, m, topic_key, subject, q.as_of.is_some(), now).await?);
     }
     Ok(out)
+}
+
+/// One memory, with everything a search result carries.
+///
+/// `cairn memory show` used to return Feature 001's `Memory` and nothing else,
+/// so a memory that had drifted looked exactly like one that had not. Reading
+/// *one* memory and reading *a list* of them ask the same question, so they now
+/// answer with the same shape.
+pub async fn one(store: &Store, project_id: Uuid, memory_id: Uuid) -> Result<Option<MemoryResult>> {
+    let row = sqlx::query(
+        "SELECT m.*, \
+                CASE m.scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1 \
+                             WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket, \
+                0.0 AS relevance \
+           FROM memories m WHERE m.id = ?1 AND m.deleted_at IS NULL",
+    )
+    .bind(memory_id.to_string())
+    .fetch_optional(store.pool())
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+
+    let m = rows::memory_bare(&row)?;
+    let topic_key: Option<String> = row.try_get("topic_key").unwrap_or(None);
+    let subject = match &topic_key {
+        Some(topic) => Some(subject_info(
+            &crate::knowledge::subject(
+                store,
+                project_id,
+                m.scope,
+                &m.scope_key,
+                topic,
+                crate::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+            )
+            .await?,
+            m.id,
+        )),
+        None => None,
+    };
+    // Always temporal: asking about one memory by name is asking when it
+    // applied, and there is no result set for the instant to be relative to.
+    Ok(Some(
+        build_result(store, &row, m, topic_key, subject, true, Utc::now()).await?,
+    ))
+}
+
+/// Assemble one result from a row the caller has already read.
+#[allow(clippy::too_many_arguments)]
+async fn build_result(
+    store: &Store,
+    r: &sqlx::sqlite::SqliteRow,
+    m: Memory,
+    topic_key: Option<String>,
+    subject: Option<cairn_core::wire::SubjectInfo>,
+    temporal: bool,
+    now: DateTime<Utc>,
+) -> Result<MemoryResult> {
+    let evidence = repo::evidence_for(store, m.id).await?;
+    let relevance: f64 = r.try_get("relevance").unwrap_or(0.0);
+    let scope_bucket: i64 = r.try_get("scope_bucket").unwrap_or(3);
+    Ok(MemoryResult {
+        id: m.id,
+        kind: m.kind,
+        scope: m.scope,
+        scope_key: m.scope_key.clone(),
+        content: m.content.clone(),
+        state: m.state,
+        local_only: m.local_only,
+        superseded_by_id: m.superseded_by_id,
+        created_at: m.created_at,
+        provenance: Provenance {
+            session_id: m.origin_session_id,
+            agent: repo::session(store, m.origin_session_id)
+                .await
+                .ok()
+                .map(|s| s.agent),
+            observation_ids: evidence.iter().map(|e| e.observation_id).collect(),
+            evidence_count: evidence.len(),
+            deleted_observation_ids: evidence
+                .iter()
+                .filter(|e| e.deleted)
+                .map(|e| e.observation_id)
+                .collect(),
+        },
+        rank: RankInfo {
+            scope_bucket,
+            relevance,
+            age_days: (now - m.created_at).num_days(),
+        },
+        subject,
+        topic_key,
+        value_key: r.try_get("value_key").unwrap_or(None),
+        temporal: temporal.then(|| temporal_of(r, m.state)),
+        importance: rows::enum_val(r, "importance").unwrap_or(Importance::Normal),
+        pinned: rows::boolean(r, "pinned").unwrap_or(false),
+        verification: crate::evidence::local_view(
+            store,
+            m.id,
+            rows::enum_val(r, "verification").unwrap_or(VerificationState::Unverified),
+            r.try_get::<Option<String>, _>("verification_authority")
+                .unwrap_or(None)
+                .and_then(|a| a.parse::<VerificationAuthority>().ok()),
+            r.try_get("last_verified_at").unwrap_or(None),
+        )
+        .await?,
+        reinforcement: cairn_core::wire::Reinforcement {
+            count: r.try_get("reinforcement_count").unwrap_or(0),
+            distinct_origins: r.try_get("distinct_origin_count").unwrap_or(0),
+        },
+    })
 }
 
 /// Where one result stands among the other answers to its subject.

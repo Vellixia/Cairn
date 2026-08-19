@@ -1134,7 +1134,7 @@ async fn session(action: &SessionAction) -> Result<Output, WireError> {
             .await?;
             Ok(Output::with(
                 v.clone(),
-                format!("Session {} started.\n", v["session"]["id"]),
+                format!("Session {} started.\n", render::id_of(&v["session"])),
             ))
         }
         SessionAction::Show { session } => {
@@ -1345,7 +1345,7 @@ async fn task(action: &TaskAction) -> Result<Output, WireError> {
             .await?;
             Ok(Output::with(
                 v.clone(),
-                format!("Task {} created.\n", v["task"]["id"]),
+                format!("Task {} created.\n", render::id_of(&v["task"])),
             ))
         }
         TaskAction::SetStatus { id, status } => {
@@ -1646,7 +1646,7 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             .await?;
             let text = format!(
                 "Remembered {}.\n{}",
-                v["memory"]["id"],
+                render::id_of(&v["memory"]),
                 render::reconciliation(&v)
             );
             Ok(Output::with(v, text))
@@ -1691,7 +1691,8 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             .await?;
             let text = format!(
                 "Remembered {}.\n  supersedes {}\n",
-                v["memory"]["id"], v["superseded"]
+                render::id_of(&v["memory"]),
+                v["superseded"].as_str().unwrap_or("?")
             );
             Ok(Output::with(v, text))
         }
@@ -1823,20 +1824,22 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             let payload: SearchPayload =
                 serde_json::from_value(v.clone()).map_err(|e| WireError::invalid(e.to_string()))?;
             let mut text = String::new();
+            // A historical answer, echoed back so it cannot be mistaken for a
+            // current one (FR-342, D82). Without this line a `--as-of` result
+            // and a live one are the same eight lines of output.
+            if let Some(instant) = as_of {
+                // RFC 3339, the same spelling the flag takes, so the line can be
+                // pasted back into the command that produced it.
+                text.push_str(&format!(
+                    "as_of {} — what this project believed then, not now\n\n",
+                    instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ));
+            }
             if payload.results.is_empty() {
                 text.push_str("No matching memory.\n");
             }
             for r in &payload.results {
-                text.push_str(&format!(
-                    "{}  [{}/{}] {}\n    from {} session {} · {} evidence\n",
-                    r.id,
-                    r.kind,
-                    r.scope,
-                    r.content,
-                    r.provenance.agent.as_deref().unwrap_or("unknown"),
-                    r.provenance.session_id,
-                    r.provenance.evidence_count
-                ));
+                text.push_str(&render::search_result(r));
             }
             Ok(Output::with(v, text))
         }
@@ -1846,13 +1849,18 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 memory_id: *id,
             })
             .await?;
-            Ok(Output::with(
-                v.clone(),
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&v["memory"]).unwrap_or_default()
-                ),
-            ))
+            let text =
+                match serde_json::from_value::<cairn_core::wire::MemoryResult>(v["memory"].clone())
+                {
+                    Ok(m) => render::memory_detail(&m),
+                    // A shape this build does not know is still worth showing, and
+                    // showing it raw is better than showing nothing.
+                    Err(_) => format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&v["memory"]).unwrap_or_default()
+                    ),
+                };
+            Ok(Output::with(v, text))
         }
         MemoryAction::Forget { id } => {
             let v = client::send(&Request::MemoryForget {
@@ -2229,7 +2237,10 @@ async fn daemon(action: &DaemonAction) -> Result<Output, WireError> {
             let v = client::send(&Request::DaemonStatus).await?;
             Ok(Output::with(
                 v.clone(),
-                format!("Running since {}\n", v["started_at"]),
+                format!(
+                    "Running since {}\n",
+                    v["started_at"].as_str().unwrap_or("?")
+                ),
             ))
         }
     }

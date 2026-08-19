@@ -473,7 +473,15 @@ fn warning_kind_counts(warnings: &[ContextWarning]) -> String {
     }
     let parts: Vec<String> = counts
         .iter()
-        .map(|(kind, n)| format!("{n} {kind}"))
+        // "2 conflict" reads as a truncated string rather than a count. The
+        // kinds are single English nouns, so the plural is the suffix.
+        .map(|(kind, n)| {
+            if *n == 1 {
+                format!("{n} {kind}")
+            } else {
+                format!("{n} {kind}s")
+            }
+        })
         .collect();
     parts.join(" · ")
 }

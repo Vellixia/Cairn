@@ -835,11 +835,28 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             Ok(json!({ "deleted": memory_id }))
         }
         Request::MemoryGet { cwd, memory_id } => {
-            d.resolve(&cwd).await?;
-            let m = repo::memory(&d.store, memory_id)
+            let r = d.resolve(&cwd).await?;
+            // The same shape a search result carries. Returning Feature 001's
+            // `Memory` made a drifted memory look exactly like a sound one,
+            // which is the single question `cairn memory show` is asked.
+            let m = cairn_store::search::one(&d.store, r.project.id, memory_id)
                 .await
-                .map_err(storage_err)?;
-            Ok(json!({ "memory": m }))
+                .map_err(storage_err)?
+                .ok_or_else(|| {
+                    WireError::new(codes::NOT_FOUND, format!("no memory {memory_id}"))
+                })?;
+            let mut body = serde_json::to_value(&m).unwrap_or(json!({}));
+            // Feature 001's `evidence` array, with its digests, kept exactly
+            // where it was. A search result summarizes the same links inside
+            // `provenance`; this call has always returned them in full, and
+            // gaining fields must never cost an existing caller one (FR-497).
+            if let Some(object) = body.as_object_mut() {
+                let evidence = repo::evidence_for(&d.store, memory_id)
+                    .await
+                    .map_err(storage_err)?;
+                object.insert("evidence".into(), json!(evidence));
+            }
+            Ok(json!({ "memory": body }))
         }
         Request::MemorySearch {
             cwd,
@@ -1636,6 +1653,18 @@ async fn verify_now(
         });
         if explain {
             body["runs"] = json!(run_history(d, id).await?);
+        } else if state != VerificationState::Verified {
+            // Why it is not verified, without making the caller ask twice. A
+            // locator that names no key produces an `inconclusive` run with the
+            // reason on it, and reporting only `unverified` hid the one line
+            // that says what to change.
+            if let Some(last) = run_history(d, id).await?.into_iter().next() {
+                body["last_run"] = json!({
+                    "result": last["result"],
+                    "detail": last["detail"],
+                    "verifier": last["verifier"],
+                });
+            }
         }
         return Ok(body);
     }
@@ -1773,6 +1802,18 @@ async fn memory_subject(
         ));
     }
 
+    // What the answers actually say. `MemoryFacts` carries a content digest and
+    // not the content, which is right for the classifier and wrong for a human:
+    // a subject rendered as a column of identifiers does not answer "what does
+    // this project believe?" (FR-307). Fetched for the **answers** only — one
+    // to three rows in practice — rather than for every member.
+    let mut answer_content: std::collections::BTreeMap<Uuid, String> = Default::default();
+    for id in &read.view.answers {
+        if let Ok(m) = cairn_store::repo::memory(&d.store, *id).await {
+            answer_content.insert(*id, m.content);
+        }
+    }
+
     // Elevation candidates are *reported*, never applied: branch-scoped
     // knowledge never becomes project knowledge because a branch merged
     // (FR-382).
@@ -1824,6 +1865,9 @@ async fn memory_subject(
                 "id": m.id,
                 "state": m.state,
                 "value_key": m.value_key,
+                // Present on an answer, absent on every other member: the
+                // question a subject read asks is what the *answers* say.
+                "content": answer_content.get(&m.id),
                 "verification": m.verification,
                 "verification_authority": m.verification_authority,
                 "pinned": m.pinned,

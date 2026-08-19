@@ -361,6 +361,154 @@ pub fn reconciliation(v: &serde_json::Value) -> String {
     out
 }
 
+/// One search result, with what a caller needs to judge it.
+///
+/// The lifecycle state, the value it asserts and whether it still stands are
+/// the difference between a current answer and a historical one. Printing the
+/// content alone made a superseded memory and a verified one look identical,
+/// which is exactly the mistake `--as-of` exists to prevent.
+pub fn search_result(r: &cairn_core::wire::MemoryResult) -> String {
+    let mut line = format!("{}  [{}/{}] {}\n    ", r.id, r.kind, r.scope, r.content);
+    line.push_str(&format!("{}", r.state));
+    if let Some(v) = &r.value_key {
+        line.push_str(&format!(" · value: {v}"));
+    }
+    if r.verification.state != cairn_core::VerificationState::Unverified {
+        line.push_str(&format!(
+            " · {}",
+            authority_word(r.verification.state, r.verification.authority)
+        ));
+    }
+    if r.pinned {
+        line.push_str(" · pinned");
+    }
+    line.push_str(&format!(
+        "\n    from {} session {} · {} evidence\n",
+        r.provenance.agent.as_deref().unwrap_or("unknown"),
+        r.provenance.session_id,
+        r.provenance.evidence_count
+    ));
+    line
+}
+
+/// `verified (cairn)` — the state, and what established it (FR-370).
+fn authority_word(
+    state: cairn_core::VerificationState,
+    authority: Option<cairn_core::VerificationAuthority>,
+) -> String {
+    match authority {
+        Some(a) => format!("{state} ({a})"),
+        None => state.to_string(),
+    }
+}
+
+/// One memory, read on its own.
+///
+/// `cairn memory show` printed the raw JSON body, so the question it is
+/// actually asked — *does this still hold?* — was answered by making the reader
+/// parse a document. The lifecycle state, the verification and the subject
+/// position lead, because those are the answer.
+pub fn memory_detail(m: &cairn_core::wire::MemoryResult) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("content       {}\n", m.content));
+    out.push_str(&format!("id            {}\n", m.id));
+    out.push_str(&format!("type          {} · {}\n", m.kind, m.scope));
+    out.push_str(&format!("state         {}\n", m.state));
+    if let Some(by) = m.superseded_by_id {
+        out.push_str(&format!("superseded by {by}\n"));
+    }
+    out.push_str(&format!(
+        "verification  {}\n",
+        authority_word(m.verification.state, m.verification.authority)
+    ));
+    if m.verification.fact_count > 0 {
+        out.push_str(&format!(
+            "evidence      {} fact(s){}\n",
+            m.verification.fact_count,
+            if m.verification.basis.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    " · {}",
+                    m.verification
+                        .basis
+                        .iter()
+                        .map(|b| b.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            }
+        ));
+    }
+    if let Some(topic) = &m.topic_key {
+        out.push_str(&format!("subject       {topic}"));
+        if let Some(v) = &m.value_key {
+            out.push_str(&format!(" = {v}"));
+        }
+        out.push('\n');
+        if let Some(s) = &m.subject {
+            out.push_str(&format!(
+                "              {} · {}\n",
+                s.reconciliation,
+                if s.is_canonical_answer {
+                    "a canonical answer"
+                } else {
+                    "not a canonical answer"
+                }
+            ));
+            if !s.competing_answers.is_empty() {
+                out.push_str(&format!(
+                    "              {} competing answer(s)\n",
+                    s.competing_answers.len()
+                ));
+            }
+            if !s.corroborating_answers.is_empty() {
+                out.push_str(&format!(
+                    "              {} corroborating statement(s)\n",
+                    s.corroborating_answers.len()
+                ));
+            }
+        }
+    }
+    if m.pinned {
+        out.push_str("pinned        yes\n");
+    }
+    if m.importance != cairn_core::Importance::Normal {
+        out.push_str(&format!("importance    {}\n", m.importance));
+    }
+    // Never labelled as verifications (FR-406).
+    if m.reinforcement.count > 0 {
+        out.push_str(&format!(
+            "reinforced    {} time(s) · {} distinct origin(s)\n",
+            m.reinforcement.count, m.reinforcement.distinct_origins
+        ));
+    }
+    out.push_str(&format!(
+        "from          {} session {}\n",
+        m.provenance.agent.as_deref().unwrap_or("unknown"),
+        m.provenance.session_id
+    ));
+    out
+}
+
+/// The identifier of a JSON object, unquoted.
+///
+/// `Display` on a `serde_json::Value` prints a string *with its quotes*, which
+/// is right for JSON and wrong for a line a person reads.
+pub fn id_of(v: &serde_json::Value) -> String {
+    v["id"].as_str().unwrap_or("?").to_string()
+}
+
+/// `n thing` or `n things`. A count read back as "1 duplicate statements" reads
+/// as a bug in the thing being counted.
+fn plural(n: usize, thing: &str) -> String {
+    if n == 1 {
+        format!("{n} {thing}")
+    } else {
+        format!("{n} {thing}s")
+    }
+}
+
 /// Render a subject: its answer or answers, and why (FR-307).
 ///
 /// The reconciliation state leads, because it is the thing a reader needs
@@ -409,7 +557,20 @@ pub fn subject(v: &serde_json::Value) -> String {
                 .and_then(|m| m["verification_authority"].as_str())
                 .map(|a| format!(" ({a})"))
                 .unwrap_or_default();
-            out.push_str(&format!("- `{id}` — {verification}{authority}"));
+            // The value it asserts and what it actually says, because those are
+            // the two things a reader came for. An answer rendered as a bare
+            // identifier does not answer the question (FR-307).
+            let value = member
+                .and_then(|m| m["value_key"].as_str())
+                .map(|v| format!("{v} — "))
+                .unwrap_or_default();
+            let content = member
+                .and_then(|m| m["content"].as_str())
+                .map(|c| format!("\"{c}\" "))
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "- {value}{content}`{id}` — {verification}{authority}"
+            ));
             if let Some(acc) = accounting.get(i) {
                 let origins = acc["distinct_origins"].as_i64().unwrap_or(1);
                 let dupes = acc["duplicates"].as_array().map(|d| d.len()).unwrap_or(0);
@@ -417,7 +578,9 @@ pub fn subject(v: &serde_json::Value) -> String {
                     // Never presented as a number of independent verifications
                     // (FR-406).
                     out.push_str(&format!(
-                        " · {dupes} duplicate statements · {origins} distinct origins"
+                        " · {} · {origins} distinct origin{}",
+                        plural(dupes, "duplicate statement"),
+                        if origins == 1 { "" } else { "s" }
                     ));
                 }
             }
@@ -481,6 +644,18 @@ pub fn verification(v: &serde_json::Value) -> String {
     if let Some(state) = v["verification"].as_str() {
         let authority = v["authority"].as_str();
         let mut out = format!("{}\n", authority_line(state, authority));
+        // The reason, when there is one and the caller did not ask for the
+        // whole history. "unverified" on its own is a fact with no next step.
+        if let Some(last) = v["last_run"].as_object() {
+            out.push_str(&format!(
+                "  last run: {} → {}\n",
+                last.get("verifier").and_then(|x| x.as_str()).unwrap_or("?"),
+                last.get("result").and_then(|x| x.as_str()).unwrap_or("?"),
+            ));
+            if let Some(detail) = last.get("detail").and_then(|x| x.as_str()) {
+                out.push_str(&format!("  {detail}\n"));
+            }
+        }
         if let Some(runs) = v["runs"].as_array() {
             out.push_str("\n## Runs\n");
             for r in runs {

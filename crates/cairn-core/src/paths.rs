@@ -123,9 +123,18 @@ pub fn ensure_home() -> std::io::Result<PathBuf> {
 /// fails rather than overwrites if somebody else got there first. The loser
 /// reads the winner's value, and every process agrees.
 pub fn machine_salt() -> std::io::Result<String> {
-    let path = machine_salt_path();
+    machine_salt_at(&machine_salt_path())
+}
+
+/// The same, at an explicit path.
+///
+/// Split out so the race can be tested without touching `CAIRN_HOME`. The
+/// original regression set that variable, which is process-global, and any
+/// other test that set it could pull the home out from under eight running
+/// threads — a flaky test guarding against a race, which is the worst kind.
+pub fn machine_salt_at(path: &std::path::Path) -> std::io::Result<String> {
     let read_existing = || -> Option<String> {
-        let existing = std::fs::read_to_string(&path).ok()?;
+        let existing = std::fs::read_to_string(path).ok()?;
         let trimmed = existing.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
     };
@@ -133,7 +142,9 @@ pub fn machine_salt() -> std::io::Result<String> {
         return Ok(salt);
     }
 
-    ensure_home()?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let salt = crate::domain::new_id().to_string() + &crate::domain::new_id().to_string();
 
     // Unique per attempt: a stale temporary file from a killed process must not
@@ -150,7 +161,7 @@ pub fn machine_salt() -> std::io::Result<String> {
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
 
-    let won = std::fs::hard_link(&tmp, &path).is_ok();
+    let won = std::fs::hard_link(&tmp, path).is_ok();
     let _ = std::fs::remove_file(&tmp);
     if won {
         return Ok(salt);
@@ -160,11 +171,11 @@ pub fn machine_salt() -> std::io::Result<String> {
     // which case the pre-existing behaviour is still the best available.
     read_existing().map_or_else(
         || {
-            std::fs::write(&path, &salt)?;
+            std::fs::write(path, &salt)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
             }
             Ok(salt.clone())
         },
@@ -200,13 +211,15 @@ mod tests {
     /// one run in three, which is exactly how long a race like this survives.
     #[test]
     fn a_racing_salt_creation_agrees_on_one_value() {
-        let prev = std::env::var("CAIRN_HOME").ok();
+        // No `CAIRN_HOME`: the variable is process-global, and a sibling test
+        // that sets it would pull the home out from under these eight threads.
+        // A flaky test guarding a race is worse than none.
         let dir = std::env::temp_dir().join(format!("cairn-salt-race-{}", crate::domain::new_id()));
-        std::env::set_var("CAIRN_HOME", &dir);
+        let path = dir.join("machine-salt");
 
         let salts: Vec<String> = std::thread::scope(|s| {
             let handles: Vec<_> = (0..8)
-                .map(|_| s.spawn(|| machine_salt().expect("salt")))
+                .map(|_| s.spawn(|| machine_salt_at(&path).expect("salt")))
                 .collect();
             handles
                 .into_iter()
@@ -220,9 +233,7 @@ mod tests {
             "racing callers produced different salts: {salts:?}"
         );
         assert_eq!(
-            std::fs::read_to_string(machine_salt_path())
-                .expect("salt file")
-                .trim(),
+            std::fs::read_to_string(&path).expect("salt file").trim(),
             first.as_str(),
             "the stored salt is not the one the callers were given"
         );
@@ -236,9 +247,5 @@ mod tests {
         assert!(leftovers.is_empty(), "left behind: {leftovers:?}");
 
         let _ = std::fs::remove_dir_all(&dir);
-        match prev {
-            Some(v) => std::env::set_var("CAIRN_HOME", v),
-            None => std::env::remove_var("CAIRN_HOME"),
-        }
     }
 }
