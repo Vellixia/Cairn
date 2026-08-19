@@ -320,12 +320,13 @@ here should be read as it having passed.
 | | |
 |---|---|
 | Automated tasks (T001–T145) | complete, with evidence |
-| Deterministic gates | passing — **1,077 passed, 0 failed, 1 ignored, 0 skipped**, against real PostgreSQL 18.4 |
+| Deterministic gates | passing — **1,084 passed, 0 failed, 1 ignored, 0 skipped**, against real PostgreSQL 18.4 with `--all-targets` |
 | Inherited Feature 001 / 002 regressions | passing, including against a migrated alpha.4 store |
 | Server migration and mixed-version recovery | verified against a real PostgreSQL and real held-back servers |
 | Independent adversarial review | **performed this run** — implementation-log Checkpoints O and P |
 | Real quickstart walkthrough (T146) | **performed this run** — Checkpoint R |
-| Unresolved CRITICAL / HIGH findings | **none open.** Sixteen were found and fixed this run: F1–F8 by the independent review, F9–F10 by driving a real agent, F11 by the final gate, and D5–D12 by the quickstart walkthrough |
+| Fresh review of the `main...HEAD` diff | **performed this run** — Checkpoint S. Three reviewers across sync/migration, privacy/authority/continuity, and compatibility/scope |
+| Unresolved CRITICAL / HIGH findings | **none open.** Twenty-two were found and fixed this run: F1–F8 by the independent review, F9–F10 by driving a real agent, F11 by the final gate, D5–D12 by the quickstart walkthrough, and D13–D18 by the fresh review of the diff and by CI |
 | Documentation / API mismatches | **none open.** D1–D4 were found preparing the walkthrough and closed in Checkpoint Q |
 | Open items, recorded and deliberately not fixed | **two.** (1) `contracts/mcp-tools.md` describes `next_step` as "the one call that would collapse them" and points at `reinforce`, which does not collapse — the collapsing call is an explicit `duplicates` relation. The contract's verbatim string was kept; its surrounding prose is wrong about the effect. (2) On a pull, the client drops a record it cannot yet place rather than retrying it, while the server's comment says it holds and retries. With push ordering corrected and `page_cursor` pinning behind a truncated page, the reachable exposure is gone; closing it properly needs `updated_at` on the wire and a policy for a record that can never be placed. Both are written up in Checkpoint R |
 | **T146 — quickstart walkthrough** | **RUN, PASSES** |

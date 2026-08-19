@@ -1708,3 +1708,172 @@ does not collapse: `derive_subject` keeps both statements, and the collapsing
 call is an explicit `duplicates` relation. The contract's own string was kept —
 contract wins, and inventing a replacement is not this run's call — but the prose
 around it is wrong about its effect. Confirmed by driving both calls live.
+
+---
+
+# Checkpoint S — what a fresh review of the diff found
+
+T146 was walked, the gates were green, and the PR was opened. Three
+reviewers then read the `main...HEAD` diff cold, in three areas:
+synchronization and migration safety, the privacy boundary and
+verification authority, and backward compatibility and scope. They found
+seven more defects, and CI found an eighth that no local run reproduced.
+
+Every one is fixed with a regression that fails against the code as it
+was. One further finding is filed rather than fixed, deliberately, and
+the reasoning is recorded below.
+
+## The pattern in the CI failures
+
+Three CI runs failed, on three different tests, and none of them
+reproduced locally — including under CI's exact `--all-targets` command.
+All three were the same shape: **a test asserting a weaker condition than
+the property it names.**
+
+- `sync_degradation` settled on `blocked == 0`, which is *released*, not
+  *delivered*. `drop(old)` kills the server the worker is pointed at, so a
+  drain that already claimed its rows fails with them `in_flight` —
+  neither blocked nor failed, correctly counted as pending, and
+  reclaimable only after `CLAIM_TIMEOUT_SECONDS`, which is longer than the
+  45 seconds the test waited.
+- `concurrent_proposals` printed `stderr` for calls made with `--json`,
+  which put the whole error envelope on stdout. The failure read
+  `1 of 32 proposals failed: [""]`. Teaching it to print both streams
+  turned the next failure into a diagnosis in one run.
+- `migration_alpha4` ran `cairn daemon stop` and immediately swapped the
+  database file. That command returns when the daemon *accepts* the
+  request. Unix usually survives the race — an unlinked file stays
+  readable by whoever holds it — and Windows does not.
+
+None was fixed by re-running. The second is the one to remember: the
+instrumentation was pushed on its own, with the commit saying plainly that
+it was not a fix, and the very next run named the real defect.
+
+## D13 (CRITICAL) — twelve MCP actions advertised and never dispatched
+
+`crates/cairn/src/mcp.rs`
+
+`tools/list` advertised ten actions on `cairn_remember`, eight on
+`cairn_task` and five on `cairn_session`. The dispatcher implemented
+three, four and four. The other twelve fell through to `unknown action`.
+
+An agent reading the tool definitions was told about the entire Feature
+003 write surface — reinforce, attach_evidence, verify, pin, reconcile,
+promote, record_outcome, add_criterion, update_criterion, blocker,
+readiness, checkpoint — and refused when it used any of it. Every
+capability was CLI-only, and MCP is the interface this feature exists to
+serve. `cairn_session action=checkpoint` is the worst of them: it is the
+path FR-425 gives an agent whose integration cannot be called back after
+a compaction.
+
+The wire requests and the daemon handlers were already there. Only the
+dispatch was missing.
+
+**Why nothing caught it.** `every_feature_003_action_is_reachable` reads
+the `tools/list` schema and never issues a `tools/call` — it asserted the
+promise rather than the behaviour. The replacement calls every advertised
+action on every tool, and ends with a control call on a deliberately bogus
+action so that a change in how refusals surface cannot quietly turn it
+into a test that passes for every input.
+
+## D14 (HIGH) — every keyless write opened its own session
+
+`crates/cairnd/src/handlers.rs::ensure_session_for_memory`
+
+The on-demand key was `format!("cairn-cli-{}", new_id())` — fresh and
+random on every call — and `start_session` is idempotent *per key*. So
+each write without `--session` created another session. CI showed the
+consequence once the assertion could print stdout: 21 of 32 concurrent
+proposals failed with `ambiguous_session`, the active count climbing 2, 3,
+6, 7, 8. The command that opened the sessions was the command that broke
+the worktree.
+
+This repository had already recorded the failure in its own memory, from
+an earlier session. It was reachable the whole time.
+
+The key is now derived from the worktree, which is what `start_session`'s
+contract assumes, and stays per-worktree because scope resolution is. That
+alone would turn duplicates into a constraint error — `sessions` carries a
+unique index on `(project_id, agent_session_key)` and `start_session`
+reads by key and then inserts — so the loser of that race now reads the
+winner's session instead of failing the caller's write.
+
+## D15 (HIGH) — `memory show` dropped four Feature 001 fields
+
+Enriching it with the Feature 003 view replaced the body with a search
+result. `project_id`, `origin_session_id`, `updated_at` and `deleted_at`
+went with it, and because a search excludes deleted rows,
+`memory show <forgotten-id>` became `not_found` instead of returning the
+tombstone. FR-497 forbids this in so many words, and this one was
+introduced by Checkpoint R's own work — the enrichment that fixed a real
+gap took four fields with it.
+
+The Feature 001 shape is the base again and Feature 003 is laid over it.
+
+## D16 (HIGH) — a peer could store a state Cairn refuses to derive
+
+`crates/cairnd/src/sync.rs::import_verification`
+
+The one path a verification reaches a row without passing
+`rebuild_verification`. The column carries no CHECK, and what a peer sends
+is input rather than truth. Two pairs were storable: a state outside the
+enum, and `verified` with no authority.
+
+The second propagated. It rendered as a bare `verified` against FR-370,
+`summary` re-emitted it to the next peer, and — having no local runs and
+no `remote_*` authority to recognise — the next `doctor --rebuild-derived`
+silently rewrote it to `unverified`, losing the peer's verification rather
+than keeping it.
+
+## D17 (HIGH) — an unreadable task digest read as agreement
+
+`crates/cairn-core/src/continuity.rs::classify_checkpoint`
+
+Task state was compared only when both digests were present, and both come
+from a fallible store read. A transient failure at restore time therefore
+read as agreement: no divergence, the checkpoint stayed `current`, and
+`next_action_is_live` handed the agent its recorded action as the thing to
+do — against a task that may have moved. The path axis in the same file
+already keeps the opposite rule with `NotFingerprintable`.
+
+**The first fix was wrong and a test said so.** Treating *any* absent
+digest as a divergence broke
+`a_session_bound_before_this_feature_reports_no_false_divergence`:
+`task_snapshot_at_bind` is NULL for a session bound before the migration,
+and migration.md §Step 4 says the absence means unknown and nothing is
+claimed. The asymmetry is now deliberate — absence at record time claims
+nothing, absence at read time does not claim agreement — and only the
+second is reported.
+
+## D18 (MEDIUM) — the machine salt's fallback write was not exclusive
+
+`crates/cairn-core/src/paths.rs`
+
+The hard-link path was correct. The fallback, taken when linking is
+unavailable at all, was a plain write: the same last-one-wins race the
+link exists to avoid, in the branch where the guarantee is weakest. It now
+creates the file exclusively and reads the winner's value on conflict.
+
+## Filed rather than fixed
+
+**Contradicting evidence is stored and inert** ([#46]). An agent can
+attach a fact that disproves a memory; Cairn stores it, changes nothing,
+and keeps reporting the memory `verified`.
+`VerificationState::Conflicted` has exactly one reference outside its enum
+— a ranking arm — and no writer anywhere, while every consumer filters
+`role = 'supports'`. FR-369 defines the state and
+`documented_transitions()` asserts the transition is reachable. It is not.
+
+Not fixed here on purpose. The derivation rule is real design work on the
+same function D16 and Checkpoint Q's D6 both just touched, and stacking a
+new derived state on those guards late in review is how a subtle mistake
+ships. The issue carries the file-and-line evidence.
+
+Two smaller ones were filed for the same reason: the contract prose that
+describes `next_step` as the call that collapses two statements ([#43]),
+and the pull path that drops a record it cannot place instead of retrying
+it ([#44]).
+
+[#43]: https://github.com/Vellixia/Cairn/issues/43
+[#44]: https://github.com/Vellixia/Cairn/issues/44
+[#46]: https://github.com/Vellixia/Cairn/issues/46
