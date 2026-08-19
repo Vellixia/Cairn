@@ -836,25 +836,46 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         }
         Request::MemoryGet { cwd, memory_id } => {
             let r = d.resolve(&cwd).await?;
-            // The same shape a search result carries. Returning Feature 001's
-            // `Memory` made a drifted memory look exactly like a sound one,
-            // which is the single question `cairn memory show` is asked.
-            let m = cairn_store::search::one(&d.store, r.project.id, memory_id)
+            // Feature 001's answer first, and whole.
+            //
+            // Enriching this call by *replacing* the body with a search result
+            // dropped four fields an existing caller may read — `project_id`,
+            // `origin_session_id`, `updated_at`, `deleted_at` — and, because a
+            // search excludes deleted rows, turned `memory show <forgotten-id>`
+            // from "here is the tombstone" into `not_found`. Gaining fields must
+            // never cost a caller one (FR-497), so the Feature 001 shape is the
+            // base and Feature 003 is laid over it.
+            let base = repo::memory(&d.store, memory_id)
                 .await
-                .map_err(storage_err)?
-                .ok_or_else(|| {
-                    WireError::new(codes::NOT_FOUND, format!("no memory {memory_id}"))
-                })?;
-            let mut body = serde_json::to_value(&m).unwrap_or(json!({}));
-            // Feature 001's `evidence` array, with its digests, kept exactly
-            // where it was. A search result summarizes the same links inside
-            // `provenance`; this call has always returned them in full, and
-            // gaining fields must never cost an existing caller one (FR-497).
+                .map_err(storage_err)?;
+            let mut body = serde_json::to_value(&base).unwrap_or(json!({}));
+
+            // The Feature 003 view, where there is one. A deleted memory has no
+            // search result — it is excluded from search by design — and still
+            // answers with everything Feature 001 ever gave.
             if let Some(object) = body.as_object_mut() {
-                let evidence = repo::evidence_for(&d.store, memory_id)
+                if let Some(enriched) = cairn_store::search::one(&d.store, r.project.id, memory_id)
                     .await
-                    .map_err(storage_err)?;
-                object.insert("evidence".into(), json!(evidence));
+                    .map_err(storage_err)?
+                {
+                    let enriched = serde_json::to_value(&enriched).unwrap_or(json!({}));
+                    for key in [
+                        "topic_key",
+                        "value_key",
+                        "importance",
+                        "pinned",
+                        "verification",
+                        "reinforcement",
+                        "subject",
+                        "temporal",
+                        "provenance",
+                        "rank",
+                    ] {
+                        if let Some(value) = enriched.get(key) {
+                            object.insert(key.into(), value.clone());
+                        }
+                    }
+                }
             }
             Ok(json!({ "memory": body }))
         }
@@ -2165,7 +2186,26 @@ pub(crate) async fn ensure_session_for_memory(
         Err(_) => {}
     }
     let git = git_status(r.repo.worktree_path.clone()).await?;
-    let key = key.unwrap_or_else(|| format!("cairn-cli-{}", new_id()));
+    // One on-demand session per worktree, not one per call.
+    //
+    // A fresh `new_id()` here minted a distinct key every time, and
+    // `start_session` is idempotent *per key* — so every keyless write created
+    // another session. Two `cairn memory add` calls left two, and the third
+    // call, along with every `cairn context` after it, failed with
+    // `ambiguous_session`: the command that opened the sessions was the command
+    // that broke the worktree. Under concurrency it is worse; 32 parallel
+    // writes left 32 sessions and 21 of them failed outright.
+    //
+    // Deriving the key from the worktree makes the on-demand session stable and
+    // idempotent, which is what `start_session`'s key contract already assumes.
+    // It stays per-worktree because scope resolution is: two worktrees are two
+    // working contexts and must not share one session.
+    let key = key.unwrap_or_else(|| {
+        format!(
+            "cairn-cli-{}",
+            &cairn_core::digest(&r.worktree())[..16.min(cairn_core::digest(&r.worktree()).len())]
+        )
+    });
     repo::start_session(
         &d.store,
         repo::StartSession {

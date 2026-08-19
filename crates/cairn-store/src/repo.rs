@@ -309,7 +309,8 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
             (id, project_id, task_id, user_id, agent, branch, commit_sha, worktree_path,
              agent_session_key, previous_session_id, status, started_at, ended_at,
              last_event_at, last_turn_ended_at, daemon_run_id, end_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, NULL, ?11, NULL, ?12, NULL)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, NULL, ?11, NULL, ?12, NULL)
+         ON CONFLICT DO NOTHING",
     )
     .bind(id.to_string())
     .bind(input.project_id.to_string())
@@ -326,6 +327,20 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
     .execute(&mut *tx)
     .await?;
     tx::commit(tx, "start_session").await?;
+
+    // The read above and this insert are check-then-act, and `sessions` has a
+    // unique index on `(project_id, agent_session_key)`. Two callers starting
+    // the same session at once both see nothing and both insert; one wins.
+    //
+    // Starting a session that already exists is not an error — it is the
+    // idempotency this function's key contract promises — so the loser reads
+    // the winner's session rather than failing the caller's write.
+    if let Some(existing) = session_by_key(store, input.project_id, input.agent_session_key).await?
+    {
+        if existing.id != id {
+            return Ok(existing);
+        }
+    }
 
     // A session that starts already bound to a task records the state it bound
     // at, exactly as `bind_task` does — otherwise a session started with

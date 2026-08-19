@@ -557,3 +557,115 @@ fn a_stop_turn_checkpoint_persists_across_a_daemon_restart() {
     );
     s.settle_session_status("active");
 }
+
+/// Writing memory without naming a session opens **one** session, not one per
+/// write.
+///
+/// `ensure_session_for_memory` minted a fresh random key on every call, and
+/// `start_session` is idempotent per key — so each keyless write created
+/// another session. Two `cairn memory add` calls left two sessions, and the
+/// third, along with every `cairn context` after it, failed with
+/// `ambiguous_session`. The command that opened the sessions was the command
+/// that broke the worktree.
+#[test]
+fn keyless_memory_writes_share_one_session() {
+    let s = Sandbox::new();
+
+    for i in 0..4 {
+        let r = s.cairn(&[
+            "memory",
+            "add",
+            &format!("A durable fact number {i}."),
+            "--type",
+            "fact",
+            "--scope",
+            "project",
+        ]);
+        assert!(
+            r.ok(),
+            "keyless write {i} failed: {} {}",
+            r.stdout,
+            r.stderr
+        );
+    }
+
+    let sessions = s.json(&["session", "list"]);
+    let active = sessions["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .filter(|x| x["status"] == "active")
+        .count();
+    assert_eq!(
+        active, 1,
+        "four keyless writes left {active} active sessions: {sessions}"
+    );
+
+    // And the worktree still answers, which is the property the duplicates took
+    // away.
+    let c = s.cairn(&["context"]);
+    assert!(
+        c.ok(),
+        "context broke after keyless writes: {} {}",
+        c.stdout,
+        c.stderr
+    );
+}
+
+/// The same, in parallel: concurrent keyless writes converge on one session.
+///
+/// `start_session` reads by key and then inserts, and `sessions` carries a
+/// unique index on `(project_id, agent_session_key)`. Concurrent callers all
+/// see nothing and all insert; one wins. Starting a session that already exists
+/// is the idempotency the key contract promises, so the losers must read the
+/// winner's session rather than failing the caller's write.
+#[test]
+fn concurrent_keyless_writes_converge_on_one_session() {
+    let s = Sandbox::new();
+
+    let outcomes: Vec<cairn_e2e::CliResult> = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..12)
+            .map(|i| {
+                let s = &s;
+                scope.spawn(move || {
+                    s.cairn(&[
+                        "memory",
+                        "add",
+                        &format!("Parallel fact number {i}."),
+                        "--type",
+                        "fact",
+                        "--scope",
+                        "project",
+                    ])
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("thread"))
+            .collect()
+    });
+
+    let failed: Vec<String> = outcomes
+        .iter()
+        .filter(|o| !o.ok())
+        .map(|o| format!("exit {} · out {:?}", o.code, o.stdout))
+        .collect();
+    assert!(
+        failed.is_empty(),
+        "{} of 12 failed: {failed:?}",
+        failed.len()
+    );
+
+    let sessions = s.json(&["session", "list"]);
+    let active = sessions["sessions"]
+        .as_array()
+        .expect("sessions")
+        .iter()
+        .filter(|x| x["status"] == "active")
+        .count();
+    assert_eq!(
+        active, 1,
+        "twelve concurrent keyless writes left {active} active sessions"
+    );
+}

@@ -535,3 +535,71 @@ fn the_instructions_are_the_canonical_contract_and_stay_bounded() {
     // always said so by omission. Feature 003 must not have introduced one.
     assert!(!lower.contains("hook") && !lower.contains("skill"));
 }
+
+/// `memory show` keeps every field Feature 001 returned (FR-497).
+///
+/// Enriching the call with Feature 003's view once *replaced* the body with a
+/// search result, which quietly dropped `project_id`, `origin_session_id`,
+/// `updated_at` and `deleted_at` — and, because a search excludes deleted rows,
+/// turned `memory show <forgotten-id>` into `not_found`. The response was
+/// strictly better for a new reader and broken for an old one.
+#[test]
+fn memory_show_keeps_every_feature_001_field() {
+    let s = Sandbox::new();
+    let created = s.json(&[
+        "memory",
+        "add",
+        "Errors are returned, never logged and swallowed",
+        "--type",
+        "convention",
+        "--scope",
+        "project",
+    ]);
+    let id = created["memory"]["id"].as_str().expect("id").to_string();
+
+    let shown = s.json(&["memory", "show", &id])["memory"].clone();
+    for field in [
+        "id",
+        "project_id",
+        "type",
+        "scope",
+        "scope_key",
+        "content",
+        "state",
+        "superseded_by_id",
+        "origin_session_id",
+        "local_only",
+        "evidence",
+        "created_at",
+        "updated_at",
+        "deleted_at",
+    ] {
+        assert!(
+            shown.get(field).is_some(),
+            "Feature 001 field `{field}` is gone from `memory show`: {shown}"
+        );
+    }
+    // And the Feature 003 view is laid over it, not instead of it.
+    for field in ["verification", "pinned", "importance"] {
+        assert!(
+            shown.get(field).is_some(),
+            "Feature 003 field `{field}` is missing: {shown}"
+        );
+    }
+
+    // A forgotten memory is a tombstone, not a 404: deletion is soft, and this
+    // call has always answered for one.
+    s.must(&["memory", "forget", &id]);
+    let after = s.cairn(&["memory", "show", &id, "--json"]);
+    assert!(
+        after.ok(),
+        "a forgotten memory stopped resolving: {} {}",
+        after.stdout,
+        after.stderr
+    );
+    let body: Value = serde_json::from_str(&after.stdout).expect("json");
+    assert!(
+        !body["data"]["memory"]["deleted_at"].is_null(),
+        "the tombstone did not report when it was deleted: {body}"
+    );
+}
