@@ -167,20 +167,43 @@ pub fn machine_salt_at(path: &std::path::Path) -> std::io::Result<String> {
         return Ok(salt);
     }
 
-    // Somebody else linked theirs in first — or the filesystem cannot link, in
-    // which case the pre-existing behaviour is still the best available.
-    read_existing().map_or_else(
-        || {
-            std::fs::write(path, &salt)?;
+    // Somebody else linked theirs in first — the ordinary race, and their value
+    // is now the one on disk.
+    if let Some(existing) = read_existing() {
+        return Ok(existing);
+    }
+
+    // Or the filesystem cannot hard-link at all. Create exclusively rather than
+    // writing: a plain write is the same last-one-wins race the link exists to
+    // avoid, and losing it means holding an `origin_ref` that no longer matches
+    // this machine's own project — which is how a pattern stops recognizing
+    // where it came from and validates itself there (FR-402).
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            file.write_all(salt.as_bytes())?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
             }
-            Ok(salt.clone())
-        },
-        Ok,
-    )
+            Ok(salt)
+        }
+        // Somebody created it between the link attempt and this one.
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_existing().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "the machine salt exists but could not be read",
+                )
+            })
+        }
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]
