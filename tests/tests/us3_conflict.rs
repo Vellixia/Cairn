@@ -275,7 +275,14 @@ fn concurrent_proposals() {
         failed.is_empty(),
         "{} of 32 proposals failed: {:?}",
         failed.len(),
-        failed.iter().map(|f| &f.stderr).collect::<Vec<_>>()
+        // Both streams, deliberately. These calls pass `--json`, and the JSON
+        // envelope — including the `error.code` that says *why* — goes to
+        // stdout; stderr is empty. Reporting only stderr printed `[""]` and
+        // said nothing, which is exactly what a CI failure here looked like.
+        failed
+            .iter()
+            .map(|f| format!("exit {} · out {:?} · err {:?}", f.code, f.stdout, f.stderr))
+            .collect::<Vec<_>>()
     );
 
     // Zero lost writes.
