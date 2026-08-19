@@ -240,17 +240,42 @@ pub fn classify_checkpoint(
     // A task divergence is decided by the derived digest, never by a counter:
     // two machines can each advance a counter from 5 to 6 and mean entirely
     // different things (D80).
-    if assumed.task_id.is_some()
-        && current.task_exists
-        && assumed.task_state_digest.is_some()
-        && current.task_state_digest.is_some()
-        && assumed.task_state_digest != current.task_state_digest
-    {
-        divergences.push(Divergence {
-            kind: DivergenceKind::Task,
-            recorded: assumed.task_state_digest.clone().unwrap_or_default(),
-            current: current.task_state_digest.clone().unwrap_or_default(),
-        });
+    //
+    // A digest that could not be computed is **unknown**, never "unchanged".
+    // Both sides come from a fallible store read, and requiring both to be
+    // present before comparing meant a transient failure at either end read as
+    // agreement: the checkpoint stayed `current`, and `next_action_is_live`
+    // then emitted its recorded action as the thing to do — against a task that
+    // may have moved underneath it. That is the failure FR-434 exists to
+    // prevent, and it is the same "I could not look" ≠ "nothing moved" rule the
+    // path axis already keeps with `NotFingerprintable`.
+    //
+    // Unknown therefore counts as a divergence. The cost of being wrong is one
+    // action labelled `previous` that did not need to be; the cost the other
+    // way is a stale instruction presented as live.
+    // The asymmetry is deliberate. A checkpoint that recorded **no** digest
+    // never knew the task's state — `task_snapshot_at_bind` is NULL for a
+    // session bound before the migration — and claiming a divergence there
+    // would be inventing one (migration.md §Step 4). A checkpoint that recorded
+    // one and cannot be compared against it *now* is the opposite case: we knew,
+    // we cannot check, and claiming agreement would be inventing that instead.
+    if assumed.task_id.is_some() && current.task_exists {
+        match (
+            assumed.task_state_digest.as_deref(),
+            current.task_state_digest.as_deref(),
+        ) {
+            (Some(recorded), Some(now)) if recorded != now => divergences.push(Divergence {
+                kind: DivergenceKind::Task,
+                recorded: recorded.to_string(),
+                current: now.to_string(),
+            }),
+            (Some(recorded), None) => divergences.push(Divergence {
+                kind: DivergenceKind::Task,
+                recorded: recorded.to_string(),
+                current: "unavailable".to_string(),
+            }),
+            _ => {}
+        }
     }
 
     // Bounded to the paths the checkpoint already names. No globbing, no
@@ -535,6 +560,32 @@ mod tests {
         let c = classify_checkpoint(&a, &cur);
         assert!(!c.has(DivergenceKind::Task));
         assert_eq!(c.state, CheckpointState::Current);
+    }
+
+    /// A digest we recorded and cannot read back is unknown, not unchanged.
+    ///
+    /// Both sides come from a fallible store read. Requiring both to be present
+    /// before comparing meant a transient failure read as agreement: the
+    /// checkpoint stayed `current`, and `next_action_is_live` then handed the
+    /// agent its recorded action as the thing to do — against a task that may
+    /// have moved. The path axis already keeps this rule with
+    /// `NotFingerprintable`; the task axis did not.
+    #[test]
+    fn a_task_digest_that_cannot_be_read_is_not_agreement() {
+        let a = assumed();
+        assert!(a.task_state_digest.is_some(), "the checkpoint recorded one");
+        let mut cur = current();
+        cur.task_state_digest = None;
+
+        let c = classify_checkpoint(&a, &cur);
+        assert!(
+            c.has(DivergenceKind::Task),
+            "an unreadable digest was reported as no change: {c:?}"
+        );
+        assert!(
+            !c.next_action_is_live(),
+            "a recorded action was offered as live against a task nobody could check"
+        );
     }
 
     #[test]
