@@ -1559,7 +1559,17 @@ async fn evidence(action: &EvidenceAction) -> Result<Output, WireError> {
                 },
             })
             .await?;
-            Ok(Output::with(v, "Evidence recorded.\n".to_string()))
+            // Who collected it, named at the moment it is recorded. Whether
+            // Cairn read the value or an agent asserted it is what decides
+            // the authority a later verification may claim (FR-370), and a
+            // bare "recorded" leaves the writer unable to tell which they
+            // just created.
+            let text = format!(
+                "Evidence {} recorded.  collector: {}\n",
+                render::id_of(&v["evidence"]),
+                v["evidence"]["collector"].as_str().unwrap_or("?")
+            );
+            Ok(Output::with(v, text))
         }
         EvidenceAction::List { memory } => {
             let v = client::send(&Request::EvidenceList {

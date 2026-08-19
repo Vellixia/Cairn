@@ -1595,6 +1595,62 @@ async fn evidence_add(
         .await
         .map_err(storage_err)?;
         body["attached_to"] = json!(memory_id);
+
+        // The attestation **is** the act that establishes the claim.
+        //
+        // `contracts/evidence-verification.md` §Agent-attested says an agent
+        // submitting an observed value and its digest may move a memory to
+        // `verified` with authority `attested`. Nothing did. `cairn verify`
+        // correctly refuses to re-run an agent's observation — Cairn has no way
+        // to — and no other path recorded a run, so `attested` was reachable
+        // from a store-level call in the test suite and from no caller at all.
+        //
+        // The run goes through the ordinary verifier with the submission as its
+        // captured outcome, rather than being written `verified` directly: that
+        // way the digest is really compared, and re-attesting a *different*
+        // value against the same fact drifts instead of quietly re-verifying.
+        if collector == EvidenceCollector::Agent {
+            if let Some(verifier @ VerifierKind::RuntimeState) = crate::verify::verifier_for(&fact)
+            {
+                let captured = crate::verify::CapturedOutcome {
+                    outcome: observed_value.clone(),
+                    exit_code: 0,
+                    commit: git.commit_sha.clone(),
+                };
+                let worktree = std::path::PathBuf::from(&r.repo.worktree_path);
+                let outcome = crate::verify::run_verifier(
+                    &worktree,
+                    &config,
+                    &fact,
+                    verifier,
+                    Some(&captured),
+                );
+                cairn_store::evidence::record_run(
+                    &d.store,
+                    cairn_store::evidence::NewRun {
+                        project_id: r.project.id,
+                        memory_id: Some(memory_id),
+                        criterion_id: None,
+                        verifier,
+                        evidence_id: Some(fact.id),
+                        expected_digest: fact.fingerprint.as_deref(),
+                        observed_digest: outcome.observed.as_deref(),
+                        result: outcome.result,
+                        detail: outcome.detail.as_deref(),
+                        repo_branch: &git.branch,
+                        repo_commit: git.commit_sha.as_deref(),
+                        trigger: VerifyTrigger::Attach,
+                    },
+                )
+                .await
+                .map_err(storage_err)?;
+                let (state, authority) =
+                    cairn_store::evidence::rebuild_verification_after_run(&d.store, memory_id)
+                        .await
+                        .map_err(storage_err)?;
+                body["verification"] = json!({ "state": state, "authority": authority });
+            }
+        }
     }
     Ok(body)
 }
@@ -1737,7 +1793,10 @@ async fn verify_one(
         .map_err(storage_err)?;
     }
 
-    cairn_store::evidence::rebuild_verification(&d.store, memory_id)
+    // A run was just recorded here, so the conservative guard against
+    // resurrecting a `needs_recheck` state does not apply: these records are
+    // newer than the state they replace.
+    cairn_store::evidence::rebuild_verification_after_run(&d.store, memory_id)
         .await
         .map_err(storage_err)
 }

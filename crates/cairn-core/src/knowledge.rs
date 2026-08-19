@@ -604,19 +604,51 @@ pub fn derive_subject(members: &[MemoryFacts], relations: &[Relation]) -> Subjec
 
     // Step 1 — only a lifecycle-active proposal can be a current answer. A
     // stale or superseded one is history, and history has no canonical answer.
-    let active: Vec<&MemoryFacts> = members
+    let mut active: Vec<&MemoryFacts> = members
         .iter()
         .filter(|m| m.state == MemoryState::Active)
         .collect();
+
+    // A statement Cairn decided is a duplicate of another is not a separate
+    // claim (FR-321). So when the statement it duplicates is superseded, it is
+    // history for exactly the reason its target is.
+    //
+    // Without this, superseding one member promotes that member's own
+    // duplicates into competing answers: a subject that read `reinforced` with
+    // one answer and two duplicates becomes `conflicted` with three answers the
+    // moment somebody deliberately replaces the answer — a conflict assembled
+    // out of statements nobody ever made independently, and the exact "second
+    // competing active answer" FR-321 says duplication is recorded instead of.
+    //
+    // Transitive, because a duplicate of a duplicate is one too, and bounded by
+    // the member count, which `reconcile_members_max` already caps.
+    let superseded_members: BTreeSet<Uuid> = members
+        .iter()
+        .filter(|m| m.state == MemoryState::Superseded)
+        .map(|m| m.id)
+        .collect();
+    let mut history: BTreeSet<Uuid> = superseded_members;
+    loop {
+        let grew: Vec<Uuid> = decisions
+            .iter()
+            .filter(|r| r.kind == RelationKind::Duplicates && r.from != r.to)
+            .filter(|r| history.contains(&r.to) && !history.contains(&r.from))
+            .map(|r| r.from)
+            .collect();
+        if grew.is_empty() {
+            break;
+        }
+        history.extend(grew);
+    }
+    active.retain(|m| !history.contains(&m.id));
+
     if active.is_empty() {
         return SubjectView::historical(decisions, narrowed_by);
     }
     let active_ids: BTreeSet<Uuid> = active.iter().map(|m| m.id).collect();
 
     // Step 2 — a proposal another *active* proposal supersedes or duplicates is
-    // no longer a candidate. Restricting to active endpoints matters: a
-    // duplicate of a memory that has since been superseded is still a
-    // candidate in its own right.
+    // no longer a candidate.
     let mut supersedes_edges: Vec<(Uuid, Uuid)> = Vec::new();
     let mut duplicates_edges: Vec<(Uuid, Uuid)> = Vec::new();
     for r in &decisions {

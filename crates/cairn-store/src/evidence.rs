@@ -509,6 +509,34 @@ pub async fn rebuild_verification(
     store: &Store,
     memory_id: Uuid,
 ) -> Result<(VerificationState, Option<VerificationAuthority>)> {
+    rebuild_verification_inner(store, memory_id, false).await
+}
+
+/// The same, called immediately after a run the caller has just recorded.
+///
+/// The conservative form will not lift `needs_recheck` off a row whose newest
+/// run is `verified`, because from the records alone it cannot tell a state set
+/// *after* that run from a run recorded *after* that state — and resurrecting a
+/// verification somebody marked owed is much the worse error.
+///
+/// A caller that has just recorded the run knows which of the two it is, and
+/// without that distinction a memory could never leave `needs_recheck`. An
+/// agent re-attesting — which is exactly what
+/// `contracts/evidence-verification.md` says returns an attested claim to
+/// `verified` — wrote a newer verified run and got `needs_recheck` back, for
+/// good.
+pub async fn rebuild_verification_after_run(
+    store: &Store,
+    memory_id: Uuid,
+) -> Result<(VerificationState, Option<VerificationAuthority>)> {
+    rebuild_verification_inner(store, memory_id, true).await
+}
+
+async fn rebuild_verification_inner(
+    store: &Store,
+    memory_id: Uuid,
+    after_run: bool,
+) -> Result<(VerificationState, Option<VerificationAuthority>)> {
     let runs = runs_for_memory(store, memory_id).await?;
 
     // What the row said before, so an unchanged rebuild can tell it has nothing
@@ -596,7 +624,8 @@ pub async fn rebuild_verification(
     // Deliberately narrow. `drifted` is derivable from a run and is **not**
     // preserved here — a rebuild that could not overrule a recorded drift would
     // stop being a rebuild (FR-478).
-    let state = if state == VerificationState::Verified
+    let state = if !after_run
+        && state == VerificationState::Verified
         && previous.0.as_deref() == Some(VerificationState::NeedsRecheck.as_str())
     {
         VerificationState::NeedsRecheck

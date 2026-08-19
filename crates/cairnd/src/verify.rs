@@ -396,7 +396,7 @@ pub async fn bounded_pass(d: &Daemon, project_id: Uuid, worktree: &Path) -> Pass
         .is_ok()
         {
             report.runs_recorded += 1;
-            if evidence::rebuild_verification(&d.store, memory_id)
+            if evidence::rebuild_verification_after_run(&d.store, memory_id)
                 .await
                 .is_ok()
             {

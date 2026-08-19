@@ -675,3 +675,144 @@ fn a_two_member_coarse_value_key_is_still_corroborated() {
         assert!(read.members.iter().all(|m| m.state == MemoryState::Active));
     });
 }
+
+// ---------------------------------------------------------------------------
+// D5 — superseding a member promoted that member's own duplicates
+// ---------------------------------------------------------------------------
+
+/// Superseding an answer does not turn its duplicates into competitors.
+///
+/// Found by walking `quickstart.md` on a real repository (T146). Three
+/// statements about one subject, two of them recorded as `duplicates` of the
+/// third: the subject reads `reinforced`, one answer, two duplicate statements.
+/// Supersede that answer — a deliberate act, on the memory that *is* the
+/// answer — and both duplicates were promoted to competing answers, so a
+/// settled subject became `conflicted` with three answers, two of which Cairn
+/// itself had already decided were not separate claims.
+///
+/// FR-321 is explicit: duplication is recorded **rather than a second competing
+/// active answer**. A statement that duplicates a superseded statement is
+/// history for the same reason its target is.
+#[test]
+fn superseding_an_answer_does_not_promote_its_own_duplicates() {
+    let mut answer = keyed(1, "infra.db", "postgresql", "Production runs PostgreSQL 16");
+    let dup_a = keyed(2, "infra.db", "postgresql", "Production runs PostgreSQL 16");
+    let dup_b = keyed(
+        3,
+        "infra.db",
+        "postgresql",
+        "The production database is Postgres",
+    );
+    let replacement = keyed(
+        4,
+        "infra.db",
+        "cockroachdb",
+        "Migrated production to CockroachDB",
+    );
+
+    let relations = vec![
+        Relation::new(
+            RelationKind::Duplicates,
+            id(2),
+            id(1),
+            RelationBasis::DeterministicRule,
+        ),
+        // The explicit form: an agent read both and said they are one claim.
+        Relation::new(
+            RelationKind::Duplicates,
+            id(3),
+            id(1),
+            RelationBasis::ExplicitAgent,
+        ),
+        Relation::new(
+            RelationKind::Supersedes,
+            id(4),
+            id(1),
+            RelationBasis::ExplicitAgent,
+        ),
+    ];
+
+    // Before the supersession: one answer, two duplicates.
+    let before = derive_subject(
+        &[answer.clone(), dup_a.clone(), dup_b.clone()],
+        &relations[..2],
+    );
+    assert_eq!(before.reconciliation, Reconciliation::Reinforced);
+    assert_eq!(before.answers, vec![id(1)]);
+
+    // The supersession lands: `answer` is history, and so are the statements
+    // that duplicate it.
+    answer.state = MemoryState::Superseded;
+    let after = derive_subject(&[answer, dup_a, dup_b, replacement], &relations);
+
+    assert_eq!(
+        after.reconciliation,
+        Reconciliation::Settled,
+        "superseding the answer manufactured a conflict from its own duplicates: {after:?}"
+    );
+    assert_eq!(
+        after.answers,
+        vec![id(4)],
+        "a duplicate of a superseded statement is still an answer"
+    );
+}
+
+/// The same, one link further out: a duplicate of a duplicate is one too.
+#[test]
+fn the_duplicate_of_a_duplicate_follows_it_into_history() {
+    let mut answer = keyed(1, "infra.db", "postgresql", "Production runs PostgreSQL 16");
+    let dup = keyed(2, "infra.db", "postgresql", "Postgres in production");
+    let dup_of_dup = keyed(3, "infra.db", "postgresql", "The production DB is Postgres");
+    let replacement = keyed(
+        4,
+        "infra.db",
+        "cockroachdb",
+        "Migrated production to CockroachDB",
+    );
+
+    let relations = vec![
+        Relation::new(
+            RelationKind::Duplicates,
+            id(2),
+            id(1),
+            RelationBasis::ExplicitAgent,
+        ),
+        Relation::new(
+            RelationKind::Duplicates,
+            id(3),
+            id(2),
+            RelationBasis::ExplicitAgent,
+        ),
+        Relation::new(
+            RelationKind::Supersedes,
+            id(4),
+            id(1),
+            RelationBasis::ExplicitAgent,
+        ),
+    ];
+
+    answer.state = MemoryState::Superseded;
+    let view = derive_subject(&[answer, dup, dup_of_dup, replacement], &relations);
+    assert_eq!(view.reconciliation, Reconciliation::Settled, "{view:?}");
+    assert_eq!(view.answers, vec![id(4)]);
+}
+
+/// A duplicate whose target is not a member at all is still an answer.
+///
+/// `contracts/records-and-rebuild.md`: a relation naming a memory that does not
+/// exist is ignored by the derivation — it may be a memory that has not synced
+/// yet. Dropping the statement instead would let a missing row silently delete
+/// the only answer a subject has.
+#[test]
+fn a_duplicate_of_a_memory_nobody_has_stays_an_answer() {
+    let orphan = keyed(2, "infra.db", "postgresql", "Production runs PostgreSQL 16");
+    let relations = vec![Relation::new(
+        RelationKind::Duplicates,
+        id(2),
+        id(99),
+        RelationBasis::DeterministicRule,
+    )];
+    let view = derive_subject(&[orphan], &relations);
+    assert_eq!(view.reconciliation, Reconciliation::Settled);
+    assert_eq!(view.answers, vec![id(2)]);
+}
