@@ -325,8 +325,9 @@ here should be read as it having passed.
 | Server migration and mixed-version recovery | verified against a real PostgreSQL and real held-back servers |
 | Independent adversarial review | **performed this run** — implementation-log Checkpoints O and P |
 | Real quickstart walkthrough (T146) | **performed this run** — Checkpoint R |
-| Unresolved CRITICAL / HIGH findings | **none open.** Twenty-three were found and fixed this run: F1–F8 by review, F9–F10 by driving a real agent, F11 by the final gate, D1–D12 by the quickstart walkthrough |
-| Open deviations | **none.** D1–D12 are closed; one contract-prose discrepancy is recorded in Checkpoint R |
+| Unresolved CRITICAL / HIGH findings | **none open.** Sixteen were found and fixed this run: F1–F8 by the independent review, F9–F10 by driving a real agent, F11 by the final gate, and D5–D12 by the quickstart walkthrough |
+| Documentation / API mismatches | **none open.** D1–D4 were found preparing the walkthrough and closed in Checkpoint Q |
+| Open items, recorded and deliberately not fixed | **two.** (1) `contracts/mcp-tools.md` describes `next_step` as "the one call that would collapse them" and points at `reinforce`, which does not collapse — the collapsing call is an explicit `duplicates` relation. The contract's verbatim string was kept; its surrounding prose is wrong about the effect. (2) On a pull, the client drops a record it cannot yet place rather than retrying it, while the server's comment says it holds and retries. With push ordering corrected and `page_cursor` pinning behind a truncated page, the reachable exposure is gone; closing it properly needs `updated_at` on the wire and a policy for a record that can never be placed. Both are written up in Checkpoint R |
 | **T146 — quickstart walkthrough** | **RUN, PASSES** |
 | **T147 — topic-key effectiveness** | **DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking. False-grouping count **unknown, not zero** |
 | **T148 — live continuity walkthrough** | Claude Code portion executed; **Codex and OpenCode DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking |
