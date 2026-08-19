@@ -732,14 +732,22 @@ pub async fn sync_changes(
     // relation it cannot place and retries it, rather than the server handing
     // out a consistent-looking page that is not.
     let relations = read_after(&state.pool, q.project_id, since, RELATIONS_SQL).await?;
+    let tasks = read_after(&state.pool, q.project_id, since, TASKS_SQL).await?;
     let criteria = read_after(&state.pool, q.project_id, since, CRITERIA_SQL).await?;
     let blockers = read_after(&state.pool, q.project_id, since, BLOCKERS_SQL).await?;
 
-    let cursor = page_cursor(&[&rows, &relations, &criteria, &blockers], since).to_rfc3339();
+    let cursor =
+        page_cursor(&[&rows, &relations, &tasks, &criteria, &blockers], since).to_rfc3339();
 
     Ok(Json(json!({
         "memories": memories,
         "relations": relations.iter().map(relation_json).collect::<Vec<_>>(),
+        // Tasks are handed back as well as accepted (`contracts/privacy-sync.md`
+        // §What crosses). Without them a criterion arrived naming a `task_id`
+        // that could never arrive, so a task created on one machine existed
+        // nowhere else and US11's two machines could not converge on a state
+        // digest they had no task to compute one from.
+        "tasks": tasks.iter().map(task_json).collect::<Vec<_>>(),
         "criteria": criteria.iter().map(criterion_json).collect::<Vec<_>>(),
         "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
         "cursor": cursor,
@@ -751,6 +759,9 @@ const PAGE: i64 = 500;
 
 const RELATIONS_SQL: &str = "SELECT * FROM memory_relations
      WHERE project_id = $1 AND updated_at > $2 AND deleted_at IS NULL
+     ORDER BY updated_at ASC LIMIT $3";
+const TASKS_SQL: &str = "SELECT * FROM tasks
+     WHERE project_id = $1 AND updated_at > $2
      ORDER BY updated_at ASC LIMIT $3";
 const CRITERIA_SQL: &str = "SELECT * FROM task_criteria
      WHERE project_id = $1 AND updated_at > $2
@@ -832,6 +843,30 @@ fn relation_json(r: &sqlx::postgres::PgRow) -> Value {
         "kind": r.get::<String, _>("kind"),
         "decided_by_session": r.get::<Uuid, _>("decided_by_session"),
         "basis": r.get::<String, _>("basis"),
+    })
+}
+
+/// A task as a peer receives it.
+///
+/// `local_revision` is deliberately absent: it is a private concurrency token
+/// and is neither transmitted nor stored here (D80). The state digest is absent
+/// for the same reason it is nowhere on the wire — both sides derive it from the
+/// criteria and blockers that did cross, which is what makes two machines
+/// agreeing on it a guarantee rather than a copied value.
+fn task_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": r.get::<Uuid, _>("id"),
+        "title": r.get::<String, _>("title"),
+        "goal": r.get::<String, _>("goal"),
+        "status": r.get::<String, _>("status"),
+        "acceptance_criteria": r
+            .try_get::<Vec<String>, _>("acceptance_criteria")
+            .unwrap_or_default(),
+        "deleted": r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
+            .ok()
+            .flatten()
+            .is_some(),
     })
 }
 

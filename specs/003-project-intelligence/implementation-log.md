@@ -1503,3 +1503,208 @@ as a deviation.
 `CAIRN_TEST_DATABASE_URL` was unset and the server tests early-returned. The
 authoritative gate in §8 re-runs everything against real PostgreSQL, and that is
 where the skipped count has to be zero.
+
+---
+
+# Checkpoint R — T146, and the eight defects a real walkthrough found
+
+Checkpoint Q closed D1–D4, which were what stopped the walkthrough starting. This
+one is the walkthrough itself: all eleven user stories plus the Prerequisites,
+on a fresh store, on a real git repository, against a real daemon and a real
+`cairn-server` on real PostgreSQL 18.4 — including US7's two machines and its
+old-server-then-upgrade path, and a second project for US8 and US9.
+
+It found eight more defects. Six of them are the same shape as D2 and none of
+them could have been found by reading code: the daemon knew the answer, the JSON
+carried it, and the surface a person or an agent actually reads did not print
+it. The last three could not have been found by one machine at all.
+
+## Why a green suite could not see any of this
+
+Two blind spots, and both are structural rather than careless.
+
+**Nothing asserted on rendered output.** The briefing, the subject view, the
+search result and `memory show` were all tested through their payloads. A field
+could therefore be complete in the struct, correct on the wire, and absent from
+the only text an agent ever sees. `tests/tests/cli_rendering.rs` asserts stdout.
+
+**Nothing drove a task through the server and read it back.** `us7_offline_merge`
+proves memories and relations survive the wire. Tasks had no equivalent, so a
+whole entity type was pushed and never handed back and everything stayed green.
+`tests/tests/sync_tasks.rs` closes that.
+
+## D5 (HIGH) — superseding an answer promoted its own duplicates
+
+`crates/cairn-core/src/knowledge.rs::derive_subject`
+
+Three statements about one subject, two recorded as `duplicates` of the third:
+the subject reads `reinforced`, one answer, two duplicate statements. Supersede
+that answer — a deliberate act, on the memory that *is* the answer — and both
+duplicates became competing answers. A settled subject read `conflicted` with
+three answers, two of which Cairn itself had already decided were not separate
+claims.
+
+FR-321 is explicit that duplication is recorded **rather than a second competing
+active answer**. Step 2 restricted its edges to active endpoints, with a comment
+defending the choice ("a duplicate of a memory that has since been superseded is
+still a candidate in its own right"); the walkthrough is what showed the
+consequence. A statement that duplicates a superseded statement is history for
+the same reason its target is, transitively. A duplicate whose target is not a
+member at all is untouched — a relation naming a memory that does not exist is
+ignored by the derivation, because it may be one that has not synced yet.
+
+## D6 (HIGH) — agent-attested verification was reachable from nowhere
+
+`crates/cairnd/src/handlers.rs::evidence_add`
+
+`contracts/evidence-verification.md` §Agent-attested says an agent that submits
+an observed value and its digest may move a memory to `verified` with authority
+`attested`. Nothing did. `cairn verify` refuses to re-run an agent's observation
+— correctly, Cairn has no way to — and no other path recorded a run. The entire
+`attested` authority was reachable from a store-level `record_run` inside the
+test suite and from no caller at all.
+
+Attaching agent-collected evidence now records the attesting run, through the
+ordinary verifier with the submission as its captured outcome rather than
+written `verified` directly, so the digest is really compared and re-attesting a
+different value drifts instead of quietly re-verifying.
+
+That exposed a second half. `rebuild_verification` refuses to lift
+`needs_recheck` off a row whose newest run is `verified`, because from records
+alone it cannot tell a state set *after* a run from a run recorded *after* a
+state. A re-attestation is the second — so an attested claim could never be
+renewed, and was stuck owing a recheck it had no way to satisfy. That is the
+mirror image of the permanent unfalsifiable claim the contract's last rule
+exists to prevent. The guard now applies only to callers that did not just
+record a run; `doctor --rebuild-derived` keeps it in full.
+
+Verified live, end to end: attest → `verified/attested`; recheck →
+`needs_recheck`; attest again → `verified/attested`. Promotion and task-criterion
+verification both still refuse an attested source — for the first time against
+one reached through a caller-facing path.
+
+## D7 (MEDIUM) — the briefing never said which criteria were done
+
+`crates/cairn/src/render.rs::briefing`
+
+Tier 0a has carried the per-criterion state, the progress counts, the readiness
+and the leading blocker since it landed. The rendered briefing printed the
+criterion *text* and nothing else, so an agent resuming after a compaction saw a
+list of sentences with no way to tell which were finished — the one thing FR-443
+guarantees it will still know. Both axes are now rendered and never collapsed
+(FR-483), with counts and never a percentage (FR-486).
+
+## D8 (HIGH) — a diverged checkpoint never reached the agent
+
+`crates/cairn/src/render.rs::continuity`, `crates/cairn/src/main.rs`
+
+The payload carried the whole classification: `state: diverged`, the commit it
+was recorded at, the task digest, every relevant path whose fingerprint moved,
+the recorded `previous_next_action`, and the continuity mode. The CLI
+deserialized `ContextPayload`, which does not carry the checkpoint block, and
+rendered none of it. A session resuming after a compaction read a briefing that
+looked exactly like a fresh one and carried on from a commit that had moved.
+
+The divergence now leads the output, before anything written against the state
+that moved, and the recorded action is labelled **previous**, never `next`
+(FR-434). The footer states the mode the integration actually delivers and how
+many times a checkpoint has been restored here.
+
+## D9 (HIGH) — a round trip rewrote this machine's own authority
+
+`crates/cairnd/src/sync.rs::import_verification`
+
+A memory this machine verified was pushed to the server, and the next pull
+applied the peer's badge over the local one: `verified` stayed, so nothing looked
+wrong, but the authority became `remote_cairn`. Authority decides exactly two
+things and both then refused it — the memory's own project could no longer
+promote it, and it no longer counted towards local readiness, on the strength of
+a check this machine had run. Found by US8 refusing a promotion with
+`imported_not_sufficient` seconds after `verify` reported `authority: cairn`.
+
+Records win (FR-478), and a verification run is a durable local record: an import
+that finds any local run now rebuilds from those runs instead of taking the
+peer's summary. `rebuild_verification`'s own comment already said so.
+
+## D10 (MEDIUM) — omissions below Level 0 carried no reason
+
+`crates/cairn-core/src/context.rs`
+
+FR-461: every admitted item carries reasons and **every omission carries one**.
+Warnings, constraints and criteria recorded theirs. A memory dropped for budget
+recorded nothing, so `--explain` could name the section it cut short and never
+say how much went or why — which is the question the explain view exists to
+answer.
+
+## D11 (HIGH) — tasks were pushed to the server and never handed back
+
+`crates/cairn-server/src/sync.rs`, `crates/cairnd/src/sync.rs`
+
+`/api/sync/changes` returned memories, relations, criteria and blockers.
+`privacy-sync.md` lists Task as both sent and stored, the server's `tasks` table
+holds them, and the pull ignored them — so a task created on one machine existed
+nowhere else. Criteria arrived naming a `task_id` that could never arrive, were
+correctly held rather than invented, and stayed held. US11's two machines had no
+task to compute a state digest from.
+
+## D12 (HIGH) — criteria given at creation time were never queued
+
+`crates/cairn-store/src/repo.rs::create_task`
+
+`create_task` seeded its criteria and enqueued only the task. Every criterion
+supplied with `--criterion` was therefore unshared, and only criteria added
+*afterwards* ever crossed. A peer received the task as a shell: zero criteria,
+and a completion readiness of `ready`, because nothing was outstanding.
+
+### The race underneath it, and why it was not the tests
+
+With D11 and D12 fixed, `sync_tasks` still failed about one run in three, always
+the same way: the task present on the peer, its criteria absent. Re-running until
+green would have shipped it.
+
+`enqueue_task` queued the criteria, then the blockers, then the task. A peer that
+polled between two of those pushes saw criteria for a task the server did not
+have yet, correctly declined to invent the task — and the pull cursor had already
+advanced past those criteria, so they were never offered again. The task then
+arrived alone.
+
+The fix is the rule this codebase already states for memories and their
+relations, and which the pull side already follows: **the task is queued before
+the records that belong to it.** Four consecutive clean runs after the reorder.
+
+Worth recording as a residual: the client drops a record it cannot place rather
+than retrying it, while the server's comment says it "holds and retries". With
+push ordering correct and `page_cursor` already pinning the cursor behind a
+truncated page, the reachable exposure is gone — but the comment overstates what
+the client does, and closing it properly needs `updated_at` on the wire and a
+policy for a record that can never be placed.
+
+## What changed in `quickstart.md`
+
+Every block was replaced with what the command actually printed. The corrections
+are all of one kind — the document described an earlier or an intended surface,
+and the code was right:
+
+- `cairn connect claude-code` needs `--yes`; `cairn status` has no schema line
+  (`cairn doctor` reports the schema and the continuity mode);
+- `evidence add` takes `--type`, not `--kind`, and requires a `--locator`, which
+  for a configuration fact must name its key after a `#`;
+- `pattern promote` takes `--applies-when` and `--caveat`; `task blocker open`
+  takes `--description`; `session start` takes `--task`;
+- reinforcement does **not** collapse two statements — the subject stays
+  `corroborated`, and the call that collapses them is
+  `reconcile --relation duplicates --basis explicit_agent`. Verified live before
+  it was written down.
+
+A note at the top of the document now states that the vocabulary is normative and
+the identifiers and spacing are not, so a later reader does not score an elided
+UUID as a deviation.
+
+### One contract discrepancy, recorded rather than fixed
+
+`contracts/mcp-tools.md` describes `next_step` as "the one call that would
+collapse them", and its verbatim string points at `action=reinforce`. Reinforcing
+does not collapse: `derive_subject` keeps both statements, and the collapsing
+call is an explicit `duplicates` relation. The contract's own string was kept —
+contract wins, and inventing a replacement is not this run's call — but the prose
+around it is wrong about its effect. Confirmed by driving both calls live.

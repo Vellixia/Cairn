@@ -166,6 +166,34 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
     selection.reserve_released = budget.reserve_released();
 
     // ---- Level 1 -----------------------------------------------------------
+    // How many items each section had, so an omission can be counted rather
+    // than merely named. FR-461 requires *every* omission to carry a reason,
+    // and `omitted_sections` says only which section was cut short — not how
+    // much of it went, nor why. The explain view is where that has to be
+    // answerable.
+    let section_total = |section: &str| -> usize {
+        match section {
+            "known_failures" => input.known_failures.len(),
+            "decisions" => input.decisions.len(),
+            "task_memory" => input.task_memory.len(),
+            "branch_memory" => input.branch_memory.len(),
+            "project_memory" => input.project_memory.len(),
+            "patterns" => input.patterns.len(),
+            _ => 0,
+        }
+    };
+    let section_kept = |b: &Briefing, section: &str| -> usize {
+        match section {
+            "known_failures" => b.known_failures.len(),
+            "decisions" => b.decisions.len(),
+            "task_memory" => b.memory.task.len(),
+            "branch_memory" => b.memory.branch.len(),
+            "project_memory" => b.memory.project.len(),
+            "patterns" => b.patterns.len(),
+            _ => 0,
+        }
+    };
+
     for section in SECTION_ORDER {
         let admitted = match *section {
             // Admitted above, as Tier 0a.
@@ -205,6 +233,20 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         };
         if !admitted {
             omitted.push((*section).to_string());
+            // Patterns arrive already capped and ordered by the caller, so
+            // anything dropped here went for budget — the only reason this
+            // loop can be the cause of.
+            note_omission(
+                &mut selection,
+                if *section == "patterns" {
+                    "pattern"
+                } else {
+                    "memory"
+                },
+                section_total(section).saturating_sub(section_kept(&briefing, section)),
+                OmissionReason::BudgetExhausted,
+                "cairn memory search",
+            );
         }
     }
 

@@ -244,7 +244,7 @@ async fn rewrite_projection(tx: &mut sqlx::SqliteConnection, task_id: Uuid) -> R
 /// The criteria and blockers themselves are not sent here — that is Phase 10's
 /// work. What must go out now is the retained projection, because a peer's
 /// `tasks.acceptance_criteria` would otherwise drift from this machine's.
-async fn enqueue_task(
+pub(crate) async fn enqueue_task(
     tx: &mut sqlx::SqliteConnection,
     store: &Store,
     policy: SyncPolicy,
@@ -252,6 +252,32 @@ async fn enqueue_task(
 ) -> Result<()> {
     let t = task_tx(&mut *tx, task_id).await?;
     let _ = store;
+
+    // The task first, then the records that belong to it — the same rule the
+    // pull side already follows for memories and their relations, and for
+    // tasks and their criteria.
+    //
+    // Queued the other way round, a peer that pulled between the two pushes saw
+    // criteria for a task the server did not have yet. It correctly declined to
+    // invent the task, so those criteria were dropped — and the pull cursor had
+    // already moved past them, so they were never offered again. The task then
+    // arrived alone, and the peer held a task with no criteria and a completion
+    // readiness of `ready`. Intermittent, because it depended on where the
+    // peer's poll fell between two pushes.
+    //
+    // `enqueue` returns whether a row was written — false when the project is
+    // not linked, which is the ordinary local-only case and not a failure.
+    outbox::enqueue(
+        &mut *tx,
+        policy,
+        t.project_id,
+        cairn_core::domain::OutboxEntityType::Task,
+        task_id,
+        OutboxOperation::Upsert,
+        &outbox::task_payload(&t),
+    )
+    .await?;
+
     // The criteria and blockers themselves, by stable id, so disjoint edits on
     // two machines both land and converge by identity rather than by whichever
     // arrived last (FR-413).
@@ -285,18 +311,6 @@ async fn enqueue_task(
         .await?;
     }
 
-    // `enqueue` returns whether a row was written — false when the project is
-    // not linked, which is the ordinary local-only case and not a failure.
-    outbox::enqueue(
-        &mut *tx,
-        policy,
-        t.project_id,
-        cairn_core::domain::OutboxEntityType::Task,
-        task_id,
-        OutboxOperation::Upsert,
-        &outbox::task_payload(&t),
-    )
-    .await?;
     Ok(())
 }
 
@@ -1433,4 +1447,49 @@ async fn blockers_tx(tx: &mut sqlx::SqliteConnection, task_id: Uuid) -> Result<V
         .fetch_all(&mut *tx)
         .await?;
     rs.iter().map(blocker).collect()
+}
+
+/// Upsert a task that arrived from a peer.
+///
+/// `local_revision` is untouched on purpose. It is this machine's private
+/// concurrency token, never transmitted and never compared across machines
+/// (D80); an import that reset it would make the next optimistic write on this
+/// machine fail against a revision nobody here had read.
+///
+/// The `acceptance_criteria` projection is *not* taken from the peer either. It
+/// is rebuilt from the criteria rows this store holds, which is what keeps the
+/// projection a derived value rather than a second copy that can disagree
+/// (FR-478).
+pub async fn import_task(
+    store: &Store,
+    id: Uuid,
+    project_id: Uuid,
+    title: &str,
+    goal: &str,
+    status: &str,
+    deleted: bool,
+) -> Result<()> {
+    let mut tx = tx::begin(store, "import_task").await?;
+    let now = rows::now_text();
+    sqlx::query(
+        "INSERT INTO tasks
+            (id, project_id, title, goal, acceptance_criteria, status,
+             created_at, updated_at, deleted_at)
+         VALUES (?1, ?2, ?3, ?4, '[]', ?5, ?6, ?6, ?7)
+         ON CONFLICT (id) DO UPDATE SET
+             title = excluded.title, goal = excluded.goal, status = excluded.status,
+             updated_at = excluded.updated_at, deleted_at = excluded.deleted_at",
+    )
+    .bind(id.to_string())
+    .bind(project_id.to_string())
+    .bind(title)
+    .bind(goal)
+    .bind(status)
+    .bind(&now)
+    .bind(deleted.then(|| now.clone()))
+    .execute(&mut *tx)
+    .await?;
+
+    rewrite_projection(&mut tx, id).await?;
+    tx::commit(tx, "import_task").await
 }

@@ -194,28 +194,17 @@ pub async fn create_task(
 
     crate::criteria::seed_criteria_tx(&mut tx, id, criteria, session).await?;
 
-    let created = Task {
-        id,
-        project_id,
-        title: title.to_string(),
-        goal: goal.to_string(),
-        acceptance_criteria: criteria.to_vec(),
-        status: TaskStatus::Todo,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        deleted_at: None,
-    };
-    // Same transaction as the change it describes (D9).
-    outbox::enqueue(
-        &mut *tx,
-        policy,
-        project_id,
-        OutboxEntityType::Task,
-        id,
-        OutboxOperation::Upsert,
-        &outbox::task_payload(&created),
-    )
-    .await?;
+    // Same transaction as the change it describes (D9) — and the criteria as
+    // well as the task.
+    //
+    // Enqueuing only the task left every criterion given at creation time
+    // unqueued and therefore unshared, so a task created with `--criterion`
+    // arrived on a peer as a shell with none of them: zero criteria, and a
+    // completion readiness of `ready` because nothing was outstanding. Only
+    // criteria added *after* creation ever crossed. `enqueue_task` queues the
+    // criteria, the blockers and the task together, which is the same set every
+    // later criterion change already queues.
+    crate::criteria::enqueue_task(&mut tx, store, policy, id).await?;
     tx::commit(tx, "create_task").await?;
     task(store, id).await
 }

@@ -1046,10 +1046,15 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             .await?;
             let payload: ContextPayload =
                 serde_json::from_value(v.clone()).map_err(|e| WireError::invalid(e.to_string()))?;
-            let mut text = render::briefing(&payload);
+            // Divergence leads. A session resuming after a compaction has to
+            // learn that the ground moved before it reads anything written
+            // against the ground it moved from (FR-434).
+            let mut text = render::continuity(&v);
+            text.push_str(&render::briefing(&payload));
             if let Some(selection) = payload.selection.as_ref() {
                 text.push_str(&render::selection(selection));
             }
+            text.push_str(&render::continuity_footer(&v));
             Ok(Output::with(v, text))
         }
 

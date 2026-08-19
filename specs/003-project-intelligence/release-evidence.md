@@ -110,24 +110,65 @@ name, and asserted to fail when one disagrees.
 
 ---
 
-## Live-agent evidence — DOES NOT PASS
+## Live-agent evidence
 
-Each task below is written out so it can be run without re-deriving anything,
-and each states precisely what it needs and how far this run got.
-
-**None of the three passes.** One of them — T148 — was **partially run against a
-live agent in this environment**, and what it produced was a defect rather than
-a confirmation. The status of each is stated exactly below.
-
-> **FEATURE_003_MANUAL_EVIDENCE_PENDING**
->
 > | Task | Status |
 > |---|---|
-> | T146 quickstart walkthrough | **NOT RUN** — blocking |
-> | T147 topic-key effectiveness | **NOT RUN** (harness complete) — not blocking |
-> | T148 live continuity walkthrough | **PARTIALLY RUN, DOES NOT PASS** — blocking; Claude Code driven live and found over-claiming, Codex and OpenCode not driven |
+> | T146 quickstart walkthrough | **RUN, PASSES** — all eleven user stories on a fresh store, real repository, real daemon, real server on real PostgreSQL |
+> | T147 topic-key effectiveness | **DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — owner-approved; not PR-blocking, still release-blocking |
+> | T148 live continuity walkthrough | **Claude Code portion executed**; Codex and OpenCode live portions **DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — owner-approved; not PR-blocking, still release-blocking |
 
-### T146 — the quickstart walkthrough · BLOCKING · NOT RUN
+**The deferral is a decision, not a result.** Nothing in #42 has been run.
+T147 and T148 remain unchecked in `tasks.md` and this feature is **not
+release-ready** until that issue closes.
+
+### Why Codex and OpenCode were deferred
+
+Both need an isolated environment authenticated through the vendor's own
+interactive flow — `CODEX_HOME=<isolated> codex login`, and
+`XDG_DATA_HOME=<isolated> XDG_CONFIG_HOME=<isolated> opencode auth login`.
+Under a fresh home Codex reports `Not logged in`, OpenCode's isolated root holds
+no credentials, and no `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is present, so
+there is no non-interactive path either. An automated session cannot truthfully
+perform an interactive login, and copying the operator's credentials into the
+isolated root is not the supported flow. The operator's `~/.codex` and
+`~/.local/share/opencode/` were left untouched, and Feature 002's ownership
+protection was not weakened to route around it.
+
+### T146 — the quickstart walkthrough · BLOCKING · RUN, PASSES
+
+**How it was run.** A fresh `CAIRN_HOME`, a fresh git repository, `HOME` and
+`XDG_CONFIG_HOME` pointed inside the scratch tree so nothing could reach the
+operator's own agent configuration. A real daemon, and for US7 a real
+`cairn-server` against PostgreSQL 18.4 in a dedicated container on port 5433 —
+plus a second server held at `--max-schema-version 1` on its own database for
+the old-server path. Three stores in all (two machines plus the held-back
+machine), a second git worktree for US3, and a second project for US8 and US9.
+
+| Section | Result |
+|---|---|
+| Prerequisites | `init`, `connect claude-code --yes`, `status`, `doctor` — schema 5, `continuity: agent_initiated` |
+| US1 canonical knowledge | corroboration, explicit reinforcement, automatic duplication, the explicit collapse, the coarse-value-key case, the scope exception |
+| US2 knowledge evolves | supersession settles the subject; `--as-of` returns the historical answer, labelled |
+| US3 conflicts are visible | two worktrees, conflict detected and warned, resolved explicitly to `settled` |
+| US4 evidence-backed | `configuration` verified with `authority: cairn`; attestation reaching `verified/attested`; both strict consumers refusing it |
+| US5 drift detection | file changed, `drifted` with the reason, memory content untouched, superseded deliberately |
+| US6 compression-safe continuity | criteria states and progress in the briefing; checkpoint divergence across commit, task and file digest; an edit no Cairn session made; `continuity agent_initiated` |
+| US7 multi-device | two machines converge on one conflicted subject, a decision on A lands on B, `remote_cairn` and `remote_attested` told apart, blocked work on an old server released on upgrade |
+| US8 reusable patterns | promotion gate passed, pattern offered in a second project, four refusal classes reproduced |
+| US9 counterexamples | trust `sanitized → contested`, alternative cause surfaced, ten repetitions did not manufacture validation |
+| US10 minimum safe context | Level 0 survives a budget that drops everything else; criteria truncate with a retrieval call; every omission carries a reason |
+| US11 evidence-aware tasks | both axes independent, blockers, and two machines converging on one `state_digest` from disjoint offline edits |
+
+**What it found.** Eight defects beyond D1–D4 — D5 through D12 — each fixed with
+a regression, all recorded in implementation-log Checkpoint R. Three of them
+(D9, D11, D12) are unreachable by a single machine, and one was an intermittent
+sync race that was diagnosed rather than re-run until green.
+
+`quickstart.md` was corrected wherever the code was right and the document was
+not; the corrections are listed in Checkpoint R.
+
+### T146 — original statement of the gate
 
 **What it is.** `specs/003-project-intelligence/quickstart.md` end to end on a
 real repository with a live agent, section by section, for all eleven user
@@ -279,22 +320,29 @@ here should be read as it having passed.
 | | |
 |---|---|
 | Automated tasks (T001–T145) | complete, with evidence |
-| Deterministic gates | passing — 1,043 passed, 0 failed, 0 skipped, against real PostgreSQL, run twice |
+| Deterministic gates | passing — **1,077 passed, 0 failed, 1 ignored, 0 skipped**, against real PostgreSQL 18.4 |
 | Inherited Feature 001 / 002 regressions | passing, including against a migrated alpha.4 store |
 | Server migration and mixed-version recovery | verified against a real PostgreSQL and real held-back servers |
-| Independent adversarial review | **performed this run** — see implementation-log Checkpoints O and P |
-| Unresolved CRITICAL / HIGH findings | **none open.** Eleven were found and fixed this run: F1–F8 by review, F9–F10 by driving a real agent, F11 by the final gate |
-| Open deviations | D1–D4, documentation against implementation — recorded, not fixed |
-| **T146 — quickstart walkthrough** | **NOT RUN — needs an operator to drive all eleven sections with a live agent** |
-| **T148 — live continuity walkthrough** | **PARTIALLY RUN, DOES NOT PASS — Claude Code driven live and found over-claiming; Codex and OpenCode not connectable by this run** |
-| T147 — topic-key effectiveness | harness complete, results NOT COLLECTED — non-blocking. False-grouping count **unknown, not zero** |
+| Independent adversarial review | **performed this run** — implementation-log Checkpoints O and P |
+| Real quickstart walkthrough (T146) | **performed this run** — Checkpoint R |
+| Unresolved CRITICAL / HIGH findings | **none open.** Twenty-three were found and fixed this run: F1–F8 by review, F9–F10 by driving a real agent, F11 by the final gate, D1–D12 by the quickstart walkthrough |
+| Open deviations | **none.** D1–D12 are closed; one contract-prose discrepancy is recorded in Checkpoint R |
+| **T146 — quickstart walkthrough** | **RUN, PASSES** |
+| **T147 — topic-key effectiveness** | **DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking. False-grouping count **unknown, not zero** |
+| **T148 — live continuity walkthrough** | Claude Code portion executed; **Codex and OpenCode DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking |
 
-Two release-blocking gates have not passed. Until they have, this feature is
-implementation-complete and **not** release-ready.
+**146 of 148 tasks complete. 2 deferred to #42.** Nothing deferred is recorded
+as passed.
+
+This feature is implementation-complete, its automated verification is complete,
+its quickstart evidence is complete — and it is **not release-ready**. #42 is a
+release blocker. It does not block opening the PR.
 
 The honest summary of this run is that the earlier "0 unresolved CRITICAL/HIGH"
-was true of the tests and false of the code. A separate review found eight
-defects in a green branch, and driving one real agent found two more — including
-a build that told Claude Code its continuity was automatic and then dropped it
-silently. That is the argument for tier 5 in one sentence, and it is why T146
-and T148 remain blocking rather than being written off as formalities.
+was true of the tests and false of the code, twice over. An independent review
+found eight defects in a green branch. Driving one real agent found two more —
+including a build that told Claude Code its continuity was automatic and then
+dropped it silently. Then walking the quickstart on real infrastructure found
+twelve more, three of which no single machine could have seen, and one of which
+was an intermittent sync race that would have been shipped by anyone re-running
+until green. That is the argument for tiers 4 and 5 in one paragraph.

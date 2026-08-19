@@ -73,11 +73,54 @@ pub fn briefing(payload: &ContextPayload) -> String {
             "\n## Task: {} ({})\n{}\n",
             t.title, t.status, t.goal
         ));
-        if !t.acceptance_criteria.is_empty() {
+        // Both axes, never collapsed: what somebody *asserted* about a
+        // criterion and what Cairn *checked* are different claims, and printing
+        // one of them would be the collapse FR-483 exists to prevent. The
+        // payload has carried these since Tier 0a landed; nothing rendered
+        // them, so the agent reading the briefing saw a list of sentences and
+        // could not tell which were done.
+        if !t.criteria.is_empty() {
+            out.push_str("\nAcceptance criteria:\n");
+            for c in &t.criteria {
+                out.push_str(&format!(
+                    "- {} {} · {} — {}\n",
+                    c.label, c.state, c.verification, c.text
+                ));
+            }
+            if let Some(omitted) = t.criteria_omitted {
+                out.push_str(&format!(
+                    "  (+{omitted} more — `cairn task show {}`)\n",
+                    t.id
+                ));
+            }
+        } else if !t.acceptance_criteria.is_empty() {
+            // A Feature 001 payload, which carries the text and nothing else.
             out.push_str("\nAcceptance criteria:\n");
             for c in &t.acceptance_criteria {
                 out.push_str(&format!("- {c}\n"));
             }
+        }
+
+        // Counts, never a percentage: there is no field for one (FR-486).
+        if let Some(p) = &t.progress {
+            out.push_str(&format!(
+                "\nProgress: {} verified · {} satisfied but unverified · {} blocked · {} pending",
+                p.verified, p.satisfied_unverified, p.blocked, p.pending
+            ));
+            if p.waived > 0 {
+                out.push_str(&format!(" · {} waived", p.waived));
+            }
+            out.push('\n');
+        }
+        if let Some(r) = &t.completion_readiness {
+            out.push_str(&format!("Readiness: {r}\n"));
+        }
+        if let Some(blocker) = &t.blocker {
+            let more = match t.open_blockers {
+                Some(n) if n > 1 => format!(" (+{} more open)", n - 1),
+                _ => String::new(),
+            };
+            out.push_str(&format!("Blocked by: {blocker}{more}\n"));
         }
     }
 
@@ -887,6 +930,99 @@ pub fn selection(s: &cairn_core::wire::Selection) -> String {
         }
     }
     out
+}
+
+/// What a post-compaction read must be told before anything else (FR-426,
+/// FR-434).
+///
+/// The daemon has always returned the checkpoint's classification — the commit
+/// it was recorded at, the task digest, every relevant path whose fingerprint
+/// moved — and the mode the integration actually delivers. None of it was
+/// rendered, so an agent resuming after a compaction read a briefing that
+/// looked exactly like a fresh one and carried on from a commit that had moved.
+///
+/// It leads, because a stale next action acted on is worse than no next action
+/// at all. And the recorded action is labelled **previous**, never `next`: it
+/// was written against a state that no longer holds, and presenting it as the
+/// thing to do would be the confident wrong answer this whole tier exists to
+/// prevent.
+pub fn continuity(v: &serde_json::Value) -> String {
+    let checkpoint = &v["checkpoint"];
+    let mut out = String::new();
+
+    let state = checkpoint["classification"]["state"].as_str().unwrap_or("");
+    if state == "diverged" {
+        out.push_str("⚠ CHECKPOINT DIVERGED\n");
+        for d in checkpoint["classification"]["divergences"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            let kind = d["kind"].as_str().unwrap_or("?");
+            let recorded = d["recorded"].as_str().unwrap_or("?");
+            let current = d["current"].as_str().unwrap_or("?");
+            match kind {
+                "commit" => out.push_str(&format!(
+                    "    recorded at {}\n    now at      {}\n",
+                    short(recorded),
+                    short(current)
+                )),
+                "task" => out.push_str("    the task changed since the checkpoint\n"),
+                "files" => out.push_str(&format!("    files changed: {current}\n")),
+                other => out.push_str(&format!("    {other}: {recorded} → {current}\n")),
+            }
+        }
+        for p in checkpoint["classification"]["paths"]
+            .as_array()
+            .into_iter()
+            .flatten()
+        {
+            // A path Cairn could not fingerprint says so rather than pretending
+            // it was unchanged.
+            let path = p["path"].as_str().unwrap_or("?");
+            let outcome = p["outcome"].as_str().unwrap_or("?");
+            let class = p["current_class"].as_str().unwrap_or("?");
+            if outcome != "unchanged" {
+                out.push_str(&format!("      {path}  ({outcome}, {class})\n"));
+            }
+        }
+    }
+
+    if let Some(previous) = v["briefing"]["previous_next_action"]
+        .as_str()
+        .or_else(|| checkpoint["previous_next_action"].as_str())
+    {
+        if state == "diverged" {
+            out.push_str(&format!(
+                "    previous next action (may be stale):\n        \"{previous}\"\n"
+            ));
+        }
+    }
+
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+/// The continuity a session's integration actually delivers, and the count that
+/// says whether it has ever been exercised here (FR-426).
+pub fn continuity_footer(v: &serde_json::Value) -> String {
+    let Some(mode) = v["continuity_mode"].as_str() else {
+        return String::new();
+    };
+    let restores = v["checkpoint"]["restore_count"].as_i64();
+    let mut line = format!("\n---\ncontinuity {mode}");
+    if let Some(n) = restores {
+        line.push_str(&format!(" · checkpoint restored {n} time(s)"));
+    }
+    line.push('\n');
+    line
+}
+
+/// The first twelve characters of an object name, which is what a person reads.
+fn short(sha: &str) -> String {
+    sha.chars().take(12).collect()
 }
 
 #[cfg(test)]

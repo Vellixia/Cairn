@@ -7,6 +7,12 @@ independently runnable and each ends in something a developer can see.
 
 Everything below runs offline. No server, no API key, no network.
 
+Every block below was produced by running the command against a real repository with a real daemon
+(T146). **The vocabulary is normative; the identifiers and the spacing are not.** Identifiers are
+elided as `0192f4…` throughout, counts and timestamps are whatever the walk produced, and a reader
+checking this document against a run should score the outcome words, the field names and the shape —
+not a full UUID where an ellipsis stands.
+
 ## Prerequisites
 
 ```bash
@@ -15,19 +21,43 @@ export PATH="$PWD/target/release:$PATH"
 
 cd ~/src/your-git-repo
 cairn init
-cairn connect claude-code            # or codex, opencode
+cairn connect claude-code --yes      # or codex, opencode
 ```
 
-An existing Cairn store upgrades in place at first open. `cairn status` shows the schema version:
+`connect` writes to your agent's configuration, so it asks first: without `--yes` it refuses with
+`confirmation_required` and offers `--dry-run`.
+
+`cairn status` is the project at a glance, including how far subject identity has actually reached
+here (FR-499) and what wants attention:
 
 ```bash
 cairn status
-#   project        your-git-repo
-#   branch         main @ abc1234
-#   schema         5
-#   memory         412 memories · 38 with a subject · 4 pinned
-#   knowledge      2 conflicted subjects · 7 needing recheck · 1 drifted
-#   integrations   claude-code (FULL) · continuity: automatic
+#   Project      your-git-repo (0192c0…)
+#   Sharing      local only
+#   Worktree     /Users/you/src/your-git-repo
+#   Branch       main @ abc1234
+#   Working tree 0 staged, 0 unstaged, 2 untracked
+#   Integration  claude-code-hooks
+#   Daemon       running
+#   Recorded     1204 observations, 412 memories
+#   Subjects     9% of project memory (38 of 412)
+#   Attention    2 conflicted · 1 drifted
+#   Sessions     none active
+```
+
+`Subjects` and `Attention` appear only when there is something to say: a project with no subjects has
+no share to report, and one with nothing conflicted or drifted has nothing to draw attention to.
+
+An existing Cairn store upgrades in place at first open. The schema version, and what each connected
+agent's continuity actually is, come from `cairn doctor`:
+
+```bash
+cairn doctor
+#   core        cli 0.1.0-alpha.4 · daemon 0.1.0-alpha.4 · schema 5 · project registered
+#
+#   claude-code  MCP_PLUS
+#                continuity: agent_initiated — Cairn is warned before compaction but not
+#                called back after; the agent must ask for context with reason=post_compaction
 ```
 
 ---
@@ -57,9 +87,22 @@ cairn memory reinforce 0192f4… --from 0192f7…
 ```
 
 Cairn will not decide for you that two differently-worded statements are one claim — that needs reading
-them, which is judgement, not a rule. It tells you which memory yours agrees with and makes collapsing
-them one call. If you skip the call, nothing is lost: both stand, and the briefing shows one plus a
-count.
+them, which is judgement, not a rule. It tells you which memory yours agrees with and makes deciding
+one call. If you skip the call, nothing is lost: both stand, and the briefing shows one plus a count.
+
+**Reinforcing is not merging.** It records that a session found the memory still true, which is a real
+act with a real author, and both statements remain answers — the subject stays `corroborated`. If you
+have read both and they really are the same claim, the call that says so is `reconcile`:
+
+```bash
+cairn memory reconcile --from 0192f7… --to 0192f4… \
+  --relation duplicates --basis explicit_agent \
+  --rationale "same claim, different wording"
+#   Decision recorded.
+```
+
+Now the subject has one answer and the other statement is accounted for as its duplicate — still
+individually retrievable, with its own provenance.
 
 An **identical** statement needs no call at all:
 
@@ -75,14 +118,17 @@ Ask what the project holds:
 
 ```bash
 cairn memory subject infrastructure.production_database
-#   SUBJECT  infrastructure.production_database  (project)
-#   state    reinforced
-#   answer   postgresql — "Production runs PostgreSQL 16"
-#            reinforced 2 times · 3 distinct origin sessions · unverified
-#   members  3 (all retrievable individually with their own provenance)
-#   decisions
-#     0192f5… reinforces 0192f4…  (explicit_agent,     session 0192a1…, claude-code)
-#     0192f6… duplicates 0192f4…  (deterministic_rule, session 0192b7…, codex)
+#   # infrastructure.production_database (project:0192c0…)
+#
+#   **Reconciliation**: reinforced
+#
+#   ## Answers
+#   - postgresql — "Production runs PostgreSQL 16" `0192f4…` — unverified · 2 duplicate statements · 3 distinct origins
+#
+#   ## Decisions
+#   - reinforces `0192f7…` → `0192f4…` (explicit_agent)
+#   - duplicates `0192f7…` → `0192f4…` (explicit_agent)
+#   - duplicates `0192f6…` → `0192f4…` (deterministic_rule)
 ```
 
 ### A coarse value key does not merge two different claims
@@ -97,12 +143,15 @@ cairn memory add --type decision --scope project \
 #   → if this is the same claim: cairn memory reinforce 0192h1… --from 0192h2…
 
 cairn memory subject auth.strategy
-#   SUBJECT  auth.strategy  (project)
-#   state    CORROBORATED — the value is agreed, the statements are not
-#   value    jwt
-#   answers  "JWT uses HS256 with a shared secret"        (0192h1…, claude-code)
-#            "JWT uses RS256 with rotating public keys"   (0192h2…, codex)
-#   no reinforcement recorded — these are different claims about one value
+#   # auth.strategy (project:0192c0…)
+#
+#   **Reconciliation**: corroborated
+#
+#   The value is agreed and the statements are several: 2 distinct statements.
+#
+#   ## Answers
+#   - jwt — "JWT uses HS256 with a shared secret" `0192h1…` — unverified
+#   - jwt — "JWT uses RS256 with rotating public keys" `0192h2…` — unverified
 ```
 
 Both survive. Neither is suppressed. The briefing shows one plus `+1 further statement`, and an agent
@@ -129,11 +178,21 @@ simultaneously applicable, so there is no conflict to detect.
 ```
 
 ```bash
+cairn memory subject infrastructure.production_database --scope task --scope-key <task-id>
+#   # infrastructure.production_database (task:0192t1…)
+#
+#   **Reconciliation**: settled
+#
+#   ## Answers
+#   - sqlite — "This fixture suite uses SQLite in-memory" `0192s1…` — unverified
+
 cairn memory subject infrastructure.production_database
-#   SUBJECT  infrastructure.production_database
-#   project  postgresql — reinforced ×2
-#   task     sqlite     — narrows the project answer
-#   state    settled per scope · NO CONFLICT
+#   # infrastructure.production_database (project:0192c0…)
+#
+#   **Reconciliation**: reinforced
+#
+#   ## Answers
+#   - postgresql — "Production runs PostgreSQL 16" `0192f4…` — unverified · 2 duplicate statements · 3 distinct origins
 ```
 
 **What you see**: inside that task the answer is SQLite; everywhere else it is PostgreSQL. No false
@@ -147,15 +206,36 @@ alarm.
 cairn memory supersede --memory-id 0192f4… --type decision --scope project \
   --topic-key infrastructure.production_database --value-key cockroachdb \
   "Migrated production to CockroachDB in the 2026-08 migration"
+#   Remembered 0192k1….
+#     supersedes 0192f4…
 ```
 
-```bash
-cairn memory search --topic-key infrastructure.production_database
-#   [decision] Migrated production to CockroachDB…   active   value: cockroachdb
+The subject settles on the replacement. The statements that duplicated the memory you replaced follow
+it into history — Cairn had already decided they were not separate claims, so promoting them to
+competitors now would manufacture a conflict out of nothing (FR-321):
 
+```bash
+cairn memory subject infrastructure.production_database
+#   **Reconciliation**: settled
+#
+#   ## Answers
+#   - cockroachdb — "Migrated production to CockroachDB in the 2026-08 migration" `0192k1…` — unverified
+
+cairn memory search --topic-key infrastructure.production_database
+#   0192k1…  [decision/project] Migrated production to CockroachDB in the 2026-08 migration
+#       active · value: cockroachdb
+#       from claude-code session 0192a1… · 0 evidence
+```
+
+Ask what was true before, at any instant Cairn recorded:
+
+```bash
 cairn memory search --topic-key infrastructure.production_database --as-of 2026-08-01T00:00:00Z
-#   as_of 2026-08-01T00:00:00Z
-#   [fact] Production runs PostgreSQL 16              superseded  value: postgresql
+#   as_of 2026-08-01T00:00:00Z — what this project believed then, not now
+#
+#   0192f4…  [fact/project] Production runs PostgreSQL 16
+#       superseded · value: postgresql
+#       from claude-code session 0192a1… · 0 evidence
 ```
 
 **What you see**: today's answer, and July's answer, both correct. Reading a July session's handoff now
@@ -182,10 +262,19 @@ cairn memory add --type fact --scope project \
 
 ```bash
 cairn context
-#   ⚠ CONFLICT  deploy.queue_backend
-#       sqs      — "Deploys queue through SQS"       (claude-code, session 0192c1…)
-#       rabbitmq — "Deploys queue through RabbitMQ"  (codex,       session 0192c4…)
-#       unresolved — resolve with `cairn memory reconcile`
+#   ## Warnings
+#   1 conflict
+#   ⚠ CONFLICT deploy.queue_backend — 2 competing answers (rabbitmq, sqs) and no recorded decision
+
+cairn memory subject deploy.queue_backend
+#   **Reconciliation**: conflicted
+#
+#   ⚠ 2 competing answers, and no winner. Resolve by superseding one, narrowing its scope,
+#     or attaching verification that distinguishes them.
+#
+#   ## Answers
+#   - sqs — "Deploys queue through SQS" `0192c1…` — unverified
+#   - rabbitmq — "Deploys queue through RabbitMQ" `0192c4…` — unverified
 ```
 
 **What you see**: both, attributed, with no winner picked. Resolve it deliberately:
@@ -194,7 +283,13 @@ cairn context
 cairn memory reconcile --from <rabbitmq-id> --to <sqs-id> \
   --relation supersedes --basis explicit_user \
   --rationale "SQS was decommissioned in July"
-#   subject deploy.queue_backend: settled → rabbitmq
+#   Decision recorded.
+
+cairn memory subject deploy.queue_backend
+#   **Reconciliation**: settled
+#
+#   ## Answers
+#   - rabbitmq — "Deploys queue through RabbitMQ" `0192c4…` — unverified
 ```
 
 ---
@@ -205,53 +300,79 @@ cairn memory reconcile --from <rabbitmq-id> --to <sqs-id> \
 cairn memory add --type fact --scope project \
   --topic-key service.api_port --value-key 8080 "The API listens on 8080"
 
-cairn evidence add --memory <id> --kind configuration \
-  --subject "API port" --value 8080 --locator config/app.yml
-#   evidence 0192d1…  collector: cairn  digest: 9f2e…
+cairn evidence add --memory <id> --type configuration \
+  --subject "API port" --value 8080 --locator "config/app.yml#server.port"
+#   Evidence 0192d1… recorded.  collector: cairn
 
+cairn verify --memory <id> --explain
+#   ✓ verified                      (authority: cairn)
+#
+#   ## Runs
+#   - configuration → verified at 2026-08-14T09:12:04Z (on_demand)
+```
+
+A configuration locator names its key after a `#`. Without one there is nothing to compare, and the
+run says so rather than failing silently:
+
+```bash
 cairn verify --memory <id>
-#   verified  ·  configuration @ config/app.yml  ·  abc1234 on main  ·  2026-08-14T09:12:04Z
-#   authority: cairn  (a deterministic check Cairn ran itself)
+#   · unverified
+#     last run: configuration → inconclusive
+#     the locator names no key
 ```
 
 ```bash
 cairn memory search --topic-key service.api_port
-#   [fact] The API listens on 8080   active  ✓ verified (configuration) 2026-08-14  authority: cairn
-```
-
-An assertion of importance is not evidence:
-
-```bash
-cairn evidence add --memory <id> --kind runtime_state \
-  --subject "the team thinks this matters" --value important
-#   error: verifier_unavailable — no deterministic verifier for that subject
+#   0192e1…  [fact/project] The API listens on 8080
+#       active · value: 8080 · verified (cairn)
+#       from claude-code session 0192a1… · 0 evidence
 ```
 
 ### Attested evidence is useful, and never wears the same badge
 
 Cairn cannot call a staging API. An agent can, and telling Cairn the result is worth recording:
 
-```bash
-cairn evidence add --memory <id> --kind runtime_state --collector agent \
-  --subject "GET /health version field" --value "2.4.1"
-cairn verify --memory <id>
-#   verified  ·  runtime_state  ·  authority: attested
-#              established by an agent's submission, not by a check Cairn ran
+The attestation **is** the act that establishes the claim — Cairn will never re-collect it, so there is
+nothing else to run:
 
-cairn memory search --topic-key service.version
-#   [fact] The service reports 2.4.1   active  ✓ verified (attested)  authority: attested
+```bash
+cairn evidence add --memory <id> --type runtime_state --collector agent \
+  --subject "GET /health version field" --value "2.4.1" --locator config/app.yml
+#   Evidence 0192d9… recorded.  collector: agent
+
+cairn memory show <id>
+#   verification  verified (attested)
+```
+
+Asking Cairn to re-check it says exactly what it can and cannot do, and leaves a recheck owed:
+
+```bash
+cairn verify --memory <id>
+#   · needs_recheck
+#     last run: runtime_state → inconclusive
+#     attested evidence is not re-collected; the agent must attest again
+```
+
+Attesting again pays it off — which is what stops an attested claim becoming permanently
+unfalsifiable *and* stops it becoming permanently stale:
+
+```bash
+cairn evidence add --memory <id> --type runtime_state --collector agent \
+  --subject "GET /health version field" --value "2.4.1" --locator config/app.yml
+cairn memory show <id>
+#   verification  verified (attested)
 ```
 
 It is `verified`, and it says how. The two places where that difference decides something both refuse it:
 
 ```bash
-cairn task criterion verify <ac-id>
-#   error: attested_not_sufficient
-#     A criterion is verified only on evidence Cairn collected itself.
+cairn task criterion verify <ac-id> --evidence <attested-evidence-id>
+#   cairn: attested_not_sufficient: that criterion is not verified: no deterministic check
+#          this machine ran over Cairn-collected evidence established it
 
-cairn pattern promote --memory <id> --dry-run
-#   refused: attested_not_sufficient
-#     Cross-project promotion needs a deterministic check Cairn ran on this machine.
+cairn pattern promote --memory <id> --dry-run --signal … --applies-when … --approach …
+#   cairn: attested_not_sufficient: the source is verified by an agent's attestation;
+#          promotion requires a deterministic check Cairn ran itself
 ```
 
 ---
@@ -262,23 +383,38 @@ cairn pattern promote --memory <id> --dry-run
 sed -i '' 's/port: 8080/port: 9000/' config/app.yml
 cairn verify --memory <id>          # or wait for the maintenance pass
 
+cairn verify --memory <id>
+#   · drifted
+#     last run: configuration → drifted
+#     the configuration value differs from what was recorded
+
 cairn memory search --topic-key service.api_port
-#   [fact] The API listens on 8080   active  ⚠ drifted
-#          evidence config/app.yml now reads 9000 (was 8080)
+#   0192e1…  [fact/project] The API listens on 8080
+#       active · value: 8080 · drifted
+#       from claude-code session 0192a1… · 0 evidence
 ```
 
 ```bash
 cairn context
-#   ⚠ DRIFT  service.api_port — remembered 8080, config/app.yml now says 9000
+#   ## Warnings
+#   1 drift
+#   ⚠ DRIFT service.api_port — remembered "The API listens on 8080" — its evidence moved
 ```
 
-The memory content is untouched. Cairn did not rewrite it and did not invent a replacement:
+The memory content is untouched. Cairn did not rewrite it and did not invent a replacement — the
+lifecycle state and the verification state are separate axes, and only the second moved:
 
 ```bash
 cairn memory show <id>
-#   content   The API listens on 8080        ← unchanged
-#   state     active
+#   content       The API listens on 8080        ← unchanged
+#   id            0192e1…
+#   type          fact · project
+#   state         active
 #   verification  drifted
+#   evidence      1 fact(s) · configuration
+#   subject       service.api_port = 8080
+#                 settled · a canonical answer
+#   from          claude-code session 0192a1…
 ```
 
 Replacing it is your call:
@@ -299,7 +435,7 @@ cairn task new --title "Retry backoff" --goal "Transient failures retry with jit
   --criterion "backoff is exponential with jitter" \
   --criterion "the retry cap is configurable" \
   --criterion "cargo test --workspace passes"
-cairn session start --agent claude-code --task-id <task-id>
+cairn session start --agent claude-code --task <task-id>
 ```
 
 Work normally. Cairn captures. At each compaction boundary the adapter fires
@@ -307,16 +443,38 @@ Work normally. Cairn captures. At each compaction boundary the adapter fires
 
 ```bash
 cairn context
-#   TASK       Retry backoff — transient failures retry with jitter    (in_progress)
-#   CRITERIA   AC-1 satisfied ✓verified · AC-2 pending · AC-3 satisfied (unverified)
-#   PROGRESS   1 verified · 1 satisfied but unverified · 0 blocked · 1 pending
-#   NEXT       add the configurable cap to RetryConfig
-#   CONSTRAINTS
-#     • never mutate CC Switch's private database directly
-#   REJECTED   fixed 100 ms sleep — thundering herd under load
-#   REPOSITORY main @ def4567 · 3 unstaged
-#   continuity automatic · checkpoint restored 10 times · state current
+#   # Cairn context
+#
+#   **Project**: your-git-repo
+#   **Repository**: branch `main`, commit `def4567…`, working tree 0 staged, 3 unstaged, 0 untracked
+#
+#   ## Constraints
+#   - Never mutate CC Switch's private database directly
+#
+#   ## Task: Retry backoff (todo)
+#   Transient failures retry with jitter
+#
+#   Acceptance criteria:
+#   - AC-1 satisfied · verified — backoff is exponential with jitter
+#   - AC-3 satisfied · unverified — cargo test --workspace passes
+#   - AC-2 pending · unverified — the retry cap is configurable
+#
+#   Progress: 1 verified · 1 satisfied but unverified · 0 blocked · 1 pending
+#   Readiness: not_ready
+#
+#   ## Previous session
+#   Next step: add the configurable cap to RetryConfig
+#
+#   ## Known failures
+#   - A fixed 100 ms sleep — thundering herd under load
+#
+#   ---
+#   continuity agent_initiated · checkpoint restored 10 time(s)
 ```
+
+Both axes on every criterion, never collapsed: what somebody *asserted* about it and what Cairn
+*checked* are different claims (FR-483). The progress counts and the readiness are O(1) in the size of
+the task, which is what makes them survivable at any budget.
 
 **What you see**: after ten compactions the agent still knows the goal, the criteria and their states,
 what is left, what was already ruled out, and what to do next — from Cairn, not from a summary.
@@ -337,14 +495,24 @@ Session A resumes:
 ```bash
 cairn context --reason post_compaction
 #   ⚠ CHECKPOINT DIVERGED
-#       recorded at abc123 on main
-#       current:      def456 on main
-#       task changed: AC-4 added "production smoke passes"   (another machine)
-#                     blocker opened "staging credentials"    (this machine)
-#       files changed: src/config.rs  (digest differs; session 0192e9…, claude-code)
+#       recorded at abc123456789
+#       now at      def456789abc
+#       the task changed since the checkpoint
+#       files changed: src/config.rs
+#         src/config.rs  (changed, digest)
 #       previous next action (may be stale):
 #           "finish the retry backoff in config.rs"
+#
+#   # Cairn context
+#   …
+#   ## Warnings
+#   1 task_divergence
+#   ⚠ TASK_DIVERGENCE AC-4 — criterion added — "production smoke passes" (this_machine)
 ```
+
+The divergence leads, before anything written against the state that moved. The recorded action is
+labelled **previous**, never `next`: acting on a stale instruction confidently is the failure this
+tier exists to prevent (FR-434).
 
 **What you see**: Cairn does not tell you to carry on editing `config.rs` from a commit that has moved.
 
@@ -359,11 +527,13 @@ git status --short                     # M src/config.rs — commit unchanged
 
 cairn context --reason post_compaction
 #   ⚠ CHECKPOINT DIVERGED
-#       commit unchanged (abc123)
-#       files changed: src/config.rs  (digest differs; no Cairn session recorded a change)
+#       files changed: src/config.rs
+#         src/config.rs  (changed, digest)
 #       previous next action (may be stale):
 #           "finish the retry backoff in config.rs"
 ```
+
+The commit is unchanged, so no commit divergence is reported — only the fingerprint that moved.
 
 **What you see**: the checkpoint compares the fingerprint it recorded, so it does not matter who made
 the change or whether Cairn was watching. And a path it cannot fingerprint says so rather than
@@ -371,22 +541,29 @@ pretending:
 
 ```bash
 cairn session checkpoint
-#   checkpoint 0192j1…  ·  8 relevant paths fingerprinted
-#     6 digest · 1 size (vendor/large.bin exceeds the payload cap) · 1 unknown (secrets/** excluded)
+#   Checkpoint recorded over 8 relevant paths.
 ```
+
+The relevant paths are the ones this session actually touched, taken from what Cairn captured — a
+session that has touched nothing checkpoints over none, and says so.
 
 ### An agent without a post-compaction signal
 
 ```bash
 cairn doctor
-#   opencode   MCP_PLUS
-#     continuity: agent_initiated
-#       A checkpoint is written before compaction. This agent provides no
-#       post-compaction signal, so continuity is not restored automatically —
-#       call cairn_context(reason=post_compaction) after a compaction.
+#   claude-code  MCP_PLUS
+#                continuity: agent_initiated — Cairn is warned before compaction but not
+#                called back after; the agent must ask for context with reason=post_compaction
+#
+#   generic-mcp  MCP_ONLY   (no automatic session start)
+#                continuity: unavailable_automatic — this agent reports no compaction event;
+#                write a checkpoint with cairn_session action=checkpoint before you compact
 ```
 
-Honest, and specific about what to do instead.
+Honest, and specific about what to do instead. **Cairn may under-promise a capability; it must never
+claim a continuity mode the integration cannot deliver.** Claude Code writes the checkpoint before a
+compaction and has no supported channel to return context afterwards, so it reports
+`agent_initiated` — not `automatic`.
 
 ---
 
@@ -406,11 +583,14 @@ Both reconnect:
 ```bash
 cairn sync now      # on each machine
 cairn memory subject infrastructure.production_database
-#   SUBJECT  infrastructure.production_database  (project)
-#   state    CONFLICTED
-#   answers  postgresql  — machine A, session 0192f1… (claude-code)
-#            cockroachdb — machine B, session 0192f8… (codex)
-#   no winner selected — resolve with `cairn memory reconcile`
+#   **Reconciliation**: conflicted
+#
+#   ⚠ 2 competing answers, and no winner. Resolve by superseding one, narrowing its scope,
+#     or attaching verification that distinguishes them.
+#
+#   ## Answers
+#   - postgresql — "prod is PostgreSQL" `0192f1…` — unverified
+#   - cockroachdb — "prod is CockroachDB" `0192f8…` — unverified
 ```
 
 Identical on both machines, and identical whichever machine's clock is ahead. Nothing was decided by a
@@ -427,9 +607,13 @@ cairn sync now
 # machine B
 cairn sync now
 cairn memory subject infrastructure.production_database
-#   state   settled
-#   answer  cockroachdb
-#   the postgresql memory is superseded here too, from A's recorded decision
+#   **Reconciliation**: settled
+#
+#   ## Answers
+#   - cockroachdb — "prod is CockroachDB" `0192f8…` — unverified
+#
+#   ## Decisions
+#   - supersedes `0192f8…` → `0192f1…` (explicit_user)
 ```
 
 ### A peer's verification says how it was established
@@ -437,16 +621,19 @@ cairn memory subject infrastructure.production_database
 ```bash
 # machine B, reading a memory machine A verified
 cairn memory search --topic-key service.api_port
-#   [fact] The API listens on 8080   active
-#          ✓ verified elsewhere  authority: remote_cairn
-#            a deterministic check on another machine, 2026-08-14
+#   0192e1…  [fact/project] The API listens on 8080
+#       active · value: 8080 · verified (remote_cairn)
+#       from unknown session 0192a1… · 0 evidence
 
 # and one machine A only attested
 cairn memory search --topic-key service.version
-#   [fact] The service reports 2.4.1   active
-#          ✓ verified elsewhere (attested)  authority: remote_attested
-#            an agent's submission on another machine — not a check
+#   0192v1…  [fact/project] The service reports 2.4.1
+#       active · value: 2.4.1 · verified (remote_attested)
+#       from unknown session 0192a1… · 0 evidence
 ```
+
+On machine A itself both keep the authority A established — a round trip through the server never
+turns a check this machine ran into someone else's.
 
 **What you see**: two verifications that would have looked identical now do not. Neither counts toward
 this machine's task readiness, and neither can be promoted from here.
@@ -457,11 +644,18 @@ this machine's task readiness, and neither can be promoted from here.
 # server still on Feature 001's schema
 cairn sync now
 cairn sync status
-#   pending 0 · blocked 3 · failed 0 · last success 2026-08-14T09:14:02Z
-#   ⚠ degraded: this server does not accept memory relations or task criteria
-#     (server schema 1, this build expects 2). 3 items are retained and will be
-#     delivered automatically when the server is upgraded. Memories, tasks,
-#     sessions and handoffs are syncing normally.
+#   Linked       yes
+#   Pending      0
+#   Failed       0
+#   Last success 2026-08-14T09:14:02Z
+#   Blocked      3 (waiting for: memory_relations, memory_subject_identity or memory_verification)
+#     server: schema=1;capabilities=
+#     3 item(s) are waiting for this server to gain memory_relations, memory_subject_identity or
+#     memory_verification. Everything else syncs normally (0 queued), nothing has been lost, and the
+#     retained work is delivered automatically once the server is upgraded.
+
+cairn status
+#   Retained     3 item(s) waiting for: memory_relations, memory_subject_identity or memory_verification
 ```
 
 Nothing is lost and nothing is retried pointlessly. Upgrade the server, and the next drain cycle notices:
@@ -469,11 +663,11 @@ Nothing is lost and nothing is retried pointlessly. Upgrade the server, and the 
 ```bash
 # after the server is upgraded
 cairn sync now
-#   server capability changed (schema 1 → 2) · released 3 blocked items
-#   applied 3 · duplicate 0 · rejected 0
-
 cairn sync status
-#   pending 0 · blocked 0 · failed 0 · last success 2026-08-14T11:02:18Z
+#   Linked       yes
+#   Pending      0
+#   Failed       0
+#   Last success 2026-08-14T11:02:18Z
 
 # machine B
 cairn sync now
@@ -492,50 +686,75 @@ In project A, a verified fix:
 ```bash
 cairn memory add --type procedure --scope project \
   "Expand Docker's default-address-pools when bridge network creation fails with an address-pool error"
-cairn evidence add --memory <id> --kind command_outcome \
-  --subject "docker network create" --value "exit 0 after pool expansion" \
-  --observation-id <captured-observation>
-cairn verify --memory <id>          # verified
+cairn evidence add --memory <id> --type configuration \
+  --subject "docker default address pools" --value expanded \
+  --locator "config/docker.yml#default-address-pools"
+cairn verify --memory <id>
+#   ✓ verified                      (authority: cairn)
 
 cairn pattern promote --memory <id> \
   --signal "could not find an available non-overlapping ipv4 address pool" \
   --signal "docker bridge network create failure" \
-  --applies "Docker bridge networking in use" \
-  --applies "the error names address-pool allocation" \
+  --applies-when "Docker bridge networking is in use" \
+  --applies-when "the error names address-pool allocation" \
   --root-cause "the daemon's default-address-pools are fully allocated" \
   --approach "expand default-address-pools in the daemon configuration and restart" \
-  --constraint "existing networks are not migrated to the new pool"
-#   pattern 0192g1…  trust: sanitized  origin: opaque
-#   sanitization: 10/10 checks passed
+  --caveat "existing networks are not migrated to the new pool"
+#   promoted 0192g1…
+#     Expand Docker's default-address-pools when bridge network creation fails with an address-pool error
+
+cairn pattern list
+#   0192g1…  Expand Docker's default-address-pools when bridge network creation fails…
+#     trust sanitized · applications 0 · distinct projects 0 · independently validated in 0 · counterexamples 0
 ```
 
 Now in project B, months later, the same error surfaces and Cairn captures it:
 
 ```bash
 cairn context
-#   PRIOR PATTERN (unverified in this project)
-#     Docker cannot allocate a non-overlapping bridge network — trust: sanitized
-#     Applies when: Docker bridge networking · the error names address-pool allocation
-#     Known approach: expand default-address-pools and restart
-#     Caveat: existing networks are not migrated
+#   ## Patterns from other projects (unverified here)
+#   - **Expand Docker's default-address-pools when bridge network creation fails with an
+#     address-pool error** (sanitized, 10 signals matched): expand default-address-pools in the
+#     daemon configuration and restart
 ```
+
+A pattern is offered under its own heading and never mixed into this project's memory — a separate
+array on the wire, and a separate section here, so it cannot be read as something this project knows.
 
 **What you see**: the prior fix, offered — and explicitly not claimed to be true here.
 
 ### Promotion refuses what it should
 
+The gate runs in order, and the first thing it asks is whether the source is verified at all — a
+pattern starts from a check, not from a claim:
+
 ```bash
-cairn pattern promote --memory <id-of-a-project-fact> --dry-run
-#   refused: not_transferable
-#     A project configuration fact is not transferable knowledge.
-
-cairn pattern promote --memory <id-with-a-path> --dry-run
-#   refused: project_identifying
-#     The content contains an absolute path. (value not shown)
-
-cairn pattern promote --memory <local-only-id> --dry-run
-#   refused: local_only_memory
+cairn pattern promote --memory <unverified-id> --dry-run --signal … --applies-when … --approach …
+#   cairn: source_unverified: the source memory is not verified; a pattern starts from a
+#          check, not from a claim
 ```
+
+Given a verified source, the rest of the gate still refuses what it should:
+
+```bash
+cairn pattern promote --memory <id-of-a-project-fact> --dry-run …
+#   cairn: not_transferable: this memory states what this project is configured with rather
+#          than a problem and its resolution, so it transfers nowhere
+
+cairn pattern promote --memory <id-with-a-path> --dry-run …
+#   cairn: project_identifying: this candidate names an absolute filesystem path, which a
+#          pattern must never carry
+
+cairn pattern promote --memory <local-only-id> --dry-run …
+#   cairn: local_only_memory: the source memory is local-only; a pattern derived from it
+#          would be that memory travelling under another name
+
+cairn pattern promote --memory <superseded-id> --dry-run …
+#   cairn: source_not_active: the source memory is no longer active; promoting it would
+#          export a conclusion this project has already replaced
+```
+
+The privacy refusal names the class and never echoes the value it found.
 
 ---
 
@@ -546,17 +765,20 @@ In project B the symptom matches but the cause is different:
 ```bash
 cairn pattern outcome 0192g1… --outcome not_applicable \
   --alternative-cause "a VPN route collision produced the same error; the pools were not exhausted"
-#   recorded. trust: sanitized → contested. no success count changed.
+#   recorded not_applicable (independent)
+#     trust contested · applications 1 · distinct projects 1 · independently validated in 0 · counterexamples 1
 ```
 
 Next time it surfaces:
 
 ```bash
 cairn context
-#   PRIOR PATTERN (unverified in this project) — trust: contested
-#     Docker cannot allocate a non-overlapping bridge network
-#     ⚠ Known alternative cause: a VPN route collision produced the same symptom.
-#       Check this first: verify the configured network ranges are genuinely exhausted.
+#   ## Patterns from other projects (unverified here)
+#   - **Expand Docker's default-address-pools…** (contested, 10 signals matched): expand
+#     default-address-pools in the daemon configuration and restart
+#     - another cause found behind this: a VPN route collision produced the same error; the
+#       pools were not exhausted
+#     - check first: Docker bridge networking is in use
 ```
 
 Repetition does not manufacture trust:
@@ -564,11 +786,13 @@ Repetition does not manufacture trust:
 ```bash
 # ten sessions in project A each record the same incident resolved
 cairn pattern show 0192g1…
-#   applications 11 · distinct projects 2 · independently validated in 0 · counterexamples 1
-#   trust contested
+#   trust contested · unverified in any project but where it was applied
+#   applications 2 · distinct projects 2 · independently validated in 0 · counterexamples 1
 ```
 
-**What you see**: eleven applications, and Cairn still says nobody has independently validated it.
+**What you see**: ten repetitions in the origin project did not become ten applications — the
+accounting is by project, not by how often somebody pressed the button — and Cairn still says nobody
+has independently validated it. A pattern's own project cannot validate it (FR-402).
 
 ---
 
@@ -579,18 +803,29 @@ A project with thousands of memories and a tight budget.
 ```bash
 cairn memory search --limit 1 --json | jq '.total'      # 5000+
 
-cairn context --token-budget 800
-#   TASK       Retry backoff — transient failures retry with jitter   (in_progress)
-#   NEXT       add the configurable cap to RetryConfig
-#   BLOCKERS   staging credentials expired
-#   ⚠ CONFLICT deploy.queue_backend — sqs vs rabbitmq
-#   ⚠ DRIFT    service.api_port — remembered 8080, config/app.yml says 9000
-#   CONSTRAINTS
-#     • never mutate CC Switch's private database directly
-#   REPOSITORY main @ def4567 · 3 unstaged
-#   CRITERIA   AC-1 ✓ · AC-2 pending · AC-3 satisfied (unverified)
+cairn context --token-budget 300
+#   # Cairn context
 #
-#   estimated 782 / 800 tokens · truncated · omitted: project_memory, branch_memory
+#   **Repository**: branch `main`, commit `def4567…`, working tree 0 staged, 3 unstaged, 0 untracked
+#
+#   ## Warnings
+#   1 conflict · 1 drift
+#   ⚠ CONFLICT deploy.queue_backend — 2 competing answers (rabbitmq, sqs) and no recorded decision
+#   ⚠ DRIFT service.api_port — remembered "The API listens on 8080" — its evidence moved
+#
+#   ## Constraints
+#   - Never mutate CC Switch's private database directly
+#
+#   ## Task: Retry backoff (todo)
+#   Acceptance criteria:
+#   - AC-1 satisfied · verified — backoff is exponential with jitter
+#   - AC-2 pending · unverified — the retry cap is configurable
+#
+#   Progress: 1 verified · 0 satisfied but unverified · 0 blocked · 1 pending
+#   Readiness: not_ready
+#
+#   ---
+#   280 of 300 estimated tokens; omitted: project_memory
 ```
 
 **What you see**: at 800 tokens with 5,000 memories present, everything you cannot work without
@@ -599,38 +834,41 @@ survives, and Cairn says exactly what it dropped.
 Why:
 
 ```bash
-cairn context --token-budget 800 --explain
-#   budget 800 · reserve 320 · reserve used 296 · released 24
+cairn context --token-budget 300 --explain
+#   budget 300 · reserve 120 · reserve used 120 · released 0
 #   INCLUDED
-#     minimum_safe  task       task_binding                        96
-#     minimum_safe  warning    conflict_warning                    41
-#     minimum_safe  warning    drift_warning                       44
-#     minimum_safe  memory     pinned                              38
-#     relevant      memory     scope_match canonical_answer verified 24
+#     minimum_safe  repository scope_match                          26
+#     minimum_safe  warning    conflict_warning                     41
+#     minimum_safe  warning    drift_warning                        33
+#     minimum_safe  task       task_binding                         39
+#     minimum_safe  constraint pinned                               17
+#     minimum_safe  criterion  task_binding                         15
 #   OMITTED
-#     memory ×4,988  budget_exhausted
-#     memory ×7      not_canonical
-#     pattern ×1     cap_reached
+#     memory ×12       budget_exhausted  — `cairn memory search`
 ```
+
+Every omission carries a reason, and the count with the call that retrieves what went (FR-461).
 
 ### A task with forty criteria, and a budget that cannot hold them
 
 ```bash
-cairn context --token-budget 800
-#   TASK       Retry backoff — transient failures retry with jitter   (in_progress)
-#   PROGRESS   12 verified · 6 satisfied but unverified · 3 blocked · 19 pending
-#   READINESS  not_ready
-#   BLOCKERS   4 open — "staging credentials expired"
-#   NEXT       add the configurable cap to RetryConfig
-#   ⚠ 1 conflict · 1 drift
-#   REPOSITORY main @ def4567 · 3 unstaged
-#   CONSTRAINTS
-#     • never mutate CC Switch's private database directly
-#   CRITERIA   AC-9 blocked · AC-14 blocked · AC-3 satisfied (unverified)
-#              + 37 criteria omitted — `cairn task get <id>`
-#   BLOCKERS   1 of 4 shown — `cairn task get <id>`
+cairn context --token-budget 400
+#   ## Task: Retry backoff (todo)
+#   Transient failures retry with jitter
 #
-#   estimated 794 / 800 tokens · truncated
+#   Acceptance criteria:
+#   - AC-1 satisfied · unverified — backoff is exponential with jitter
+#   - AC-3 satisfied · unverified — cargo test --workspace passes
+#   - AC-2 pending · unverified — the retry cap is configurable
+#   …
+#     (+31 more — `cairn task show 0192t9…`)
+#
+#   Progress: 0 verified · 2 satisfied but unverified · 0 blocked · 38 pending
+#   Readiness: not_ready
+#   Blocked by: staging credentials expired (+3 more open)
+#
+#   ---
+#   387 of 400 estimated tokens; omitted: previous_handoff, project_memory
 
 **What you see**: forty criteria do not fit in 800 tokens and Cairn does not pretend otherwise. What is
 guaranteed is the *state* — goal, progress counts, readiness, the blocker that matters, the next action,
@@ -643,15 +881,32 @@ blocked-first, and what did not fit is counted with the call that retrieves it.
 ## US11 — Evidence-aware tasks
 
 ```bash
-cairn task get <task-id>
-#   TASK      Retry backoff (revision 7)
-#   CRITERIA
-#     AC-1  backoff is exponential with jitter   satisfied  ✓ verified
-#     AC-2  the retry cap is configurable        pending      unverified
-#     AC-3  cargo test --workspace passes        satisfied    unverified
-#   BLOCKERS  1 open — staging credentials expired
-#   PROGRESS  1 verified · 2 satisfied but unverified · 0 blocked · 1 pending
+cairn task show <task-id>
+#   Release readiness
+#   The release gate is evidence-backed
+#   Status: todo
+#   Revision: 6 (local)
+#   State:    ff82530e6348c364
+#   Acceptance criteria:
+#     AC-1  satisfied · verified  (rev 3)  the config port is 9000
+#     AC-2  pending · unverified  (rev 1)  the docker pools are expanded
+#   BLOCKER   staging credentials expired
+#   PROGRESS  1 verified · 0 satisfied but unverified · 0 blocked · 1 pending
+#   BLOCKERS  1 open
 #   READINESS not_ready
+```
+
+A criterion Cairn checked reads `pending · verified` until somebody asserts it is satisfied: the two
+axes are independent, and only one of them is Cairn's to write.
+
+```bash
+cairn evidence add --type configuration --subject "API port" --value 9000 \
+  --locator "config/app.yml#server.port"
+cairn task criterion verify <ac-1-id> --evidence <evidence-id>
+#   AC-1  pending · verified  (rev 2)  the config port is 9000
+
+cairn task blocker open <task-id> --description "staging credentials expired"
+#   Blocker opened.
 ```
 
 Two sessions, two criteria, no lost work:
@@ -661,10 +916,10 @@ Two sessions, two criteria, no lost work:
 cairn task criterion set <ac-2-id> \              cairn task criterion set <ac-3-id> \
   --state satisfied --expected-revision 7           --state satisfied --expected-revision 7
 
-cairn task get <task-id>
-#   TASK Retry backoff (revision 9)
-#     AC-2 satisfied     ← session A's change survived
-#     AC-3 satisfied     ← session B's change survived
+cairn task show <task-id>
+#   Revision: 9 (local)
+#     AC-2  satisfied · unverified     ← session A's change survived
+#     AC-3  satisfied · unverified     ← session B's change survived
 ```
 
 ### Two machines, two criteria, offline
@@ -678,9 +933,9 @@ cairn task criterion set <ac-1-id> \      cairn task criterion set <ac-2-id> \
 cairn sync now                            cairn sync now
 
 # machine A                                machine B
-cairn task get <task-id>                  cairn task get <task-id>
-#   local_revision 7                      #   local_revision 7
-#   state_digest   8b21c4…                #   state_digest   8b21c4…   ← identical
+cairn task show <task-id>                 cairn task show <task-id>
+#   Revision: 4 (local)                   #   Revision: 2 (local)   ← differs, and is never compared
+#   State:    c48cd474e7b479e7            #   State:    c48cd474e7b479e7   ← identical
 #     AC-1 satisfied  ← A's change        #     AC-1 satisfied  ← arrived from A
 #     AC-2 satisfied  ← arrived from B    #     AC-2 satisfied  ← B's change
 ```

@@ -932,6 +932,20 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
         count += 1;
     }
 
+    // Tasks before their criteria, for the same reason memories come before
+    // their relations: a criterion naming a task this store does not have is
+    // held rather than invented, and importing in this order means it usually
+    // does not have to be.
+    for t in body
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        if import_task(d, project_id, t).await {
+            count += 1;
+        }
+    }
+
     // Criteria and blockers upsert by stable id, so two machines that changed
     // different criteria offline both land — neither overwrites the other.
     for c in body
@@ -1061,6 +1075,26 @@ async fn import_verification(d: &Daemon, memory_id: Uuid, value: &serde_json::Va
     };
     let state = verification.get("state").and_then(|v| v.as_str());
     let Some(state) = state else { return };
+
+    // A run this machine recorded outranks anything a peer says about the same
+    // memory. Records win over derived state (FR-478), and a verification run
+    // is a durable local record.
+    //
+    // Without this a memory this machine checked itself came back from the
+    // server wearing `remote_cairn`: it had been pushed, and the pull applied
+    // the peer's badge over the local one. The state stayed `verified`, so
+    // nothing looked wrong — but the authority decides two things, and both
+    // then refused it. Its own project could no longer promote it, and it no
+    // longer counted towards local readiness, on the strength of a check this
+    // machine had run.
+    if !cairn_store::evidence::runs_for_memory(&d.store, memory_id)
+        .await
+        .unwrap_or_default()
+        .is_empty()
+    {
+        let _ = cairn_store::evidence::rebuild_verification(&d.store, memory_id).await;
+        return;
+    }
 
     let authority = match verification.get("authority").and_then(|v| v.as_str()) {
         Some("cairn") => Some("remote_cairn"),
@@ -1219,6 +1253,42 @@ async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> bool {
         state,
         uuid("opened_by_session").unwrap_or_else(Uuid::nil),
         uuid("cleared_by_session"),
+        value
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .await
+    .is_ok()
+}
+
+/// Insert a peer's task locally.
+///
+/// The title, goal and status are the peer's; everything derived stays this
+/// machine's. `local_revision` is never transmitted and never overwritten — it
+/// is a private concurrency token (D80) — and the `acceptance_criteria`
+/// projection is rebuilt from the criteria rows that arrive separately rather
+/// than copied, so it cannot disagree with them.
+async fn import_task(d: &Daemon, project_id: Uuid, value: &serde_json::Value) -> bool {
+    let Some(id) = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return false;
+    };
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let status = match str_of("status") {
+        "" => "todo",
+        other => other,
+    };
+    cairn_store::criteria::import_task(
+        &d.store,
+        id,
+        project_id,
+        str_of("title"),
+        str_of("goal"),
+        status,
         value
             .get("deleted")
             .and_then(|v| v.as_bool())

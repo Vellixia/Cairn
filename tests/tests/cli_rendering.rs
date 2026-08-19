@@ -388,3 +388,198 @@ fn supersede_names_what_it_replaced() {
     );
     assert!(!r.stdout.contains('"'), "quoted json leaked: {}", r.stdout);
 }
+
+/// The briefing says which criteria are done, and how far along the task is.
+///
+/// Tier 0a has always carried the per-criterion state, the progress counts and
+/// the readiness; the rendered briefing printed the criterion *text* and nothing
+/// else. An agent reading it after a compaction saw a list of sentences with no
+/// way to tell which were finished — which is the one thing FR-443 guarantees it
+/// will still know.
+#[test]
+fn the_briefing_shows_criterion_state_and_progress() {
+    let s = Sandbox::new();
+    let t = s.cairn(&[
+        "task",
+        "new",
+        "--title",
+        "Retry backoff",
+        "--goal",
+        "Transient failures retry with jitter",
+        "--criterion",
+        "backoff is exponential with jitter",
+        "--criterion",
+        "the retry cap is configurable",
+        "--json",
+    ]);
+    assert!(t.ok(), "{}", t.stderr);
+    let task_id = serde_json::from_str::<serde_json::Value>(&t.stdout).expect("json")["data"]
+        ["task"]["id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+
+    let shown = s.cairn(&["task", "show", &task_id, "--json"]);
+    assert!(shown.ok(), "{}", shown.stderr);
+    let first = serde_json::from_str::<serde_json::Value>(&shown.stdout).expect("json")["data"]
+        ["criteria"][0]["id"]
+        .as_str()
+        .expect("criterion id")
+        .to_string();
+    assert!(s
+        .cairn(&["task", "criterion", "set", &first, "--state", "satisfied"])
+        .ok());
+
+    assert!(s
+        .cairn(&[
+            "session",
+            "start",
+            "--agent",
+            "claude-code",
+            "--key",
+            "w",
+            "--task",
+            &task_id
+        ])
+        .ok());
+    let c = s.cairn(&["context"]);
+    assert!(c.ok(), "{}", c.stderr);
+    assert!(
+        c.stdout.contains("AC-1 satisfied"),
+        "the criterion's state is missing: {}",
+        c.stdout
+    );
+    assert!(
+        c.stdout.contains("AC-2 pending"),
+        "the criterion's state is missing: {}",
+        c.stdout
+    );
+    // Both axes, never collapsed (FR-483).
+    assert!(c.stdout.contains("satisfied · unverified"), "{}", c.stdout);
+    assert!(
+        c.stdout
+            .contains("Progress: 0 verified · 1 satisfied but unverified"),
+        "the progress counts are missing: {}",
+        c.stdout
+    );
+    assert!(c.stdout.contains("Readiness: not_ready"), "{}", c.stdout);
+}
+
+/// Every omission carries a reason (FR-461).
+///
+/// Warnings, constraints and criteria recorded one; memory dropped for budget
+/// recorded nothing, so `--explain` could name the section it cut and never say
+/// how much went or why — which is the question the explain view exists for.
+#[test]
+fn the_explain_view_accounts_for_the_memories_it_dropped() {
+    let s = Sandbox::new();
+    for i in 0..40 {
+        assert!(s
+            .cairn(&[
+                "memory",
+                "add",
+                &format!("Module {i:03} owns the retry budget for its own transport"),
+                "--type",
+                "fact",
+                "--scope",
+                "project",
+            ])
+            .ok());
+    }
+    // Small enough that the memory Cairn *did* read cannot all fit — the
+    // per-scope read cap means a merely tight budget drops nothing.
+    let c = s.cairn(&["context", "--token-budget", "120", "--explain"]);
+    assert!(c.ok(), "{}", c.stderr);
+    assert!(
+        c.stdout.contains("OMITTED"),
+        "nothing was reported as omitted at a budget that cannot hold it: {}",
+        c.stdout
+    );
+    assert!(
+        c.stdout.contains("budget_exhausted"),
+        "the omission carried no reason: {}",
+        c.stdout
+    );
+    assert!(
+        c.stdout.contains("memory ×"),
+        "the omitted memories were not counted: {}",
+        c.stdout
+    );
+}
+
+/// A post-compaction read learns the ground moved, before it reads anything
+/// written against the ground it moved from (FR-434).
+#[test]
+fn a_diverged_checkpoint_leads_the_briefing() {
+    let s = Sandbox::new();
+    let t = s.cairn(&[
+        "task",
+        "new",
+        "--title",
+        "Retry backoff",
+        "--goal",
+        "Transient failures retry",
+        "--criterion",
+        "backoff is exponential",
+        "--json",
+    ]);
+    assert!(t.ok(), "{}", t.stderr);
+    let task_id = serde_json::from_str::<serde_json::Value>(&t.stdout).expect("json")["data"]
+        ["task"]["id"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+
+    let started = s.cairn(&[
+        "session",
+        "start",
+        "--agent",
+        "claude-code",
+        "--key",
+        "w",
+        "--task",
+        &task_id,
+        "--json",
+    ]);
+    assert!(started.ok(), "{}", started.stderr);
+    let session = serde_json::from_str::<serde_json::Value>(&started.stdout).expect("json")["data"]
+        ["session"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_string();
+
+    assert!(s
+        .cairn(&["session", "checkpoint", "--session", &session])
+        .ok());
+
+    // The ground moves: a new commit under the same session.
+    s.write_file("src/config.rs", "pub fn load() { /* moved */ }\n");
+    s.git(&["add", "."]);
+    s.git(&["commit", "-m", "refactor config loading", "--no-gpg-sign"]);
+
+    let c = s.cairn(&["context", "--reason", "post_compaction"]);
+    assert!(c.ok(), "{}", c.stderr);
+    assert!(
+        c.stdout.starts_with("⚠ CHECKPOINT DIVERGED"),
+        "the divergence did not lead the briefing: {}",
+        c.stdout
+    );
+    assert!(
+        c.stdout.contains("recorded at") && c.stdout.contains("now at"),
+        "the commit divergence was not named: {}",
+        c.stdout
+    );
+    // Never `next action` — it was written against a state that no longer holds.
+    assert!(
+        !c.stdout.contains("next action (may be stale)")
+            || c.stdout.contains("previous next action (may be stale)"),
+        "a stale action was presented as the next one: {}",
+        c.stdout
+    );
+    // And the mode the integration actually delivers, never over-claimed.
+    assert!(
+        c.stdout.contains("continuity agent_initiated"),
+        "the continuity mode was not reported: {}",
+        c.stdout
+    );
+}
