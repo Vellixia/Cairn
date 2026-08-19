@@ -490,3 +490,55 @@ fn the_mcp_create_response_carries_the_same_reconciliation() {
         "if this is the same claim, call action=reinforce with memory_id"
     );
 }
+
+/// The Feature 003 write surface works over MCP, not just past the dispatcher.
+///
+/// `every_advertised_action_is_dispatched` proves no advertised action is
+/// refused as unknown. This proves the wiring behind one of them is real: an
+/// agent reinforcing a memory over MCP records the relation and the accounting
+/// moves.
+#[test]
+fn an_agent_can_reinforce_over_mcp() {
+    let s = Sandbox::new();
+    let mut mcp = cairn_e2e::Mcp::start(&s);
+    let cwd = s.repo_path().to_string_lossy().to_string();
+
+    let create = |mcp: &mut cairn_e2e::Mcp, content: &str| -> String {
+        mcp.tool_result(
+            "cairn_remember",
+            serde_json::json!({
+                "action": "create", "type": "fact", "scope": "project",
+                "content": content,
+                "topic_key": "infrastructure.production_database",
+                "value_key": "postgresql"
+            }),
+            &cwd,
+        )["content"][0]["text"]["memory"]["id"]
+            .as_str()
+            .expect("id")
+            .to_string()
+    };
+    let first = create(&mut mcp, "Production runs PostgreSQL 16");
+    let second = create(&mut mcp, "The production database is Postgres");
+
+    let reinforced = mcp.tool_result(
+        "cairn_remember",
+        serde_json::json!({
+            "action": "reinforce", "memory_id": first, "from_memory_id": second
+        }),
+        &cwd,
+    );
+    assert_eq!(
+        reinforced["isError"], false,
+        "reinforce over MCP failed: {reinforced}"
+    );
+
+    // The accounting moved, which is the whole point of an explicit
+    // reinforcement (FR-322): reinforcements are counted apart from distinct
+    // origins, and neither is a verification.
+    let body = &reinforced["content"][0]["text"];
+    assert_eq!(
+        body["reinforcements"], 1,
+        "the reinforcement was not recorded: {body}"
+    );
+}

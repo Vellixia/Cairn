@@ -603,3 +603,69 @@ fn memory_show_keeps_every_feature_001_field() {
         "the tombstone did not report when it was deleted: {body}"
     );
 }
+
+/// Every advertised action is *dispatched*, not merely listed.
+///
+/// `every_feature_003_action_is_reachable` reads the `tools/list` schema and
+/// never issues a `tools/call`, so it passed green while seven of
+/// `cairn_remember`'s ten actions, four of `cairn_task`'s eight and
+/// `cairn_session`'s `checkpoint` fell through to `unknown action`. The schema
+/// promised the whole Feature 003 write surface and the dispatch implemented
+/// `create`, `supersede` and `forget` — so an agent reading the tool
+/// definitions was told about capabilities the tool would refuse.
+///
+/// This calls each one. Most fail on a missing argument or a missing subject,
+/// which is correct and is not what this asserts: the assertion is that no
+/// advertised action is unknown to the dispatcher.
+#[test]
+fn every_advertised_action_is_dispatched() {
+    let s = Sandbox::new();
+    let mut mcp = Mcp::start(&s);
+    mcp.call("initialize", json!({}));
+    let listed = mcp.call("tools/list", json!({}));
+    let cwd = s.repo_path().to_string_lossy().to_string();
+
+    let tools = listed["tools"].as_array().expect("tools").clone();
+    let mut unknown = Vec::new();
+
+    for tool in &tools {
+        let name = tool["name"].as_str().expect("name").to_string();
+        let actions: Vec<String> = tool["inputSchema"]["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+
+        for action in actions {
+            let result = mcp.call(
+                "tools/call",
+                json!({ "name": name, "arguments": { "cwd": cwd, "action": action } }),
+            );
+            let text = result["content"][0]["text"].as_str().unwrap_or_default();
+            if text.contains("unknown action") {
+                unknown.push(format!("{name}/{action}"));
+            }
+        }
+    }
+
+    assert!(
+        unknown.is_empty(),
+        "advertised but not dispatched: {unknown:?}"
+    );
+
+    // The detector detects. Without this, a change in how a refusal is
+    // surfaced would turn this test into one that passes for every input.
+    let control = mcp.call(
+        "tools/call",
+        json!({ "name": "cairn_remember",
+                "arguments": { "cwd": cwd, "action": "definitely_not_an_action" } }),
+    );
+    assert!(
+        control["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unknown action"),
+        "an unknown action no longer reports itself as one, so this test proves nothing: {control}"
+    );
+}

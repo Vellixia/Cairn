@@ -459,6 +459,101 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
+                "reinforce" => {
+                    client::send(&Request::MemoryReinforce {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        memory_id: uuid_arg(args, "memory_id")?,
+                        from_memory_id: uuid_opt(args, "from_memory_id"),
+                    })
+                    .await?
+                }
+                "attach_evidence" => {
+                    client::send(&Request::EvidenceAdd {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        kind: enum_arg(args, "kind")
+                            .ok_or_else(|| WireError::invalid("kind is required"))?,
+                        collector: enum_arg(args, "collector"),
+                        subject: str_arg(args, "subject")
+                            .ok_or_else(|| WireError::invalid("subject is required"))?,
+                        observed_value: str_arg(args, "observed_value")
+                            .ok_or_else(|| WireError::invalid("observed_value is required"))?,
+                        source_locator: str_arg(args, "source_locator")
+                            .ok_or_else(|| WireError::invalid("source_locator is required"))?,
+                        observation_id: uuid_opt(args, "observation_id"),
+                        memory_id: uuid_opt(args, "memory_id"),
+                        role: enum_arg(args, "role"),
+                    })
+                    .await?
+                }
+                "verify" => {
+                    client::send(&Request::Verify {
+                        cwd,
+                        memory_id: uuid_opt(args, "memory_id"),
+                        all: bool_arg(args, "all"),
+                        explain: bool_arg(args, "explain"),
+                    })
+                    .await?
+                }
+                "pin" => {
+                    client::send(&Request::MemoryPin {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        memory_id: uuid_arg(args, "memory_id")?,
+                        // Pinning is the default; `pinned: false` unpins.
+                        pinned: args.get("pinned").and_then(|v| v.as_bool()).unwrap_or(true),
+                        reason: str_arg(args, "reason"),
+                    })
+                    .await?
+                }
+                "reconcile" => {
+                    client::send(&Request::MemoryReconcile {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        from_memory_id: uuid_arg(args, "from_memory_id")?,
+                        to_memory_id: uuid_arg(args, "to_memory_id")?,
+                        relation: enum_arg(args, "relation")
+                            .ok_or_else(|| WireError::invalid("relation is required"))?,
+                        basis: enum_arg(args, "basis")
+                            .unwrap_or(cairn_core::RelationBasis::ExplicitAgent),
+                        basis_evidence_id: uuid_opt(args, "basis_evidence_id"),
+                        rationale: str_arg(args, "rationale"),
+                    })
+                    .await?
+                }
+                "promote" => {
+                    client::send(&Request::PatternPromote {
+                        cwd,
+                        memory_id: uuid_arg(args, "memory_id")?,
+                        title: str_arg(args, "title"),
+                        problem: str_arg(args, "problem"),
+                        signals: str_list(args, "signals"),
+                        applicability: str_list(args, "applicability"),
+                        root_cause: str_arg(args, "root_cause"),
+                        approach: str_arg(args, "approach"),
+                        constraints: str_list(args, "constraints"),
+                        dry_run: bool_arg(args, "dry_run"),
+                    })
+                    .await?
+                }
+                "record_outcome" => {
+                    client::send(&Request::PatternOutcome {
+                        cwd,
+                        id: uuid_arg(args, "pattern_id")?,
+                        outcome: enum_arg(args, "outcome")
+                            .ok_or_else(|| WireError::invalid("outcome is required"))?,
+                        signals: str_list(args, "signals"),
+                        alternative_cause: str_arg(args, "alternative_cause"),
+                        evidence_id: uuid_opt(args, "evidence_id"),
+                        session: uuid_opt(args, "session_id"),
+                    })
+                    .await?
+                }
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -508,6 +603,17 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
+                // The path FR-425 gives an agent whose integration cannot be
+                // called back after a compaction: write the checkpoint yourself,
+                // before you compact.
+                "checkpoint" => {
+                    client::send(&Request::SessionCheckpoint {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                    })
+                    .await?
+                }
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -551,6 +657,62 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                             .get("acceptance_criteria")
                             .map(|_| string_list(args, "acceptance_criteria")),
                         status: enum_arg(args, "status"),
+                    })
+                    .await?
+                }
+                "add_criterion" => {
+                    client::send(&Request::TaskCriterionAdd {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        task_id: uuid_arg(args, "task_id")?,
+                        text: str_arg(args, "text")
+                            .ok_or_else(|| WireError::invalid("text is required"))?,
+                    })
+                    .await?
+                }
+                "update_criterion" => {
+                    client::send(&Request::TaskCriterionSet {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        criterion_id: uuid_arg(args, "criterion_id")?,
+                        state: enum_arg(args, "state"),
+                        text: str_arg(args, "text"),
+                        // Omitting it applies the write and records a blind
+                        // write; supplying what you read is the protection
+                        // (FR-490).
+                        expected_revision: args.get("expected_revision").and_then(|v| v.as_i64()),
+                    })
+                    .await?
+                }
+                // One action, because a blocker has exactly one transition:
+                // `clear: true` closes the one named, anything else opens one.
+                "blocker" => {
+                    if args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        client::send(&Request::TaskBlockerClear {
+                            cwd,
+                            agent_session_key: key,
+                            session_id: uuid_opt(args, "session_id"),
+                            blocker_id: uuid_arg(args, "blocker_id")?,
+                        })
+                        .await?
+                    } else {
+                        client::send(&Request::TaskBlockerOpen {
+                            cwd,
+                            agent_session_key: key,
+                            session_id: uuid_opt(args, "session_id"),
+                            task_id: uuid_arg(args, "task_id")?,
+                            description: str_arg(args, "description")
+                                .ok_or_else(|| WireError::invalid("description is required"))?,
+                        })
+                        .await?
+                    }
+                }
+                "readiness" => {
+                    client::send(&Request::TaskReadiness {
+                        cwd,
+                        task_id: uuid_arg(args, "task_id")?,
                     })
                     .await?
                 }
@@ -633,6 +795,22 @@ fn uuid_opt(args: &Value, key: &str) -> Option<uuid::Uuid> {
     args.get(key)
         .and_then(|v| v.as_str())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
+}
+
+fn bool_arg(args: &Value, key: &str) -> bool {
+    args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn str_list(args: &Value, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn uuid_list(args: &Value, key: &str) -> Vec<uuid::Uuid> {
