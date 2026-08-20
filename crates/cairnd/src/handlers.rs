@@ -1103,17 +1103,7 @@ pub(crate) async fn resolve_session(
             "no active session in this worktree; start one with `cairn session start`",
         )),
         1 => Ok(active.into_iter().next().expect("length checked")),
-        _ => {
-            let ids: Vec<String> = active.iter().map(|s| s.id.to_string()).collect();
-            Err(WireError::new(
-                codes::AMBIGUOUS_SESSION,
-                format!(
-                    "{} active sessions here; pass --session: {}",
-                    ids.len(),
-                    ids.join(", ")
-                ),
-            ))
-        }
+        _ => Err(ambiguous_session(&active)),
     }
 }
 
@@ -1448,19 +1438,35 @@ async fn session_for_read(
     match active.len() {
         0 => Ok(None),
         1 => Ok(active.into_iter().next()),
-        _ => {
-            let ids: Vec<String> = active.iter().map(|s| s.id.to_string()).collect();
-            Err(WireError::new(
-                codes::AMBIGUOUS_SESSION,
-                format!(
-                    "{} sessions are active in this worktree; pass --session or \
-                     agent_session_key: {}",
-                    ids.len(),
-                    ids.join(", ")
-                ),
-            ))
-        }
+        _ => Err(ambiguous_session(&active)),
     }
+}
+
+/// Report the ambiguity with enough to settle it.
+///
+/// The ids alone name the candidates but say nothing about which one the caller
+/// wants. Naming each session's agent and how long it has been silent is what
+/// makes the answer obvious in the case that actually occurs: an agent that was
+/// restarted rather than exited leaves its old session active and silent, and
+/// the live one is the one that just spoke (#41).
+fn ambiguous_session(active: &[Session]) -> WireError {
+    let now = chrono::Utc::now();
+    let described: Vec<String> = active
+        .iter()
+        .map(|s| {
+            let quiet_for = (now - s.last_event_at).num_minutes().max(0);
+            format!("{} ({}, silent {quiet_for}m)", s.id, s.agent)
+        })
+        .collect();
+    WireError::new(
+        codes::AMBIGUOUS_SESSION,
+        format!(
+            "{} sessions are active in this worktree; pass --session or \
+             agent_session_key: {}",
+            described.len(),
+            described.join(", ")
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------

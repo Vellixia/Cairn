@@ -81,7 +81,26 @@ pub async fn release_abandoned_claims(daemon: &Daemon) -> u64 {
 /// working day.
 pub const IDLE_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
 
-/// Close sessions nothing has driven for `idle_for`.
+/// How long a session that a newer one in the same worktree has overtaken may
+/// stay silent before it is presumed abandoned.
+///
+/// Much shorter than `IDLE_SESSION_TIMEOUT`, because the evidence is stronger:
+/// a session working alone that goes quiet is probably being read; a session
+/// that goes quiet while a *newer* session runs in the same worktree has
+/// probably been replaced. An agent that is killed and restarted — rather than
+/// exited — leaves exactly this trace, and the old session then blocks the
+/// briefing for the new one.
+///
+/// Matched to the sweep interval, so a worktree converges on one session within
+/// roughly two ticks instead of the two hours a solo session is granted. Being
+/// wrong is cheap and self-correcting: a session closed here is found by its own
+/// key regardless of status, and the next event it produces resumes it (D16
+/// rule 4). Being wrong in the other direction is what #41 reports — a worktree
+/// that stays ambiguous for hours.
+pub const SUPERSEDED_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Close sessions nothing has driven for `idle_for`, and sessions a newer
+/// session in the same worktree overtook more than `superseded_after` ago.
 ///
 /// Daemon start already reconciles sessions from a *previous* run, but a daemon
 /// that keeps running had no way to notice a session everyone had walked away
@@ -90,9 +109,14 @@ pub const IDLE_SESSION_TIMEOUT: std::time::Duration = std::time::Duration::from_
 /// knows its own session key.
 ///
 /// Returns how many were closed.
-pub async fn reap_idle_sessions(daemon: &Daemon, idle_for: std::time::Duration) -> usize {
-    let cutoff = chrono::Utc::now()
-        - chrono::Duration::from_std(idle_for).unwrap_or_else(|_| chrono::Duration::hours(2));
+pub async fn reap_idle_sessions(
+    daemon: &Daemon,
+    idle_for: std::time::Duration,
+    superseded_after: std::time::Duration,
+) -> usize {
+    let now = chrono::Utc::now();
+    let cutoff =
+        now - chrono::Duration::from_std(idle_for).unwrap_or_else(|_| chrono::Duration::hours(2));
 
     let idle = match repo::sessions_idle_since(&daemon.store, cutoff).await {
         Ok(s) => s,
@@ -102,8 +126,47 @@ pub async fn reap_idle_sessions(daemon: &Daemon, idle_for: std::time::Duration) 
         }
     };
 
-    let mut count = 0;
+    // Sessions a newer one in the same worktree replaced. Held to a much
+    // shorter silence than a session working alone, and never including the
+    // newest in a worktree, so this can narrow a worktree to one session but
+    // never empty it (#41).
+    let superseded_cutoff = now
+        - chrono::Duration::from_std(superseded_after)
+            .unwrap_or_else(|_| chrono::Duration::minutes(15));
+    let superseded =
+        match repo::superseded_sessions_idle_since(&daemon.store, superseded_cutoff).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read superseded sessions");
+                Vec::new()
+            }
+        };
+
+    // The reason travels with the session: "superseded" and "idle" are
+    // different findings, and `cairn session show` is where a developer asks
+    // why a session ended.
+    let mut seen: std::collections::HashSet<uuid::Uuid> = std::collections::HashSet::new();
+    let mut to_close: Vec<(_, &'static str)> = Vec::new();
     for session in idle {
+        if seen.insert(session.id) {
+            to_close.push((session, "no events for longer than the idle timeout"));
+        }
+    }
+    for session in superseded {
+        if seen.insert(session.id) {
+            tracing::info!(
+                session = %session.id, agent = %session.agent,
+                "a newer session in this worktree has overtaken this one"
+            );
+            to_close.push((
+                session,
+                "a newer session in this worktree overtook it and it went silent",
+            ));
+        }
+    }
+
+    let mut count = 0;
+    for (session, reason) in to_close {
         let policy = match repo::project(&daemon.store, session.project_id).await {
             Ok(p) => SyncPolicy::from_project(&p),
             Err(_) => SyncPolicy {
@@ -124,14 +187,14 @@ pub async fn reap_idle_sessions(daemon: &Daemon, idle_for: std::time::Duration) 
             &daemon.store,
             session.id,
             SessionStatus::Interrupted,
-            Some("no events for longer than the idle timeout"),
+            Some(reason),
             policy,
         )
         .await
         {
             Ok(_) => {
                 count += 1;
-                tracing::info!(session = %session.id, "reaped idle session");
+                tracing::info!(session = %session.id, reason, "reaped idle session");
             }
             Err(e) => tracing::warn!(session = %session.id, error = %e, "idle reap failed"),
         }
@@ -328,7 +391,10 @@ mod tests {
     async fn an_empty_store_reconciles_nothing() {
         let d = fx::daemon().await;
         assert_eq!(reconcile_previous_runs(&d).await, 0);
-        assert_eq!(reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT).await, 0);
+        assert_eq!(
+            reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT, IDLE_SESSION_TIMEOUT).await,
+            0
+        );
         assert_eq!(release_abandoned_claims(&d).await, 0);
     }
 
@@ -346,7 +412,10 @@ mod tests {
         // Zero tolerance rather than a fabricated timestamp: every session is
         // then idle, which is the condition under test without reaching into
         // the schema to age a row.
-        assert_eq!(reap_idle_sessions(&d, std::time::Duration::ZERO).await, 1);
+        assert_eq!(
+            reap_idle_sessions(&d, std::time::Duration::ZERO, IDLE_SESSION_TIMEOUT).await,
+            1
+        );
 
         let reloaded = repo::session(&d.store, s.id).await.expect("session");
         assert_eq!(reloaded.status, SessionStatus::Interrupted);
@@ -378,7 +447,10 @@ mod tests {
         let p = fx::project(&d, "thinking", None).await;
         let s = fx::session(&d, &p, "reading").await;
 
-        assert_eq!(reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT).await, 0);
+        assert_eq!(
+            reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT, IDLE_SESSION_TIMEOUT).await,
+            0
+        );
         assert_eq!(
             repo::session(&d.store, s.id).await.expect("session").status,
             SessionStatus::Active
@@ -392,11 +464,140 @@ mod tests {
         let p = fx::project(&d, "twice", None).await;
         fx::session(&d, &p, "once").await;
 
-        assert_eq!(reap_idle_sessions(&d, std::time::Duration::ZERO).await, 1);
         assert_eq!(
-            reap_idle_sessions(&d, std::time::Duration::ZERO).await,
+            reap_idle_sessions(&d, std::time::Duration::ZERO, IDLE_SESSION_TIMEOUT).await,
+            1
+        );
+        assert_eq!(
+            reap_idle_sessions(&d, std::time::Duration::ZERO, IDLE_SESSION_TIMEOUT).await,
             0,
             "an already-interrupted session is no longer active, so not idle"
+        );
+    }
+
+    /// A restarted agent's abandoned session does not poison the worktree for
+    /// hours (#41).
+    ///
+    /// The reported case: three OpenCode sessions in one worktree, started
+    /// minutes apart because the agent was restarted rather than exited. The
+    /// first did 44 seconds of work and the second 3m22s; both then sat `active`
+    /// for two and five hours while the third did 26 hours of real work, and
+    /// every `cairn context` in that worktree failed with `ambiguous_session`
+    /// throughout.
+    ///
+    /// The generous idle timeout is correct for a session on its own, so it is
+    /// passed here unchanged and proves it is not what does the work: only the
+    /// superseded window is zero.
+    #[tokio::test]
+    async fn a_session_a_newer_one_overtook_is_reaped_without_waiting_for_the_idle_timeout() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "restarted", None).await;
+        let abandoned = fx::session(&d, &p, "opencode-first").await;
+        let live = fx::session(&d, &p, "opencode-second").await;
+
+        assert_eq!(
+            reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT, std::time::Duration::ZERO).await,
+            1,
+            "the overtaken session was not reaped"
+        );
+
+        let abandoned = repo::session(&d.store, abandoned.id)
+            .await
+            .expect("session");
+        assert_eq!(abandoned.status, SessionStatus::Interrupted);
+        assert!(
+            abandoned
+                .end_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("overtook"),
+            "the reason should say it was overtaken, not that it timed out: {:?}",
+            abandoned.end_reason
+        );
+
+        // The newest session in a worktree is never reaped by this rule, so a
+        // worktree can be narrowed to one session but never emptied.
+        assert_eq!(
+            repo::session(&d.store, live.id)
+                .await
+                .expect("session")
+                .status,
+            SessionStatus::Active,
+            "the live session was reaped along with the debris"
+        );
+    }
+
+    /// The worktree converges on exactly one session, whatever the pile-up.
+    #[tokio::test]
+    async fn three_sessions_in_one_worktree_collapse_to_the_newest() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "pileup", None).await;
+        for key in ["first", "second", "third"] {
+            fx::session(&d, &p, key).await;
+        }
+
+        assert_eq!(
+            reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT, std::time::Duration::ZERO).await,
+            2,
+            "both abandoned sessions should have been reaped"
+        );
+
+        let still_active = repo::list_sessions(&d.store, p.id)
+            .await
+            .expect("sessions")
+            .into_iter()
+            .filter(|s| s.status == SessionStatus::Active)
+            .count();
+        assert_eq!(
+            still_active, 1,
+            "a worktree must end up with exactly one active session"
+        );
+    }
+
+    /// Supersession needs a newer sibling, not merely silence.
+    ///
+    /// A developer with one session, reading and thinking, is the case the
+    /// generous timeout exists for. The short window must not reach it.
+    #[tokio::test]
+    async fn a_lone_silent_session_is_not_superseded_by_nobody() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "alone", None).await;
+        let s = fx::session(&d, &p, "thinking").await;
+
+        assert_eq!(
+            reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT, std::time::Duration::ZERO).await,
+            0,
+            "a session with no newer sibling was reaped by the superseded rule"
+        );
+        assert_eq!(
+            repo::session(&d.store, s.id).await.expect("session").status,
+            SessionStatus::Active
+        );
+    }
+
+    /// A session in a *different* worktree is not a sibling.
+    ///
+    /// Scope resolution is per worktree: two worktrees are two working contexts
+    /// and one must never close the other's session.
+    #[tokio::test]
+    async fn a_session_in_another_worktree_supersedes_nothing() {
+        let d = fx::daemon().await;
+        let here = fx::project(&d, "here", None).await;
+        let elsewhere = fx::project(&d, "elsewhere", None).await;
+        let mine = fx::session(&d, &here, "mine").await;
+        fx::session(&d, &elsewhere, "theirs").await;
+
+        assert_eq!(
+            reap_idle_sessions(&d, IDLE_SESSION_TIMEOUT, std::time::Duration::ZERO).await,
+            0,
+            "a session in another worktree was treated as a successor"
+        );
+        assert_eq!(
+            repo::session(&d.store, mine.id)
+                .await
+                .expect("session")
+                .status,
+            SessionStatus::Active
         );
     }
 

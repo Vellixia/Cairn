@@ -145,8 +145,12 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
             // may be starting after a long absence.
             loop {
                 ticks.tick().await;
-                let reaped =
-                    recover::reap_idle_sessions(&daemon, recover::IDLE_SESSION_TIMEOUT).await;
+                let reaped = recover::reap_idle_sessions(
+                    &daemon,
+                    recover::IDLE_SESSION_TIMEOUT,
+                    recover::SUPERSEDED_SESSION_TIMEOUT,
+                )
+                .await;
                 // The same tick sweeps any boundary still owing a handoff, so
                 // progress does not depend on a restart (FR-240, D22).
                 let swept =

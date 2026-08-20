@@ -574,6 +574,49 @@ pub async fn sessions_idle_since(
     rs.iter().map(rows::session).collect()
 }
 
+/// Active sessions a newer active session in the same worktree has overtaken,
+/// silent since `cutoff`.
+///
+/// An agent that is restarted rather than exited leaves its session `active`:
+/// no `SessionEnd` arrives, and Cairn has no liveness signal to notice. Every
+/// such session makes the worktree ambiguous, which is what blocks the briefing
+/// an agent asks for before it knows its own session key — the very thing the
+/// idle reaper exists to prevent.
+///
+/// The generous idle timeout is right for a session on its own: a developer
+/// reading and thinking must never be mistaken for one who left. It is far too
+/// generous once a *newer* session is running in the same worktree, because
+/// then the older one is not thinking — something replaced it. That is the
+/// evidence this query looks for, and it is why the caller may apply a much
+/// shorter silence to these than to a session working alone.
+///
+/// Only sessions with a newer sibling are returned, so the newest in a worktree
+/// is never reaped by this rule and a worktree can never be emptied by it. Ties
+/// on `started_at` break on id, so two sessions stamped the same instant still
+/// leave exactly one survivor.
+pub async fn superseded_sessions_idle_since(
+    store: &Store,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<Session>> {
+    let rs = sqlx::query(
+        "SELECT s.* FROM sessions s
+          WHERE s.status = 'active' AND s.deleted_at IS NULL AND s.last_event_at < ?1
+            AND EXISTS (
+                SELECT 1 FROM sessions n
+                 WHERE n.project_id = s.project_id
+                   AND n.worktree_path = s.worktree_path
+                   AND n.status = 'active' AND n.deleted_at IS NULL
+                   AND (n.started_at > s.started_at
+                        OR (n.started_at = s.started_at AND n.id > s.id))
+            )
+          ORDER BY s.started_at ASC",
+    )
+    .bind(cutoff.to_rfc3339())
+    .fetch_all(store.pool())
+    .await?;
+    rs.iter().map(rows::session).collect()
+}
+
 pub async fn sessions_from_previous_runs(store: &Store, current_run: Uuid) -> Result<Vec<Session>> {
     let rs = sqlx::query(
         "SELECT * FROM sessions
@@ -1669,6 +1712,139 @@ pub async fn set_pull_cursor(store: &Store, project_id: Uuid, cursor: &str) -> R
     .execute(store.pool())
     .await?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Deferred pull records (#44)
+// ---------------------------------------------------------------------------
+
+/// A pulled record held back because the parent it names had not arrived.
+#[derive(Debug, Clone)]
+pub struct DeferredRecord {
+    pub kind: String,
+    pub record_key: String,
+    pub payload: String,
+    pub waiting_on: String,
+    pub attempts: i64,
+    pub first_seen_at: String,
+}
+
+/// Hold a pulled record until the parent it names arrives.
+///
+/// Keyed by the record's own identity, so a record the server sends again
+/// replaces the held copy instead of adding another. `first_seen_at` survives
+/// the replacement: how long a record has been waiting is the diagnostic, and
+/// re-sending it does not make the wait shorter.
+pub async fn defer_pulled_record(
+    store: &Store,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+    payload: &str,
+    waiting_on: &str,
+) -> Result<()> {
+    let now = rows::now_text();
+    sqlx::query(
+        "INSERT INTO sync_deferred
+            (project_id, kind, record_key, payload, waiting_on, attempts,
+             first_seen_at, last_attempt_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
+         ON CONFLICT(project_id, kind, record_key) DO UPDATE SET
+            payload = ?4, waiting_on = ?5, last_attempt_at = ?6",
+    )
+    .bind(project_id.to_string())
+    .bind(kind)
+    .bind(record_key)
+    .bind(payload)
+    .bind(waiting_on)
+    .bind(&now)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// Records waiting on a parent, oldest wait first.
+///
+/// Bounded: a backlog must not turn one pull into an unbounded amount of work.
+/// Whatever does not fit is offered again on the next pull.
+pub async fn deferred_records(
+    store: &Store,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<DeferredRecord>> {
+    let rs = sqlx::query(
+        "SELECT kind, record_key, payload, waiting_on, attempts, first_seen_at
+           FROM sync_deferred
+          WHERE project_id = ?1
+          ORDER BY first_seen_at ASC
+          LIMIT ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?;
+    Ok(rs
+        .iter()
+        .map(|r| DeferredRecord {
+            kind: r.get::<String, _>("kind"),
+            record_key: r.get::<String, _>("record_key"),
+            payload: r.get::<String, _>("payload"),
+            waiting_on: r.get::<String, _>("waiting_on"),
+            attempts: r.get::<i64, _>("attempts"),
+            first_seen_at: r.get::<String, _>("first_seen_at"),
+        })
+        .collect())
+}
+
+/// The record landed, or can never land: stop holding it.
+pub async fn clear_deferred_record(
+    store: &Store,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM sync_deferred
+          WHERE project_id = ?1 AND kind = ?2 AND record_key = ?3",
+    )
+    .bind(project_id.to_string())
+    .bind(kind)
+    .bind(record_key)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// The parent still has not arrived. Recorded so a record waiting on one that
+/// never comes is visible rather than merely retried in silence.
+pub async fn note_deferred_attempt(
+    store: &Store,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE sync_deferred
+            SET attempts = attempts + 1, last_attempt_at = ?4
+          WHERE project_id = ?1 AND kind = ?2 AND record_key = ?3",
+    )
+    .bind(project_id.to_string())
+    .bind(kind)
+    .bind(record_key)
+    .bind(rows::now_text())
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// How many records this project is holding, for `cairn status` and `doctor`.
+pub async fn deferred_count(store: &Store, project_id: Uuid) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_deferred WHERE project_id = ?1")
+            .bind(project_id.to_string())
+            .fetch_one(store.pool())
+            .await?,
+    )
 }
 
 /// What the server last said it could hold, verbatim.
