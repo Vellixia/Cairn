@@ -1399,6 +1399,15 @@ until it passed would have shipped it.
 
 ## F12 (CRITICAL) — Codex kept the `automatic` claim F10 had already disproved
 
+> **Superseded by F13.** The conclusion below is wrong. "Cairn re-delivers to no
+> agent after a compaction" is true of the `PostCompact` path and false of Codex,
+> which re-opens a session after compacting and is delivered to there. F10's
+> refusal to transfer its finding to Codex was correct; F12 overrode it on
+> reasoning, and T148 then contradicted F12 by driving real compactions. The
+> document corrections F12 made to `compatibility.md` — where Claude Code was
+> still `automatic` after F10 — remain valid; only the Codex conclusion is
+> reversed.
+
 `crates/cairn-integrate/src/capability.rs`, `specs/003-project-intelligence/compatibility.md`,
 `specs/003-project-intelligence/research.md`,
 `specs/003-project-intelligence/contracts/continuity-context.md`
@@ -1464,6 +1473,313 @@ damage.
 ## Gate after F12
 
 1,097 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean.
+
+## F13 (CRITICAL) — F12 generalised one agent's limitation into a rule, and T148 disproved it
+
+`crates/cairn-integrate/src/capability.rs`, `tests/tests/us6_continuity.rs`,
+`specs/003-project-intelligence/compatibility.md`,
+`specs/003-project-intelligence/research.md`,
+`specs/003-project-intelligence/contracts/continuity-context.md`
+
+F12 downgraded Codex to `agent_initiated` on a chain that looked airtight:
+`LifecyclePostCompaction` is *context re-delivery after compaction*;
+`context_compacted` is capture class so `cairn hook` sends it one-way and returns
+before `emit_context`; `delivers_context` is `session_opened` alone; therefore
+nothing is re-delivered to anyone and no agent can be `automatic`.
+
+Every step is true. The conclusion does not follow, because it assumes the only
+way context can arrive after a compaction is the `PostCompact` event itself.
+**Codex re-emits `SessionStart` after every `PostCompact`.** Session open is
+precisely where `delivers_context` is true, so Codex is delivered to — the
+briefing, with the restored checkpoint in it — without ever asking.
+
+T148 was run against a real store in an isolated home, with Codex authenticated
+through its own interactive login and `model_auto_compact_token_limit` lowered so
+that real auto-compactions fired:
+
+| evidence | result |
+|---|---|
+| `context_compacting` checkpoints, two runs | 7, **every one `restore_count = 1`** with a `restored_at` |
+| `lifecycle_pre_compaction` | established by **observation** |
+| `lifecycle_post_compaction` | established by **observation** |
+| `context_at_session_open` | established by observation, **`degraded = 0`** |
+| observation types recorded | `command_run` only — no MCP call |
+| `cairn` invocations by the agent | **0** |
+| memory-only token recalled after 2 real compactions | **yes** — `TOKEN=ZEBRA-7741-QUARTZ`, present in no file |
+
+The last row is the one that closes it. A canary was written to Cairn memory and
+to nothing else; the agent was told explicitly not to run any `cairn` command,
+and asked for it after compacting twice. It answered correctly. Context reached
+the model without being requested, which is what `automatic` means.
+
+Separately and deterministically: feeding `cairn hook SessionStart --agent codex`
+the payload Codex sends returns
+`hookSpecificOutput.additionalContext` — 478 bytes containing the canary. So the
+delivery path exists independently of any model's behaviour.
+
+Codex's `LifecyclePostCompaction` returns to `guaranteed` and it reports
+`automatic` again. What separates it from Claude Code is not its hook list, which
+is identical in the events it names, but whether a session is opened after
+compacting — and that is observable only by compacting.
+
+### The regression F12 added has been deleted, not fixed
+
+`no_agent_claims_automatic_while_nothing_is_redelivered` walked `AgentId::ALL`
+and asserted no agent derives `automatic`. It was the strongest-looking artifact
+of the whole change and it encoded the false premise directly, so keeping it in
+any form would have prevented the true answer. `each_agents_mode_is_the_rule_
+applied_to_its_capabilities` already re-derives every agent's mode from the two
+capabilities it reads, which is the honest guard: it changes when an agent
+changes, and it cannot be satisfied by editing a table.
+
+### What to take from F10 through F13
+
+F10 declined to transfer its Claude Code finding to Codex, saying that would be
+"inventing evidence." That was right, and F12 overrode it with an argument rather
+than an observation. An argument about a vendor's runtime behaviour is a
+hypothesis; a driven compaction is evidence. Under-promising was safe, which is
+why nothing shipped in F12 was a defect — but "safe" and "true" are different
+claims, and FR-426 asks for the true one where it can be had.
+
+## Gate after F13
+
+1,096 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean.
+
+## F14 (CRITICAL) — one capability was doing capture and delivery, so the mode could not be honest
+
+`crates/cairn-integrate/src/capability.rs`, `crates/cairnd/src/integrations.rs`,
+`specs/003-project-intelligence/contracts/continuity-context.md`,
+`specs/003-project-intelligence/compatibility.md`,
+`specs/003-project-intelligence/research.md`
+
+F10 and F13 each corrected one agent's continuity mode and neither fixed the
+reason a wrong mode was reachable. This does.
+
+### The conflation
+
+`capability.rs` states the invariant that every lifecycle capability corresponds
+to exactly one canonical event, so `LifecyclePostCompaction` **is** the capability
+for `ContextCompacted` -- capture, and nothing more. But its `missing_behavior()`
+read *"context re-delivery after compaction"*, and `continuity_mode` consumed it
+as delivery:
+
+```rust
+(Guaranteed, Guaranteed) => ContinuityMode::Automatic
+```
+
+So **any agent that merely fired a post-compaction event derived `automatic`**.
+That is an over-claim by construction, and the only way to prevent it was to
+hand-edit `base()` -- the maintained table D57 exists to avoid. F10 edited it one
+way for Claude Code, F12 the other way for Codex. Both were patching the symptom.
+
+Cairn already had the right shape elsewhere: `ContextAtSessionOpen` is a separate
+capability from `LifecycleSessionOpen`, for exactly this reason. Compaction simply
+never got the same split.
+
+### The unread delivery point
+
+All three adapters capture `source` on session open -- `claude_code.rs`,
+`codex.rs`, `opencode.rs` all call `.with_source(payload.str("source"))` -- and
+**nothing in the codebase compared it to `"compact"`**. Meanwhile
+`restore_checkpoint` had exactly one call site: the `Context` handler under
+`reason == PostCompaction`. The hook path sends `CanonicalEvent`, which carries no
+reason, so the post-compaction session open delivered an ordinary briefing and
+never restored the checkpoint. That is precisely F10's `restore_count = 0` --
+correctly observed, and attributed to the wrong hook.
+
+### The change
+
+`ContextAfterCompaction` is now its own capability. `LifecyclePostCompaction`
+keeps its 1:1 event mapping and its description is corrected to *capture of the
+compaction boundary*. The derivation reads capture for the guard and **delivery**
+for the promise, and requires the delivery capability to be `established()` --
+guaranteed *and* verified by observation here. A vendor fact alone is never
+enough, so a wrong entry in `base()` can only under-promise, which is the
+direction FR-426 permits. The per-agent hand-edits are gone and the mode is
+derived again.
+
+On the delivery side, a session that opens holding an unrestored
+`context_compacting` checkpoint is the same session returning from a compaction.
+That is read from Cairn's own records rather than a vendor string, so it holds for
+any agent that re-opens a session after compacting; `source == "compact"` is
+consulted only as corroboration. When such a session open restores a checkpoint
+into the briefing the agent consumes, `context_after_compaction` is recorded as an
+observation -- delivery evidence, distinct from having heard about a compaction.
+
+### Live evidence (T148, re-run because the shared derivation changed)
+
+**Claude Code**, `/compact` driving a real compaction: `context_compacting`
+checkpoint written and restored, and `context_after_compaction`,
+`lifecycle_pre_compaction`, `lifecycle_post_compaction` and
+`context_at_session_open` (`degraded = 0`) all established by observation.
+Reported mode **`automatic`**. F10's downgrade was wrong for the same reason F12's
+was: it read `PostCompact` and never looked at the boundary after it.
+
+**Codex**, three real auto-compactions at `model_auto_compact_token_limit=6000` on
+`gpt-5.4-mini`: four `SessionStart` hooks for three compactions, all three
+checkpoints restored, `context_after_compaction` established. Reported mode
+**`unavailable_automatic`** -- correctly, because hook trust was bypassed for the
+run rather than persisted, and `apply_activation` puts every lifecycle capability
+in `PendingActivation` for a trust-gated agent. The delivery capability is proven;
+the declared mode waits on one interactive trust approval. That is the honest
+answer and not a defect.
+
+### The tests assert the rule now, not the agents
+
+The old per-agent test listed four expected modes, which is what made it possible
+to "fix" a wrong mode by editing the list -- twice. It is replaced by
+`every_agents_mode_is_the_rule_applied_to_its_capabilities`, which re-derives from
+the two capabilities and names no agent, plus four semantic regressions:
+
+- `capture_of_a_compaction_never_implies_delivery_after_it` -- perfect capture on
+  both sides with no delivery must not be `automatic`; adding the delivery
+  observation, and nothing else, is what moves it.
+- `a_documented_delivery_is_not_enough_for_automatic` -- `Expected` derives
+  `agent_initiated`, `Verified` derives `automatic`.
+- `a_conditional_capture_is_never_automatic` -- across all four availabilities.
+- `a_profile_with_no_observations_never_claims_automatic` -- over every agent, so
+  a newly added agent cannot claim it from vendor documentation.
+
+Two older assertions hard-coded a count of conditional behaviours next to a rule
+they already checked; both now derive the expected count from the profile, so a
+capability an agent genuinely qualifies for no longer reads as a regression.
+
+### The same conflation, one layer down
+
+Review of the first cut caught a real defect in it. The `context_compacted` arm
+of `canonical_event` asked for a `PostCompaction` briefing, which **restores the
+checkpoint** -- but that event is capture class, so `cairn hook` sends it one-way
+and throws the reply away. It consumed the checkpoint and emitted nothing, which
+meant the session-open arm then found `restore_count = 1` and declined to deliver.
+Whether delivery got observed depended on which of two hooks the vendor happened
+to run first. The first Claude Code run recorded `restore_count = 2` -- two
+restores for one compaction -- which is the race showing up in the data and which
+should have been the tell.
+
+So the arm now captures only: `lifecycle_post_compaction` is already recorded
+before the match, and that is the whole of what the event establishes. Restoration
+belongs where context can reach the model -- the session that opens next for an
+agent that opens one, and `cairn_context(reason=post_compaction)` for an agent
+that does not. The session-open gate also now honours a vendor that names the
+boundary, so a checkpoint consumed by some other path does not silently cost the
+delivery.
+
+`the_post_compaction_hook_restores_without_being_asked` asserted the removed
+behaviour: it fired `PreCompact` and `PostCompact` only and expected a restore.
+Its intent was right and its mechanism was not, so it is now
+`the_compaction_lifecycle_restores_without_being_asked` and fires all three hooks
+in vendor order. It deliberately does not assert the evidence row, because
+`capability_evidence.agent` is a foreign key into `agent_integrations` and the
+sandbox connects no agent -- which is also why the first attempt at that
+assertion saw an empty table rather than a missing row.
+
+### Live evidence, re-run on the final code
+
+| agent | compactions | checkpoint | delivery evidence | mode |
+|---|---|---|---|---|
+| Claude Code | 1 (`/compact`) | `restore_count = 1`, restored 16:13:29 | `context_after_compaction` **established** | **`automatic`** |
+| Codex | 1 real auto-compaction, 2 `SessionStart` | `restore_count = 1`, restored 16:13:59 | `context_after_compaction` **established** | `unavailable_automatic` |
+| OpenCode | 2, driven via `POST /session/{id}/summarize` | `restore_count`, capture complete both sides | **absent** | `agent_initiated` |
+
+Both restores are now exactly one per compaction, where the pre-fix Claude Code
+run showed two. Codex reads `unavailable_automatic` because its hook trust was
+bypassed for the run rather than persisted, and `apply_activation` holds every
+lifecycle capability in `PendingActivation` for a trust-gated agent: the delivery
+capability is proven and the declared mode waits on one interactive approval.
+
+OpenCode is the case that proves the split is doing work. Two real compactions
+produced two `pre_compact` handoffs and verified `lifecycle_pre_compaction` *and*
+`lifecycle_post_compaction` -- capture complete on both sides -- while
+`context_after_compaction` never appeared and the mode stayed `agent_initiated`.
+The reason is structural: **OpenCode never re-opens a session.** One session row
+existed throughout, `lifecycle_session_open` was established once before the first
+compaction and never again. Under the old rule its verified post-compaction
+capture would have counted toward `automatic`.
+
+Its own compaction hook cannot substitute. `experimental.session.compacting`
+offers `output.context[]` and `output.prompt`, and both are *input to the
+summarising model*: a passive capsule pushed through `context` was observed to
+vanish from the summary, while a coercive instruction survived. That is
+model-mediated, so it can bias what a summary preserves but cannot guarantee a
+capsule is present. Two hooks that could -- `experimental.chat.messages.transform`
+and `experimental.chat.system.transform`, both re-applied per request and both
+observed delivering verbatim after a compaction -- are undocumented publicly and
+would be a new delivery mechanism rather than a fix to this one. Recorded as the
+identified path, not taken here.
+
+## Gate after F14
+
+1,100 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean.
+
+## F15 (CRITICAL) — Codex trust was unreadable, so its mode could never leave the floor
+
+`crates/cairn-integrate/src/agents/codex.rs`
+
+With the operator's hook trust freshly approved, Cairn still reported
+`installed_not_activated` and held Codex at `unavailable_automatic`. The approval
+had worked; Cairn was looking in the wrong file.
+
+`trust_state` read a `trust` or `trust_state` field out of `hooks.json`. Codex
+never writes one there. It records trust in its own `config.toml`, beside that
+file, one entry per hook:
+
+```toml
+[hooks.state."/…/.codex/hooks.json:pre_compact:0:0"]
+trusted_hash = "sha256:1dc20f81…"
+```
+
+So the `None` arm was reached every time and fell back to the recorded install's
+activation, which `cairn connect` writes as `pending_user_trust`. The effect: a
+developer who had done the one thing the remedy asked for was still told to do
+it, `apply_activation` kept every lifecycle capability at `PendingActivation`,
+and `continuity_mode` stayed at its most conservative value **permanently**, with
+no action available that could change it. The doc comment's intent -- *"it reads
+what Codex wrote"* -- was right; the location was wrong.
+
+`codex_trusted_hooks` now reads `[hooks.state]` from `config.toml` and requires
+an entry for every event Cairn registers. The key format was already documented a
+few dozen lines above, in the comment explaining Codex's hook grouping.
+
+Only **presence** is read, never the hash's value. Verifying it would mean
+recomputing Codex's own digest of its own file, and guessing that wrong would
+either forge a trust Cairn cannot see or deny one the user really gave. Codex
+re-prompts by itself when content stops matching, and Cairn's separate
+`content_hash` record is what detects an upgrade having reset trust (D24).
+
+This is the same family as [#50](https://github.com/Vellixia/Cairn/issues/50) --
+a probe pointed somewhere the vendor never writes -- and the third such defect
+found in this area. All three were invisible because they fail in the safe
+direction: they understate a capability, so nothing over-claims and no test
+catches it.
+
+### T148 — Codex, under normal trusted activation
+
+Six real auto-compactions, `gpt-5.4-mini` at low reasoning,
+`model_auto_compact_token_limit = 6000`, **no `--dangerously-bypass-hook-trust`
+anywhere**, isolated `HOME` whose `.codex` the operator authenticated and trusted
+interactively.
+
+| # | required | observed |
+|---|---|---|
+| 1 | `PreCompact` checkpoint created | 6 `context_compacting` checkpoints |
+| 2 | `PostCompact` remains capture only | order `PreCompact → context compacted → PostCompact → SessionStart`; every restore timestamp falls after its `PostCompact` |
+| 3 | `SessionStart` occurs after compaction | 7 `SessionStart` hooks for 6 compactions, one following each |
+| 4 | unrestored checkpoint restored exactly once | 6 checkpoints, **6** total restores — one each |
+| 5 | `additionalContext` returned | `MARKER=TRUSTED-CX-8823`, a token held only in Cairn memory and present in no file |
+| 6 | no explicit agent retrieval | **0** `cairn` invocations; every observation is `command_run` |
+| 7 | `ContextAfterCompaction` established | by observation |
+| 8 | `automatic` derived without an override | `continuity_mode: automatic`; all three capabilities `guaranteed`/`verified`; no per-agent compaction entry in `base()` |
+
+Criteria 3 and 4 together are also the live duplicate-restore proof: seven
+session opens produced six restores, so no checkpoint was ever consumed twice.
+Codex's level advanced `MCP_PLUS → FULL` once trust was readable.
+
+## Gate after F15
+
+1,102 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
 `--all-targets`. fmt and clippy clean.
 
 # Checkpoint Q — the four quickstart deviations, closed

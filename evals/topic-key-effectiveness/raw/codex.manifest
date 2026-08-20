@@ -1,0 +1,8 @@
+agent=codex
+version=codex-cli 0.147.0
+provider=openai
+model=gpt-5.4-mini
+reasoning=low
+config_root=/private/tmp/claude-501/-Users-andresholivin-Documents-code-Cairn/029ce14e-f865-4c66-ae82-0c31ccb5f0f1/scratchpad/t148/home/.codex
+store=/tmp/t7a
+items=A1 A2 A4 A5 B1 B2 B4 C1 C2 C4 D5 E1

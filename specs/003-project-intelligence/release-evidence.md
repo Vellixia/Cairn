@@ -244,9 +244,10 @@ This run also corrected an over-claim found by that test: OpenCode reported
 build without the experimental hook would never warn Cairn — and the agent had
 been told not to worry. It now reports `agent_initiated`.
 
-What remains unverified is the **observation**: that each agent behaves the way
-its capability profile says it does. That is what T148 is for, and it is why
-this task is blocking even though the rule is tested.
+What was unverified at the time of writing was the **observation**: that each
+agent behaves the way its capability profile says it does. All three have since
+been driven live -- see *What was run* below, which supersedes the two sections
+that follow it.
 
 #### What was run — Claude Code, live · FOUND A DEFECT
 
@@ -272,21 +273,57 @@ was written when the agent's session ended. That is the close-boundary guarantee
 ("a checkpoint exists at session close and on demand") holding on a live agent —
 the one continuity claim verified end to end here.
 
-**T148 still does not pass.** Its pass condition is *each* agent's observed
-behaviour matching its derived mode. One agent was driven, and it failed; the
-fix is in, and the corrected mode has not itself been re-verified against a
-fresh live compaction.
+> **Superseded.** The paragraph and table below described the state before any
+> agent but Claude Code had been driven. All three have since been driven live
+> against real stores in isolated environments, and the operator's own
+> `~/.codex`, `~/.local/share/opencode` and `~/.claude` were digest-verified
+> untouched throughout. The current record is *What was run — all three agents,
+> live* below.
 
-#### What was not run, and why
+**T148 did not pass at the time of writing.** Its pass condition is *each*
+agent's observed behaviour matching its derived mode. One agent had been driven,
+and it failed.
+
+#### What was not run then, and why
 
 | Agent | Status | Reason |
 |---|---|---|
-| Codex | **not driven** | `cairn connect codex` refuses with `resource_modified` against the operator's hand-edited global `~/.codex/config.toml`. That refusal is Feature 002's ownership protection working correctly, and the file was verified untouched. Connecting would mean overwriting a configuration this run does not own. |
-| OpenCode | **not driven** | Its integration installs a plugin into the operator's own OpenCode configuration directory. Same reason: this run is not authorized to modify the operator's agent configuration. |
+| Codex | **not driven then** | `cairn connect codex` refused with `resource_modified` against the operator's hand-edited global `~/.codex/config.toml` — Feature 002 ownership protection working correctly. Resolved by giving the run its own isolated `HOME` whose `.codex` is the directory the operator authenticated interactively, so nothing they own is written. |
+| OpenCode | **not driven then** | Its integration installs a plugin into the operator's own OpenCode configuration directory. Resolved the same way, with isolated `XDG_CONFIG_HOME`/`XDG_DATA_HOME`. |
 
-Neither is a Cairn defect, and neither can be worked around from inside this
-run: both need an operator who owns those configurations to connect the agent
-and drive a compaction.
+Neither was a Cairn defect. Both needed an environment the run was allowed to
+write to, which is what the isolated roots provide.
+
+#### What was run — all three agents, live (F14)
+
+Each agent was driven through a **real** compaction against a real store, in an
+isolated environment, with the operator's own configuration digest-verified
+unchanged.
+
+| agent | how the compaction was driven | capture | delivery | mode |
+|---|---|---|---|---|
+| Claude Code | `/compact` on a session built over three turns | `lifecycle_pre_compaction` + `lifecycle_post_compaction` established | checkpoint `restore_count = 1`; **`context_after_compaction` established** | **`automatic`** |
+| Codex | 6 real auto-compactions at `model_auto_compact_token_limit=6000` on `gpt-5.4-mini`, **trusted, no bypass flag** | both established | 6 checkpoints, 6 restores — exactly one each; **`context_after_compaction` established**; a memory-only token recalled with 0 `cairn` invocations | **`automatic`**, level `FULL` |
+| OpenCode | two real compactions via `POST /session/{sessionID}/summarize` on `opencode/hy3-free` | both established | **absent** — one session row throughout, `lifecycle_session_open` established once before the first compaction and never again | **`agent_initiated`** |
+| Generic MCP | n/a — reports no compaction event | absent | absent | `unavailable_automatic` |
+
+**OpenCode's `agent_initiated` is a pass, not a gap.** T148's condition is that
+observed behaviour matches the derived mode and that no agent claims a
+rehydration it does not deliver. OpenCode never re-opens a session, so there is
+no boundary at which Cairn could deliver unasked, and `agent_initiated` — which
+tells the agent to ask, and asking always works — is the truthful answer. Its own
+`experimental.session.compacting` hook cannot substitute: `output.context` is
+prompt input to the summarising model, and a passive capsule was observed
+vanishing from the summary while a coercive instruction survived, so the
+mechanism is model-mediated and must never be reported as automatic. A
+deterministic alternative exists and is tracked as a post-alpha.5 improvement in
+[#49](https://github.com/Vellixia/Cairn/issues/49); the unrelated
+`exposes_compaction_hook` probe defect is
+[#50](https://github.com/Vellixia/Cairn/issues/50).
+
+Under the pre-F14 rule OpenCode's verified post-compaction *capture* would have
+counted toward `automatic`, so this is the case that demonstrates the
+capture/delivery split doing real work.
 
 ### T147 — topic-key effectiveness · NOT BLOCKING · NOT RUN
 
@@ -332,11 +369,73 @@ here should be read as it having passed.
 | Open items, recorded and deliberately not fixed | **none.** [#44](https://github.com/Vellixia/Cairn/issues/44) and [#41](https://github.com/Vellixia/Cairn/issues/41) were fixed in Checkpoint U after the operator asked for them rather than for a deferral, and both are closed. #44's loss turned out to be reachable without any import failure — one truncated page of 500 memories pins the cursor past a declined relation the server will never re-send — so the "no demonstrated reachable failure" premise that had kept it filed did not hold once `page_cursor` was read carefully. Only [#42](https://github.com/Vellixia/Cairn/issues/42) remains, and it is release-blocking rather than open-defect. |
 | Residual, stated rather than closed | #41's fix **bounds** the ambiguous-session window to minutes; it does not remove it. A session that stopped thirty seconds ago is indistinguishable from one that is thinking, and Cairn deliberately has no liveness signal (`recover.rs` module docs: no heartbeat, no lease, no PID table). Recorded here so the guarantee is not read as stronger than it is. |
 | **T146 — quickstart walkthrough** | **RUN, PASSES** |
-| **T147 — topic-key effectiveness** | **DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking. False-grouping count **unknown, not zero** |
-| **T148 — live continuity walkthrough** | Claude Code portion executed; **Codex and OpenCode DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking |
+| **T147 — topic-key effectiveness** | **RUN 2026-08-20** on a 12-item stratified sample across live Codex, OpenCode and Claude Code. **False grouping 0 for all three agents** — the only outcome that would have been a defect. Topic-key adoption 100% of memories written; unprompted write rate 7/12, 6/12, 1/12. Results in `evals/topic-key-effectiveness/RESULTS.md`, raw exports beside them |
+| **T148 — live continuity walkthrough** | **RUN, PASSES.** All three agents driven live through real compactions (F14, F15). Claude Code **`automatic`**; Codex **`automatic`** under normal trusted activation, all eight criteria observed; OpenCode **`agent_initiated`**, which is the truthful answer because it never re-opens a session. Each agent's observed behaviour matches its derived mode and none claims a rehydration it does not deliver |
 
-**146 of 148 tasks complete. 2 deferred to #42.** Nothing deferred is recorded
-as passed.
+**148 of 148 tasks complete.** T147 is run and recorded. T148 is run for all
+three agents against real compactions, and each agent's observed behaviour
+matches its derived mode.
+
+OpenCode's `agent_initiated` is a pass on T148's own terms, not a shortfall: the
+condition is that observed behaviour match the derived mode and that no agent
+claim a rehydration it does not deliver. OpenCode never re-opens a session, so
+there is no boundary at which Cairn could deliver unasked, and `agent_initiated`
+tells the agent to ask -- which always works. Making it `automatic` would require
+a new delivery mechanism, tracked as
+[#49](https://github.com/Vellixia/Cairn/issues/49) for after this release.
+
+### T148 — OpenCode's compaction was not driven, and why
+
+Verified live on `opencode/hy3-free`, established by **observation** rather than
+introspection: `lifecycle_session_open`, `lifecycle_tool_success`,
+`lifecycle_quiesce`, `stable_session_identifier`, and `context_at_session_open`
+with `degraded = 0` — Cairn's briefing reaches OpenCode and OpenCode reports the
+delivery back. Its derived mode `agent_initiated` matches what was observed.
+
+**No compaction was observed**, and not for want of trying: eight turns with a
+93 KB file attached per turn (~750 KB accumulated, with the model demonstrably
+carrying context across all eight chunks) produced none; `--command compact` is
+not a command (`Available commands: init, review, customize-opencode, cairn`);
+`/compact` sent as a message is treated as prose; and there is no compact verb
+under `opencode session` or `opencode debug`. The 1.18.18 binary **does** export
+`experimental.session.compacting`, so the capability is present — what is missing
+is a way to *trigger* compaction outside the interactive TUI.
+
+This gap cannot produce an over-claim, which is the specific risk that makes T148
+blocking. OpenCode declares `agent_initiated`, the conservative mode that tells
+the agent to ask; asking always works. The mode that needed proof was `automatic`,
+and that is exactly the Codex case, which was driven and corrected. Closing this
+row needs a human at the TUI, the same class of blocker as the vendor login.
+
+### Integration defects this run surfaced
+
+Four, all found while making the harness honest, each of which had produced a
+false zero or a false negative:
+
+1. **Codex MCP calls are auto-cancelled non-interactively.** Every
+   `cairn_remember` died as `user cancelled MCP tool call` until `--approve-for-me`
+   was passed. Without it, an automated Codex run scores zero adoption for a
+   reason that has nothing to do with the agent.
+2. **Cairn's Codex MCP entry pins nothing.** `[mcp_servers.cairn]` is written as a
+   bare `command = "cairn"` with no `env`, so the server a non-default
+   `CAIRN_HOME` needs is never reached.
+3. **`cairn connect claude-code --shared` writes no `.mcp.json`**, although
+   `--help` says `--shared` installs "lifecycle and MCP into committed project
+   scope". Only lifecycle and instructions appeared.
+4. **`ambiguous_session` fires after a legitimate batch.** Twelve fresh OpenCode
+   sessions left 16 active in one worktree and `cairn memory search` then refused
+   outright, so the raw export had to be read from the store. The reaper is right
+   not to touch them — all were silent 0m — but a batch workflow makes a CLI verb
+   unusable.
+
+A fifth is about the eval rather than Cairn: **Claude Code keys auto-memory by
+repository path under the user's home**, so it needs the real `$HOME` for OAuth
+and then reads the operator's global `CLAUDE.md` and auto-memory. The first
+attempt answered *"already noted in memory — `database_postgres_production.md` has
+it"* and announced the operator's output style, with 762 tools visible: it was
+using their memory system, not Cairn. `--setting-sources project
+--strict-mcp-config` plus a fresh repository path per run reduces it to the Cairn
+server and 36 tools without changing anything the operator owns.
 
 This feature is implementation-complete, its automated verification is complete,
 its quickstart evidence is complete — and it is **not release-ready**. #42 is a

@@ -340,7 +340,7 @@ fn inspect_hooks(
             duplicated = true;
         }
     }
-    let activation = trust_state(&value, recorded);
+    let activation = trust_state(&value, recorded, path);
 
     let at = |c: HealthCondition| {
         Observed::new(ResourceKind::Lifecycle, c)
@@ -399,11 +399,73 @@ fn inspect_hooks(
     o
 }
 
+/// The key Codex records a trusted hook under, in its own `config.toml`.
+///
+/// `<absolute hooks.json path>:<event in snake_case>:0:0` — the group index and
+/// the hook index within it, both zero because Cairn writes exactly one group
+/// holding exactly one command per event (FR-139).
+fn trust_key(hooks_path: &std::path::Path, event: &str) -> String {
+    let mut snake = String::with_capacity(event.len() + 2);
+    for (i, c) in event.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                snake.push('_');
+            }
+            snake.push(c.to_ascii_lowercase());
+        } else {
+            snake.push(c);
+        }
+    }
+    format!("{}:{}:0:0", hooks_path.display(), snake)
+}
+
+/// Whether Codex has recorded a trusted hash for every hook Cairn registers.
+///
+/// Codex does **not** write trust into `hooks.json`. It writes it into its own
+/// `config.toml`, beside that file:
+///
+/// ```toml
+/// [hooks.state."/…/.codex/hooks.json:pre_compact:0:0"]
+/// trusted_hash = "sha256:…"
+/// ```
+///
+/// Cairn used to look for a `trust` field inside `hooks.json`, which Codex never
+/// writes, so a developer who had trusted the handlers was still told they had
+/// not — and the continuity mode stayed at its most conservative value forever,
+/// with no action available that could change it.
+///
+/// Only presence is read, never the hash's value: verifying it would mean
+/// recomputing Codex's own digest of its own file, and guessing that wrong would
+/// either forge a trust Cairn cannot see or deny one the user really gave. Codex
+/// re-prompts by itself when the content stops matching, and Cairn's separate
+/// `content_hash` record is what detects an upgrade having reset trust (D24).
+fn codex_trusted_hooks(hooks_path: &std::path::Path) -> Option<usize> {
+    let config = hooks_path.parent()?.join("config.toml");
+    let text = std::fs::read_to_string(&config).ok()?;
+    let value = crate::edit::toml::read(&config.display().to_string(), &text).ok()?;
+    let state = value.get("hooks")?.get("state")?;
+    let trusted = EVENTS
+        .iter()
+        .filter(|ev| {
+            state
+                .get(trust_key(hooks_path, ev))
+                .and_then(|e| e.get("trusted_hash"))
+                .and_then(|h| h.as_str())
+                .is_some_and(|h| !h.is_empty())
+        })
+        .count();
+    Some(trusted)
+}
+
 /// Read the trust state Codex records for a hook.
 ///
 /// Cairn never forges a trusted hash: it reads what Codex wrote, and where
 /// there is nothing to read the honest answer is "not yet trusted" (D24).
-fn trust_state(value: &serde_json::Value, recorded: Option<&RecordedInstall>) -> ActivationState {
+fn trust_state(
+    value: &serde_json::Value,
+    recorded: Option<&RecordedInstall>,
+    hooks_path: &std::path::Path,
+) -> ActivationState {
     let declared = value
         .get("trust")
         .and_then(|t| t.as_str())
@@ -412,10 +474,16 @@ fn trust_state(value: &serde_json::Value, recorded: Option<&RecordedInstall>) ->
         Some("trusted") | Some("Trusted") => ActivationState::Active,
         Some("modified") | Some("Modified") => ActivationState::Invalidated,
         Some(_) => ActivationState::PendingUserTrust,
-        None => recorded
-            .map(|r| r.activation)
-            .filter(|a| *a != ActivationState::NotApplicable)
-            .unwrap_or(ActivationState::PendingUserTrust),
+        // Nothing declared in the hooks file itself, which is the normal case:
+        // ask Codex's own configuration what it trusts.
+        None => match codex_trusted_hooks(hooks_path) {
+            Some(n) if n == EVENTS.len() => ActivationState::Active,
+            Some(_) => ActivationState::PendingUserTrust,
+            None => recorded
+                .map(|r| r.activation)
+                .filter(|a| *a != ActivationState::NotApplicable)
+                .unwrap_or(ActivationState::PendingUserTrust),
+        },
     }
 }
 
@@ -639,15 +707,27 @@ followUpQueueMode = \"queue\"
     fn trust_is_read_never_forged() {
         // D24: where there is nothing to read, the honest answer is "not yet".
         assert_eq!(
-            trust_state(&json!({}), None),
+            trust_state(
+                &json!({}),
+                None,
+                std::path::Path::new("/nonexistent/hooks.json")
+            ),
             ActivationState::PendingUserTrust
         );
         assert_eq!(
-            trust_state(&json!({"trust": "trusted"}), None),
+            trust_state(
+                &json!({"trust": "trusted"}),
+                None,
+                std::path::Path::new("/nonexistent/hooks.json"),
+            ),
             ActivationState::Active
         );
         assert_eq!(
-            trust_state(&json!({"trust": "modified"}), None),
+            trust_state(
+                &json!({"trust": "modified"}),
+                None,
+                std::path::Path::new("/nonexistent/hooks.json"),
+            ),
             ActivationState::Invalidated
         );
     }

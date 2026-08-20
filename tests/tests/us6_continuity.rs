@@ -57,21 +57,25 @@ fn restored(s: &Sandbox, session: &str) -> Value {
     v["checkpoint"].clone()
 }
 
-/// The post-compaction **hook** restores the checkpoint, with nobody asking
-/// (FR-426, T148).
+/// The compaction lifecycle restores the checkpoint with nobody asking, at the
+/// boundary where context can actually reach the model (FR-426, T148, F14).
 ///
 /// Every other test in this file restores by calling
 /// `cairn context --reason post_compaction` itself. That is what an
-/// `agent_initiated` agent does — and testing only that way is how an agent
-/// deriving `automatic` came to promise a restoration it never performed: the
-/// `PostCompact` hook asked the daemon for a `continuation`, which builds an
-/// ordinary briefing and never touches the checkpoint. Written, never read.
+/// `agent_initiated` agent does, and testing only that way is how an agent
+/// deriving `automatic` came to promise a restoration it never performed.
 ///
-/// Found by driving a real compaction in Claude Code against a real store: the
-/// `context_compacting` checkpoint was there and its `restore_count` was 0.
-/// So this test fires the hooks and asks nothing.
+/// This test fires the hooks and asks nothing. It fires all three, in the order
+/// the vendor sends them, because `PostCompact` is capture class: `cairn hook`
+/// sends it one-way and throws the reply away, so nothing can be delivered from
+/// it for any agent. The boundary that can deliver is the session the agent
+/// opens next -- Claude Code names it with source `compact`. An earlier version
+/// of this test fired only `PreCompact` and `PostCompact` and asserted a restore,
+/// which is why `context_compacted` used to ask for a briefing it could not
+/// return: it consumed the checkpoint the session open needed and emitted
+/// nothing.
 #[test]
-fn the_post_compaction_hook_restores_without_being_asked() {
+fn the_compaction_lifecycle_restores_without_being_asked() {
     let s = Sandbox::new();
     let session = session_with_checkpoint(&s, "compacted", "src/retry.rs");
 
@@ -81,7 +85,7 @@ fn the_post_compaction_hook_restores_without_being_asked() {
     ));
     assert_eq!(before, vec!["0".to_string()], "nothing has restored yet");
 
-    // Exactly what the agent's adapter sends, and nothing else.
+    // Exactly what the agent's adapter sends, in order, and nothing else.
     s.hook(
         "PreCompact",
         json!({ "session_id": "compacted", "trigger": "auto" }),
@@ -90,9 +94,12 @@ fn the_post_compaction_hook_restores_without_being_asked() {
         "PostCompact",
         json!({ "session_id": "compacted", "trigger": "auto" }),
     );
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "compacted", "source": "compact" }),
+    );
 
-    // `context_compacted` is capture class, so the hook returns before the
-    // daemon has finished with it. Poll rather than sleep a fixed time.
+    // Capture-class hooks return before the daemon has finished, so poll.
     let restores = |s: &Sandbox| {
         s.query_column(&format!(
             "SELECT CAST(COALESCE(SUM(restore_count), 0) AS TEXT) FROM continuity_checkpoints
@@ -112,9 +119,17 @@ fn the_post_compaction_hook_restores_without_being_asked() {
     assert_ne!(
         restores(&s),
         "0",
-        "the post-compaction hook did not restore the checkpoint: an agent whose mode is \
+        "the compaction lifecycle did not restore the checkpoint: an agent whose mode is \
          `automatic` was promised a rehydration it never got"
     );
+
+    // The matching `context_after_compaction` evidence row is deliberately not
+    // asserted here: `capability_evidence.agent` is a foreign key into
+    // `agent_integrations`, so evidence can only be recorded for an agent that
+    // has actually been connected, and this sandbox connects none. That the
+    // delivery is recorded as *delivery* is covered by the derivation
+    // regressions above and by the live T148 evidence in the release record,
+    // where both Claude Code and Codex establish it against a real store.
 }
 
 // ---------------------------------------------------------------------------
@@ -383,108 +398,75 @@ fn continuity_mode_is_derived_not_claimed() {
     );
 }
 
-/// Each agent's mode is what the rule produces from its capabilities (T130,
-/// FR-426, FR-427).
+/// Every agent's mode is the rule applied to its own capabilities, and no
+/// agent's table is asserted (T130, FR-426, FR-427).
 ///
-/// Asserted against the **derivation**, not against a list. The values below
-/// are what Claude Code, Codex, OpenCode and a generic MCP client happen to
-/// come out as today; if one of them gained or lost a compaction event, this
-/// test should change because the *agent* changed — never because someone
-/// edited a table to make the output look right.
-///
-/// A mode that over-claims is a defect, not a note: an agent reported as
-/// `automatic` that is never called back loses the session's continuity
-/// silently, which is the failure this whole slice exists to prevent.
+/// The previous version of this test listed the four expected values. That is
+/// what made it possible to "fix" a wrong mode by editing the list, which is
+/// twice what actually happened. So it asserts the rule and two properties that
+/// hold whatever the agents do, and it names no agent at all.
 #[test]
-fn each_agents_mode_is_the_rule_applied_to_its_capabilities() {
+fn every_agents_mode_is_the_rule_applied_to_its_capabilities() {
     use cairn_core::domain::ContinuityMode;
     use cairn_integrate::capability::{Availability, Capability, CapabilityProfile};
     use cairn_integrate::model::AgentId;
 
-    for (agent, expected) in [
-        // Claude Code reported `automatic` until a real compaction was driven
-        // against a real store (T148). The checkpoint was written and its
-        // `restore_count` stayed 0: `PostCompact` fires, but the vendor does
-        // not support `additionalContext` on it, so there is no channel to hand
-        // the checkpoint back. `agent_initiated` is what it actually delivers —
-        // Cairn writes the checkpoint before compaction, and the agent asks for
-        // it with `cairn_context(reason=post_compaction)`.
-        (AgentId::ClaudeCode, ContinuityMode::AgentInitiated),
-        // Codex reported `automatic` on the strength of registering both
-        // compaction hooks. Registration is not re-delivery: `ContextCompacted`
-        // is capture class, so the hook sends it one-way and returns without
-        // emitting anything back to the session (`delivers_context` in
-        // `crates/cairn/src/hook.rs` is `SessionOpened` alone). The checkpoint
-        // is restored, and the agent still has to ask for it -- which is what
-        // `agent_initiated` means. Held unverified for T148 until it was read
-        // against the delivery path instead of the vendor's hook list.
-        (AgentId::Codex, ContinuityMode::AgentInitiated),
-        (AgentId::Opencode, ContinuityMode::AgentInitiated),
-        (AgentId::GenericMcp, ContinuityMode::UnavailableAutomatic),
-    ] {
+    for agent in AgentId::ALL {
         let profile = CapabilityProfile::base(agent);
         let derived = profile.continuity_mode();
-        assert_eq!(
-            derived,
-            expected,
-            "{} derives {derived:?}, expected {expected:?} — pre-compaction is {:?}, \
-             post-compaction is {:?}",
-            agent.as_str(),
-            profile.get(Capability::LifecyclePreCompaction).availability,
-            profile
-                .get(Capability::LifecyclePostCompaction)
-                .availability,
-        );
 
-        // And the derivation is the rule, not a lookup: the answer follows the
-        // two capabilities it reads.
-        let pre = profile.get(Capability::LifecyclePreCompaction).availability;
-        let post = profile
-            .get(Capability::LifecyclePostCompaction)
-            .availability;
-        let by_rule = if matches!(pre, Availability::Absent | Availability::PendingActivation) {
+        let capture = profile.get(Capability::LifecyclePreCompaction);
+        let delivery = profile.get(Capability::ContextAfterCompaction);
+
+        let by_rule = if matches!(
+            capture.availability,
+            Availability::Absent | Availability::PendingActivation
+        ) {
             // Nothing warns Cairn: the agent must checkpoint for itself.
             ContinuityMode::UnavailableAutomatic
-        } else if pre == Availability::Guaranteed && post == Availability::Guaranteed {
-            // `automatic` promises Cairn is called back on both sides, and only
-            // two guarantees can keep that promise. A conditional warning is
-            // one an agent cannot plan around.
+        } else if capture.availability != Availability::Guaranteed {
+            // A warning that may not arrive is one an agent cannot plan around.
+            ContinuityMode::AgentInitiated
+        } else if delivery.established() {
+            // Observed delivery is the only thing that keeps the promise.
             ContinuityMode::Automatic
         } else {
             ContinuityMode::AgentInitiated
         };
+
         assert_eq!(
             derived,
             by_rule,
-            "{} does not follow the documented rule",
-            agent.as_str()
+            "{} does not follow the documented rule -- capture {:?}/{:?}, delivery {:?}/{:?}",
+            agent.as_str(),
+            capture.availability,
+            capture.confidence,
+            delivery.availability,
+            delivery.confidence,
         );
+
+        // The delivery capability is what the mode turns on. Whatever the
+        // capture side says, a profile with no *observed* delivery cannot be
+        // `automatic` -- which is the property the old list could not express.
+        if !delivery.established() {
+            assert_ne!(
+                derived,
+                ContinuityMode::Automatic,
+                "{} claims automatic without an observed post-compaction delivery",
+                agent.as_str()
+            );
+        }
     }
 }
 
-/// No agent may report `automatic` while Cairn has no way to re-deliver
-/// context after a compaction (FR-426).
+/// A freshly installed agent never claims `automatic` (FR-426).
 ///
-/// `automatic` is a promise that the developer does not have to act: Cairn is
-/// called back on both sides and the context comes back on its own. The second
-/// half does not exist. `ContextCompacted` is capture class, so `cairn hook`
-/// sends it one-way and returns before reaching `emit_context` -- the only
-/// event that delivers context is `SessionOpened`. Whatever a vendor's hook
-/// list says, nothing is handed back to the session, so the honest mode is
-/// `agent_initiated`: Cairn restores the checkpoint and the agent asks for it.
-///
-/// This is the invariant, not the four values above. Both agents that once
-/// reported `automatic` did so from their hook registrations rather than from
-/// the delivery path -- Claude Code until a real compaction disproved it (F10),
-/// Codex until the path was read (F12). A future agent added with both
-/// compaction hooks `guaranteed` would silently claim `automatic` again, and
-/// this test is what stops it.
-///
-/// **If this test fails because Cairn gained a post-compaction delivery path,
-/// it is the test that is wrong.** Delete it, and let the agents whose vendor
-/// channel genuinely carries the context back report `automatic` again.
+/// `base()` is what a vendor documents, and nothing in it is evidence that this
+/// installation works. Until Cairn has watched a compaction hand context back
+/// here, the honest answer is the one that tells the agent to ask. This is the
+/// property that makes a wrong entry in `base()` harmless.
 #[test]
-fn no_agent_claims_automatic_while_nothing_is_redelivered() {
+fn a_profile_with_no_observations_never_claims_automatic() {
     use cairn_core::domain::ContinuityMode;
     use cairn_integrate::capability::CapabilityProfile;
     use cairn_integrate::model::AgentId;
@@ -494,12 +476,279 @@ fn no_agent_claims_automatic_while_nothing_is_redelivered() {
         assert_ne!(
             mode,
             ContinuityMode::Automatic,
-            "{} reports `automatic`, which promises context comes back without being \
-             asked for; no agent can keep that promise while `delivers_context` in \
-             crates/cairn/src/hook.rs is SessionOpened alone",
-            agent.as_str(),
+            "{} claims automatic from vendor documentation alone",
+            agent.as_str()
         );
     }
+}
+
+/// Capture is not delivery, and only delivery can make a mode `automatic`
+/// (FR-426).
+///
+/// This is the rule the whole slice turns on, so it is asserted on a profile
+/// built by hand rather than on any agent's table. An agent that reports a
+/// compaction has told Cairn the boundary happened; it has said nothing about
+/// whether anything can be handed back. Reading the capture capability as if it
+/// were the delivery one is what let two agents in turn be given a mode the code
+/// could not keep -- once too generously, once too meanly.
+#[test]
+fn capture_of_a_compaction_never_implies_delivery_after_it() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::{
+        Availability, Capability, CapabilityProfile, CapabilityState, Confidence,
+    };
+    use cairn_integrate::model::AgentId;
+
+    let state = |availability, confidence| CapabilityState {
+        availability,
+        confidence,
+        depends_on: None,
+    };
+
+    // Perfect capture on both sides, verified by observation, and no delivery.
+    let mut p = CapabilityProfile::base(AgentId::ClaudeCode);
+    p.capabilities.insert(
+        Capability::LifecyclePreCompaction,
+        state(Availability::Guaranteed, Confidence::Verified),
+    );
+    p.capabilities.insert(
+        Capability::LifecyclePostCompaction,
+        state(Availability::Guaranteed, Confidence::Verified),
+    );
+    p.capabilities.insert(
+        Capability::ContextAfterCompaction,
+        state(Availability::Absent, Confidence::Expected),
+    );
+    assert_eq!(
+        p.continuity_mode(),
+        ContinuityMode::AgentInitiated,
+        "a compaction Cairn was merely told about must not read as re-delivery"
+    );
+
+    // The delivery capability is what moves it, and nothing else needs to change.
+    p.capabilities.insert(
+        Capability::ContextAfterCompaction,
+        state(Availability::Guaranteed, Confidence::Verified),
+    );
+    assert_eq!(
+        p.continuity_mode(),
+        ContinuityMode::Automatic,
+        "an observed delivery after compaction is exactly what `automatic` means"
+    );
+}
+
+/// `automatic` requires a delivery Cairn has **seen**, not one a vendor
+/// documents (FR-426).
+///
+/// `base()` records what a vendor offers, and a vendor fact can be wrong, stale,
+/// or true only on some builds. Gating on `established()` -- guaranteed *and*
+/// verified -- means a mistake in that table can only ever under-promise, which
+/// is the direction FR-426 permits.
+#[test]
+fn a_documented_delivery_is_not_enough_for_automatic() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::{
+        Availability, Capability, CapabilityProfile, CapabilityState, Confidence,
+    };
+    use cairn_integrate::model::AgentId;
+
+    let mut p = CapabilityProfile::base(AgentId::ClaudeCode);
+    p.capabilities.insert(
+        Capability::LifecyclePreCompaction,
+        CapabilityState {
+            availability: Availability::Guaranteed,
+            confidence: Confidence::Verified,
+            depends_on: None,
+        },
+    );
+
+    for (confidence, expected) in [
+        (Confidence::Expected, ContinuityMode::AgentInitiated),
+        (Confidence::Verified, ContinuityMode::Automatic),
+    ] {
+        p.capabilities.insert(
+            Capability::ContextAfterCompaction,
+            CapabilityState {
+                availability: Availability::Guaranteed,
+                confidence,
+                depends_on: None,
+            },
+        );
+        assert_eq!(
+            p.continuity_mode(),
+            expected,
+            "confidence {confidence:?} should derive {expected:?}"
+        );
+    }
+}
+
+/// A warning an agent cannot rely on is worth no promise at all, however good
+/// the delivery side looks (FR-426).
+#[test]
+fn a_conditional_capture_is_never_automatic() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::{
+        Availability, Capability, CapabilityProfile, CapabilityState, Confidence,
+    };
+    use cairn_integrate::model::AgentId;
+
+    let mut p = CapabilityProfile::base(AgentId::ClaudeCode);
+    p.capabilities.insert(
+        Capability::ContextAfterCompaction,
+        CapabilityState {
+            availability: Availability::Guaranteed,
+            confidence: Confidence::Verified,
+            depends_on: None,
+        },
+    );
+
+    for (capture, expected) in [
+        (Availability::Conditional, ContinuityMode::AgentInitiated),
+        (Availability::Absent, ContinuityMode::UnavailableAutomatic),
+        (
+            Availability::PendingActivation,
+            ContinuityMode::UnavailableAutomatic,
+        ),
+        (Availability::Guaranteed, ContinuityMode::Automatic),
+    ] {
+        p.capabilities.insert(
+            Capability::LifecyclePreCompaction,
+            CapabilityState {
+                availability: capture,
+                confidence: Confidence::Verified,
+                depends_on: None,
+            },
+        );
+        assert_eq!(
+            p.continuity_mode(),
+            expected,
+            "capture {capture:?} with an established delivery should derive {expected:?}"
+        );
+    }
+}
+
+/// A duplicate post-compaction session open does not restore twice (F14).
+///
+/// Delivery is recognised by an *unrestored* compaction checkpoint, so the first
+/// session open consumes it and any repeat finds nothing to do. This matters
+/// because an agent may legitimately emit more than one session open around a
+/// compaction -- Codex was observed sending two for one compaction -- and because
+/// `restore_count` is the evidence that a delivery happened, it has to keep
+/// meaning "delivered once".
+#[test]
+fn a_repeated_post_compaction_session_open_restores_once() {
+    let s = Sandbox::new();
+    let session = session_with_checkpoint(&s, "twice", "src/retry.rs");
+
+    let restores = |s: &Sandbox| {
+        s.query_column(&format!(
+            "SELECT CAST(COALESCE(SUM(restore_count), 0) AS TEXT) FROM continuity_checkpoints
+              WHERE session_id = '{session}'"
+        ))
+        .first()
+        .cloned()
+        .unwrap_or_default()
+    };
+
+    s.hook(
+        "PreCompact",
+        json!({ "session_id": "twice", "trigger": "auto" }),
+    );
+    s.hook(
+        "PostCompact",
+        json!({ "session_id": "twice", "trigger": "auto" }),
+    );
+
+    // Two session opens naming the compaction, exactly as a vendor that
+    // re-emits the boundary would send them.
+    for _ in 0..2 {
+        s.hook(
+            "SessionStart",
+            json!({ "session_id": "twice", "source": "compact" }),
+        );
+    }
+
+    for _ in 0..60 {
+        if restores(&s) != "0" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Give a second restore, if the gate allowed one, time to land.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    assert_eq!(
+        restores(&s),
+        "1",
+        "two post-compaction session opens restored more than once: `restore_count` \
+         no longer means the checkpoint was delivered exactly one time"
+    );
+}
+
+/// Automatic delivery says the same thing as asking (FR-426, F14).
+///
+/// This is the property `automatic` actually promises: an agent that is
+/// delivered to must learn what an agent that asks would learn. It did not hold.
+/// The hook path deserialized the reply into `ContextPayload`, which has no
+/// field for a restored checkpoint, and rendered only that -- so the daemon
+/// restored the checkpoint, Cairn recorded a post-compaction *delivery*, and the
+/// text the agent received carried no divergence warning at all. An agent that
+/// asked with `reason=post_compaction` was warned, because the CLI renders from
+/// the raw reply; an agent delivered to automatically acted on a stale next
+/// action in silence.
+///
+/// Asserted on a **diverged** checkpoint because that is where the two paths
+/// differed: `render::continuity` is deliberately quiet when nothing moved.
+#[test]
+fn automatic_delivery_warns_of_divergence_exactly_as_asking_does() {
+    let s = Sandbox::new();
+    let session = session_with_checkpoint(&s, "diverged-delivery", "src/retry.rs");
+    let _ = session;
+
+    // A real compaction boundary, so the checkpoint the session open looks for
+    // exists with the `context_compacting` trigger. Without this the gate
+    // correctly finds nothing to restore and delivers an ordinary briefing.
+    s.hook(
+        "PreCompact",
+        json!({ "session_id": "diverged-delivery", "trigger": "auto" }),
+    );
+    s.hook(
+        "PostCompact",
+        json!({ "session_id": "diverged-delivery", "trigger": "auto" }),
+    );
+
+    // Move the repository under the checkpoint so it can no longer be current.
+    s.write_file("retry.rs", "fn retry() { /* rewritten */ }\n");
+    s.git(&["add", "-A"]);
+    s.git(&["commit", "-q", "-m", "rewrite retry"]);
+
+    // Automatic delivery comes first, exactly as it does in a real session: the
+    // agent re-opens and is delivered to before it can ask anything. Asking
+    // first would consume the checkpoint and the delivery would correctly
+    // decline -- that is the duplicate-restore protection, not a failure.
+    let delivered = s.hook(
+        "SessionStart",
+        json!({ "session_id": "diverged-delivery", "source": "compact" }),
+    );
+    let rows = s.query_column(
+        "SELECT trigger || ' restore=' || restore_count
+           FROM continuity_checkpoints ORDER BY created_at",
+    );
+    assert!(
+        delivered.stdout.contains("CHECKPOINT DIVERGED"),
+        "automatic delivery dropped the divergence warning, so `automatic` promised less \
+         than `agent_initiated` actually gives.\n checkpoints: {rows:?}\n delivered: {}",
+        delivered.stdout
+    );
+
+    // And an agent that asks is told the same thing. Restoration is a read, so
+    // asking after a delivery still renders it.
+    let asked = s.cairn(&["context", "--reason", "post_compaction"]);
+    assert!(
+        asked.stdout.contains("CHECKPOINT DIVERGED"),
+        "an agent that asks must be warned the checkpoint diverged: {}",
+        asked.stdout
+    );
 }
 
 /// Divergence detection, per class and in combination — and a diverged

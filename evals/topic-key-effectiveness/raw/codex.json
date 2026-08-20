@@ -1,0 +1,309 @@
+{
+  "ok": true,
+  "data": {
+    "results": [
+      {
+        "content": "Migrations are additive only; they never rewrite an existing row in-place.",
+        "created_at": "2026-08-20T13:07:26.684396Z",
+        "id": "01a01f48-995c-7893-a132-76951b95e3e9",
+        "importance": "normal",
+        "local_only": false,
+        "pinned": false,
+        "provenance": {
+          "agent": "codex",
+          "evidence_count": 0,
+          "observation_ids": [],
+          "session_id": "01a01f48-3fb0-7bf0-9407-bc3b05a438a8"
+        },
+        "rank": {
+          "age_days": 0,
+          "relevance": 0.0,
+          "scope_bucket": 2
+        },
+        "reinforcement": {
+          "count": 0,
+          "distinct_origins": 1
+        },
+        "scope": "project",
+        "scope_key": "01a01f43-7bee-73b3-846d-8f7b6a810d24",
+        "state": "active",
+        "subject": {
+          "competing_answers": [],
+          "corroborating_answers": [],
+          "is_canonical_answer": true,
+          "reconciliation": "settled"
+        },
+        "superseded_by_id": null,
+        "topic_key": "migrations.row_mutation",
+        "type": "convention",
+        "value_key": "additive_only_no_row_rewrites",
+        "verification": {
+          "authority": null,
+          "basis": [],
+          "fact_count": 0,
+          "last_verified_at": null,
+          "state": "unverified"
+        }
+      },
+      {
+        "content": "Batches can be replayed safely because they are keyed; replaying an already-applied batch should not change state.",
+        "created_at": "2026-08-20T13:06:20.128171Z",
+        "id": "01a01f47-9560-7892-b18d-b86da588c7f1",
+        "importance": "normal",
+        "local_only": false,
+        "pinned": false,
+        "provenance": {
+          "agent": "codex",
+          "evidence_count": 0,
+          "observation_ids": [],
+          "session_id": "01a01f47-33ae-7240-9fe6-fed786f61647"
+        },
+        "rank": {
+          "age_days": 0,
+          "relevance": 0.0,
+          "scope_bucket": 2
+        },
+        "reinforcement": {
+          "count": 0,
+          "distinct_origins": 1
+        },
+        "scope": "project",
+        "scope_key": "01a01f43-7bee-73b3-846d-8f7b6a810d24",
+        "state": "active",
+        "subject": {
+          "competing_answers": [],
+          "corroborating_answers": [],
+          "is_canonical_answer": true,
+          "reconciliation": "settled"
+        },
+        "superseded_by_id": null,
+        "topic_key": "batch.replay",
+        "type": "convention",
+        "value_key": "keyed.replay_is_safe",
+        "verification": {
+          "authority": null,
+          "basis": [],
+          "fact_count": 0,
+          "last_verified_at": null,
+          "state": "unverified"
+        }
+      },
+      {
+        "content": "Batches are idempotent: replaying an already-applied batch should not change state.",
+        "created_at": "2026-08-20T13:05:49.654312Z",
+        "id": "01a01f47-1e56-7671-a661-29bc9d81f1f7",
+        "importance": "normal",
+        "local_only": false,
+        "pinned": false,
+        "provenance": {
+          "agent": "codex",
+          "evidence_count": 0,
+          "observation_ids": [],
+          "session_id": "01a01f46-d616-7b70-9dc2-01e73dd91236"
+        },
+        "rank": {
+          "age_days": 0,
+          "relevance": 0.0,
+          "scope_bucket": 2
+        },
+        "reinforcement": {
+          "count": 0,
+          "distinct_origins": 1
+        },
+        "scope": "project",
+        "scope_key": "01a01f43-7bee-73b3-846d-8f7b6a810d24",
+        "state": "active",
+        "subject": {
+          "competing_answers": [],
+          "corroborating_answers": [],
+          "is_canonical_answer": true,
+          "reconciliation": "settled"
+        },
+        "superseded_by_id": null,
+        "topic_key": "batches.idempotency",
+        "type": "convention",
+        "value_key": "replay_has_no_effect",
+        "verification": {
+          "authority": null,
+          "basis": [],
+          "fact_count": 0,
+          "last_verified_at": null,
+          "state": "unverified"
+        }
+      },
+      {
+        "content": "The tool itself is versioned with semver.",
+        "created_at": "2026-08-20T13:05:25.531256Z",
+        "id": "01a01f46-c01b-75c2-af3b-c5b45d9d30ce",
+        "importance": "normal",
+        "local_only": false,
+        "pinned": false,
+        "provenance": {
+          "agent": "codex",
+          "evidence_count": 0,
+          "observation_ids": [],
+          "session_id": "01a01f46-3ceb-7ec3-8c55-d9aa266a3263"
+        },
+        "rank": {
+          "age_days": 0,
+          "relevance": 0.0,
+          "scope_bucket": 2
+        },
+        "reinforcement": {
+          "count": 0,
+          "distinct_origins": 1
+        },
+        "scope": "project",
+        "scope_key": "01a01f43-7bee-73b3-846d-8f7b6a810d24",
+        "state": "active",
+        "subject": {
+          "competing_answers": [],
+          "corroborating_answers": [],
+          "is_canonical_answer": true,
+          "reconciliation": "settled"
+        },
+        "superseded_by_id": null,
+        "topic_key": "tool.versioning.scheme",
+        "type": "fact",
+        "value_key": "semver",
+        "verification": {
+          "authority": null,
+          "basis": [],
+          "fact_count": 0,
+          "last_verified_at": null,
+          "state": "unverified"
+        }
+      },
+      {
+        "content": "Plugin discovery should look in the config directory; PATH-based discovery was rejected.",
+        "created_at": "2026-08-20T13:04:47.187652Z",
+        "id": "01a01f46-2a53-7a52-9463-1a5c73f51356",
+        "importance": "normal",
+        "local_only": false,
+        "pinned": false,
+        "provenance": {
+          "agent": "codex",
+          "evidence_count": 0,
+          "observation_ids": [],
+          "session_id": "01a01f45-b5d0-7c60-9cd6-6a74986ee714"
+        },
+        "rank": {
+          "age_days": 0,
+          "relevance": 0.0,
+          "scope_bucket": 2
+        },
+        "reinforcement": {
+          "count": 0,
+          "distinct_origins": 1
+        },
+        "scope": "project",
+        "scope_key": "01a01f43-7bee-73b3-846d-8f7b6a810d24",
+        "state": "active",
+        "subject": {
+          "competing_answers": [],
+          "corroborating_answers": [],
+          "is_canonical_answer": true,
+          "reconciliation": "settled"
+        },
+        "superseded_by_id": null,
+        "topic_key": "plugin_discovery_config_dir",
+        "type": "convention",
+        "value_key": "use_config_dir_not_path",
+        "verification": {
+          "authority": null,
+          "basis": [],
+          "fact_count": 0,
+          "last_verified_at": null,
+          "state": "unverified"
+        }
+      },
+      {
+        "content": "Local development uses SQLite.",
+        "created_at": "2026-08-20T13:03:25.284824Z",
+        "id": "01a01f44-ea64-7ab0-91a4-4723afc278c0",
+        "importance": "normal",
+        "local_only": false,
+        "pinned": false,
+        "provenance": {
+          "agent": "codex",
+          "evidence_count": 0,
+          "observation_ids": [],
+          "session_id": "01a01f44-6a98-7671-86ac-e4c9713c6e2c"
+        },
+        "rank": {
+          "age_days": 0,
+          "relevance": 0.0,
+          "scope_bucket": 2
+        },
+        "reinforcement": {
+          "count": 0,
+          "distinct_origins": 1
+        },
+        "scope": "project",
+        "scope_key": "01a01f43-7bee-73b3-846d-8f7b6a810d24",
+        "state": "active",
+        "subject": {
+          "competing_answers": [],
+          "corroborating_answers": [],
+          "is_canonical_answer": true,
+          "reconciliation": "settled"
+        },
+        "superseded_by_id": null,
+        "topic_key": "database.local_development",
+        "type": "fact",
+        "value_key": "sqlite",
+        "verification": {
+          "authority": null,
+          "basis": [],
+          "fact_count": 0,
+          "last_verified_at": null,
+          "state": "unverified"
+        }
+      },
+      {
+        "content": "Production database choice settled on PostgreSQL.",
+        "created_at": "2026-08-20T13:02:25.339630Z",
+        "id": "01a01f44-003b-7df3-806d-7a1551d247c9",
+        "importance": "normal",
+        "local_only": false,
+        "pinned": false,
+        "provenance": {
+          "agent": "codex",
+          "evidence_count": 0,
+          "observation_ids": [],
+          "session_id": "01a01f43-87a1-7471-a685-6b7f5ebe4e4d"
+        },
+        "rank": {
+          "age_days": 0,
+          "relevance": 0.0,
+          "scope_bucket": 2
+        },
+        "reinforcement": {
+          "count": 0,
+          "distinct_origins": 1
+        },
+        "scope": "project",
+        "scope_key": "01a01f43-7bee-73b3-846d-8f7b6a810d24",
+        "state": "active",
+        "subject": {
+          "competing_answers": [],
+          "corroborating_answers": [],
+          "is_canonical_answer": true,
+          "reconciliation": "settled"
+        },
+        "superseded_by_id": null,
+        "topic_key": "infrastructure.production_database",
+        "type": "decision",
+        "value_key": "postgresql",
+        "verification": {
+          "authority": null,
+          "basis": [],
+          "fact_count": 0,
+          "last_verified_at": null,
+          "state": "unverified"
+        }
+      }
+    ],
+    "total": 7
+  }
+}

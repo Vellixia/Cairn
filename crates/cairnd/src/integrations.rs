@@ -141,20 +141,54 @@ async fn dispatch(
                 },
             )
             .await?;
+
+            // A session that opens with an unrestored compaction checkpoint is
+            // the *same* session coming back from a compaction, not a new one.
+            // That is the first boundary the model reads afterwards, and it is
+            // the only place Cairn can hand the checkpoint back without being
+            // asked -- `context_compacted` is capture class and returns before
+            // anything is emitted.
+            //
+            // Detected from Cairn's own recorded state rather than a vendor
+            // string, so it holds for any agent that re-opens a session after
+            // compacting. `source` is consulted only as corroboration where the
+            // vendor supplies it: Claude Code sends `compact`, and the others
+            // send nothing at all.
+            let after_compaction = post_compaction_reopen(d, &cwd, key.as_deref(), &event).await;
+            let reason = if after_compaction {
+                cairn_core::wire::ContextReason::PostCompaction
+            } else {
+                cairn_core::wire::ContextReason::SessionStart
+            };
+
             // Context delivery is the one canonical event whose handling
             // produces something the agent consumes (D19a).
-            crate::handlers::handle(
+            let delivered = crate::handlers::handle(
                 d,
                 cairn_core::wire::Request::Context {
                     cwd,
                     agent_session_key: key,
                     session_id: None,
-                    reason: Some(cairn_core::wire::ContextReason::SessionStart),
+                    reason: Some(reason),
                     token_budget,
                     explain: false,
                 },
             )
-            .await
+            .await;
+
+            // `context_after_compaction` is delivery, not capture, so it is
+            // established only where a checkpoint was actually restored *into*
+            // a briefing the agent consumes. A compaction Cairn merely heard
+            // about establishes `lifecycle_post_compaction` and nothing more --
+            // which is the whole point of them being two capabilities.
+            if after_compaction {
+                if let Ok(payload) = &delivered {
+                    if payload.get("checkpoint").is_some() {
+                        write_evidence(d, &event.agent, "context_after_compaction").await;
+                    }
+                }
+            }
+            delivered
         }
         CanonicalEvent::ToolSucceeded | CanonicalEvent::ToolFailed => {
             let observation = event
@@ -204,20 +238,22 @@ async fn dispatch(
         // `automatic`, whose whole promise is that continuity is restored
         // automatically after compaction, silently got no restoration at all.
         // A mode that over-claims is a defect, not a note (FR-426).
-        CanonicalEvent::ContextCompacted => {
-            crate::handlers::handle(
-                d,
-                cairn_core::wire::Request::Context {
-                    cwd,
-                    agent_session_key: key,
-                    session_id: None,
-                    reason: Some(cairn_core::wire::ContextReason::PostCompaction),
-                    token_budget,
-                    explain: false,
-                },
-            )
-            .await
-        }
+        // Capture only. This event is capture class, so `cairn hook` sends it
+        // one-way and throws the reply away -- there is no channel here to hand
+        // anything back on, for any agent.
+        //
+        // It used to ask for a `PostCompaction` briefing, which *restores* the
+        // checkpoint. Nothing could be delivered from it, so the only effect was
+        // to consume the checkpoint the next session open needs, leaving whether
+        // delivery is observed to depend on which of two hooks the vendor
+        // happens to run first. Restoration belongs where context can actually
+        // reach the model: the session that opens next for an agent that re-opens
+        // one, and `cairn_context(reason=post_compaction)` for an agent that does
+        // not.
+        //
+        // `lifecycle_post_compaction` is already recorded above, which is the
+        // whole of what this event establishes.
+        CanonicalEvent::ContextCompacted => Ok(serde_json::json!({})),
         CanonicalEvent::SessionClosed => {
             crate::handlers::handle(
                 d,
@@ -484,4 +520,72 @@ pub async fn record_recovery(
     .map_err(storage_err)?;
     // Only the path is ever returned, never the content (FR-239).
     Ok(json!({ "artifact_path": artifact_path }))
+}
+
+/// Whether this session-open is the same session returning from a compaction.
+///
+/// True when Cairn holds a `context_compacting` checkpoint for the session that
+/// has never been restored. That is a fact about Cairn's own records, so it does
+/// not depend on a vendor naming the boundary; where a vendor does name it --
+/// Claude Code's `SessionStart` source is `compact` -- it agrees, and is used
+/// only as corroboration.
+///
+/// Deliberately conservative: a checkpoint already restored is not restored
+/// twice, and no checkpoint at all means an ordinary session start.
+async fn post_compaction_reopen(
+    d: &Daemon,
+    cwd: &str,
+    key: Option<&str>,
+    event: &CanonicalLifecycleEvent,
+) -> bool {
+    // A vendor that names the boundary is believed immediately.
+    let named = event
+        .source
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("compact"));
+
+    let Ok(r) = d.resolve(cwd).await else {
+        return named;
+    };
+    let Some(key) = key else { return named };
+    let session = match cairn_store::repo::session_by_key(&d.store, r.project.id, key).await {
+        Ok(Some(s)) => s,
+        _ => return named,
+    };
+    match cairn_store::continuity::latest(&d.store, session.id).await {
+        // An **unrestored** compaction checkpoint is the signal, and the
+        // `restore_count` is what makes a second session open harmless: once the
+        // first has restored it, a duplicate finds it consumed and delivers
+        // nothing again. A vendor naming the boundary is deliberately *not* ORed
+        // in here -- an agent that re-emits `SessionStart` twice would then
+        // restore twice, and `restore_count` would stop meaning "delivered once".
+        Ok(Some(c)) => {
+            c.trigger == cairn_core::domain::CheckpointTrigger::ContextCompacting
+                && c.restore_count == 0
+        }
+        // Only where Cairn has no checkpoint to reason about at all does the
+        // vendor's own naming decide. Nothing can be restored in that case, so
+        // it costs a briefing reason and no more.
+        _ => named,
+    }
+}
+
+/// One capability-evidence row, recorded as an observation.
+async fn write_evidence(d: &Daemon, agent: &str, capability: &str) {
+    let version = rec::agent(&d.store, agent)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|a| a.detected_version);
+    let row = rec::CapabilityEvidence {
+        agent: agent.to_string(),
+        capability: capability.to_string(),
+        evidence: "observation".into(),
+        established_at: chrono::Utc::now().to_rfc3339(),
+        agent_version: version,
+        degraded: None,
+    };
+    if let Err(e) = rec::record_evidence(&d.store, &row).await {
+        tracing::debug!(error = %e, "could not record capability evidence");
+    }
 }

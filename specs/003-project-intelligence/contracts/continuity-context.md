@@ -54,38 +54,51 @@ owes a handoff owes its checkpoint with it and the existing sweep covers both (F
 No new canonical event and no new capability (FR-427). The mode is a **derived read** over
 Feature 002's capability profile (D57):
 
-| `LifecyclePreCompaction` | `LifecyclePostCompaction` | `continuity_mode` | What Cairn says |
+| capture: `LifecyclePreCompaction` | delivery: `ContextAfterCompaction` | `continuity_mode` | What Cairn says |
 |---|---|---|---|
-| present | present | `automatic` | Continuity is restored automatically after compaction |
-| present | absent / conditional | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
+| guaranteed | **established** | `automatic` | Continuity is restored automatically after compaction |
+| guaranteed | anything else | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
+| conditional | any | `agent_initiated` | A warning that may not arrive is one an agent cannot plan around |
 | absent | any | `unavailable_automatic` | Compression-safe continuity is not automatic for this agent; a checkpoint exists at session close and on demand |
 
-Under the delivery path as built: Claude Code `agent_initiated`, Codex `agent_initiated`,
-OpenCode `agent_initiated` (its compaction hook is experimental), generic MCP
-`unavailable_automatic`. These are outputs of the rule, not entries in a maintained table.
+**Capture is not delivery, and the second column is delivery.**
+`LifecyclePostCompaction` is the capture of the compaction boundary -- the agent
+told Cairn it happened. `ContextAfterCompaction` is the separate fact that
+Cairn's context reached the session afterwards without the agent asking. An agent
+can do the first and offer nowhere to do the second, so the mode reads the
+delivery capability. This mirrors `ContextAtSessionOpen` standing apart from
+`LifecycleSessionOpen`.
 
-**No agent reaches `automatic` today.** The first row of the table above is reachable only if Cairn
-gains a post-compaction delivery path; it is kept because the rule is the contract, not because any
-agent satisfies it.
+**`automatic` requires an observation, not a vendor promise.** The delivery
+column must be `established()` -- guaranteed *and* verified on this
+installation. A profile built only from what a vendor documents therefore never
+claims `automatic`, and a wrong entry in that table can only under-promise, which
+is the direction FR-426 permits. This is what keeps the mode derived rather than
+maintained (D57): the previous rule read the capture capability, so any agent
+that merely reported a compaction claimed re-delivery too, and the only way to
+stop it was editing the very table the derivation exists to avoid.
 
-**Claude Code was `automatic` until a real compaction was driven against a real store.** The
-`PostCompact` hook fires and Cairn restores the checkpoint — but the vendor does not support
-`additionalContext` on that event, and documents its output as shown to the user only. There is no
-channel through which the checkpoint reaches the session, so the agent is never *told* without
-asking. `LifecyclePostCompaction` is the capability "context re-delivery after compaction", and
-re-delivery is the part that is not available. The claim was corrected rather than the observation
-(FR-426).
+**Where delivery actually happens.** Not at the post-compaction event: that event
+is capture class, so `cairn hook` sends it one-way and returns before anything is
+emitted. It happens at the **next session open**, which is the first boundary the
+model reads after a compaction. Cairn detects that boundary from its own recorded
+state -- a `context_compacting` checkpoint for this session that has never been
+restored -- so it does not depend on a vendor naming it, and consults
+`SessionStart.source == "compact"` only as corroboration where a vendor supplies
+it.
 
-**Codex was `automatic` until the delivery path was read rather than its hook list (F12).** Codex
-registers `PreCompact` and `PostCompact`, so Cairn is called — but being called is not re-delivering.
-`context_compacted` is capture class, so `cairn hook` sends it one-way and returns before reaching
-`emit_context`, and `delivers_context` is `session_opened` alone. That is a fact about Cairn and
-holds for every agent, independently of what any vendor supports, so ruling Codex out needed no live
-compaction. Its `LifecyclePostCompaction` is `conditional` and it reports `agent_initiated`, which is
-what it delivers: the checkpoint is restored and the agent asks for it with
-`reason=post_compaction`. T148 (#42) may raise it to `guaranteed` later, but only on live evidence
-that a compaction really does hand context back — under-promising is permitted here, over-claiming
-is the defect FR-426 forbids.
+Verified live (T148):
+
+| agent | capture | delivery | observed mode |
+|---|---|---|---|
+| Claude Code | `PreCompact` -> `PostCompact` | `SessionStart` source `compact`, plain-text stdout | `automatic` |
+| Codex | `PreCompact` -> `PostCompact` | `SessionStart` re-emitted, `additionalContext` | `automatic` once hook trust is active; `unavailable_automatic` until then |
+| OpenCode | `experimental.session.compacting` (conditional) | no post-compaction session open | `agent_initiated` |
+| Generic MCP | none | none | `unavailable_automatic` |
+
+Claude Code and Codex were each, at different times, given a mode from reasoning
+about `PostCompact` alone -- once too generously and once too meanly. Both are
+now settled by driving real compactions (F10, F13, F14).
 
 Reported by `cairn agents`, `cairn doctor` and in the `cairn_context` response. Cairn never reports a
 rehydration guarantee an adapter cannot provide (FR-426, SC-311 companion).

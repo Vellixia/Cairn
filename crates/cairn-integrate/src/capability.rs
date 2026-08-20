@@ -37,11 +37,21 @@ pub enum Capability {
     LifecyclePostCompaction,
     LifecycleSessionClose,
     ContextAtSessionOpen,
+    /// Cairn's context reached the session **after a compaction**, without the
+    /// agent having to ask for it.
+    ///
+    /// Deliberately separate from `LifecyclePostCompaction`, which is only the
+    /// capture of the compaction boundary. An agent can tell Cairn a compaction
+    /// happened and still offer nowhere to put the checkpoint back; those are
+    /// two facts, and conflating them is what let a mode over-claim. This
+    /// mirrors `ContextAtSessionOpen` standing apart from `LifecycleSessionOpen`
+    /// for exactly the same reason.
+    ContextAfterCompaction,
     StableSessionIdentifier,
 }
 
 impl Capability {
-    pub const ALL: [Capability; 14] = [
+    pub const ALL: [Capability; 15] = [
         Capability::McpUserScope,
         Capability::McpProjectScope,
         Capability::InstructionsProject,
@@ -55,6 +65,7 @@ impl Capability {
         Capability::LifecyclePostCompaction,
         Capability::LifecycleSessionClose,
         Capability::ContextAtSessionOpen,
+        Capability::ContextAfterCompaction,
         Capability::StableSessionIdentifier,
     ];
 
@@ -73,6 +84,7 @@ impl Capability {
             Capability::LifecyclePostCompaction => "lifecycle_post_compaction",
             Capability::LifecycleSessionClose => "lifecycle_session_close",
             Capability::ContextAtSessionOpen => "context_at_session_open",
+            Capability::ContextAfterCompaction => "context_after_compaction",
             Capability::StableSessionIdentifier => "stable_session_identifier",
         }
     }
@@ -124,6 +136,9 @@ impl Capability {
             Capability::LifecycleQuiesce => "a first turn checkpoint here",
             Capability::LifecycleSessionClose => "a first session closed here",
             Capability::ContextAtSessionOpen => "context delivered at a session start here",
+            Capability::ContextAfterCompaction => {
+                "context delivered here after a compaction, without the agent asking"
+            }
             Capability::StableSessionIdentifier => {
                 "two events carrying the agent's own session identifier"
             }
@@ -147,7 +162,8 @@ impl Capability {
             Capability::LifecycleToolFailure => "automatic capture of tool failures",
             Capability::LifecycleQuiesce => "turn checkpoints when the agent stops working",
             Capability::LifecyclePreCompaction => "a durable handoff before compaction",
-            Capability::LifecyclePostCompaction => "context re-delivery after compaction",
+            Capability::LifecyclePostCompaction => "capture of the compaction boundary",
+            Capability::ContextAfterCompaction => "context re-delivery after compaction",
             Capability::LifecycleSessionClose => "automatic session completion",
             Capability::ContextAtSessionOpen => "project context delivered at session start",
             Capability::StableSessionIdentifier => "a stable session identity from the agent",
@@ -376,60 +392,28 @@ impl CapabilityProfile {
                 for k in Capability::ALL {
                     set!(k, Guaranteed);
                 }
-                // The `PostCompact` hook fires, and that is not the same fact.
-                // This capability is *context re-delivery* after compaction,
-                // and Claude Code's hook cannot re-deliver: `additionalContext`
-                // is unsupported for `PostCompact`, whose output the vendor
-                // documents as "shows stderr to user only". Cairn is told the
-                // compaction happened and has no way to hand the checkpoint
-                // back through that channel.
+                // `LifecyclePostCompaction` stays guaranteed: `PostCompact`
+                // really does fire, and capturing the boundary is the whole of
+                // what that capability claims. Re-delivery is a different fact
+                // and a different hook -- `PostCompact` is informational, while
+                // `SessionStart` with source `compact` is the first boundary the
+                // model reads after a compaction, and is the mechanism the
+                // vendor documents for re-injecting context.
                 //
-                // Recorded as `conditional` rather than `absent` because the
-                // signal is real and Cairn does act on it — it restores the
-                // checkpoint, so `cairn_context(reason=post_compaction)`
-                // answers immediately. What is not guaranteed is that the agent
-                // is *told* without asking, which is precisely the difference
-                // between `automatic` and `agent_initiated` (FR-426).
-                c.insert(
-                    LifecyclePostCompaction,
-                    CapabilityState::conditional(
-                        "Claude Code's PostCompact hook can return context to the session",
-                    ),
-                );
+                // Guaranteed here means "the vendor documents it", never "Cairn
+                // has seen it work": `continuity_mode` will not say `automatic`
+                // until a delivery is observed on this installation.
             }
             AgentId::Codex => {
                 for k in Capability::ALL {
                     set!(k, Guaranteed);
                 }
-                // Codex registers `PostCompact` and Cairn is called on it, but
-                // this capability is *context re-delivery* after compaction,
-                // and Cairn does not re-deliver on that path for any agent:
-                // `ContextCompacted` is capture class, so `cairn hook` sends it
-                // one-way and returns without ever reaching `emit_context`
-                // (`crates/cairn/src/hook.rs`, where `delivers_context` is
-                // `SessionOpened` alone).
-                //
-                // What the hook does do is restore the checkpoint, so
-                // `cairn_context(reason=post_compaction)` answers immediately.
-                // That is the same shape as Claude Code above: the signal is
-                // real and acted on, and what is *not* guaranteed is that the
-                // agent is told without asking -- precisely the difference
-                // between `automatic` and `agent_initiated` (FR-426).
-                //
-                // This was `guaranteed` until it was read against the delivery
-                // path rather than the hook registration. It had never been
-                // driven live (T148, deferred to #42), and the identical
-                // `automatic` claim for Claude Code was disproved the moment a
-                // real compaction was run. Under-promising is permitted here;
-                // over-claiming is the defect FR-426 forbids. If T148 ever
-                // shows Codex genuinely re-delivering, this becomes
-                // `guaranteed` on that evidence (F12).
-                c.insert(
-                    LifecyclePostCompaction,
-                    CapabilityState::conditional(
-                        "Codex's PostCompact hook can return context to the session",
-                    ),
-                );
+                // Codex re-emits `SessionStart` after every `PostCompact`,
+                // observed seven times across two driven compactions, so the
+                // session it opens next is where context comes back. Both the
+                // capture and the delivery capability are what the vendor
+                // offers; whether a delivery actually happened here is settled
+                // by observation rather than by this table (F13, F14).
             }
             AgentId::Opencode => {
                 for k in Capability::ALL {
@@ -449,6 +433,18 @@ impl CapabilityProfile {
                     LifecyclePreCompaction,
                     CapabilityState::conditional(
                         "the installed OpenCode exposes experimental.session.compacting",
+                    ),
+                );
+                // OpenCode signals no session end and does not re-open a session
+                // after compacting, so it cannot borrow the session-open
+                // delivery path the other two agents use. Whether its compaction
+                // hook can itself carry a continuity capsule into the compacted
+                // context is not established here, so this stays conditional --
+                // and a conditional capability can never reach `automatic`.
+                c.insert(
+                    ContextAfterCompaction,
+                    CapabilityState::conditional(
+                        "OpenCode's compaction hook can place context into the compacted session",
                     ),
                 );
                 // The one genuine absence: OpenCode signals no session end at
@@ -637,12 +633,19 @@ impl CapabilityProfile {
     /// continuity (FR-426, FR-427, D57).
     ///
     /// ```text
-    /// pre     post                  mode
-    /// ------  --------------------  ----------------------
-    /// present present               automatic
-    /// present absent / conditional  agent_initiated
-    /// absent  any                   unavailable_automatic
+    /// capture (pre)  delivery (after)  mode
+    /// -------------  ----------------  ----------------------
+    /// guaranteed     established       automatic
+    /// guaranteed     anything else     agent_initiated
+    /// conditional    any               agent_initiated
+    /// absent         any               unavailable_automatic
     /// ```
+    ///
+    /// The second column is `ContextAfterCompaction` -- context actually coming
+    /// back -- and **not** `LifecyclePostCompaction`, which is only the capture
+    /// of the boundary. Being told that a compaction happened says nothing about
+    /// whether anything can be handed back, and treating those as one fact is
+    /// what let two agents in turn be given a mode the code could not keep.
     ///
     /// A **derived read** over the capability profile Feature 002 already
     /// maintains. No new canonical event and no new capability: a mode that
@@ -653,34 +656,43 @@ impl CapabilityProfile {
     /// Claiming `automatic` for an agent whose post-compaction hook is
     /// experimental would be exactly the false promise US6 #4 is about.
     pub fn continuity_mode(&self) -> cairn_core::domain::ContinuityMode {
-        let pre = self.get(Capability::LifecyclePreCompaction);
-        let post = self.get(Capability::LifecyclePostCompaction);
+        let capture = self.get(Capability::LifecyclePreCompaction);
+        let delivery = self.get(Capability::ContextAfterCompaction);
 
         use cairn_core::domain::ContinuityMode;
 
         // Nothing warns Cairn at all: the agent must write its own checkpoint
         // before compacting, because there is no moment Cairn can do it.
         if matches!(
-            pre.availability,
+            capture.availability,
             Availability::Absent | Availability::PendingActivation
         ) {
             return ContinuityMode::UnavailableAutomatic;
         }
 
-        // `automatic` is a promise that Cairn is called back on both sides, and
-        // it is only keepable when **both** are guaranteed.
+        // A conditional warning is one an agent cannot plan around. OpenCode's
+        // depends on the installed build exposing
+        // `experimental.session.compacting`; on a build without it Cairn is
+        // never told a compaction is coming, so no checkpoint is written at all.
+        // Conditional and absent mean the same thing to an agent that must act.
+        if capture.availability != Availability::Guaranteed {
+            return ContinuityMode::AgentInitiated;
+        }
+
+        // `automatic` tells a developer their work survives a compaction without
+        // anyone doing anything. Only a delivery Cairn has actually **observed**
+        // on this installation can keep that promise: `established()` is
+        // guaranteed *and* verified, so a vendor fact alone is never enough, and
+        // a wrong entry in `base()` can only ever under-promise.
         //
-        // A conditional pre-compaction is the case this originally got wrong.
-        // OpenCode's warning depends on the installed build exposing
-        // `experimental.session.compacting`, so on a build without it Cairn is
-        // never told compaction is coming and the checkpoint is never written —
-        // while the agent had been told continuity was automatic and did
-        // nothing. Conditional and unavailable mean the same thing to an agent
-        // that must act: it cannot rely on being called, so it must ask
-        // (FR-426).
-        match (pre.availability, post.availability) {
-            (Availability::Guaranteed, Availability::Guaranteed) => ContinuityMode::Automatic,
-            _ => ContinuityMode::AgentInitiated,
+        // This is what keeps the mode derived rather than maintained (D57). The
+        // previous rule read the capture capability here, so any agent that
+        // merely reported a compaction claimed re-delivery too, and the only way
+        // to stop it was editing the very table the derivation exists to avoid.
+        if delivery.established() {
+            ContinuityMode::Automatic
+        } else {
+            ContinuityMode::AgentInitiated
         }
     }
 }
@@ -1157,7 +1169,15 @@ mod tests {
                 assert!(s.depends_on.is_some(), "{c} is conditional on nothing");
             }
         }
-        assert_eq!(p.conditional_behaviors().len(), 2);
+        // One reported behaviour per conditional capability -- the count is
+        // derived from the profile rather than written down, so a capability
+        // this agent genuinely qualifies for does not read as a regression.
+        let conditional = Capability::ALL
+            .into_iter()
+            .filter(|c| p.get(*c).availability == Availability::Conditional)
+            .count();
+        assert!(conditional > 0, "OpenCode has conditional capabilities");
+        assert_eq!(p.conditional_behaviors().len(), conditional);
     }
 
     // ------------------------------------------------- T066 — Codex gate ---
