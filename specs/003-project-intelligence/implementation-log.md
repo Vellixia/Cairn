@@ -1877,3 +1877,96 @@ it ([#44]).
 [#43]: https://github.com/Vellixia/Cairn/issues/43
 [#44]: https://github.com/Vellixia/Cairn/issues/44
 [#46]: https://github.com/Vellixia/Cairn/issues/46
+
+---
+
+# Checkpoint T — the post-PR issue sweep
+
+Checkpoint S closed what a fresh review of the diff found. This checkpoint closes
+what was left open in the tracker: every issue against this branch, read in full,
+except #42, which is the release blocker already tracked deliberately.
+
+## #46 — contradicting evidence now moves a memory
+
+Filed in Checkpoint S with the derivation deliberately deferred, because it sat on
+the same function (`rebuild_verification_inner`) that D6 and D16 had both just
+touched, and stacking a third change on those guards during review was the wrong
+place to do design work.
+
+The design turned out to already exist. `cairn-core/src/verify.rs`'s state machine
+documents `(Verified, ContradictingEvidenceAttached) -> Conflicted` and every
+recovery transition out of `Conflicted`, with an exhaustiveness test holding the
+whole table to account — but nothing outside that module ever imported
+`VerificationTrigger` or called `transition()`. The FSM was fully specified and
+completely disconnected from the derivation that actually runs.
+
+`rebuild_verification_inner` now checks for an active `contradicts` fact directly
+— a durable-record query, not a call into the FSM, since the ad-hoc run-derived
+state it already computes was never routed through `transition()` either — and
+overrides `Verified` to `Conflicted` when one exists. Recovery mirrors the
+existing `needs_recheck`-preservation guard exactly: every documented exit from
+`Conflicted` lands on `NeedsRecheck`, and only a caller that just recorded a fresh
+run (`after_run`) may land on `Verified` instead, for the same reason a
+re-attestation is allowed to lift `NeedsRecheck`.
+
+Both strict consumers needed **no code change**. `derive_authority` already
+returns `None` for any non-`Verified` state, so a conflicted memory carries no
+authority automatically. Promotion's existing `source.verification != Verified`
+precondition already refuses it with `source_unverified`. Task-criterion
+verification needed no change either, and for a reason worth recording rather
+than assuming: criteria only ever receive `role = supports` via
+`attach_to_criterion`, so `role = contradicts` is a memory-only concept — there is
+nothing for the criterion gate to consult.
+
+Six regressions. Three were proven against the pre-fix code the way this whole
+run has insisted on — and one of them caught a real tooling trap on the way in.
+`cargo test -p cairn-e2e --test us8_patterns` against the *reverted* derivation
+passed clean on the first attempt, which was wrong: the e2e sandbox spawns the
+prebuilt `cairnd` binary from `target/debug`, and `cargo test` alone does not
+rebuild it. Only after `cargo build --workspace` did the same test fail as
+expected, then pass once restored. Recorded because it is exactly the kind of
+false-negative regression check this run has repeatedly warned against trusting.
+
+## #43 — contract prose corrected, code untouched
+
+The issue's own conclusion was explicit: "the implementation is correct." Reworded
+`contracts/mcp-tools.md`'s description of `next_step` for the `corroborating`
+outcome to say what `reinforce` actually does — confirms, does not merge — and
+name `reconcile --relation duplicates --basis explicit_agent` as the call that
+collapses two statements into one answer. The wire string and the CLI hint are
+unchanged; changing runtime behaviour on an issue that states its own root cause
+is documentation-only was not this checkpoint's call to make unilaterally.
+
+## #44 — left as scoped, given one diagnostic
+
+The issue is explicit that a proper fix needs `updated_at` on the wire, cursor
+repositioning, and a policy for a permanently unplaceable record, and that this is
+"a large change to a heavily tested branch on speculative grounds" with "no
+currently reachable correctness failure known." The governing instruction for
+this checkpoint repeated the same boundary in the same words: no redesign unless
+review proves a currently reachable failure. None has been.
+
+What was missing even as an accepted, documented risk was any trace. A criterion
+or relation declined because its parent had not arrived yet left no signal
+anywhere — not a log line, not a metric — so a project stuck waiting on one was
+invisible until someone went looking for exactly this symptom. Two
+`tracing::debug!` lines at the two decline points name what was declined and why.
+Pure observability: the cursor, the wire shape and the import ordering are
+untouched, and no regression is claimed because no behaviour changed.
+
+## #38 — not this repository's defect
+
+CC Switch 3.19.2's own provider-activation persistence, investigated by the
+operator directly against `farion1231/cc-switch`'s source and narrowed to four
+specific writes that should have happened and did not. Nothing in this codebase
+performs those writes — Cairn is explicitly forbidden from touching CC Switch's
+own storage (FR-232) — so there is no code change here that constitutes "fixing"
+it. Left as filed.
+
+## Gate after Checkpoint T
+
+1,088 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean, `git diff --check` clean.
+
+[#38]: https://github.com/Vellixia/Cairn/issues/38
+[#42]: https://github.com/Vellixia/Cairn/issues/42
