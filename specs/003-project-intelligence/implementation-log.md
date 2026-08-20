@@ -1400,7 +1400,8 @@ until it passed would have shipped it.
 ## F12 (CRITICAL) — Codex kept the `automatic` claim F10 had already disproved
 
 `crates/cairn-integrate/src/capability.rs`, `specs/003-project-intelligence/compatibility.md`,
-`specs/003-project-intelligence/research.md`
+`specs/003-project-intelligence/research.md`,
+`specs/003-project-intelligence/contracts/continuity-context.md`
 
 F10 downgraded Claude Code from `automatic` to `agent_initiated` and left Codex
 alone, on the stated grounds that Codex's hooks are its own vendor's and
@@ -1443,12 +1444,22 @@ does not wait on #42. T148 can still upgrade Codex to `guaranteed` later — but
 only on live evidence that a compaction really does hand context back, which is
 the evidence F10 established nobody had.
 
-Two documents were also asserting the disproved claim as settled fact.
+Three documents were also asserting the disproved claim as settled fact.
 `compatibility.md` still listed **Claude Code** as `automatic` after F10 had
 changed it in code, so the table contradicted the test suite; `research.md`
 prefaced both with "under currently verified vendor behaviour" when neither had
 been verified. Both now read `agent_initiated`, and `research.md` records that
 the `automatic` row is currently unreachable.
+
+The third was found in review rather than by me, and it was the one that
+mattered most: `contracts/continuity-context.md` is the **canonical** D57
+contract, and it still named Codex `automatic` and stated that Codex was
+"untouched because its hook set is its own vendor's". Anyone implementing or
+validating D57 from the canonical contract would have taken behaviour opposite to
+the capability profile. The miss was a shallow search — `specs/003-*/\*.md` does
+not reach `contracts/`. Searching for a claim means searching every file that can
+carry it, and a contract directory is exactly where a stale claim does the most
+damage.
 
 ## Gate after F12
 
