@@ -9,6 +9,10 @@ schemas, and the wire protocol without a deprecation period.
 
 ## [Unreleased]
 
+Nothing yet.
+
+## [0.1.0-alpha.5] — 2026-08-21
+
 Project intelligence. Cairn stops being a place memories are kept and starts
 being a thing that knows what this project currently believes, what stands
 behind each belief, and when the world has moved out from under one.
@@ -105,6 +109,43 @@ free-form, searchable, briefable and syncable exactly as before.
 One documented approximation: `superseded_at` for supersessions that happened
 before this release is taken from `updated_at`. See
 `specs/003-project-intelligence/migration.md` §Step 2(b).
+
+### Continuity, verified against live agents
+
+`continuity_mode` is derived from two separate capabilities rather than one.
+Capturing a compaction boundary and delivering context after one are different
+facts, and treating them as a single capability meant any agent that merely
+reported a compaction claimed re-delivery too. `automatic` now additionally
+requires that Cairn has **observed** a delivery on this installation, so a wrong
+entry in the vendor table can only ever under-promise.
+
+Post-compaction restoration happens at the next session open -- the first
+boundary the model reads -- detected from Cairn's own records rather than a vendor
+string, and the restored checkpoint is now rendered to an agent that is delivered
+to, not only to one that asks.
+
+Driven against real compactions in all three agents. Claude Code and Codex report
+`automatic`; OpenCode reports `agent_initiated`, which is the truthful answer
+because it never re-opens a session, and telling the agent to ask always works.
+A generic MCP client still degrades to `unavailable_automatic`.
+
+Codex's hook trust is read from Codex's own `config.toml`, where Codex writes it.
+It was previously read from `hooks.json`, where it never appears, so an approved
+trust was invisible and the continuity mode stayed at its most conservative value
+permanently with no action available that could change it.
+
+### Known limitations
+
+- OpenCode cannot reach `automatic`: it publishes no post-compaction session
+  open, and its compaction hook only biases the summarising model rather than
+  placing text in the compacted context. A deterministic mechanism exists and is
+  tracked in [#49](https://github.com/Vellixia/Cairn/issues/49).
+- OpenCode's pre-compaction capability is reported `conditional` on a probe that
+  can never be satisfied, so the stated condition is not actionable
+  ([#50](https://github.com/Vellixia/Cairn/issues/50)). It understates a real
+  capability and cannot cause an over-claim.
+- Topic keys do not converge across agents. Value keys do. Recorded, with the
+  measurements, in `evals/topic-key-effectiveness/`.
 
 ## [0.1.0-alpha.4] — 2026-08-13
 
