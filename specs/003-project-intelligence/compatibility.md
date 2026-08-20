@@ -81,11 +81,11 @@ changes.
 
 Derived, not maintained (D57). These are the current outputs of the rule:
 
-| Agent | Pre-compaction | Post-compaction | `continuity_mode` | What Cairn tells the developer |
+| Agent | Capture (pre) | Delivery (after) | `continuity_mode` | What Cairn tells the developer |
 |---|---|---|---|---|
-| Claude Code | `PreCompact` | `PostCompact` (conditional) | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
-| Codex | `PreCompact` | `PostCompact` | `automatic` | Continuity restores automatically (verified live, T148) |
-| OpenCode | `experimental.session.compacting` (conditional) | `session.compacted` | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
+| Claude Code | `PreCompact` | `SessionStart` source `compact` | `automatic` | Continuity restores automatically (verified live, T148) |
+| Codex | `PreCompact` | `SessionStart` re-emitted | `automatic` once hook trust is active | Continuity restores automatically; `unavailable_automatic` while handlers are untrusted (verified live, T148) |
+| OpenCode | `experimental.session.compacting` (conditional) | none -- no post-compaction session open | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
 | Generic MCP | none | none | `unavailable_automatic` | Not automatic for this client; a checkpoint exists at session close and via `cairn_session action=checkpoint` |
 
 OpenCode is `agent_initiated` rather than `automatic` because its compaction hook is an experimental

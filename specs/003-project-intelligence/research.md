@@ -441,17 +441,20 @@ it works because observations already carry `session_id`, `path` and `occurred_a
 | present | absent or conditional | `agent_initiated` — names `cairn_context(reason=post_compaction)` |
 | absent | any | `unavailable_automatic` — checkpoint still written at session close and on demand |
 
-Under behaviour verified live by T148, that is Claude Code `agent_initiated`, Codex
-`automatic`, OpenCode `agent_initiated` (its compaction hook is experimental), generic MCP
-`unavailable_automatic` — outputs of the rule, not a hand-maintained table.
+The second column of that table is **delivery**, not the post-compaction event. `ContextCompacted`
+is capture class, so `cairn hook` sends it one-way and returns before anything is emitted; no agent
+is ever delivered to *at* that event. Delivery happens at the **next session open**, the first
+boundary the model reads after a compaction, and `automatic` additionally requires that Cairn has
+*observed* it here — a vendor's documentation is not evidence.
 
-The two agents that register both compaction hooks do **not** land in the same place, and the
-reason is not in their hook lists. `ContextCompacted` is capture class, so `cairn hook` sends it
-one-way and returns without emitting anything back — `delivers_context` is `SessionOpened` alone.
-Claude Code stops there, so its checkpoint is never handed back and it is `agent_initiated`. Codex
-re-emits `SessionStart` after every `PostCompact`, and session open is exactly where context *is*
-delivered, so its briefing comes back unasked and `automatic` is honest. Both were established by
-driving real compactions, not by reading adapters (F10, F13).
+Under behaviour verified live by T148 that is Claude Code `automatic` (`SessionStart` with source
+`compact`), Codex `automatic` once its hook trust is active and `unavailable_automatic` until then,
+OpenCode `agent_initiated` (no post-compaction session open, and its compaction hook only biases a
+summariser), generic MCP `unavailable_automatic` — outputs of the rule, not a hand-maintained table.
+
+Claude Code and Codex were each given a mode at some point by reasoning about `PostCompact` alone,
+once too meanly and once too generously. Both are now settled by driving real compactions and
+reading what Cairn recorded (F10, F13, F14).
 
 **Rationale**: B5. Feature 002 built exactly this machinery and its honesty rules (FR-241, FR-242)
 already forbid claiming a capability that is only expected. Adding a capability would duplicate it;

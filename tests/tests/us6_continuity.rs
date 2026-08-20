@@ -383,82 +383,231 @@ fn continuity_mode_is_derived_not_claimed() {
     );
 }
 
-/// Each agent's mode is what the rule produces from its capabilities (T130,
-/// FR-426, FR-427).
+/// Every agent's mode is the rule applied to its own capabilities, and no
+/// agent's table is asserted (T130, FR-426, FR-427).
 ///
-/// Asserted against the **derivation**, not against a list. The values below
-/// are what Claude Code, Codex, OpenCode and a generic MCP client happen to
-/// come out as today; if one of them gained or lost a compaction event, this
-/// test should change because the *agent* changed — never because someone
-/// edited a table to make the output look right.
-///
-/// A mode that over-claims is a defect, not a note: an agent reported as
-/// `automatic` that is never called back loses the session's continuity
-/// silently, which is the failure this whole slice exists to prevent.
+/// The previous version of this test listed the four expected values. That is
+/// what made it possible to "fix" a wrong mode by editing the list, which is
+/// twice what actually happened. So it asserts the rule and two properties that
+/// hold whatever the agents do, and it names no agent at all.
 #[test]
-fn each_agents_mode_is_the_rule_applied_to_its_capabilities() {
+fn every_agents_mode_is_the_rule_applied_to_its_capabilities() {
     use cairn_core::domain::ContinuityMode;
     use cairn_integrate::capability::{Availability, Capability, CapabilityProfile};
     use cairn_integrate::model::AgentId;
 
-    for (agent, expected) in [
-        // Claude Code reported `automatic` until a real compaction was driven
-        // against a real store (T148). The checkpoint was written and its
-        // `restore_count` stayed 0: `PostCompact` fires, but the vendor does
-        // not support `additionalContext` on it, so there is no channel to hand
-        // the checkpoint back. `agent_initiated` is what it actually delivers —
-        // Cairn writes the checkpoint before compaction, and the agent asks for
-        // it with `cairn_context(reason=post_compaction)`.
-        (AgentId::ClaudeCode, ContinuityMode::AgentInitiated),
-        // `automatic`, and now verified live by T148 instead of assumed.
-        // Codex re-emits `SessionStart` after every `PostCompact`, and session
-        // open is exactly where `delivers_context` is true, so the briefing
-        // comes back on its own. Observed: every `context_compacting`
-        // checkpoint restored, `context_at_session_open` established
-        // non-degraded, and a memory-only token recalled after two real
-        // compactions with zero `cairn` calls. Claude Code differs because it
-        // does *not* re-open a session after compacting, which is why the
-        // finding above is its own and does not generalise (F13).
-        (AgentId::Codex, ContinuityMode::Automatic),
-        (AgentId::Opencode, ContinuityMode::AgentInitiated),
-        (AgentId::GenericMcp, ContinuityMode::UnavailableAutomatic),
-    ] {
+    for agent in AgentId::ALL {
         let profile = CapabilityProfile::base(agent);
         let derived = profile.continuity_mode();
-        assert_eq!(
-            derived,
-            expected,
-            "{} derives {derived:?}, expected {expected:?} — pre-compaction is {:?}, \
-             post-compaction is {:?}",
-            agent.as_str(),
-            profile.get(Capability::LifecyclePreCompaction).availability,
-            profile
-                .get(Capability::LifecyclePostCompaction)
-                .availability,
-        );
 
-        // And the derivation is the rule, not a lookup: the answer follows the
-        // two capabilities it reads.
-        let pre = profile.get(Capability::LifecyclePreCompaction).availability;
-        let post = profile
-            .get(Capability::LifecyclePostCompaction)
-            .availability;
-        let by_rule = if matches!(pre, Availability::Absent | Availability::PendingActivation) {
+        let capture = profile.get(Capability::LifecyclePreCompaction);
+        let delivery = profile.get(Capability::ContextAfterCompaction);
+
+        let by_rule = if matches!(
+            capture.availability,
+            Availability::Absent | Availability::PendingActivation
+        ) {
             // Nothing warns Cairn: the agent must checkpoint for itself.
             ContinuityMode::UnavailableAutomatic
-        } else if pre == Availability::Guaranteed && post == Availability::Guaranteed {
-            // `automatic` promises Cairn is called back on both sides, and only
-            // two guarantees can keep that promise. A conditional warning is
-            // one an agent cannot plan around.
+        } else if capture.availability != Availability::Guaranteed {
+            // A warning that may not arrive is one an agent cannot plan around.
+            ContinuityMode::AgentInitiated
+        } else if delivery.established() {
+            // Observed delivery is the only thing that keeps the promise.
             ContinuityMode::Automatic
         } else {
             ContinuityMode::AgentInitiated
         };
+
         assert_eq!(
             derived,
             by_rule,
-            "{} does not follow the documented rule",
+            "{} does not follow the documented rule -- capture {:?}/{:?}, delivery {:?}/{:?}",
+            agent.as_str(),
+            capture.availability,
+            capture.confidence,
+            delivery.availability,
+            delivery.confidence,
+        );
+
+        // The delivery capability is what the mode turns on. Whatever the
+        // capture side says, a profile with no *observed* delivery cannot be
+        // `automatic` -- which is the property the old list could not express.
+        if !delivery.established() {
+            assert_ne!(
+                derived,
+                ContinuityMode::Automatic,
+                "{} claims automatic without an observed post-compaction delivery",
+                agent.as_str()
+            );
+        }
+    }
+}
+
+/// A freshly installed agent never claims `automatic` (FR-426).
+///
+/// `base()` is what a vendor documents, and nothing in it is evidence that this
+/// installation works. Until Cairn has watched a compaction hand context back
+/// here, the honest answer is the one that tells the agent to ask. This is the
+/// property that makes a wrong entry in `base()` harmless.
+#[test]
+fn a_profile_with_no_observations_never_claims_automatic() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::CapabilityProfile;
+    use cairn_integrate::model::AgentId;
+
+    for agent in AgentId::ALL {
+        let mode = CapabilityProfile::base(agent).continuity_mode();
+        assert_ne!(
+            mode,
+            ContinuityMode::Automatic,
+            "{} claims automatic from vendor documentation alone",
             agent.as_str()
+        );
+    }
+}
+
+/// Capture is not delivery, and only delivery can make a mode `automatic`
+/// (FR-426).
+///
+/// This is the rule the whole slice turns on, so it is asserted on a profile
+/// built by hand rather than on any agent's table. An agent that reports a
+/// compaction has told Cairn the boundary happened; it has said nothing about
+/// whether anything can be handed back. Reading the capture capability as if it
+/// were the delivery one is what let two agents in turn be given a mode the code
+/// could not keep -- once too generously, once too meanly.
+#[test]
+fn capture_of_a_compaction_never_implies_delivery_after_it() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::{
+        Availability, Capability, CapabilityProfile, CapabilityState, Confidence,
+    };
+    use cairn_integrate::model::AgentId;
+
+    let state = |availability, confidence| CapabilityState {
+        availability,
+        confidence,
+        depends_on: None,
+    };
+
+    // Perfect capture on both sides, verified by observation, and no delivery.
+    let mut p = CapabilityProfile::base(AgentId::ClaudeCode);
+    p.capabilities.insert(
+        Capability::LifecyclePreCompaction,
+        state(Availability::Guaranteed, Confidence::Verified),
+    );
+    p.capabilities.insert(
+        Capability::LifecyclePostCompaction,
+        state(Availability::Guaranteed, Confidence::Verified),
+    );
+    p.capabilities.insert(
+        Capability::ContextAfterCompaction,
+        state(Availability::Absent, Confidence::Expected),
+    );
+    assert_eq!(
+        p.continuity_mode(),
+        ContinuityMode::AgentInitiated,
+        "a compaction Cairn was merely told about must not read as re-delivery"
+    );
+
+    // The delivery capability is what moves it, and nothing else needs to change.
+    p.capabilities.insert(
+        Capability::ContextAfterCompaction,
+        state(Availability::Guaranteed, Confidence::Verified),
+    );
+    assert_eq!(
+        p.continuity_mode(),
+        ContinuityMode::Automatic,
+        "an observed delivery after compaction is exactly what `automatic` means"
+    );
+}
+
+/// `automatic` requires a delivery Cairn has **seen**, not one a vendor
+/// documents (FR-426).
+///
+/// `base()` records what a vendor offers, and a vendor fact can be wrong, stale,
+/// or true only on some builds. Gating on `established()` -- guaranteed *and*
+/// verified -- means a mistake in that table can only ever under-promise, which
+/// is the direction FR-426 permits.
+#[test]
+fn a_documented_delivery_is_not_enough_for_automatic() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::{
+        Availability, Capability, CapabilityProfile, CapabilityState, Confidence,
+    };
+    use cairn_integrate::model::AgentId;
+
+    let mut p = CapabilityProfile::base(AgentId::ClaudeCode);
+    p.capabilities.insert(
+        Capability::LifecyclePreCompaction,
+        CapabilityState {
+            availability: Availability::Guaranteed,
+            confidence: Confidence::Verified,
+            depends_on: None,
+        },
+    );
+
+    for (confidence, expected) in [
+        (Confidence::Expected, ContinuityMode::AgentInitiated),
+        (Confidence::Verified, ContinuityMode::Automatic),
+    ] {
+        p.capabilities.insert(
+            Capability::ContextAfterCompaction,
+            CapabilityState {
+                availability: Availability::Guaranteed,
+                confidence,
+                depends_on: None,
+            },
+        );
+        assert_eq!(
+            p.continuity_mode(),
+            expected,
+            "confidence {confidence:?} should derive {expected:?}"
+        );
+    }
+}
+
+/// A warning an agent cannot rely on is worth no promise at all, however good
+/// the delivery side looks (FR-426).
+#[test]
+fn a_conditional_capture_is_never_automatic() {
+    use cairn_core::domain::ContinuityMode;
+    use cairn_integrate::capability::{
+        Availability, Capability, CapabilityProfile, CapabilityState, Confidence,
+    };
+    use cairn_integrate::model::AgentId;
+
+    let mut p = CapabilityProfile::base(AgentId::ClaudeCode);
+    p.capabilities.insert(
+        Capability::ContextAfterCompaction,
+        CapabilityState {
+            availability: Availability::Guaranteed,
+            confidence: Confidence::Verified,
+            depends_on: None,
+        },
+    );
+
+    for (capture, expected) in [
+        (Availability::Conditional, ContinuityMode::AgentInitiated),
+        (Availability::Absent, ContinuityMode::UnavailableAutomatic),
+        (
+            Availability::PendingActivation,
+            ContinuityMode::UnavailableAutomatic,
+        ),
+        (Availability::Guaranteed, ContinuityMode::Automatic),
+    ] {
+        p.capabilities.insert(
+            Capability::LifecyclePreCompaction,
+            CapabilityState {
+                availability: capture,
+                confidence: Confidence::Verified,
+                depends_on: None,
+            },
+        );
+        assert_eq!(
+            p.continuity_mode(),
+            expected,
+            "capture {capture:?} with an established delivery should derive {expected:?}"
         );
     }
 }
