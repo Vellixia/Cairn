@@ -28,6 +28,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project_intelligence",
         include_str!("../migrations/0005_project_intelligence.sql"),
     ),
+    (
+        6,
+        "sync_deferred",
+        include_str!("../migrations/0006_sync_deferred.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.

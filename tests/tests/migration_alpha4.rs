@@ -137,7 +137,10 @@ fn no_row_is_lost_and_no_pre_existing_value_is_rewritten() {
         before_snapshots.push((*table, columns.clone(), store.snapshot(table, &refs)));
     }
 
-    assert_eq!(store.migrate_to_latest(), 5);
+    assert_eq!(
+        store.migrate_to_latest(),
+        cairn_store::migrate::latest_version()
+    );
 
     assert_eq!(
         store.row_counts(),
@@ -550,14 +553,20 @@ fn full_text_search_returns_the_same_rows_in_the_same_order() {
 #[test]
 fn running_the_migration_twice_changes_nothing() {
     let store = Alpha4Store::build();
-    assert_eq!(store.migrate_to_latest(), 5);
+    assert_eq!(
+        store.migrate_to_latest(),
+        cairn_store::migrate::latest_version()
+    );
 
     let snapshot: Vec<String> =
         store.query_column("SELECT id || '=' || text FROM task_criteria ORDER BY task_id, ordinal");
     let relations = store.row_count("memory_relations");
     let criteria = store.row_count("task_criteria");
 
-    assert_eq!(store.migrate_to_latest(), 5);
+    assert_eq!(
+        store.migrate_to_latest(),
+        cairn_store::migrate::latest_version()
+    );
 
     assert_eq!(store.row_count("memory_relations"), relations);
     assert_eq!(store.row_count("task_criteria"), criteria);
@@ -620,22 +629,34 @@ fn an_interrupted_migration_rolls_back_entirely() {
 fn an_older_build_refuses_a_newer_store_and_a_newer_build_migrates_an_older_one() {
     let store = Alpha4Store::build();
 
-    // A schema-5 build opens a schema-4 store by migrating it.
-    assert_eq!(store.migrate_to_latest(), 5);
+    // The current build opens a schema-4 store by migrating it to whatever it
+    // supports. Read from the build rather than written as a literal: what this
+    // asserts is that a newer build migrates an older store, which is true at
+    // every version, and pinning the number here means adding a migration looks
+    // like a broken guard.
+    let latest = cairn_store::migrate::latest_version();
+    assert!(
+        latest > SCHEMA,
+        "this test needs a build newer than the fixture: latest {latest}, fixture {SCHEMA}"
+    );
+    assert_eq!(store.migrate_to_latest(), latest);
 
     // A build that supports only schema 4 refuses it rather than writing
     // against a schema it does not understand.
     let refused = store
-        .migrate_to(4)
+        .migrate_to(SCHEMA)
         .expect_err("a schema-4 build must refuse");
     assert!(
         refused.contains("newer than this build supports"),
         "the refusal does not name the version guard: {refused}"
     );
-    assert!(refused.contains('5') && refused.contains('4'), "{refused}");
+    assert!(
+        refused.contains(&latest.to_string()) && refused.contains(&SCHEMA.to_string()),
+        "the refusal names neither version: {refused}"
+    );
 
     // And the refusal changed nothing.
-    assert_eq!(store.schema_version(), 5);
+    assert_eq!(store.schema_version(), latest);
 }
 
 /// The DDL constraints on the new tables are live, not decorative.

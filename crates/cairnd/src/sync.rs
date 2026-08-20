@@ -928,8 +928,14 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
         .and_then(|v| v.as_array())
         .unwrap_or(&Vec::new())
     {
-        import_relation(d, project_id, r).await;
-        count += 1;
+        match import_relation(d, project_id, r).await {
+            Placement::Placed => count += 1,
+            Placement::AwaitingParent(waiting_on) => {
+                hold_for_a_later_pull(d, project_id, "relation", &relation_key(r), r, waiting_on)
+                    .await;
+            }
+            Placement::Unusable => {}
+        }
     }
 
     // Tasks before their criteria, for the same reason memories come before
@@ -948,13 +954,23 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
 
     // Criteria and blockers upsert by stable id, so two machines that changed
     // different criteria offline both land — neither overwrites the other.
+    let id_key = |v: &serde_json::Value| {
+        v.get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
     for c in body
         .get("criteria")
         .and_then(|v| v.as_array())
         .unwrap_or(&Vec::new())
     {
-        if import_criterion(d, c).await {
-            count += 1;
+        match import_criterion(d, c).await {
+            Placement::Placed => count += 1,
+            Placement::AwaitingParent(waiting_on) => {
+                hold_for_a_later_pull(d, project_id, "criterion", &id_key(c), c, waiting_on).await;
+            }
+            Placement::Unusable => {}
         }
     }
     for b in body
@@ -962,10 +978,19 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
         .and_then(|v| v.as_array())
         .unwrap_or(&Vec::new())
     {
-        if import_blocker(d, b).await {
-            count += 1;
+        match import_blocker(d, b).await {
+            Placement::Placed => count += 1,
+            Placement::AwaitingParent(waiting_on) => {
+                hold_for_a_later_pull(d, project_id, "blocker", &id_key(b), b, waiting_on).await;
+            }
+            Placement::Unusable => {}
         }
     }
+
+    // Records earlier pulls could not place. Replayed after the fresh page, so
+    // a parent that arrived in *this* page releases what was waiting on it
+    // without waiting for another pull (#44).
+    count += replay_deferred(d, project_id).await;
 
     if let Some(cursor) = body.get("cursor").and_then(|c| c.as_str()) {
         repo::set_pull_cursor(&d.store, project_id, cursor)
@@ -1157,6 +1182,131 @@ async fn import_verification(d: &Daemon, memory_id: Uuid, value: &serde_json::Va
     .await;
 }
 
+/// What became of one pulled record.
+///
+/// The distinction that matters is between a record that cannot be placed
+/// **yet** and one that can never be placed. The first is held and replayed;
+/// the second is discarded, because retrying it forever would be a leak with no
+/// outcome (#44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// Imported.
+    Placed,
+    /// The parent it names has not arrived. Carries the missing parent, so a
+    /// project waiting on one record can say what it is waiting for.
+    AwaitingParent(Uuid),
+    /// Malformed, or refused by the store. There is nothing to retry.
+    Unusable,
+}
+
+/// How many held records one pull replays.
+///
+/// A backlog must not turn a single pull into unbounded work; whatever does not
+/// fit is offered again on the next pull, oldest wait first.
+const DEFERRED_REPLAY_BATCH: i64 = 500;
+
+/// Retry the records earlier pulls could not place.
+///
+/// Run after the fresh page has been imported, so a relation held since an
+/// earlier pull is placed as soon as the memory it names lands. Nothing here
+/// depends on another held record — relations wait on memories and criteria and
+/// blockers wait on tasks, and neither is itself deferred — so one pass is
+/// enough and there is no ordering to get right.
+async fn replay_deferred(d: &Daemon, project_id: Uuid) -> usize {
+    let held = match repo::deferred_records(&d.store, project_id, DEFERRED_REPLAY_BATCH).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the records held for a later pull");
+            return 0;
+        }
+    };
+
+    let mut placed = 0;
+    for record in held {
+        let outcome = match serde_json::from_str::<serde_json::Value>(&record.payload) {
+            Ok(value) => match record.kind.as_str() {
+                "relation" => import_relation(d, project_id, &value).await,
+                "criterion" => import_criterion(d, &value).await,
+                "blocker" => import_blocker(d, &value).await,
+                _ => Placement::Unusable,
+            },
+            // A payload that cannot be parsed can never be placed.
+            Err(_) => Placement::Unusable,
+        };
+
+        match outcome {
+            Placement::Placed => {
+                release_held_record(d, project_id, &record, "it landed").await;
+                placed += 1;
+            }
+            Placement::Unusable => {
+                release_held_record(d, project_id, &record, "it can never be placed").await
+            }
+            // Still waiting. Recorded rather than retried in silence, so a
+            // parent that never arrives is visible in the store.
+            Placement::AwaitingParent(_) => {
+                if let Err(e) = repo::note_deferred_attempt(
+                    &d.store,
+                    project_id,
+                    &record.kind,
+                    &record.record_key,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "could not record a held record's attempt");
+                }
+            }
+        }
+    }
+    placed
+}
+
+/// Stop holding a record, because it landed or never can.
+async fn release_held_record(
+    d: &Daemon,
+    project_id: Uuid,
+    record: &cairn_store::repo::DeferredRecord,
+    reason: &'static str,
+) {
+    if let Err(e) =
+        repo::clear_deferred_record(&d.store, project_id, &record.kind, &record.record_key).await
+    {
+        tracing::warn!(error = %e, "could not release a held record");
+        return;
+    }
+    tracing::debug!(
+        kind = %record.kind, key = %record.record_key,
+        waiting_since = %record.first_seen_at, attempts = record.attempts, reason,
+        "released a held record"
+    );
+}
+
+/// Hold a record the fresh page could not place.
+async fn hold_for_a_later_pull(
+    d: &Daemon,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+    value: &serde_json::Value,
+    waiting_on: Uuid,
+) {
+    if let Err(e) = repo::defer_pulled_record(
+        &d.store,
+        project_id,
+        kind,
+        record_key,
+        &value.to_string(),
+        &waiting_on.to_string(),
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %e, kind, record_key,
+            "could not hold a record whose parent has not arrived; it is lost"
+        );
+    }
+}
+
 /// Import a reconciliation decision.
 ///
 /// `INSERT OR IGNORE` on the normalized primary key, then re-derive. This is the
@@ -1164,7 +1314,7 @@ async fn import_verification(d: &Daemon, memory_id: Uuid, value: &serde_json::Va
 /// row exists, so a supersession decided on another machine never lands. The
 /// *decision* is what travels, and deriving from it fixes the defect without
 /// introducing row overwriting (D67, R5).
-async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value) {
+async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value) -> Placement {
     let uuid = |k: &str| {
         value
             .get(k)
@@ -1172,7 +1322,7 @@ async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value
             .and_then(|s| Uuid::parse_str(s).ok())
     };
     let (Some(from), Some(to)) = (uuid("from_memory_id"), uuid("to_memory_id")) else {
-        return;
+        return Placement::Unusable;
     };
     let kind = value
         .get("kind")
@@ -1184,22 +1334,26 @@ async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value
         .unwrap_or("explicit_user");
 
     let (Ok(kind), Ok(basis)) = (kind.parse(), basis.parse()) else {
-        return;
+        return Placement::Unusable;
     };
 
     // A relation whose memory has not arrived is held rather than dropped: the
-    // foreign key would refuse it, and the next pull carries it again.
+    // foreign key would refuse it, and it is replayed after every later pull
+    // until the memory lands.
     //
-    // "The next pull carries it again" is a promise the cursor does not
-    // currently keep in every case (#44) — logged so a project stuck waiting
-    // on one relation is at least diagnosable from the daemon log, rather than
-    // silent both here and at the symptom.
-    if repo::memory(&d.store, from).await.is_err() || repo::memory(&d.store, to).await.is_err() {
-        tracing::debug!(
-            project = %project_id, %from, %to,
-            "declined a relation whose memory has not arrived yet"
-        );
-        return;
+    // It used to be dropped outright, on the claim that "the next pull carries
+    // it again" — a promise the cursor does not keep. The cursor is a timestamp
+    // and the server re-sends a record only when the record itself changes, so
+    // a relation older than the page's newest row, whose memory falls in the
+    // next page, was lost permanently (#44).
+    for parent in [from, to] {
+        if repo::memory(&d.store, parent).await.is_err() {
+            tracing::debug!(
+                project = %project_id, %from, %to, waiting_on = %parent,
+                "holding a relation whose memory has not arrived yet"
+            );
+            return Placement::AwaitingParent(parent);
+        }
     }
 
     let _ = cairn_store::knowledge::record_relation(
@@ -1229,10 +1383,27 @@ async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value
     for endpoint in [to, from] {
         let _ = cairn_store::knowledge::rebuild_reinforcement(&d.store, endpoint).await;
     }
+    Placement::Placed
+}
+
+/// The identity of a relation as the wire carries it.
+///
+/// Relations have no `id` on the wire; `(from, to, kind)` is the primary key
+/// `memory_relations` is declared with, so it is the relation's identity here
+/// too. A relation the server sends again replaces its held copy rather than
+/// adding a second row.
+fn relation_key(value: &serde_json::Value) -> String {
+    let field = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    format!(
+        "{}:{}:{}",
+        field("from_memory_id"),
+        field("to_memory_id"),
+        field("kind")
+    )
 }
 
 /// Import one criterion that arrived from a peer.
-async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> bool {
+async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> Placement {
     let uuid = |k: &str| {
         value
             .get(k)
@@ -1240,27 +1411,25 @@ async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> bool {
             .and_then(|s| Uuid::parse_str(s).ok())
     };
     let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
-        return false;
+        return Placement::Unusable;
     };
-    // A criterion for a task that has not arrived is held, not invented.
-    //
-    // Logged for the same reason the relation case is (#44): the cursor does
-    // not currently guarantee this criterion is offered again, so a project
-    // stuck waiting on one is at least diagnosable from the daemon log.
+    // A criterion for a task that has not arrived is held, not invented — and
+    // held durably, for the reason the relation case is (#44): the cursor does
+    // not offer it again.
     if repo::task(&d.store, task_id).await.is_err() {
         tracing::debug!(
             criterion_id = %id, %task_id,
-            "declined a criterion whose task has not arrived yet"
+            "holding a criterion whose task has not arrived yet"
         );
-        return false;
+        return Placement::AwaitingParent(task_id);
     }
     let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
     let (Ok(state), Ok(verification)) = (str_of("state").parse(), str_of("verification").parse())
     else {
-        return false;
+        return Placement::Unusable;
     };
 
-    cairn_store::criteria::import_criterion(
+    let stored = cairn_store::criteria::import_criterion(
         &d.store,
         id,
         task_id,
@@ -1275,11 +1444,16 @@ async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> bool {
             .unwrap_or(false),
     )
     .await
-    .is_ok()
+    .is_ok();
+    if stored {
+        Placement::Placed
+    } else {
+        Placement::Unusable
+    }
 }
 
 /// Import one blocker that arrived from a peer.
-async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> bool {
+async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> Placement {
     let uuid = |k: &str| {
         value
             .get(k)
@@ -1287,17 +1461,22 @@ async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> bool {
             .and_then(|s| Uuid::parse_str(s).ok())
     };
     let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
-        return false;
+        return Placement::Unusable;
     };
+    // Held rather than dropped, for the same reason a criterion is (#44).
     if repo::task(&d.store, task_id).await.is_err() {
-        return false;
+        tracing::debug!(
+            blocker_id = %id, %task_id,
+            "holding a blocker whose task has not arrived yet"
+        );
+        return Placement::AwaitingParent(task_id);
     }
     let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
     let Ok(state) = str_of("state").parse() else {
-        return false;
+        return Placement::Unusable;
     };
 
-    cairn_store::criteria::import_blocker(
+    let stored = cairn_store::criteria::import_blocker(
         &d.store,
         id,
         task_id,
@@ -1311,7 +1490,12 @@ async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> bool {
             .unwrap_or(false),
     )
     .await
-    .is_ok()
+    .is_ok();
+    if stored {
+        Placement::Placed
+    } else {
+        Placement::Unusable
+    }
 }
 
 /// Insert a peer's task locally.
@@ -1457,6 +1641,244 @@ mod tests {
             stored(&d, good).await,
             ("verified".to_string(), Some("remote_cairn".to_string())),
             "an honest imported verification did not land"
+        );
+    }
+
+    /// A relation whose memory has not arrived is held and later placed, not
+    /// dropped (#44).
+    ///
+    /// The pull cursor is a timestamp over `updated_at` and the server offers a
+    /// record again only when the record itself changes, so "the next pull
+    /// carries it again" was never true. One page of 500 memories reaches it:
+    /// the cursor pins to that page's newest row, and a relation older than
+    /// that row whose memory falls in the *next* page was lost permanently.
+    #[tokio::test]
+    async fn a_relation_whose_memory_has_not_arrived_is_held_until_it_does() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "held-relation", None).await;
+        let s = fx::session(&d, &p, "peer").await;
+
+        let make = |content: &'static str| {
+            let store = d.store.clone();
+            let (project, session) = (p.id, s.id);
+            async move {
+                cairn_store::repo::create_memory(
+                    &store,
+                    cairn_store::repo::NewMemory::free_form(
+                        project,
+                        cairn_core::MemoryType::Fact,
+                        cairn_core::MemoryScope::Project,
+                        &project.to_string(),
+                        content,
+                        session,
+                        false,
+                        &[],
+                    ),
+                    cairn_store::outbox::SyncPolicy {
+                        linked: false,
+                        server_project_id: None,
+                    },
+                )
+                .await
+                .expect("memory")
+                .id
+            }
+        };
+
+        let present = make("This memory arrived in the first page.").await;
+        // The memory this relation names has not arrived, and will not until a
+        // later page.
+        let absent = Uuid::now_v7();
+        let wire = serde_json::json!({
+            "from_memory_id": absent.to_string(),
+            "to_memory_id": present.to_string(),
+            "kind": "supersedes",
+            "basis": "explicit_agent",
+            "decided_by_session": s.id.to_string(),
+        });
+
+        assert_eq!(
+            import_relation(&d, p.id, &wire).await,
+            Placement::AwaitingParent(absent),
+            "the relation was not recognised as waiting on its memory"
+        );
+
+        // The fresh-page path holds it, which is what the cursor cannot do.
+        hold_for_a_later_pull(&d, p.id, "relation", &relation_key(&wire), &wire, absent).await;
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            1,
+            "the relation was dropped rather than held"
+        );
+
+        // Replaying while the memory is still missing keeps holding it, and
+        // records the attempt rather than retrying in silence.
+        assert_eq!(replay_deferred(&d, p.id).await, 0);
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            1,
+            "a record still waiting on its parent must stay held"
+        );
+        let held = repo::deferred_records(&d.store, p.id, 10)
+            .await
+            .expect("held");
+        assert_eq!(held[0].attempts, 1, "the attempt was not recorded");
+        assert_eq!(held[0].waiting_on, absent.to_string());
+
+        // The memory arrives in a later page, through the same importer the
+        // real pull uses, exactly as the ordering failure has it.
+        import_memory(
+            &d,
+            p.id,
+            &serde_json::json!({
+                "id": absent.to_string(),
+                "type": "fact",
+                "scope": "project",
+                "scope_key": p.id.to_string(),
+                "content": "This memory arrived in a later page.",
+                "provenance": { "session_id": s.id.to_string() },
+            }),
+        )
+        .await
+        .expect("the later page's memory did not import");
+
+        assert_eq!(
+            replay_deferred(&d, p.id).await,
+            1,
+            "the held relation was not placed once its memory arrived"
+        );
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            0,
+            "a placed record must stop being held"
+        );
+
+        let stored = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM memory_relations
+              WHERE from_memory_id = ?1 AND to_memory_id = ?2 AND kind = 'supersedes'",
+        )
+        .bind(absent.to_string())
+        .bind(present.to_string())
+        .fetch_one(d.store.pool())
+        .await
+        .expect("query");
+        assert_eq!(stored, 1, "the relation never reached the store");
+    }
+
+    /// A criterion whose task has not arrived is held, then placed (#44).
+    #[tokio::test]
+    async fn a_criterion_whose_task_has_not_arrived_is_held_until_it_does() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "held-criterion", None).await;
+
+        let task_id = Uuid::now_v7();
+        let criterion_id = Uuid::now_v7();
+        let wire = serde_json::json!({
+            "id": criterion_id.to_string(),
+            "task_id": task_id.to_string(),
+            "ordinal": 1,
+            "label": "C1",
+            "text": "The daemon starts in the worktree it was asked about.",
+            "state": "pending",
+            "verification": "unverified",
+        });
+
+        assert_eq!(
+            import_criterion(&d, &wire).await,
+            Placement::AwaitingParent(task_id),
+            "the criterion was not recognised as waiting on its task"
+        );
+        hold_for_a_later_pull(
+            &d,
+            p.id,
+            "criterion",
+            &criterion_id.to_string(),
+            &wire,
+            task_id,
+        )
+        .await;
+        assert_eq!(replay_deferred(&d, p.id).await, 0);
+
+        // The task arrives on a later page.
+        assert!(
+            import_task(
+                &d,
+                p.id,
+                &serde_json::json!({
+                    "id": task_id.to_string(),
+                    "title": "Fix the daemon's working directory",
+                    "goal": "Start where asked.",
+                    "status": "todo",
+                }),
+            )
+            .await,
+            "the task fixture did not import"
+        );
+
+        assert_eq!(
+            replay_deferred(&d, p.id).await,
+            1,
+            "the held criterion was not placed once its task arrived"
+        );
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            0
+        );
+        let stored = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM task_criteria WHERE id = ?1 AND task_id = ?2",
+        )
+        .bind(criterion_id.to_string())
+        .bind(task_id.to_string())
+        .fetch_one(d.store.pool())
+        .await
+        .expect("query");
+        assert_eq!(stored, 1, "the criterion never reached the store");
+    }
+
+    /// A record that can never be placed is released, not retried forever.
+    ///
+    /// Holding is for a parent that has not arrived *yet*. A payload nothing can
+    /// parse has no parent to wait for, and keeping it would be a leak with no
+    /// outcome.
+    #[tokio::test]
+    async fn a_record_that_can_never_be_placed_stops_being_held() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "unusable", None).await;
+
+        repo::defer_pulled_record(
+            &d.store,
+            p.id,
+            "relation",
+            "nonsense",
+            "{ this is not json",
+            &Uuid::now_v7().to_string(),
+        )
+        .await
+        .expect("defer");
+
+        assert_eq!(replay_deferred(&d, p.id).await, 0);
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            0,
+            "an unplaceable record is still being held"
+        );
+    }
+
+    /// A record the server sends again replaces its held copy.
+    #[tokio::test]
+    async fn re_sending_a_held_record_does_not_pile_up_rows() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "resent", None).await;
+        let task_id = Uuid::now_v7();
+        let wire = serde_json::json!({ "id": "c", "task_id": task_id.to_string() });
+
+        for _ in 0..3 {
+            hold_for_a_later_pull(&d, p.id, "criterion", "c", &wire, task_id).await;
+        }
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            1,
+            "a re-sent record was held more than once"
         );
     }
 
