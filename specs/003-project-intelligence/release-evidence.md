@@ -332,11 +332,66 @@ here should be read as it having passed.
 | Open items, recorded and deliberately not fixed | **none.** [#44](https://github.com/Vellixia/Cairn/issues/44) and [#41](https://github.com/Vellixia/Cairn/issues/41) were fixed in Checkpoint U after the operator asked for them rather than for a deferral, and both are closed. #44's loss turned out to be reachable without any import failure — one truncated page of 500 memories pins the cursor past a declined relation the server will never re-send — so the "no demonstrated reachable failure" premise that had kept it filed did not hold once `page_cursor` was read carefully. Only [#42](https://github.com/Vellixia/Cairn/issues/42) remains, and it is release-blocking rather than open-defect. |
 | Residual, stated rather than closed | #41's fix **bounds** the ambiguous-session window to minutes; it does not remove it. A session that stopped thirty seconds ago is indistinguishable from one that is thinking, and Cairn deliberately has no liveness signal (`recover.rs` module docs: no heartbeat, no lease, no PID table). Recorded here so the guarantee is not read as stronger than it is. |
 | **T146 — quickstart walkthrough** | **RUN, PASSES** |
-| **T147 — topic-key effectiveness** | **DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking. False-grouping count **unknown, not zero** |
-| **T148 — live continuity walkthrough** | Claude Code portion executed; **Codex and OpenCode DEFERRED to [#42](https://github.com/Vellixia/Cairn/issues/42)** — not PR-blocking, still release-blocking |
+| **T147 — topic-key effectiveness** | **RUN 2026-08-20** on a 12-item stratified sample across live Codex, OpenCode and Claude Code. **False grouping 0 for all three agents** — the only outcome that would have been a defect. Topic-key adoption 100% of memories written; unprompted write rate 7/12, 6/12, 1/12. Results in `evals/topic-key-effectiveness/RESULTS.md`, raw exports beside them |
+| **T148 — live continuity walkthrough** | Claude Code **and Codex** executed live. Codex was driven through real auto-compactions and **corrected upward to `automatic`** on observed evidence (F13). OpenCode's session lifecycle is verified live, but **its compaction could not be driven non-interactively** — see the OpenCode row below |
 
-**146 of 148 tasks complete. 2 deferred to #42.** Nothing deferred is recorded
-as passed.
+**147 of 148 tasks complete.** T147 is run and recorded. T148 is run for Claude
+Code and Codex and **partially** for OpenCode: everything except its compaction
+path is verified live, and that one gap is recorded below rather than counted as
+a pass.
+
+### T148 — OpenCode's compaction was not driven, and why
+
+Verified live on `opencode/hy3-free`, established by **observation** rather than
+introspection: `lifecycle_session_open`, `lifecycle_tool_success`,
+`lifecycle_quiesce`, `stable_session_identifier`, and `context_at_session_open`
+with `degraded = 0` — Cairn's briefing reaches OpenCode and OpenCode reports the
+delivery back. Its derived mode `agent_initiated` matches what was observed.
+
+**No compaction was observed**, and not for want of trying: eight turns with a
+93 KB file attached per turn (~750 KB accumulated, with the model demonstrably
+carrying context across all eight chunks) produced none; `--command compact` is
+not a command (`Available commands: init, review, customize-opencode, cairn`);
+`/compact` sent as a message is treated as prose; and there is no compact verb
+under `opencode session` or `opencode debug`. The 1.18.18 binary **does** export
+`experimental.session.compacting`, so the capability is present — what is missing
+is a way to *trigger* compaction outside the interactive TUI.
+
+This gap cannot produce an over-claim, which is the specific risk that makes T148
+blocking. OpenCode declares `agent_initiated`, the conservative mode that tells
+the agent to ask; asking always works. The mode that needed proof was `automatic`,
+and that is exactly the Codex case, which was driven and corrected. Closing this
+row needs a human at the TUI, the same class of blocker as the vendor login.
+
+### Integration defects this run surfaced
+
+Four, all found while making the harness honest, each of which had produced a
+false zero or a false negative:
+
+1. **Codex MCP calls are auto-cancelled non-interactively.** Every
+   `cairn_remember` died as `user cancelled MCP tool call` until `--approve-for-me`
+   was passed. Without it, an automated Codex run scores zero adoption for a
+   reason that has nothing to do with the agent.
+2. **Cairn's Codex MCP entry pins nothing.** `[mcp_servers.cairn]` is written as a
+   bare `command = "cairn"` with no `env`, so the server a non-default
+   `CAIRN_HOME` needs is never reached.
+3. **`cairn connect claude-code --shared` writes no `.mcp.json`**, although
+   `--help` says `--shared` installs "lifecycle and MCP into committed project
+   scope". Only lifecycle and instructions appeared.
+4. **`ambiguous_session` fires after a legitimate batch.** Twelve fresh OpenCode
+   sessions left 16 active in one worktree and `cairn memory search` then refused
+   outright, so the raw export had to be read from the store. The reaper is right
+   not to touch them — all were silent 0m — but a batch workflow makes a CLI verb
+   unusable.
+
+A fifth is about the eval rather than Cairn: **Claude Code keys auto-memory by
+repository path under the user's home**, so it needs the real `$HOME` for OAuth
+and then reads the operator's global `CLAUDE.md` and auto-memory. The first
+attempt answered *"already noted in memory — `database_postgres_production.md` has
+it"* and announced the operator's output style, with 762 tools visible: it was
+using their memory system, not Cairn. `--setting-sources project
+--strict-mcp-config` plus a fresh repository path per run reduces it to the Cairn
+server and 36 tools without changing anything the operator owns.
 
 This feature is implementation-complete, its automated verification is complete,
 its quickstart evidence is complete — and it is **not release-ready**. #42 is a
