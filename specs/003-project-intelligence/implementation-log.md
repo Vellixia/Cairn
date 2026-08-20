@@ -1399,6 +1399,15 @@ until it passed would have shipped it.
 
 ## F12 (CRITICAL) — Codex kept the `automatic` claim F10 had already disproved
 
+> **Superseded by F13.** The conclusion below is wrong. "Cairn re-delivers to no
+> agent after a compaction" is true of the `PostCompact` path and false of Codex,
+> which re-opens a session after compacting and is delivered to there. F10's
+> refusal to transfer its finding to Codex was correct; F12 overrode it on
+> reasoning, and T148 then contradicted F12 by driving real compactions. The
+> document corrections F12 made to `compatibility.md` — where Claude Code was
+> still `automatic` after F10 — remain valid; only the Codex conclusion is
+> reversed.
+
 `crates/cairn-integrate/src/capability.rs`, `specs/003-project-intelligence/compatibility.md`,
 `specs/003-project-intelligence/research.md`,
 `specs/003-project-intelligence/contracts/continuity-context.md`
@@ -1464,6 +1473,78 @@ damage.
 ## Gate after F12
 
 1,097 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean.
+
+## F13 (CRITICAL) — F12 generalised one agent's limitation into a rule, and T148 disproved it
+
+`crates/cairn-integrate/src/capability.rs`, `tests/tests/us6_continuity.rs`,
+`specs/003-project-intelligence/compatibility.md`,
+`specs/003-project-intelligence/research.md`,
+`specs/003-project-intelligence/contracts/continuity-context.md`
+
+F12 downgraded Codex to `agent_initiated` on a chain that looked airtight:
+`LifecyclePostCompaction` is *context re-delivery after compaction*;
+`context_compacted` is capture class so `cairn hook` sends it one-way and returns
+before `emit_context`; `delivers_context` is `session_opened` alone; therefore
+nothing is re-delivered to anyone and no agent can be `automatic`.
+
+Every step is true. The conclusion does not follow, because it assumes the only
+way context can arrive after a compaction is the `PostCompact` event itself.
+**Codex re-emits `SessionStart` after every `PostCompact`.** Session open is
+precisely where `delivers_context` is true, so Codex is delivered to — the
+briefing, with the restored checkpoint in it — without ever asking.
+
+T148 was run against a real store in an isolated home, with Codex authenticated
+through its own interactive login and `model_auto_compact_token_limit` lowered so
+that real auto-compactions fired:
+
+| evidence | result |
+|---|---|
+| `context_compacting` checkpoints, two runs | 7, **every one `restore_count = 1`** with a `restored_at` |
+| `lifecycle_pre_compaction` | established by **observation** |
+| `lifecycle_post_compaction` | established by **observation** |
+| `context_at_session_open` | established by observation, **`degraded = 0`** |
+| observation types recorded | `command_run` only — no MCP call |
+| `cairn` invocations by the agent | **0** |
+| memory-only token recalled after 2 real compactions | **yes** — `TOKEN=ZEBRA-7741-QUARTZ`, present in no file |
+
+The last row is the one that closes it. A canary was written to Cairn memory and
+to nothing else; the agent was told explicitly not to run any `cairn` command,
+and asked for it after compacting twice. It answered correctly. Context reached
+the model without being requested, which is what `automatic` means.
+
+Separately and deterministically: feeding `cairn hook SessionStart --agent codex`
+the payload Codex sends returns
+`hookSpecificOutput.additionalContext` — 478 bytes containing the canary. So the
+delivery path exists independently of any model's behaviour.
+
+Codex's `LifecyclePostCompaction` returns to `guaranteed` and it reports
+`automatic` again. What separates it from Claude Code is not its hook list, which
+is identical in the events it names, but whether a session is opened after
+compacting — and that is observable only by compacting.
+
+### The regression F12 added has been deleted, not fixed
+
+`no_agent_claims_automatic_while_nothing_is_redelivered` walked `AgentId::ALL`
+and asserted no agent derives `automatic`. It was the strongest-looking artifact
+of the whole change and it encoded the false premise directly, so keeping it in
+any form would have prevented the true answer. `each_agents_mode_is_the_rule_
+applied_to_its_capabilities` already re-derives every agent's mode from the two
+capabilities it reads, which is the honest guard: it changes when an agent
+changes, and it cannot be satisfied by editing a table.
+
+### What to take from F10 through F13
+
+F10 declined to transfer its Claude Code finding to Codex, saying that would be
+"inventing evidence." That was right, and F12 overrode it with an argument rather
+than an observation. An argument about a vendor's runtime behaviour is a
+hypothesis; a driven compaction is evidence. Under-promising was safe, which is
+why nothing shipped in F12 was a defect — but "safe" and "true" are different
+claims, and FR-426 asks for the true one where it can be had.
+
+## Gate after F13
+
+1,096 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
 `--all-targets`. fmt and clippy clean.
 
 # Checkpoint Q — the four quickstart deviations, closed

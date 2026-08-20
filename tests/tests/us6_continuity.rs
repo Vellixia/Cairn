@@ -410,15 +410,16 @@ fn each_agents_mode_is_the_rule_applied_to_its_capabilities() {
         // Cairn writes the checkpoint before compaction, and the agent asks for
         // it with `cairn_context(reason=post_compaction)`.
         (AgentId::ClaudeCode, ContinuityMode::AgentInitiated),
-        // Codex reported `automatic` on the strength of registering both
-        // compaction hooks. Registration is not re-delivery: `ContextCompacted`
-        // is capture class, so the hook sends it one-way and returns without
-        // emitting anything back to the session (`delivers_context` in
-        // `crates/cairn/src/hook.rs` is `SessionOpened` alone). The checkpoint
-        // is restored, and the agent still has to ask for it -- which is what
-        // `agent_initiated` means. Held unverified for T148 until it was read
-        // against the delivery path instead of the vendor's hook list.
-        (AgentId::Codex, ContinuityMode::AgentInitiated),
+        // `automatic`, and now verified live by T148 instead of assumed.
+        // Codex re-emits `SessionStart` after every `PostCompact`, and session
+        // open is exactly where `delivers_context` is true, so the briefing
+        // comes back on its own. Observed: every `context_compacting`
+        // checkpoint restored, `context_at_session_open` established
+        // non-degraded, and a memory-only token recalled after two real
+        // compactions with zero `cairn` calls. Claude Code differs because it
+        // does *not* re-open a session after compacting, which is why the
+        // finding above is its own and does not generalise (F13).
+        (AgentId::Codex, ContinuityMode::Automatic),
         (AgentId::Opencode, ContinuityMode::AgentInitiated),
         (AgentId::GenericMcp, ContinuityMode::UnavailableAutomatic),
     ] {
@@ -458,46 +459,6 @@ fn each_agents_mode_is_the_rule_applied_to_its_capabilities() {
             by_rule,
             "{} does not follow the documented rule",
             agent.as_str()
-        );
-    }
-}
-
-/// No agent may report `automatic` while Cairn has no way to re-deliver
-/// context after a compaction (FR-426).
-///
-/// `automatic` is a promise that the developer does not have to act: Cairn is
-/// called back on both sides and the context comes back on its own. The second
-/// half does not exist. `ContextCompacted` is capture class, so `cairn hook`
-/// sends it one-way and returns before reaching `emit_context` -- the only
-/// event that delivers context is `SessionOpened`. Whatever a vendor's hook
-/// list says, nothing is handed back to the session, so the honest mode is
-/// `agent_initiated`: Cairn restores the checkpoint and the agent asks for it.
-///
-/// This is the invariant, not the four values above. Both agents that once
-/// reported `automatic` did so from their hook registrations rather than from
-/// the delivery path -- Claude Code until a real compaction disproved it (F10),
-/// Codex until the path was read (F12). A future agent added with both
-/// compaction hooks `guaranteed` would silently claim `automatic` again, and
-/// this test is what stops it.
-///
-/// **If this test fails because Cairn gained a post-compaction delivery path,
-/// it is the test that is wrong.** Delete it, and let the agents whose vendor
-/// channel genuinely carries the context back report `automatic` again.
-#[test]
-fn no_agent_claims_automatic_while_nothing_is_redelivered() {
-    use cairn_core::domain::ContinuityMode;
-    use cairn_integrate::capability::CapabilityProfile;
-    use cairn_integrate::model::AgentId;
-
-    for agent in AgentId::ALL {
-        let mode = CapabilityProfile::base(agent).continuity_mode();
-        assert_ne!(
-            mode,
-            ContinuityMode::Automatic,
-            "{} reports `automatic`, which promises context comes back without being \
-             asked for; no agent can keep that promise while `delivers_context` in \
-             crates/cairn/src/hook.rs is SessionOpened alone",
-            agent.as_str(),
         );
     }
 }

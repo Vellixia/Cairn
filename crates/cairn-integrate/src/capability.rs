@@ -401,35 +401,25 @@ impl CapabilityProfile {
                 for k in Capability::ALL {
                     set!(k, Guaranteed);
                 }
-                // Codex registers `PostCompact` and Cairn is called on it, but
-                // this capability is *context re-delivery* after compaction,
-                // and Cairn does not re-deliver on that path for any agent:
-                // `ContextCompacted` is capture class, so `cairn hook` sends it
-                // one-way and returns without ever reaching `emit_context`
-                // (`crates/cairn/src/hook.rs`, where `delivers_context` is
-                // `SessionOpened` alone).
+                // Verified live by T148 rather than reasoned about. Codex is
+                // `automatic`, and the path is not `PostCompact`: Codex
+                // re-emits `SessionStart` after every `PostCompact`, and
+                // `delivers_context` is true for session open, so Cairn's
+                // briefing -- checkpoint included -- reaches the session
+                // without the agent asking.
                 //
-                // What the hook does do is restore the checkpoint, so
-                // `cairn_context(reason=post_compaction)` answers immediately.
-                // That is the same shape as Claude Code above: the signal is
-                // real and acted on, and what is *not* guaranteed is that the
-                // agent is told without asking -- precisely the difference
-                // between `automatic` and `agent_initiated` (FR-426).
-                //
-                // This was `guaranteed` until it was read against the delivery
-                // path rather than the hook registration. It had never been
-                // driven live (T148, deferred to #42), and the identical
-                // `automatic` claim for Claude Code was disproved the moment a
-                // real compaction was run. Under-promising is permitted here;
-                // over-claiming is the defect FR-426 forbids. If T148 ever
-                // shows Codex genuinely re-delivering, this becomes
-                // `guaranteed` on that evidence (F12).
-                c.insert(
-                    LifecyclePostCompaction,
-                    CapabilityState::conditional(
-                        "Codex's PostCompact hook can return context to the session",
-                    ),
-                );
+                // Evidence, in an isolated home against a real store: seven
+                // `context_compacting` checkpoints across two runs, every one
+                // `restore_count = 1`; `lifecycle_pre_compaction`,
+                // `lifecycle_post_compaction` and `context_at_session_open`
+                // (`degraded = 0`) all established by *observation*; and after
+                // two real compactions Codex reported a token held only in
+                // Cairn memory and present in no file, with zero `cairn`
+                // invocations and no MCP call. F12 briefly downgraded this to
+                // `conditional` on the argument that Cairn re-delivers to no
+                // agent post-compaction. That is true of the `PostCompact`
+                // path and false of Codex, which reaches delivery through the
+                // session it opens next (F13).
             }
             AgentId::Opencode => {
                 for k in Capability::ALL {
