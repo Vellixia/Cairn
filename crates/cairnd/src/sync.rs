@@ -1189,7 +1189,16 @@ async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value
 
     // A relation whose memory has not arrived is held rather than dropped: the
     // foreign key would refuse it, and the next pull carries it again.
+    //
+    // "The next pull carries it again" is a promise the cursor does not
+    // currently keep in every case (#44) — logged so a project stuck waiting
+    // on one relation is at least diagnosable from the daemon log, rather than
+    // silent both here and at the symptom.
     if repo::memory(&d.store, from).await.is_err() || repo::memory(&d.store, to).await.is_err() {
+        tracing::debug!(
+            project = %project_id, %from, %to,
+            "declined a relation whose memory has not arrived yet"
+        );
         return;
     }
 
@@ -1234,7 +1243,15 @@ async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> bool {
         return false;
     };
     // A criterion for a task that has not arrived is held, not invented.
+    //
+    // Logged for the same reason the relation case is (#44): the cursor does
+    // not currently guarantee this criterion is offered again, so a project
+    // stuck waiting on one is at least diagnosable from the daemon log.
     if repo::task(&d.store, task_id).await.is_err() {
+        tracing::debug!(
+            criterion_id = %id, %task_id,
+            "declined a criterion whose task has not arrived yet"
+        );
         return false;
     }
     let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
