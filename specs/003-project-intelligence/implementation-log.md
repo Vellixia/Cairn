@@ -1968,5 +1968,133 @@ it. Left as filed.
 1,088 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
 `--all-targets`. fmt and clippy clean, `git diff --check` clean.
 
+# Checkpoint U — the two deferred issues, fixed
+
+Checkpoint T deferred [#44] on the grounds that no reachable correctness failure
+had been demonstrated, and left [#41] open pending a design decision. The
+operator then asked for both to be fixed. That changed the question from "is
+deferring defensible" to "what is actually true", and on #44 the deferral premise
+did not survive being checked.
+
+## #44 — the cursor never carried what the comment promised
+
+`import_relation` said a declined relation was "held rather than dropped: the
+foreign key would refuse it, and the next pull carries it again." The second half
+was false. `pull_cursor` is a timestamp over `updated_at`, and `sync_changes`
+returns rows with `updated_at > since`, so the server re-offers a record only when
+the record itself changes. Nothing carried it.
+
+Reaching the loss needs no import failure and no exotic state, which is what the
+earlier assessment got wrong. `page_cursor` pins the cursor to the newest row of
+any page it had to truncate at `PAGE = 500`. So: 600 memories and one relation in
+one response, the cursor stops at memory 500, and a relation whose `updated_at`
+is older than that row — while the memory it names falls in the *next* page — is
+declined now and never offered again. A reconciliation decision lost permanently,
+with no error at either end. The same shape applies to a criterion or blocker
+whose task lands in a later page.
+
+The fix holds the payload locally, in `sync_deferred` (migration 6), and replays
+it after every later pull until the parent lands. The wire and the cursor are
+untouched: nothing here is transmitted and no record is re-requested.
+
+Rolling the cursor back to just before the oldest unplaced record was the obvious
+alternative and is worse. A memory deleted on the server while its relation
+survives is excluded from the memories query but still returned as a relation, so
+it can never be placed — and the cursor would then never advance, stalling sync
+permanently. Holding cannot stall. The symmetric risk, holding forever, is
+handled by classifying rather than retrying: `Placement::Unusable` — an
+unparseable payload, a state outside the enum, a kind that does not exist — is
+released, so the table cannot accumulate records nothing will ever place. Replay
+is bounded at 500 per pull, oldest wait first.
+
+`Placement` replaced the bare `bool` the three importers returned because "not
+placed" was doing two incompatible jobs — *not yet* and *never* — and only the
+first may be retried. Distinguishing them is the whole fix; the table is just
+where the first kind waits.
+
+Two smaller things fell out. The relation loop incremented `count` for every
+relation it was handed, including the ones it dropped, so a pull reported
+importing records it had discarded. And relations have no `id` on the wire, so
+the held copy keys on `(from, to, kind)` — the primary key `memory_relations` is
+actually declared with — which makes a re-sent record replace its held copy
+instead of adding one row per pull.
+
+Four regressions; three fail against the code as it was, with the honest symptom
+(`the relation was dropped rather than held`).
+
+Adding migration 6 broke three assertions pinned to the literal `5`. None of them
+is about the number — two are preconditions and one is the version guard itself —
+so they now read `migrate::latest_version()`, which is what
+`sandbox_on_migrated_alpha4` in the same file already did. Adding a migration
+should not look like a broken guard.
+
+## #41 — restart debris, and a field that destroys its own evidence
+
+The reported store had three `active` OpenCode sessions in one worktree. The
+first reading of it, recorded in a comment on the issue, was **wrong**: the rows
+showed `ended_at == last_event_at` hours after each session started, which looked
+like three sessions genuinely alive for hours.
+
+`end_session` writes `last_event_at = ended_at`. The reaper overwrites the field
+it used to decide, so every reaped session's row claims activity right up to the
+moment it was reaped. Reading `observations` instead:
+
+| session | started | last real event | worked for | obs |
+|---|---|---|---|---|
+| `01a00e49` | 05:55:12 | 05:55:56 | 44 sec | 40 |
+| `01a00e4b` | 05:57:16 | 06:00:38 | 3m22s | 46 |
+| `01a00e4f` | 06:01:46 | Aug 18 08:39 | ~26 h | 951 |
+
+Each session started 70–80 seconds after the previous went permanently silent.
+Restart debris: the third did all the work while the first two sat `active` for
+two and five hours, poisoning every `cairn context` in that worktree. Not the
+"two agents deliberately sharing a worktree" case, and not D14's duplicated
+on-demand key either — these are three distinct vendor-issued OpenCode keys.
+
+The two-hour idle timeout is correct for a session on its own; a developer
+reading and thinking must never be mistaken for one who left. It is far too
+generous once a *newer* session is running in the same worktree, because then the
+older one is not thinking — something replaced it. That is evidence already in
+the store, and `superseded_sessions_idle_since` looks for exactly it: such
+sessions are held to fifteen minutes rather than two hours.
+
+The rule is deliberately narrow. Only a session with a newer active sibling in
+the same worktree qualifies, so the newest is never reaped and a worktree can be
+narrowed to one session but never emptied. `started_at` ties break on id, so two
+sessions stamped the same instant still leave exactly one survivor. A session in
+a different worktree is not a successor — two worktrees are two working contexts.
+A session working alone keeps the full generous timeout, which is what two of the
+four regressions exist to pin.
+
+Being wrong is cheap, and this was verified rather than assumed: `session_by_key`
+does not filter on status, and `start_session`, `observe` and `turn_checkpoint`
+all resume an `Interrupted` session, so a session reaped early returns on its
+next tool call (D16 rule 4). Being wrong in the other direction is the bug.
+
+**Not** reaped at `session_start`, which would have addressed the reported call
+sequence — `SessionStart` then `Context` in one dispatch — most directly. Two
+reasons. Generating handoffs there runs git and briefing synthesis on the
+session-open deadline. And the existing seal-now/synthesize-later machinery, the
+natural way to avoid that, labels swept handoffs `session_end`, which FR-229
+reserves for a boundary that actually completed; using it for abandoned debris
+would make the distinction it exists to draw meaningless. The periodic reaper
+already labels `recovered` correctly, so the rule lives there.
+
+The consequence is stated rather than hidden: this **bounds** the ambiguous
+window to minutes instead of hours, and does not remove it. A session that
+stopped thirty seconds ago is indistinguishable from one that is thinking without
+a liveness signal, and this module's own documentation is explicit that Cairn has
+none by choice. `ambiguous_session` now names each candidate's agent and how long
+it has been silent, so the window that remains is actionable instead of merely
+reported.
+
+## Gate after Checkpoint U
+
+1,096 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean, `git diff --check` clean. Each of the two
+commits builds on its own.
+
 [#38]: https://github.com/Vellixia/Cairn/issues/38
+[#41]: https://github.com/Vellixia/Cairn/issues/41
 [#42]: https://github.com/Vellixia/Cairn/issues/42
+[#44]: https://github.com/Vellixia/Cairn/issues/44
