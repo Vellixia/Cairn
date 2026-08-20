@@ -83,8 +83,8 @@ Derived, not maintained (D57). These are the current outputs of the rule:
 
 | Agent | Pre-compaction | Post-compaction | `continuity_mode` | What Cairn tells the developer |
 |---|---|---|---|---|
-| Claude Code | `PreCompact` | `PostCompact` | `automatic` | Continuity restores automatically |
-| Codex | `PreCompact` | `PostCompact` | `automatic` | Continuity restores automatically |
+| Claude Code | `PreCompact` | `PostCompact` (conditional) | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
+| Codex | `PreCompact` | `PostCompact` (conditional) | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
 | OpenCode | `experimental.session.compacting` (conditional) | `session.compacted` | `agent_initiated` | A checkpoint is written before compaction; call `cairn_context(reason=post_compaction)` to restore it |
 | Generic MCP | none | none | `unavailable_automatic` | Not automatic for this client; a checkpoint exists at session close and via `cairn_session action=checkpoint` |
 

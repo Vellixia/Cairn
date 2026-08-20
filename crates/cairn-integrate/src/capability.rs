@@ -401,6 +401,35 @@ impl CapabilityProfile {
                 for k in Capability::ALL {
                     set!(k, Guaranteed);
                 }
+                // Codex registers `PostCompact` and Cairn is called on it, but
+                // this capability is *context re-delivery* after compaction,
+                // and Cairn does not re-deliver on that path for any agent:
+                // `ContextCompacted` is capture class, so `cairn hook` sends it
+                // one-way and returns without ever reaching `emit_context`
+                // (`crates/cairn/src/hook.rs`, where `delivers_context` is
+                // `SessionOpened` alone).
+                //
+                // What the hook does do is restore the checkpoint, so
+                // `cairn_context(reason=post_compaction)` answers immediately.
+                // That is the same shape as Claude Code above: the signal is
+                // real and acted on, and what is *not* guaranteed is that the
+                // agent is told without asking -- precisely the difference
+                // between `automatic` and `agent_initiated` (FR-426).
+                //
+                // This was `guaranteed` until it was read against the delivery
+                // path rather than the hook registration. It had never been
+                // driven live (T148, deferred to #42), and the identical
+                // `automatic` claim for Claude Code was disproved the moment a
+                // real compaction was run. Under-promising is permitted here;
+                // over-claiming is the defect FR-426 forbids. If T148 ever
+                // shows Codex genuinely re-delivering, this becomes
+                // `guaranteed` on that evidence (F12).
+                c.insert(
+                    LifecyclePostCompaction,
+                    CapabilityState::conditional(
+                        "Codex's PostCompact hook can return context to the session",
+                    ),
+                );
             }
             AgentId::Opencode => {
                 for k in Capability::ALL {

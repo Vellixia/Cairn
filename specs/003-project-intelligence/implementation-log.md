@@ -1343,6 +1343,14 @@ Codex is deliberately unchanged: its hook set is its own vendor's, no compaction
 has been driven in it, and transferring this finding would be inventing
 evidence.
 
+> **Superseded by F12.** Half of cause 2 above is not a Claude Code fact at all.
+> `context_compacted` being capture class, and `delivers_context` being true
+> only for `session_opened`, are facts about *Cairn* and hold for every agent.
+> Only the `additionalContext` half is the vendor's. So Codex could be ruled out
+> on this codebase's own evidence without driving it, and leaving it `automatic`
+> was not caution — it kept the stronger claim under the label of refusing to
+> invent evidence.
+
 ### Why the suite could not have caught it
 
 Every continuity test restores by calling `cairn context --reason
@@ -1388,6 +1396,64 @@ Worth stating plainly: this was a real defect reached by a flaky test. Re-runnin
 until it passed would have shipped it.
 
 ---
+
+## F12 (CRITICAL) — Codex kept the `automatic` claim F10 had already disproved
+
+`crates/cairn-integrate/src/capability.rs`, `specs/003-project-intelligence/compatibility.md`,
+`specs/003-project-intelligence/research.md`
+
+F10 downgraded Claude Code from `automatic` to `agent_initiated` and left Codex
+alone, on the stated grounds that Codex's hooks are its own vendor's and
+transferring the finding would be inventing evidence. That was the wrong
+boundary. F10's own cause 2 has two halves:
+
+- `context_compacted` is capture class, so `cairn hook` sends it one-way and
+  returns before reaching `emit_context`, and `delivers_context` is
+  `session_opened` alone. **This is a fact about Cairn.** It holds for every
+  agent, whatever its vendor supports.
+- `additionalContext` is unsupported on Claude Code's `PostCompact`. This one is
+  the vendor's.
+
+Only the second needed a live Codex to check. The first already settled it:
+`LifecyclePostCompaction` is the capability *context re-delivery after
+compaction*, and Cairn re-delivers to nobody after a compaction. Codex
+registering `PreCompact` and `PostCompact` says Cairn is **called**; it does not
+say anything comes back. So Codex was reporting a rehydration guarantee that no
+code path in this repository can keep — the exact defect FR-426 calls out, left
+in place by a rule that read the vendors' hook lists instead of the delivery
+path.
+
+`base()` blanket-set every capability `guaranteed` for Codex, so the fix is the
+same shape as F10's: the wrong input, not the rule. `LifecyclePostCompaction`
+becomes `conditional` for Codex, the derivation is untouched, and Codex reports
+`agent_initiated` — which is what it actually does, since the checkpoint *is*
+restored and the agent gets it by asking with `reason=post_compaction`.
+
+No agent reaches `automatic` now. That row of the table is unreachable until
+Cairn gains a post-compaction delivery path, and the regression says so in those
+terms rather than pinning four values: `no_agent_claims_automatic_while_nothing_
+is_redelivered` iterates `AgentId::ALL` and fails if any agent derives
+`automatic`, naming `delivers_context` as the reason. Swapping the expected value
+in the existing per-agent test would not have stopped the next agent added with
+both hooks `guaranteed` from silently claiming `automatic` again. Both tests fail
+against the code as it was, on `codex reports \`automatic\``.
+
+Under-promising is explicitly permitted here and over-claiming is not, so this
+does not wait on #42. T148 can still upgrade Codex to `guaranteed` later — but
+only on live evidence that a compaction really does hand context back, which is
+the evidence F10 established nobody had.
+
+Two documents were also asserting the disproved claim as settled fact.
+`compatibility.md` still listed **Claude Code** as `automatic` after F10 had
+changed it in code, so the table contradicted the test suite; `research.md`
+prefaced both with "under currently verified vendor behaviour" when neither had
+been verified. Both now read `agent_initiated`, and `research.md` records that
+the `automatic` row is currently unreachable.
+
+## Gate after F12
+
+1,097 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean.
 
 # Checkpoint Q — the four quickstart deviations, closed
 
