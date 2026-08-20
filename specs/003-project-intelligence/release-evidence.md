@@ -244,9 +244,10 @@ This run also corrected an over-claim found by that test: OpenCode reported
 build without the experimental hook would never warn Cairn — and the agent had
 been told not to worry. It now reports `agent_initiated`.
 
-What remains unverified is the **observation**: that each agent behaves the way
-its capability profile says it does. That is what T148 is for, and it is why
-this task is blocking even though the rule is tested.
+What was unverified at the time of writing was the **observation**: that each
+agent behaves the way its capability profile says it does. All three have since
+been driven live -- see *What was run* below, which supersedes the two sections
+that follow it.
 
 #### What was run — Claude Code, live · FOUND A DEFECT
 
@@ -272,21 +273,57 @@ was written when the agent's session ended. That is the close-boundary guarantee
 ("a checkpoint exists at session close and on demand") holding on a live agent —
 the one continuity claim verified end to end here.
 
-**T148 still does not pass.** Its pass condition is *each* agent's observed
-behaviour matching its derived mode. One agent was driven, and it failed; the
-fix is in, and the corrected mode has not itself been re-verified against a
-fresh live compaction.
+> **Superseded.** The paragraph and table below described the state before any
+> agent but Claude Code had been driven. All three have since been driven live
+> against real stores in isolated environments, and the operator's own
+> `~/.codex`, `~/.local/share/opencode` and `~/.claude` were digest-verified
+> untouched throughout. The current record is *What was run — all three agents,
+> live* below.
 
-#### What was not run, and why
+**T148 did not pass at the time of writing.** Its pass condition is *each*
+agent's observed behaviour matching its derived mode. One agent had been driven,
+and it failed.
+
+#### What was not run then, and why
 
 | Agent | Status | Reason |
 |---|---|---|
-| Codex | **not driven** | `cairn connect codex` refuses with `resource_modified` against the operator's hand-edited global `~/.codex/config.toml`. That refusal is Feature 002's ownership protection working correctly, and the file was verified untouched. Connecting would mean overwriting a configuration this run does not own. |
-| OpenCode | **not driven** | Its integration installs a plugin into the operator's own OpenCode configuration directory. Same reason: this run is not authorized to modify the operator's agent configuration. |
+| Codex | **not driven then** | `cairn connect codex` refused with `resource_modified` against the operator's hand-edited global `~/.codex/config.toml` — Feature 002 ownership protection working correctly. Resolved by giving the run its own isolated `HOME` whose `.codex` is the directory the operator authenticated interactively, so nothing they own is written. |
+| OpenCode | **not driven then** | Its integration installs a plugin into the operator's own OpenCode configuration directory. Resolved the same way, with isolated `XDG_CONFIG_HOME`/`XDG_DATA_HOME`. |
 
-Neither is a Cairn defect, and neither can be worked around from inside this
-run: both need an operator who owns those configurations to connect the agent
-and drive a compaction.
+Neither was a Cairn defect. Both needed an environment the run was allowed to
+write to, which is what the isolated roots provide.
+
+#### What was run — all three agents, live (F14)
+
+Each agent was driven through a **real** compaction against a real store, in an
+isolated environment, with the operator's own configuration digest-verified
+unchanged.
+
+| agent | how the compaction was driven | capture | delivery | mode |
+|---|---|---|---|---|
+| Claude Code | `/compact` on a session built over three turns | `lifecycle_pre_compaction` + `lifecycle_post_compaction` established | checkpoint `restore_count = 1`; **`context_after_compaction` established** | **`automatic`** |
+| Codex | real auto-compaction at `model_auto_compact_token_limit=6000` on `gpt-5.4-mini` | both established | checkpoint `restore_count = 1`; **`context_after_compaction` established** | `unavailable_automatic` while hook trust is unapproved; the delivery capability itself is proven |
+| OpenCode | two real compactions via `POST /session/{sessionID}/summarize` on `opencode/hy3-free` | both established | **absent** — one session row throughout, `lifecycle_session_open` established once before the first compaction and never again | **`agent_initiated`** |
+| Generic MCP | n/a — reports no compaction event | absent | absent | `unavailable_automatic` |
+
+**OpenCode's `agent_initiated` is a pass, not a gap.** T148's condition is that
+observed behaviour matches the derived mode and that no agent claims a
+rehydration it does not deliver. OpenCode never re-opens a session, so there is
+no boundary at which Cairn could deliver unasked, and `agent_initiated` — which
+tells the agent to ask, and asking always works — is the truthful answer. Its own
+`experimental.session.compacting` hook cannot substitute: `output.context` is
+prompt input to the summarising model, and a passive capsule was observed
+vanishing from the summary while a coercive instruction survived, so the
+mechanism is model-mediated and must never be reported as automatic. A
+deterministic alternative exists and is tracked as a post-alpha.5 improvement in
+[#49](https://github.com/Vellixia/Cairn/issues/49); the unrelated
+`exposes_compaction_hook` probe defect is
+[#50](https://github.com/Vellixia/Cairn/issues/50).
+
+Under the pre-F14 rule OpenCode's verified post-compaction *capture* would have
+counted toward `automatic`, so this is the case that demonstrates the
+capture/delivery split doing real work.
 
 ### T147 — topic-key effectiveness · NOT BLOCKING · NOT RUN
 

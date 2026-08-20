@@ -191,7 +191,22 @@ pub async fn run(event: &str) {
 fn deliver_context(agent: cairn_integrate::AgentId, value: &serde_json::Value) -> bool {
     match serde_json::from_value::<ContextPayload>(value.clone()) {
         Ok(payload) => {
-            let text = render::briefing(&payload);
+            // A restored checkpoint is rendered from the raw reply, not from
+            // `ContextPayload`, which has no field for it -- so deserializing
+            // first and rendering only that dropped the checkpoint on the floor.
+            //
+            // That was a real over-claim: the daemon restored the checkpoint and
+            // Cairn recorded a post-compaction *delivery*, while the text the
+            // agent actually received said "no prior history for this project"
+            // and carried none of it. An agent that asked with
+            // `reason=post_compaction` got the checkpoint, because the CLI
+            // renders from the raw value; an agent delivered to automatically
+            // did not. `automatic` has to mean the same thing as asking.
+            //
+            // It leads, for the reason `render::continuity` documents: a stale
+            // next action acted on is worse than no next action at all.
+            let mut text = render::continuity(value);
+            text.push_str(&render::briefing(&payload));
             let degraded = text.trim().is_empty();
             emit_context(agent, &text);
             degraded

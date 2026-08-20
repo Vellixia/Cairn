@@ -685,6 +685,72 @@ fn a_repeated_post_compaction_session_open_restores_once() {
     );
 }
 
+/// Automatic delivery says the same thing as asking (FR-426, F14).
+///
+/// This is the property `automatic` actually promises: an agent that is
+/// delivered to must learn what an agent that asks would learn. It did not hold.
+/// The hook path deserialized the reply into `ContextPayload`, which has no
+/// field for a restored checkpoint, and rendered only that -- so the daemon
+/// restored the checkpoint, Cairn recorded a post-compaction *delivery*, and the
+/// text the agent received carried no divergence warning at all. An agent that
+/// asked with `reason=post_compaction` was warned, because the CLI renders from
+/// the raw reply; an agent delivered to automatically acted on a stale next
+/// action in silence.
+///
+/// Asserted on a **diverged** checkpoint because that is where the two paths
+/// differed: `render::continuity` is deliberately quiet when nothing moved.
+#[test]
+fn automatic_delivery_warns_of_divergence_exactly_as_asking_does() {
+    let s = Sandbox::new();
+    let session = session_with_checkpoint(&s, "diverged-delivery", "src/retry.rs");
+    let _ = session;
+
+    // A real compaction boundary, so the checkpoint the session open looks for
+    // exists with the `context_compacting` trigger. Without this the gate
+    // correctly finds nothing to restore and delivers an ordinary briefing.
+    s.hook(
+        "PreCompact",
+        json!({ "session_id": "diverged-delivery", "trigger": "auto" }),
+    );
+    s.hook(
+        "PostCompact",
+        json!({ "session_id": "diverged-delivery", "trigger": "auto" }),
+    );
+
+    // Move the repository under the checkpoint so it can no longer be current.
+    s.write_file("retry.rs", "fn retry() { /* rewritten */ }\n");
+    s.git(&["add", "-A"]);
+    s.git(&["commit", "-q", "-m", "rewrite retry"]);
+
+    // Automatic delivery comes first, exactly as it does in a real session: the
+    // agent re-opens and is delivered to before it can ask anything. Asking
+    // first would consume the checkpoint and the delivery would correctly
+    // decline -- that is the duplicate-restore protection, not a failure.
+    let delivered = s.hook(
+        "SessionStart",
+        json!({ "session_id": "diverged-delivery", "source": "compact" }),
+    );
+    let rows = s.query_column(
+        "SELECT trigger || ' restore=' || restore_count
+           FROM continuity_checkpoints ORDER BY created_at",
+    );
+    assert!(
+        delivered.stdout.contains("CHECKPOINT DIVERGED"),
+        "automatic delivery dropped the divergence warning, so `automatic` promised less \
+         than `agent_initiated` actually gives.\n checkpoints: {rows:?}\n delivered: {}",
+        delivered.stdout
+    );
+
+    // And an agent that asks is told the same thing. Restoration is a read, so
+    // asking after a delivery still renders it.
+    let asked = s.cairn(&["context", "--reason", "post_compaction"]);
+    assert!(
+        asked.stdout.contains("CHECKPOINT DIVERGED"),
+        "an agent that asks must be warned the checkpoint diverged: {}",
+        asked.stdout
+    );
+}
+
 /// Divergence detection, per class and in combination — and a diverged
 /// checkpoint never emits a live next action (metrics 15 and 16, FR-431,
 /// FR-434).
