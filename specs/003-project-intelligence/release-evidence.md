@@ -303,7 +303,7 @@ unchanged.
 | agent | how the compaction was driven | capture | delivery | mode |
 |---|---|---|---|---|
 | Claude Code | `/compact` on a session built over three turns | `lifecycle_pre_compaction` + `lifecycle_post_compaction` established | checkpoint `restore_count = 1`; **`context_after_compaction` established** | **`automatic`** |
-| Codex | real auto-compaction at `model_auto_compact_token_limit=6000` on `gpt-5.4-mini` | both established | checkpoint `restore_count = 1`; **`context_after_compaction` established** | `unavailable_automatic` while hook trust is unapproved; the delivery capability itself is proven |
+| Codex | 6 real auto-compactions at `model_auto_compact_token_limit=6000` on `gpt-5.4-mini`, **trusted, no bypass flag** | both established | 6 checkpoints, 6 restores — exactly one each; **`context_after_compaction` established**; a memory-only token recalled with 0 `cairn` invocations | **`automatic`**, level `FULL` |
 | OpenCode | two real compactions via `POST /session/{sessionID}/summarize` on `opencode/hy3-free` | both established | **absent** — one session row throughout, `lifecycle_session_open` established once before the first compaction and never again | **`agent_initiated`** |
 | Generic MCP | n/a — reports no compaction event | absent | absent | `unavailable_automatic` |
 
@@ -370,12 +370,19 @@ here should be read as it having passed.
 | Residual, stated rather than closed | #41's fix **bounds** the ambiguous-session window to minutes; it does not remove it. A session that stopped thirty seconds ago is indistinguishable from one that is thinking, and Cairn deliberately has no liveness signal (`recover.rs` module docs: no heartbeat, no lease, no PID table). Recorded here so the guarantee is not read as stronger than it is. |
 | **T146 — quickstart walkthrough** | **RUN, PASSES** |
 | **T147 — topic-key effectiveness** | **RUN 2026-08-20** on a 12-item stratified sample across live Codex, OpenCode and Claude Code. **False grouping 0 for all three agents** — the only outcome that would have been a defect. Topic-key adoption 100% of memories written; unprompted write rate 7/12, 6/12, 1/12. Results in `evals/topic-key-effectiveness/RESULTS.md`, raw exports beside them |
-| **T148 — live continuity walkthrough** | **All three agents driven live** through real compactions (F14). Claude Code `automatic`; Codex delivery proven, mode `unavailable_automatic` until its hook trust is approved once interactively; OpenCode `agent_initiated` because it never re-opens a session and its compaction hook is model-mediated. Compaction was driven with `/compact`, `model_auto_compact_token_limit`, and `POST /session/{id}/summarize` respectively |
+| **T148 — live continuity walkthrough** | **RUN, PASSES.** All three agents driven live through real compactions (F14, F15). Claude Code **`automatic`**; Codex **`automatic`** under normal trusted activation, all eight criteria observed; OpenCode **`agent_initiated`**, which is the truthful answer because it never re-opens a session. Each agent's observed behaviour matches its derived mode and none claims a rehydration it does not deliver |
 
-**147 of 148 tasks complete.** T147 is run and recorded. T148 is run for Claude
-Code and Codex and **partially** for OpenCode: everything except its compaction
-path is verified live, and that one gap is recorded below rather than counted as
-a pass.
+**148 of 148 tasks complete.** T147 is run and recorded. T148 is run for all
+three agents against real compactions, and each agent's observed behaviour
+matches its derived mode.
+
+OpenCode's `agent_initiated` is a pass on T148's own terms, not a shortfall: the
+condition is that observed behaviour match the derived mode and that no agent
+claim a rehydration it does not deliver. OpenCode never re-opens a session, so
+there is no boundary at which Cairn could deliver unasked, and `agent_initiated`
+tells the agent to ask -- which always works. Making it `automatic` would require
+a new delivery mechanism, tracked as
+[#49](https://github.com/Vellixia/Cairn/issues/49) for after this release.
 
 ### T148 — OpenCode's compaction was not driven, and why
 

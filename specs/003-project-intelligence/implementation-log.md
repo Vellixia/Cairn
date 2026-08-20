@@ -1714,6 +1714,74 @@ identified path, not taken here.
 1,100 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
 `--all-targets`. fmt and clippy clean.
 
+## F15 (CRITICAL) — Codex trust was unreadable, so its mode could never leave the floor
+
+`crates/cairn-integrate/src/agents/codex.rs`
+
+With the operator's hook trust freshly approved, Cairn still reported
+`installed_not_activated` and held Codex at `unavailable_automatic`. The approval
+had worked; Cairn was looking in the wrong file.
+
+`trust_state` read a `trust` or `trust_state` field out of `hooks.json`. Codex
+never writes one there. It records trust in its own `config.toml`, beside that
+file, one entry per hook:
+
+```toml
+[hooks.state."/…/.codex/hooks.json:pre_compact:0:0"]
+trusted_hash = "sha256:1dc20f81…"
+```
+
+So the `None` arm was reached every time and fell back to the recorded install's
+activation, which `cairn connect` writes as `pending_user_trust`. The effect: a
+developer who had done the one thing the remedy asked for was still told to do
+it, `apply_activation` kept every lifecycle capability at `PendingActivation`,
+and `continuity_mode` stayed at its most conservative value **permanently**, with
+no action available that could change it. The doc comment's intent -- *"it reads
+what Codex wrote"* -- was right; the location was wrong.
+
+`codex_trusted_hooks` now reads `[hooks.state]` from `config.toml` and requires
+an entry for every event Cairn registers. The key format was already documented a
+few dozen lines above, in the comment explaining Codex's hook grouping.
+
+Only **presence** is read, never the hash's value. Verifying it would mean
+recomputing Codex's own digest of its own file, and guessing that wrong would
+either forge a trust Cairn cannot see or deny one the user really gave. Codex
+re-prompts by itself when content stops matching, and Cairn's separate
+`content_hash` record is what detects an upgrade having reset trust (D24).
+
+This is the same family as [#50](https://github.com/Vellixia/Cairn/issues/50) --
+a probe pointed somewhere the vendor never writes -- and the third such defect
+found in this area. All three were invisible because they fail in the safe
+direction: they understate a capability, so nothing over-claims and no test
+catches it.
+
+### T148 — Codex, under normal trusted activation
+
+Six real auto-compactions, `gpt-5.4-mini` at low reasoning,
+`model_auto_compact_token_limit = 6000`, **no `--dangerously-bypass-hook-trust`
+anywhere**, isolated `HOME` whose `.codex` the operator authenticated and trusted
+interactively.
+
+| # | required | observed |
+|---|---|---|
+| 1 | `PreCompact` checkpoint created | 6 `context_compacting` checkpoints |
+| 2 | `PostCompact` remains capture only | order `PreCompact → context compacted → PostCompact → SessionStart`; every restore timestamp falls after its `PostCompact` |
+| 3 | `SessionStart` occurs after compaction | 7 `SessionStart` hooks for 6 compactions, one following each |
+| 4 | unrestored checkpoint restored exactly once | 6 checkpoints, **6** total restores — one each |
+| 5 | `additionalContext` returned | `MARKER=TRUSTED-CX-8823`, a token held only in Cairn memory and present in no file |
+| 6 | no explicit agent retrieval | **0** `cairn` invocations; every observation is `command_run` |
+| 7 | `ContextAfterCompaction` established | by observation |
+| 8 | `automatic` derived without an override | `continuity_mode: automatic`; all three capabilities `guaranteed`/`verified`; no per-agent compaction entry in `base()` |
+
+Criteria 3 and 4 together are also the live duplicate-restore proof: seven
+session opens produced six restores, so no checkpoint was ever consumed twice.
+Codex's level advanced `MCP_PLUS → FULL` once trust was readable.
+
+## Gate after F15
+
+1,102 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with
+`--all-targets`. fmt and clippy clean.
+
 # Checkpoint Q — the four quickstart deviations, closed
 
 Checkpoint O found D1–D4 by walking `quickstart.md` on a real repository. They
