@@ -485,3 +485,68 @@ fn a_project_that_was_shown_the_pattern_does_not_validate_it_by_agreeing() {
         "a suggestion confirmed by local evidence is confirmation: {confirmed}"
     );
 }
+
+/// A memory whose own evidence contradicts it does not promote.
+///
+/// `VerificationState::Conflicted` had no writer, so this case was previously
+/// unreachable: the source stayed `verified` and the promotion gate never saw
+/// anything to refuse. Now that attaching a contradiction actually moves the
+/// memory (`crates/cairn-store/src/evidence.rs`), the gate's own precondition —
+/// `source.verification != Verified` refuses with `source_unverified` — refuses
+/// it, with no change to `patterns.rs` itself.
+#[test]
+fn a_conflicted_source_does_not_promote() {
+    let s = Sandbox::new();
+    let id = promotable_memory(&s);
+
+    // An agent attaches evidence that disagrees with the claim just verified.
+    let contradiction = s.json(&[
+        "evidence",
+        "add",
+        "--type",
+        "configuration",
+        "--subject",
+        "docker default address pools",
+        "--value",
+        "plenty free",
+        "--locator",
+        "incident/2026-08-19.md",
+        "--collector",
+        "agent",
+        "--role",
+        "contradicts",
+        "--memory",
+        &id,
+    ]);
+    assert!(contradiction.get("error").is_none(), "{contradiction}");
+    assert_eq!(
+        contradiction["verification"]["state"], "conflicted",
+        "attaching the contradiction did not move the memory: {contradiction}"
+    );
+
+    let shown = s.json(&["memory", "show", &id]);
+    assert_eq!(
+        shown["memory"]["verification"]["state"], "conflicted",
+        "the memory itself does not report the conflict: {shown}"
+    );
+
+    // `promote()`'s own helper goes through `Sandbox::json`, which asserts
+    // success — exactly the response this call must not produce, so the
+    // refusal is read with `json_err` instead.
+    let refused = s.json_err(&[
+        "pattern",
+        "promote",
+        "--memory",
+        &id,
+        "--dry-run",
+        "--signal",
+        "could not find an available non-overlapping ipv4 address pool",
+        "--signal",
+        "docker bridge network create failure",
+    ]);
+    assert_eq!(
+        refused["code"].as_str(),
+        Some("source_unverified"),
+        "a conflicted source was not refused: {refused}"
+    );
+}

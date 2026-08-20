@@ -633,6 +633,50 @@ async fn rebuild_verification_inner(
         state
     };
 
+    // A memory whose own evidence disagrees with it is not verified, however
+    // strong the supporting runs. This is the reachable half of the
+    // transition `(Verified, ContradictingEvidenceAttached) -> Conflicted`
+    // (FR-369, `cairn-core/src/verify.rs::documented_transitions`) — reachable
+    // half because the trigger fires from a durable record (an active
+    // `contradicts` fact), not from a role no writer ever produced.
+    //
+    // Checked here rather than at attach time so it survives every path that
+    // can change the picture: attaching the contradiction, attaching a new
+    // supporting run, or `doctor --rebuild-derived` re-deriving from records
+    // that moved since the cache was written.
+    let contradicted = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM memory_evidence_facts l
+           JOIN evidence_facts f ON f.id = l.evidence_id
+          WHERE l.memory_id = ?1 AND l.role = 'contradicts' AND f.deleted_at IS NULL",
+    )
+    .bind(memory_id.to_string())
+    .fetch_one(store.pool())
+    .await?
+        > 0;
+
+    let state = if contradicted && state == VerificationState::Verified {
+        VerificationState::Conflicted
+    } else if !contradicted
+        && !after_run
+        && previous.0.as_deref() == Some(VerificationState::Conflicted.as_str())
+    {
+        // Every documented exit from `conflicted` lands on `needs_recheck` —
+        // a fingerprint change, evidence removed, the last support deleted,
+        // and this one, the contradiction itself going away. None of them is
+        // `verified`: the disagreement clearing is not itself a check, so it
+        // does not get to hand back the confidence a check would have to
+        // re-establish.
+        //
+        // Guarded by `!after_run` for the same reason the `needs_recheck`
+        // preservation above is: a caller that just recorded a fresh run
+        // *is* the check that re-establishes it, and gets to land on
+        // whatever that run found — including `verified`, if the
+        // contradiction is gone and the run agrees.
+        VerificationState::NeedsRecheck
+    } else {
+        state
+    };
+
     let authority = derive_authority(state, &facts);
 
     // `verified` with no authority is not a state Cairn may hold: FR-370 ties
@@ -1274,6 +1318,295 @@ mod tests {
         assert_eq!(stored.0, "verified");
         assert_eq!(stored.1.as_deref(), Some("cairn"));
         assert!(stored.2.is_some(), "last_verified_at was not recorded");
+    }
+
+    /// An agent can attach evidence that *disproves* a memory, and Cairn is
+    /// not silent about it.
+    ///
+    /// `VerificationState::Conflicted` had exactly one reference outside its
+    /// own enum — a ranking arm — and no writer anywhere: `role = 'contradicts'`
+    /// reached storage and every consumer filtered it back out. An agent could
+    /// record "this claim is contradicted", receive `ok: true`, and the memory
+    /// went on reporting `verified` regardless (FR-369; the reachable half of
+    /// `(Verified, ContradictingEvidenceAttached) -> Conflicted`,
+    /// `cairn-core/src/verify.rs::documented_transitions`).
+    #[tokio::test]
+    async fn a_contradicting_fact_moves_a_verified_memory_to_conflicted() {
+        let f = fixture().await;
+        let m = f
+            .propose(
+                f.session_a,
+                Some("infra.db"),
+                Some("postgresql"),
+                "PostgreSQL.",
+            )
+            .await;
+        let supporting = evidence(
+            &f,
+            EvidenceKind::Configuration,
+            EvidenceCollector::Cairn,
+            "postgresql",
+            "config/database.yml",
+        )
+        .await;
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::Configuration,
+                evidence_id: Some(supporting.id),
+                expected_digest: Some("aaa"),
+                observed_digest: Some("aaa"),
+                result: VerifyResult::Verified,
+                detail: None,
+                repo_branch: "main",
+                repo_commit: Some("abc123"),
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .expect("run");
+        let (state, authority) = rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild");
+        assert_eq!(
+            state,
+            VerificationState::Verified,
+            "setup: must start verified"
+        );
+        assert_eq!(authority, Some(VerificationAuthority::Cairn));
+
+        // No run of its own — the attached fact is the evidence, not something
+        // Cairn re-checks.
+        let contradicting = evidence(
+            &f,
+            EvidenceKind::Configuration,
+            EvidenceCollector::Agent,
+            "cockroachdb",
+            "incident/2026-08-19.md",
+        )
+        .await;
+        attach_to_memory(
+            &f.store,
+            m.memory.id,
+            contradicting.id,
+            EvidenceRole::Contradicts,
+            f.session_a,
+        )
+        .await
+        .expect("attach");
+
+        let (state, authority) = rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild after contradiction");
+        assert_eq!(
+            state,
+            VerificationState::Conflicted,
+            "a contradicting fact did not move the memory off `verified`"
+        );
+        assert_eq!(
+            authority, None,
+            "a conflicted memory carried an authority; only `verified` may (FR-370)"
+        );
+
+        // Never bare: every surface that shows verification shows the reason
+        // (FR-370) — the authority column enforces the pair structurally, and
+        // this is the derivation actually producing the honest half of it.
+        let stored: (String, Option<String>) = sqlx::query_as(
+            "SELECT verification, verification_authority FROM memories WHERE id = ?1",
+        )
+        .bind(m.memory.id.to_string())
+        .fetch_one(f.store.pool())
+        .await
+        .expect("stored");
+        assert_eq!(stored.0, "conflicted");
+        assert_eq!(stored.1, None);
+    }
+
+    /// Every documented exit from `conflicted` lands on `needs_recheck`, never
+    /// straight back to `verified` — the disagreement clearing is not itself a
+    /// check, so it does not get to hand back the confidence a check would
+    /// have to re-establish.
+    #[tokio::test]
+    async fn conflicted_recovers_to_needs_recheck_once_the_contradiction_clears() {
+        let f = fixture().await;
+        let m = f
+            .propose(f.session_a, Some("infra.db"), Some("postgresql"), "PG.")
+            .await;
+        let supporting = evidence(
+            &f,
+            EvidenceKind::Configuration,
+            EvidenceCollector::Cairn,
+            "postgresql",
+            "config/database.yml",
+        )
+        .await;
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::Configuration,
+                evidence_id: Some(supporting.id),
+                expected_digest: Some("aaa"),
+                observed_digest: Some("aaa"),
+                result: VerifyResult::Verified,
+                detail: None,
+                repo_branch: "main",
+                repo_commit: Some("abc123"),
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .expect("run");
+        let contradicting = evidence(
+            &f,
+            EvidenceKind::Configuration,
+            EvidenceCollector::Agent,
+            "cockroachdb",
+            "incident/2026-08-19.md",
+        )
+        .await;
+        attach_to_memory(
+            &f.store,
+            m.memory.id,
+            contradicting.id,
+            EvidenceRole::Contradicts,
+            f.session_a,
+        )
+        .await
+        .expect("attach");
+        let (state, _) = rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild");
+        assert_eq!(
+            state,
+            VerificationState::Conflicted,
+            "setup: must start conflicted"
+        );
+
+        // The contradiction clears — the fact is withdrawn, not the run.
+        sqlx::query("UPDATE evidence_facts SET deleted_at = ?2 WHERE id = ?1")
+            .bind(contradicting.id.to_string())
+            .bind(rows::now_text())
+            .execute(f.store.pool())
+            .await
+            .expect("withdraw the contradicting fact");
+
+        // A rebuild not tied to a fresh run — `doctor --rebuild-derived`'s own
+        // path — must not resurrect `verified` from a run recorded before the
+        // disagreement was noticed.
+        let (state, authority) = rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild after withdrawal");
+        assert_eq!(
+            state,
+            VerificationState::NeedsRecheck,
+            "the contradiction clearing was treated as a check, not as owing one"
+        );
+        assert_eq!(authority, None);
+    }
+
+    /// The escape hatch: a caller that just recorded a fresh run *is* the
+    /// check `conflicted`'s recovery is waiting for, and may land on whatever
+    /// that run found — including `verified`, once the contradiction is gone.
+    ///
+    /// Mirrors why `rebuild_verification_after_run` exists at all: without the
+    /// distinction, a memory could re-litigate its own conflict forever,
+    /// exactly as one could never leave `needs_recheck` before that fix.
+    #[tokio::test]
+    async fn a_fresh_run_after_the_contradiction_clears_may_reach_verified() {
+        let f = fixture().await;
+        let m = f
+            .propose(f.session_a, Some("infra.db"), Some("postgresql"), "PG.")
+            .await;
+        let supporting = evidence(
+            &f,
+            EvidenceKind::Configuration,
+            EvidenceCollector::Cairn,
+            "postgresql",
+            "config/database.yml",
+        )
+        .await;
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::Configuration,
+                evidence_id: Some(supporting.id),
+                expected_digest: Some("aaa"),
+                observed_digest: Some("aaa"),
+                result: VerifyResult::Verified,
+                detail: None,
+                repo_branch: "main",
+                repo_commit: Some("abc123"),
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .expect("run");
+        let contradicting = evidence(
+            &f,
+            EvidenceKind::Configuration,
+            EvidenceCollector::Agent,
+            "cockroachdb",
+            "incident/2026-08-19.md",
+        )
+        .await;
+        attach_to_memory(
+            &f.store,
+            m.memory.id,
+            contradicting.id,
+            EvidenceRole::Contradicts,
+            f.session_a,
+        )
+        .await
+        .expect("attach");
+        rebuild_verification(&f.store, m.memory.id)
+            .await
+            .expect("rebuild");
+        sqlx::query("UPDATE evidence_facts SET deleted_at = ?2 WHERE id = ?1")
+            .bind(contradicting.id.to_string())
+            .bind(rows::now_text())
+            .execute(f.store.pool())
+            .await
+            .expect("withdraw");
+
+        // A genuine fresh check, recorded after the withdrawal.
+        record_run(
+            &f.store,
+            NewRun {
+                project_id: f.project,
+                memory_id: Some(m.memory.id),
+                criterion_id: None,
+                verifier: VerifierKind::Configuration,
+                evidence_id: Some(supporting.id),
+                expected_digest: Some("aaa"),
+                observed_digest: Some("aaa"),
+                result: VerifyResult::Verified,
+                detail: None,
+                repo_branch: "main",
+                repo_commit: Some("def456"),
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .expect("fresh run");
+
+        let (state, authority) = rebuild_verification_after_run(&f.store, m.memory.id)
+            .await
+            .expect("rebuild after the fresh run");
+        assert_eq!(
+            state,
+            VerificationState::Verified,
+            "a fresh run after the contradiction cleared could not close the conflict"
+        );
+        assert_eq!(authority, Some(VerificationAuthority::Cairn));
     }
 
     #[tokio::test]

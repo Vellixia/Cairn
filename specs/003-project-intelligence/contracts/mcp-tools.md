@@ -228,9 +228,21 @@ One discriminator per tool. No action takes a sub-operation (D70).
 - `duplicate` — content identical after normalization; a `duplicates` relation was recorded
   automatically, and `matched_memory_id` names the canonical member.
 - **`corroborating`** — the same subject and value key, differing content. **Nothing was merged and no
-  relation was recorded.** `matched_memory_id` names the member it agrees with, and `next_step` states
-  the one call that would collapse them if the agent — which can read both — judges them the same claim.
-  This is the prompt that keeps deduplication cheap without letting Cairn infer (FR-327).
+  relation was recorded.** `matched_memory_id` names the member it agrees with, and `next_step` names the
+  call an agent that has independently confirmed the claim makes: `action=reinforce` against the matched
+  member, from the memory just written. Reinforcing is confirmation, not merging — it records that this
+  session found the matched member still true, and the subject stays `corroborated` with both statements
+  retained (`contracts/knowledge.md` §Automatic reconciliation, D46). This is the prompt that keeps
+  reinforcement cheap without letting Cairn infer it (FR-327).
+
+  If the agent's judgment is stronger than confirmation — that the two statements are not merely both
+  true but are *the same claim*, differently worded, and should collapse into one canonical answer —
+  reinforcing does not do that. The collapsing call is an explicit `reconcile` with
+  `relation: "duplicates"` and `basis: "explicit_agent"`, naming the newer memory as `from_memory_id` and
+  the matched member as `to_memory_id`. After it the subject reads `reinforced` with one answer, and the
+  folded-in statement is accounted for as its duplicate — still individually retrievable with its own
+  provenance. Both calls were driven live against a real store during T146; see implementation-log
+  Checkpoint R.
 - `conflict_detected` — same subject, incompatible value key, overlapping scope.
 - `deferred` — `reconcile_members_max` was exceeded; the memory is stored either way.
 

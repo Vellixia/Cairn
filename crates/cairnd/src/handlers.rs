@@ -1617,6 +1617,11 @@ async fn evidence_add(
         .map_err(storage_err)?;
         body["attached_to"] = json!(memory_id);
 
+        // Whether either branch below has already read the post-attachment
+        // state back, so the second one does not repeat a rebuild the first
+        // already performed against the same attachment.
+        let mut rebuilt = false;
+
         // The attestation **is** the act that establishes the claim.
         //
         // `contracts/evidence-verification.md` §Agent-attested says an agent
@@ -1670,7 +1675,23 @@ async fn evidence_add(
                         .await
                         .map_err(storage_err)?;
                 body["verification"] = json!({ "state": state, "authority": authority });
+                rebuilt = true;
             }
+        }
+
+        // A contradiction is not inert. It has no run of its own to record —
+        // the fact itself, already attached above, is what the derivation
+        // reads — but it can move the memory to `conflicted` on the spot, and
+        // a caller told only `attached_to` would have no way to learn that
+        // without a second round trip. Skipped when the branch above already
+        // rebuilt: that call saw the same attachment, since it happens after
+        // it, so a second rebuild here would only repeat it.
+        if !rebuilt && role == Some(EvidenceRole::Contradicts) {
+            let (state, authority) =
+                cairn_store::evidence::rebuild_verification(&d.store, memory_id)
+                    .await
+                    .map_err(storage_err)?;
+            body["verification"] = json!({ "state": state, "authority": authority });
         }
     }
     Ok(body)
