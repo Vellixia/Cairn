@@ -553,14 +553,19 @@ async fn post_compaction_reopen(
         _ => return named,
     };
     match cairn_store::continuity::latest(&d.store, session.id).await {
+        // An **unrestored** compaction checkpoint is the signal, and the
+        // `restore_count` is what makes a second session open harmless: once the
+        // first has restored it, a duplicate finds it consumed and delivers
+        // nothing again. A vendor naming the boundary is deliberately *not* ORed
+        // in here -- an agent that re-emits `SessionStart` twice would then
+        // restore twice, and `restore_count` would stop meaning "delivered once".
         Ok(Some(c)) => {
-            // An unrestored compaction checkpoint is the signal. A vendor that
-            // names the boundary is believed as well, so a checkpoint that was
-            // somehow already consumed does not silently cost the delivery.
-            named
-                || (c.trigger == cairn_core::domain::CheckpointTrigger::ContextCompacting
-                    && c.restore_count == 0)
+            c.trigger == cairn_core::domain::CheckpointTrigger::ContextCompacting
+                && c.restore_count == 0
         }
+        // Only where Cairn has no checkpoint to reason about at all does the
+        // vendor's own naming decide. Nothing can be restored in that case, so
+        // it costs a briefing reason and no more.
         _ => named,
     }
 }

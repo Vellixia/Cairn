@@ -627,6 +627,64 @@ fn a_conditional_capture_is_never_automatic() {
     }
 }
 
+/// A duplicate post-compaction session open does not restore twice (F14).
+///
+/// Delivery is recognised by an *unrestored* compaction checkpoint, so the first
+/// session open consumes it and any repeat finds nothing to do. This matters
+/// because an agent may legitimately emit more than one session open around a
+/// compaction -- Codex was observed sending two for one compaction -- and because
+/// `restore_count` is the evidence that a delivery happened, it has to keep
+/// meaning "delivered once".
+#[test]
+fn a_repeated_post_compaction_session_open_restores_once() {
+    let s = Sandbox::new();
+    let session = session_with_checkpoint(&s, "twice", "src/retry.rs");
+
+    let restores = |s: &Sandbox| {
+        s.query_column(&format!(
+            "SELECT CAST(COALESCE(SUM(restore_count), 0) AS TEXT) FROM continuity_checkpoints
+              WHERE session_id = '{session}'"
+        ))
+        .first()
+        .cloned()
+        .unwrap_or_default()
+    };
+
+    s.hook(
+        "PreCompact",
+        json!({ "session_id": "twice", "trigger": "auto" }),
+    );
+    s.hook(
+        "PostCompact",
+        json!({ "session_id": "twice", "trigger": "auto" }),
+    );
+
+    // Two session opens naming the compaction, exactly as a vendor that
+    // re-emits the boundary would send them.
+    for _ in 0..2 {
+        s.hook(
+            "SessionStart",
+            json!({ "session_id": "twice", "source": "compact" }),
+        );
+    }
+
+    for _ in 0..60 {
+        if restores(&s) != "0" {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Give a second restore, if the gate allowed one, time to land.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    assert_eq!(
+        restores(&s),
+        "1",
+        "two post-compaction session opens restored more than once: `restore_count` \
+         no longer means the checkpoint was delivered exactly one time"
+    );
+}
+
 /// Divergence detection, per class and in combination — and a diverged
 /// checkpoint never emits a live next action (metrics 15 and 16, FR-431,
 /// FR-434).
