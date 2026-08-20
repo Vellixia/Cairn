@@ -270,10 +270,14 @@ pub async fn agents() -> Result<Output, WireError> {
             continue;
         }
         text.push_str(&format!(
-            "{:<13} {:<9} {:<22} {}\n",
+            "{:<13} {:<9} {:<22} {:<21} {}\n",
             agent.as_str(),
             state.detection.version.as_deref().unwrap_or("-"),
             state.compatibility.as_str().replace('_', "-"),
+            // Derived from this agent's capability profile, never from a table
+            // someone maintains: a mode that over-claims is a defect, and a
+            // table is exactly how one comes to over-claim (FR-426, FR-427).
+            state.profile.continuity_mode().as_str().replace('_', "-"),
             level_line(&state)
         ));
         rows.push(agent_json(&state));
@@ -339,6 +343,26 @@ fn level_line(state: &AgentState) -> String {
     s
 }
 
+/// What a continuity mode means, in the words a developer needs.
+///
+/// The mode is derived; this is only its rendering. It says what the agent will
+/// do rather than naming a state, because "agent_initiated" tells someone
+/// nothing about whether their work survives a compaction.
+fn continuity_note(mode: cairn_core::domain::ContinuityMode) -> &'static str {
+    use cairn_core::domain::ContinuityMode::*;
+    match mode {
+        Automatic => "automatic — Cairn is called back before and after compaction",
+        AgentInitiated => {
+            "agent_initiated — Cairn is warned before compaction but not called back after; \
+             the agent must ask for context with reason=post_compaction"
+        }
+        UnavailableAutomatic => {
+            "unavailable_automatic — this agent reports no compaction event; write a \
+             checkpoint with cairn_session action=checkpoint before you compact"
+        }
+    }
+}
+
 fn agent_json(state: &AgentState) -> Value {
     let (guaranteed, conditional, absent) = state.profile.lifecycle_coverage();
     let mut caps = serde_json::Map::new();
@@ -365,6 +389,10 @@ fn agent_json(state: &AgentState) -> Value {
         "agent": state.agent.as_str(),
         "detected": state.detection.detected,
         "connected": state.connected,
+        // What this agent can honestly promise about surviving compaction
+        // (FR-426). `automatic` means Cairn is called back; `agent_initiated`
+        // means the agent must ask; `unavailable_automatic` means neither.
+        "continuity_mode": state.profile.continuity_mode().as_str(),
         "version": state.detection.version,
         "compatibility": state.compatibility.as_str(),
         "level": state.outcome.level.as_str(),
@@ -972,6 +1000,11 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
     let mut snap = snapshot().await?;
     let owed = boundary_owed().await;
     let status = client::send(&Request::Status { cwd: cwd() }).await.ok();
+    // Sync degradation belongs in doctor: it is a condition of the
+    // installation, it resolves without the developer doing anything, and
+    // discovering it only through a count in `sync status` would make retained
+    // work look like a queue that stopped moving (FR-415, FR-499).
+    let sync = client::send(&Request::SyncStatus { cwd: cwd() }).await.ok();
 
     // Doctor is where an agent upgrade is noticed. Re-recording each connected
     // agent's detected version discards observation evidence that belonged to
@@ -1019,6 +1052,10 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             .as_ref()
             .map(|s| s["handoff_synthesis_failures"].clone())
             .unwrap_or(json!([])),
+        "sync_degradation": sync
+            .as_ref()
+            .map(|s| s["degradation"].clone())
+            .unwrap_or(json!(null)),
     });
     text.push_str(&format!(
         "core        cli {} · daemon {} · schema {} · {}\n\n",
@@ -1034,6 +1071,23 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             "daemon unreachable"
         }
     ));
+    if let Some(d) = core["sync_degradation"].as_object() {
+        text.push_str(&format!(
+            "sync        {} item(s) retained for a server that cannot hold them yet\n\
+                          waiting for: {}\n\
+                          {}\n\n",
+            d.get("blocked").and_then(|v| v.as_i64()).unwrap_or(0),
+            d.get("missing_capabilities")
+                .and_then(|v| v.as_array())
+                .map(|a| a
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "))
+                .unwrap_or_default(),
+            d.get("note").and_then(|v| v.as_str()).unwrap_or_default(),
+        ));
+    }
 
     let targets: Vec<AgentId> = match agent {
         Some(a) => vec![a],
@@ -1046,6 +1100,10 @@ pub async fn doctor(agent: Option<AgentId>) -> Result<Output, WireError> {
             continue;
         }
         text.push_str(&format!("{:<12} {}\n", a.as_str(), level_line(&state)));
+        text.push_str(&format!(
+            "             continuity: {}\n",
+            continuity_note(state.profile.continuity_mode())
+        ));
         // How sessions here actually end. A developer who reads nothing else
         // should still not believe a session is being completed when it is
         // being timed out (FR-229).

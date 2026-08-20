@@ -1,0 +1,14 @@
+{
+  "description": "A superseded memory keeps its last verification, which is what lets a historical query say what was verified then (D50).",
+  "input": {
+    "extra": {
+      "from": "verified",
+      "trigger": "superseded"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": null
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "description": "The server gains the capability. The blocked rows return to `pending` with their **original** idempotency key and payload, and the ordinary drain delivers them - exactly once, under the server's unchanged claim mechanism. A new key would make the retained work a second delivery rather than the one that was waiting (FR-418, SC-331).",
+  "input": {
+    "extra": {
+      "server_before": {
+        "schema_version": 1,
+        "capabilities": []
+      },
+      "server_after": {
+        "schema_version": 2,
+        "capabilities": [
+          "memory_relations",
+          "task_criteria",
+          "task_blockers"
+        ]
+      },
+      "queued": [
+        {
+          "entity_type": "memory_relation",
+          "operation": "upsert"
+        },
+        {
+          "entity_type": "task_criterion",
+          "operation": "upsert"
+        }
+      ],
+      "rejection": {
+        "code": "unknown_entity_type",
+        "class": "capability"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "blocked_before_upgrade": 2,
+      "released_on_upgrade": 2,
+      "delivered_after_upgrade": 2,
+      "delivered_exactly_once": true,
+      "idempotency_key_preserved": true,
+      "payload_preserved": true,
+      "manual_repair_required": false,
+      "peers_converged": true
+    }
+  }
+}

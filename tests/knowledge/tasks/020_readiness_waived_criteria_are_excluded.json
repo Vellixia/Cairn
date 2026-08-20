@@ -1,0 +1,40 @@
+{
+  "description": "A waived criterion is excluded from readiness rather than counted as unsatisfied. Waiving is how work is taken out of scope without pretending it was done.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "waived",
+          "verification": "unverified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 1,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 1,
+        "total": 2
+      },
+      "readiness": "ready",
+      "action_order": null
+    }
+  }
+}

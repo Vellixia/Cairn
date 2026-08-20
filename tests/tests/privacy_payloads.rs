@@ -337,3 +337,183 @@ fn a_handoff_built_from_adapter_events_carries_no_conversation_content() {
     // What it does carry is the developer's own repository state.
     assert!(handoff["repository_state"].is_object());
 }
+
+// ---------------------------------------------------------------------------
+// T132 — the wire refuses every newly forbidden name, by name (FR-506, SC-316)
+// ---------------------------------------------------------------------------
+
+/// Field names that would carry evidence, diagnostic or checkpoint content.
+///
+/// Listed here rather than imported so the test and the server do not agree by
+/// construction: if someone removes one from the server's list, this fails.
+const FORBIDDEN_FIELDS: &[&str] = &[
+    "observed_value",
+    "source_locator",
+    "value_digest",
+    "fingerprint",
+    "relevant_paths",
+    "path_fingerprints",
+    "criteria_snapshot",
+    "task_snapshot_at_bind",
+    "sanitization_report",
+    "origin_ref",
+    "alternative_cause",
+    "signal_digest",
+    "pin_reason",
+    "rationale",
+    "basis_evidence_id",
+    "detail",
+    "prior_value",
+    "new_value",
+    "content_norm_digest",
+];
+
+/// Record kinds that are local to the machine that produced them.
+const FORBIDDEN_ENTITY_TYPES: &[&str] = &[
+    "evidence_fact",
+    "verification_run",
+    "continuity_checkpoint",
+    "reusable_pattern",
+    "pattern_application",
+    "task_change",
+];
+
+fn linked_server() -> Option<(cairn_e2e::Server, Sandbox, String, String)> {
+    let server = cairn_e2e::Server::start()?;
+    let s = Sandbox::new();
+    let token = server.new_user_token("forbidden");
+    cairn_e2e::attach_server(&s, &server, &token);
+    s.must(&["init"]);
+    let project_id = s.json(&["link", "--create"])["server_project_id"]
+        .as_str()
+        .expect("a shared project")
+        .to_string();
+    Some((server, s, token, project_id))
+}
+
+fn item(entity_type: &str, key: &str, payload: serde_json::Value) -> serde_json::Value {
+    json!({
+        "idempotency_key": key,
+        "entity_type": entity_type,
+        "entity_id": uuid::Uuid::now_v7(),
+        "operation": "upsert",
+        "payload": payload,
+    })
+}
+
+/// Every forbidden field is refused **and the refusal names it**.
+///
+/// Naming it is the part that matters. A generic "invalid request" would leave
+/// whoever sent it guessing, and — worse — would be indistinguishable from a
+/// capability refusal, which is retained and retried rather than failed.
+#[test]
+fn every_forbidden_field_is_refused_by_name() {
+    let Some((server, _s, token, project_id)) = linked_server() else {
+        eprintln!("SKIPPED: set CAIRN_TEST_DATABASE_URL to run the server suite");
+        return;
+    };
+
+    let items: Vec<serde_json::Value> = FORBIDDEN_FIELDS
+        .iter()
+        .enumerate()
+        .map(|(i, field)| {
+            item(
+                "memory",
+                &format!("forbidden-field-{i}"),
+                json!({ "content": "a legitimate memory", *field: "leaked" }),
+            )
+        })
+        .collect();
+
+    let out = cairn_e2e::post_json_bearer(
+        &server.base,
+        "/api/sync/batch",
+        &json!({ "project_id": project_id, "items": items }),
+        &token,
+    );
+    let results = out["results"].as_array().expect("results");
+    assert_eq!(results.len(), FORBIDDEN_FIELDS.len(), "{out}");
+
+    for (result, field) in results.iter().zip(FORBIDDEN_FIELDS) {
+        assert_eq!(
+            result["status"], "rejected",
+            "`{field}` was accepted: {out}"
+        );
+        let message = result["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(field),
+            "the refusal for `{field}` does not name it: {message}"
+        );
+    }
+
+    // And nothing of it reached storage, which is the assertion the API answer
+    // alone cannot make.
+    let dump = server.dump();
+    assert!(
+        !dump.contains("leaked"),
+        "a refused value reached the database anyway"
+    );
+}
+
+/// Every forbidden entity type is refused outright.
+///
+/// These are not fields on a record the server keeps — they are record kinds it
+/// has no table for and must never grow one. The refusal is by name so a
+/// malformed or malicious client cannot create a table's worth of local-only
+/// content by asking nicely.
+#[test]
+fn every_forbidden_entity_type_is_refused() {
+    let Some((server, _s, token, project_id)) = linked_server() else {
+        eprintln!("SKIPPED: set CAIRN_TEST_DATABASE_URL to run the server suite");
+        return;
+    };
+
+    let items: Vec<serde_json::Value> = FORBIDDEN_ENTITY_TYPES
+        .iter()
+        .enumerate()
+        .map(|(i, kind)| {
+            item(
+                kind,
+                &format!("forbidden-type-{i}"),
+                json!({ "content": "leaked-by-type" }),
+            )
+        })
+        .collect();
+
+    let out = cairn_e2e::post_json_bearer(
+        &server.base,
+        "/api/sync/batch",
+        &json!({ "project_id": project_id, "items": items }),
+        &token,
+    );
+    let results = out["results"].as_array().expect("results");
+    assert_eq!(results.len(), FORBIDDEN_ENTITY_TYPES.len(), "{out}");
+
+    for (result, kind) in results.iter().zip(FORBIDDEN_ENTITY_TYPES) {
+        assert_eq!(result["status"], "rejected", "`{kind}` was accepted: {out}");
+        let message = result["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(kind),
+            "the refusal for `{kind}` does not name it: {message}"
+        );
+    }
+
+    let dump = server.dump();
+    assert!(
+        !dump.contains("leaked-by-type"),
+        "a refused item was stored"
+    );
+    // The server has no table for any of them, which is what makes the refusal
+    // a property of the schema rather than of this check.
+    for kind in FORBIDDEN_ENTITY_TYPES {
+        let table = format!("{kind}s");
+        assert_eq!(
+            server.count(&format!(
+                "SELECT COUNT(*) FROM information_schema.tables
+                  WHERE table_schema = 'public' AND table_name = '{table}'"
+            )),
+            0,
+            "the server has a `{table}` table, which it must never have"
+        );
+    }
+}

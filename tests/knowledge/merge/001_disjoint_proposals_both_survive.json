@@ -1,0 +1,34 @@
+{
+  "description": "Two machines each propose a different value for the same subject while offline. Both proposals survive with their provenance; neither is overwritten, because there is no canonical row to overwrite (FR-336).",
+  "input": {
+    "extra": {
+      "store_a": {
+        "proposals": [
+          {
+            "topic": "deploy.queue_backend",
+            "value": "sqs"
+          }
+        ]
+      },
+      "store_b": {
+        "proposals": [
+          {
+            "topic": "deploy.queue_backend",
+            "value": "rabbitmq"
+          }
+        ]
+      },
+      "clocks": [
+        "2026-01-01T00:00:00Z",
+        "2026-06-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "memories": 2,
+      "reconciliation": "conflicted",
+      "relations": 0
+    }
+  }
+}

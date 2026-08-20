@@ -1,0 +1,23 @@
+{
+  "description": "A task of 5 acceptance criteria at 1200 tokens, where the criterion text alone exceeds the whole budget. Tier 0a stays complete because it is O(1) in the size of the task: the agent still knows what it is doing, how far along it is and what is blocking it. The text that does not fit is counted by kind with a retrieval path, never dropped silently (FR-443, FR-448).",
+  "input": {
+    "extra": {
+      "memories": 50,
+      "budget": 1200,
+      "criteria": 5,
+      "criterion_text_tokens": 40,
+      "blockers": 2,
+      "warnings": 1,
+      "pins": 1,
+      "task": true
+    }
+  },
+  "expect": {
+    "extra": {
+      "within_budget": true,
+      "tier_0a_complete": true,
+      "omissions_reported": true,
+      "no_regression": false
+    }
+  }
+}

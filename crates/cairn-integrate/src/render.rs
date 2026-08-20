@@ -178,13 +178,57 @@ mod tests {
             "lifecycle",
             "task",
             "depth",
+            // Feature 003's four obligations (FR-498). Each is a thing an
+            // agent must *do*, not a thing it must know, which is why they
+            // belong in the always-on contract rather than in the Skill.
+            "subject",
+            "evidence_over_importance",
+            "corroboration",
+            "outcome",
         ] {
             assert!(
                 ids.contains(&required),
                 "contract omits the {required} rule"
             );
         }
-        assert_eq!(c.rules.len(), 9);
+        assert_eq!(c.rules.len(), 13);
+    }
+
+    /// Both renderings stay inside the bound (FR-125, Feature 002 FR-129).
+    ///
+    /// `contract_within_bound` covers the always-on block. The MCP
+    /// `instructions` string is the same rules in another voice and is read by
+    /// every generic client on every connection, so it is bounded too — and it
+    /// is the longer of the two, because it names tools.
+    #[test]
+    fn the_mcp_instructions_stay_within_bound() {
+        let mcp = Contract::canonical().mcp_instructions();
+        assert!(
+            mcp.chars().count() <= CONTRACT_SIZE_BOUND,
+            "the MCP instructions are {} characters, over the {CONTRACT_SIZE_BOUND} bound",
+            mcp.chars().count()
+        );
+    }
+
+    /// Both renderings come from the one canonical source (Feature 002 FR-123).
+    ///
+    /// Asserted by rule identity rather than by text: the two voices differ on
+    /// purpose, and what must not differ is which obligations they carry.
+    #[test]
+    fn every_obligation_appears_in_both_renderings() {
+        let c = Contract::canonical();
+        for rule in &c.rules {
+            assert!(
+                !rule.block.trim().is_empty(),
+                "{} has no always-on rendering",
+                rule.id
+            );
+            assert!(
+                !rule.mcp.trim().is_empty(),
+                "{} has no MCP rendering",
+                rule.id
+            );
+        }
     }
 
     #[test]

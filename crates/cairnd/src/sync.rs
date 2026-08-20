@@ -19,6 +19,14 @@ const WORKER_TICK: Duration = Duration::from_millis(500);
 /// Backoff after a transient failure: doubles to a ceiling, then holds.
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
+/// How often a project holding **only** retained work asks the server whether
+/// it has been upgraded (FR-418).
+///
+/// Slower than the worker tick on purpose. There is nothing to send, so this is
+/// a single small request every few seconds rather than one every half second —
+/// and noticing an upgrade a few seconds late costs nothing, while never
+/// noticing it costs the whole promise.
+const CAPABILITY_PROBE: Duration = Duration::from_secs(5);
 
 type Reply = Result<serde_json::Value, WireError>;
 
@@ -30,6 +38,9 @@ type Reply = Result<serde_json::Value, WireError>;
 /// rejections are already recorded as `failed` by `drain` and are not retried.
 pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
     let mut backoff = BACKOFF_MIN;
+    // Due immediately, so a daemon starting up next to an already-upgraded
+    // server does not wait an interval before noticing.
+    let mut last_probe = std::time::Instant::now() - CAPABILITY_PROBE;
     loop {
         tokio::time::sleep(WORKER_TICK).await;
 
@@ -41,6 +52,8 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
             }
         };
 
+        let probe_due = last_probe.elapsed() >= CAPABILITY_PROBE;
+        let mut probed = false;
         let mut hit_transient = false;
         for project in projects.iter().filter(|p| p.linked) {
             let Some(server_project_id) = project.server_project_id else {
@@ -53,7 +66,23 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
                 Err(_) => continue,
             };
             if pending == 0 {
-                continue;
+                // Retained work is **not** pending, and a project holding only
+                // retained work would otherwise never enter a drain again — so
+                // the capability probe would never run, and the upgrade this
+                // machine is waiting for would never be noticed. "Delivered
+                // automatically when the server is upgraded" is the promise
+                // FR-418 makes and `sync status` repeats to the user; without
+                // this it would need a manual `cairn sync now` to come true.
+                //
+                // Rarely, though. There is nothing to send, so this is one
+                // small request per interval, not one per tick.
+                let blocked = outbox::blocked_count(&daemon.store, project.id)
+                    .await
+                    .unwrap_or(0);
+                if blocked == 0 || !probe_due {
+                    continue;
+                }
+                probed = true;
             }
 
             match drain(&daemon, project.id, server_project_id).await {
@@ -78,6 +107,9 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
             }
         }
 
+        if probed {
+            last_probe = std::time::Instant::now();
+        }
         if hit_transient {
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(BACKOFF_MAX);
@@ -433,14 +465,20 @@ async fn backfill(d: &Daemon, project: &Project) -> Result<(), WireError> {
         }
     }
     for m in shared_memories(d, project.id).await? {
-        enqueue_one(
-            d,
-            policy,
-            project.id,
-            OutboxEntityType::Memory,
-            m.id,
-            outbox::memory_payload(&m),
-        )
+        enqueue_one(d, policy, project.id, OutboxEntityType::Memory, m.id, {
+            // No transaction is open here, so a pooled connection is taken
+            // for the read. A payload that cannot be enriched still syncs
+            // its Feature 001 shape rather than being dropped.
+            let mut conn = d
+                .store
+                .pool()
+                .acquire()
+                .await
+                .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
+            outbox::memory_payload_for(&mut conn, &m)
+                .await
+                .unwrap_or_else(|_| outbox::memory_payload(&m))
+        })
         .await?;
     }
     Ok(())
@@ -517,8 +555,53 @@ pub async fn status(d: &Daemon, cwd: &str) -> Reply {
         failures: outbox::failures(&d.store, r.project.id)
             .await
             .map_err(storage_err)?,
+        degradation: degradation(d, r.project.id).await,
     };
     Ok(serde_json::to_value(payload).unwrap_or(json!({})))
+}
+
+/// What this project is holding back, and why (T112, FR-415).
+///
+/// `None` when nothing is blocked, so an ordinary deployment reports nothing
+/// and the field costs a reader nothing. When something is blocked the answer
+/// names the gap and says the work will be delivered automatically — a count
+/// with no explanation would read as data loss.
+pub async fn degradation(d: &Daemon, project_id: Uuid) -> Option<SyncDegradation> {
+    let items = outbox::blocked(&d.store, project_id).await.ok()?;
+    if items.is_empty() {
+        return None;
+    }
+    let capability = repo::server_capability(&d.store, project_id)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+
+    let mut missing: Vec<String> = items
+        .iter()
+        .filter_map(|i| {
+            ENTITY_CAPABILITIES
+                .iter()
+                .find(|(entity, _)| *entity == i.entity_type)
+                .map(|(_, needs)| needs.join(" or "))
+        })
+        .collect();
+    missing.sort();
+    missing.dedup();
+
+    let (pending, _) = outbox::counts(&d.store, project_id).await.ok()?;
+    Some(SyncDegradation {
+        blocked: items.len() as i64,
+        server_capability: capability,
+        note: format!(
+            "{} item(s) are waiting for this server to gain {}. Everything else \
+             syncs normally ({pending} queued), nothing has been lost, and the \
+             retained work is delivered automatically once the server is upgraded.",
+            items.len(),
+            missing.join(", ")
+        ),
+        missing_capabilities: missing,
+    })
 }
 
 /// Drain the outbox, then pull shared records produced by other members.
@@ -568,7 +651,13 @@ async fn drain(
     // emptied the queue rather than having emptied its own share of it.
     let _drain_guard = d.sync_drain.lock().await;
 
-    let (mut applied, mut duplicate, mut rejected) = (0, 0, 0);
+    // Once per drain cycle, not once per item and not once per tick with an
+    // empty queue: the probe is cheap, but a request per row against a server
+    // that just refused everything is exactly the futile traffic `blocked`
+    // exists to avoid (FR-418).
+    let capability = refresh_capability(d, project_id).await;
+
+    let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
     let mut connection: Option<Client> = None;
 
     loop {
@@ -638,15 +727,36 @@ async fn drain(
                     duplicate += 1;
                 }
                 Some(SyncItemStatus::Rejected) => {
-                    // Permanent. Surfaced with its identity, not retried forever.
-                    let msg = result
-                        .and_then(|r| r.error.as_ref())
+                    let error = result.and_then(|r| r.error.as_ref());
+                    let msg = error
                         .map(|e| e.message.clone())
                         .unwrap_or_else(|| "rejected".into());
-                    outbox::mark_failed(&d.store, *row_id, &msg)
-                        .await
-                        .map_err(storage_err)?;
-                    rejected += 1;
+
+                    // Two kinds of "no", and they must not share a state.
+                    //
+                    // A **content** rejection is permanent: an observation
+                    // identifier where none may go will never become
+                    // acceptable, and retaining it would turn a privacy refusal
+                    // into a pending delivery. A **capability** rejection says
+                    // the server cannot hold this *yet*; failing it strands
+                    // work that an upgrade would deliver, which is the
+                    // behaviour this corrects (FR-415, FR-418, D81).
+                    match error.map(|e| e.code.as_str()) {
+                        Some(code) if codes::CAPABILITY_REFUSALS.contains(&code) => {
+                            outbox::mark_blocked(&d.store, *row_id, code, &capability, &msg)
+                                .await
+                                .map_err(storage_err)?;
+                            blocked += 1;
+                        }
+                        _ => {
+                            // Permanent. Surfaced with its identity, not
+                            // retried forever.
+                            outbox::mark_failed(&d.store, *row_id, &msg)
+                                .await
+                                .map_err(storage_err)?;
+                            rejected += 1;
+                        }
+                    }
                 }
                 None => {
                     outbox::mark_retryable(&d.store, *row_id, "no result for item")
@@ -659,8 +769,114 @@ async fn drain(
             break;
         }
     }
+    if blocked > 0 {
+        tracing::info!(
+            project = %project_id, blocked, capability = %capability,
+            "work retained for a server that cannot hold it yet"
+        );
+    }
     Ok((applied, duplicate, rejected))
 }
+
+/// Ask the server what it can hold, and release anything it now can (T111).
+///
+/// Returns the capability as an opaque string, which is what a blocked row
+/// records so a person can see *what* it is waiting for.
+///
+/// A server that answers without `capabilities` is a server from before the
+/// field existed, and its silence is the answer: it can hold none of this. That
+/// is why there is no probe endpoint and no negotiation — `GET /api/version`
+/// already existed, and adding to it additively meant an old server needed no
+/// change at all (D81).
+async fn refresh_capability(d: &Daemon, project_id: Uuid) -> String {
+    let Ok(client) = client(d).await else {
+        // Offline. Whatever was last known still describes the server better
+        // than nothing does.
+        return repo::server_capability(&d.store, project_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+    };
+    let Ok(body) = client.get("/api/version").await else {
+        return repo::server_capability(&d.store, project_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+    };
+
+    let schema = body
+        .get("schema_version")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1);
+    let mut names: Vec<String> = body
+        .get("capabilities")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    let capability = format!("schema={schema};capabilities={}", names.join(","));
+
+    let previous = repo::server_capability(&d.store, project_id)
+        .await
+        .ok()
+        .flatten();
+    if previous.as_deref() == Some(capability.as_str()) {
+        return capability;
+    }
+
+    // The capability changed. Anything the server can now hold goes back into
+    // the ordinary queue with its original idempotency key, and the ordinary
+    // drain — the one about to run — delivers it. Nothing here sends anything
+    // itself, so there is no second delivery path to keep exactly-once.
+    let releasable: Vec<OutboxEntityType> = ENTITY_CAPABILITIES
+        .iter()
+        // Every capability the type can wait on must be present. Releasing a
+        // memory on `memory_subject_identity` alone would put an attested one
+        // back in front of a server that still has no column for it.
+        .filter(|(_, needs)| needs.iter().all(|need| names.iter().any(|n| n == need)))
+        .map(|(entity, _)| *entity)
+        .collect();
+    match outbox::release_blocked(&d.store, project_id, &releasable).await {
+        Ok(n) if n > 0 => tracing::info!(
+            project = %project_id, released = n, capability = %capability,
+            "the server gained a capability; retained work returns to the queue"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "could not release retained work"),
+    }
+    let _ = repo::set_server_capability(&d.store, project_id, &capability).await;
+    capability
+}
+
+/// What a server has never answered about.
+const UNKNOWN_CAPABILITY: &str = "schema=unknown;capabilities=";
+
+/// The capabilities each retainable entity type may be waiting for.
+///
+/// A `memory` lists **two**, because a schema-1 server refuses one by field
+/// rather than by type and there is more than one field it can refuse on: a
+/// subject identity, or a verification. Either is enough to hold the memory
+/// back, and it is released when the server can hold whichever it carries.
+///
+/// A memory is retained whole rather than sent stripped: delivering a claim
+/// without the thing that makes it comparable, or without what established it,
+/// is worse than delivering it a migration later.
+const ENTITY_CAPABILITIES: &[(OutboxEntityType, &[&str])] = &[
+    (OutboxEntityType::MemoryRelation, &["memory_relations"]),
+    (OutboxEntityType::TaskCriterion, &["task_criteria"]),
+    (OutboxEntityType::TaskBlocker, &["task_blockers"]),
+    (
+        OutboxEntityType::Memory,
+        &["memory_subject_identity", "memory_verification"],
+    ),
+];
 
 /// Hand a claimed batch back to the queue after a transient failure.
 ///
@@ -703,6 +919,79 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
             count += 1;
         }
     }
+
+    // Memories first, then the decisions about them: a relation whose memory has
+    // not arrived is held and retried rather than dropped, and importing in this
+    // order means it usually does not have to be.
+    for r in body
+        .get("relations")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        match import_relation(d, project_id, r).await {
+            Placement::Placed => count += 1,
+            Placement::AwaitingParent(waiting_on) => {
+                hold_for_a_later_pull(d, project_id, "relation", &relation_key(r), r, waiting_on)
+                    .await;
+            }
+            Placement::Unusable => {}
+        }
+    }
+
+    // Tasks before their criteria, for the same reason memories come before
+    // their relations: a criterion naming a task this store does not have is
+    // held rather than invented, and importing in this order means it usually
+    // does not have to be.
+    for t in body
+        .get("tasks")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        if import_task(d, project_id, t).await {
+            count += 1;
+        }
+    }
+
+    // Criteria and blockers upsert by stable id, so two machines that changed
+    // different criteria offline both land — neither overwrites the other.
+    let id_key = |v: &serde_json::Value| {
+        v.get("id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    for c in body
+        .get("criteria")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        match import_criterion(d, c).await {
+            Placement::Placed => count += 1,
+            Placement::AwaitingParent(waiting_on) => {
+                hold_for_a_later_pull(d, project_id, "criterion", &id_key(c), c, waiting_on).await;
+            }
+            Placement::Unusable => {}
+        }
+    }
+    for b in body
+        .get("blockers")
+        .and_then(|v| v.as_array())
+        .unwrap_or(&Vec::new())
+    {
+        match import_blocker(d, b).await {
+            Placement::Placed => count += 1,
+            Placement::AwaitingParent(waiting_on) => {
+                hold_for_a_later_pull(d, project_id, "blocker", &id_key(b), b, waiting_on).await;
+            }
+            Placement::Unusable => {}
+        }
+    }
+
+    // Records earlier pulls could not place. Replayed after the fresh page, so
+    // a parent that arrived in *this* page releases what was waiting on it
+    // without waiting for another pull (#44).
+    count += replay_deferred(d, project_id).await;
+
     if let Some(cursor) = body.get("cursor").and_then(|c| c.as_str()) {
         repo::set_pull_cursor(&d.store, project_id, cursor)
             .await
@@ -726,9 +1015,12 @@ async fn import_memory(
         .and_then(|s| Uuid::parse_str(s).ok())
         .ok_or_else(|| WireError::invalid("shared memory without an id"))?;
 
-    if repo::memory(&d.store, id).await.is_ok() {
-        return Ok(());
-    }
+    // A memory this store already holds is **not** skipped. `import_memory`
+    // never overwrites a local row — `INSERT OR IGNORE` is the whole rule — but
+    // a peer re-sends a memory precisely when something shareable about it
+    // changed, and the one such thing is its verification. Returning early here
+    // meant a peer's later check never arrived, so `remote_cairn` and
+    // `remote_attested` could not occur (FR-368, SC-329).
     let content = value
         .get("content")
         .and_then(|v| v.as_str())
@@ -755,24 +1047,491 @@ async fn import_memory(
         .and_then(|s| Uuid::parse_str(s).ok())
         .unwrap_or_else(new_id);
 
-    sqlx::query(
-        "INSERT OR IGNORE INTO memories
-            (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
-             origin_session_id, local_only, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, 0, ?8, ?8)",
+    // The subject identity the sender proposed travels with the row. Without it
+    // the proposal arrives free-form, no subject read can ever see it, and a
+    // value another machine proposed for a subject this machine already holds
+    // is invisible rather than corroborating or conflicting — which is the
+    // whole of US7 (FR-411).
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str());
+    repo::import_memory(
+        &d.store,
+        repo::ImportedMemory {
+            id,
+            project_id,
+            kind,
+            scope,
+            scope_key: &scope_key,
+            content,
+            origin_session_id: origin,
+            topic_key: str_of("topic_key"),
+            value_key: str_of("value_key"),
+            importance: str_of("importance")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(Importance::Normal),
+            effective_from: str_of("effective_from"),
+        },
     )
-    .bind(id.to_string())
-    .bind(project_id.to_string())
-    .bind(kind.as_str())
-    .bind(scope.as_str())
-    .bind(scope_key)
-    .bind(content)
-    .bind(origin.to_string())
-    .bind(chrono::Utc::now().to_rfc3339())
-    .execute(d.store.pool())
     .await
     .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
+
+    import_verification(d, id, value).await;
+
+    // The arriving proposal changes what this subject's members are, so the
+    // counts derived from them are rebuilt rather than assumed unchanged.
+    let _ = cairn_store::knowledge::rebuild_reinforcement(&d.store, id).await;
     Ok(())
+}
+
+/// Record what a peer said about a memory's verification, wearing the peer's
+/// badge (FR-368, FR-370, SC-329).
+///
+/// `cairn` → `remote_cairn`, `attested` → `remote_attested`. The sender's value
+/// is **never** stored verbatim. "Verified here" is a claim only the local
+/// machine can make, and an imported verification counts towards neither local
+/// readiness nor promotion — it is rendered as verified *elsewhere*, with the
+/// peer's authority named.
+///
+/// Without this an attested claim from a peer would arrive as
+/// `{state: verified, basis: ["test_outcome"]}` and be rendered exactly like a
+/// peer that had really run the tests.
+async fn import_verification(d: &Daemon, memory_id: Uuid, value: &serde_json::Value) {
+    let Some(verification) = value.get("verification") else {
+        return;
+    };
+    let state = verification.get("state").and_then(|v| v.as_str());
+    let Some(state) = state else { return };
+
+    // A run this machine recorded outranks anything a peer says about the same
+    // memory. Records win over derived state (FR-478), and a verification run
+    // is a durable local record.
+    //
+    // Without this a memory this machine checked itself came back from the
+    // server wearing `remote_cairn`: it had been pushed, and the pull applied
+    // the peer's badge over the local one. The state stayed `verified`, so
+    // nothing looked wrong — but the authority decides two things, and both
+    // then refused it. Its own project could no longer promote it, and it no
+    // longer counted towards local readiness, on the strength of a check this
+    // machine had run.
+    if !cairn_store::evidence::runs_for_memory(&d.store, memory_id)
+        .await
+        .unwrap_or_default()
+        .is_empty()
+    {
+        let _ = cairn_store::evidence::rebuild_verification(&d.store, memory_id).await;
+        return;
+    }
+
+    let authority = match verification.get("authority").and_then(|v| v.as_str()) {
+        Some("cairn") => Some("remote_cairn"),
+        Some("attested") => Some("remote_attested"),
+        // A peer relaying a third machine's authority is not something this
+        // machine can act on, so it is not recorded as an authority at all.
+        _ => None,
+    };
+
+    // What a peer says is input, not truth, and this is the one place a state
+    // reaches the row without passing through `rebuild_verification`.
+    //
+    // Two rules that function enforces have to hold here as well, because the
+    // column carries no CHECK and this is the trust boundary:
+    //
+    //   * a state outside the enum is not storable at all — a malformed or
+    //     older peer must not be able to invent one;
+    //   * `verified` with no authority is not a pair Cairn may hold (FR-370).
+    //     A peer that sends one is telling us it was verified without saying
+    //     what verified it, and the honest local answer is `unverified`. Left
+    //     as-is it rendered as a bare `verified`, re-emitted itself to the next
+    //     peer through `summary`, and — having no local runs and no `remote_*`
+    //     authority to recognise — was silently rewritten by the next
+    //     `doctor --rebuild-derived` anyway.
+    //
+    // An authority without `verified` is dropped for the same reason: authority
+    // says what established the state, and nothing established a state that is
+    // not `verified`.
+    let Ok(state) = state.parse::<cairn_core::VerificationState>() else {
+        tracing::debug!(%memory_id, state, "ignored an unrecognised imported verification state");
+        return;
+    };
+    let (state, authority) = match (state, authority) {
+        (cairn_core::VerificationState::Verified, None) => {
+            tracing::debug!(%memory_id, "a peer sent `verified` with no authority; storing unverified");
+            (cairn_core::VerificationState::Unverified, None)
+        }
+        (cairn_core::VerificationState::Verified, some) => {
+            (cairn_core::VerificationState::Verified, some)
+        }
+        (other, _) => (other, None),
+    };
+    let state = state.as_str();
+
+    let _ = sqlx::query(
+        "UPDATE memories
+            SET verification = ?2, verification_authority = ?3,
+                last_verified_at = COALESCE(?4, last_verified_at)
+          WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .bind(state)
+    .bind(authority)
+    .bind(
+        verification
+            .get("last_verified_at")
+            .and_then(|v| v.as_str()),
+    )
+    .execute(d.store.pool())
+    .await;
+}
+
+/// What became of one pulled record.
+///
+/// The distinction that matters is between a record that cannot be placed
+/// **yet** and one that can never be placed. The first is held and replayed;
+/// the second is discarded, because retrying it forever would be a leak with no
+/// outcome (#44).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Placement {
+    /// Imported.
+    Placed,
+    /// The parent it names has not arrived. Carries the missing parent, so a
+    /// project waiting on one record can say what it is waiting for.
+    AwaitingParent(Uuid),
+    /// Malformed, or refused by the store. There is nothing to retry.
+    Unusable,
+}
+
+/// How many held records one pull replays.
+///
+/// A backlog must not turn a single pull into unbounded work; whatever does not
+/// fit is offered again on the next pull, oldest wait first.
+const DEFERRED_REPLAY_BATCH: i64 = 500;
+
+/// Retry the records earlier pulls could not place.
+///
+/// Run after the fresh page has been imported, so a relation held since an
+/// earlier pull is placed as soon as the memory it names lands. Nothing here
+/// depends on another held record — relations wait on memories and criteria and
+/// blockers wait on tasks, and neither is itself deferred — so one pass is
+/// enough and there is no ordering to get right.
+async fn replay_deferred(d: &Daemon, project_id: Uuid) -> usize {
+    let held = match repo::deferred_records(&d.store, project_id, DEFERRED_REPLAY_BATCH).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not read the records held for a later pull");
+            return 0;
+        }
+    };
+
+    let mut placed = 0;
+    for record in held {
+        let outcome = match serde_json::from_str::<serde_json::Value>(&record.payload) {
+            Ok(value) => match record.kind.as_str() {
+                "relation" => import_relation(d, project_id, &value).await,
+                "criterion" => import_criterion(d, &value).await,
+                "blocker" => import_blocker(d, &value).await,
+                _ => Placement::Unusable,
+            },
+            // A payload that cannot be parsed can never be placed.
+            Err(_) => Placement::Unusable,
+        };
+
+        match outcome {
+            Placement::Placed => {
+                release_held_record(d, project_id, &record, "it landed").await;
+                placed += 1;
+            }
+            Placement::Unusable => {
+                release_held_record(d, project_id, &record, "it can never be placed").await
+            }
+            // Still waiting. Recorded rather than retried in silence, so a
+            // parent that never arrives is visible in the store.
+            Placement::AwaitingParent(_) => {
+                if let Err(e) = repo::note_deferred_attempt(
+                    &d.store,
+                    project_id,
+                    &record.kind,
+                    &record.record_key,
+                )
+                .await
+                {
+                    tracing::warn!(error = %e, "could not record a held record's attempt");
+                }
+            }
+        }
+    }
+    placed
+}
+
+/// Stop holding a record, because it landed or never can.
+async fn release_held_record(
+    d: &Daemon,
+    project_id: Uuid,
+    record: &cairn_store::repo::DeferredRecord,
+    reason: &'static str,
+) {
+    if let Err(e) =
+        repo::clear_deferred_record(&d.store, project_id, &record.kind, &record.record_key).await
+    {
+        tracing::warn!(error = %e, "could not release a held record");
+        return;
+    }
+    tracing::debug!(
+        kind = %record.kind, key = %record.record_key,
+        waiting_since = %record.first_seen_at, attempts = record.attempts, reason,
+        "released a held record"
+    );
+}
+
+/// Hold a record the fresh page could not place.
+async fn hold_for_a_later_pull(
+    d: &Daemon,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+    value: &serde_json::Value,
+    waiting_on: Uuid,
+) {
+    if let Err(e) = repo::defer_pulled_record(
+        &d.store,
+        project_id,
+        kind,
+        record_key,
+        &value.to_string(),
+        &waiting_on.to_string(),
+    )
+    .await
+    {
+        tracing::warn!(
+            error = %e, kind, record_key,
+            "could not hold a record whose parent has not arrived; it is lost"
+        );
+    }
+}
+
+/// Import a reconciliation decision.
+///
+/// `INSERT OR IGNORE` on the normalized primary key, then re-derive. This is the
+/// correction research B2 found: today `import_memory` returns early when the
+/// row exists, so a supersession decided on another machine never lands. The
+/// *decision* is what travels, and deriving from it fixes the defect without
+/// introducing row overwriting (D67, R5).
+async fn import_relation(d: &Daemon, project_id: Uuid, value: &serde_json::Value) -> Placement {
+    let uuid = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    };
+    let (Some(from), Some(to)) = (uuid("from_memory_id"), uuid("to_memory_id")) else {
+        return Placement::Unusable;
+    };
+    let kind = value
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let basis = value
+        .get("basis")
+        .and_then(|v| v.as_str())
+        .unwrap_or("explicit_user");
+
+    let (Ok(kind), Ok(basis)) = (kind.parse(), basis.parse()) else {
+        return Placement::Unusable;
+    };
+
+    // A relation whose memory has not arrived is held rather than dropped: the
+    // foreign key would refuse it, and it is replayed after every later pull
+    // until the memory lands.
+    //
+    // It used to be dropped outright, on the claim that "the next pull carries
+    // it again" — a promise the cursor does not keep. The cursor is a timestamp
+    // and the server re-sends a record only when the record itself changes, so
+    // a relation older than the page's newest row, whose memory falls in the
+    // next page, was lost permanently (#44).
+    for parent in [from, to] {
+        if repo::memory(&d.store, parent).await.is_err() {
+            tracing::debug!(
+                project = %project_id, %from, %to, waiting_on = %parent,
+                "holding a relation whose memory has not arrived yet"
+            );
+            return Placement::AwaitingParent(parent);
+        }
+    }
+
+    let _ = cairn_store::knowledge::record_relation(
+        &d.store,
+        cairn_store::knowledge::NewRelation {
+            project_id,
+            from,
+            to,
+            kind,
+            decided_by_session: uuid("decided_by_session").unwrap_or_else(new_id),
+            basis,
+            // Stripped on the wire, and correctly absent here.
+            basis_evidence_id: None,
+            rationale: None,
+        },
+    )
+    .await;
+
+    // The decision changed what is canonical, so the derived state is rebuilt
+    // from the records rather than patched.
+    //
+    // Supersession is rebuilt per project, because one `supersedes` relation
+    // can move a whole chain. Reinforcement is rebuilt per **memory** — it is
+    // keyed by memory id, and passing the project id here silently rebuilt
+    // nothing at all, leaving an imported `reinforces` uncounted.
+    let _ = cairn_store::knowledge::rebuild_supersession(&d.store, project_id).await;
+    for endpoint in [to, from] {
+        let _ = cairn_store::knowledge::rebuild_reinforcement(&d.store, endpoint).await;
+    }
+    Placement::Placed
+}
+
+/// The identity of a relation as the wire carries it.
+///
+/// Relations have no `id` on the wire; `(from, to, kind)` is the primary key
+/// `memory_relations` is declared with, so it is the relation's identity here
+/// too. A relation the server sends again replaces its held copy rather than
+/// adding a second row.
+fn relation_key(value: &serde_json::Value) -> String {
+    let field = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    format!(
+        "{}:{}:{}",
+        field("from_memory_id"),
+        field("to_memory_id"),
+        field("kind")
+    )
+}
+
+/// Import one criterion that arrived from a peer.
+async fn import_criterion(d: &Daemon, value: &serde_json::Value) -> Placement {
+    let uuid = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    };
+    let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
+        return Placement::Unusable;
+    };
+    // A criterion for a task that has not arrived is held, not invented — and
+    // held durably, for the reason the relation case is (#44): the cursor does
+    // not offer it again.
+    if repo::task(&d.store, task_id).await.is_err() {
+        tracing::debug!(
+            criterion_id = %id, %task_id,
+            "holding a criterion whose task has not arrived yet"
+        );
+        return Placement::AwaitingParent(task_id);
+    }
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let (Ok(state), Ok(verification)) = (str_of("state").parse(), str_of("verification").parse())
+    else {
+        return Placement::Unusable;
+    };
+
+    let stored = cairn_store::criteria::import_criterion(
+        &d.store,
+        id,
+        task_id,
+        value.get("ordinal").and_then(|v| v.as_i64()).unwrap_or(1),
+        str_of("label"),
+        str_of("text"),
+        state,
+        verification,
+        value
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .await
+    .is_ok();
+    if stored {
+        Placement::Placed
+    } else {
+        Placement::Unusable
+    }
+}
+
+/// Import one blocker that arrived from a peer.
+async fn import_blocker(d: &Daemon, value: &serde_json::Value) -> Placement {
+    let uuid = |k: &str| {
+        value
+            .get(k)
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+    };
+    let (Some(id), Some(task_id)) = (uuid("id"), uuid("task_id")) else {
+        return Placement::Unusable;
+    };
+    // Held rather than dropped, for the same reason a criterion is (#44).
+    if repo::task(&d.store, task_id).await.is_err() {
+        tracing::debug!(
+            blocker_id = %id, %task_id,
+            "holding a blocker whose task has not arrived yet"
+        );
+        return Placement::AwaitingParent(task_id);
+    }
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let Ok(state) = str_of("state").parse() else {
+        return Placement::Unusable;
+    };
+
+    let stored = cairn_store::criteria::import_blocker(
+        &d.store,
+        id,
+        task_id,
+        str_of("description"),
+        state,
+        uuid("opened_by_session").unwrap_or_else(Uuid::nil),
+        uuid("cleared_by_session"),
+        value
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .await
+    .is_ok();
+    if stored {
+        Placement::Placed
+    } else {
+        Placement::Unusable
+    }
+}
+
+/// Insert a peer's task locally.
+///
+/// The title, goal and status are the peer's; everything derived stays this
+/// machine's. `local_revision` is never transmitted and never overwritten — it
+/// is a private concurrency token (D80) — and the `acceptance_criteria`
+/// projection is rebuilt from the criteria rows that arrive separately rather
+/// than copied, so it cannot disagree with them.
+async fn import_task(d: &Daemon, project_id: Uuid, value: &serde_json::Value) -> bool {
+    let Some(id) = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return false;
+    };
+    let str_of = |k: &str| value.get(k).and_then(|v| v.as_str()).unwrap_or_default();
+    let status = match str_of("status") {
+        "" => "todo",
+        other => other,
+    };
+    cairn_store::criteria::import_task(
+        &d.store,
+        id,
+        project_id,
+        str_of("title"),
+        str_of("goal"),
+        status,
+        value
+            .get("deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .await
+    .is_ok()
 }
 
 #[cfg(test)]
@@ -788,6 +1547,341 @@ mod tests {
     /// it was not linked and pointed at `cairn link --create` — which would
     /// have made a second shared project for a repository that already had
     /// one — while `cairn status`, reading the same row, said the opposite.
+    /// A peer cannot put a state on a row that Cairn refuses to derive.
+    ///
+    /// `import_verification` is the one path a verification reaches a row
+    /// without passing `rebuild_verification`, the column carries no CHECK, and
+    /// what a peer sends is input rather than truth. Two pairs must not be
+    /// storable: a state outside the enum, and `verified` with no authority —
+    /// which rendered as a bare `verified` against FR-370, re-emitted itself to
+    /// the next peer, and was silently rewritten by the next rebuild anyway.
+    #[tokio::test]
+    async fn an_imported_verification_cannot_invent_a_state_or_drop_its_authority() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "importing", None).await;
+        let s = fx::session(&d, &p, "peer").await;
+
+        let stored = |d: &Daemon, id: Uuid| {
+            let store = d.store.clone();
+            async move {
+                sqlx::query_as::<_, (String, Option<String>)>(
+                    "SELECT verification, verification_authority FROM memories WHERE id = ?1",
+                )
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .expect("row")
+            }
+        };
+
+        let make = |content: &'static str| {
+            let store = d.store.clone();
+            let (project, session) = (p.id, s.id);
+            async move {
+                cairn_store::repo::create_memory(
+                    &store,
+                    cairn_store::repo::NewMemory::free_form(
+                        project,
+                        cairn_core::MemoryType::Fact,
+                        cairn_core::MemoryScope::Project,
+                        &project.to_string(),
+                        content,
+                        session,
+                        false,
+                        &[],
+                    ),
+                    cairn_store::outbox::SyncPolicy {
+                        linked: false,
+                        server_project_id: None,
+                    },
+                )
+                .await
+                .expect("memory")
+                .id
+            }
+        };
+
+        // `verified` with nothing standing behind it.
+        let bare = make("A peer said this was verified.").await;
+        import_verification(
+            &d,
+            bare,
+            &serde_json::json!({ "verification": { "state": "verified" } }),
+        )
+        .await;
+        assert_eq!(
+            stored(&d, bare).await,
+            ("unverified".to_string(), None),
+            "a peer stored `verified` with no authority"
+        );
+
+        // A state that is not a state.
+        let bogus = make("A peer invented a state for this.").await;
+        import_verification(
+            &d,
+            bogus,
+            &serde_json::json!({ "verification": { "state": "extremely_verified" } }),
+        )
+        .await;
+        assert_eq!(
+            stored(&d, bogus).await,
+            ("unverified".to_string(), None),
+            "a peer stored a state outside the enum"
+        );
+
+        // The ordinary case still lands, wearing the imported badge.
+        let good = make("A peer really did check this.").await;
+        import_verification(
+            &d,
+            good,
+            &serde_json::json!({ "verification": { "state": "verified", "authority": "cairn" } }),
+        )
+        .await;
+        assert_eq!(
+            stored(&d, good).await,
+            ("verified".to_string(), Some("remote_cairn".to_string())),
+            "an honest imported verification did not land"
+        );
+    }
+
+    /// A relation whose memory has not arrived is held and later placed, not
+    /// dropped (#44).
+    ///
+    /// The pull cursor is a timestamp over `updated_at` and the server offers a
+    /// record again only when the record itself changes, so "the next pull
+    /// carries it again" was never true. One page of 500 memories reaches it:
+    /// the cursor pins to that page's newest row, and a relation older than
+    /// that row whose memory falls in the *next* page was lost permanently.
+    #[tokio::test]
+    async fn a_relation_whose_memory_has_not_arrived_is_held_until_it_does() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "held-relation", None).await;
+        let s = fx::session(&d, &p, "peer").await;
+
+        let make = |content: &'static str| {
+            let store = d.store.clone();
+            let (project, session) = (p.id, s.id);
+            async move {
+                cairn_store::repo::create_memory(
+                    &store,
+                    cairn_store::repo::NewMemory::free_form(
+                        project,
+                        cairn_core::MemoryType::Fact,
+                        cairn_core::MemoryScope::Project,
+                        &project.to_string(),
+                        content,
+                        session,
+                        false,
+                        &[],
+                    ),
+                    cairn_store::outbox::SyncPolicy {
+                        linked: false,
+                        server_project_id: None,
+                    },
+                )
+                .await
+                .expect("memory")
+                .id
+            }
+        };
+
+        let present = make("This memory arrived in the first page.").await;
+        // The memory this relation names has not arrived, and will not until a
+        // later page.
+        let absent = Uuid::now_v7();
+        let wire = serde_json::json!({
+            "from_memory_id": absent.to_string(),
+            "to_memory_id": present.to_string(),
+            "kind": "supersedes",
+            "basis": "explicit_agent",
+            "decided_by_session": s.id.to_string(),
+        });
+
+        assert_eq!(
+            import_relation(&d, p.id, &wire).await,
+            Placement::AwaitingParent(absent),
+            "the relation was not recognised as waiting on its memory"
+        );
+
+        // The fresh-page path holds it, which is what the cursor cannot do.
+        hold_for_a_later_pull(&d, p.id, "relation", &relation_key(&wire), &wire, absent).await;
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            1,
+            "the relation was dropped rather than held"
+        );
+
+        // Replaying while the memory is still missing keeps holding it, and
+        // records the attempt rather than retrying in silence.
+        assert_eq!(replay_deferred(&d, p.id).await, 0);
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            1,
+            "a record still waiting on its parent must stay held"
+        );
+        let held = repo::deferred_records(&d.store, p.id, 10)
+            .await
+            .expect("held");
+        assert_eq!(held[0].attempts, 1, "the attempt was not recorded");
+        assert_eq!(held[0].waiting_on, absent.to_string());
+
+        // The memory arrives in a later page, through the same importer the
+        // real pull uses, exactly as the ordering failure has it.
+        import_memory(
+            &d,
+            p.id,
+            &serde_json::json!({
+                "id": absent.to_string(),
+                "type": "fact",
+                "scope": "project",
+                "scope_key": p.id.to_string(),
+                "content": "This memory arrived in a later page.",
+                "provenance": { "session_id": s.id.to_string() },
+            }),
+        )
+        .await
+        .expect("the later page's memory did not import");
+
+        assert_eq!(
+            replay_deferred(&d, p.id).await,
+            1,
+            "the held relation was not placed once its memory arrived"
+        );
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            0,
+            "a placed record must stop being held"
+        );
+
+        let stored = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM memory_relations
+              WHERE from_memory_id = ?1 AND to_memory_id = ?2 AND kind = 'supersedes'",
+        )
+        .bind(absent.to_string())
+        .bind(present.to_string())
+        .fetch_one(d.store.pool())
+        .await
+        .expect("query");
+        assert_eq!(stored, 1, "the relation never reached the store");
+    }
+
+    /// A criterion whose task has not arrived is held, then placed (#44).
+    #[tokio::test]
+    async fn a_criterion_whose_task_has_not_arrived_is_held_until_it_does() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "held-criterion", None).await;
+
+        let task_id = Uuid::now_v7();
+        let criterion_id = Uuid::now_v7();
+        let wire = serde_json::json!({
+            "id": criterion_id.to_string(),
+            "task_id": task_id.to_string(),
+            "ordinal": 1,
+            "label": "C1",
+            "text": "The daemon starts in the worktree it was asked about.",
+            "state": "pending",
+            "verification": "unverified",
+        });
+
+        assert_eq!(
+            import_criterion(&d, &wire).await,
+            Placement::AwaitingParent(task_id),
+            "the criterion was not recognised as waiting on its task"
+        );
+        hold_for_a_later_pull(
+            &d,
+            p.id,
+            "criterion",
+            &criterion_id.to_string(),
+            &wire,
+            task_id,
+        )
+        .await;
+        assert_eq!(replay_deferred(&d, p.id).await, 0);
+
+        // The task arrives on a later page.
+        assert!(
+            import_task(
+                &d,
+                p.id,
+                &serde_json::json!({
+                    "id": task_id.to_string(),
+                    "title": "Fix the daemon's working directory",
+                    "goal": "Start where asked.",
+                    "status": "todo",
+                }),
+            )
+            .await,
+            "the task fixture did not import"
+        );
+
+        assert_eq!(
+            replay_deferred(&d, p.id).await,
+            1,
+            "the held criterion was not placed once its task arrived"
+        );
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            0
+        );
+        let stored = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM task_criteria WHERE id = ?1 AND task_id = ?2",
+        )
+        .bind(criterion_id.to_string())
+        .bind(task_id.to_string())
+        .fetch_one(d.store.pool())
+        .await
+        .expect("query");
+        assert_eq!(stored, 1, "the criterion never reached the store");
+    }
+
+    /// A record that can never be placed is released, not retried forever.
+    ///
+    /// Holding is for a parent that has not arrived *yet*. A payload nothing can
+    /// parse has no parent to wait for, and keeping it would be a leak with no
+    /// outcome.
+    #[tokio::test]
+    async fn a_record_that_can_never_be_placed_stops_being_held() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "unusable", None).await;
+
+        repo::defer_pulled_record(
+            &d.store,
+            p.id,
+            "relation",
+            "nonsense",
+            "{ this is not json",
+            &Uuid::now_v7().to_string(),
+        )
+        .await
+        .expect("defer");
+
+        assert_eq!(replay_deferred(&d, p.id).await, 0);
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            0,
+            "an unplaceable record is still being held"
+        );
+    }
+
+    /// A record the server sends again replaces its held copy.
+    #[tokio::test]
+    async fn re_sending_a_held_record_does_not_pile_up_rows() {
+        let d = fx::daemon().await;
+        let p = fx::project(&d, "resent", None).await;
+        let task_id = Uuid::now_v7();
+        let wire = serde_json::json!({ "id": "c", "task_id": task_id.to_string() });
+
+        for _ in 0..3 {
+            hold_for_a_later_pull(&d, p.id, "criterion", "c", &wire, task_id).await;
+        }
+        assert_eq!(
+            repo::deferred_count(&d.store, p.id).await.expect("count"),
+            1,
+            "a re-sent record was held more than once"
+        );
+    }
+
     #[tokio::test]
     async fn link_status_reports_an_existing_link() {
         let d = fx::daemon().await;

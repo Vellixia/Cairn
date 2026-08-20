@@ -19,6 +19,30 @@ pub async fn generate(
     trigger: HandoffTrigger,
     policy: SyncPolicy,
 ) -> Result<Handoff, WireError> {
+    generate_inner(daemon, session, trigger, policy, true).await
+}
+
+/// The boundary record alone, with no checkpoint of its own.
+///
+/// Used where the caller writes the checkpoint itself — `cairn session
+/// checkpoint` derives a handoff to anchor to and then records one explicitly.
+/// Without this the single command would write two checkpoints for one boundary.
+pub async fn generate_boundary_record(
+    daemon: &Daemon,
+    session: &Session,
+    trigger: HandoffTrigger,
+    policy: SyncPolicy,
+) -> Result<Handoff, WireError> {
+    generate_inner(daemon, session, trigger, policy, false).await
+}
+
+async fn generate_inner(
+    daemon: &Daemon,
+    session: &Session,
+    trigger: HandoffTrigger,
+    policy: SyncPolicy,
+    write_checkpoint: bool,
+) -> Result<Handoff, WireError> {
     // Let captures already in flight land first, so the handoff reports the
     // whole session rather than most of it (H3).
     daemon.quiesce_captures().await;
@@ -64,9 +88,48 @@ pub async fn generate(
         trigger,
     );
 
-    repo::insert_handoff(store, &handoff, session.project_id, policy)
+    let stored = repo::insert_handoff(store, &handoff, session.project_id, policy)
         .await
-        .map_err(storage_err)
+        .map_err(storage_err)?;
+
+    // The checkpoint is written inside the same step that produces the handoff,
+    // so a boundary that owes a handoff owes its checkpoint with it and the
+    // existing pending-handoff sweep covers both (Feature 002 D22, FR-425).
+    //
+    // A turn checkpoint deliberately gets none: `agent_quiesced` is a turn
+    // boundary, not a work boundary (Feature 001 D16).
+    if let Some(checkpoint_trigger) = checkpoint_trigger_for(trigger).filter(|_| write_checkpoint) {
+        let worktree = std::path::PathBuf::from(&session.worktree_path);
+        if let Err(e) = crate::continuity::write(
+            daemon,
+            session,
+            stored.id,
+            checkpoint_trigger,
+            &worktree,
+            &stored.next_step,
+        )
+        .await
+        {
+            // A missing checkpoint degrades continuity; it does not fail the
+            // boundary. The handoff is already durable.
+            tracing::warn!(session = %session.id, error = %e, "checkpoint not written");
+        }
+    }
+
+    Ok(stored)
+}
+
+/// Which handoff triggers are work boundaries that owe a checkpoint.
+fn checkpoint_trigger_for(trigger: HandoffTrigger) -> Option<CheckpointTrigger> {
+    match trigger {
+        HandoffTrigger::SessionEnd => Some(CheckpointTrigger::SessionClosed),
+        HandoffTrigger::PreCompact => Some(CheckpointTrigger::ContextCompacting),
+        // A handoff synthesized at daemon-start reconciliation describes a
+        // boundary that already passed; its worktree state is whatever the
+        // machine holds now, which is not what the session assumed. Recording
+        // that as an assumption set would manufacture a false comparison.
+        HandoffTrigger::Recovered => None,
+    }
 }
 
 /// How many quick attempts a sealed boundary gets before it is reported as a

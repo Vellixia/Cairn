@@ -1,0 +1,26 @@
+{
+  "description": "A memory that went stale before Cairn recorded staleness instants. Its applicability interval is unknown, and a historical answer says so rather than presenting an unbounded interval as fact.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The workspace builds with Cargo.",
+        "scope": "branch",
+        "scope_key": "branch/gone",
+        "topic_key": "build.tool",
+        "value_key": "cargo",
+        "state": "stale",
+        "origin_session": "s1"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "historical",
+    "answers": [],
+    "extra": {
+      "stale_at": null,
+      "applicability": "unknown",
+      "historical_answer": "returned as effective, applicability unknown"
+    }
+  }
+}

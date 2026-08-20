@@ -3,7 +3,7 @@ name: cairn
 description: Use Cairn's persistent project memory — resume prior work, search before investigating, record durable decisions and failures, choose the right memory scope, and bind work to a task.
 metadata:
   cairn_skill_schema: 1
-  cairn_skill_revision: 62c4053fc613
+  cairn_skill_revision: a602eb2cd702
 ---
 
 # Cairn

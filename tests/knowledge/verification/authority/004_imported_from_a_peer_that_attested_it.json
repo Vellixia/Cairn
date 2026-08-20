@@ -1,0 +1,18 @@
+{
+  "description": "A peer established this by attestation. Both facts travel: that it was established elsewhere, and that an attestation is what established it.",
+  "input": {
+    "extra": {
+      "runs": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "imported_from": "attested",
+      "authority": "remote_attested",
+      "satisfies_deterministic_requirement": false,
+      "criterion_may_verify": false,
+      "promotion_eligible": false,
+      "refusal": "imported_not_sufficient"
+    }
+  }
+}

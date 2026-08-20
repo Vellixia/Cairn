@@ -116,12 +116,19 @@ fn tool_definitions() -> Vec<Value> {
             "name": "cairn_context",
             "description": "Build the bounded briefing for the current repository: project, \
                             branch, commit, working tree, task goal, previous handoff, and \
-                            relevant scoped memory.",
+                            relevant scoped memory — plus the minimum safe continuity, drift \
+                            and conflict warnings, and whether your checkpoint diverged.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "reason": { "type": "string", "enum": ["session_start", "continuation", "refresh"] },
+                    // `post_compaction` is how an agent whose adapter has no
+                    // post-compaction event restores continuity itself. An
+                    // unknown value still falls back to `refresh` (D57, FR-426).
+                    "reason": { "type": "string", "enum": ["session_start", "continuation", "refresh", "post_compaction"] },
+                    "depth": { "type": "string", "enum": ["minimum", "standard"], "description": "`minimum` is Level 0 only. Level 2 is never automatic." },
+                    "include_patterns": { "type": "boolean", "description": "Signal-matched patterns from other projects, always labelled unverified here" },
+                    "explain": { "type": "boolean", "description": "Return the selection diagnostics. Costs no budget when false." },
                     "token_budget": { "type": "integer", "description": "Cairn-estimated tokens" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier. Required when more than one session is open in this worktree." },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
@@ -133,7 +140,8 @@ fn tool_definitions() -> Vec<Value> {
             "name": "cairn_search",
             "description": "Search durable memory. Results are ranked scope-first — current \
                             task, then branch, then project — with lexical relevance and \
-                            recency breaking ties within a scope.",
+                            recency breaking ties within a scope. Filter by verification state \
+                            or subject; ask for reusable patterns explicitly.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -144,6 +152,16 @@ fn tool_definitions() -> Vec<Value> {
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "state": { "type": "string", "enum": ["active", "stale", "superseded"] },
                     "limit": { "type": "integer" },
+                    // A `drifted` memory is lifecycle-`active` and is returned
+                    // by default, with its verification state visible (FR-373).
+                    "verification": { "type": "string", "enum": ["unverified", "verified", "needs_recheck", "drifted", "conflicted"] },
+                    "authority": { "type": "string", "enum": ["cairn", "attested", "remote_cairn", "remote_attested"], "description": "What established the verification" },
+                    "corroborated": { "type": "boolean" },
+                    "conflicted": { "type": "boolean" },
+                    "topic_key": { "type": "string", "description": "Exact, or a prefix when it ends in a dot" },
+                    "as_of": { "type": "string", "description": "What was effective at this instant, RFC 3339" },
+                    "pinned": { "type": "boolean" },
+                    "include_patterns": { "type": "boolean", "description": "Patterns in a separate array, never mixed into results" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier, so scope precedence uses your task" },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
@@ -153,12 +171,21 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_remember",
             "description": "Record durable knowledge, replace it, or forget it. Supporting \
-                            observations are optional and are never invented.",
+                            observations are optional and are never invented. Give durable \
+                            project facts a `topic_key` and a `value_key` specific enough to \
+                            state the whole claim. Attach evidence rather than asserting \
+                            importance. If Cairn reports a corroborating member and it is the \
+                            same claim, reinforce it. Record a conflict rather than overwriting.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["create", "supersede", "forget"] },
+                    // One discriminator, and no action takes a sub-operation (D70).
+                    "action": { "type": "string", "enum": [
+                        "create", "supersede", "forget",
+                        "reinforce", "attach_evidence", "verify", "pin",
+                        "reconcile", "promote", "record_outcome"
+                    ] },
                     "type": { "type": "string", "enum": ["fact", "decision", "convention", "failure", "procedure"] },
                     "scope": { "type": "string", "enum": ["project", "branch", "task", "session"] },
                     "scope_key": { "type": "string" },
@@ -166,6 +193,39 @@ fn tool_definitions() -> Vec<Value> {
                     "evidence_observation_ids": { "type": "array", "items": { "type": "string" } },
                     "local_only": { "type": "boolean" },
                     "memory_id": { "type": "string" },
+                    // create / supersede
+                    "topic_key": { "type": "string", "description": "The subject this states something about. A key that will not normalize is reported and the memory is stored free-form." },
+                    "value_key": { "type": "string", "description": "The comparable value it asserts. Needs a topic_key." },
+                    "importance": { "type": "string", "enum": ["low", "normal", "high"], "description": "Ranks within a bucket, and nothing more" },
+                    // attach_evidence
+                    "kind": { "type": "string", "enum": ["observation", "file", "git_ref", "configuration", "test_outcome", "command_outcome", "runtime_state", "schema_version"] },
+                    "subject": { "type": "string" },
+                    "observed_value": { "type": "string" },
+                    "source_locator": { "type": "string", "description": "Repository-relative or a Git ref. Never absolute." },
+                    "observation_id": { "type": "string" },
+                    "role": { "type": "string", "enum": ["supports", "contradicts"] },
+                    "collector": { "type": "string", "enum": ["cairn", "agent"], "description": "`agent` when you are attesting rather than Cairn checking" },
+                    // pin
+                    "pinned": { "type": "boolean" },
+                    "reason": { "type": "string" },
+                    // reconcile
+                    "from_memory_id": { "type": "string" },
+                    "to_memory_id": { "type": "string" },
+                    "relation": { "type": "string", "enum": ["narrows", "not_applicable_to", "supersedes"] },
+                    "basis": { "type": "string", "enum": ["explicit_agent", "evidence"] },
+                    "basis_evidence_id": { "type": "string" },
+                    "rationale": { "type": "string" },
+                    // promote / record_outcome
+                    "signals": { "type": "array", "items": { "type": "string" } },
+                    "applicability": { "type": "array", "items": { "type": "string" } },
+                    "root_cause": { "type": "string" },
+                    "approach": { "type": "string" },
+                    "constraints": { "type": "array", "items": { "type": "string" } },
+                    "dry_run": { "type": "boolean" },
+                    "pattern_id": { "type": "string" },
+                    "outcome": { "type": "string", "enum": ["resolved", "not_applicable", "failed"] },
+                    "alternative_cause": { "type": "string" },
+                    "evidence_id": { "type": "string" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier. Required when more than one session is open in this worktree." },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
@@ -175,16 +235,21 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_session",
             "description": "Inspect or steer the current session. Starting is idempotent per \
-                            agent session, so two agents in one checkout get two sessions.",
+                            agent session, so two agents in one checkout get two sessions — or \
+                            write a continuity checkpoint before you compact.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end"] },
+                    "action": { "type": "string", "enum": ["current", "start", "bind_task", "end", "checkpoint"] },
                     "agent": { "type": "string" },
                     "agent_session_key": { "type": "string" },
+                    "session_id": { "type": "string" },
                     "task_id": { "type": "string" },
-                    "status": { "type": "string", "enum": ["completed", "interrupted"] }
+                    "status": { "type": "string", "enum": ["completed", "interrupted"] },
+                    // checkpoint
+                    "next_action": { "type": "string", "description": "What you were about to do" },
+                    "relevant_paths": { "type": "array", "items": { "type": "string" }, "description": "Repository-relative paths this work depends on" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -192,17 +257,34 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_task",
             "description": "List, read, create or update tasks — title, goal, acceptance \
-                            criteria and status.",
+                            criteria and status. Update one criterion at a time and pass the \
+                            `expected_revision` you read.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "cwd": cwd_property(),
-                    "action": { "type": "string", "enum": ["list", "get", "create", "update"] },
+                    "action": { "type": "string", "enum": [
+                        "list", "get", "create", "update",
+                        "add_criterion", "update_criterion", "blocker", "readiness"
+                    ] },
                     "task_id": { "type": "string" },
                     "title": { "type": "string" },
                     "goal": { "type": "string" },
                     "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
-                    "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"] }
+                    "status": { "type": "string", "enum": ["todo", "in_progress", "done", "blocked"] },
+                    // add_criterion / update_criterion
+                    "text": { "type": "string" },
+                    "criterion_id": { "type": "string" },
+                    "state": { "type": "string", "enum": ["pending", "satisfied", "blocked", "waived"] },
+                    "verification": { "type": "string", "enum": ["unverified", "verified", "failed"] },
+                    "evidence_observation_id": { "type": "string" },
+                    // This store's local concurrency token, read from `get`. It
+                    // is not a version anyone else shares (D80).
+                    "expected_revision": { "type": "integer" },
+                    // blocker
+                    "description": { "type": "string" },
+                    "blocker_id": { "type": "string" },
+                    "clear": { "type": "boolean" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -210,7 +292,8 @@ fn tool_definitions() -> Vec<Value> {
         json!({
             "name": "cairn_handoff",
             "description": "Read the latest handoff, generate one at a boundary, or attach a \
-                            bounded note beside the derived record.",
+                            bounded note beside the derived record — optionally with its \
+                            continuity checkpoint.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -218,8 +301,11 @@ fn tool_definitions() -> Vec<Value> {
                     "action": { "type": "string", "enum": ["latest", "generate", "annotate"] },
                     "session_id": { "type": "string" },
                     "agent_session_key": { "type": "string" },
+                    // `stop` is deliberately absent: a turn checkpoint is not a
+                    // handoff boundary (Feature 001 D16).
                     "trigger": { "type": "string", "enum": ["pre_compact", "session_end"] },
-                    "note": { "type": "string" }
+                    "note": { "type": "string" },
+                    "include_checkpoint": { "type": "boolean", "description": "Add the anchored checkpoint and its staleness assessment" }
                 },
                 "required": ["cwd", "action"]
             }
@@ -264,6 +350,8 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .get("token_budget")
                     .and_then(|v| v.as_u64())
                     .map(|v| v as usize),
+                // The six tools are fixed; diagnostics stay a CLI affordance.
+                explain: false,
             })
             .await?;
             // The agent gets the rendered briefing plus the raw envelope, so it
@@ -285,6 +373,26 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                 kind: enum_arg(args, "type"),
                 state: enum_arg(args, "state"),
                 limit: args.get("limit").and_then(|v| v.as_i64()),
+                topic_key: str_arg(args, "topic_key"),
+                as_of: str_arg(args, "as_of").and_then(|t| {
+                    chrono::DateTime::parse_from_rfc3339(&t)
+                        .ok()
+                        .map(|d| d.with_timezone(&chrono::Utc))
+                }),
+                conflicted: args
+                    .get("conflicted")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                corroborated: args
+                    .get("corroborated")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                include_patterns: args
+                    .get("include_patterns")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                verification: enum_arg(args, "verification"),
+                authority: enum_arg(args, "authority"),
             };
             let value = client::send(&Request::MemorySearch {
                 cwd,
@@ -320,12 +428,16 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                             content,
                             evidence_observation_ids: evidence,
                             local_only,
+                            topic_key: str_arg(args, "topic_key"),
+                            value_key: str_arg(args, "value_key"),
+                            importance: enum_arg(args, "importance"),
                         })
                         .await?
                     } else {
                         client::send(&Request::MemorySupersede {
                             cwd,
                             agent_session_key: key,
+                            session_id: uuid_opt(args, "session_id"),
                             memory_id: uuid_arg(args, "memory_id")?,
                             kind,
                             scope: enum_arg(args, "scope"),
@@ -333,6 +445,9 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                             content,
                             evidence_observation_ids: evidence,
                             local_only,
+                            topic_key: str_arg(args, "topic_key"),
+                            value_key: str_arg(args, "value_key"),
+                            importance: enum_arg(args, "importance"),
                         })
                         .await?
                     }
@@ -341,6 +456,101 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     client::send(&Request::MemoryForget {
                         cwd,
                         memory_id: uuid_arg(args, "memory_id")?,
+                    })
+                    .await?
+                }
+                "reinforce" => {
+                    client::send(&Request::MemoryReinforce {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        memory_id: uuid_arg(args, "memory_id")?,
+                        from_memory_id: uuid_opt(args, "from_memory_id"),
+                    })
+                    .await?
+                }
+                "attach_evidence" => {
+                    client::send(&Request::EvidenceAdd {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        kind: enum_arg(args, "kind")
+                            .ok_or_else(|| WireError::invalid("kind is required"))?,
+                        collector: enum_arg(args, "collector"),
+                        subject: str_arg(args, "subject")
+                            .ok_or_else(|| WireError::invalid("subject is required"))?,
+                        observed_value: str_arg(args, "observed_value")
+                            .ok_or_else(|| WireError::invalid("observed_value is required"))?,
+                        source_locator: str_arg(args, "source_locator")
+                            .ok_or_else(|| WireError::invalid("source_locator is required"))?,
+                        observation_id: uuid_opt(args, "observation_id"),
+                        memory_id: uuid_opt(args, "memory_id"),
+                        role: enum_arg(args, "role"),
+                    })
+                    .await?
+                }
+                "verify" => {
+                    client::send(&Request::Verify {
+                        cwd,
+                        memory_id: uuid_opt(args, "memory_id"),
+                        all: bool_arg(args, "all"),
+                        explain: bool_arg(args, "explain"),
+                    })
+                    .await?
+                }
+                "pin" => {
+                    client::send(&Request::MemoryPin {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        memory_id: uuid_arg(args, "memory_id")?,
+                        // Pinning is the default; `pinned: false` unpins.
+                        pinned: args.get("pinned").and_then(|v| v.as_bool()).unwrap_or(true),
+                        reason: str_arg(args, "reason"),
+                    })
+                    .await?
+                }
+                "reconcile" => {
+                    client::send(&Request::MemoryReconcile {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        from_memory_id: uuid_arg(args, "from_memory_id")?,
+                        to_memory_id: uuid_arg(args, "to_memory_id")?,
+                        relation: enum_arg(args, "relation")
+                            .ok_or_else(|| WireError::invalid("relation is required"))?,
+                        basis: enum_arg(args, "basis")
+                            .unwrap_or(cairn_core::RelationBasis::ExplicitAgent),
+                        basis_evidence_id: uuid_opt(args, "basis_evidence_id"),
+                        rationale: str_arg(args, "rationale"),
+                    })
+                    .await?
+                }
+                "promote" => {
+                    client::send(&Request::PatternPromote {
+                        cwd,
+                        memory_id: uuid_arg(args, "memory_id")?,
+                        title: str_arg(args, "title"),
+                        problem: str_arg(args, "problem"),
+                        signals: str_list(args, "signals"),
+                        applicability: str_list(args, "applicability"),
+                        root_cause: str_arg(args, "root_cause"),
+                        approach: str_arg(args, "approach"),
+                        constraints: str_list(args, "constraints"),
+                        dry_run: bool_arg(args, "dry_run"),
+                    })
+                    .await?
+                }
+                "record_outcome" => {
+                    client::send(&Request::PatternOutcome {
+                        cwd,
+                        id: uuid_arg(args, "pattern_id")?,
+                        outcome: enum_arg(args, "outcome")
+                            .ok_or_else(|| WireError::invalid("outcome is required"))?,
+                        signals: str_list(args, "signals"),
+                        alternative_cause: str_arg(args, "alternative_cause"),
+                        evidence_id: uuid_opt(args, "evidence_id"),
+                        session: uuid_opt(args, "session_id"),
                     })
                     .await?
                 }
@@ -393,6 +603,17 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     })
                     .await?
                 }
+                // The path FR-425 gives an agent whose integration cannot be
+                // called back after a compaction: write the checkpoint yourself,
+                // before you compact.
+                "checkpoint" => {
+                    client::send(&Request::SessionCheckpoint {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                    })
+                    .await?
+                }
                 other => return Err(WireError::invalid(format!("unknown action: {other}"))),
             };
             Ok(pretty(&value))
@@ -436,6 +657,62 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                             .get("acceptance_criteria")
                             .map(|_| string_list(args, "acceptance_criteria")),
                         status: enum_arg(args, "status"),
+                    })
+                    .await?
+                }
+                "add_criterion" => {
+                    client::send(&Request::TaskCriterionAdd {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        task_id: uuid_arg(args, "task_id")?,
+                        text: str_arg(args, "text")
+                            .ok_or_else(|| WireError::invalid("text is required"))?,
+                    })
+                    .await?
+                }
+                "update_criterion" => {
+                    client::send(&Request::TaskCriterionSet {
+                        cwd,
+                        agent_session_key: key,
+                        session_id: uuid_opt(args, "session_id"),
+                        criterion_id: uuid_arg(args, "criterion_id")?,
+                        state: enum_arg(args, "state"),
+                        text: str_arg(args, "text"),
+                        // Omitting it applies the write and records a blind
+                        // write; supplying what you read is the protection
+                        // (FR-490).
+                        expected_revision: args.get("expected_revision").and_then(|v| v.as_i64()),
+                    })
+                    .await?
+                }
+                // One action, because a blocker has exactly one transition:
+                // `clear: true` closes the one named, anything else opens one.
+                "blocker" => {
+                    if args.get("clear").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        client::send(&Request::TaskBlockerClear {
+                            cwd,
+                            agent_session_key: key,
+                            session_id: uuid_opt(args, "session_id"),
+                            blocker_id: uuid_arg(args, "blocker_id")?,
+                        })
+                        .await?
+                    } else {
+                        client::send(&Request::TaskBlockerOpen {
+                            cwd,
+                            agent_session_key: key,
+                            session_id: uuid_opt(args, "session_id"),
+                            task_id: uuid_arg(args, "task_id")?,
+                            description: str_arg(args, "description")
+                                .ok_or_else(|| WireError::invalid("description is required"))?,
+                        })
+                        .await?
+                    }
+                }
+                "readiness" => {
+                    client::send(&Request::TaskReadiness {
+                        cwd,
+                        task_id: uuid_arg(args, "task_id")?,
                     })
                     .await?
                 }
@@ -518,6 +795,22 @@ fn uuid_opt(args: &Value, key: &str) -> Option<uuid::Uuid> {
     args.get(key)
         .and_then(|v| v.as_str())
         .and_then(|s| uuid::Uuid::parse_str(s).ok())
+}
+
+fn bool_arg(args: &Value, key: &str) -> bool {
+    args.get(key).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+fn str_list(args: &Value, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn uuid_list(args: &Value, key: &str) -> Vec<uuid::Uuid> {

@@ -1,0 +1,714 @@
+{
+  "calls": [
+    {
+      "method": "tools/list",
+      "params": {},
+      "result": {
+        "tools": [
+          {
+            "description": "Build the bounded briefing for the current repository: project, branch, commit, working tree, task goal, previous handoff, and relevant scoped memory.",
+            "inputSchema": {
+              "properties": {
+                "agent_session_key": {
+                  "description": "Your own session identifier. Required when more than one session is open in this worktree.",
+                  "type": "string"
+                },
+                "cwd": {
+                  "description": "Directory to resolve the repository from",
+                  "type": "string"
+                },
+                "reason": {
+                  "enum": [
+                    "session_start",
+                    "continuation",
+                    "refresh"
+                  ],
+                  "type": "string"
+                },
+                "session_id": {
+                  "description": "Cairn session id, as an alternative to agent_session_key",
+                  "type": "string"
+                },
+                "token_budget": {
+                  "description": "Cairn-estimated tokens",
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "cwd"
+              ],
+              "type": "object"
+            },
+            "name": "cairn_context"
+          },
+          {
+            "description": "Search durable memory. Results are ranked scope-first — current task, then branch, then project — with lexical relevance and recency breaking ties within a scope.",
+            "inputSchema": {
+              "properties": {
+                "agent_session_key": {
+                  "description": "Your own session identifier, so scope precedence uses your task",
+                  "type": "string"
+                },
+                "cwd": {
+                  "description": "Directory to resolve the repository from",
+                  "type": "string"
+                },
+                "limit": {
+                  "type": "integer"
+                },
+                "query": {
+                  "type": "string"
+                },
+                "scope": {
+                  "enum": [
+                    "project",
+                    "branch",
+                    "task",
+                    "session"
+                  ],
+                  "type": "string"
+                },
+                "scope_key": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "description": "Cairn session id, as an alternative to agent_session_key",
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "stale",
+                    "superseded"
+                  ],
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "fact",
+                    "decision",
+                    "convention",
+                    "failure",
+                    "procedure"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cwd"
+              ],
+              "type": "object"
+            },
+            "name": "cairn_search"
+          },
+          {
+            "description": "Record durable knowledge, replace it, or forget it. Supporting observations are optional and are never invented.",
+            "inputSchema": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "create",
+                    "supersede",
+                    "forget"
+                  ],
+                  "type": "string"
+                },
+                "agent_session_key": {
+                  "description": "Your own session identifier. Required when more than one session is open in this worktree.",
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "cwd": {
+                  "description": "Directory to resolve the repository from",
+                  "type": "string"
+                },
+                "evidence_observation_ids": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "local_only": {
+                  "type": "boolean"
+                },
+                "memory_id": {
+                  "type": "string"
+                },
+                "scope": {
+                  "enum": [
+                    "project",
+                    "branch",
+                    "task",
+                    "session"
+                  ],
+                  "type": "string"
+                },
+                "scope_key": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "description": "Cairn session id, as an alternative to agent_session_key",
+                  "type": "string"
+                },
+                "type": {
+                  "enum": [
+                    "fact",
+                    "decision",
+                    "convention",
+                    "failure",
+                    "procedure"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cwd",
+                "action"
+              ],
+              "type": "object"
+            },
+            "name": "cairn_remember"
+          },
+          {
+            "description": "Inspect or steer the current session. Starting is idempotent per agent session, so two agents in one checkout get two sessions.",
+            "inputSchema": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "current",
+                    "start",
+                    "bind_task",
+                    "end"
+                  ],
+                  "type": "string"
+                },
+                "agent": {
+                  "type": "string"
+                },
+                "agent_session_key": {
+                  "type": "string"
+                },
+                "cwd": {
+                  "description": "Directory to resolve the repository from",
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "completed",
+                    "interrupted"
+                  ],
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cwd",
+                "action"
+              ],
+              "type": "object"
+            },
+            "name": "cairn_session"
+          },
+          {
+            "description": "List, read, create or update tasks — title, goal, acceptance criteria and status.",
+            "inputSchema": {
+              "properties": {
+                "acceptance_criteria": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "action": {
+                  "enum": [
+                    "list",
+                    "get",
+                    "create",
+                    "update"
+                  ],
+                  "type": "string"
+                },
+                "cwd": {
+                  "description": "Directory to resolve the repository from",
+                  "type": "string"
+                },
+                "goal": {
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "todo",
+                    "in_progress",
+                    "done",
+                    "blocked"
+                  ],
+                  "type": "string"
+                },
+                "task_id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cwd",
+                "action"
+              ],
+              "type": "object"
+            },
+            "name": "cairn_task"
+          },
+          {
+            "description": "Read the latest handoff, generate one at a boundary, or attach a bounded note beside the derived record.",
+            "inputSchema": {
+              "properties": {
+                "action": {
+                  "enum": [
+                    "latest",
+                    "generate",
+                    "annotate"
+                  ],
+                  "type": "string"
+                },
+                "agent_session_key": {
+                  "type": "string"
+                },
+                "cwd": {
+                  "description": "Directory to resolve the repository from",
+                  "type": "string"
+                },
+                "note": {
+                  "type": "string"
+                },
+                "session_id": {
+                  "type": "string"
+                },
+                "trigger": {
+                  "enum": [
+                    "pre_compact",
+                    "session_end"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "cwd",
+                "action"
+              ],
+              "type": "object"
+            },
+            "name": "cairn_handoff"
+          }
+        ]
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "start",
+          "agent": "claude-code",
+          "agent_session_key": "baseline-1"
+        },
+        "name": "cairn_session"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "agent_session_key": "baseline-1",
+              "session": {
+                "agent": "claude-code",
+                "branch": "main",
+                "commit": "<commit>",
+                "ended_at": null,
+                "id": "<uuid>",
+                "idle_seconds": 0,
+                "last_turn_ended_at": null,
+                "previous_session_id": null,
+                "started_at": "<timestamp>",
+                "status": "active",
+                "task_id": null,
+                "worktree_path": "<path>"
+              }
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "acceptance_criteria": [
+            "the briefing renders",
+            "the tools answer"
+          ],
+          "action": "create",
+          "goal": "record the baseline",
+          "title": "Baseline work"
+        },
+        "name": "cairn_task"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "task": {
+                "acceptance_criteria": [
+                  "the briefing renders",
+                  "the tools answer"
+                ],
+                "created_at": "<timestamp>",
+                "deleted_at": null,
+                "goal": "record the baseline",
+                "id": "<uuid>",
+                "project_id": "<uuid>",
+                "status": "todo",
+                "title": "Baseline work",
+                "updated_at": "<timestamp>"
+              }
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "bind_task",
+          "agent_session_key": "baseline-1",
+          "task_id": "<uuid>"
+        },
+        "name": "cairn_session"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "session": {
+                "agent": "claude-code",
+                "branch": "main",
+                "commit": "<commit>",
+                "ended_at": null,
+                "id": "<uuid>",
+                "idle_seconds": 0,
+                "last_turn_ended_at": null,
+                "previous_session_id": null,
+                "started_at": "<timestamp>",
+                "status": "active",
+                "task_id": "<uuid>",
+                "worktree_path": "<path>"
+              }
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "get",
+          "task_id": "<uuid>"
+        },
+        "name": "cairn_task"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "task": {
+                "acceptance_criteria": [
+                  "the briefing renders",
+                  "the tools answer"
+                ],
+                "created_at": "<timestamp>",
+                "deleted_at": null,
+                "goal": "record the baseline",
+                "id": "<uuid>",
+                "project_id": "<uuid>",
+                "status": "todo",
+                "title": "Baseline work",
+                "updated_at": "<timestamp>"
+              }
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "update",
+          "status": "in_progress",
+          "task_id": "<uuid>"
+        },
+        "name": "cairn_task"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "task": {
+                "acceptance_criteria": [
+                  "the briefing renders",
+                  "the tools answer"
+                ],
+                "created_at": "<timestamp>",
+                "deleted_at": null,
+                "goal": "record the baseline",
+                "id": "<uuid>",
+                "project_id": "<uuid>",
+                "status": "in_progress",
+                "title": "Baseline work",
+                "updated_at": "<timestamp>"
+              }
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "create",
+          "agent_session_key": "baseline-1",
+          "content": "The baseline records what Feature 001 already produced.",
+          "scope": "project",
+          "type": "decision"
+        },
+        "name": "cairn_remember"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "memory": {
+                "content": "The baseline records what Feature 001 already produced.",
+                "created_at": "<timestamp>",
+                "deleted_at": null,
+                "evidence": [],
+                "id": "<uuid>",
+                "local_only": false,
+                "origin_session_id": "<uuid>",
+                "project_id": "<uuid>",
+                "scope": "project",
+                "scope_key": "<uuid>",
+                "state": "active",
+                "superseded_by_id": null,
+                "type": "decision",
+                "updated_at": "<timestamp>"
+              }
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "agent_session_key": "baseline-1",
+          "query": "baseline"
+        },
+        "name": "cairn_search"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "results": [
+                {
+                  "content": "The baseline records what Feature 001 already produced.",
+                  "created_at": "<timestamp>",
+                  "id": "<uuid>",
+                  "local_only": false,
+                  "provenance": {
+                    "agent": "claude-code",
+                    "evidence_count": 0,
+                    "observation_ids": [],
+                    "session_id": "<uuid>"
+                  },
+                  "rank": {
+                    "age_days": 0,
+                    "relevance": 1e-6,
+                    "scope_bucket": 2
+                  },
+                  "scope": "project",
+                  "scope_key": "<uuid>",
+                  "state": "active",
+                  "superseded_by_id": null,
+                  "type": "decision"
+                }
+              ],
+              "total": 1
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "agent_session_key": "baseline-1",
+          "reason": "session_start"
+        },
+        "name": "cairn_context"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "# Cairn context\n\n**Project**: <sandbox>\n**Repository**: branch `main`, commit `<commit>`, working tree clean\n\n## Task: Baseline work (in_progress)\nrecord the baseline\n\nAcceptance criteria:\n- the briefing renders\n- the tools answer\n\n## Project memory\n- [decision] The baseline records what Feature 001 already produced.\n\n---\n84 of 3000 estimated tokens\n\n\n```json\n{\n  \"briefing\": {\n    \"decisions\": [],\n    \"known_failures\": [],\n    \"memory\": {\n      \"branch\": [],\n      \"project\": [\n        \"[decision] The baseline records what Feature 001 already produced.\"\n      ],\n      \"task\": []\n    },\n    \"no_prior_history\": false,\n    \"project\": {\n      \"id\": \"<uuid>\",\n      \"linked\": false,\n      \"name\": \"<sandbox>\",\n      \"server_project_id\": null\n    },\n    \"repository\": {\n      \"branch\": \"main\",\n      \"commit_sha\": \"<commit>\",\n      \"staged\": 0,\n      \"unstaged\": 0,\n      \"untracked\": 0\n    },\n    \"task\": {\n      \"acceptance_criteria\": [\n        \"the briefing renders\",\n        \"the tools answer\"\n      ],\n      \"goal\": \"record the baseline\",\n      \"id\": \"<uuid>\",\n      \"status\": \"in_progress\",\n      \"title\": \"Baseline work\"\n    }\n  },\n  \"budget\": 3000,\n  \"degraded\": false,\n  \"estimated_tokens\": 84,\n  \"omitted_sections\": [],\n  \"truncated\": false\n}\n```",
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "generate",
+          "agent_session_key": "baseline-1",
+          "trigger": "session_end"
+        },
+        "name": "cairn_handoff"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "handoff": {
+                "agent_note": null,
+                "changed_files": [],
+                "completed_work": [],
+                "created_at": "<timestamp>",
+                "decisions": [
+                  "The baseline records what Feature 001 already produced."
+                ],
+                "deleted_at": null,
+                "evidence": [],
+                "failures": [],
+                "goal": "record the baseline",
+                "id": "<uuid>",
+                "next_step": "Continue with: Acceptance criterion: the briefing renders",
+                "progress": "0 file(s) changed, 0 test command(s) run, 0 failure(s) open",
+                "remaining_work": [
+                  "Acceptance criterion: the briefing renders",
+                  "Acceptance criterion: the tools answer"
+                ],
+                "repository_state": {
+                  "branch": "main",
+                  "commit_sha": "<commit>",
+                  "staged": 0,
+                  "unstaged": 0,
+                  "untracked": 0
+                },
+                "session_id": "<uuid>",
+                "tests_executed": [],
+                "trigger": "session_end"
+              }
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "latest",
+          "agent_session_key": "baseline-1"
+        },
+        "name": "cairn_handoff"
+      },
+      "result": {
+        "content": [
+          {
+            "text": {
+              "handoff": {
+                "agent_note": null,
+                "changed_files": [],
+                "completed_work": [],
+                "created_at": "<timestamp>",
+                "decisions": [
+                  "The baseline records what Feature 001 already produced."
+                ],
+                "deleted_at": null,
+                "evidence": [],
+                "failures": [],
+                "goal": "record the baseline",
+                "id": "<uuid>",
+                "next_step": "Continue with: Acceptance criterion: the briefing renders",
+                "progress": "0 file(s) changed, 0 test command(s) run, 0 failure(s) open",
+                "remaining_work": [
+                  "Acceptance criterion: the briefing renders",
+                  "Acceptance criterion: the tools answer"
+                ],
+                "repository_state": {
+                  "branch": "main",
+                  "commit_sha": "<commit>",
+                  "staged": 0,
+                  "unstaged": 0,
+                  "untracked": 0
+                },
+                "session_id": "<uuid>",
+                "tests_executed": [],
+                "trigger": "session_end"
+              },
+              "session_id": "<uuid>"
+            },
+            "type": "text"
+          }
+        ],
+        "isError": false
+      }
+    },
+    {
+      "method": "tools/call",
+      "params": {
+        "arguments": {
+          "action": "status",
+          "agent_session_key": "baseline-1"
+        },
+        "name": "cairn_session"
+      },
+      "result": {
+        "content": [
+          {
+            "text": "invalid_request: unknown action: status",
+            "type": "text"
+          }
+        ],
+        "isError": true
+      }
+    }
+  ]
+}

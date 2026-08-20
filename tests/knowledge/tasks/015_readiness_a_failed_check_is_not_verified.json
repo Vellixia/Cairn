@@ -1,0 +1,40 @@
+{
+  "description": "A satisfied criterion whose check failed is not verified, so readiness is ready_unverified and never ready. The failure does not move the work axis - the two axes stay independent (FR-482).",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "satisfied",
+          "verification": "failed",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 1,
+        "satisfied_unverified": 1,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 0,
+        "total": 2
+      },
+      "readiness": "ready_unverified",
+      "action_order": null
+    }
+  }
+}

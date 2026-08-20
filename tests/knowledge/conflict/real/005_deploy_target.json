@@ -1,0 +1,40 @@
+{
+  "description": "Two applicable answers for deploy.target in one scope disagree. Both stay active, neither is marked superseded, and no single canonical answer is emitted.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Deployment goes through Dokploy.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "deploy.target",
+        "value_key": "dokploy",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Deployment goes through Fly.io.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "deploy.target",
+        "value_key": "flyio",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ]
+  }
+}

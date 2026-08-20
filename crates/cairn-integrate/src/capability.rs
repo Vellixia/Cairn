@@ -372,7 +372,32 @@ impl CapabilityProfile {
             };
         }
         match agent {
-            AgentId::ClaudeCode | AgentId::Codex => {
+            AgentId::ClaudeCode => {
+                for k in Capability::ALL {
+                    set!(k, Guaranteed);
+                }
+                // The `PostCompact` hook fires, and that is not the same fact.
+                // This capability is *context re-delivery* after compaction,
+                // and Claude Code's hook cannot re-deliver: `additionalContext`
+                // is unsupported for `PostCompact`, whose output the vendor
+                // documents as "shows stderr to user only". Cairn is told the
+                // compaction happened and has no way to hand the checkpoint
+                // back through that channel.
+                //
+                // Recorded as `conditional` rather than `absent` because the
+                // signal is real and Cairn does act on it — it restores the
+                // checkpoint, so `cairn_context(reason=post_compaction)`
+                // answers immediately. What is not guaranteed is that the agent
+                // is *told* without asking, which is precisely the difference
+                // between `automatic` and `agent_initiated` (FR-426).
+                c.insert(
+                    LifecyclePostCompaction,
+                    CapabilityState::conditional(
+                        "Claude Code's PostCompact hook can return context to the session",
+                    ),
+                );
+            }
+            AgentId::Codex => {
                 for k in Capability::ALL {
                     set!(k, Guaranteed);
                 }
@@ -575,6 +600,59 @@ impl CapabilityProfile {
             }
         }
         (g, c, a)
+    }
+}
+
+impl CapabilityProfile {
+    /// What Cairn can honestly promise this agent about compression-safe
+    /// continuity (FR-426, FR-427, D57).
+    ///
+    /// ```text
+    /// pre     post                  mode
+    /// ------  --------------------  ----------------------
+    /// present present               automatic
+    /// present absent / conditional  agent_initiated
+    /// absent  any                   unavailable_automatic
+    /// ```
+    ///
+    /// A **derived read** over the capability profile Feature 002 already
+    /// maintains. No new canonical event and no new capability: a mode that
+    /// needed its own signal would be a second source of truth about the same
+    /// thing, and would drift from it.
+    ///
+    /// Cairn never reports a rehydration guarantee an adapter cannot provide.
+    /// Claiming `automatic` for an agent whose post-compaction hook is
+    /// experimental would be exactly the false promise US6 #4 is about.
+    pub fn continuity_mode(&self) -> cairn_core::domain::ContinuityMode {
+        let pre = self.get(Capability::LifecyclePreCompaction);
+        let post = self.get(Capability::LifecyclePostCompaction);
+
+        use cairn_core::domain::ContinuityMode;
+
+        // Nothing warns Cairn at all: the agent must write its own checkpoint
+        // before compacting, because there is no moment Cairn can do it.
+        if matches!(
+            pre.availability,
+            Availability::Absent | Availability::PendingActivation
+        ) {
+            return ContinuityMode::UnavailableAutomatic;
+        }
+
+        // `automatic` is a promise that Cairn is called back on both sides, and
+        // it is only keepable when **both** are guaranteed.
+        //
+        // A conditional pre-compaction is the case this originally got wrong.
+        // OpenCode's warning depends on the installed build exposing
+        // `experimental.session.compacting`, so on a build without it Cairn is
+        // never told compaction is coming and the checkpoint is never written —
+        // while the agent had been told continuity was automatic and did
+        // nothing. Conditional and unavailable mean the same thing to an agent
+        // that must act: it cannot rely on being called, so it must ask
+        // (FR-426).
+        match (pre.availability, post.availability) {
+            (Availability::Guaranteed, Availability::Guaranteed) => ContinuityMode::Automatic,
+            _ => ContinuityMode::AgentInitiated,
+        }
     }
 }
 

@@ -1,0 +1,31 @@
+{
+  "description": "A project-scoped answer for auth.strategy and a task-scoped one that disagrees. They are never simultaneously applicable, so this is a scope exception and not a conflict: the narrower applies in its own context and the broader is the answer it narrows.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Authentication uses JWT bearer tokens.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "auth.strategy",
+        "value_key": "jwt",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Authentication uses opaque session cookies.",
+        "scope": "task",
+        "scope_key": "T1",
+        "topic_key": "auth.strategy",
+        "value_key": "session_cookie",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

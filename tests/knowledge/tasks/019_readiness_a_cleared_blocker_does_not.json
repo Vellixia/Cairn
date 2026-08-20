@@ -1,0 +1,37 @@
+{
+  "description": "The same task once the blocker is cleared. A cleared blocker is retained for attribution and stops holding readiness down (FR-485).",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        }
+      ],
+      "blockers": [
+        {
+          "state": "cleared",
+          "deleted": false
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 1,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 0,
+        "total": 1
+      },
+      "readiness": "ready",
+      "action_order": null
+    }
+  }
+}

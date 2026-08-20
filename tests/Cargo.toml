@@ -27,3 +27,4 @@ uuid.workspace = true
 tokio.workspace = true
 sqlx.workspace = true
 tiktoken-rs = "0.12"
+chrono.workspace = true

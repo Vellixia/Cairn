@@ -54,7 +54,7 @@ async fn health() -> Json<Value> {
 /// Unauthenticated on purpose: the version of a service is not a secret, and
 /// the sign-in page is a reasonable place to show it.
 async fn version(State(state): State<AppState>) -> Json<Value> {
-    let payload = state.releases.payload().await;
+    let payload = state.releases.payload(state.schema_version).await;
     Json(serde_json::to_value(payload).unwrap_or_else(|_| json!({})))
 }
 

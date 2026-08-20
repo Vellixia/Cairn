@@ -1,0 +1,45 @@
+{
+  "description": "The head moved. Someone committed - possibly another session, possibly the developer - and the recorded action may already be done.",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "def456abc123def456abc123def456abc123defa",
+        "task_exists": true,
+        "worktree_exists": true,
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "diverged",
+      "divergences": [
+        "commit"
+      ],
+      "next_action_is_live": false
+    }
+  }
+}

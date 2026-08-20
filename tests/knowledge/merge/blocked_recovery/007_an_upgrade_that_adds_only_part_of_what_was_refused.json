@@ -1,0 +1,39 @@
+{
+  "description": "The server gains one capability and not the other. Only the rows whose class the new capability supports are released; the rest stay blocked and stay recoverable. Releasing everything on any change would put work back in front of a server that still cannot hold it, and the futile retry the state exists to prevent would happen anyway.",
+  "input": {
+    "extra": {
+      "server_before": {
+        "schema_version": 1,
+        "capabilities": []
+      },
+      "server_after": {
+        "schema_version": 2,
+        "capabilities": [
+          "memory_relations"
+        ]
+      },
+      "queued": [
+        {
+          "entity_type": "memory_relation",
+          "operation": "upsert"
+        },
+        {
+          "entity_type": "task_blocker",
+          "operation": "upsert"
+        }
+      ],
+      "rejection": {
+        "code": "unknown_entity_type",
+        "class": "capability"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "released_on_upgrade": 1,
+      "still_blocked": 1,
+      "retries_of_still_blocked": 0,
+      "never_failed": true
+    }
+  }
+}

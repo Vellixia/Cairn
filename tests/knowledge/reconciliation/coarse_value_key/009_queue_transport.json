@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about queue.transport. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "AMQP messages are published with publisher confirms.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "queue.transport",
+        "value_key": "amqp",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "AMQP messages are published fire-and-forget.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "queue.transport",
+        "value_key": "amqp",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "description": "A peer's verification is reported as established elsewhere; it does not overwrite what this machine knows (FR-368).",
+  "input": {
+    "extra": {
+      "from": "verified",
+      "trigger": "imported"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": null
+    }
+  }
+}

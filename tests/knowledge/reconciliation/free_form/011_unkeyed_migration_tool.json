@@ -1,0 +1,31 @@
+{
+  "description": "Two free-form memories with no topic key. Neither merges with, supersedes nor reinforces the other, whatever their content, and both stay retrievable.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Migrations are applied by sqlx.",
+        "scope": "project",
+        "scope_key": "p1",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Migrations are applied by Flyway.",
+        "scope": "project",
+        "scope_key": "p1",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about frontend.framework. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Next.js renders entirely on the server.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "frontend.framework",
+        "value_key": "nextjs",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Next.js renders statically and hydrates on the client.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "frontend.framework",
+        "value_key": "nextjs",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

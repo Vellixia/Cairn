@@ -235,9 +235,28 @@ pub fn git_err(e: cairn_git::GitError) -> WireError {
     }
 }
 
+/// The sync policy for a project, for the background paths that hold an id
+/// rather than a resolved worktree.
+///
+/// A project that cannot be read is treated as unlinked: a maintenance pass must
+/// not fail because it could not decide whether to enqueue.
+pub async fn sync_policy_for_project(d: &Daemon, project_id: Uuid) -> SyncPolicy {
+    match repo::project(&d.store, project_id).await {
+        Ok(p) => SyncPolicy::from_project(&p),
+        Err(_) => SyncPolicy {
+            linked: false,
+            server_project_id: None,
+        },
+    }
+}
+
 pub fn storage_err(e: cairn_store::StoreError) -> WireError {
     match e {
         cairn_store::StoreError::NotFound(what) => WireError::not_found(what),
+        // A refusal already carries the contract's stable code. Passing it
+        // through is what keeps `revision_conflict` distinguishable from
+        // `storage_unavailable` at the agent surface.
+        cairn_store::StoreError::Refused { code, message } => WireError::new(code, message),
         other => WireError::new(codes::STORAGE_UNAVAILABLE, other.to_string()),
     }
 }

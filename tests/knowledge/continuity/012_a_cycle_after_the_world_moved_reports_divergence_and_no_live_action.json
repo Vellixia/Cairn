@@ -1,0 +1,50 @@
+{
+  "description": "The tenth cycle, taken after the commit moved and a relevant path changed. Every field is still delivered, the checkpoint is `diverged`, and the recorded next action is reported as a **previous** one \u2014 presenting it as the action to take is how an agent resumes work that no longer applies (FR-434).",
+  "input": {
+    "extra": {
+      "cycle": 10,
+      "recorded": {
+        "task_bound": true,
+        "commit": "abc123",
+        "branch": "feature/retry",
+        "relevant_paths": [
+          "src/retry.rs"
+        ],
+        "next_action": "finish the retry backoff in src/retry.rs"
+      },
+      "moved": {
+        "commit": "def456",
+        "relevant_paths": [
+          "src/retry.rs"
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "required_fields": [
+        "task_id",
+        "task_state_digest",
+        "branch",
+        "commit",
+        "relevant_paths",
+        "next_action",
+        "restore_count"
+      ],
+      "forbidden_fields": [
+        "summary",
+        "transcript",
+        "assistant_message",
+        "user_prompt",
+        "conversation"
+      ],
+      "checkpoint_state": "diverged",
+      "divergence_kinds": [
+        "commit",
+        "files"
+      ],
+      "next_action_is_live": false,
+      "previous_next_action_present": true
+    }
+  }
+}

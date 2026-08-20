@@ -307,6 +307,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror 2.0.19",
+ "unicode-normalization",
  "uuid",
 ]
 
@@ -318,6 +319,7 @@ dependencies = [
  "cairn-integrate",
  "cairn-store",
  "cairn-sys",
+ "chrono",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -409,6 +411,7 @@ dependencies = [
  "anyhow",
  "cairn-core",
  "cairn-git",
+ "cairn-integrate",
  "cairn-store",
  "chrono",
  "clap",

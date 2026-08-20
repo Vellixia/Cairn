@@ -1,0 +1,35 @@
+{
+  "description": "B opens a blocker offline while A satisfies a criterion. Both arrive, and readiness on both machines reflects both - an open blocker is decisive wherever it was opened.",
+  "input": {
+    "extra": {
+      "task": {
+        "criteria": [
+          "one"
+        ]
+      },
+      "store_a": {
+        "criterion_changes": [
+          {
+            "label": "AC-1",
+            "state": "satisfied"
+          }
+        ]
+      },
+      "store_b": {
+        "blockers": [
+          "staging credentials expired"
+        ]
+      },
+      "clocks": [
+        "2026-01-01T00:00:00Z",
+        "2026-06-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "digests_match": true,
+      "readiness": "not_ready"
+    }
+  }
+}

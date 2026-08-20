@@ -1,0 +1,25 @@
+{
+  "description": "A memory supported by both an attested fact and a Cairn-read digest, verified by the digest, has authority `cairn`: a deterministic check did establish the claim, and saying otherwise would understate what Cairn knows. The attested fact stays attached and stays labelled (metric 25c).",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "verified",
+          "collector": "agent",
+          "verifier": "runtime_state"
+        },
+        {
+          "result": "verified",
+          "collector": "cairn",
+          "verifier": "file_digest"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": "cairn",
+      "satisfies_deterministic_requirement": true
+    }
+  }
+}

@@ -244,7 +244,65 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             session_id,
             reason,
             token_budget,
-        } => context(d, &cwd, agent_session_key, session_id, reason, token_budget).await,
+            explain,
+        } => {
+            context(
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                reason,
+                token_budget,
+                explain,
+            )
+            .await
+        }
+
+        Request::SessionCheckpoint {
+            cwd,
+            agent_session_key,
+            session_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = resolve_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+
+            // A checkpoint anchors to a handoff. When none exists yet, one is
+            // derived first rather than refusing with `no_boundary_record` —
+            // asking for a checkpoint is a reasonable thing to do at any point,
+            // and the boundary record is Cairn's job to produce (FR-425).
+            let handoff = match repo::latest_handoff(&d.store, s.id)
+                .await
+                .map_err(storage_err)?
+            {
+                Some(h) => h,
+                None => {
+                    handoffs::generate_boundary_record(d, &s, HandoffTrigger::PreCompact, r.policy)
+                        .await?
+                }
+            };
+
+            let worktree = std::path::PathBuf::from(r.worktree());
+            let checkpoint = crate::continuity::write(
+                d,
+                &s,
+                handoff.id,
+                CheckpointTrigger::Explicit,
+                &worktree,
+                &handoff.next_step,
+            )
+            .await?;
+
+            Ok(json!({
+                "checkpoint": {
+                    "id": checkpoint.id,
+                    "handoff_id": checkpoint.handoff_id,
+                    "trigger": checkpoint.trigger,
+                    "assumed": checkpoint.assumed,
+                    "next_action": checkpoint.next_action,
+                    "relevant_paths": checkpoint.assumed.path_fingerprints.len(),
+                }
+            }))
+        }
 
         Request::HandoffGenerate {
             cwd,
@@ -295,7 +353,18 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         Request::TaskGet { cwd, task_id } => {
             d.resolve(&cwd).await?;
             let t = repo::task(&d.store, task_id).await.map_err(storage_err)?;
-            Ok(json!({ "task": t }))
+            let mut out = json!({ "task": t });
+            // The new read-only fields. `local_revision` is what an agent
+            // passes back as `expected_revision`; `state_digest` is what two
+            // machines compare. They answer different questions and are never
+            // interchangeable (D80).
+            let detail = task_detail(d, task_id).await?;
+            if let (Some(o), Some(m)) = (out.as_object_mut(), detail.as_object()) {
+                for (k, v) in m {
+                    o.insert(k.clone(), v.clone());
+                }
+            }
+            Ok(out)
         }
         Request::TaskCreate {
             cwd,
@@ -304,12 +373,16 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             acceptance_criteria,
         } => {
             let r = d.resolve(&cwd).await?;
+            // The seeded criteria are attributed in the change log. Resolving
+            // without creating is deliberate: see `authoring_session`.
+            let session = authoring_session(d, &r, None, None).await?;
             let t = repo::create_task(
                 &d.store,
                 r.project.id,
                 &title,
                 &goal,
                 &acceptance_criteria,
+                session,
                 r.policy,
             )
             .await
@@ -325,6 +398,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             status,
         } => {
             let r = d.resolve(&cwd).await?;
+            let session = authoring_session(d, &r, None, None).await?;
             let t = repo::update_task(
                 &d.store,
                 task_id,
@@ -332,11 +406,215 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 goal.as_deref(),
                 acceptance_criteria.as_deref(),
                 status,
+                session,
                 r.policy,
             )
             .await
             .map_err(storage_err)?;
             Ok(json!({ "task": t }))
+        }
+
+        Request::TaskCriterionAdd {
+            cwd,
+            agent_session_key,
+            session_id,
+            task_id,
+            text,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            let c = cairn_store::criteria::add_criterion(&d.store, task_id, &text, s, r.policy)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "criterion": criterion_json(&c) }))
+        }
+        Request::TaskCriterionSet {
+            cwd,
+            agent_session_key,
+            session_id,
+            criterion_id,
+            state,
+            text,
+            expected_revision,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            if state.is_none() && text.is_none() {
+                return Err(WireError::invalid("pass --state or --text"));
+            }
+            let mut c = None;
+            if let Some(state) = state {
+                c = Some(
+                    cairn_store::criteria::set_criterion_state(
+                        &d.store,
+                        criterion_id,
+                        state,
+                        expected_revision,
+                        s,
+                        r.policy,
+                    )
+                    .await
+                    .map_err(storage_err)?,
+                );
+            }
+            if let Some(text) = text {
+                // A second change in the same call compares against the revision
+                // the first one produced, because the caller's token was already
+                // honoured by that write.
+                //
+                // Only when the caller supplied one, though. A caller that
+                // supplied none is making a blind write, and *both* halves must
+                // be recorded as blind — otherwise `cairn task history` shows
+                // half an overwrite while the other half reads as checked
+                // (FR-490).
+                let expected = expected_revision.and(
+                    c.as_ref()
+                        .map(|c: &cairn_store::criteria::Criterion| c.revision),
+                );
+                c = Some(
+                    cairn_store::criteria::set_criterion_text(
+                        &d.store,
+                        criterion_id,
+                        &text,
+                        expected.or(expected_revision),
+                        s,
+                        r.policy,
+                    )
+                    .await
+                    .map_err(storage_err)?,
+                );
+            }
+            Ok(json!({ "criterion": c.as_ref().map(criterion_json) }))
+        }
+        Request::TaskCriterionVerify {
+            cwd,
+            agent_session_key,
+            session_id,
+            criterion_id,
+            evidence_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            if let Some(evidence_id) = evidence_id {
+                cairn_store::evidence::attach_to_criterion(&d.store, criterion_id, evidence_id, s)
+                    .await
+                    .map_err(storage_err)?;
+            }
+            let verdict = crate::verify::verify_criterion(
+                d,
+                r.project.id,
+                std::path::Path::new(&r.worktree()),
+                criterion_id,
+                s,
+                r.policy,
+            )
+            .await?;
+            let c = cairn_store::criteria::criterion_by_id(&d.store, criterion_id)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "criterion": criterion_json(&c), "verdict": verdict }))
+        }
+        Request::TaskCriterionRemove {
+            cwd,
+            agent_session_key,
+            session_id,
+            criterion_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            cairn_store::criteria::remove_criterion(&d.store, criterion_id, s, r.policy)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "removed": criterion_id }))
+        }
+        Request::TaskBlockerOpen {
+            cwd,
+            agent_session_key,
+            session_id,
+            task_id,
+            description,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            let b =
+                cairn_store::criteria::open_blocker(&d.store, task_id, &description, s, r.policy)
+                    .await
+                    .map_err(storage_err)?;
+            Ok(json!({ "blocker": blocker_json(&b) }))
+        }
+        Request::TaskBlockerClear {
+            cwd,
+            agent_session_key,
+            session_id,
+            blocker_id,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = authoring_session(d, &r, session_id, agent_session_key.as_deref()).await?;
+            let b = cairn_store::criteria::clear_blocker(&d.store, blocker_id, s, r.policy)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({ "blocker": blocker_json(&b) }))
+        }
+        Request::TaskReadiness { cwd, task_id } => {
+            d.resolve(&cwd).await?;
+            let readiness = cairn_store::criteria::readiness(&d.store, task_id)
+                .await
+                .map_err(storage_err)?;
+            Ok(json!({
+                "progress": readiness.progress,
+                "open_blockers": readiness.open_blockers,
+                "completion_readiness": readiness.completion_readiness,
+            }))
+        }
+        Request::TaskHistory {
+            cwd,
+            task_id,
+            limit,
+        } => {
+            d.resolve(&cwd).await?;
+            let changes = cairn_store::criteria::history(&d.store, task_id, limit.unwrap_or(100))
+                .await
+                .map_err(storage_err)?;
+            let changes: Vec<serde_json::Value> = changes
+                .iter()
+                .map(|c| {
+                    json!({
+                        "local_revision": c.local_revision,
+                        "kind": c.kind,
+                        "subject_id": c.subject_id,
+                        "session_id": c.session_id,
+                        "prior_value": c.prior_value,
+                        "new_value": c.new_value,
+                        "blind_write": c.blind_write,
+                    })
+                })
+                .collect();
+            Ok(json!({ "changes": changes }))
+        }
+
+        Request::MemoryPin {
+            cwd,
+            agent_session_key,
+            session_id,
+            memory_id,
+            pinned,
+            reason,
+        } => {
+            let r = d.resolve(&cwd).await?;
+            let s = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+            let config = d.config.read().await.clone();
+            repo::set_pinned(
+                &d.store,
+                memory_id,
+                pinned,
+                reason.as_deref(),
+                s.id,
+                config.pin_budget_project,
+                config.pin_budget_per_scope,
+            )
+            .await
+            .map_err(storage_err)?;
+            Ok(json!({ "memory_id": memory_id, "pinned": pinned }))
         }
 
         Request::MemoryCreate {
@@ -349,6 +627,9 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             content,
             evidence_observation_ids,
             local_only,
+            topic_key,
+            value_key,
+            importance,
         } => {
             memory_create(
                 d,
@@ -362,12 +643,18 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 evidence_observation_ids,
                 local_only,
                 None,
+                SubjectProposal {
+                    topic_key,
+                    value_key,
+                    importance,
+                },
             )
             .await
         }
         Request::MemorySupersede {
             cwd,
             agent_session_key,
+            session_id,
             memory_id,
             kind,
             scope,
@@ -375,12 +662,15 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             content,
             evidence_observation_ids,
             local_only,
+            topic_key,
+            value_key,
+            importance,
         } => {
             memory_create(
                 d,
                 &cwd,
                 agent_session_key,
-                None,
+                session_id,
                 kind,
                 scope,
                 scope_key,
@@ -388,9 +678,155 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 evidence_observation_ids,
                 local_only,
                 Some(memory_id),
+                SubjectProposal {
+                    topic_key,
+                    value_key,
+                    importance,
+                },
             )
             .await
         }
+        Request::MemorySubject {
+            cwd,
+            topic_key,
+            scope,
+            scope_key,
+        } => memory_subject(d, &cwd, topic_key, scope, scope_key).await,
+        Request::RebuildDerived { cwd } => rebuild_derived(d, &cwd).await,
+        Request::PatternList { cwd, trust, signal } => {
+            crate::patterns::list(d, &cwd, trust, signal).await
+        }
+        Request::PatternShow { cwd, id } => crate::patterns::show(d, &cwd, id).await,
+        Request::PatternPromote {
+            cwd,
+            memory_id,
+            title,
+            problem,
+            signals,
+            applicability,
+            root_cause,
+            approach,
+            constraints,
+            dry_run,
+        } => {
+            crate::patterns::promote(
+                d,
+                &cwd,
+                crate::patterns::PromoteRequest {
+                    memory_id,
+                    title,
+                    problem,
+                    signals,
+                    applicability,
+                    root_cause,
+                    approach,
+                    constraints,
+                    dry_run,
+                },
+            )
+            .await
+        }
+        Request::PatternOutcome {
+            cwd,
+            id,
+            outcome,
+            signals,
+            alternative_cause,
+            evidence_id,
+            session,
+        } => {
+            crate::patterns::record_outcome(
+                d,
+                &cwd,
+                id,
+                outcome,
+                signals,
+                alternative_cause,
+                evidence_id,
+                session,
+            )
+            .await
+        }
+        Request::PatternForget { cwd, id } => crate::patterns::forget(d, &cwd, id).await,
+        Request::MemoryReinforce {
+            cwd,
+            agent_session_key,
+            session_id,
+            memory_id,
+            from_memory_id,
+        } => {
+            memory_reinforce(
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                memory_id,
+                from_memory_id,
+            )
+            .await
+        }
+        Request::MemoryReconcile {
+            cwd,
+            agent_session_key,
+            session_id,
+            from_memory_id,
+            to_memory_id,
+            relation,
+            basis,
+            basis_evidence_id,
+            rationale,
+        } => {
+            memory_reconcile(
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                from_memory_id,
+                to_memory_id,
+                relation,
+                basis,
+                basis_evidence_id,
+                rationale,
+            )
+            .await
+        }
+        Request::EvidenceAdd {
+            cwd,
+            agent_session_key,
+            session_id,
+            kind,
+            collector,
+            subject,
+            observed_value,
+            source_locator,
+            observation_id,
+            memory_id,
+            role,
+        } => {
+            evidence_add(
+                d,
+                &cwd,
+                agent_session_key,
+                session_id,
+                kind,
+                collector,
+                subject,
+                observed_value,
+                source_locator,
+                observation_id,
+                memory_id,
+                role,
+            )
+            .await
+        }
+        Request::EvidenceList { cwd, memory_id } => evidence_list(d, &cwd, memory_id).await,
+        Request::EvidenceShow { cwd, evidence_id } => evidence_show(d, &cwd, evidence_id).await,
+        Request::Verify {
+            cwd,
+            memory_id,
+            all,
+            explain,
+        } => verify_now(d, &cwd, memory_id, all, explain).await,
         Request::MemoryForget { cwd, memory_id } => {
             let r = d.resolve(&cwd).await?;
             repo::delete_memory(&d.store, memory_id, r.policy)
@@ -399,11 +835,49 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             Ok(json!({ "deleted": memory_id }))
         }
         Request::MemoryGet { cwd, memory_id } => {
-            d.resolve(&cwd).await?;
-            let m = repo::memory(&d.store, memory_id)
+            let r = d.resolve(&cwd).await?;
+            // Feature 001's answer first, and whole.
+            //
+            // Enriching this call by *replacing* the body with a search result
+            // dropped four fields an existing caller may read — `project_id`,
+            // `origin_session_id`, `updated_at`, `deleted_at` — and, because a
+            // search excludes deleted rows, turned `memory show <forgotten-id>`
+            // from "here is the tombstone" into `not_found`. Gaining fields must
+            // never cost a caller one (FR-497), so the Feature 001 shape is the
+            // base and Feature 003 is laid over it.
+            let base = repo::memory(&d.store, memory_id)
                 .await
                 .map_err(storage_err)?;
-            Ok(json!({ "memory": m }))
+            let mut body = serde_json::to_value(&base).unwrap_or(json!({}));
+
+            // The Feature 003 view, where there is one. A deleted memory has no
+            // search result — it is excluded from search by design — and still
+            // answers with everything Feature 001 ever gave.
+            if let Some(object) = body.as_object_mut() {
+                if let Some(enriched) = cairn_store::search::one(&d.store, r.project.id, memory_id)
+                    .await
+                    .map_err(storage_err)?
+                {
+                    let enriched = serde_json::to_value(&enriched).unwrap_or(json!({}));
+                    for key in [
+                        "topic_key",
+                        "value_key",
+                        "importance",
+                        "pinned",
+                        "verification",
+                        "reinforcement",
+                        "subject",
+                        "temporal",
+                        "provenance",
+                        "rank",
+                    ] {
+                        if let Some(value) = enriched.get(key) {
+                            object.insert(key.into(), value.clone());
+                        }
+                    }
+                }
+            }
+            Ok(json!({ "memory": body }))
         }
         Request::MemorySearch {
             cwd,
@@ -504,6 +978,7 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         version: Some(env!("CARGO_PKG_VERSION").to_string()),
         local_schema_version: cairn_store::migrate::latest_version(),
         sessions_awaiting_handoff: debt.0,
+        knowledge: knowledge_health(d, r.project.id).await,
         handoff_synthesis_failures: debt
             .1
             .into_iter()
@@ -511,6 +986,42 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
             .collect(),
     };
     Ok(serde_json::to_value(payload).unwrap_or(json!({})))
+}
+
+/// The subject mechanism's reach in this project, and what it is reporting.
+///
+/// `None` only when the read fails: status must not fail because a metric could
+/// not be computed.
+async fn knowledge_health(
+    d: &Daemon,
+    project_id: Uuid,
+) -> Option<cairn_core::wire::KnowledgeHealth> {
+    let a = repo::subject_adoption(&d.store, project_id).await.ok()?;
+    Some(cairn_core::wire::KnowledgeHealth {
+        project_memories: a.project_memories,
+        with_subject: a.with_subject,
+        subject_share_percent: a.percent(),
+        conflicted_subjects: a.conflicted_subjects,
+        needs_recheck: a.needs_recheck,
+        drifted: a.drifted,
+        sync_degradation: crate::sync::degradation(d, project_id).await,
+    })
+}
+
+/// Recompute every derived value in this project and report what differed.
+async fn rebuild_derived(d: &Daemon, cwd: &str) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let outcomes = cairn_store::diag::rebuild_derived(&d.store, r.project.id)
+        .await
+        .map_err(storage_err)?;
+    let differed: i64 = outcomes.iter().map(|o| o.differed).sum();
+    Ok(json!({
+        "derived": outcomes,
+        "differed": differed,
+        // The caller exits non-zero on this, so a release cannot ship a store
+        // whose derived values disagree with the records behind them.
+        "consistent": differed == 0,
+    }))
 }
 
 /// Mark memory whose scope key no longer resolves as `stale` (FR-018).
@@ -563,7 +1074,7 @@ async fn integration_mode(d: &Daemon) -> String {
 ///
 /// A worktree may hold several active sessions, so ambiguity is reported
 /// rather than guessed (FR-010).
-async fn resolve_session(
+pub(crate) async fn resolve_session(
     d: &Daemon,
     r: &Resolved,
     session_id: Option<Uuid>,
@@ -592,17 +1103,7 @@ async fn resolve_session(
             "no active session in this worktree; start one with `cairn session start`",
         )),
         1 => Ok(active.into_iter().next().expect("length checked")),
-        _ => {
-            let ids: Vec<String> = active.iter().map(|s| s.id.to_string()).collect();
-            Err(WireError::new(
-                codes::AMBIGUOUS_SESSION,
-                format!(
-                    "{} active sessions here; pass --session: {}",
-                    ids.len(),
-                    ids.join(", ")
-                ),
-            ))
-        }
+        _ => Err(ambiguous_session(&active)),
     }
 }
 
@@ -795,6 +1296,29 @@ async fn observe(
     repo::touch_session(&d.store, session.id)
         .await
         .map_err(storage_err)?;
+
+    // Drift marking rides the capture path (T063). It is one indexed lookup by
+    // exact locator, capped at `evidence_lookups_per_event_max`, and it writes
+    // exactly `verification` on the memories the fact supports. Exceeding the
+    // cap defers to the background pass and is not an error, which is what
+    // keeps a hook inside Feature 001's 250 ms deadline with its always-exit-0
+    // rule unchanged (FR-374, FR-475).
+    if let Some(o) = &stored {
+        if o.kind == ObservationType::FileChanged {
+            if let Some(path) = o.path.as_deref() {
+                let report = crate::drift::mark_for_path(d, r.project.id, path).await;
+                if report.marked > 0 {
+                    tracing::debug!(
+                        path,
+                        marked = report.marked,
+                        deferred = report.deferred,
+                        "marked claims for recheck"
+                    );
+                }
+            }
+        }
+    }
+
     match stored {
         Some(o) => Ok(json!({ "observation_id": o.id, "recorded": true })),
         None => Ok(json!({ "recorded": false, "reason": "excluded" })),
@@ -812,6 +1336,7 @@ async fn context(
     session_id: Option<Uuid>,
     _reason: Option<ContextReason>,
     token_budget: Option<usize>,
+    explain: bool,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let budget = token_budget.unwrap_or(d.config.read().await.context_budget_tokens);
@@ -821,8 +1346,69 @@ async fn context(
     // another agent's task goal (FR-010, M1).
     let session = session_for_read(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    let payload = briefing::build(d, &r, session.as_ref(), budget, false).await?;
-    Ok(serde_json::to_value(payload).unwrap_or(json!({})))
+    let payload = briefing::build(d, &r, session.as_ref(), budget, false, explain).await?;
+    let mut out = serde_json::to_value(payload).unwrap_or(json!({}));
+
+    // The mode Cairn can honestly promise this agent — derived from Feature
+    // 002's capability profile, never from a capability of its own (FR-426).
+    if let Some(mode) = continuity_mode(d, session.as_ref()).await {
+        if let Some(o) = out.as_object_mut() {
+            o.insert("continuity_mode".into(), json!(mode));
+        }
+    }
+
+    // A post-compaction refresh is where a checkpoint is restored.
+    if _reason == Some(ContextReason::PostCompaction) {
+        if let Some(restored) = restore_checkpoint(d, &r, session.as_ref()).await {
+            if let Some(o) = out.as_object_mut() {
+                o.insert("checkpoint".into(), restored);
+            }
+        }
+    }
+
+    // Whether the task advanced since this session bound to it (FR-489, D80).
+    //
+    // Derived by diffing the bound snapshot against the current records — never
+    // read from `task_changes`, which is local and would silently omit a
+    // criterion another machine changed even though the row itself arrived.
+    // Phase 8 places this in the Level 0 tier; it is reported here so a session
+    // is never presented as having worked against the current state.
+    if let Some(divergence) = task_divergence(d, session.as_ref()).await {
+        if let Some(o) = out.as_object_mut() {
+            o.insert("task_divergence".into(), divergence);
+        }
+    }
+    Ok(out)
+}
+
+/// What materially changed on the bound task since the session bound to it.
+///
+/// `None` when there is no bound task, no snapshot (a session that bound before
+/// this feature existed genuinely does not know, and synthesizing one would
+/// produce a false report), or nothing changed.
+async fn task_divergence(d: &Daemon, session: Option<&Session>) -> Option<serde_json::Value> {
+    let session = session?;
+    let task_id = session.task_id?;
+    let snapshot: Option<String> =
+        sqlx::query_scalar("SELECT task_snapshot_at_bind FROM sessions WHERE id = ?1")
+            .bind(session.id.to_string())
+            .fetch_optional(d.store.pool())
+            .await
+            .ok()
+            .flatten();
+    let snapshot = snapshot?;
+
+    let changes = cairn_store::criteria::divergence(&d.store, task_id, &snapshot)
+        .await
+        .ok()?;
+    if changes.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "task_id": task_id,
+        "advanced": true,
+        "changes": changes,
+    }))
 }
 
 /// The session a read-only request applies to.
@@ -852,19 +1438,35 @@ async fn session_for_read(
     match active.len() {
         0 => Ok(None),
         1 => Ok(active.into_iter().next()),
-        _ => {
-            let ids: Vec<String> = active.iter().map(|s| s.id.to_string()).collect();
-            Err(WireError::new(
-                codes::AMBIGUOUS_SESSION,
-                format!(
-                    "{} sessions are active in this worktree; pass --session or \
-                     agent_session_key: {}",
-                    ids.len(),
-                    ids.join(", ")
-                ),
-            ))
-        }
+        _ => Err(ambiguous_session(&active)),
     }
+}
+
+/// Report the ambiguity with enough to settle it.
+///
+/// The ids alone name the candidates but say nothing about which one the caller
+/// wants. Naming each session's agent and how long it has been silent is what
+/// makes the answer obvious in the case that actually occurs: an agent that was
+/// restarted rather than exited leaves its old session active and silent, and
+/// the live one is the one that just spoke (#41).
+fn ambiguous_session(active: &[Session]) -> WireError {
+    let now = chrono::Utc::now();
+    let described: Vec<String> = active
+        .iter()
+        .map(|s| {
+            let quiet_for = (now - s.last_event_at).num_minutes().max(0);
+            format!("{} ({}, silent {quiet_for}m)", s.id, s.agent)
+        })
+        .collect();
+    WireError::new(
+        codes::AMBIGUOUS_SESSION,
+        format!(
+            "{} sessions are active in this worktree; pass --session or \
+             agent_session_key: {}",
+            described.len(),
+            described.join(", ")
+        ),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +1506,596 @@ async fn most_recent_session(d: &Daemon, r: &Resolved) -> Result<Session, WireEr
 // Memory
 // ---------------------------------------------------------------------------
 
+/// The subject identity a caller proposed, carried as one value so the create
+/// path does not grow three more positional arguments.
+///
+/// Every field optional: a caller that supplies none receives Feature 001
+/// behaviour exactly, and the memory is stored free-form (FR-313, FR-497).
+#[derive(Debug, Clone, Default)]
+pub struct SubjectProposal {
+    pub topic_key: Option<String>,
+    pub value_key: Option<String>,
+    pub importance: Option<Importance>,
+}
+
+// ---------------------------------------------------------------------------
+// Evidence and verification (T057)
+// ---------------------------------------------------------------------------
+
+/// Render one fact for output, with its value already redacted and bounded at
+/// the point it was stored.
+fn evidence_json(f: &cairn_store::evidence::EvidenceFact) -> serde_json::Value {
+    json!({
+        "id": f.id,
+        "kind": f.kind,
+        "collector": f.collector,
+        "subject": f.subject,
+        "observed_value": f.observed_value,
+        "source_locator": f.source_locator,
+        "repo_branch": f.repo_branch,
+        "repo_commit": f.repo_commit,
+        "collected_by_session": f.collected_by_session,
+        "observation_id": f.observation_id,
+        // A deleted fact resolves as deleted rather than disappearing
+        // (FR-358, FR-505).
+        "deleted": f.deleted,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn evidence_add(
+    d: &Daemon,
+    cwd: &str,
+    agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    kind: EvidenceKind,
+    collector: Option<EvidenceCollector>,
+    subject: String,
+    observed_value: String,
+    source_locator: String,
+    observation_id: Option<Uuid>,
+    memory_id: Option<Uuid>,
+    role: Option<EvidenceRole>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+    let git = git_status(r.repo.worktree_path.clone()).await?;
+    let config = d.config.read().await.clone();
+
+    // A path Cairn was told not to look at yields no fact at all, and the
+    // reason is `evidence_excluded` rather than `no_evidence` — "I was told not
+    // to look" and "nobody attached anything" are different answers.
+    if config.is_path_excluded(&source_locator) {
+        return Err(WireError::new(
+            codes::EVIDENCE_EXCLUDED,
+            "that locator matches a privacy exclusion; no evidence was created",
+        ));
+    }
+
+    // Cairn may only claim to have collected something it can actually read.
+    // Anything else is an agent's attestation, and is labelled as one.
+    let collector = collector.unwrap_or(match kind {
+        EvidenceKind::RuntimeState => EvidenceCollector::Agent,
+        _ => EvidenceCollector::Cairn,
+    });
+
+    let fingerprint = cairn_core::digest(&observed_value);
+    let fact = cairn_store::evidence::record(
+        &d.store,
+        cairn_store::evidence::NewEvidence {
+            project_id: r.project.id,
+            kind,
+            collector,
+            subject: &subject,
+            observed_value: &observed_value,
+            source_locator: &source_locator,
+            fingerprint: &fingerprint,
+            observation_id,
+            repo_branch: &git.branch,
+            repo_commit: git.commit_sha.as_deref(),
+            collected_by_session: session.id,
+        },
+        config.evidence_value_max_bytes,
+        config.evidence_locator_max_bytes,
+    )
+    .await
+    .map_err(|e| {
+        let text = e.to_string();
+        if text.contains(codes::ABSOLUTE_LOCATOR) {
+            WireError::new(codes::ABSOLUTE_LOCATOR, text)
+        } else if text.contains(codes::EVIDENCE_OUTSIDE_WORKTREE) {
+            WireError::new(codes::EVIDENCE_OUTSIDE_WORKTREE, text)
+        } else {
+            storage_err(e)
+        }
+    })?;
+
+    let mut body = json!({ "evidence": evidence_json(&fact) });
+    if let Some(memory_id) = memory_id {
+        cairn_store::evidence::attach_to_memory(
+            &d.store,
+            memory_id,
+            fact.id,
+            role.unwrap_or(EvidenceRole::Supports),
+            session.id,
+        )
+        .await
+        .map_err(storage_err)?;
+        body["attached_to"] = json!(memory_id);
+
+        // Whether either branch below has already read the post-attachment
+        // state back, so the second one does not repeat a rebuild the first
+        // already performed against the same attachment.
+        let mut rebuilt = false;
+
+        // The attestation **is** the act that establishes the claim.
+        //
+        // `contracts/evidence-verification.md` §Agent-attested says an agent
+        // submitting an observed value and its digest may move a memory to
+        // `verified` with authority `attested`. Nothing did. `cairn verify`
+        // correctly refuses to re-run an agent's observation — Cairn has no way
+        // to — and no other path recorded a run, so `attested` was reachable
+        // from a store-level call in the test suite and from no caller at all.
+        //
+        // The run goes through the ordinary verifier with the submission as its
+        // captured outcome, rather than being written `verified` directly: that
+        // way the digest is really compared, and re-attesting a *different*
+        // value against the same fact drifts instead of quietly re-verifying.
+        if collector == EvidenceCollector::Agent {
+            if let Some(verifier @ VerifierKind::RuntimeState) = crate::verify::verifier_for(&fact)
+            {
+                let captured = crate::verify::CapturedOutcome {
+                    outcome: observed_value.clone(),
+                    exit_code: 0,
+                    commit: git.commit_sha.clone(),
+                };
+                let worktree = std::path::PathBuf::from(&r.repo.worktree_path);
+                let outcome = crate::verify::run_verifier(
+                    &worktree,
+                    &config,
+                    &fact,
+                    verifier,
+                    Some(&captured),
+                );
+                cairn_store::evidence::record_run(
+                    &d.store,
+                    cairn_store::evidence::NewRun {
+                        project_id: r.project.id,
+                        memory_id: Some(memory_id),
+                        criterion_id: None,
+                        verifier,
+                        evidence_id: Some(fact.id),
+                        expected_digest: fact.fingerprint.as_deref(),
+                        observed_digest: outcome.observed.as_deref(),
+                        result: outcome.result,
+                        detail: outcome.detail.as_deref(),
+                        repo_branch: &git.branch,
+                        repo_commit: git.commit_sha.as_deref(),
+                        trigger: VerifyTrigger::Attach,
+                    },
+                )
+                .await
+                .map_err(storage_err)?;
+                let (state, authority) =
+                    cairn_store::evidence::rebuild_verification_after_run(&d.store, memory_id)
+                        .await
+                        .map_err(storage_err)?;
+                body["verification"] = json!({ "state": state, "authority": authority });
+                rebuilt = true;
+            }
+        }
+
+        // A contradiction is not inert. It has no run of its own to record —
+        // the fact itself, already attached above, is what the derivation
+        // reads — but it can move the memory to `conflicted` on the spot, and
+        // a caller told only `attached_to` would have no way to learn that
+        // without a second round trip. Skipped when the branch above already
+        // rebuilt: that call saw the same attachment, since it happens after
+        // it, so a second rebuild here would only repeat it.
+        if !rebuilt && role == Some(EvidenceRole::Contradicts) {
+            let (state, authority) =
+                cairn_store::evidence::rebuild_verification(&d.store, memory_id)
+                    .await
+                    .map_err(storage_err)?;
+            body["verification"] = json!({ "state": state, "authority": authority });
+        }
+    }
+    Ok(body)
+}
+
+async fn evidence_list(d: &Daemon, cwd: &str, memory_id: Option<Uuid>) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let facts = match memory_id {
+        Some(id) => cairn_store::evidence::facts_for_memory(&d.store, id)
+            .await
+            .map_err(storage_err)?
+            .into_iter()
+            .map(|(role, f)| {
+                let mut v = evidence_json(&f);
+                v["role"] = json!(role);
+                v
+            })
+            .collect::<Vec<_>>(),
+        None => cairn_store::evidence::facts_for_project(&d.store, r.project.id)
+            .await
+            .map_err(storage_err)?
+            .iter()
+            .map(evidence_json)
+            .collect(),
+    };
+    Ok(json!({ "evidence": facts, "total": facts.len() }))
+}
+
+async fn evidence_show(d: &Daemon, cwd: &str, evidence_id: Uuid) -> Reply {
+    d.resolve(cwd).await?;
+    let fact = cairn_store::evidence::fact(&d.store, evidence_id)
+        .await
+        .map_err(storage_err)?;
+    Ok(json!({ "evidence": evidence_json(&fact) }))
+}
+
+/// Verify on demand: the same verifiers and the same caps as the background
+/// pass, reported synchronously (FR-472).
+async fn verify_now(
+    d: &Daemon,
+    cwd: &str,
+    memory_id: Option<Uuid>,
+    all: bool,
+    explain: bool,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let worktree = std::path::PathBuf::from(&r.repo.worktree_path);
+
+    if let Some(id) = memory_id {
+        let (state, authority) = verify_one(d, r.project.id, &worktree, id).await?;
+        let mut body = json!({
+            "memory_id": id,
+            "verification": state,
+            // Never bare: every surface that shows a state shows its authority
+            // (FR-370).
+            "authority": authority,
+        });
+        if explain {
+            body["runs"] = json!(run_history(d, id).await?);
+        } else if state != VerificationState::Verified {
+            // Why it is not verified, without making the caller ask twice. A
+            // locator that names no key produces an `inconclusive` run with the
+            // reason on it, and reporting only `unverified` hid the one line
+            // that says what to change.
+            if let Some(last) = run_history(d, id).await?.into_iter().next() {
+                body["last_run"] = json!({
+                    "result": last["result"],
+                    "detail": last["detail"],
+                    "verifier": last["verifier"],
+                });
+            }
+        }
+        return Ok(body);
+    }
+
+    if !all {
+        return Err(WireError::invalid("verify needs --memory or --all"));
+    }
+
+    let report = crate::verify::bounded_pass(d, r.project.id, &worktree).await;
+    let mut body = json!({
+        "facts_examined": report.facts_examined,
+        "runs_recorded": report.runs_recorded,
+        "memories_updated": report.memories_updated,
+    });
+    if report.yielded {
+        // A cap bound. Remaining work is queued for the next tick; this is an
+        // outcome, not a failure (FR-473).
+        body["notes"] = json!([codes::VERIFY_PASS_YIELDED]);
+    }
+    Ok(body)
+}
+
+async fn verify_one(
+    d: &Daemon,
+    project_id: Uuid,
+    worktree: &std::path::Path,
+    memory_id: Uuid,
+) -> Result<(VerificationState, Option<VerificationAuthority>), WireError> {
+    let config = d.config.read().await.clone();
+    let git = git_status(worktree.to_path_buf()).await?;
+
+    let linked = cairn_store::evidence::facts_for_memory(&d.store, memory_id)
+        .await
+        .map_err(storage_err)?;
+    if linked.is_empty() {
+        // No evidence is a state, not an error: the memory stays unverified and
+        // the reason is that nobody attached anything (FR-473).
+        return Err(WireError::new(
+            codes::NO_EVIDENCE,
+            "that memory carries no evidence, so nothing can be checked",
+        ));
+    }
+
+    for (role, fact) in linked {
+        if role != EvidenceRole::Supports {
+            continue;
+        }
+        let Some(verifier) = crate::verify::verifier_for(&fact) else {
+            continue;
+        };
+        let outcome = crate::verify::run_verifier(worktree, &config, &fact, verifier, None);
+        cairn_store::evidence::record_run(
+            &d.store,
+            cairn_store::evidence::NewRun {
+                project_id,
+                memory_id: Some(memory_id),
+                criterion_id: None,
+                verifier,
+                evidence_id: Some(fact.id),
+                expected_digest: fact.fingerprint.as_deref(),
+                observed_digest: outcome.observed.as_deref(),
+                result: outcome.result,
+                detail: outcome.detail.as_deref(),
+                repo_branch: &git.branch,
+                repo_commit: git.commit_sha.as_deref(),
+                trigger: VerifyTrigger::OnDemand,
+            },
+        )
+        .await
+        .map_err(storage_err)?;
+    }
+
+    // A run was just recorded here, so the conservative guard against
+    // resurrecting a `needs_recheck` state does not apply: these records are
+    // newer than the state they replace.
+    cairn_store::evidence::rebuild_verification_after_run(&d.store, memory_id)
+        .await
+        .map_err(storage_err)
+}
+
+async fn run_history(d: &Daemon, memory_id: Uuid) -> Result<Vec<serde_json::Value>, WireError> {
+    Ok(cairn_store::evidence::runs_for_memory(&d.store, memory_id)
+        .await
+        .map_err(storage_err)?
+        .into_iter()
+        .map(|r| {
+            json!({
+                "verifier": r.verifier,
+                "result": r.result,
+                "detail": r.detail,
+                "repo_branch": r.repo_branch,
+                "repo_commit": r.repo_commit,
+                "checked_at": r.checked_at,
+                "triggered_by": r.trigger,
+            })
+        })
+        .collect())
+}
+
+async fn memory_subject(
+    d: &Daemon,
+    cwd: &str,
+    topic_key: String,
+    scope: Option<MemoryScope>,
+    scope_key: Option<String>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let git = git_status(r.repo.worktree_path.clone()).await?;
+    let scope = scope.unwrap_or(MemoryScope::Project);
+    let key = match (&scope, scope_key) {
+        (_, Some(k)) => k,
+        (MemoryScope::Project, None) => r.project.id.to_string(),
+        (MemoryScope::Branch, None) => git.branch.clone(),
+        (_, None) => {
+            return Err(WireError::invalid(
+                "a task- or session-scoped subject needs an explicit --scope-key",
+            ))
+        }
+    };
+
+    let normalized = cairn_core::knowledge::normalize_topic_key(&topic_key).ok_or_else(|| {
+        WireError::new(
+            codes::INVALID_TOPIC_KEY,
+            "that topic key has no representable characters",
+        )
+    })?;
+
+    let cap = d.config.read().await.reconcile_members_max;
+    let read =
+        cairn_store::knowledge::subject(&d.store, r.project.id, scope, &key, &normalized, cap)
+            .await
+            .map_err(storage_err)?;
+
+    if read.members.is_empty() {
+        return Err(WireError::new(
+            codes::SUBJECT_NOT_FOUND,
+            format!("no subject {normalized} in {scope}:{key}"),
+        ));
+    }
+
+    // What the answers actually say. `MemoryFacts` carries a content digest and
+    // not the content, which is right for the classifier and wrong for a human:
+    // a subject rendered as a column of identifiers does not answer "what does
+    // this project believe?" (FR-307). Fetched for the **answers** only — one
+    // to three rows in practice — rather than for every member.
+    let mut answer_content: std::collections::BTreeMap<Uuid, String> = Default::default();
+    for id in &read.view.answers {
+        if let Ok(m) = cairn_store::repo::memory(&d.store, *id).await {
+            answer_content.insert(*id, m.content);
+        }
+    }
+
+    // Elevation candidates are *reported*, never applied: branch-scoped
+    // knowledge never becomes project knowledge because a branch merged
+    // (FR-382).
+    let mut elevation = Vec::new();
+    if scope == MemoryScope::Project {
+        let worktree = std::path::PathBuf::from(&r.repo.worktree_path);
+        for c in cairn_store::knowledge::branch_scoped_subjects(&d.store, r.project.id)
+            .await
+            .map_err(storage_err)?
+            .into_iter()
+            .filter(|c| c.topic_key == normalized)
+        {
+            let merged = tokio::task::spawn_blocking({
+                let worktree = worktree.clone();
+                let branch = c.branch.clone();
+                let target = git.branch.clone();
+                move || cairn_git::is_merged_into(&worktree, &branch, &target).unwrap_or(false)
+            })
+            .await
+            .unwrap_or(false);
+            if merged {
+                elevation.push(json!({
+                    "memory_id": c.memory_id,
+                    "branch": c.branch,
+                    "value_key": c.value_key,
+                    "applied": false,
+                }));
+            }
+        }
+    }
+
+    Ok(json!({
+        "subject": {
+            "topic_key": normalized,
+            "scope": scope,
+            "scope_key": key,
+            "reconciliation": read.view.reconciliation,
+            "answers": read.view.answers,
+            "narrowed_by": read.view.narrowed_by,
+            "accounting": read.view.accounting.iter().map(|a| json!({
+                "memory_id": a.memory_id,
+                "duplicates": a.duplicates,
+                "distinct_origins": a.distinct_origins,
+            })).collect::<Vec<_>>(),
+            "decisions": read.view.decisions.iter().map(|r| json!({
+                "from": r.from, "to": r.to, "kind": r.kind, "basis": r.basis,
+            })).collect::<Vec<_>>(),
+            "members": read.members.iter().map(|m| json!({
+                "id": m.id,
+                "state": m.state,
+                "value_key": m.value_key,
+                // Present on an answer, absent on every other member: the
+                // question a subject read asks is what the *answers* say.
+                "content": answer_content.get(&m.id),
+                "verification": m.verification,
+                "verification_authority": m.verification_authority,
+                "pinned": m.pinned,
+                "importance": m.importance,
+            })).collect::<Vec<_>>(),
+            "degraded": read.degraded,
+            "elevation_candidates": elevation,
+        }
+    }))
+}
+
+/// Record that a session confirms an existing memory is still true (FR-321).
+async fn memory_reinforce(
+    d: &Daemon,
+    cwd: &str,
+    agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    memory_id: Uuid,
+    from_memory_id: Option<Uuid>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+    let target = repo::memory(&d.store, memory_id)
+        .await
+        .map_err(storage_err)?;
+
+    // Without a memory of its own, the confirmation still needs a `from`
+    // endpoint. The session's own most recent memory is not a substitute — it
+    // may be about something else entirely — so the caller supplies one.
+    let from = from_memory_id.ok_or_else(|| {
+        WireError::invalid("reinforcement needs the memory that carries the confirming statement")
+    })?;
+
+    let wrote = cairn_store::knowledge::reinforce(
+        &d.store,
+        target.project_id,
+        from,
+        memory_id,
+        session.id,
+        RelationBasis::ExplicitAgent,
+    )
+    .await
+    .map_err(storage_err)?;
+
+    let counts: (i64, i64) = sqlx::query_as(
+        "SELECT reinforcement_count, distinct_origin_count FROM memories WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .fetch_one(d.store.pool())
+    .await
+    .map_err(|e| storage_err(cairn_store::StoreError::Sqlx(e)))?;
+
+    Ok(json!({
+        "reinforced": memory_id,
+        "recorded": wrote,
+        // Never presented as a number of independent verifications (FR-406).
+        "reinforcements": counts.0,
+        "distinct_origins": counts.1,
+    }))
+}
+
+/// Record an explicit reconciliation decision (FR-335).
+#[allow(clippy::too_many_arguments)]
+async fn memory_reconcile(
+    d: &Daemon,
+    cwd: &str,
+    agent_session_key: Option<String>,
+    session_id: Option<Uuid>,
+    from_memory_id: Uuid,
+    to_memory_id: Uuid,
+    relation: RelationKind,
+    basis: RelationBasis,
+    basis_evidence_id: Option<Uuid>,
+    rationale: Option<String>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
+
+    // A conflict is detected automatically and resolved never. Leaving one
+    // requires a supersession, a narrowing, or a verification result that
+    // distinguishes the members (FR-334).
+    if relation == RelationKind::ConflictsWith {
+        return Err(WireError::new(
+            codes::NOT_CONFLICTED,
+            "a conflict is detected, not declared; resolve it by superseding or narrowing",
+        ));
+    }
+
+    let rationale = rationale.map(|t| cairn_core::redact::redact(&t));
+    let wrote = cairn_store::knowledge::reconcile_as(
+        &d.store,
+        r.project.id,
+        session.id,
+        from_memory_id,
+        to_memory_id,
+        relation,
+        basis,
+        basis_evidence_id,
+        rationale.as_deref(),
+    )
+    .await
+    .map_err(|e| {
+        let text = e.to_string();
+        if text.contains("relation_conflict") {
+            WireError::new(codes::RELATION_CONFLICT, text)
+        } else if text.contains("invalid_request") {
+            WireError::invalid(text)
+        } else {
+            storage_err(e)
+        }
+    })?;
+
+    Ok(json!({
+        "from": from_memory_id,
+        "to": to_memory_id,
+        "relation": relation,
+        "basis": basis,
+        "recorded": wrote,
+    }))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn memory_create(
     d: &Daemon,
@@ -917,6 +2109,7 @@ async fn memory_create(
     evidence: Vec<Uuid>,
     local_only: bool,
     supersedes: Option<Uuid>,
+    subject: SubjectProposal,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     // A memory needs an origin session, and only that. Evidence is optional and
@@ -936,6 +2129,9 @@ async fn memory_create(
         origin_session_id: session.id,
         local_only,
         evidence: &evidence,
+        topic_key: subject.topic_key.as_deref(),
+        value_key: subject.value_key.as_deref(),
+        importance: subject.importance.unwrap_or(cairn_core::Importance::Normal),
     };
 
     match supersedes {
@@ -946,10 +2142,26 @@ async fn memory_create(
             Ok(json!({ "memory": new, "superseded": old.id }))
         }
         None => {
-            let m = repo::create_memory(&d.store, new, r.policy)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "memory": m }))
+            let out = repo::create_memory_reconciled(
+                &d.store,
+                new,
+                r.policy,
+                d.config.read().await.reconcile_members_max,
+            )
+            .await
+            .map_err(storage_err)?;
+
+            // What reconciliation decided, and the notes that ride an `ok: true`
+            // envelope: an unrepresentable topic key, a deferred decision, or a
+            // corroborating member the writer should look at (FR-312, FR-327,
+            // FR-474).
+            let mut body = json!({ "memory": out.memory });
+            body["reconciliation"] =
+                serde_json::to_value(out.report()).unwrap_or(serde_json::Value::Null);
+            if !out.notes.is_empty() {
+                body["notes"] = json!(out.notes);
+            }
+            Ok(body)
         }
     }
 }
@@ -962,7 +2174,34 @@ async fn memory_create(
 /// got a throwaway session — worsening the ambiguity for everyone else and
 /// stamping the memory with an origin that never did the work. Ambiguity is the
 /// caller's to resolve, exactly as it is for `cairn context`.
-async fn ensure_session_for_memory(
+/// Who a task-model change is attributed to, **without creating a session**.
+///
+/// `ensure_session_for_memory` starts a `cairn-cli` session when there is none,
+/// which is right for a memory — a memory must belong to a session's provenance.
+/// It is wrong here: `cairn task new` has never needed a session, and inventing
+/// one leaves a second active session in the worktree that makes the next
+/// agent's `cairn_context` ambiguous.
+///
+/// The nil UUID means "no session", and is what `cairn task history` renders as
+/// an unattributed change. That is honest: a CLI invocation outside any session
+/// genuinely has no author to name, and naming a throwaway one would be worse
+/// than naming none.
+async fn authoring_session(
+    d: &Daemon,
+    r: &Resolved,
+    session_id: Option<Uuid>,
+    key: Option<&str>,
+) -> Result<Uuid, WireError> {
+    match resolve_session(d, r, session_id, key).await {
+        Ok(s) => Ok(s.id),
+        Err(e) if e.code == codes::NO_ACTIVE_SESSION || e.code == codes::AMBIGUOUS_SESSION => {
+            Ok(Uuid::nil())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+pub(crate) async fn ensure_session_for_memory(
     d: &Daemon,
     r: &Resolved,
     session_id: Option<Uuid>,
@@ -974,7 +2213,26 @@ async fn ensure_session_for_memory(
         Err(_) => {}
     }
     let git = git_status(r.repo.worktree_path.clone()).await?;
-    let key = key.unwrap_or_else(|| format!("cairn-cli-{}", new_id()));
+    // One on-demand session per worktree, not one per call.
+    //
+    // A fresh `new_id()` here minted a distinct key every time, and
+    // `start_session` is idempotent *per key* — so every keyless write created
+    // another session. Two `cairn memory add` calls left two, and the third
+    // call, along with every `cairn context` after it, failed with
+    // `ambiguous_session`: the command that opened the sessions was the command
+    // that broke the worktree. Under concurrency it is worse; 32 parallel
+    // writes left 32 sessions and 21 of them failed outright.
+    //
+    // Deriving the key from the worktree makes the on-demand session stable and
+    // idempotent, which is what `start_session`'s key contract already assumes.
+    // It stays per-worktree because scope resolution is: two worktrees are two
+    // working contexts and must not share one session.
+    let key = key.unwrap_or_else(|| {
+        format!(
+            "cairn-cli-{}",
+            &cairn_core::digest(&r.worktree())[..16.min(cairn_core::digest(&r.worktree()).len())]
+        )
+    });
     repo::start_session(
         &d.store,
         repo::StartSession {
@@ -1036,11 +2294,49 @@ async fn memory_search(
         task_id: session.as_ref().and_then(|s| s.task_id),
         session_id: session.as_ref().map(|s| s.id),
     };
+    let include_patterns = query.include_patterns;
     let results = search::search(&d.store, r.project.id, &query, &ctx)
         .await
         .map_err(storage_err)?;
     let total = results.len();
-    Ok(serde_json::to_value(SearchPayload { results, total }).unwrap_or(json!({})))
+    let mut payload = serde_json::to_value(SearchPayload { results, total }).unwrap_or(json!({}));
+
+    // A **separate** array, and only when asked for. Merging a pattern into
+    // `results` would hand a caller another project's knowledge among its own
+    // memories, with nothing in the shape to say which was which (SC-312).
+    if include_patterns {
+        let signals = crate::briefing::project_signals_for(d, r.project.id, &git.branch).await;
+        let config = d.config.read().await.clone();
+        let matched = cairn_store::patterns::matching(
+            &d.store,
+            &signals,
+            config.pattern_signals_min,
+            config.patterns_in_context_max,
+        )
+        .await
+        .unwrap_or_default();
+
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "patterns".into(),
+                json!(matched
+                    .into_iter()
+                    .map(|(p, overlap)| json!({
+                        "id": p.id,
+                        "title": p.title,
+                        "trust": p.trust,
+                        // Always. A pattern is offered, never asserted here.
+                        "verified_in_this_project": false,
+                        "applicability": p.applicability,
+                        "approach": p.approach,
+                        "constraints": p.constraints,
+                        "signal_overlap": overlap,
+                    }))
+                    .collect::<Vec<_>>()),
+            );
+        }
+    }
+    Ok(payload)
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,6 +2411,151 @@ async fn delete(
         }
     }
     Ok(json!({ "deleted": id, "target": target, "with_memories": with_memories }))
+}
+
+// ---------------------------------------------------------------------------
+// Task work state rendering (`contracts/task-model.md`)
+// ---------------------------------------------------------------------------
+
+/// One criterion, as every surface reports it.
+///
+/// Note what has no key here: a percentage. Progress is counts, derived on
+/// read, and there is nowhere for an agent to write a number of its own
+/// (FR-486).
+fn criterion_json(c: &cairn_store::criteria::Criterion) -> serde_json::Value {
+    json!({
+        "id": c.id,
+        "ordinal": c.ordinal,
+        "label": c.label,
+        "text": c.text,
+        "state": c.state,
+        "verification": c.verification,
+        "revision": c.revision,
+        "deleted": c.deleted,
+    })
+}
+
+fn blocker_json(b: &cairn_store::criteria::Blocker) -> serde_json::Value {
+    json!({
+        "id": b.id,
+        "task_id": b.task_id,
+        "description": b.description,
+        "state": b.state,
+        "opened_by_session": b.opened_by_session,
+        "cleared_by_session": b.cleared_by_session,
+    })
+}
+
+/// The read-only fields `task get` gained.
+///
+/// `local_revision` and `state_digest` sit side by side deliberately: the first
+/// answers "has anything changed since I read this, **here**", the second
+/// answers "do two machines hold the same task state". Conflating them was a
+/// real defect in the first design (D80).
+async fn task_detail(d: &Daemon, task_id: Uuid) -> Result<serde_json::Value, WireError> {
+    let t = repo::task(&d.store, task_id).await.map_err(storage_err)?;
+    let local_revision: i64 = sqlx::query_scalar("SELECT local_revision FROM tasks WHERE id = ?1")
+        .bind(task_id.to_string())
+        .fetch_one(d.store.pool())
+        .await
+        .map_err(|e| storage_err(cairn_store::StoreError::from(e)))?;
+
+    let criteria = cairn_store::criteria::criteria(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+    let blockers = cairn_store::criteria::blockers(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+    let readiness = cairn_store::criteria::readiness(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+    let digest = cairn_store::criteria::state_digest(&d.store, task_id)
+        .await
+        .map_err(storage_err)?;
+
+    // Evidence counts per criterion, so a reader can see what a verification
+    // rests on without the evidence content crossing any boundary.
+    let mut rendered = Vec::new();
+    for c in criteria.iter().filter(|c| !c.deleted) {
+        let facts = cairn_store::evidence::facts_for_criterion(&d.store, c.id)
+            .await
+            .unwrap_or_default();
+        let mut v = criterion_json(c);
+        if let Some(o) = v.as_object_mut() {
+            o.insert("evidence_count".into(), json!(facts.len()));
+            o.insert(
+                "authority".into(),
+                json!(facts
+                    .iter()
+                    .map(|f| f.collector.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()),
+            );
+        }
+        rendered.push(v);
+    }
+
+    let _ = &t;
+    Ok(json!({
+        "local_revision": local_revision,
+        "state_digest": digest,
+        "criteria": rendered,
+        "blockers": blockers
+            .iter()
+            .filter(|b| !b.deleted)
+            .map(blocker_json)
+            .collect::<Vec<_>>(),
+        "progress": readiness.progress,
+        "open_blockers": readiness.open_blockers,
+        "completion_readiness": readiness.completion_readiness,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Continuity (`contracts/continuity-context.md` Part 1)
+// ---------------------------------------------------------------------------
+
+/// What Cairn can honestly promise this agent about compression-safe continuity.
+///
+/// Derived from Feature 002's capability profile (D57). `None` when the session's
+/// agent has no profile — a mode invented for an unknown agent would be a claim
+/// with nothing behind it.
+async fn continuity_mode(d: &Daemon, session: Option<&Session>) -> Option<String> {
+    let _ = d;
+    let agent = session.map(|s| s.agent.as_str())?;
+    let agent = cairn_integrate::AgentId::parse(agent)?;
+    let adapter = cairn_integrate::adapter_for(agent);
+    // The declared profile, not a detected one: the mode is a statement about
+    // what this agent's lifecycle can do, which does not depend on whether its
+    // configuration happens to be installed right now.
+    let profile = adapter.capabilities(&cairn_integrate::Detection::found(None, None));
+    Some(profile.continuity_mode().as_str().to_string())
+}
+
+/// Restore the checkpoint this session should resume from.
+///
+/// The session's own newest checkpoint, else the newest on this branch — a
+/// session that compacted before it had one still resumes informed.
+async fn restore_checkpoint(
+    d: &Daemon,
+    r: &Resolved,
+    session: Option<&Session>,
+) -> Option<serde_json::Value> {
+    let checkpoint = match session {
+        Some(s) => match cairn_store::continuity::latest(&d.store, s.id).await {
+            Ok(Some(c)) => Some(c),
+            _ => cairn_store::continuity::latest_on_branch(&d.store, r.project.id, &s.branch)
+                .await
+                .ok()
+                .flatten(),
+        },
+        None => None,
+    }?;
+
+    let worktree = std::path::PathBuf::from(r.worktree());
+    let restored = crate::continuity::restore(d, &checkpoint, &worktree)
+        .await
+        .ok()?;
+    serde_json::to_value(restored).ok()
 }
 
 #[cfg(test)]
@@ -1434,6 +2875,9 @@ mod tests {
                 content: "Errors are returned, never logged and swallowed".into(),
                 evidence_observation_ids: vec![],
                 local_only: false,
+                topic_key: None,
+                value_key: None,
+                importance: None,
             },
         )
         .await;

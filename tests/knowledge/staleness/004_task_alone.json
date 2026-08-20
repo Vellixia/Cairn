@@ -1,0 +1,45 @@
+{
+  "description": "The task state digest differs, so the task advanced. Decided by the derived digest and never by a counter, so it means the same thing whichever machine moved it (D80).",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_exists": true,
+        "worktree_exists": true,
+        "task_state_digest": "d1",
+        "path_fingerprints": [
+          {
+            "path": "src/retry.rs",
+            "class": "digest",
+            "exists": true,
+            "value": "1111111111111111111111111111111111111111111111111111111111111111"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "diverged",
+      "divergences": [
+        "task"
+      ],
+      "next_action_is_live": false
+    }
+  }
+}

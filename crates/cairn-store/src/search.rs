@@ -8,7 +8,7 @@
 use crate::{repo, rows, Result, Store};
 use cairn_core::domain::*;
 use cairn_core::wire::{MemoryQuery, MemoryResult, Provenance, RankInfo};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
 
@@ -47,7 +47,33 @@ pub async fn search(
     } else {
         sql.push_str(", 0.0 AS relevance FROM memories m WHERE 1 = 1");
     }
-    sql.push_str(" AND m.project_id = ? AND m.deleted_at IS NULL AND m.state = ?");
+    sql.push_str(" AND m.project_id = ? AND m.deleted_at IS NULL");
+    if q.as_of.is_none() {
+        sql.push_str(" AND m.state = ?");
+    } else {
+        // A historical answer is precisely the set of proposals that are no
+        // longer current, so filtering to `active` would return the wrong
+        // thing. The temporal predicate replaces the lifecycle one
+        // (`contracts/knowledge.md` §Temporal queries).
+        sql.push_str(
+            " AND m.effective_from IS NOT NULL AND m.effective_from <= ?\
+              AND (m.superseded_at IS NULL OR m.superseded_at > ?)",
+        );
+    }
+    // A topic key is an identity, not text: it is matched by exact or prefix
+    // SQL comparison and never by FTS (data-model.md §2.1).
+    if let Some(topic) = &q.topic_key {
+        if topic.ends_with('.') {
+            sql.push_str(" AND m.topic_key LIKE ? ESCAPE '\\'");
+        } else {
+            sql.push_str(" AND m.topic_key = ?");
+        }
+    }
+    if q.conflicted || q.corroborated {
+        // A subject state is derived, so it cannot be a SQL predicate. What SQL
+        // can do is narrow to the rows that could possibly qualify.
+        sql.push_str(" AND m.topic_key IS NOT NULL");
+    }
 
     // Explicit filters win; otherwise restrict to the scopes that apply here.
     let mut scope_clause = String::new();
@@ -72,6 +98,16 @@ pub async fn search(
     }
     sql.push_str(&scope_clause);
 
+    // A `drifted` memory is still returned by default: hiding it would make an
+    // agent silently re-derive knowledge Cairn holds (FR-373). These filters
+    // narrow deliberately; they change no default.
+    if q.verification.is_some() {
+        sql.push_str(" AND m.verification = ?");
+    }
+    if q.authority.is_some() {
+        sql.push_str(" AND m.verification_authority = ?");
+    }
+
     if q.kind.is_some() {
         sql.push_str(" AND m.type = ?");
     }
@@ -81,7 +117,25 @@ pub async fn search(
     if let Some(text) = &q.query {
         query = query.bind(fts_query(text));
     }
-    query = query.bind(project_id.to_string()).bind(state.as_str());
+    query = query.bind(project_id.to_string());
+    match &q.as_of {
+        None => query = query.bind(state.as_str()),
+        Some(t) => {
+            let at = t.to_rfc3339();
+            query = query.bind(at.clone()).bind(at);
+        }
+    }
+    if let Some(topic) = &q.topic_key {
+        if let Some(prefix) = topic.strip_suffix('.') {
+            let escaped = prefix
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            query = query.bind(format!("{escaped}.%"));
+        } else {
+            query = query.bind(topic.clone());
+        }
+    }
 
     if let Some(scope) = q.scope {
         query = query.bind(scope.as_str());
@@ -99,51 +153,319 @@ pub async fn search(
             query = query.bind(s.to_string());
         }
     }
+    if let Some(v) = q.verification {
+        query = query.bind(v.as_str());
+    }
+    if let Some(a) = q.authority {
+        query = query.bind(a.as_str());
+    }
     if let Some(kind) = q.kind {
         query = query.bind(kind.as_str());
     }
-    query = query.bind(limit);
+    // A derived filter has to see every candidate before the limit is applied,
+    // or the limit would cut the set the derivation is computed over.
+    let subject_filter = q.conflicted || q.corroborated;
+    query = query.bind(if subject_filter {
+        SUBJECT_FILTER_SCAN_MAX
+    } else {
+        limit
+    });
 
     let raw = query.fetch_all(store.pool()).await?;
+    let keep = if subject_filter {
+        Some(qualifying_subjects(store, project_id, &raw, q.conflicted, q.corroborated).await?)
+    } else {
+        None
+    };
     let now = Utc::now();
-    let mut out = Vec::with_capacity(raw.len());
+
+    // Which rows the caller will actually see, decided *before* anything is
+    // derived. A subject filter reads up to `SUBJECT_FILTER_SCAN_MAX` rows to
+    // find fifty; enriching as we go would derive five hundred subjects to
+    // return ten.
+    let mut kept: Vec<(&sqlx::sqlite::SqliteRow, Memory, Option<String>)> = Vec::new();
     for r in &raw {
         let m = rows::memory_bare(r)?;
-        let evidence = repo::evidence_for(store, m.id).await?;
-        let relevance: f64 = r.try_get("relevance").unwrap_or(0.0);
-        let scope_bucket: i64 = r.try_get("scope_bucket").unwrap_or(3);
-        out.push(MemoryResult {
-            id: m.id,
-            kind: m.kind,
-            scope: m.scope,
-            scope_key: m.scope_key.clone(),
-            content: m.content.clone(),
-            state: m.state,
-            local_only: m.local_only,
-            superseded_by_id: m.superseded_by_id,
-            created_at: m.created_at,
-            provenance: Provenance {
-                session_id: m.origin_session_id,
-                agent: repo::session(store, m.origin_session_id)
-                    .await
-                    .ok()
-                    .map(|s| s.agent),
-                observation_ids: evidence.iter().map(|e| e.observation_id).collect(),
-                evidence_count: evidence.len(),
-                deleted_observation_ids: evidence
-                    .iter()
-                    .filter(|e| e.deleted)
-                    .map(|e| e.observation_id)
-                    .collect(),
-            },
-            rank: RankInfo {
-                scope_bucket,
-                relevance,
-                age_days: (now - m.created_at).num_days(),
-            },
+        let topic_key: Option<String> = r.try_get("topic_key").unwrap_or(None);
+        if let Some(keep) = &keep {
+            match &topic_key {
+                Some(t) if keep.contains_key(&(m.scope, m.scope_key.clone(), t.clone())) => {}
+                _ => continue,
+            }
+        }
+        if kept.len() >= limit as usize {
+            break;
+        }
+        kept.push((r, m, topic_key));
+    }
+
+    // One derivation per distinct subject among the results, not one per
+    // result: several members of one subject are the common case, and the
+    // answer is the same for all of them. A filtered search has already derived
+    // exactly these, and that work is reused rather than repeated.
+    let mut subjects: std::collections::BTreeMap<
+        (MemoryScope, String, String),
+        crate::knowledge::SubjectRead,
+    > = keep.unwrap_or_default();
+    for (_, m, topic_key) in &kept {
+        if let Some(topic) = topic_key {
+            let key = (m.scope, m.scope_key.clone(), topic.clone());
+            // `entry` would need the derivation eagerly, and deriving a subject
+            // already in the map is the cost this cache exists to avoid.
+            if let std::collections::btree_map::Entry::Vacant(slot) = subjects.entry(key) {
+                slot.insert(
+                    crate::knowledge::subject(
+                        store,
+                        project_id,
+                        m.scope,
+                        &m.scope_key,
+                        topic,
+                        crate::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+                    )
+                    .await?,
+                );
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(kept.len());
+    for (r, m, topic_key) in kept {
+        let subject = topic_key.as_ref().and_then(|t| {
+            subjects
+                .get(&(m.scope, m.scope_key.clone(), t.clone()))
+                .map(|read| subject_info(read, m.id))
         });
+        out.push(build_result(store, r, m, topic_key, subject, q.as_of.is_some(), now).await?);
     }
     Ok(out)
+}
+
+/// One memory, with everything a search result carries.
+///
+/// `cairn memory show` used to return Feature 001's `Memory` and nothing else,
+/// so a memory that had drifted looked exactly like one that had not. Reading
+/// *one* memory and reading *a list* of them ask the same question, so they now
+/// answer with the same shape.
+pub async fn one(store: &Store, project_id: Uuid, memory_id: Uuid) -> Result<Option<MemoryResult>> {
+    let row = sqlx::query(
+        "SELECT m.*, \
+                CASE m.scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1 \
+                             WHEN 'project' THEN 2 ELSE 3 END AS scope_bucket, \
+                0.0 AS relevance \
+           FROM memories m WHERE m.id = ?1 AND m.deleted_at IS NULL",
+    )
+    .bind(memory_id.to_string())
+    .fetch_optional(store.pool())
+    .await?;
+    let Some(row) = row else { return Ok(None) };
+
+    let m = rows::memory_bare(&row)?;
+    let topic_key: Option<String> = row.try_get("topic_key").unwrap_or(None);
+    let subject = match &topic_key {
+        Some(topic) => Some(subject_info(
+            &crate::knowledge::subject(
+                store,
+                project_id,
+                m.scope,
+                &m.scope_key,
+                topic,
+                crate::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+            )
+            .await?,
+            m.id,
+        )),
+        None => None,
+    };
+    // Always temporal: asking about one memory by name is asking when it
+    // applied, and there is no result set for the instant to be relative to.
+    Ok(Some(
+        build_result(store, &row, m, topic_key, subject, true, Utc::now()).await?,
+    ))
+}
+
+/// Assemble one result from a row the caller has already read.
+#[allow(clippy::too_many_arguments)]
+async fn build_result(
+    store: &Store,
+    r: &sqlx::sqlite::SqliteRow,
+    m: Memory,
+    topic_key: Option<String>,
+    subject: Option<cairn_core::wire::SubjectInfo>,
+    temporal: bool,
+    now: DateTime<Utc>,
+) -> Result<MemoryResult> {
+    let evidence = repo::evidence_for(store, m.id).await?;
+    let relevance: f64 = r.try_get("relevance").unwrap_or(0.0);
+    let scope_bucket: i64 = r.try_get("scope_bucket").unwrap_or(3);
+    Ok(MemoryResult {
+        id: m.id,
+        kind: m.kind,
+        scope: m.scope,
+        scope_key: m.scope_key.clone(),
+        content: m.content.clone(),
+        state: m.state,
+        local_only: m.local_only,
+        superseded_by_id: m.superseded_by_id,
+        created_at: m.created_at,
+        provenance: Provenance {
+            session_id: m.origin_session_id,
+            agent: repo::session(store, m.origin_session_id)
+                .await
+                .ok()
+                .map(|s| s.agent),
+            observation_ids: evidence.iter().map(|e| e.observation_id).collect(),
+            evidence_count: evidence.len(),
+            deleted_observation_ids: evidence
+                .iter()
+                .filter(|e| e.deleted)
+                .map(|e| e.observation_id)
+                .collect(),
+        },
+        rank: RankInfo {
+            scope_bucket,
+            relevance,
+            age_days: (now - m.created_at).num_days(),
+        },
+        subject,
+        topic_key,
+        value_key: r.try_get("value_key").unwrap_or(None),
+        temporal: temporal.then(|| temporal_of(r, m.state)),
+        importance: rows::enum_val(r, "importance").unwrap_or(Importance::Normal),
+        pinned: rows::boolean(r, "pinned").unwrap_or(false),
+        verification: crate::evidence::local_view(
+            store,
+            m.id,
+            rows::enum_val(r, "verification").unwrap_or(VerificationState::Unverified),
+            r.try_get::<Option<String>, _>("verification_authority")
+                .unwrap_or(None)
+                .and_then(|a| a.parse::<VerificationAuthority>().ok()),
+            r.try_get("last_verified_at").unwrap_or(None),
+        )
+        .await?,
+        reinforcement: cairn_core::wire::Reinforcement {
+            count: r.try_get("reinforcement_count").unwrap_or(0),
+            distinct_origins: r.try_get("distinct_origin_count").unwrap_or(0),
+        },
+    })
+}
+
+/// Where one result stands among the other answers to its subject.
+///
+/// The split is the one the subject state itself rests on: an answer asserting
+/// a **different** value competes, and one asserting the **same** value in
+/// different words corroborates. Cairn merges neither (D46), so a caller that
+/// wants a single answer has to be told what else is there and which kind it
+/// is — otherwise it picks one and calls it the project's position, which is
+/// the silent winner this feature exists to prevent.
+fn subject_info(read: &crate::knowledge::SubjectRead, id: Uuid) -> cairn_core::wire::SubjectInfo {
+    let value_of = |m: Uuid| -> Option<String> {
+        read.members
+            .iter()
+            .find(|x| x.id == m)
+            .and_then(|x| x.value_key.clone())
+    };
+    let mine = value_of(id);
+    let mut competing = Vec::new();
+    let mut corroborating = Vec::new();
+    for answer in &read.view.answers {
+        if *answer == id {
+            continue;
+        }
+        // Two members with no value key at all agree about nothing in
+        // particular, so absence never counts as agreement.
+        if mine.is_some() && value_of(*answer) == mine {
+            corroborating.push(*answer);
+        } else {
+            competing.push(*answer);
+        }
+    }
+    cairn_core::wire::SubjectInfo {
+        reconciliation: read.view.reconciliation,
+        is_canonical_answer: read.view.answers.contains(&id),
+        competing_answers: competing,
+        corroborating_answers: corroborating,
+    }
+}
+
+/// How many rows a derived-subject filter may consider.
+///
+/// A subject state cannot be a SQL predicate, so the filter reads candidates
+/// and derives. The bound is what keeps that from becoming an unbounded scan
+/// (FR-474's discipline applied to a read).
+const SUBJECT_FILTER_SCAN_MAX: i64 = 512;
+
+/// The subjects among the candidate rows whose derived state qualifies.
+///
+/// Returns the derivation, not just the key: every qualifying subject has just
+/// been derived, and every surviving row needs that same derivation for its
+/// `subject` field. Discarding it here only to recompute it twenty lines later
+/// would double the work the bound above exists to limit.
+async fn qualifying_subjects(
+    store: &Store,
+    project_id: Uuid,
+    raw: &[sqlx::sqlite::SqliteRow],
+    conflicted: bool,
+    corroborated: bool,
+) -> Result<std::collections::BTreeMap<(MemoryScope, String, String), crate::knowledge::SubjectRead>>
+{
+    let mut subjects: std::collections::BTreeSet<(MemoryScope, String, String)> =
+        Default::default();
+    for r in raw {
+        let scope: MemoryScope = rows::enum_val(r, "scope")?;
+        let scope_key: String = r.try_get("scope_key")?;
+        if let Some(topic) = r.try_get::<Option<String>, _>("topic_key")? {
+            subjects.insert((scope, scope_key, topic));
+        }
+    }
+
+    let mut keep = std::collections::BTreeMap::new();
+    for (scope, scope_key, topic) in subjects {
+        let read = crate::knowledge::subject(
+            store,
+            project_id,
+            scope,
+            &scope_key,
+            &topic,
+            crate::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+        )
+        .await?;
+        let qualifies = (conflicted
+            && read.view.reconciliation == cairn_core::Reconciliation::Conflicted)
+            || (corroborated
+                && read.view.reconciliation == cairn_core::Reconciliation::Corroborated);
+        if qualifies {
+            keep.insert((scope, scope_key, topic), read);
+        }
+    }
+    Ok(keep)
+}
+
+/// What a historical answer may say about when this proposal applied.
+///
+/// `stale_at` NULL means **unknown**, never "not stale": a memory that went
+/// stale before Cairn recorded staleness instants has no authoritative
+/// instant, so the answer says the applicability is unknown rather than
+/// implying the proposal applied throughout (FR-342, D82).
+fn temporal_of(r: &sqlx::sqlite::SqliteRow, state: MemoryState) -> cairn_core::wire::Temporal {
+    let parse = |col: &str| -> Option<DateTime<Utc>> {
+        r.try_get::<Option<String>, _>(col)
+            .ok()
+            .flatten()
+            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&Utc))
+    };
+    let stale_at = parse("stale_at");
+    let applicability = if state == MemoryState::Stale && stale_at.is_none() {
+        cairn_core::Applicability::Unknown
+    } else {
+        cairn_core::Applicability::Bounded
+    };
+    cairn_core::wire::Temporal {
+        effective_from: parse("effective_from"),
+        superseded_at: parse("superseded_at"),
+        stale_at,
+        applicability,
+    }
 }
 
 /// Turn user text into an FTS5 query.
@@ -204,9 +526,17 @@ mod tests {
         let p = ensure_project(&store, "/tmp/x/.git", "x", None)
             .await
             .unwrap();
-        let t = create_task(&store, p.id, "Rate limit", "429 over limit", &[], LOCAL)
-            .await
-            .unwrap();
+        let t = create_task(
+            &store,
+            p.id,
+            "Rate limit",
+            "429 over limit",
+            &[],
+            new_id(),
+            LOCAL,
+        )
+        .await
+        .unwrap();
         let s = start_session(
             &store,
             StartSession {
@@ -246,6 +576,9 @@ mod tests {
                 origin_session_id: session,
                 local_only: false,
                 evidence: &[],
+                topic_key: None,
+                value_key: None,
+                importance: cairn_core::Importance::Normal,
             },
             LOCAL,
         )
@@ -326,6 +659,9 @@ mod tests {
                 origin_session_id: session,
                 local_only: false,
                 evidence: &[],
+                topic_key: None,
+                value_key: None,
+                importance: cairn_core::Importance::Normal,
             },
             LOCAL,
         )
@@ -402,6 +738,9 @@ mod tests {
                 origin_session_id: session,
                 local_only: false,
                 evidence: &[],
+                topic_key: None,
+                value_key: None,
+                importance: cairn_core::Importance::Normal,
             },
             LOCAL,
         )

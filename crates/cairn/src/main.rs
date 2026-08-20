@@ -1,5 +1,11 @@
 //! `cairn` — the developer's interface, the hook runtime, and the MCP server.
 
+// The MCP tool definitions are one `json!` literal per tool, and
+// `cairn_remember` now carries every Feature 003 action's parameters. The
+// macro expands recursively once per node, so the default limit is reached
+// by a schema that is merely long rather than deep.
+#![recursion_limit = "512"]
+
 mod client;
 mod hook;
 mod integrate;
@@ -62,7 +68,27 @@ enum Command {
         apps: Vec<String>,
     },
     /// Inspect integration health. Makes no change.
-    Doctor { agent: Option<String> },
+    Doctor {
+        agent: Option<String>,
+        /// Recompute every derived value and report how many differed.
+        ///
+        /// Exits non-zero if any did: a release where a derived value
+        /// disagrees with its rebuild ships a known inconsistency.
+        ///
+        /// Scoped to the project this directory resolves to, like every other
+        /// command. There is deliberately no `--project`: it would be a second
+        /// way to say what `cd` already says, and a flag with two meanings is
+        /// how the wrong project gets rebuilt.
+        #[arg(long)]
+        rebuild_derived: bool,
+    },
+    /// Reusable cross-project patterns (`contracts/patterns.md`).
+    ///
+    /// A pattern is local to this machine and never synchronizes.
+    Pattern {
+        #[command(subcommand)]
+        action: PatternAction,
+    },
     /// Restore Cairn-owned state only.
     Repair {
         agent: Option<String>,
@@ -103,6 +129,26 @@ enum Command {
         #[command(subcommand)]
         action: MemoryAction,
     },
+    /// Bounded, redacted evidence facts. Local, always.
+    Evidence {
+        #[command(subcommand)]
+        action: EvidenceAction,
+    },
+    /// Run deterministic verification.
+    ///
+    /// Cairn reads files inside the worktree and Git. It runs no build, no test
+    /// suite and no shell command, and it reaches no network.
+    Verify {
+        /// One memory.
+        #[arg(long)]
+        memory: Option<Uuid>,
+        /// Every memory in the project that owes a check, within the pass caps.
+        #[arg(long)]
+        all: bool,
+        /// Print the run history, not only the current state.
+        #[arg(long)]
+        explain: bool,
+    },
     /// Read a handoff.
     Handoff {
         #[command(subcommand)]
@@ -110,11 +156,21 @@ enum Command {
     },
     /// Print the briefing a session would receive.
     Context {
-        #[arg(long)]
+        #[arg(long, alias = "token-budget")]
         budget: Option<usize>,
         /// Which session to brief, when more than one is open here.
         #[arg(long)]
         session: Option<Uuid>,
+        /// Why the briefing is being assembled. `post_compaction` restores the
+        /// session's checkpoint.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Show why each item was selected and why each omission was left out.
+        ///
+        /// Costs no budget when absent: the diagnostics are computed but only
+        /// returned on request (FR-462, FR-463).
+        #[arg(long)]
+        explain: bool,
     },
     /// Capture exclusions.
     Privacy {
@@ -225,6 +281,15 @@ enum ExportAction {
 enum SessionAction {
     /// Every session in this project, newest first.
     List,
+    /// Record a continuity checkpoint now.
+    ///
+    /// Derives the boundary record first when none exists, rather than
+    /// refusing: asking for a checkpoint is reasonable at any point, and
+    /// producing the handoff it anchors to is Cairn's job (FR-425).
+    Checkpoint {
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
     Start {
         #[arg(long, default_value = "cairn-cli")]
         agent: String,
@@ -269,10 +334,223 @@ enum TaskAction {
         id: Uuid,
         status: String,
     },
+    /// Feature 001's whole-list form. Still works: the list is diffed by text,
+    /// so unchanged entries keep their ids and labels.
+    Update {
+        id: Uuid,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        goal: Option<String>,
+        /// Repeatable. The whole list, as Feature 001 has always taken it.
+        #[arg(long = "acceptance-criteria")]
+        acceptance_criteria: Option<Vec<String>>,
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Acceptance criteria with stable identity.
+    #[command(subcommand)]
+    Criterion(CriterionAction),
+    /// Blockers — append-only, one `open → cleared` transition.
+    #[command(subcommand)]
+    Blocker(BlockerAction),
+    /// Derived progress and completion readiness. Changes no status.
+    Readiness {
+        id: Uuid,
+    },
+    /// The local change log, including blind-write markers.
+    History {
+        id: Uuid,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CriterionAction {
+    Add {
+        task_id: Uuid,
+        #[arg(long)]
+        text: String,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    Set {
+        criterion_id: Uuid,
+        /// `pending`, `satisfied`, `blocked` or `waived`. Independent of
+        /// verification, which only Cairn writes.
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        text: Option<String>,
+        /// The revision you read. Supplying it is how you are protected from
+        /// losing someone else's assertion; omitting it applies the write and
+        /// records it as a blind write.
+        #[arg(long = "expected-revision")]
+        expected_revision: Option<i64>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Ask Cairn to verify the criterion from its evidence.
+    ///
+    /// There is no flag that asserts a verification: a criterion reaches
+    /// `verified` only on a deterministic check this machine ran over evidence
+    /// Cairn collected itself.
+    Verify {
+        criterion_id: Uuid,
+        #[arg(long)]
+        evidence: Option<Uuid>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Tombstone it. Ordinals are not renumbered, so no label changes meaning.
+    Remove {
+        criterion_id: Uuid,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+}
+
+#[derive(Subcommand)]
+enum BlockerAction {
+    Open {
+        task_id: Uuid,
+        #[arg(long)]
+        description: String,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// The only transition, and terminal: reopening creates a new blocker.
+    Clear {
+        blocker_id: Uuid,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PatternAction {
+    /// List promoted patterns with their counters.
+    List {
+        /// `candidate`, `sanitized`, `validated` or `contested`.
+        #[arg(long)]
+        trust: Option<String>,
+        /// Only patterns matching this signal token.
+        #[arg(long)]
+        signal: Option<String>,
+    },
+    /// Full text, applications, counterexamples and the sanitization report.
+    Show { id: Uuid },
+    /// Propose promoting a project memory to a reusable pattern.
+    ///
+    /// Runs the ten-check gate. Any failure refuses, names the class and writes
+    /// nothing.
+    Promote {
+        #[arg(long)]
+        memory: Uuid,
+        /// A symptom token or error signature. Repeatable; at least two must
+        /// survive normalization.
+        #[arg(long = "signal")]
+        signals: Vec<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        problem: Option<String>,
+        /// A condition under which the pattern applies. Repeatable.
+        #[arg(long = "applies-when")]
+        applicability: Vec<String>,
+        #[arg(long)]
+        root_cause: Option<String>,
+        #[arg(long)]
+        approach: Option<String>,
+        /// What the approach does *not* do. Repeatable.
+        #[arg(long = "caveat")]
+        constraints: Vec<String>,
+        /// Report the gate outcome without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Record what happened when a pattern was applied here.
+    Outcome {
+        id: Uuid,
+        /// `resolved`, `not_applicable` or `failed`.
+        #[arg(long)]
+        outcome: String,
+        /// The signals this project saw. Repeatable — one incident, one set.
+        #[arg(long = "signal")]
+        signals: Vec<String>,
+        /// The cause found instead, on a `not_applicable` outcome.
+        #[arg(long)]
+        alternative_cause: Option<String>,
+        /// Deterministic evidence collected in **this** project.
+        #[arg(long)]
+        evidence: Option<Uuid>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Tombstone a pattern. Its applications survive as history.
+    Forget { id: Uuid },
+}
+
+#[derive(Subcommand)]
+enum EvidenceAction {
+    /// Record a fact, optionally attaching it to a memory.
+    Add {
+        /// `observation`, `file`, `git_ref`, `configuration`, `test_outcome`,
+        /// `command_outcome`, `runtime_state`, `schema_version`.
+        #[arg(long = "type")]
+        kind: String,
+        /// What it describes — "database backend".
+        #[arg(long)]
+        subject: String,
+        /// The observed value. Redacted, then bounded.
+        #[arg(long)]
+        value: String,
+        /// Repository-relative path or Git ref. Never absolute. A configuration
+        /// locator names its key after a `#`: `config/app.yml#server.port`.
+        #[arg(long)]
+        locator: String,
+        /// `cairn` when Cairn can read it; `agent` when an agent attests it.
+        #[arg(long)]
+        collector: Option<String>,
+        #[arg(long)]
+        observation: Option<Uuid>,
+        /// The memory it bears on.
+        #[arg(long)]
+        memory: Option<Uuid>,
+        /// `supports` (default) or `contradicts`.
+        #[arg(long)]
+        role: Option<String>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    List {
+        /// Only the facts attached to this memory.
+        #[arg(long)]
+        memory: Option<Uuid>,
+    },
+    Show {
+        id: Uuid,
+    },
 }
 
 #[derive(Subcommand)]
 enum MemoryAction {
+    /// Hold a memory in Level 0 as a standing constraint.
+    ///
+    /// A pin never widens scope, and nothing is ever auto-unpinned to make room
+    /// (FR-453, FR-454).
+    Pin {
+        id: Uuid,
+        /// Unpin it instead.
+        #[arg(long = "off")]
+        off: bool,
+        /// Bounded and redacted before it is stored.
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
     Add {
         content: String,
         #[arg(long = "type", default_value = "fact")]
@@ -287,7 +565,96 @@ enum MemoryAction {
         /// Supporting observation ids. Optional, and never invented.
         #[arg(long = "evidence")]
         evidence: Vec<Uuid>,
+        /// The subject this states something about — `infra.production_database`.
+        ///
+        /// Optional. Without one the memory is free-form and behaves exactly as
+        /// it does today; with one it takes part in reconciliation.
+        #[arg(long)]
+        topic_key: Option<String>,
+        /// The comparable value it asserts. Only meaningful with a topic key.
+        #[arg(long)]
+        value_key: Option<String>,
+        /// Ranks within a bucket, and nothing more: it never changes scope
+        /// precedence and never admits an item into reserved context.
+        #[arg(long)]
+        importance: Option<String>,
         /// Which session recorded this, when more than one is open here.
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Replace a memory, keeping the original and the link between them.
+    ///
+    /// The original is retained and marked superseded, and a `supersedes`
+    /// relation records *who* decided and *when* — which is what lets an
+    /// `--as-of` search still answer what the project believed in July
+    /// (FR-020, FR-323, FR-342).
+    Supersede {
+        content: String,
+        /// The memory this replaces.
+        #[arg(long = "memory-id")]
+        memory_id: Uuid,
+        #[arg(long = "type", default_value = "fact")]
+        kind: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        scope_key: Option<String>,
+        /// Never transmitted, even for a linked project.
+        #[arg(long)]
+        local_only: bool,
+        /// Supporting observation ids. Optional, and never invented.
+        #[arg(long = "evidence")]
+        evidence: Vec<Uuid>,
+        /// The subject the replacement states something about.
+        #[arg(long)]
+        topic_key: Option<String>,
+        /// The comparable value it asserts. Only meaningful with a topic key.
+        #[arg(long)]
+        value_key: Option<String>,
+        #[arg(long)]
+        importance: Option<String>,
+        /// Which session recorded this, when more than one is open here.
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Inspect a subject: its members, its answer or answers, and why.
+    Subject {
+        topic_key: String,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        scope_key: Option<String>,
+    },
+    /// Confirm that an existing memory is still true.
+    ///
+    /// Explicit, always. Cairn never infers a reinforcement from a matching
+    /// value key.
+    Reinforce {
+        id: Uuid,
+        /// The memory carrying this session's confirming statement.
+        #[arg(long)]
+        from: Uuid,
+        #[arg(long)]
+        session: Option<Uuid>,
+    },
+    /// Record an explicit reconciliation decision.
+    Reconcile {
+        #[arg(long)]
+        from: Uuid,
+        #[arg(long)]
+        to: Uuid,
+        /// `supersedes`, `narrows`, `not_applicable_to`, `duplicates` or
+        /// `reinforces`. A conflict is detected, never declared.
+        #[arg(long)]
+        relation: String,
+        /// `deterministic_rule`, `evidence`, `explicit_agent` or
+        /// `explicit_user`.
+        #[arg(long, default_value = "explicit_user")]
+        basis: String,
+        #[arg(long)]
+        basis_evidence: Option<Uuid>,
+        #[arg(long)]
+        rationale: Option<String>,
         #[arg(long)]
         session: Option<Uuid>,
     },
@@ -303,6 +670,29 @@ enum MemoryAction {
         state: Option<String>,
         #[arg(long)]
         limit: Option<i64>,
+        /// Exact subject identity, or a prefix when it ends in a dot.
+        #[arg(long)]
+        topic_key: Option<String>,
+        /// What was effective at an instant, RFC 3339. A historical answer,
+        /// echoed back so it cannot be mistaken for a current one.
+        #[arg(long)]
+        as_of: Option<String>,
+        /// Only memories whose subject is conflicted.
+        #[arg(long)]
+        conflicted: bool,
+        /// Only memories whose subject is corroborated.
+        #[arg(long)]
+        corroborated: bool,
+        /// `unverified`, `verified`, `needs_recheck`, `drifted`, `conflicted`.
+        #[arg(long)]
+        verification: Option<String>,
+        /// Also return signal-matched prior patterns, in a separate array.
+        #[arg(long)]
+        include_patterns: bool,
+        /// What established it: `cairn`, `attested`, `remote_cairn`,
+        /// `remote_attested`.
+        #[arg(long)]
+        authority: Option<String>,
         /// Which session's task to rank by, when more than one is open here.
         #[arg(long)]
         session: Option<Uuid>,
@@ -558,7 +948,17 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             };
             integrate::connect(&opts).await
         }
-        Command::Doctor { agent } => integrate::doctor(parse_agent_opt(agent)?).await,
+        Command::Doctor {
+            agent,
+            rebuild_derived,
+        } => {
+            if *rebuild_derived {
+                rebuild_derived_command().await
+            } else {
+                integrate::doctor(parse_agent_opt(agent)?).await
+            }
+        }
+        Command::Pattern { action } => pattern(action).await,
         Command::Repair {
             agent,
             dry_run,
@@ -589,6 +989,22 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         Command::Session { action } => session(action).await,
         Command::Task { action } => task(action).await,
         Command::Memory { action } => memory(action).await,
+        Command::Evidence { action } => evidence(action).await,
+        Command::Verify {
+            memory,
+            all,
+            explain,
+        } => {
+            let v = client::send(&Request::Verify {
+                cwd: cwd(),
+                memory_id: *memory,
+                all: *all,
+                explain: *explain,
+            })
+            .await?;
+            let text = render::verification(&v);
+            Ok(Output::with(v, text))
+        }
 
         Command::Handoff { action } => {
             let HandoffAction::Show { session } = action;
@@ -603,18 +1019,43 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             Ok(Output::with(v, render::handoff(&h)))
         }
 
-        Command::Context { budget, session } => {
+        Command::Context {
+            budget,
+            session,
+            reason,
+            explain,
+        } => {
+            let reason = match reason {
+                Some(r) => Some(match r.as_str() {
+                    "session_start" => ContextReason::SessionStart,
+                    "continuation" => ContextReason::Continuation,
+                    "refresh" => ContextReason::Refresh,
+                    "post_compaction" => ContextReason::PostCompaction,
+                    other => return Err(WireError::invalid(format!("unknown reason `{other}`"))),
+                }),
+                None => Some(ContextReason::Refresh),
+            };
             let v = client::send(&Request::Context {
                 cwd: cwd(),
                 agent_session_key: None,
                 session_id: *session,
-                reason: Some(ContextReason::Refresh),
+                reason,
                 token_budget: *budget,
+                explain: *explain,
             })
             .await?;
             let payload: ContextPayload =
                 serde_json::from_value(v.clone()).map_err(|e| WireError::invalid(e.to_string()))?;
-            Ok(Output::with(v, render::briefing(&payload)))
+            // Divergence leads. A session resuming after a compaction has to
+            // learn that the ground moved before it reads anything written
+            // against the ground it moved from (FR-434).
+            let mut text = render::continuity(&v);
+            text.push_str(&render::briefing(&payload));
+            if let Some(selection) = payload.selection.as_ref() {
+                text.push_str(&render::selection(selection));
+            }
+            text.push_str(&render::continuity_footer(&v));
+            Ok(Output::with(v, text))
         }
 
         Command::Privacy { action } => privacy(action).await,
@@ -698,7 +1139,7 @@ async fn session(action: &SessionAction) -> Result<Output, WireError> {
             .await?;
             Ok(Output::with(
                 v.clone(),
-                format!("Session {} started.\n", v["session"]["id"]),
+                format!("Session {} started.\n", render::id_of(&v["session"])),
             ))
         }
         SessionAction::Show { session } => {
@@ -714,6 +1155,19 @@ async fn session(action: &SessionAction) -> Result<Output, WireError> {
                     "{}\n",
                     serde_json::to_string_pretty(&v["session"]).unwrap_or_default()
                 ),
+            ))
+        }
+        SessionAction::Checkpoint { session } => {
+            let v = client::send(&Request::SessionCheckpoint {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+            })
+            .await?;
+            let paths = v["checkpoint"]["relevant_paths"].as_u64().unwrap_or(0);
+            Ok(Output::with(
+                v,
+                format!("Checkpoint recorded over {paths} relevant paths.\n"),
             ))
         }
         SessionAction::End {
@@ -879,12 +1333,7 @@ async fn task(action: &TaskAction) -> Result<Output, WireError> {
             let t: Task = serde_json::from_value(v["task"].clone())
                 .map_err(|e| WireError::invalid(e.to_string()))?;
             let mut text = format!("{}\n{}\nStatus: {}\n", t.title, t.goal, t.status);
-            if !t.acceptance_criteria.is_empty() {
-                text.push_str("Acceptance criteria:\n");
-                for c in &t.acceptance_criteria {
-                    text.push_str(&format!("- {c}\n"));
-                }
-            }
+            text.push_str(&render::task_work_state(&v));
             Ok(Output::with(v, text))
         }
         TaskAction::New {
@@ -901,7 +1350,7 @@ async fn task(action: &TaskAction) -> Result<Output, WireError> {
             .await?;
             Ok(Output::with(
                 v.clone(),
-                format!("Task {} created.\n", v["task"]["id"]),
+                format!("Task {} created.\n", render::id_of(&v["task"])),
             ))
         }
         TaskAction::SetStatus { id, status } => {
@@ -917,11 +1366,263 @@ async fn task(action: &TaskAction) -> Result<Output, WireError> {
             .await?;
             Ok(Output::with(v, format!("Task is now {status}.\n")))
         }
+        TaskAction::Update {
+            id,
+            title,
+            goal,
+            acceptance_criteria,
+            status,
+        } => {
+            let status: Option<TaskStatus> = match status {
+                Some(s) => Some(parse_enum("status", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::TaskUpdate {
+                cwd: cwd(),
+                task_id: *id,
+                title: title.clone(),
+                goal: goal.clone(),
+                acceptance_criteria: acceptance_criteria.clone(),
+                status,
+            })
+            .await?;
+            Ok(Output::with(v, "Task updated.\n".to_string()))
+        }
+        TaskAction::Criterion(action) => criterion(action).await,
+        TaskAction::Blocker(action) => blocker(action).await,
+        TaskAction::Readiness { id } => {
+            let v = client::send(&Request::TaskReadiness {
+                cwd: cwd(),
+                task_id: *id,
+            })
+            .await?;
+            let text = render::readiness(&v);
+            Ok(Output::with(v, text))
+        }
+        TaskAction::History { id, limit } => {
+            let v = client::send(&Request::TaskHistory {
+                cwd: cwd(),
+                task_id: *id,
+                limit: *limit,
+            })
+            .await?;
+            let text = render::task_history(&v);
+            Ok(Output::with(v, text))
+        }
+    }
+}
+
+async fn criterion(action: &CriterionAction) -> Result<Output, WireError> {
+    match action {
+        CriterionAction::Add {
+            task_id,
+            text,
+            session,
+        } => {
+            let v = client::send(&Request::TaskCriterionAdd {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                task_id: *task_id,
+                text: text.clone(),
+            })
+            .await?;
+            Ok(Output::with(
+                v.clone(),
+                format!(
+                    "{} added.\n",
+                    v["criterion"]["label"].as_str().unwrap_or("?")
+                ),
+            ))
+        }
+        CriterionAction::Set {
+            criterion_id,
+            state,
+            text,
+            expected_revision,
+            session,
+        } => {
+            let state: Option<CriterionState> = match state {
+                Some(s) => Some(parse_enum("state", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::TaskCriterionSet {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                criterion_id: *criterion_id,
+                state,
+                text: text.clone(),
+                expected_revision: *expected_revision,
+            })
+            .await?;
+            Ok(Output::with(
+                v.clone(),
+                render::criterion_line(&v["criterion"]),
+            ))
+        }
+        CriterionAction::Verify {
+            criterion_id,
+            evidence,
+            session,
+        } => {
+            let v = client::send(&Request::TaskCriterionVerify {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                criterion_id: *criterion_id,
+                evidence_id: *evidence,
+            })
+            .await?;
+            Ok(Output::with(
+                v.clone(),
+                render::criterion_line(&v["criterion"]),
+            ))
+        }
+        CriterionAction::Remove {
+            criterion_id,
+            session,
+        } => {
+            let v = client::send(&Request::TaskCriterionRemove {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                criterion_id: *criterion_id,
+            })
+            .await?;
+            Ok(Output::with(
+                v,
+                "Criterion removed. Ordinals are not renumbered.\n".to_string(),
+            ))
+        }
+    }
+}
+
+async fn blocker(action: &BlockerAction) -> Result<Output, WireError> {
+    match action {
+        BlockerAction::Open {
+            task_id,
+            description,
+            session,
+        } => {
+            let v = client::send(&Request::TaskBlockerOpen {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                task_id: *task_id,
+                description: description.clone(),
+            })
+            .await?;
+            Ok(Output::with(v, "Blocker opened.\n".to_string()))
+        }
+        BlockerAction::Clear {
+            blocker_id,
+            session,
+        } => {
+            let v = client::send(&Request::TaskBlockerClear {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                blocker_id: *blocker_id,
+            })
+            .await?;
+            Ok(Output::with(v, "Blocker cleared.\n".to_string()))
+        }
+    }
+}
+
+async fn evidence(action: &EvidenceAction) -> Result<Output, WireError> {
+    match action {
+        EvidenceAction::Add {
+            kind,
+            subject,
+            value,
+            locator,
+            collector,
+            observation,
+            memory,
+            role,
+            session,
+        } => {
+            let v = client::send(&Request::EvidenceAdd {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                kind: parse_enum("type", kind)?,
+                collector: match collector {
+                    Some(c) => Some(parse_enum("collector", c)?),
+                    None => None,
+                },
+                subject: subject.clone(),
+                observed_value: value.clone(),
+                source_locator: locator.clone(),
+                observation_id: *observation,
+                memory_id: *memory,
+                role: match role {
+                    Some(r) => Some(parse_enum("role", r)?),
+                    None => None,
+                },
+            })
+            .await?;
+            // Who collected it, named at the moment it is recorded. Whether
+            // Cairn read the value or an agent asserted it is what decides
+            // the authority a later verification may claim (FR-370), and a
+            // bare "recorded" leaves the writer unable to tell which they
+            // just created.
+            let text = format!(
+                "Evidence {} recorded.  collector: {}\n",
+                render::id_of(&v["evidence"]),
+                v["evidence"]["collector"].as_str().unwrap_or("?")
+            );
+            Ok(Output::with(v, text))
+        }
+        EvidenceAction::List { memory } => {
+            let v = client::send(&Request::EvidenceList {
+                cwd: cwd(),
+                memory_id: *memory,
+            })
+            .await?;
+            let text = render::evidence_list(&v);
+            Ok(Output::with(v, text))
+        }
+        EvidenceAction::Show { id } => {
+            let v = client::send(&Request::EvidenceShow {
+                cwd: cwd(),
+                evidence_id: *id,
+            })
+            .await?;
+            let text = render::evidence_list(&v);
+            Ok(Output::with(v, text))
+        }
     }
 }
 
 async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
     match action {
+        MemoryAction::Pin {
+            id,
+            off,
+            reason,
+            session,
+        } => {
+            let v = client::send(&Request::MemoryPin {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                memory_id: *id,
+                pinned: !*off,
+                reason: reason.clone(),
+            })
+            .await?;
+            Ok(Output::with(
+                v,
+                if *off {
+                    "Unpinned.\n".to_string()
+                } else {
+                    "Pinned. It now leads every briefing in this scope.\n".to_string()
+                },
+            ))
+        }
         MemoryAction::Add {
             content,
             kind,
@@ -929,9 +1630,16 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             scope_key,
             local_only,
             evidence,
+            topic_key,
+            value_key,
+            importance,
             session,
         } => {
             let kind: MemoryType = parse_enum("type", kind)?;
+            let importance = match importance {
+                Some(i) => Some(parse_enum::<Importance>("importance", i)?),
+                None => None,
+            };
             let scope = match scope {
                 Some(s) => Some(parse_enum::<MemoryScope>("scope", s)?),
                 None => None,
@@ -944,14 +1652,126 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 scope,
                 scope_key: scope_key.clone(),
                 content: content.clone(),
+                topic_key: topic_key.clone(),
+                value_key: value_key.clone(),
+                importance,
                 evidence_observation_ids: evidence.clone(),
                 local_only: *local_only,
             })
             .await?;
-            Ok(Output::with(
-                v.clone(),
-                format!("Remembered {}.\n", v["memory"]["id"]),
-            ))
+            let text = format!(
+                "Remembered {}.\n{}",
+                render::id_of(&v["memory"]),
+                render::reconciliation(&v)
+            );
+            Ok(Output::with(v, text))
+        }
+        MemoryAction::Supersede {
+            content,
+            memory_id,
+            kind,
+            scope,
+            scope_key,
+            local_only,
+            evidence,
+            topic_key,
+            value_key,
+            importance,
+            session,
+        } => {
+            let kind: MemoryType = parse_enum("type", kind)?;
+            let importance = match importance {
+                Some(i) => Some(parse_enum::<Importance>("importance", i)?),
+                None => None,
+            };
+            let scope = match scope {
+                Some(s) => Some(parse_enum::<MemoryScope>("scope", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::MemorySupersede {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                memory_id: *memory_id,
+                kind,
+                scope,
+                scope_key: scope_key.clone(),
+                content: content.clone(),
+                topic_key: topic_key.clone(),
+                value_key: value_key.clone(),
+                importance,
+                evidence_observation_ids: evidence.clone(),
+                local_only: *local_only,
+            })
+            .await?;
+            let text = format!(
+                "Remembered {}.\n  supersedes {}\n",
+                render::id_of(&v["memory"]),
+                v["superseded"].as_str().unwrap_or("?")
+            );
+            Ok(Output::with(v, text))
+        }
+        MemoryAction::Subject {
+            topic_key,
+            scope,
+            scope_key,
+        } => {
+            let scope = match scope {
+                Some(s) => Some(parse_enum::<MemoryScope>("scope", s)?),
+                None => None,
+            };
+            let v = client::send(&Request::MemorySubject {
+                cwd: cwd(),
+                topic_key: topic_key.clone(),
+                scope,
+                scope_key: scope_key.clone(),
+            })
+            .await?;
+            let text = render::subject(&v);
+            Ok(Output::with(v, text))
+        }
+        MemoryAction::Reinforce { id, from, session } => {
+            let v = client::send(&Request::MemoryReinforce {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                memory_id: *id,
+                from_memory_id: Some(*from),
+            })
+            .await?;
+            let counts = format!(
+                "Reinforced. reinforcements {} · distinct origins {}\n",
+                v.get("reinforcements")
+                    .and_then(|n| n.as_i64())
+                    .unwrap_or(0),
+                v.get("distinct_origins")
+                    .and_then(|n| n.as_i64())
+                    .unwrap_or(1),
+            );
+            Ok(Output::with(v, counts))
+        }
+        MemoryAction::Reconcile {
+            from,
+            to,
+            relation,
+            basis,
+            basis_evidence,
+            rationale,
+            session,
+        } => {
+            let v = client::send(&Request::MemoryReconcile {
+                cwd: cwd(),
+                agent_session_key: None,
+                session_id: *session,
+                from_memory_id: *from,
+                to_memory_id: *to,
+                relation: parse_enum("relation", relation)?,
+                basis: parse_enum("basis", basis)?,
+                basis_evidence_id: *basis_evidence,
+                rationale: rationale.clone(),
+            })
+            .await?;
+            Ok(Output::with(v, "Decision recorded.\n".to_string()))
         }
         MemoryAction::Search {
             query,
@@ -960,8 +1780,25 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             kind,
             state,
             limit,
+            topic_key,
+            as_of,
+            conflicted,
+            corroborated,
+            include_patterns,
+            verification,
+            authority,
             session,
         } => {
+            let as_of = match as_of {
+                Some(t) => Some(
+                    chrono::DateTime::parse_from_rfc3339(t)
+                        .map_err(|e| {
+                            WireError::invalid(format!("--as-of must be an RFC 3339 instant: {e}"))
+                        })?
+                        .with_timezone(&chrono::Utc),
+                ),
+                None => None,
+            };
             let q = MemoryQuery {
                 query: query.clone(),
                 scope: match scope {
@@ -978,6 +1815,19 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                     None => None,
                 },
                 limit: *limit,
+                topic_key: topic_key.clone(),
+                as_of,
+                conflicted: *conflicted,
+                corroborated: *corroborated,
+                include_patterns: *include_patterns,
+                verification: match verification {
+                    Some(v) => Some(parse_enum("verification", v)?),
+                    None => None,
+                },
+                authority: match authority {
+                    Some(a) => Some(parse_enum("authority", a)?),
+                    None => None,
+                },
             };
             let v = client::send(&Request::MemorySearch {
                 cwd: cwd(),
@@ -989,20 +1839,22 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             let payload: SearchPayload =
                 serde_json::from_value(v.clone()).map_err(|e| WireError::invalid(e.to_string()))?;
             let mut text = String::new();
+            // A historical answer, echoed back so it cannot be mistaken for a
+            // current one (FR-342, D82). Without this line a `--as-of` result
+            // and a live one are the same eight lines of output.
+            if let Some(instant) = as_of {
+                // RFC 3339, the same spelling the flag takes, so the line can be
+                // pasted back into the command that produced it.
+                text.push_str(&format!(
+                    "as_of {} — what this project believed then, not now\n\n",
+                    instant.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                ));
+            }
             if payload.results.is_empty() {
                 text.push_str("No matching memory.\n");
             }
             for r in &payload.results {
-                text.push_str(&format!(
-                    "{}  [{}/{}] {}\n    from {} session {} · {} evidence\n",
-                    r.id,
-                    r.kind,
-                    r.scope,
-                    r.content,
-                    r.provenance.agent.as_deref().unwrap_or("unknown"),
-                    r.provenance.session_id,
-                    r.provenance.evidence_count
-                ));
+                text.push_str(&render::search_result(r));
             }
             Ok(Output::with(v, text))
         }
@@ -1012,13 +1864,18 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 memory_id: *id,
             })
             .await?;
-            Ok(Output::with(
-                v.clone(),
-                format!(
-                    "{}\n",
-                    serde_json::to_string_pretty(&v["memory"]).unwrap_or_default()
-                ),
-            ))
+            let text =
+                match serde_json::from_value::<cairn_core::wire::MemoryResult>(v["memory"].clone())
+                {
+                    Ok(m) => render::memory_detail(&m),
+                    // A shape this build does not know is still worth showing, and
+                    // showing it raw is better than showing nothing.
+                    Err(_) => format!(
+                        "{}\n",
+                        serde_json::to_string_pretty(&v["memory"]).unwrap_or_default()
+                    ),
+                };
+            Ok(Output::with(v, text))
         }
         MemoryAction::Forget { id } => {
             let v = client::send(&Request::MemoryForget {
@@ -1130,6 +1987,172 @@ async fn auth(action: &AuthAction) -> Result<Output, WireError> {
     }
 }
 
+/// `cairn doctor --rebuild-derived` (FR-478, FR-518, SC-324).
+///
+/// Every derived value recomputed from the records behind it, and how many
+/// disagreed. A difference is a bug report rather than a normal outcome, so a
+/// non-zero count is a non-zero exit — this is a release gate, and a gate that
+/// reports a problem and exits 0 is not one.
+async fn rebuild_derived_command() -> Result<Output, WireError> {
+    let v = client::send(&Request::RebuildDerived { cwd: cwd() }).await?;
+
+    let mut text = String::new();
+    for outcome in v["derived"].as_array().unwrap_or(&Vec::new()) {
+        text.push_str(&format!(
+            "{:<34} {:>6} checked  {:>4} differed\n",
+            outcome["derived"].as_str().unwrap_or(""),
+            outcome["checked"].as_i64().unwrap_or(0),
+            outcome["differed"].as_i64().unwrap_or(0),
+        ));
+    }
+    let differed = v["differed"].as_i64().unwrap_or(0);
+    text.push_str(&if differed == 0 {
+        "\nevery derived value equals its rebuild\n".to_string()
+    } else {
+        format!("\n{differed} derived value(s) disagree with their rebuild\n")
+    });
+
+    if differed > 0 {
+        return Err(WireError::new(
+            "derived_inconsistent",
+            format!("{differed} derived value(s) disagree with their rebuild"),
+        ));
+    }
+    Ok(Output::with(v, text))
+}
+
+/// `cairn pattern …` (`contracts/patterns.md` §Surfaces).
+async fn pattern(action: &PatternAction) -> Result<Output, WireError> {
+    match action {
+        PatternAction::List { trust, signal } => {
+            let trust = match trust {
+                Some(t) => Some(parse_enum::<PatternTrust>("trust", t)?),
+                None => None,
+            };
+            let v = client::send(&Request::PatternList {
+                cwd: cwd(),
+                trust,
+                signal: signal.clone(),
+            })
+            .await?;
+            let mut text = String::new();
+            for p in v["patterns"].as_array().unwrap_or(&Vec::new()) {
+                text.push_str(&format!(
+                    "{}  {}\n  trust {} · {}\n",
+                    p["id"].as_str().unwrap_or(""),
+                    p["title"].as_str().unwrap_or(""),
+                    p["trust"].as_str().unwrap_or(""),
+                    p["counts"].as_str().unwrap_or("")
+                ));
+            }
+            if text.is_empty() {
+                text.push_str("no patterns\n");
+            }
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Show { id } => {
+            let v = client::send(&Request::PatternShow {
+                cwd: cwd(),
+                id: *id,
+            })
+            .await?;
+            let p = &v["pattern"];
+            let mut text = format!(
+                "{}\n  trust {} · unverified in any project but where it was applied\n  {}\n",
+                p["title"].as_str().unwrap_or(""),
+                p["trust"].as_str().unwrap_or(""),
+                v["counts"].as_str().unwrap_or("")
+            );
+            text.push_str(&format!(
+                "  problem   {}\n  cause     {}\n  approach  {}\n",
+                p["problem"].as_str().unwrap_or(""),
+                p["root_cause"].as_str().unwrap_or(""),
+                p["approach"].as_str().unwrap_or("")
+            ));
+            for c in v["alternative_causes"].as_array().unwrap_or(&Vec::new()) {
+                text.push_str(&format!(
+                    "  ⚠ known alternative cause: {}\n",
+                    c.as_str().unwrap_or("")
+                ));
+            }
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Promote {
+            memory,
+            signals,
+            title,
+            problem,
+            applicability,
+            root_cause,
+            approach,
+            constraints,
+            dry_run,
+        } => {
+            let v = client::send(&Request::PatternPromote {
+                cwd: cwd(),
+                memory_id: *memory,
+                title: title.clone(),
+                problem: problem.clone(),
+                signals: signals.clone(),
+                applicability: applicability.clone(),
+                root_cause: root_cause.clone(),
+                approach: approach.clone(),
+                constraints: constraints.clone(),
+                dry_run: *dry_run,
+            })
+            .await?;
+            let text = if *dry_run {
+                format!(
+                    "would promote: {}\n(nothing was written)\n",
+                    v["pattern"]["title"].as_str().unwrap_or("")
+                )
+            } else {
+                format!(
+                    "promoted {}\n  {}\n",
+                    v["pattern"]["id"].as_str().unwrap_or(""),
+                    v["pattern"]["title"].as_str().unwrap_or("")
+                )
+            };
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Outcome {
+            id,
+            outcome,
+            signals,
+            alternative_cause,
+            evidence,
+            session,
+        } => {
+            let v = client::send(&Request::PatternOutcome {
+                cwd: cwd(),
+                id: *id,
+                outcome: parse_enum::<PatternOutcome>("outcome", outcome)?,
+                signals: signals.clone(),
+                alternative_cause: alternative_cause.clone(),
+                evidence_id: *evidence,
+                session: *session,
+            })
+            .await?;
+            let text = format!(
+                "recorded {} ({})\n  trust {} · {}\n",
+                v["outcome"].as_str().unwrap_or(""),
+                v["discovery"].as_str().unwrap_or(""),
+                v["trust"].as_str().unwrap_or(""),
+                v["counts"].as_str().unwrap_or("")
+            );
+            Ok(Output::with(v, text))
+        }
+        PatternAction::Forget { id } => {
+            let v = client::send(&Request::PatternForget {
+                cwd: cwd(),
+                id: *id,
+            })
+            .await?;
+            Ok(Output::with(v, format!("forgotten {id}\n")))
+        }
+    }
+}
+
 async fn sync(action: &SyncAction) -> Result<Output, WireError> {
     match action {
         SyncAction::Status => {
@@ -1149,6 +2172,18 @@ async fn sync(action: &SyncAction) -> Result<Output, WireError> {
                 text.push_str(&format!(
                     "  failed {} {}: {}\n",
                     f.entity_type, f.entity_id, f.error
+                ));
+            }
+            // Retained work is reported on its own line, never folded into
+            // `Failed`: it is waiting, not lost, and saying so is the whole
+            // point of the state (FR-415).
+            if let Some(d) = &s.degradation {
+                text.push_str(&format!(
+                    "Blocked      {} (waiting for: {})\n  server: {}\n  {}\n",
+                    d.blocked,
+                    d.missing_capabilities.join(", "),
+                    d.server_capability,
+                    d.note
                 ));
             }
             Ok(Output::with(v, text))
@@ -1217,7 +2252,10 @@ async fn daemon(action: &DaemonAction) -> Result<Output, WireError> {
             let v = client::send(&Request::DaemonStatus).await?;
             Ok(Output::with(
                 v.clone(),
-                format!("Running since {}\n", v["started_at"]),
+                format!(
+                    "Running since {}\n",
+                    v["started_at"].as_str().unwrap_or("?")
+                ),
             ))
         }
     }

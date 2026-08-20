@@ -1,0 +1,31 @@
+{
+  "description": "A project-scoped answer for service.api_port and a task-scoped one that disagrees. They are never simultaneously applicable, so this is a scope exception and not a conflict: the narrower applies in its own context and the broader is the answer it narrows.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The API listens on port 8080.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The API listens on port 9000.",
+        "scope": "task",
+        "scope_key": "T1",
+        "topic_key": "service.api_port",
+        "value_key": "9000",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

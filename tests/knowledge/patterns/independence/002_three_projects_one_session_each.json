@@ -1,0 +1,41 @@
+{
+  "description": "The same total number of sessions, spread across three projects. This is what independent corroboration looks like, and the counters say so.",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "A",
+          "sessions": 1,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        },
+        {
+          "project": "B",
+          "sessions": 1,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        },
+        {
+          "project": "C",
+          "sessions": 1,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": false
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "rows": 3,
+      "distinct_projects_applied": 3,
+      "qualifying_successes": 3,
+      "trust": "validated"
+    }
+  }
+}

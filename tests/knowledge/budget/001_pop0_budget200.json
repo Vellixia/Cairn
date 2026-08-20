@@ -1,0 +1,21 @@
+{
+  "description": "No task, no warnings, no pins and no checkpoint at a budget of 200. The reserve is withheld and then released unspent, so the briefing is byte-identical to the pre-feature baseline - the reserve is a cap on the lower levels, never a floor Level 0 must spend (FR-442).",
+  "input": {
+    "extra": {
+      "memories": 0,
+      "budget": 200,
+      "criteria": 0,
+      "blockers": 0,
+      "warnings": 0,
+      "pins": 0,
+      "task": false
+    }
+  },
+  "expect": {
+    "extra": {
+      "within_budget": true,
+      "tier_0a_complete": false,
+      "no_regression": true
+    }
+  }
+}

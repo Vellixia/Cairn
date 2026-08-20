@@ -1,0 +1,43 @@
+{
+  "description": "A holds AC-1 and moves it to satisfied; B holds AC-2 and moves it to satisfied. Both machines end with both changes, because criteria upsert by stable id and different criteria are different rows. The two local counters differ and are never compared; both machines compute the same task_state_digest (FR-490, FR-493, SC-330). The same scenario with the two machines' clocks swapped: identical merged state, because nothing in the merge consults a clock.",
+  "input": {
+    "extra": {
+      "task": {
+        "criteria": [
+          "one",
+          "two"
+        ]
+      },
+      "store_a": {
+        "criterion_changes": [
+          {
+            "label": "AC-1",
+            "state": "satisfied"
+          }
+        ]
+      },
+      "store_b": {
+        "criterion_changes": [
+          {
+            "label": "AC-2",
+            "state": "satisfied"
+          }
+        ]
+      },
+      "clocks": [
+        "2026-06-01T00:00:00Z",
+        "2026-01-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "criteria_satisfied": [
+        "AC-1",
+        "AC-2"
+      ],
+      "digests_match": true,
+      "counters_compared": false
+    }
+  }
+}

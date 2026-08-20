@@ -1,0 +1,19 @@
+{
+  "description": "A run that found the claim no longer matches its evidence establishes nothing to have an authority for.",
+  "input": {
+    "extra": {
+      "runs": [
+        {
+          "result": "drifted",
+          "collector": "cairn",
+          "verifier": "configuration"
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": null
+    }
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "description": "Every criterion waived leaves nothing to consider, and no blocker is open, so the task is ready. Vacuous, and deliberately so: the alternative would leave a task permanently unable to be reported ready after its scope was cut.",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "waived",
+          "verification": "unverified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "waived",
+          "verification": "unverified",
+          "deleted": false
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 0,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 2,
+        "total": 2
+      },
+      "readiness": "ready",
+      "action_order": null
+    }
+  }
+}

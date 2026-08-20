@@ -114,6 +114,11 @@ pub async fn claim(store: &Store, project_id: Uuid, limit: i64) -> Result<Vec<(U
           WHERE id IN (
               SELECT id FROM outbox
                WHERE project_id = ?2
+                 -- Spelled out rather than left implied by the two states
+                 -- below. A `blocked` row must never be claimed, and a
+                 -- predicate that says so survives someone adding a third
+                 -- claimable state (FR-418).
+                 AND state != 'blocked'
                  AND (state = 'pending'
                       OR (state = 'in_flight'
                           AND (claimed_at IS NULL OR claimed_at < ?3)))
@@ -197,6 +202,117 @@ pub async fn mark_failed(store: &Store, id: Uuid, error: &str) -> Result<()> {
     Ok(())
 }
 
+/// Work this server cannot hold yet (FR-418).
+///
+/// Neither a failure nor a delivery. The row keeps its idempotency key and its
+/// payload, records the refusal class and the capability the server had at the
+/// time, and is **not** claimable — so it is retried zero times against a
+/// server known to lack the capability, rather than burning a drain cycle each
+/// tick on work that cannot succeed.
+///
+/// The attempt counter is rolled back, because claiming a row that could never
+/// have been delivered is not an attempt at delivering it. Leaving it counted
+/// would make `attempts` read as futile retries when there were none.
+pub async fn mark_blocked(
+    store: &Store,
+    id: Uuid,
+    reason: &str,
+    at_capability: &str,
+    detail: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE outbox
+            SET state = 'blocked', claimed_at = NULL,
+                attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,
+                blocked_reason = ?1, blocked_at_capability = ?2, last_error = ?3
+          WHERE id = ?4",
+    )
+    .bind(reason)
+    .bind(at_capability)
+    // What the server actually said. `blocked_reason` is the class; this is
+    // the sentence that names the missing table or column, which is what
+    // someone diagnosing an unexpected hold needs.
+    .bind(detail)
+    .bind(id.to_string())
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// Return blocked rows the server can now hold to the ordinary queue.
+///
+/// `entity_types` names what the upgraded server can hold. A row whose kind is
+/// still unsupported **stays blocked**: releasing everything on any capability
+/// change would put work back in front of a server that still cannot take it,
+/// and the futile retry the state exists to prevent would happen anyway.
+///
+/// The idempotency key and the payload are untouched, so the delivery that
+/// follows is **the one that was waiting** rather than a second one. The
+/// server's `sync_state` recognises the key and delivery stays exactly-once
+/// with no change to the claim mechanism (SC-331).
+pub async fn release_blocked(
+    store: &Store,
+    project_id: Uuid,
+    entity_types: &[OutboxEntityType],
+) -> Result<u64> {
+    let mut released = 0;
+    for entity_type in entity_types {
+        let n = sqlx::query(
+            "UPDATE outbox
+                SET state = 'pending', blocked_reason = NULL, blocked_at_capability = NULL
+              WHERE project_id = ?1 AND state = 'blocked' AND entity_type = ?2",
+        )
+        .bind(project_id.to_string())
+        .bind(entity_type.as_str())
+        .execute(store.pool())
+        .await?
+        .rows_affected();
+        released += n;
+    }
+    Ok(released)
+}
+
+/// Blocked rows, and the capability gap each is waiting on.
+pub async fn blocked(store: &Store, project_id: Uuid) -> Result<Vec<BlockedItem>> {
+    let rs = sqlx::query(
+        "SELECT entity_type, entity_id, blocked_reason, blocked_at_capability, attempts
+           FROM outbox
+          WHERE project_id = ?1 AND state = 'blocked'
+          ORDER BY created_at",
+    )
+    .bind(project_id.to_string())
+    .fetch_all(store.pool())
+    .await?;
+    rs.iter()
+        .map(|r| {
+            Ok(BlockedItem {
+                entity_type: rows::enum_val(r, "entity_type")?,
+                entity_id: rows::uuid(r, "entity_id")?,
+                reason: r
+                    .try_get::<Option<String>, _>("blocked_reason")?
+                    .unwrap_or_default(),
+                at_capability: r
+                    .try_get::<Option<String>, _>("blocked_at_capability")?
+                    .unwrap_or_default(),
+                attempts: r.try_get("attempts")?,
+            })
+        })
+        .collect()
+}
+
+/// One item the server could not hold.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlockedItem {
+    pub entity_type: cairn_core::domain::OutboxEntityType,
+    pub entity_id: Uuid,
+    /// `unknown_entity_type`, `unknown_field` or `schema_older`.
+    pub reason: String,
+    /// What the server reported it could do when the work was refused.
+    pub at_capability: String,
+    /// Always zero for a row that was never retried, which is the point.
+    pub attempts: i64,
+}
+
 /// A transient failure: release the claim so the next drain retries it.
 ///
 /// The attempt was already counted when the row was claimed.
@@ -232,6 +348,20 @@ pub async fn counts(store: &Store, project_id: Uuid) -> Result<(i64, i64)> {
     .fetch_one(store.pool())
     .await?;
     Ok((pending, failed))
+}
+
+/// Work retained for a server that cannot hold it yet.
+///
+/// Reported separately from `pending` and from `failed`, because it is neither:
+/// counting it as pending would make the queue look stuck, and counting it as
+/// failed would tell the user work was lost that is in fact waiting (FR-415).
+pub async fn blocked_count(store: &Store, project_id: Uuid) -> Result<i64> {
+    Ok(sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox WHERE project_id = ?1 AND state = 'blocked'",
+    )
+    .bind(project_id.to_string())
+    .fetch_one(store.pool())
+    .await?)
 }
 
 pub async fn failures(store: &Store, project_id: Uuid) -> Result<Vec<SyncFailure>> {
@@ -350,6 +480,207 @@ pub fn handoff_payload(h: &Handoff) -> serde_json::Value {
 /// A tombstone. Content is already cleared locally; the server clears its copy.
 pub fn delete_payload(entity_id: Uuid) -> serde_json::Value {
     serde_json::json!({ "id": entity_id, "deleted": true })
+}
+
+/// The memory payload a linked project actually sends (FR-413, FR-502, D66).
+///
+/// Reads the Feature 003 columns and the verification summary from the store,
+/// because they are not on the `Memory` domain struct. One place builds the wire
+/// shape, which is where the privacy boundary is enforced.
+///
+/// What is deliberately absent, and why:
+///
+/// * `content_norm_digest` — a local index, useful to nobody else;
+/// * `pin_reason` — free text a session wrote about local context;
+/// * `local_revision` — a task's local concurrency token, meaningless elsewhere
+///   and unsound if it travelled (D80);
+/// * the memory's *local* authority when it is `remote_*` — relaying a third
+///   machine's authority would be a claim this machine cannot support (FR-368).
+///
+/// Takes a connection rather than the `Store` because every caller builds this
+/// **inside the transaction that wrote the memory**. Querying the pool there
+/// would wait for a connection the open transaction is holding — a deadlock the
+/// single-connection in-memory store makes certain and the file-backed one makes
+/// intermittent.
+pub async fn memory_payload_for(
+    tx: &mut sqlx::SqliteConnection,
+    m: &Memory,
+) -> Result<serde_json::Value> {
+    let mut payload = memory_payload(m);
+
+    let row = sqlx::query(
+        "SELECT topic_key, value_key, importance, effective_from, superseded_at,
+                stale_at, pinned, reinforcement_count, distinct_origin_count
+           FROM memories WHERE id = ?1",
+    )
+    .bind(m.id.to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let (Some(row), Some(obj)) = (row.as_ref(), payload.as_object_mut()) {
+        use sqlx::Row as _;
+        let topic: Option<String> = row.try_get("topic_key").unwrap_or(None);
+        let value: Option<String> = row.try_get("value_key").unwrap_or(None);
+        obj.insert("topic_key".into(), serde_json::json!(topic));
+        obj.insert("value_key".into(), serde_json::json!(value));
+        obj.insert(
+            "importance".into(),
+            serde_json::json!(row.try_get::<String, _>("importance").ok()),
+        );
+        obj.insert(
+            "effective_from".into(),
+            serde_json::json!(row
+                .try_get::<Option<String>, _>("effective_from")
+                .ok()
+                .flatten()),
+        );
+        obj.insert(
+            "superseded_at".into(),
+            serde_json::json!(row
+                .try_get::<Option<String>, _>("superseded_at")
+                .ok()
+                .flatten()),
+        );
+        obj.insert(
+            "stale_at".into(),
+            serde_json::json!(row.try_get::<Option<String>, _>("stale_at").ok().flatten()),
+        );
+        obj.insert(
+            "pinned".into(),
+            serde_json::json!(row.try_get::<i64, _>("pinned").unwrap_or(0) == 1),
+        );
+        obj.insert(
+            "reinforcement_count".into(),
+            serde_json::json!(row.try_get::<i64, _>("reinforcement_count").unwrap_or(0)),
+        );
+        obj.insert(
+            "distinct_origin_count".into(),
+            serde_json::json!(row.try_get::<i64, _>("distinct_origin_count").unwrap_or(0)),
+        );
+    }
+
+    // The five-key verification object. `authority` is sent only as `cairn` or
+    // `attested`: a receiver derives `remote_*` for itself, because "verified
+    // here" is a claim only the local machine can make.
+    if let Ok(summary) = crate::evidence::summary_tx(&mut *tx, m.id).await {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert(
+                "verification".into(),
+                serde_json::json!({
+                    "state": summary.state,
+                    "authority": summary.authority.and_then(|a| match a {
+                        cairn_core::domain::VerificationAuthority::Cairn => Some("cairn"),
+                        cairn_core::domain::VerificationAuthority::Attested => Some("attested"),
+                        // Never relayed. A peer's verification is that peer's
+                        // claim, and this machine cannot vouch for it.
+                        _ => None,
+                    }),
+                    "last_verified_at": summary.last_verified_at,
+                    "fact_count": summary.fact_count,
+                    "basis": summary.basis,
+                }),
+            );
+        }
+    }
+    Ok(payload)
+}
+
+/// One `memory_relations` row on the wire (FR-413).
+///
+/// `basis_evidence_id` and `rationale` are **stripped**. A peer receiving
+/// `basis: "evidence"` with no identifier reads it correctly — the decision was
+/// evidence-backed on another machine — and learns nothing about the evidence
+/// itself.
+pub fn relation_payload(
+    from: Uuid,
+    to: Uuid,
+    kind: &str,
+    decided_by_session: Uuid,
+    decided_at: &str,
+    basis: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "from_memory_id": from,
+        "to_memory_id": to,
+        "kind": kind,
+        "decided_by_session": decided_by_session,
+        "decided_at": decided_at,
+        "basis": basis,
+    })
+}
+
+/// One criterion on the wire.
+///
+/// Carries the stable id and both axes, so disjoint edits converge by identity.
+/// The per-criterion `revision` is local, like the task counter, and is absent.
+pub fn criterion_payload(c: &crate::criteria::Criterion) -> serde_json::Value {
+    serde_json::json!({
+        "id": c.id,
+        "task_id": c.task_id,
+        "ordinal": c.ordinal,
+        "label": c.label,
+        "text": c.text,
+        "state": c.state,
+        "verification": c.verification,
+        "deleted": c.deleted,
+    })
+}
+
+/// One blocker on the wire. Both ends attributed; append-only.
+pub fn blocker_payload(b: &crate::criteria::Blocker) -> serde_json::Value {
+    serde_json::json!({
+        "id": b.id,
+        "task_id": b.task_id,
+        "description": b.description,
+        "state": b.state,
+        "opened_by_session": b.opened_by_session,
+        "cleared_by_session": b.cleared_by_session,
+        "deleted": b.deleted,
+    })
+}
+
+/// A stable identity for a relation, for the outbox's entity id.
+///
+/// A relation has no id column of its own — its primary key is the endpoint
+/// pair and the kind. Deriving the outbox identity from the same three values
+/// keeps the enqueue idempotent: the same decision recorded twice claims the
+/// same row rather than queuing a duplicate.
+pub fn relation_identity(from: Uuid, to: Uuid, kind: &str) -> Uuid {
+    let digest = cairn_core::digest(&format!("{from}\u{1f}{to}\u{1f}{kind}"));
+    let bytes = digest.as_bytes();
+    let mut raw = [0u8; 16];
+    for (i, slot) in raw.iter_mut().enumerate() {
+        *slot = bytes.get(i).copied().unwrap_or(0);
+    }
+    Uuid::from_bytes(raw)
+}
+
+/// A project's sync policy, read inside a transaction.
+///
+/// Lets a write path decide whether to enqueue without every caller threading a
+/// policy it does not otherwise need. An unreadable project is treated as
+/// unlinked: failing to enqueue is recoverable, and refusing the write is not.
+pub async fn policy_for_project_tx(
+    tx: &mut sqlx::SqliteConnection,
+    project_id: Uuid,
+) -> Result<SyncPolicy> {
+    use sqlx::Row as _;
+    let row = sqlx::query("SELECT linked, server_project_id FROM projects WHERE id = ?1")
+        .bind(project_id.to_string())
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some(row) = row else {
+        return Ok(SyncPolicy {
+            linked: false,
+            server_project_id: None,
+        });
+    };
+    let linked: i64 = row.try_get("linked").unwrap_or(0);
+    let server: Option<String> = row.try_get("server_project_id").unwrap_or(None);
+    Ok(SyncPolicy {
+        linked: linked == 1,
+        server_project_id: server.and_then(|s| Uuid::parse_str(&s).ok()),
+    })
 }
 
 #[cfg(test)]

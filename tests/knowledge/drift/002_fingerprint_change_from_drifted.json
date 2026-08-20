@@ -1,0 +1,14 @@
+{
+  "description": "The support moved again. A drifted claim goes back to owing a recheck rather than staying drifted against a value nobody compared.",
+  "input": {
+    "extra": {
+      "from": "drifted",
+      "trigger": "fingerprint_changed"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

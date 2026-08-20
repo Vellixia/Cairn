@@ -41,11 +41,48 @@ pub fn estimate_lines<S: AsRef<str>>(lines: &[S]) -> usize {
 pub struct Budget {
     limit: usize,
     spent: usize,
+    /// The reserve as it was set, for diagnostics.
+    reserve_initial: usize,
+    /// Reserve still withheld from the general pool. Falls as Level 0 spends
+    /// it, and to zero when it is released.
+    reserve_withheld: usize,
+    /// How much of the reserve Level 0 actually spent.
+    reserve_spent: usize,
+    released: bool,
 }
 
 impl Budget {
     pub fn new(limit: usize) -> Self {
-        Self { limit, spent: 0 }
+        Self {
+            limit,
+            spent: 0,
+            reserve_initial: 0,
+            reserve_withheld: 0,
+            reserve_spent: 0,
+            released: false,
+        }
+    }
+
+    /// A budget with a share the lower levels cannot take.
+    ///
+    /// The reserve is a **cap on Level 1 and Level 2**, not a floor Level 0 must
+    /// spend (FR-442). Whatever Level 0 does not use returns to the general
+    /// pool at [`Budget::release_reserve`], which is what makes a project with
+    /// no task, no warnings and no pins deliver exactly what it delivers today.
+    ///
+    /// A reserve larger than the limit is clamped rather than refused: a
+    /// misconfigured fraction should shrink Level 1 to nothing, not panic on a
+    /// session-open path (FR-476).
+    pub fn with_reserve(limit: usize, reserve: usize) -> Self {
+        let reserve = reserve.min(limit);
+        Self {
+            limit,
+            spent: 0,
+            reserve_initial: reserve,
+            reserve_withheld: reserve,
+            reserve_spent: 0,
+            released: false,
+        }
     }
 
     pub fn limit(&self) -> usize {
@@ -56,17 +93,74 @@ impl Budget {
         self.spent
     }
 
+    /// Total budget left, reserved or not.
     pub fn remaining(&self) -> usize {
         self.limit.saturating_sub(self.spent)
     }
 
-    /// Admit `cost` if it fits. Returns false and spends nothing otherwise.
+    /// What a Level 1 or Level 2 admission may still take.
+    ///
+    /// The withheld reserve is subtracted, which is the whole mechanism behind
+    /// "Level 0 content cannot be displaced by Level 1 or Level 2" (I17).
+    pub fn general_remaining(&self) -> usize {
+        self.remaining().saturating_sub(self.reserve_withheld)
+    }
+
+    /// The reserve as configured.
+    pub fn reserve(&self) -> usize {
+        self.reserve_initial
+    }
+
+    /// How much of the reserve Level 0 spent.
+    pub fn reserve_used(&self) -> usize {
+        self.reserve_spent
+    }
+
+    /// How much of the reserve returned to the general pool.
+    pub fn reserve_released(&self) -> usize {
+        if self.released {
+            self.reserve_initial.saturating_sub(self.reserve_spent)
+        } else {
+            0
+        }
+    }
+
+    /// Admit `cost` from the **general** pool if it fits. Returns false and
+    /// spends nothing otherwise.
+    ///
+    /// Measure-before-emit is unchanged: the assembler asks before emitting,
+    /// which is what makes `estimated_tokens <= budget` a property of the loop
+    /// rather than a statistic (FR-445, I16).
     pub fn try_spend(&mut self, cost: usize) -> bool {
-        if self.spent + cost > self.limit {
+        if cost > self.general_remaining() {
             return false;
         }
         self.spent += cost;
         true
+    }
+
+    /// Admit `cost` for Level 0: the reserve first, then the general pool.
+    ///
+    /// Level 0 may spend beyond its reserve when the budget allows (FR-442) —
+    /// the reserve is a guarantee of a minimum, not a ceiling.
+    pub fn try_spend_reserved(&mut self, cost: usize) -> bool {
+        if cost > self.remaining() {
+            return false;
+        }
+        let from_reserve = cost.min(self.reserve_withheld);
+        self.reserve_withheld -= from_reserve;
+        self.reserve_spent += from_reserve;
+        self.spent += cost;
+        true
+    }
+
+    /// Level 0 is complete: stop withholding whatever it did not spend.
+    ///
+    /// Idempotent, because the assembler calls it once per level pass and a
+    /// second call must not resurrect a reserve.
+    pub fn release_reserve(&mut self) {
+        self.released = true;
+        self.reserve_withheld = 0;
     }
 
     /// Admit as many items as fit, in order, and return them.
@@ -143,5 +237,113 @@ mod tests {
             b.try_spend(7);
         }
         assert!(b.spent() <= 100);
+    }
+
+    // -- the Level 0 reserve (FR-442, D58) ---------------------------------
+
+    #[test]
+    fn the_reserve_is_withheld_from_the_general_pool() {
+        // I17: Level 1 and Level 2 cannot displace Level 0 content.
+        let mut b = Budget::with_reserve(1000, 400);
+        assert_eq!(b.general_remaining(), 600);
+        assert!(b.try_spend(600), "the general pool is spendable");
+        assert!(!b.try_spend(1), "and the reserve is not");
+        assert_eq!(b.remaining(), 400, "still there for Level 0");
+    }
+
+    #[test]
+    fn level_zero_spends_the_reserve_first_then_the_general_pool() {
+        let mut b = Budget::with_reserve(1000, 400);
+        assert!(b.try_spend_reserved(300));
+        assert_eq!(b.reserve_used(), 300);
+        assert_eq!(b.general_remaining(), 600, "the general pool is untouched");
+
+        // Level 0 may spend beyond its reserve when the budget allows.
+        assert!(b.try_spend_reserved(300));
+        assert_eq!(b.reserve_used(), 400, "the reserve is exhausted");
+        assert_eq!(b.spent(), 600);
+        assert_eq!(b.general_remaining(), 400, "the overflow came from general");
+    }
+
+    #[test]
+    fn unspent_reserve_returns_to_the_general_pool() {
+        // The half that makes a project with no Level 0 content byte-identical
+        // to what it delivers today.
+        let mut b = Budget::with_reserve(1000, 400);
+        assert!(b.try_spend_reserved(100));
+        b.release_reserve();
+        assert_eq!(b.reserve_released(), 300);
+        assert_eq!(
+            b.general_remaining(),
+            900,
+            "everything Level 0 did not spend is available again"
+        );
+        assert!(b.try_spend(900));
+        assert_eq!(b.spent(), 1000);
+    }
+
+    #[test]
+    fn a_project_with_no_level_zero_content_keeps_the_whole_budget() {
+        let mut b = Budget::with_reserve(3000, 1200);
+        b.release_reserve();
+        assert_eq!(b.general_remaining(), 3000);
+        assert_eq!(b.reserve_used(), 0);
+        assert_eq!(b.reserve_released(), 1200);
+    }
+
+    #[test]
+    fn releasing_twice_does_not_resurrect_a_reserve() {
+        let mut b = Budget::with_reserve(1000, 400);
+        b.release_reserve();
+        b.release_reserve();
+        assert_eq!(b.general_remaining(), 1000);
+        assert_eq!(b.reserve_released(), 400);
+    }
+
+    #[test]
+    fn a_reserve_larger_than_the_budget_is_clamped_not_refused() {
+        // A misconfigured fraction shrinks Level 1 to nothing; it never panics
+        // on the session-open path (FR-476).
+        let mut b = Budget::with_reserve(100, 500);
+        assert_eq!(b.reserve(), 100);
+        assert_eq!(b.general_remaining(), 0);
+        assert!(!b.try_spend(1));
+        assert!(b.try_spend_reserved(100));
+        assert_eq!(b.spent(), 100);
+    }
+
+    #[test]
+    fn spending_never_exceeds_the_limit_on_any_mixture_of_paths() {
+        // The existing never-exceed property, extended to the reserved path
+        // (FR-445, I16). Interleaving the two must not open a hole.
+        for reserve in [0usize, 1, 40, 99, 100] {
+            let mut b = Budget::with_reserve(100, reserve);
+            for i in 0..1000 {
+                if i % 3 == 0 {
+                    b.try_spend_reserved(7);
+                } else {
+                    b.try_spend(5);
+                }
+                if i == 500 {
+                    b.release_reserve();
+                }
+                assert!(
+                    b.spent() <= 100,
+                    "reserve {reserve} overspent at step {i}: {}",
+                    b.spent()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_budget_with_no_reserve_behaves_exactly_as_before() {
+        let mut plain = Budget::new(100);
+        let mut zero = Budget::with_reserve(100, 0);
+        for cost in [10usize, 30, 55, 20] {
+            assert_eq!(plain.try_spend(cost), zero.try_spend(cost));
+            assert_eq!(plain.spent(), zero.spent());
+            assert_eq!(plain.remaining(), zero.remaining());
+        }
     }
 }

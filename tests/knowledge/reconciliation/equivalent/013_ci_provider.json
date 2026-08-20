@@ -1,0 +1,43 @@
+{
+  "description": "Two sessions record ci.provider identically after normalization. Its sibling in ../distinct/ differs in exactly the way that matters: a different value.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "CI runs on GitHub Actions.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "ci.provider",
+        "value_key": "github_actions",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "  CI RUNS ON GITHUB ACTIONS!!  ",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "ci.provider",
+        "value_key": "github_actions",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "reinforced",
+    "answers": [
+      "a"
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "duplicates",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "duplicate",
+      "distinct_origins": 2
+    }
+  }
+}

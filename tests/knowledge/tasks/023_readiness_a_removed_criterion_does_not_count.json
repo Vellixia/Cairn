@@ -1,0 +1,42 @@
+{
+  "description": "A tombstoned criterion is excluded from both progress and readiness. Removal tombstones rather than deletes, so the id and its history survive - but the criterion is no longer work (FR-481).",
+  "input": {
+    "extra": {
+      "criteria": [
+        {
+          "ordinal": 1,
+          "label": "AC-1",
+          "text": "criterion 1",
+          "state": "satisfied",
+          "verification": "verified",
+          "deleted": false
+        },
+        {
+          "ordinal": 2,
+          "label": "AC-2",
+          "text": "criterion 2",
+          "state": "pending",
+          "verification": "unverified",
+          "deleted": true
+        }
+      ],
+      "blockers": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "progress": {
+        "verified": 1,
+        "satisfied_unverified": 0,
+        "blocked": 0,
+        "pending": 0,
+        "waived": 0,
+        "total": 1
+      },
+      "readiness": "ready",
+      "action_order": [
+        "AC-1"
+      ]
+    }
+  }
+}

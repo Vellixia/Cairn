@@ -1,0 +1,43 @@
+{
+  "description": "The paired negative for frontend.framework: the same subject, a different value, and a statement that reads similarly. Merging these would suppress a claim.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The web interface is Next.js.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "frontend.framework",
+        "value_key": "nextjs",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The web interface is SvelteKit.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "frontend.framework",
+        "value_key": "sveltekit",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "conflict_detected"
+    }
+  }
+}

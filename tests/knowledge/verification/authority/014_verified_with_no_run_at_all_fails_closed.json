@@ -1,0 +1,13 @@
+{
+  "description": "A memory reported verified with no successful run has a cache that disagrees with its records. The durable records win (FR-518).",
+  "input": {
+    "extra": {
+      "runs": []
+    }
+  },
+  "expect": {
+    "extra": {
+      "authority": null
+    }
+  }
+}

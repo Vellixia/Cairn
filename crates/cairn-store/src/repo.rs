@@ -9,6 +9,8 @@ use crate::rows;
 use crate::tx;
 use crate::{Result, Store, StoreError};
 use cairn_core::domain::*;
+use cairn_core::knowledge as knowledge_core;
+use cairn_core::knowledge::ProposalOutcome;
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
@@ -158,12 +160,19 @@ pub async fn unlink_project(store: &Store, id: Uuid) -> Result<Project> {
 // Tasks
 // ---------------------------------------------------------------------------
 
+/// Create a task, with a criterion row for each acceptance criterion.
+///
+/// `session` attributes the seeded criteria in the change log. Seeding happens
+/// in this transaction rather than afterwards because a task whose projection
+/// held criteria that no row backed would lose them the first time anything
+/// rewrote the projection (FR-481, FR-492).
 pub async fn create_task(
     store: &Store,
     project_id: Uuid,
     title: &str,
     goal: &str,
     criteria: &[String],
+    session: Uuid,
     policy: SyncPolicy,
 ) -> Result<Task> {
     let id = new_id();
@@ -183,28 +192,19 @@ pub async fn create_task(
     .execute(&mut *tx)
     .await?;
 
-    let created = Task {
-        id,
-        project_id,
-        title: title.to_string(),
-        goal: goal.to_string(),
-        acceptance_criteria: criteria.to_vec(),
-        status: TaskStatus::Todo,
-        created_at: Utc::now(),
-        updated_at: Utc::now(),
-        deleted_at: None,
-    };
-    // Same transaction as the change it describes (D9).
-    outbox::enqueue(
-        &mut *tx,
-        policy,
-        project_id,
-        OutboxEntityType::Task,
-        id,
-        OutboxOperation::Upsert,
-        &outbox::task_payload(&created),
-    )
-    .await?;
+    crate::criteria::seed_criteria_tx(&mut tx, id, criteria, session).await?;
+
+    // Same transaction as the change it describes (D9) — and the criteria as
+    // well as the task.
+    //
+    // Enqueuing only the task left every criterion given at creation time
+    // unqueued and therefore unshared, so a task created with `--criterion`
+    // arrived on a peer as a shell with none of them: zero criteria, and a
+    // completion readiness of `ready` because nothing was outstanding. Only
+    // criteria added *after* creation ever crossed. `enqueue_task` queues the
+    // criteria, the blockers and the task together, which is the same set every
+    // later criterion change already queues.
+    crate::criteria::enqueue_task(&mut tx, store, policy, id).await?;
     tx::commit(tx, "create_task").await?;
     task(store, id).await
 }
@@ -247,7 +247,14 @@ pub async fn list_tasks(
 }
 
 /// Update whichever fields were supplied. Status transitions are unrestricted
-/// and simply recorded (FR-037); there is no revision history (FR-039).
+/// and simply recorded (FR-037).
+///
+/// Feature 003 moved the body to [`crate::criteria::update_task`], which does
+/// the same job plus the criteria diff, the local counter and the change log —
+/// all in one transaction. This stays as the name Feature 001's callers use.
+/// There is deliberately no second write path: a task edit that bypassed the
+/// counter would leave `expected_revision` unsound.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_task(
     store: &Store,
     id: Uuid,
@@ -255,40 +262,10 @@ pub async fn update_task(
     goal: Option<&str>,
     criteria: Option<&[String]>,
     status: Option<TaskStatus>,
+    session: Uuid,
     policy: SyncPolicy,
 ) -> Result<Task> {
-    let current = task(store, id).await?;
-    sqlx::query(
-        "UPDATE tasks SET title = ?1, goal = ?2, acceptance_criteria = ?3, status = ?4,
-                          updated_at = ?5
-         WHERE id = ?6",
-    )
-    .bind(title.unwrap_or(&current.title))
-    .bind(goal.unwrap_or(&current.goal))
-    .bind(
-        serde_json::to_string(criteria.unwrap_or(&current.acceptance_criteria))
-            .unwrap_or_else(|_| "[]".into()),
-    )
-    .bind(status.unwrap_or(current.status).as_str())
-    .bind(rows::now_text())
-    .bind(id.to_string())
-    .execute(store.pool())
-    .await?;
-
-    let updated = task(store, id).await?;
-    let mut tx = tx::begin(store, "update_task").await?;
-    outbox::enqueue(
-        &mut *tx,
-        policy,
-        updated.project_id,
-        OutboxEntityType::Task,
-        id,
-        OutboxOperation::Upsert,
-        &outbox::task_payload(&updated),
-    )
-    .await?;
-    tx::commit(tx, "update_task").await?;
-    Ok(updated)
+    crate::criteria::update_task(store, id, title, goal, criteria, status, session, policy).await
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +309,8 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
             (id, project_id, task_id, user_id, agent, branch, commit_sha, worktree_path,
              agent_session_key, previous_session_id, status, started_at, ended_at,
              last_event_at, last_turn_ended_at, daemon_run_id, end_reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, NULL, ?11, NULL, ?12, NULL)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'active', ?11, NULL, ?11, NULL, ?12, NULL)
+         ON CONFLICT DO NOTHING",
     )
     .bind(id.to_string())
     .bind(input.project_id.to_string())
@@ -349,6 +327,33 @@ pub async fn start_session(store: &Store, input: StartSession<'_>) -> Result<Ses
     .execute(&mut *tx)
     .await?;
     tx::commit(tx, "start_session").await?;
+
+    // The read above and this insert are check-then-act, and `sessions` has a
+    // unique index on `(project_id, agent_session_key)`. Two callers starting
+    // the same session at once both see nothing and both insert; one wins.
+    //
+    // Starting a session that already exists is not an error — it is the
+    // idempotency this function's key contract promises — so the loser reads
+    // the winner's session rather than failing the caller's write.
+    if let Some(existing) = session_by_key(store, input.project_id, input.agent_session_key).await?
+    {
+        if existing.id != id {
+            return Ok(existing);
+        }
+    }
+
+    // A session that starts already bound to a task records the state it bound
+    // at, exactly as `bind_task` does — otherwise a session started with
+    // `--task` could never be told the task advanced under it (FR-489).
+    if let Some(task_id) = input.task_id {
+        if let Ok(snapshot) = crate::criteria::bind_snapshot(store, task_id).await {
+            sqlx::query("UPDATE sessions SET task_snapshot_at_bind = ?2 WHERE id = ?1")
+                .bind(id.to_string())
+                .bind(snapshot)
+                .execute(store.pool())
+                .await?;
+        }
+    }
 
     let created = session(store, id).await?;
     enqueue_session(store, input.policy, &created).await?;
@@ -484,13 +489,24 @@ pub async fn turn_checkpoint(store: &Store, id: Uuid) -> Result<Session> {
     session(store, id).await
 }
 
+/// Bind a session to a task, recording the task state it bound at.
+///
+/// `task_snapshot_at_bind` is what makes a divergence report possible without
+/// synchronizing the local change log: on refresh the snapshot is diffed
+/// against the current records, so a criterion another machine changed shows up
+/// as readily as one this machine changed (FR-489, D80).
 pub async fn bind_task(store: &Store, id: Uuid, task_id: Uuid) -> Result<Session> {
-    sqlx::query("UPDATE sessions SET task_id = ?1, last_event_at = ?2 WHERE id = ?3")
-        .bind(task_id.to_string())
-        .bind(rows::now_text())
-        .bind(id.to_string())
-        .execute(store.pool())
-        .await?;
+    let snapshot = crate::criteria::bind_snapshot(store, task_id).await?;
+    sqlx::query(
+        "UPDATE sessions SET task_id = ?1, task_snapshot_at_bind = ?4, last_event_at = ?2
+         WHERE id = ?3",
+    )
+    .bind(task_id.to_string())
+    .bind(rows::now_text())
+    .bind(id.to_string())
+    .bind(snapshot)
+    .execute(store.pool())
+    .await?;
     session(store, id).await
 }
 
@@ -551,6 +567,49 @@ pub async fn sessions_idle_since(
     let rs = sqlx::query(
         "SELECT * FROM sessions
          WHERE status = 'active' AND deleted_at IS NULL AND last_event_at < ?1",
+    )
+    .bind(cutoff.to_rfc3339())
+    .fetch_all(store.pool())
+    .await?;
+    rs.iter().map(rows::session).collect()
+}
+
+/// Active sessions a newer active session in the same worktree has overtaken,
+/// silent since `cutoff`.
+///
+/// An agent that is restarted rather than exited leaves its session `active`:
+/// no `SessionEnd` arrives, and Cairn has no liveness signal to notice. Every
+/// such session makes the worktree ambiguous, which is what blocks the briefing
+/// an agent asks for before it knows its own session key — the very thing the
+/// idle reaper exists to prevent.
+///
+/// The generous idle timeout is right for a session on its own: a developer
+/// reading and thinking must never be mistaken for one who left. It is far too
+/// generous once a *newer* session is running in the same worktree, because
+/// then the older one is not thinking — something replaced it. That is the
+/// evidence this query looks for, and it is why the caller may apply a much
+/// shorter silence to these than to a session working alone.
+///
+/// Only sessions with a newer sibling are returned, so the newest in a worktree
+/// is never reaped by this rule and a worktree can never be emptied by it. Ties
+/// on `started_at` break on id, so two sessions stamped the same instant still
+/// leave exactly one survivor.
+pub async fn superseded_sessions_idle_since(
+    store: &Store,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<Vec<Session>> {
+    let rs = sqlx::query(
+        "SELECT s.* FROM sessions s
+          WHERE s.status = 'active' AND s.deleted_at IS NULL AND s.last_event_at < ?1
+            AND EXISTS (
+                SELECT 1 FROM sessions n
+                 WHERE n.project_id = s.project_id
+                   AND n.worktree_path = s.worktree_path
+                   AND n.status = 'active' AND n.deleted_at IS NULL
+                   AND (n.started_at > s.started_at
+                        OR (n.started_at = s.started_at AND n.id > s.id))
+            )
+          ORDER BY s.started_at ASC",
     )
     .bind(cutoff.to_rfc3339())
     .fetch_all(store.pool())
@@ -667,17 +726,286 @@ pub struct NewMemory<'a> {
     pub local_only: bool,
     /// Zero or more. Never fabricated to satisfy the schema (FR-019).
     pub evidence: &'a [Uuid],
+    /// The subject this proposal concerns, as the caller proposed it. Optional:
+    /// a free-form memory is fully valid, searchable, briefable and syncable,
+    /// and behaves exactly as it does in Feature 001 (FR-313).
+    ///
+    /// Normalized here rather than by the caller, so every writer gets the same
+    /// treatment. An unrepresentable key does **not** reject the memory: it is
+    /// stored free-form and the reason is reported (FR-312).
+    pub topic_key: Option<&'a str>,
+    /// The comparable value it asserts. Accepted only alongside a topic key.
+    pub value_key: Option<&'a str>,
+    /// A within-bucket ranking hint, and nothing more (FR-308).
+    pub importance: Importance,
+}
+
+impl<'a> NewMemory<'a> {
+    /// A proposal with no subject identity — Feature 001's shape.
+    #[allow(clippy::too_many_arguments)]
+    pub fn free_form(
+        project_id: Uuid,
+        kind: MemoryType,
+        scope: MemoryScope,
+        scope_key: &'a str,
+        content: &'a str,
+        origin_session_id: Uuid,
+        local_only: bool,
+        evidence: &'a [Uuid],
+    ) -> Self {
+        Self {
+            project_id,
+            kind,
+            scope,
+            scope_key,
+            content,
+            origin_session_id,
+            local_only,
+            evidence,
+            topic_key: None,
+            value_key: None,
+            importance: Importance::Normal,
+        }
+    }
+}
+
+/// What creating a proposal turned out to mean for its subject.
+///
+/// Returned alongside the memory so the writer learns what Cairn decided — and,
+/// where Cairn deliberately did **not** decide, which member it matched, so the
+/// party that can read both statements can settle it explicitly (FR-327).
+#[derive(Debug, Clone)]
+pub struct CreateOutcome {
+    pub memory: Memory,
+    pub reconciliation: ProposalOutcome,
+    /// The relation this write actually recorded, carried out of the
+    /// transaction that recorded it rather than re-derived from the outcome.
+    /// A report built from a lookup table can drift from the database; this
+    /// cannot (`contracts/mcp-tools.md` §`reconciliation`).
+    pub relation_recorded: Option<cairn_core::RelationKind>,
+    /// The matched member's value key, taken from the members the classifier
+    /// already held, so the report costs no extra query.
+    pub matched_value_key: Option<String>,
+    /// The subject this proposal joined, **after** normalization — so the
+    /// report names the key the store actually indexed, not the raw one the
+    /// caller typed. `None` for a free-form memory, and for a key that failed
+    /// normalization (FR-312).
+    pub subject: Option<String>,
+    /// Notes for the `ok: true` envelope: `invalid_topic_key`,
+    /// `corroborating_member`, `reconciliation_deferred` (FR-312, FR-474).
+    pub notes: Vec<&'static str>,
+}
+
+impl CreateOutcome {
+    /// The wire form of what reconciliation decided.
+    pub fn report(&self) -> cairn_core::wire::ReconciliationReport {
+        cairn_core::wire::ReconciliationReport::build(
+            &self.reconciliation,
+            self.subject.as_deref(),
+            self.relation_recorded,
+            self.matched_value_key.clone(),
+        )
+    }
 }
 
 pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) -> Result<Memory> {
+    Ok(
+        create_memory_reconciled(store, m, policy, DEFAULT_RECONCILE_MEMBERS_MAX)
+            .await?
+            .memory,
+    )
+}
+
+/// The per-write bound, when the caller has no configuration to hand.
+///
+/// Mirrors `CairnConfig::reconcile_members_max`; `bounds.rs` (T140) asserts the
+/// two agree.
+pub const DEFAULT_RECONCILE_MEMBERS_MAX: usize = 64;
+
+/// Re-queue a memory whose syncable fields changed after it was first sent.
+///
+/// The outbox holds a **snapshot**, taken when the row was queued. A memory
+/// verified after it synced would otherwise keep its peers on the payload from
+/// before the check forever — and `remote_cairn` and `remote_attested`, the
+/// whole point of transmitting an authority, would be unreachable in practice
+/// (FR-368, SC-329).
+///
+/// The idempotency key covers the payload, so re-queuing an unchanged memory is
+/// a no-op rather than a duplicate delivery.
+pub async fn enqueue_memory_upsert(store: &Store, memory_id: Uuid) -> Result<bool> {
+    let m = memory(store, memory_id).await?;
+    // The boundary is the memory's own flag, checked wherever a payload is
+    // built (FR-051).
+    if m.local_only {
+        return Ok(false);
+    }
+    let mut tx = tx::begin(store, "enqueue_memory_upsert").await?;
+    let policy = outbox::policy_for_project_tx(&mut tx, m.project_id).await?;
+    let payload = outbox::memory_payload_for(&mut tx, &m).await?;
+    let queued = outbox::enqueue(
+        &mut *tx,
+        policy,
+        m.project_id,
+        OutboxEntityType::Memory,
+        m.id,
+        OutboxOperation::Upsert,
+        &payload,
+    )
+    .await?;
+    tx::commit(tx, "enqueue_memory_upsert").await?;
+    Ok(queued)
+}
+
+/// A proposal that arrived from another machine (FR-411).
+#[derive(Debug, Clone)]
+pub struct ImportedMemory<'a> {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub kind: MemoryType,
+    pub scope: MemoryScope,
+    pub scope_key: &'a str,
+    pub content: &'a str,
+    pub origin_session_id: Uuid,
+    /// As the sender proposed it. Normalized here, not trusted.
+    pub topic_key: Option<&'a str>,
+    pub value_key: Option<&'a str>,
+    pub importance: Importance,
+    pub effective_from: Option<&'a str>,
+}
+
+/// Store a proposal another machine produced, without ever overwriting a local
+/// row.
+///
+/// `INSERT OR IGNORE` is the whole merge rule for a proposal: two machines that
+/// wrote different things wrote **different rows**, and the id is the same only
+/// when it is the same record. Nothing here consults a clock, so which machine's
+/// copy arrives first cannot change the result (FR-411, SC-304).
+///
+/// What is deliberately not taken from the sender:
+///
+/// * `reinforcement_count` and `distinct_origin_count` — derived from the
+///   records this store holds, and rebuilt by the caller after the arriving
+///   decisions land;
+/// * `superseded_at` and `state` — a view of the `supersedes` relations, which
+///   `rebuild_supersession` recomputes when the decision itself arrives (D67);
+/// * `stale_at` — drift is what *this* machine observed about its own worktree;
+/// * `pinned` — an attention decision governed by this project's local pin
+///   budget (D75), which adopting a peer's pins would silently exceed.
+///
+/// Returns whether a row was written, so a caller can tell an arrival from a
+/// record it already had.
+pub async fn import_memory(store: &Store, m: ImportedMemory<'_>) -> Result<bool> {
+    // A project-scoped memory is scoped to *the project*, and each machine
+    // names that project with its own local id. Storing the sender's id would
+    // file the arriving proposal under a scope key this store's own reads never
+    // look at: present, searchable by text, and invisible to every subject
+    // read — so two machines could never converge on a project-scoped subject
+    // at all, which is most of them.
+    //
+    // Only `project` needs the mapping. A branch key is a branch name, a task
+    // key is a task id that travels with the task, and a session key belongs to
+    // the machine that opened the session.
+    let scope_key = match m.scope {
+        MemoryScope::Project => m.project_id.to_string(),
+        _ => m.scope_key.to_string(),
+    };
+
+    // Normalized again rather than trusted: the sender's normalizer is the
+    // sender's, and a key this store cannot represent must be dropped rather
+    // than stored in a shape its own reads would miss (FR-312).
+    let topic_key = m
+        .topic_key
+        .and_then(cairn_core::knowledge::normalize_topic_key);
+    // A value key means nothing without a topic key to compare within, so it
+    // is dropped along with one this store could not represent (FR-311).
+    let value_key = topic_key
+        .as_ref()
+        .and(m.value_key)
+        .and_then(cairn_core::knowledge::normalize_value_key);
+
+    let now = rows::now_text();
+    let wrote = sqlx::query(
+        "INSERT OR IGNORE INTO memories
+            (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+             origin_session_id, local_only, created_at, updated_at,
+             topic_key, value_key, content_norm_digest, importance, effective_from)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, 0, ?8, ?8,
+                 ?9, ?10, ?11, ?12, ?13)",
+    )
+    .bind(m.id.to_string())
+    .bind(m.project_id.to_string())
+    .bind(m.kind.as_str())
+    .bind(m.scope.as_str())
+    .bind(&scope_key)
+    .bind(m.content)
+    .bind(m.origin_session_id.to_string())
+    .bind(&now)
+    .bind(topic_key.as_deref())
+    .bind(value_key.as_deref())
+    // Derived here, never sent: it is a local index, and FR-506 forbids it on
+    // the wire.
+    .bind(cairn_core::knowledge::content_norm_digest(m.content))
+    .bind(m.importance.as_str())
+    .bind(m.effective_from.unwrap_or(&now))
+    .execute(store.pool())
+    .await?
+    .rows_affected()
+        > 0;
+
+    Ok(wrote)
+}
+
+/// Create a proposal and run bounded reconciliation in the same transaction.
+///
+/// The proposal and any relation it implies commit together
+/// (`contracts/records-and-rebuild.md` §Aggregate ownership), so a reader never
+/// sees a member without the decision that placed it.
+///
+/// Exactly one merging case exists — content identical after normalization —
+/// and it is the only one Cairn can decide without inference (D46). A shared
+/// value key with differing content records **nothing**: the value is agreed
+/// and the statements are several.
+pub async fn create_memory_reconciled(
+    store: &Store,
+    m: NewMemory<'_>,
+    policy: SyncPolicy,
+    reconcile_members_max: usize,
+) -> Result<CreateOutcome> {
     let id = new_id();
     let now = rows::now_text();
+    let mut notes: Vec<&'static str> = Vec::new();
+
+    // An unrepresentable key never rejects the memory (FR-312).
+    let topic_key = match m.topic_key {
+        Some(raw) => {
+            let normalized = knowledge_core::normalize_topic_key(raw);
+            if normalized.is_none() {
+                notes.push(cairn_core::wire::codes::INVALID_TOPIC_KEY);
+            }
+            normalized
+        }
+        None => None,
+    };
+    let value_key = match (m.value_key, topic_key.as_ref()) {
+        (Some(raw), Some(_)) => knowledge_core::normalize_value_key(raw),
+        // A value key with no topic key has no subject to be a value of. The
+        // memory is still stored; the key is dropped and the reason reported.
+        (Some(_), None) => {
+            notes.push(cairn_core::wire::codes::VALUE_WITHOUT_TOPIC);
+            None
+        }
+        (None, _) => None,
+    };
+    let content_norm_digest = knowledge_core::content_norm_digest(m.content);
+
     let mut tx = tx::begin(store, "create_memory").await?;
     sqlx::query(
         "INSERT INTO memories
             (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
-             origin_session_id, local_only, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, ?8, ?9, ?9)",
+             origin_session_id, local_only, created_at, updated_at,
+             topic_key, value_key, content_norm_digest, importance, effective_from)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', NULL, ?7, ?8, ?9, ?9,
+                 ?10, ?11, ?12, ?13, ?9)",
     )
     .bind(id.to_string())
     .bind(m.project_id.to_string())
@@ -688,6 +1016,10 @@ pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) 
     .bind(m.origin_session_id.to_string())
     .bind(m.local_only as i64)
     .bind(&now)
+    .bind(topic_key.as_deref())
+    .bind(value_key.as_deref())
+    .bind(&content_norm_digest)
+    .bind(m.importance.as_str())
     .execute(&mut *tx)
     .await?;
 
@@ -744,6 +1076,9 @@ pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) 
             updated_at: Utc::now(),
             deleted_at: None,
         };
+        // Built before the enqueue, not inside its argument list: both need the
+        // transaction, and only one may borrow it at a time.
+        let payload = outbox::memory_payload_for(&mut tx, &staged).await?;
         outbox::enqueue(
             &mut *tx,
             policy,
@@ -751,13 +1086,99 @@ pub async fn create_memory(store: &Store, m: NewMemory<'_>, policy: SyncPolicy) 
             OutboxEntityType::Memory,
             id,
             OutboxOperation::Upsert,
-            &outbox::memory_payload(&staged),
+            &payload,
         )
         .await?;
     }
 
+    // Bounded reconciliation, in this same transaction (FR-474).
+    let mut reconciliation = ProposalOutcome::Created;
+    let mut relation_recorded: Option<cairn_core::RelationKind> = None;
+    let mut matched_value_key: Option<String> = None;
+    if let Some(topic) = topic_key.as_deref() {
+        let (members, over_bound) = crate::knowledge::subject_members_tx(
+            &mut tx,
+            m.project_id,
+            m.scope,
+            m.scope_key,
+            topic,
+            reconcile_members_max,
+        )
+        .await?;
+
+        let proposal = knowledge_core::MemoryFacts {
+            id,
+            state: MemoryState::Active,
+            scope: m.scope,
+            scope_key: m.scope_key.to_string(),
+            topic_key: topic_key.clone(),
+            value_key: value_key.clone(),
+            content_norm_digest: Some(content_norm_digest.clone()),
+            verification: cairn_core::VerificationState::Unverified,
+            verification_authority: None,
+            evidence_fact_count: 0,
+            pinned: false,
+            importance: m.importance,
+            origin_session_id: m.origin_session_id,
+        };
+
+        if over_bound {
+            reconciliation = ProposalOutcome::Deferred;
+            notes.push(cairn_core::wire::codes::RECONCILIATION_DEFERRED);
+        } else {
+            let (outcome, relations) =
+                knowledge_core::classify_proposal(&proposal, &members, reconcile_members_max);
+            let mut kinds: Vec<cairn_core::RelationKind> = Vec::new();
+            for r in relations {
+                kinds.push(r.kind);
+                crate::knowledge::record_relation_tx(
+                    &mut tx,
+                    crate::knowledge::NewRelation {
+                        project_id: m.project_id,
+                        from: r.from,
+                        to: r.to,
+                        kind: r.kind,
+                        decided_by_session: m.origin_session_id,
+                        basis: r.basis,
+                        basis_evidence_id: None,
+                        rationale: None,
+                    },
+                )
+                .await?;
+            }
+            if matches!(outcome, ProposalOutcome::Corroborating { .. }) {
+                notes.push(cairn_core::wire::codes::CORROBORATING_MEMBER);
+            }
+            // What the write recorded, not what an outcome implies. Every
+            // relation a single classification returns shares one kind.
+            relation_recorded = kinds.first().copied();
+            // The matched member is already in `members`; reading its value key
+            // here is what keeps the report free of an extra query.
+            matched_value_key = match &outcome {
+                ProposalOutcome::Duplicate { of } => members
+                    .iter()
+                    .find(|m| m.id == *of)
+                    .and_then(|m| m.value_key.clone()),
+                ProposalOutcome::Corroborating { member } => members
+                    .iter()
+                    .find(|m| m.id == *member)
+                    .and_then(|m| m.value_key.clone()),
+                _ => None,
+            };
+            reconciliation = outcome;
+        }
+    }
+
     tx::commit(tx, "create_memory").await?;
-    memory(store, id).await
+    let memory = memory(store, id).await?;
+    Ok(CreateOutcome {
+        memory,
+        reconciliation,
+        relation_recorded,
+        matched_value_key,
+        subject: topic_key,
+        notes,
+    })
 }
 
 pub async fn memory(store: &Store, id: Uuid) -> Result<Memory> {
@@ -803,20 +1224,53 @@ pub async fn supersede_memory(
     policy: SyncPolicy,
 ) -> Result<(Memory, Memory)> {
     let original = memory(store, original_id).await?;
+    let session = replacement.origin_session_id;
     let new = create_memory(store, replacement, policy).await?;
+    let now = rows::now_text();
+
+    // The relation, the lifecycle columns and the pin move together (FR-323,
+    // FR-341, FR-456). Feature 001's `state` and `superseded_by_id` become a
+    // *view* of the relation, which is what makes FR-324 true and what lets a
+    // remotely decided supersession land on import without a row being
+    // overwritten.
+    crate::constraints::check_supersession(MemoryState::Superseded.as_str(), Some(&now))?;
+    let mut tx = tx::begin(store, "supersede_memory").await?;
+
+    crate::knowledge::record_relation_tx(
+        &mut tx,
+        crate::knowledge::NewRelation {
+            project_id: original.project_id,
+            from: new.id,
+            to: original.id,
+            kind: RelationKind::Supersedes,
+            decided_by_session: session,
+            // Supersession is never automatic (FR-325): reaching this function
+            // is itself the explicit act.
+            basis: RelationBasis::ExplicitAgent,
+            basis_evidence_id: None,
+            rationale: None,
+        },
+    )
+    .await?;
+
     sqlx::query(
-        "UPDATE memories SET state = 'superseded', superseded_by_id = ?1, updated_at = ?2
+        "UPDATE memories SET state = 'superseded', superseded_by_id = ?1, updated_at = ?2,
+                             superseded_at = ?2,
+                             pinned = 0, pinned_at = NULL, pinned_by_session = NULL,
+                             pin_reason = NULL
          WHERE id = ?3",
     )
     .bind(new.id.to_string())
-    .bind(rows::now_text())
+    .bind(&now)
     .bind(original.id.to_string())
-    .execute(store.pool())
+    .execute(&mut *tx)
     .await?;
+    tx::commit(tx, "supersede_memory").await?;
 
     let updated = memory(store, original_id).await?;
     if !updated.local_only {
         let mut tx = tx::begin(store, "supersede_memory").await?;
+        let payload = outbox::memory_payload_for(&mut tx, &updated).await?;
         outbox::enqueue(
             &mut *tx,
             policy,
@@ -824,7 +1278,7 @@ pub async fn supersede_memory(
             OutboxEntityType::Memory,
             updated.id,
             OutboxOperation::Upsert,
-            &outbox::memory_payload(&updated),
+            &payload,
         )
         .await?;
         tx::commit(tx, "supersede_memory").await?;
@@ -865,11 +1319,22 @@ pub async fn mark_stale_scopes(
             _ => false,
         };
         if gone {
-            sqlx::query("UPDATE memories SET state = 'stale', updated_at = ?1 WHERE id = ?2")
-                .bind(rows::now_text())
-                .bind(rows::uuid(r, "id")?.to_string())
-                .execute(store.pool())
-                .await?;
+            // `stale_at` records the instant Cairn itself performed the
+            // transition, going forward only (FR-341, D82). A memory that went
+            // stale before this feature existed keeps NULL, which means
+            // **unknown** — never "not stale" — and a historical answer says so
+            // rather than presenting an unbounded interval as fact. Inferring
+            // one from `updated_at` would be a second approximation on top of
+            // the one the migration already documents, and several paths touch
+            // `updated_at`, so it is a worse source here than for supersession.
+            sqlx::query(
+                "UPDATE memories SET state = 'stale', updated_at = ?1, stale_at = ?1
+                 WHERE id = ?2",
+            )
+            .bind(rows::now_text())
+            .bind(rows::uuid(r, "id")?.to_string())
+            .execute(store.pool())
+            .await?;
             marked += 1;
         }
     }
@@ -1249,6 +1714,173 @@ pub async fn set_pull_cursor(store: &Store, project_id: Uuid, cursor: &str) -> R
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// Deferred pull records (#44)
+// ---------------------------------------------------------------------------
+
+/// A pulled record held back because the parent it names had not arrived.
+#[derive(Debug, Clone)]
+pub struct DeferredRecord {
+    pub kind: String,
+    pub record_key: String,
+    pub payload: String,
+    pub waiting_on: String,
+    pub attempts: i64,
+    pub first_seen_at: String,
+}
+
+/// Hold a pulled record until the parent it names arrives.
+///
+/// Keyed by the record's own identity, so a record the server sends again
+/// replaces the held copy instead of adding another. `first_seen_at` survives
+/// the replacement: how long a record has been waiting is the diagnostic, and
+/// re-sending it does not make the wait shorter.
+pub async fn defer_pulled_record(
+    store: &Store,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+    payload: &str,
+    waiting_on: &str,
+) -> Result<()> {
+    let now = rows::now_text();
+    sqlx::query(
+        "INSERT INTO sync_deferred
+            (project_id, kind, record_key, payload, waiting_on, attempts,
+             first_seen_at, last_attempt_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
+         ON CONFLICT(project_id, kind, record_key) DO UPDATE SET
+            payload = ?4, waiting_on = ?5, last_attempt_at = ?6",
+    )
+    .bind(project_id.to_string())
+    .bind(kind)
+    .bind(record_key)
+    .bind(payload)
+    .bind(waiting_on)
+    .bind(&now)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// Records waiting on a parent, oldest wait first.
+///
+/// Bounded: a backlog must not turn one pull into an unbounded amount of work.
+/// Whatever does not fit is offered again on the next pull.
+pub async fn deferred_records(
+    store: &Store,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<DeferredRecord>> {
+    let rs = sqlx::query(
+        "SELECT kind, record_key, payload, waiting_on, attempts, first_seen_at
+           FROM sync_deferred
+          WHERE project_id = ?1
+          ORDER BY first_seen_at ASC
+          LIMIT ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?;
+    Ok(rs
+        .iter()
+        .map(|r| DeferredRecord {
+            kind: r.get::<String, _>("kind"),
+            record_key: r.get::<String, _>("record_key"),
+            payload: r.get::<String, _>("payload"),
+            waiting_on: r.get::<String, _>("waiting_on"),
+            attempts: r.get::<i64, _>("attempts"),
+            first_seen_at: r.get::<String, _>("first_seen_at"),
+        })
+        .collect())
+}
+
+/// The record landed, or can never land: stop holding it.
+pub async fn clear_deferred_record(
+    store: &Store,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+) -> Result<()> {
+    sqlx::query(
+        "DELETE FROM sync_deferred
+          WHERE project_id = ?1 AND kind = ?2 AND record_key = ?3",
+    )
+    .bind(project_id.to_string())
+    .bind(kind)
+    .bind(record_key)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// The parent still has not arrived. Recorded so a record waiting on one that
+/// never comes is visible rather than merely retried in silence.
+pub async fn note_deferred_attempt(
+    store: &Store,
+    project_id: Uuid,
+    kind: &str,
+    record_key: &str,
+) -> Result<()> {
+    sqlx::query(
+        "UPDATE sync_deferred
+            SET attempts = attempts + 1, last_attempt_at = ?4
+          WHERE project_id = ?1 AND kind = ?2 AND record_key = ?3",
+    )
+    .bind(project_id.to_string())
+    .bind(kind)
+    .bind(record_key)
+    .bind(rows::now_text())
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
+/// How many records this project is holding, for `cairn status` and `doctor`.
+pub async fn deferred_count(store: &Store, project_id: Uuid) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sync_deferred WHERE project_id = ?1")
+            .bind(project_id.to_string())
+            .fetch_one(store.pool())
+            .await?,
+    )
+}
+
+/// What the server last said it could hold, verbatim.
+///
+/// Cached so the probe runs at most once per drain cycle rather than once per
+/// item, and compared as an opaque string: a change of any kind is a reason to
+/// look again at what is blocked, and interpreting the value is the caller's
+/// job (FR-418).
+pub async fn server_capability(store: &Store, project_id: Uuid) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT server_capability FROM sync_meta WHERE project_id = ?1")
+        .bind(project_id.to_string())
+        .fetch_optional(store.pool())
+        .await?;
+    Ok(row.and_then(|r| {
+        r.try_get::<Option<String>, _>("server_capability")
+            .ok()
+            .flatten()
+    }))
+}
+
+pub async fn set_server_capability(
+    store: &Store,
+    project_id: Uuid,
+    capability: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO sync_meta (project_id, server_capability) VALUES (?1, ?2)
+         ON CONFLICT(project_id) DO UPDATE SET server_capability = ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(capability)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
 /// Seal a session's termination, durably, before anything is acknowledged
 /// (FR-240 clause 1, D22).
 ///
@@ -1457,4 +2089,562 @@ mod idle_tests {
             "a session that already ended must not be reaped twice"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 003 — the repository boundary for the columns SQLite cannot CHECK
+// ---------------------------------------------------------------------------
+
+/// Write the Feature 003 columns of a memory, refusing anything a `CHECK` would
+/// have refused (data-model.md §2.1).
+///
+/// This is the single boundary those predicates are enforced at, so a later
+/// writer cannot reach the columns without passing them. Only the fields a
+/// caller supplies are written; `None` leaves the stored value alone, which is
+/// what lets one function serve reconciliation, verification, pinning and the
+/// temporal fields without any of them clobbering another's work.
+pub async fn set_memory_intelligence(
+    store: &Store,
+    id: Uuid,
+    columns: crate::constraints::MemoryColumns<'_>,
+) -> Result<()> {
+    crate::constraints::check_memory_columns(columns)?;
+
+    let mut tx = tx::begin(store, "set_memory_intelligence").await?;
+    sqlx::query(
+        "UPDATE memories SET
+             topic_key              = COALESCE(?2, topic_key),
+             value_key              = COALESCE(?3, value_key),
+             importance             = COALESCE(?4, importance),
+             verification           = COALESCE(?5, verification),
+             verification_authority = CASE WHEN ?5 IS NOT NULL THEN ?6
+                                           ELSE COALESCE(?6, verification_authority) END,
+             pinned                 = COALESCE(?7, pinned),
+             pinned_at              = CASE WHEN ?7 IS NOT NULL THEN ?8
+                                           ELSE COALESCE(?8, pinned_at) END,
+             pinned_by_session      = CASE WHEN ?7 IS NOT NULL THEN ?9
+                                           ELSE COALESCE(?9, pinned_by_session) END,
+             pin_reason             = CASE WHEN ?7 IS NOT NULL THEN ?10
+                                           ELSE COALESCE(?10, pin_reason) END
+         WHERE id = ?1 AND deleted_at IS NULL",
+    )
+    .bind(id.to_string())
+    .bind(columns.topic_key)
+    .bind(columns.value_key)
+    .bind(columns.importance)
+    .bind(columns.verification)
+    .bind(columns.verification_authority)
+    .bind(columns.pinned)
+    .bind(columns.pinned_at)
+    .bind(columns.pinned_by_session)
+    .bind(columns.pin_reason)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod intelligence_constraint_tests {
+    use super::*;
+    use crate::constraints::MemoryColumns;
+    use crate::Store;
+
+    async fn store_with_memory() -> (tempfile::TempDir, Store, Uuid) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("cairn.sqlite3"))
+            .await
+            .unwrap();
+
+        let project = Uuid::now_v7();
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked,
+                                   server_project_id, created_at, updated_at, deleted_at)
+             VALUES (?1, 'test', ?2, NULL, 0, NULL, ?3, ?3, NULL)",
+        )
+        .bind(project.to_string())
+        .bind(format!("/tmp/git-{project}"))
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        let memory = Uuid::now_v7();
+        sqlx::query(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state,
+                                   superseded_by_id, origin_session_id, local_only,
+                                   created_at, updated_at)
+             VALUES (?1, ?2, 'fact', 'project', ?3, 'a claim', 'active', NULL, ?4, 0, ?5, ?5)",
+        )
+        .bind(memory.to_string())
+        .bind(project.to_string())
+        .bind(project.to_string())
+        .bind(Uuid::now_v7().to_string())
+        .bind(&now)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+        (dir, store, memory)
+    }
+
+    /// Each predicate a `CHECK` would have expressed is refused at the
+    /// repository boundary, against a real store rather than in the abstract.
+    #[tokio::test]
+    async fn the_boundary_refuses_what_a_check_would_have() {
+        let (_dir, store, id) = store_with_memory().await;
+
+        let cases: Vec<(&str, MemoryColumns<'_>)> = vec![
+            (
+                "value_key IS NULL OR topic_key IS NOT NULL",
+                MemoryColumns {
+                    value_key: Some("postgresql"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "importance",
+                MemoryColumns {
+                    importance: Some("critical"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "verification",
+                MemoryColumns {
+                    verification: Some("probably"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "implies verification_authority IS NULL",
+                MemoryColumns {
+                    verification: Some("drifted"),
+                    verification_authority: Some("cairn"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pinned = 0 implies",
+                MemoryColumns {
+                    pinned: Some(0),
+                    pin_reason: Some("a reason with no pin"),
+                    ..Default::default()
+                },
+            ),
+            (
+                "pinned = 1 requires",
+                MemoryColumns {
+                    pinned: Some(1),
+                    ..Default::default()
+                },
+            ),
+        ];
+
+        for (predicate, columns) in cases {
+            let err = set_memory_intelligence(&store, id, columns)
+                .await
+                .expect_err(&format!("{predicate} was accepted"))
+                .to_string();
+            assert!(err.contains(predicate), "expected {predicate}, got {err}");
+        }
+
+        // And nothing was written by any of the refusals.
+        let row: (Option<String>, String, Option<String>) = sqlx::query_as(
+            "SELECT value_key, importance, verification_authority FROM memories WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row, (None, "normal".to_string(), None));
+    }
+
+    #[tokio::test]
+    async fn a_valid_write_lands() {
+        let (_dir, store, id) = store_with_memory().await;
+
+        set_memory_intelligence(
+            &store,
+            id,
+            MemoryColumns {
+                topic_key: Some("infra.production_database"),
+                value_key: Some("postgresql"),
+                importance: Some("high"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let row: (Option<String>, Option<String>, String) =
+            sqlx::query_as("SELECT topic_key, value_key, importance FROM memories WHERE id = ?1")
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            row,
+            (
+                Some("infra.production_database".into()),
+                Some("postgresql".into()),
+                "high".into()
+            )
+        );
+    }
+
+    /// Unpinning clears the pin's metadata rather than leaving it behind.
+    #[tokio::test]
+    async fn unpinning_clears_the_metadata_it_required() {
+        let (_dir, store, id) = store_with_memory().await;
+
+        set_memory_intelligence(
+            &store,
+            id,
+            MemoryColumns {
+                pinned: Some(1),
+                pinned_at: Some("2026-01-01T00:00:00Z"),
+                pinned_by_session: Some("s1"),
+                pin_reason: Some("never move a published ref"),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        set_memory_intelligence(
+            &store,
+            id,
+            MemoryColumns {
+                pinned: Some(0),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let row: (i64, Option<String>, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT pinned, pinned_at, pinned_by_session, pin_reason FROM memories WHERE id = ?1",
+        )
+        .bind(id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row, (0, None, None, None));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Pinned invariants (`contracts/continuity-context.md` Part 3)
+// ---------------------------------------------------------------------------
+
+/// Pin a memory, or unpin it.
+///
+/// Refused with `pin_budget_exhausted` when the project or scope budget is full,
+/// **listing the current pins and unpinning nothing** (FR-454). Automatically
+/// evicting someone else's constraint to make room for a new one would be the
+/// opposite of what a pin is for.
+pub async fn set_pinned(
+    store: &Store,
+    memory_id: Uuid,
+    pinned: bool,
+    reason: Option<&str>,
+    session: Uuid,
+    project_pin_budget: usize,
+    scope_pin_budget: usize,
+) -> Result<()> {
+    let mut tx = tx::begin(store, "set_pinned").await?;
+    let row =
+        sqlx::query("SELECT project_id, scope, scope_key, pinned FROM memories WHERE id = ?1")
+            .bind(memory_id.to_string())
+            .fetch_optional(&mut *tx)
+            .await?
+            .ok_or_else(|| StoreError::NotFound(format!("memory {memory_id}")))?;
+    let project_id: String = row.try_get("project_id")?;
+    let scope: String = row.try_get("scope")?;
+    let scope_key: String = row.try_get("scope_key")?;
+    let already: i64 = row.try_get("pinned")?;
+
+    if !pinned {
+        sqlx::query(
+            "UPDATE memories SET pinned = 0, pinned_at = NULL, pinned_by_session = NULL,
+                                 pin_reason = NULL
+             WHERE id = ?1",
+        )
+        .bind(memory_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        return tx::commit(tx, "set_pinned").await;
+    }
+    if already == 1 {
+        return tx::commit(tx, "set_pinned").await;
+    }
+
+    let in_project: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE project_id = ?1 AND pinned = 1")
+            .bind(&project_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let in_scope: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM memories
+          WHERE project_id = ?1 AND scope = ?2 AND scope_key = ?3 AND pinned = 1",
+    )
+    .bind(&project_id)
+    .bind(&scope)
+    .bind(&scope_key)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    if in_project as usize >= project_pin_budget || in_scope as usize >= scope_pin_budget {
+        let current: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM memories WHERE project_id = ?1 AND pinned = 1")
+                .bind(&project_id)
+                .fetch_all(&mut *tx)
+                .await?;
+        return Err(StoreError::Refused {
+            code: cairn_core::wire::codes::PIN_BUDGET_EXHAUSTED,
+            message: format!(
+                "the pin budget is full ({in_project} of {project_pin_budget} in this project, \
+                 {in_scope} of {scope_pin_budget} in this scope); nothing was unpinned. \
+                 Current pins: {}",
+                current.join(", ")
+            ),
+        });
+    }
+
+    let bounded =
+        reason.map(|r| cairn_core::bound::bound_text(&cairn_core::redact::redact(r), 200).text);
+    sqlx::query(
+        "UPDATE memories SET pinned = 1, pinned_at = ?2, pinned_by_session = ?3, pin_reason = ?4
+         WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .bind(rows::now_text())
+    .bind(session.to_string())
+    .bind(bounded)
+    .execute(&mut *tx)
+    .await?;
+    tx::commit(tx, "set_pinned").await
+}
+
+/// Clear a superseded memory's pin, in the caller's transaction.
+///
+/// The successor is pinned only explicitly: inheriting a pin would carry an
+/// invariant onto a claim nobody chose to make invariant (FR-456).
+pub async fn clear_pin_tx(tx: &mut sqlx::SqliteConnection, memory_id: Uuid) -> Result<()> {
+    sqlx::query(
+        "UPDATE memories SET pinned = 0, pinned_at = NULL, pinned_by_session = NULL,
+                             pin_reason = NULL
+         WHERE id = ?1",
+    )
+    .bind(memory_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    Ok(())
+}
+
+/// The pins in force here, ordered by scope precedence then importance.
+///
+/// A pin never widens scope: a pinned `branch:feature/x` memory is in force only
+/// on that branch (FR-453). A pin whose claim drifted is **kept** and carries its
+/// warning — a constraint that stopped being true is exactly what must be said
+/// (FR-456).
+pub async fn applicable_pins(
+    store: &Store,
+    project_id: Uuid,
+    branch: &str,
+    task_id: Option<Uuid>,
+) -> Result<Vec<cairn_core::wire::PinnedConstraint>> {
+    let rows = sqlx::query(
+        "SELECT id, content, scope, scope_key, verification FROM memories
+          WHERE project_id = ?1 AND pinned = 1 AND deleted_at IS NULL
+            AND state != 'superseded'
+            AND ( scope = 'project'
+               OR (scope = 'branch' AND scope_key = ?2)
+               OR (scope = 'task'   AND scope_key = ?3) )
+          ORDER BY CASE scope WHEN 'task' THEN 0 WHEN 'branch' THEN 1 ELSE 2 END,
+                   importance DESC, id",
+    )
+    .bind(project_id.to_string())
+    .bind(branch)
+    .bind(task_id.map(|t| t.to_string()).unwrap_or_default())
+    .fetch_all(store.pool())
+    .await?;
+
+    rows.iter()
+        .map(|r| {
+            let verification: Option<String> = r.try_get("verification").ok();
+            Ok(cairn_core::wire::PinnedConstraint {
+                id: rows::uuid(r, "id")?,
+                text: r.try_get("content")?,
+                drifted: verification.as_deref() == Some("drifted"),
+            })
+        })
+        .collect()
+}
+
+/// The summaries of a session's `error` observations, most recent first.
+///
+/// One of the two sources of the signals a pattern is matched against. Read
+/// from what Cairn already recorded rather than asked of the agent: an agent
+/// reporting its own symptoms would be reporting them after having read
+/// whatever was suggested last time (FR-398).
+///
+/// The previous session is included, because a symptom is often recorded in the
+/// session that hit it and worked on in the next one.
+pub async fn recent_error_summaries(
+    store: &Store,
+    session_id: Uuid,
+    limit: i64,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT summary FROM observations
+          WHERE type = 'error'
+            AND session_id IN (
+                ?1,
+                (SELECT previous_session_id FROM sessions WHERE id = ?1)
+            )
+          ORDER BY occurred_at DESC
+          LIMIT ?2",
+    )
+    .bind(session_id.to_string())
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?)
+}
+
+/// The text of `failure`-type memories in the applicable scopes.
+///
+/// The other signal source. Project- and branch-scoped only: a task-scoped
+/// failure belongs to work that may have nothing to do with what is happening
+/// now, and widening the read would widen what a pattern matches on.
+pub async fn failure_memory_text(
+    store: &Store,
+    project_id: Uuid,
+    branch: &str,
+    limit: i64,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT content FROM memories
+          WHERE project_id = ?1 AND type = 'failure' AND state = 'active'
+            AND deleted_at IS NULL
+            AND (scope = 'project' OR (scope = 'branch' AND scope_key = ?2))
+          ORDER BY updated_at DESC
+          LIMIT ?3",
+    )
+    .bind(project_id.to_string())
+    .bind(branch)
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?)
+}
+
+/// How many of a project's most recent sessions supply signals.
+///
+/// The contract scopes signals to "the current and previous session". The
+/// session-independent read keeps that bound rather than reading the project's
+/// whole history: a failure from months ago is not what this project is showing
+/// now, and suggesting a pattern for it would be worse than suggesting nothing
+/// (`contracts/patterns.md` §Suggestion).
+pub const SIGNAL_SESSIONS: i64 = 2;
+
+/// A project's recent `error` observations, most recent first.
+///
+/// The session-independent form of [`recent_error_summaries`]. `cairn memory
+/// search --include-patterns` is a developer command and must not require an
+/// open agent session to answer — but the signals it matches on are still what
+/// Cairn recorded, never what the caller asserts, and still only from what this
+/// project is currently working through.
+pub async fn recent_project_errors(
+    store: &Store,
+    project_id: Uuid,
+    limit: i64,
+) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar::<_, String>(
+        "SELECT o.summary FROM observations o
+          WHERE o.type = 'error'
+            AND o.session_id IN (
+                SELECT id FROM sessions
+                 WHERE project_id = ?1 AND deleted_at IS NULL
+                 ORDER BY started_at DESC
+                 LIMIT ?3
+            )
+          ORDER BY o.occurred_at DESC
+          LIMIT ?2",
+    )
+    .bind(project_id.to_string())
+    .bind(limit)
+    .bind(SIGNAL_SESSIONS)
+    .fetch_all(store.pool())
+    .await?)
+}
+
+/// How far the subject mechanism actually reaches in this project, and what it
+/// is currently reporting (FR-499).
+///
+/// Observable in **every** project without anyone running an evaluation: an
+/// adoption rate nobody can see is one nobody acts on, and the whole design
+/// rests on agents choosing to give facts a subject. A low share is a product
+/// finding about the usage contract and the tool descriptions — never a licence
+/// to start inferring subjects from content, which D46 rejects on correctness
+/// grounds.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubjectAdoption {
+    /// Project-scoped, non-deleted memories.
+    pub project_memories: i64,
+    /// How many of them carry a subject identity.
+    pub with_subject: i64,
+    pub conflicted_subjects: i64,
+    pub needs_recheck: i64,
+    pub drifted: i64,
+}
+
+impl SubjectAdoption {
+    /// Whole percent, or `None` when there is nothing to divide by.
+    ///
+    /// `None` rather than zero: a project with no project-scoped memories has
+    /// no adoption rate, and reporting 0% would read as a failure where there
+    /// is nothing to have adopted.
+    pub fn percent(&self) -> Option<i64> {
+        (self.project_memories > 0).then(|| self.with_subject * 100 / self.project_memories)
+    }
+}
+
+pub async fn subject_adoption(store: &Store, project_id: Uuid) -> Result<SubjectAdoption> {
+    let one = |sql: &'static str| {
+        let id = project_id.to_string();
+        async move {
+            sqlx::query_scalar::<_, i64>(sql)
+                .bind(id)
+                .fetch_one(store.pool())
+                .await
+        }
+    };
+
+    Ok(SubjectAdoption {
+        project_memories: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND scope = 'project' AND deleted_at IS NULL")
+        .await?,
+        with_subject: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND scope = 'project' AND deleted_at IS NULL
+                AND topic_key IS NOT NULL")
+        .await?,
+        // Counted by subject, not by memory: one disagreement between four
+        // proposals is one thing to resolve, not four.
+        conflicted_subjects: one("SELECT COUNT(*) FROM (
+                 SELECT scope, scope_key, topic_key FROM memories
+                  WHERE project_id = ?1 AND deleted_at IS NULL AND topic_key IS NOT NULL
+                    AND state = 'active'
+                  GROUP BY scope, scope_key, topic_key
+                 HAVING COUNT(DISTINCT value_key) > 1
+             ) conflicted")
+        .await?,
+        needs_recheck: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND deleted_at IS NULL AND verification = 'needs_recheck'")
+        .await?,
+        drifted: one("SELECT COUNT(*) FROM memories
+              WHERE project_id = ?1 AND deleted_at IS NULL AND verification = 'drifted'")
+        .await?,
+    })
 }

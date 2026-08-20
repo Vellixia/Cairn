@@ -6,14 +6,18 @@
 
 mod briefing;
 mod capture;
+mod continuity;
+mod drift;
 mod handlers;
 mod handoffs;
 mod integrations;
+mod patterns;
 mod recover;
 mod state;
 mod sync;
 #[cfg(test)]
 mod testsupport;
+mod verify;
 
 use cairn_core::domain::new_id;
 use cairn_core::wire::{Envelope, Request, WireError};
@@ -141,8 +145,12 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
             // may be starting after a long absence.
             loop {
                 ticks.tick().await;
-                let reaped =
-                    recover::reap_idle_sessions(&daemon, recover::IDLE_SESSION_TIMEOUT).await;
+                let reaped = recover::reap_idle_sessions(
+                    &daemon,
+                    recover::IDLE_SESSION_TIMEOUT,
+                    recover::SUPERSEDED_SESSION_TIMEOUT,
+                )
+                .await;
                 // The same tick sweeps any boundary still owing a handoff, so
                 // progress does not depend on a restart (FR-240, D22).
                 let swept =
@@ -152,6 +160,22 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
                 }
                 if reaped > 0 {
                     tracing::info!(reaped, "closed idle sessions");
+                }
+
+                // The bounded verification pass joins the tick that already
+                // does the periodic work, rather than introducing a scheduler
+                // (FR-472). It is capped three ways and yields rather than
+                // overrunning; whatever it does not finish is picked up next
+                // tick. Nothing here ever runs on the session-open path.
+                let report = verify::sweep_projects(&daemon).await;
+                if report.runs_recorded > 0 || report.yielded {
+                    tracing::info!(
+                        facts = report.facts_examined,
+                        runs = report.runs_recorded,
+                        updated = report.memories_updated,
+                        yielded = report.yielded,
+                        "bounded verification pass"
+                    );
                 }
             }
         });

@@ -1,0 +1,42 @@
+{
+  "description": "The same claim about service.api_port, with a newline between words. Normalization collapses case, whitespace runs and trailing punctuation, so the digests are equal and the duplication is recorded.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The API listens on port 8080.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The\nAPI listens on port 8080.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "service.api_port",
+        "value_key": "8080",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "reinforced",
+    "answers": [
+      "a"
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "duplicates",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "duplicate"
+    }
+  }
+}

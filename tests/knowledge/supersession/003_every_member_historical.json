@@ -1,0 +1,31 @@
+{
+  "description": "Every member is superseded or stale, so the subject has no canonical answer and contributes nothing to a briefing.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The cache is Redis.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "cache.backend",
+        "value_key": "redis",
+        "state": "superseded",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The cache is Memcached.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "cache.backend",
+        "value_key": "memcached",
+        "state": "stale",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "historical",
+    "answers": []
+  }
+}

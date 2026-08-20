@@ -1,0 +1,36 @@
+{
+  "description": "Two machines independently record the same value, in their own words. That is corroboration, not a conflict, and it is reported as a count rather than a warning - a warning here would train people to ignore warnings. Whether two members are one claim or several is decided by content and never by the value key (FR-327, D77), which is what separates this case from its identical-content sibling below. The same scenario with the two machines' clocks swapped: identical merged state, because nothing in the merge consults a clock.",
+  "input": {
+    "extra": {
+      "store_a": {
+        "proposals": [
+          {
+            "topic": "infra.db",
+            "value": "postgresql",
+            "content": "The primary datastore is PostgreSQL"
+          }
+        ]
+      },
+      "store_b": {
+        "proposals": [
+          {
+            "topic": "infra.db",
+            "value": "postgresql",
+            "content": "We run Postgres for everything durable"
+          }
+        ]
+      },
+      "clocks": [
+        "2026-06-01T00:00:00Z",
+        "2026-01-01T00:00:00Z"
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "memories": 2,
+      "reconciliation": "corroborated",
+      "relations": 0
+    }
+  }
+}

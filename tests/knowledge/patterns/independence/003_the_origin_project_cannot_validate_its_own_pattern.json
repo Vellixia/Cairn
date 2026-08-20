@@ -1,0 +1,25 @@
+{
+  "description": "An application in the project the pattern came from is history, not evidence. `is_origin` is excluded from trust, so a pattern cannot walk itself up the ladder at home (FR-402).",
+  "input": {
+    "extra": {
+      "applications": [
+        {
+          "project": "origin",
+          "sessions": 3,
+          "outcome": "resolved",
+          "discovery": "independent",
+          "evidence": true,
+          "is_origin": true
+        }
+      ]
+    }
+  },
+  "expect": {
+    "extra": {
+      "rows": 1,
+      "distinct_projects_applied": 1,
+      "qualifying_successes": 0,
+      "trust": "sanitized"
+    }
+  }
+}

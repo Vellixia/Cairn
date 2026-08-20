@@ -241,3 +241,162 @@ fn an_event_cairn_declines_still_reads_what_the_agent_wrote() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// T136 — no model decides anything, and no gate reads one (FR-511, FR-512,
+// SC-321, SC-325)
+// ---------------------------------------------------------------------------
+
+/// Every Cargo manifest and lockfile in the workspace.
+fn manifests() -> Vec<(std::path::PathBuf, String)> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("a workspace root")
+        .to_path_buf();
+    let mut out = Vec::new();
+    for name in ["Cargo.toml", "Cargo.lock"] {
+        let path = root.join(name);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            out.push((path, text));
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(root.join("crates")) {
+        for entry in entries.flatten() {
+            let path = entry.path().join("Cargo.toml");
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                out.push((path, text));
+            }
+        }
+    }
+    let path = root.join("tests/Cargo.toml");
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        out.push((path, text));
+    }
+    out
+}
+
+/// No language model, embedding library, vector database or graph database is
+/// a dependency of anything (FR-511, SC-321).
+///
+/// This is the property the whole knowledge design rests on. Every merge,
+/// every conflict, every verification is a deterministic function of recorded
+/// state; adding a model would make the answer depend on which model ran, and
+/// two machines would stop agreeing.
+#[test]
+fn no_model_or_vector_dependency_exists() {
+    // Crate names, matched as dependency keys rather than as free text, so a
+    // comment mentioning one does not fail the test.
+    const FORBIDDEN: &[&str] = &[
+        "openai",
+        "async-openai",
+        "anthropic",
+        "ollama",
+        "llm",
+        "llama",
+        "candle-core",
+        "tokenizers",
+        "tiktoken",
+        "rust-bert",
+        "fastembed",
+        "qdrant",
+        "pinecone",
+        "lancedb",
+        "usearch",
+        "hnsw",
+        "faiss",
+        "neo4j",
+        "oxigraph",
+        "petgraph",
+    ];
+
+    for (path, text) in manifests() {
+        for line in text.lines() {
+            let name = line
+                .split(['=', ' ', '"'])
+                .find(|t| !t.is_empty())
+                .unwrap_or_default();
+            assert!(
+                !FORBIDDEN.contains(&name),
+                "{} depends on `{name}`: a model or vector store cannot be part of a \
+                 deterministic derivation",
+                path.display()
+            );
+        }
+    }
+}
+
+/// No required CI check and no release gate reads a model's judgement
+/// (SC-325).
+///
+/// The `evals/` tree exists and is informational: it measures whether agents
+/// actually adopt topic keys, which is a product question. It must never be
+/// able to fail a build, because a gate whose answer depends on a model is a
+/// gate that can change its mind about code that did not change.
+#[test]
+fn no_gating_check_reads_a_models_judgement() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("a workspace root")
+        .to_path_buf();
+
+    let workflows = root.join(".github/workflows");
+    let Ok(entries) = std::fs::read_dir(&workflows) else {
+        panic!("no workflows at {}", workflows.display());
+    };
+    for entry in entries.flatten() {
+        let Ok(text) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        let name = entry.file_name().to_string_lossy().into_owned();
+        for forbidden in [
+            "evals/",
+            "topic-key-effectiveness",
+            "OPENAI",
+            "ANTHROPIC_API",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "{name} references `{forbidden}`, so a required check would read a \
+                 model's judgement"
+            );
+        }
+    }
+
+    // And the eval tree, if it exists, is not a Cargo target: it cannot be run
+    // by `cargo test` and so cannot fail the suite.
+    let evals = root.join("evals");
+    if evals.exists() {
+        assert!(
+            !evals.join("Cargo.toml").exists(),
+            "evals/ is a Cargo package, so `cargo test --workspace` would run it"
+        );
+        let workspace = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+        assert!(
+            !workspace.contains("evals"),
+            "evals/ is a workspace member, so its result would gate the build"
+        );
+    }
+}
+
+/// Every agent-originated proposal is stored with an explicit basis, and
+/// passes a deterministic gate before it affects stored state (FR-512).
+#[test]
+fn an_agents_proposal_is_recorded_as_a_proposal() {
+    use cairn_core::domain::RelationBasis;
+
+    // The vocabulary itself says where a decision came from. There is no
+    // `inferred` and no `model`: every basis names either a rule Cairn ran or
+    // a party that asserted it.
+    let mut bases: Vec<&str> = RelationBasis::ALL.iter().map(|b| b.as_str()).collect();
+    bases.sort();
+    assert_eq!(
+        bases,
+        vec![
+            "deterministic_rule",
+            "evidence",
+            "explicit_agent",
+            "explicit_user"
+        ],
+        "a basis that does not name a rule or a party would make provenance unreadable"
+    );
+}

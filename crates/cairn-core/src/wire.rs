@@ -71,6 +71,170 @@ pub mod codes {
         UNPUBLISHED_SKILL_REF,
         PARTIAL_APPLY,
     ];
+
+    // -----------------------------------------------------------------------
+    // Feature 003 (FR-499). Added to the same stable set, with the same exit
+    // mapping. Deliberately **no** `budget_exceeded`: a briefing is truncated
+    // to fit and never rejected for size (FR-445).
+    // -----------------------------------------------------------------------
+
+    // Knowledge (`contracts/knowledge.md` §Error codes)
+    /// The proposed key did not normalize; the memory was stored free-form.
+    pub const INVALID_TOPIC_KEY: &str = "invalid_topic_key";
+    pub const VALUE_WITHOUT_TOPIC: &str = "value_without_topic";
+    pub const SUBJECT_NOT_FOUND: &str = "subject_not_found";
+    pub const NOT_CONFLICTED: &str = "not_conflicted";
+    /// The requested relation contradicts an existing one — a mutual
+    /// supersession, for instance.
+    pub const RELATION_CONFLICT: &str = "relation_conflict";
+    /// The write succeeded; the relation exceeded `reconcile_members_max`.
+    pub const RECONCILIATION_DEFERRED: &str = "reconciliation_deferred";
+    /// The write succeeded and agrees on the value with a named existing
+    /// member while differing in content. Not a failure — the prompt for an
+    /// explicit decision (FR-327).
+    pub const CORROBORATING_MEMBER: &str = "corroborating_member";
+
+    // Evidence and verification (`contracts/evidence-verification.md`)
+    pub const EVIDENCE_EXCLUDED: &str = "evidence_excluded";
+    pub const EVIDENCE_OUTSIDE_WORKTREE: &str = "evidence_outside_worktree";
+    pub const EVIDENCE_TOO_LARGE: &str = "evidence_too_large";
+    pub const ABSOLUTE_LOCATOR: &str = "absolute_locator";
+    pub const VERIFIER_UNAVAILABLE: &str = "verifier_unavailable";
+    /// The check ran and could not establish either outcome (FR-366).
+    pub const VERIFICATION_INCONCLUSIVE: &str = "verification_inconclusive";
+    /// Attested evidence was offered where a deterministic check is required —
+    /// a criterion's verification, or promotion (FR-370).
+    pub const ATTESTED_NOT_SUFFICIENT: &str = "attested_not_sufficient";
+    /// An imported verification was offered for a criterion; readiness is a
+    /// local claim (FR-368).
+    pub const IMPORTED_NOT_SUFFICIENT: &str = "imported_not_sufficient";
+    /// The bounded pass hit a cap; remaining work is queued.
+    pub const VERIFY_PASS_YIELDED: &str = "verify_pass_yielded";
+
+    // Continuity and context (`contracts/continuity-context.md`)
+    pub const PIN_BUDGET_EXHAUSTED: &str = "pin_budget_exhausted";
+    pub const CHECKPOINT_NOT_FOUND: &str = "checkpoint_not_found";
+    pub const CHECKPOINT_UNRESOLVABLE: &str = "checkpoint_unresolvable";
+    /// A relevant path could not be fingerprinted — excluded, unreadable, or
+    /// over the cap. Reported per path, never as unchanged (FR-432).
+    pub const PATH_NOT_FINGERPRINTABLE: &str = "path_not_fingerprintable";
+    pub const NO_BOUNDARY_RECORD: &str = "no_boundary_record";
+
+    // Task work state (`contracts/task-model.md`)
+    pub const REVISION_CONFLICT: &str = "revision_conflict";
+    pub const CRITERION_NOT_FOUND: &str = "criterion_not_found";
+    pub const BLOCKER_NOT_FOUND: &str = "blocker_not_found";
+    pub const BLOCKER_ALREADY_CLEARED: &str = "blocker_already_cleared";
+    pub const CRITERION_WAIVED: &str = "criterion_waived";
+
+    // The ten promotion refusals, in the gate's fixed order so the reported
+    // reason is stable (`contracts/patterns.md` §The promotion gate).
+    pub const SOURCE_NOT_ACTIVE: &str = "source_not_active";
+    pub const SOURCE_UNVERIFIED: &str = "source_unverified";
+    pub const NO_EVIDENCE: &str = "no_evidence";
+    pub const LOCAL_ONLY_MEMORY: &str = "local_only_memory";
+    pub const SOURCE_CONFLICTED: &str = "source_conflicted";
+    pub const NOT_TRANSFERABLE: &str = "not_transferable";
+    pub const POSSIBLE_SECRET: &str = "possible_secret";
+    pub const PROJECT_IDENTIFYING: &str = "project_identifying";
+    pub const INSUFFICIENT_SPECIFICITY: &str = "insufficient_specificity";
+    pub const DUPLICATE_PATTERN: &str = "duplicate_pattern";
+    pub const PATTERN_NOT_FOUND: &str = "pattern_not_found";
+    pub const OUTCOME_ALREADY_RECORDED: &str = "outcome_already_recorded";
+
+    /// The ten gate refusals **in gate order**. The order is the contract: it
+    /// is what makes the reported reason stable when a candidate violates more
+    /// than one check.
+    pub const PROMOTION_REFUSALS: &[&str] = &[
+        SOURCE_NOT_ACTIVE,
+        SOURCE_UNVERIFIED,
+        NO_EVIDENCE,
+        LOCAL_ONLY_MEMORY,
+        SOURCE_CONFLICTED,
+        NOT_TRANSFERABLE,
+        POSSIBLE_SECRET,
+        PROJECT_IDENTIFYING,
+        INSUFFICIENT_SPECIFICITY,
+        DUPLICATE_PATTERN,
+    ];
+
+    // What a server says when it cannot hold the work — as opposed to when it
+    // will not (`contracts/privacy-sync.md` §Mixed versions, D81).
+    //
+    // These are **server** codes, and deliberately not part of
+    // `INTELLIGENCE_CODES`: they never reach a CLI exit status. They classify a
+    // rejection so the daemon can tell "upgrade the server and this delivers"
+    // from "this will never be acceptable", which is the difference between
+    // retained work and lost work (FR-418).
+    pub const UNKNOWN_ENTITY_TYPE: &str = "unknown_entity_type";
+    pub const UNKNOWN_FIELD: &str = "unknown_field";
+    pub const SCHEMA_OLDER: &str = "schema_older";
+
+    /// The refusals that mean *not yet*, rather than *never*.
+    ///
+    /// A rejection outside this set is a content rejection and stays a
+    /// permanent failure exactly as it is today — which is what stops a privacy
+    /// refusal from being retained as a pending delivery.
+    pub const CAPABILITY_REFUSALS: &[&str] = &[UNKNOWN_ENTITY_TYPE, UNKNOWN_FIELD, SCHEMA_OLDER];
+
+    /// Feature 003 codes that are **not failures**.
+    ///
+    /// Each rides an `ok: true` envelope in a `notes` array, because the
+    /// operation succeeded and the note is what the caller needs to know:
+    /// FR-312 requires a memory with an unrepresentable topic key to be stored
+    /// regardless, FR-366 makes an inconclusive check an outcome rather than an
+    /// error, and FR-435 makes partial continuity a result.
+    pub const FEATURE_003_NOTES: &[&str] = &[
+        INVALID_TOPIC_KEY,
+        RECONCILIATION_DEFERRED,
+        CORROBORATING_MEMBER,
+        VERIFICATION_INCONCLUSIVE,
+        VERIFY_PASS_YIELDED,
+        CHECKPOINT_UNRESOLVABLE,
+        PATH_NOT_FINGERPRINTABLE,
+    ];
+
+    /// Every Feature 003 code, for the exit-code mapping and its test.
+    pub const INTELLIGENCE_CODES: &[&str] = &[
+        INVALID_TOPIC_KEY,
+        VALUE_WITHOUT_TOPIC,
+        SUBJECT_NOT_FOUND,
+        NOT_CONFLICTED,
+        RELATION_CONFLICT,
+        RECONCILIATION_DEFERRED,
+        CORROBORATING_MEMBER,
+        EVIDENCE_EXCLUDED,
+        EVIDENCE_OUTSIDE_WORKTREE,
+        EVIDENCE_TOO_LARGE,
+        ABSOLUTE_LOCATOR,
+        VERIFIER_UNAVAILABLE,
+        VERIFICATION_INCONCLUSIVE,
+        ATTESTED_NOT_SUFFICIENT,
+        IMPORTED_NOT_SUFFICIENT,
+        VERIFY_PASS_YIELDED,
+        PIN_BUDGET_EXHAUSTED,
+        CHECKPOINT_NOT_FOUND,
+        CHECKPOINT_UNRESOLVABLE,
+        PATH_NOT_FINGERPRINTABLE,
+        NO_BOUNDARY_RECORD,
+        REVISION_CONFLICT,
+        CRITERION_NOT_FOUND,
+        BLOCKER_NOT_FOUND,
+        BLOCKER_ALREADY_CLEARED,
+        CRITERION_WAIVED,
+        SOURCE_NOT_ACTIVE,
+        SOURCE_UNVERIFIED,
+        NO_EVIDENCE,
+        LOCAL_ONLY_MEMORY,
+        SOURCE_CONFLICTED,
+        NOT_TRANSFERABLE,
+        POSSIBLE_SECRET,
+        PROJECT_IDENTIFYING,
+        INSUFFICIENT_SPECIFICITY,
+        DUPLICATE_PATTERN,
+        PATTERN_NOT_FOUND,
+        OUTCOME_ALREADY_RECORDED,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,6 +309,10 @@ pub enum ContextReason {
     SessionStart,
     Continuation,
     Refresh,
+    /// The agent is back from a compaction and is asking for its checkpoint.
+    /// This is where a checkpoint is **restored**; it is never where one is
+    /// written (`contracts/continuity-context.md` §When one is written).
+    PostCompaction,
 }
 
 /// What a capture hook observed, before the daemon filters and stores it.
@@ -211,6 +379,42 @@ pub struct MemoryQuery {
     pub state: Option<MemoryState>,
     #[serde(default)]
     pub limit: Option<i64>,
+
+    // Feature 003. Every one defaults to absent, so a caller that omits them
+    // all receives Feature 001 behaviour exactly (FR-497).
+    /// Exact or prefix match on the normalized subject identity. A trailing
+    /// `.` makes it a prefix — `infrastructure.` matches every subject beneath
+    /// it. Matched by SQL, never by FTS: a topic key is an identity, not text.
+    #[serde(default)]
+    pub topic_key: Option<String>,
+    /// What was effective at an instant (FR-342).
+    ///
+    /// Reconstructs proposal effectiveness and explicit supersession
+    /// intervals, which is the whole of what Cairn stores authoritatively. The
+    /// lifecycle filter is relaxed when this is set, because a historical
+    /// answer is precisely the set of proposals that are no longer current.
+    #[serde(default)]
+    pub as_of: Option<DateTime<Utc>>,
+    /// Only memories whose subject is `Conflicted`.
+    #[serde(default)]
+    pub conflicted: bool,
+    /// Only memories whose subject is `Corroborated`.
+    #[serde(default)]
+    pub corroborated: bool,
+    /// Filter by verification state. A `drifted` memory is still returned by
+    /// default, because it stays lifecycle-`active` (FR-373).
+    #[serde(default)]
+    pub verification: Option<VerificationState>,
+    /// Filter by what established the verification (FR-370).
+    #[serde(default)]
+    pub authority: Option<VerificationAuthority>,
+    /// Also return signal-matched prior patterns, in a **separate** array.
+    ///
+    /// Never merged into `results`: a pattern is not this project's knowledge,
+    /// and a caller that did not ask for one must not be handed one among its
+    /// own memories (FR-406, SC-312).
+    #[serde(default)]
+    pub include_patterns: bool,
 }
 
 /// Everything the daemon can be asked to do.
@@ -416,6 +620,18 @@ pub enum Request {
         reason: Option<ContextReason>,
         #[serde(default)]
         token_budget: Option<usize>,
+        /// Return the selection diagnostics. Costs no budget when false, which
+        /// is why it is opt-in rather than always present (FR-463).
+        #[serde(default)]
+        explain: bool,
+    },
+
+    SessionCheckpoint {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
     },
 
     HandoffGenerate {
@@ -471,6 +687,98 @@ pub enum Request {
         status: Option<TaskStatus>,
     },
 
+    // -----------------------------------------------------------------------
+    // Feature 003 task work state (`contracts/task-model.md`).
+    //
+    // Note what is absent from every one of these: any field in which a caller
+    // could store a completion percentage, and any sprint, epic, point,
+    // assignee, estimate, board or inter-task dependency (FR-486, FR-491).
+    // -----------------------------------------------------------------------
+    TaskCriterionAdd {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        task_id: Uuid,
+        text: String,
+    },
+    TaskCriterionSet {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        criterion_id: Uuid,
+        #[serde(default)]
+        state: Option<CriterionState>,
+        #[serde(default)]
+        text: Option<String>,
+        /// What the caller read. Supplying it is how a caller is protected;
+        /// omitting it applies the write and records `blind_write` (FR-490).
+        #[serde(default)]
+        expected_revision: Option<i64>,
+    },
+    /// Ask Cairn to verify a criterion from its evidence. There is no field in
+    /// which a caller can *assert* a verification — that is the whole point.
+    TaskCriterionVerify {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        criterion_id: Uuid,
+        #[serde(default)]
+        evidence_id: Option<Uuid>,
+    },
+    TaskCriterionRemove {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        criterion_id: Uuid,
+    },
+    TaskBlockerOpen {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        task_id: Uuid,
+        description: String,
+    },
+    TaskBlockerClear {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        blocker_id: Uuid,
+    },
+    TaskReadiness {
+        cwd: String,
+        task_id: Uuid,
+    },
+    TaskHistory {
+        cwd: String,
+        task_id: Uuid,
+        #[serde(default)]
+        limit: Option<i64>,
+    },
+
+    MemoryPin {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        memory_id: Uuid,
+        pinned: bool,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+
     MemoryCreate {
         cwd: String,
         #[serde(default)]
@@ -489,11 +797,24 @@ pub enum Request {
         evidence_observation_ids: Vec<Uuid>,
         #[serde(default)]
         local_only: bool,
+        /// The subject this proposal concerns (FR-318). Optional: a free-form
+        /// memory is fully valid and behaves exactly as it does in Feature 001.
+        #[serde(default)]
+        topic_key: Option<String>,
+        #[serde(default)]
+        value_key: Option<String>,
+        #[serde(default)]
+        importance: Option<Importance>,
     },
     MemorySupersede {
         cwd: String,
         #[serde(default)]
         agent_session_key: Option<String>,
+        /// The session to attribute the replacement to, when the key is not to
+        /// hand. Without it a worktree running two agents cannot say which one
+        /// superseded the memory — the same ambiguity `MemoryCreate` resolves.
+        #[serde(default)]
+        session_id: Option<Uuid>,
         memory_id: Uuid,
         kind: MemoryType,
         #[serde(default)]
@@ -505,6 +826,14 @@ pub enum Request {
         evidence_observation_ids: Vec<Uuid>,
         #[serde(default)]
         local_only: bool,
+        /// The subject this proposal concerns (FR-318). Optional: a free-form
+        /// memory is fully valid and behaves exactly as it does in Feature 001.
+        #[serde(default)]
+        topic_key: Option<String>,
+        #[serde(default)]
+        value_key: Option<String>,
+        #[serde(default)]
+        importance: Option<Importance>,
     },
     MemoryForget {
         cwd: String,
@@ -522,6 +851,170 @@ pub enum Request {
         session_id: Option<Uuid>,
         #[serde(flatten)]
         query: MemoryQuery,
+    },
+
+    // ---- Reusable cross-project patterns (`contracts/patterns.md`) --------
+    //
+    // A pattern is local to the machine and has no project identity, so none of
+    // these carries a project — `cwd` is here only to resolve *this* project for
+    // the promotion source and for an application's attribution.
+    /// Recompute every derived value and report what differed (FR-478,
+    /// FR-518).
+    ///
+    /// A release where a derived value disagrees with its rebuild ships a known
+    /// inconsistency, so this exits non-zero when any of them does.
+    RebuildDerived {
+        cwd: String,
+    },
+
+    /// List promoted patterns, with their counters.
+    PatternList {
+        cwd: String,
+        #[serde(default)]
+        trust: Option<PatternTrust>,
+        #[serde(default)]
+        signal: Option<String>,
+    },
+    /// One pattern in full: text, applications, counterexamples, and the
+    /// sanitization report.
+    PatternShow {
+        cwd: String,
+        id: Uuid,
+    },
+    /// Propose a promotion. Runs the ten-check gate; `dry_run` reports the
+    /// outcome without writing (FR-395).
+    PatternPromote {
+        cwd: String,
+        memory_id: Uuid,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        problem: Option<String>,
+        #[serde(default)]
+        signals: Vec<String>,
+        #[serde(default)]
+        applicability: Vec<String>,
+        #[serde(default)]
+        root_cause: Option<String>,
+        #[serde(default)]
+        approach: Option<String>,
+        #[serde(default)]
+        constraints: Vec<String>,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    /// Record what happened when a pattern was applied here (FR-401, FR-404).
+    PatternOutcome {
+        cwd: String,
+        id: Uuid,
+        outcome: PatternOutcome,
+        #[serde(default)]
+        signals: Vec<String>,
+        #[serde(default)]
+        alternative_cause: Option<String>,
+        #[serde(default)]
+        evidence_id: Option<Uuid>,
+        #[serde(default)]
+        session: Option<Uuid>,
+    },
+    /// Tombstone a pattern. Its applications survive as history.
+    PatternForget {
+        cwd: String,
+        id: Uuid,
+    },
+
+    /// Inspect a subject: its members, its canonical answer or answers, its
+    /// reconciliation state, and the decisions that produced it (FR-307).
+    MemorySubject {
+        cwd: String,
+        topic_key: String,
+        #[serde(default)]
+        scope: Option<MemoryScope>,
+        #[serde(default)]
+        scope_key: Option<String>,
+    },
+    /// A session confirms an existing memory is still true (FR-321).
+    ///
+    /// Explicit only. Cairn never infers a reinforcement from a matching value
+    /// key — that inference was the false-merge path this feature closed.
+    MemoryReinforce {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        memory_id: Uuid,
+        /// The memory carrying the confirming session's statement. When absent
+        /// the confirmation is recorded against the session itself.
+        #[serde(default)]
+        from_memory_id: Option<Uuid>,
+    },
+    /// Attach a bounded, redacted, attributable evidence fact (FR-351).
+    ///
+    /// Local, always: there is no outbox entity type and no server table for
+    /// one, which is what makes "evidence content never leaves the machine" a
+    /// property of the schema rather than a promise.
+    EvidenceAdd {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        kind: EvidenceKind,
+        /// `cairn` when Cairn read it; `agent` when an agent attested it. An
+        /// attested fact is usable, labelled everywhere, and refused by the two
+        /// strict consumers (FR-355, FR-370).
+        #[serde(default)]
+        collector: Option<EvidenceCollector>,
+        subject: String,
+        observed_value: String,
+        /// Repository-relative, or a Git ref. Never absolute (FR-353).
+        source_locator: String,
+        #[serde(default)]
+        observation_id: Option<Uuid>,
+        /// The memory this supports or contradicts, when it is being attached.
+        #[serde(default)]
+        memory_id: Option<Uuid>,
+        #[serde(default)]
+        role: Option<EvidenceRole>,
+    },
+    EvidenceList {
+        cwd: String,
+        #[serde(default)]
+        memory_id: Option<Uuid>,
+    },
+    EvidenceShow {
+        cwd: String,
+        evidence_id: Uuid,
+    },
+    /// Run verification on demand. Same caps, same verifiers, reported
+    /// synchronously (FR-472).
+    Verify {
+        cwd: String,
+        #[serde(default)]
+        memory_id: Option<Uuid>,
+        /// Every memory in the project that owes a check.
+        #[serde(default)]
+        all: bool,
+        /// Return the run history rather than only the current state.
+        #[serde(default)]
+        explain: bool,
+    },
+    /// Record an explicit reconciliation decision (FR-335).
+    MemoryReconcile {
+        cwd: String,
+        #[serde(default)]
+        agent_session_key: Option<String>,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        from_memory_id: Uuid,
+        to_memory_id: Uuid,
+        relation: RelationKind,
+        basis: RelationBasis,
+        #[serde(default)]
+        basis_evidence_id: Option<Uuid>,
+        #[serde(default)]
+        rationale: Option<String>,
     },
 
     PrivacyExclude {
@@ -605,6 +1098,11 @@ pub struct StatusPayload {
     /// the debt visible (FR-240 clause 3).
     #[serde(default)]
     pub sessions_awaiting_handoff: i64,
+    /// How far subject identity has actually reached in this project, and what
+    /// the mechanism is currently reporting (FR-499). Defaulted, so a Feature
+    /// 001 consumer reading an older payload still parses.
+    #[serde(default)]
+    pub knowledge: Option<KnowledgeHealth>,
     /// Boundaries whose synthesis has failed, with the redacted reason. They
     /// stay retryable and actionable; this is not a terminal outcome.
     #[serde(default)]
@@ -714,12 +1212,187 @@ pub struct MemoryResult {
     pub created_at: DateTime<Utc>,
     pub provenance: Provenance,
     pub rank: RankInfo,
+
+    // Feature 003 read-only fields. A Feature 001 caller sees its existing
+    // fields unchanged and simply gains these (FR-497).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporal: Option<Temporal>,
+    /// Ranks within a bucket and nothing more (FR-308).
+    pub importance: Importance,
+    pub pinned: bool,
+    pub verification: VerificationInfo,
+    pub reinforcement: Reinforcement,
+    /// Where this result stands in its subject. Absent on a free-form memory,
+    /// which belongs to no subject.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subject: Option<SubjectInfo>,
+}
+
+/// The verification a **local** reader may see.
+///
+/// Deliberately not `VerificationSummary`, which is what the outbox transmits.
+/// That one collapses `remote_cairn` to `cairn`, because a peer must not learn
+/// that *this* machine imported a state rather than checking it (T104, FR-502).
+/// A local caller has the opposite need: without the `remote_` prefix it cannot
+/// tell a check this machine ran from one it was merely told about, which is
+/// the distinction FR-370 exists to preserve. Two readers, two truths, two
+/// types.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationInfo {
+    pub state: VerificationState,
+    /// Always present when the state is `verified` (FR-370).
+    pub authority: Option<VerificationAuthority>,
+    pub last_verified_at: Option<String>,
+    /// A count of supporting evidence facts. Never the facts themselves.
+    pub fact_count: usize,
+    /// Verifier **kinds** only — never a subject, value, locator or digest
+    /// (FR-502).
+    pub basis: Vec<VerifierKind>,
+}
+
+/// How many sessions confirmed a memory is still true.
+///
+/// A reinforcement is an explicit act by a session that read the memory
+/// (FR-321). It is **never** a verification, and must never be presented as one
+/// (FR-406) — which is why it is a field of its own rather than a number folded
+/// into `verification`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Reinforcement {
+    pub count: i64,
+    pub distinct_origins: i64,
+}
+
+/// Where a result stands among the other answers to its subject.
+///
+/// The two arrays are the same distinction the subject state rests on: an
+/// answer that asserts a *different* value competes, and one that asserts the
+/// *same* value with different words corroborates. Cairn never merges the
+/// second (D46), so a caller that wants one answer has to be told there are
+/// others and which kind they are.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SubjectInfo {
+    pub reconciliation: Reconciliation,
+    pub is_canonical_answer: bool,
+    pub competing_answers: Vec<Uuid>,
+    pub corroborating_answers: Vec<Uuid>,
+}
+
+/// What Cairn can say about when a proposal applied.
+///
+/// The claim is bounded by what Cairn stores authoritatively: an
+/// `effective_from` it recorded, and a `superseded_at` set with the
+/// supersession relation. A lifecycle transition with no authoritative instant
+/// reports `applicability: unknown` rather than an unbounded interval (FR-342,
+/// D82).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Temporal {
+    pub effective_from: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseded_at: Option<DateTime<Utc>>,
+    /// NULL means **unknown**, never "not stale".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stale_at: Option<DateTime<Utc>>,
+    /// `bounded` when every transition this memory underwent has an
+    /// authoritative instant; `unknown` when one does not.
+    pub applicability: Applicability,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchPayload {
     pub results: Vec<MemoryResult>,
     pub total: usize,
+}
+
+/// What a `create` turned out to mean for the subject it joined
+/// (`contracts/mcp-tools.md` §`cairn_remember`).
+///
+/// The internal decision is `ProposalOutcome`, a tagged enum. This is its wire
+/// form: one flat object a caller can read field by field without matching on a
+/// tag, which is what the contract fixes and what an agent reading JSON needs.
+///
+/// Two fields are deliberately *not* what a lookup table would produce.
+/// `relation_recorded` is the kind the write actually recorded, carried out of
+/// the transaction that wrote it — never re-derived from the outcome, so it
+/// cannot drift from what is in the database. And `matched_memory_id` is null
+/// for a conflict: a conflict is intrinsically several, and naming one of them
+/// as *the* match would be arbitration by identifier, which nothing in Cairn
+/// does (FR-334). The full set is in `competing_memory_ids`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReconciliationReport {
+    /// `created | duplicate | corroborating | conflict_detected | deferred`.
+    pub outcome: String,
+    /// The single member this proposal matched, where there is exactly one.
+    pub matched_memory_id: Option<Uuid>,
+    /// That member's value key.
+    pub matched_value_key: Option<String>,
+    /// The subject, normalized. Absent on a free-form memory.
+    pub subject: Option<String>,
+    /// The relation this write recorded, if any. `corroborating` records
+    /// nothing, and says so (FR-327).
+    pub relation_recorded: Option<RelationKind>,
+    pub conflict_detected: bool,
+    /// The one call that would settle this, where a caller — which can read
+    /// both statements — is the only party able to decide. Null where there is
+    /// nothing to settle.
+    pub next_step: Option<String>,
+    /// Every member the proposal disagrees with, in identifier order for a
+    /// stable rendering. Empty unless `conflict_detected`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub competing_memory_ids: Vec<Uuid>,
+}
+
+/// The verbatim prompt FR-327 relies on. A corroborating write merges nothing;
+/// this is how the party that *can* read both statements is told it may.
+pub const CORROBORATING_NEXT_STEP: &str =
+    "if this is the same claim, call action=reinforce with memory_id";
+
+/// A conflict is recorded and never resolved (FR-334). The caller is pointed at
+/// the explicit decision, not at a merge.
+pub const CONFLICT_NEXT_STEP: &str =
+    "both answers stand; record a decision with action=reconcile when you know which applies";
+
+impl ReconciliationReport {
+    /// Build the wire form from the decision and the facts the write held.
+    ///
+    /// `relation_recorded` and `matched_value_key` come from the caller because
+    /// only the write knows them: the first is what was inserted, the second is
+    /// a column of a member the classifier already had in hand.
+    pub fn build(
+        outcome: &crate::knowledge::ProposalOutcome,
+        subject: Option<&str>,
+        relation_recorded: Option<RelationKind>,
+        matched_value_key: Option<String>,
+    ) -> Self {
+        use crate::knowledge::ProposalOutcome as P;
+        let (matched, competing, next_step) = match outcome {
+            P::Duplicate { of } => (Some(*of), Vec::new(), None),
+            P::Corroborating { member } => (
+                Some(*member),
+                Vec::new(),
+                Some(CORROBORATING_NEXT_STEP.to_string()),
+            ),
+            P::ConflictDetected { with } => {
+                let mut with = with.clone();
+                with.sort();
+                (None, with, Some(CONFLICT_NEXT_STEP.to_string()))
+            }
+            P::Created | P::Deferred => (None, Vec::new(), None),
+        };
+        Self {
+            outcome: outcome.as_str().to_string(),
+            matched_memory_id: matched,
+            matched_value_key: matched.and(matched_value_key),
+            subject: subject.map(str::to_string),
+            relation_recorded,
+            conflict_detected: matches!(outcome, P::ConflictDetected { .. }),
+            next_step,
+            competing_memory_ids: competing,
+        }
+    }
 }
 
 /// The bounded briefing (FR-028).
@@ -735,6 +1408,55 @@ pub struct Briefing {
     pub known_failures: Vec<String>,
     pub memory: BriefingMemory,
     pub no_prior_history: bool,
+    // ---- Feature 003. Every one is skipped when empty, so a project with no
+    // Level 0 content produces exactly the bytes Feature 001 produced (FR-442).
+    /// Critical warning kinds with counts (Tier 0a), then their detail (Tier 0b).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<ContextWarning>,
+    /// Pinned constraints in force for this scope.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub constraints: Vec<PinnedConstraint>,
+    /// The recorded next action of a diverged checkpoint, **never** presented as
+    /// `next_action` (FR-434). Absent until Phase 9 records checkpoints.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_next_action: Option<String>,
+    /// Signal-matched prior patterns from other projects (FR-398, SC-312).
+    ///
+    /// A **separate array**, never merged into `memory`. A pattern is not this
+    /// project's knowledge and must not be readable as though it were; keeping
+    /// it in its own field is what makes that structural rather than a matter of
+    /// how it happens to be rendered.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub patterns: Vec<BriefingPattern>,
+}
+
+/// A prior pattern offered to this project, with everything needed to rule it
+/// out cheaply.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BriefingPattern {
+    pub id: Uuid,
+    pub title: String,
+    /// `sanitized`, `validated` or `contested`. Stated, never summarized into a
+    /// score.
+    pub trust: PatternTrust,
+    /// **Always false.** A pattern is never verified in the project being
+    /// briefed; it is offered, not asserted (SC-312).
+    pub verified_in_this_project: bool,
+    /// The conditions under which it applies, so the agent can rule it out
+    /// without trying it.
+    pub applicability: Vec<String>,
+    pub approach: String,
+    /// What the approach does *not* do.
+    pub constraints: Vec<String>,
+    /// A cause someone else found behind the same symptom. Present only when a
+    /// counterexample recorded one (FR-405).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alternative_cause: Option<String>,
+    /// What to rule out first, derived from the alternative cause.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_this_first: Option<String>,
+    /// How many of this project's own signals matched.
+    pub signal_overlap: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -744,6 +1466,92 @@ pub struct BriefingTask {
     pub goal: String,
     pub acceptance_criteria: Vec<String>,
     pub status: TaskStatus,
+    // ---- Feature 003 Tier 0a. Every one is O(1) in the size of the task, which
+    // is what makes the tier's guarantee keepable (FR-443).
+    /// Counts by state. Never a percentage — there is no field for one (FR-486).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<crate::tasks::Progress>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_readiness: Option<CompletionReadiness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_blockers: Option<usize>,
+    /// The single most actionable open blocker, summarized to one line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<String>,
+    /// True when the goal was truncated to `goal_max_tokens`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub goal_truncated: bool,
+    /// Criterion labels admitted as Tier 0b detail, in action order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<BriefingCriterion>,
+    /// How many criteria did not fit, with the path that retrieves them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criteria_omitted: Option<usize>,
+}
+
+/// One criterion as Level 0 renders it — both axes named, never collapsed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BriefingCriterion {
+    pub label: String,
+    pub text: String,
+    pub state: CriterionState,
+    pub verification: CriterionVerification,
+}
+
+/// A Level 0 warning. Content, not diagnostics: present whether or not
+/// `explain` was requested (FR-464).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextWarning {
+    /// `task_divergence` | `checkpoint` | `task` | `conflict` | `drift`.
+    pub kind: String,
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
+/// A pinned constraint in force for this scope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PinnedConstraint {
+    pub id: Uuid,
+    pub text: String,
+    /// A pin whose claim no longer holds keeps its pin and carries its warning —
+    /// a constraint that stopped being true is exactly what must be said
+    /// (FR-456).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drifted: bool,
+}
+
+/// Why each admitted item was chosen, and why each omission was left out.
+///
+/// Returned only when `explain` was requested, so it costs no budget otherwise
+/// (FR-463).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Selection {
+    pub budget: usize,
+    pub reserve: usize,
+    pub reserve_used: usize,
+    pub reserve_released: usize,
+    pub included: Vec<SelectedItem>,
+    pub omitted: Vec<OmittedItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SelectedItem {
+    pub level: ContextLevel,
+    pub kind: String,
+    pub id: String,
+    pub reasons: Vec<SelectionReason>,
+    pub cost: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OmittedItem {
+    pub kind: String,
+    pub count: usize,
+    pub reason: OmissionReason,
+    /// How to retrieve what was left out. Omission is never silent (FR-448).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub retrieval: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -774,6 +1582,9 @@ pub struct ContextPayload {
     pub omitted_sections: Vec<String>,
     /// True when the briefing could not be fully assembled in time (FR-046).
     pub degraded: bool,
+    /// Present only when `explain` was requested (FR-463).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<Selection>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -785,6 +1596,45 @@ pub struct SyncStatusPayload {
     pub failed: i64,
     pub last_success_at: Option<DateTime<Utc>>,
     pub failures: Vec<SyncFailure>,
+    /// Work retained for a server that cannot hold it yet (FR-415, FR-418).
+    ///
+    /// Reported apart from `pending` and from `failed` because it is neither.
+    /// Defaulted so a Feature 001 consumer reading an older payload still
+    /// parses, and so this payload still satisfies an older consumer.
+    #[serde(default)]
+    pub degradation: Option<SyncDegradation>,
+}
+
+/// What a server cannot hold, and what happens next.
+/// What `cairn status` says about the subject mechanism's reach.
+///
+/// Reported as counts and one share, never as a score. `subject_share_percent`
+/// is absent when the project has no project-scoped memory to have adopted
+/// anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KnowledgeHealth {
+    pub project_memories: i64,
+    pub with_subject: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject_share_percent: Option<i64>,
+    pub conflicted_subjects: i64,
+    pub needs_recheck: i64,
+    pub drifted: i64,
+    /// Present only when this project is retaining work for an older server.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_degradation: Option<SyncDegradation>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncDegradation {
+    pub blocked: i64,
+    /// What the server last said it could do.
+    pub server_capability: String,
+    /// The capabilities the retained work is waiting for, named.
+    pub missing_capabilities: Vec<String>,
+    /// One line for a person: what is still syncing, and what happens on
+    /// upgrade. Degradation must never read as data loss (FR-415).
+    pub note: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -927,5 +1777,104 @@ mod tests {
         let back: Provenance = serde_json::from_str(&json).unwrap();
         assert!(back.agent.is_none());
         assert!(!serde_json::to_string(&back).unwrap().contains("agent"));
+    }
+}
+
+#[cfg(test)]
+mod feature_003_code_tests {
+    use super::codes::*;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn every_code_is_unique_across_the_whole_stable_set() {
+        // One set, not three: a code that means two things on two surfaces is
+        // a code an agent cannot act on.
+        let mut all: Vec<&str> = Vec::new();
+        all.extend_from_slice(INTEGRATION_CODES);
+        all.extend_from_slice(INTELLIGENCE_CODES);
+        all.extend_from_slice(&[
+            NOT_A_REPOSITORY,
+            NO_ACTIVE_SESSION,
+            AMBIGUOUS_SESSION,
+            NOT_FOUND,
+            INVALID_REQUEST,
+            STORAGE_UNAVAILABLE,
+            DAEMON_UNAVAILABLE,
+            NOT_LINKED,
+            SERVER_UNAVAILABLE,
+            UNAUTHORIZED,
+        ]);
+        let unique: BTreeSet<&str> = all.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "duplicate code in the stable set: {all:?}"
+        );
+    }
+
+    #[test]
+    fn there_is_no_budget_exceeded_code() {
+        // FR-445: a briefing is truncated to fit, never rejected for size. A
+        // code for the rejection would invite one.
+        assert!(!INTELLIGENCE_CODES.contains(&"budget_exceeded"));
+        assert!(!INTELLIGENCE_CODES
+            .iter()
+            .any(|c| c.contains("budget_exceeded")));
+    }
+
+    #[test]
+    fn the_promotion_gate_order_is_the_contract() {
+        // The reported reason must be stable when a candidate violates several
+        // checks, and the order is what makes it so (FR-396, FR-397).
+        assert_eq!(PROMOTION_REFUSALS.len(), 10);
+        assert_eq!(PROMOTION_REFUSALS[0], SOURCE_NOT_ACTIVE);
+        assert_eq!(PROMOTION_REFUSALS[1], SOURCE_UNVERIFIED);
+        assert_eq!(
+            PROMOTION_REFUSALS[6], POSSIBLE_SECRET,
+            "the secret scan runs before the identifier scan"
+        );
+        assert_eq!(PROMOTION_REFUSALS[7], PROJECT_IDENTIFYING);
+        assert_eq!(PROMOTION_REFUSALS[9], DUPLICATE_PATTERN);
+        for code in PROMOTION_REFUSALS {
+            assert!(
+                INTELLIGENCE_CODES.contains(code),
+                "{code} is not in the set"
+            );
+        }
+    }
+
+    #[test]
+    fn notes_are_a_subset_of_the_codes_and_are_not_failures() {
+        for note in FEATURE_003_NOTES {
+            assert!(
+                INTELLIGENCE_CODES.contains(note),
+                "{note} is a note for a code that does not exist"
+            );
+        }
+        // The four the contracts call out explicitly as `ok: true`.
+        for note in [
+            INVALID_TOPIC_KEY,
+            RECONCILIATION_DEFERRED,
+            VERIFICATION_INCONCLUSIVE,
+            CHECKPOINT_UNRESOLVABLE,
+        ] {
+            assert!(FEATURE_003_NOTES.contains(&note), "{note}");
+        }
+        // And a refusal is never one of them.
+        for refusal in PROMOTION_REFUSALS {
+            assert!(
+                !FEATURE_003_NOTES.contains(refusal),
+                "{refusal} must fail loudly"
+            );
+        }
+    }
+
+    #[test]
+    fn the_two_strict_consumer_refusals_exist_and_are_distinct() {
+        // They are told apart because they mean different things: one says
+        // "an agent said so", the other says "another machine checked it".
+        assert_ne!(ATTESTED_NOT_SUFFICIENT, IMPORTED_NOT_SUFFICIENT);
+        assert!(INTELLIGENCE_CODES.contains(&ATTESTED_NOT_SUFFICIENT));
+        assert!(INTELLIGENCE_CODES.contains(&IMPORTED_NOT_SUFFICIENT));
     }
 }

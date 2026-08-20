@@ -1,0 +1,40 @@
+{
+  "description": "Two applicable answers for release.channel in one scope disagree. Both stay active, neither is marked superseded, and no single canonical answer is emitted.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Releases ship on the prerelease channel.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "release.channel",
+        "value_key": "prerelease",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Releases ship on the stable channel.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "release.channel",
+        "value_key": "stable",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ]
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "description": "Two applicable answers for build.tool in one scope disagree. Both stay active, neither is marked superseded, and no single canonical answer is emitted.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The workspace is built with Cargo.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "build.tool",
+        "value_key": "cargo",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The workspace is built with Bazel.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "build.tool",
+        "value_key": "bazel",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ]
+  }
+}

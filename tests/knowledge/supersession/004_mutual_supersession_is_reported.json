@@ -1,0 +1,46 @@
+{
+  "description": "Two machines each decided the other's proposal was replaced. Dropping both would let mutually exclusive decisions annihilate the subject, so the disagreement is reported rather than resolved.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Deployment is Dokploy.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "deploy.target",
+        "value_key": "dokploy",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Deployment is Fly.io.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "deploy.target",
+        "value_key": "flyio",
+        "origin_session": "s2"
+      }
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "supersedes",
+        "basis": "explicit_agent"
+      },
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "supersedes",
+        "basis": "explicit_agent"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ]
+  }
+}

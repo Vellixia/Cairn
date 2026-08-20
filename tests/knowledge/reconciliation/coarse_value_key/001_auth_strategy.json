@@ -1,0 +1,36 @@
+{
+  "description": "One topic, one value key, two materially different statements about auth.strategy. The value is agreed; the statements are several. Merging would report a reinforcement that never happened and suppress one of two honest claims.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "JWT uses HS256 with a shared secret.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "auth.strategy",
+        "value_key": "jwt",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "JWT uses RS256 with rotating public keys.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "auth.strategy",
+        "value_key": "jwt",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "corroborated",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "corroborating"
+    }
+  }
+}

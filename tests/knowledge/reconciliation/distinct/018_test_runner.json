@@ -1,0 +1,43 @@
+{
+  "description": "The paired negative for test.runner: the same subject, a different value, and a statement that reads similarly. Merging these would suppress a claim.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "Tests run under cargo test.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "test.runner",
+        "value_key": "cargo_test",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "Tests run under nextest.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "test.runner",
+        "value_key": "nextest",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "conflicted",
+    "answers": [
+      "a",
+      "b"
+    ],
+    "relations": [
+      {
+        "from": "a",
+        "to": "b",
+        "kind": "conflicts_with",
+        "basis": "deterministic_rule"
+      }
+    ],
+    "extra": {
+      "proposal_outcome": "conflict_detected"
+    }
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "description": "The server answers `schema_older` outright rather than naming a type or a field. The class is the same and so is the outcome, which is what makes the three codes one behaviour rather than three.",
+  "input": {
+    "extra": {
+      "server": {
+        "schema_version": 1,
+        "capabilities": []
+      },
+      "queued": [
+        {
+          "entity_type": "task_criterion",
+          "operation": "upsert"
+        }
+      ],
+      "rejection": {
+        "code": "schema_older",
+        "class": "capability"
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "state": "blocked",
+      "blocked_reason": "schema_older",
+      "retries": 0,
+      "never_failed": true,
+      "never_reported_delivered": true
+    }
+  }
+}

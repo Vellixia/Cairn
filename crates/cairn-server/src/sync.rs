@@ -9,7 +9,9 @@ use crate::auth::{self, CurrentUser};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
 use axum::extract::{Query, State};
+use axum::http::StatusCode;
 use axum::Json;
+use cairn_core::wire::codes;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::{PgPool, Postgres, Row, Transaction};
@@ -24,6 +26,50 @@ const FORBIDDEN_OBSERVATION_FIELDS: &[&str] = &[
     "outcome",
     "exit_code",
     "observations",
+    // ---- Feature 003 (FR-506) -------------------------------------------
+    //
+    // Field names that would carry evidence, diagnostic or checkpoint content.
+    // Refused **on the wire** rather than trusted not to exist: the boundary is
+    // enforced by the server, not only by what the client happens to send.
+    "observed_value",
+    "source_locator",
+    "value_digest",
+    "fingerprint",
+    "relevant_paths",
+    "criteria_snapshot",
+    "sanitization_report",
+    "origin_ref",
+    "alternative_cause",
+    "signal_digest",
+    "pin_reason",
+    "rationale",
+    "basis_evidence_id",
+    "path_fingerprints",
+    "task_snapshot_at_bind",
+    "detail",
+    "prior_value",
+    "new_value",
+    "content_norm_digest",
+    // A task's local concurrency token. Meaningless on another machine, and
+    // unsound if it travelled (D80).
+    "local_revision",
+];
+
+/// Entity types the server refuses outright, by name.
+///
+/// This list **is** the privacy boundary, stated once. A payload naming one of
+/// these is rejected exactly as `observation` is — so a malformed or malicious
+/// client cannot create a table's worth of local-only content by asking nicely.
+const FORBIDDEN_ENTITY_TYPES: &[&str] = &[
+    "observation",
+    "observation_ref",
+    "evidence_fact",
+    "verification_run",
+    "continuity_checkpoint",
+    "reusable_pattern",
+    "pattern_application",
+    "task_change",
+    "criterion_evidence",
 ];
 
 /// Session fields that are local-only (contracts/server-api.md).
@@ -69,7 +115,15 @@ pub async fn sync_batch(
     let mut results = Vec::with_capacity(body.items.len());
     for item in &body.items {
         // Items are applied independently: one rejection does not fail a batch.
-        match apply_item(&state.pool, body.project_id, user.id, item).await {
+        match apply_item(
+            &state.pool,
+            state.schema_version,
+            body.project_id,
+            user.id,
+            item,
+        )
+        .await
+        {
             Ok(status) => {
                 results.push(json!({ "idempotency_key": item.idempotency_key, "status": status }))
             }
@@ -95,11 +149,13 @@ pub async fn sync_batch(
 
 async fn apply_item(
     pool: &PgPool,
+    schema_version: i64,
     project_id: Uuid,
     user_id: Uuid,
     item: &SyncItem,
 ) -> Result<&'static str, ApiError> {
     reject_forbidden_fields(item)?;
+    reject_beyond_capability(schema_version, item)?;
 
     // Applied at most once, and the claim on the key is what decides it.
     //
@@ -133,8 +189,11 @@ async fn apply_item(
         ("project", "upsert") => upsert_project(&mut tx, project_id, item).await?,
         ("task", "upsert") => upsert_task(&mut tx, project_id, item).await?,
         ("session", "upsert") => upsert_session(&mut tx, project_id, user_id, item).await?,
-        ("memory", "upsert") => upsert_memory(&mut tx, project_id, item).await?,
+        ("memory", "upsert") => upsert_memory(&mut tx, schema_version, project_id, item).await?,
         ("handoff", "upsert") => upsert_handoff(&mut tx, project_id, item).await?,
+        ("memory_relation", "upsert") => upsert_relation(&mut tx, project_id, item).await?,
+        ("task_criterion", "upsert") => upsert_criterion(&mut tx, project_id, item).await?,
+        ("task_blocker", "upsert") => upsert_blocker(&mut tx, project_id, item).await?,
         (entity, "delete") => tombstone(&mut tx, entity, item.entity_id).await?,
         (entity, op) => {
             return Err(ApiError::invalid(format!("unsupported {entity}/{op}")));
@@ -145,12 +204,101 @@ async fn apply_item(
     Ok("applied")
 }
 
+/// Entity types this server can only hold once migration 2 has run.
+const SCHEMA_2_ENTITY_TYPES: &[&str] = &["memory_relation", "task_criterion", "task_blocker"];
+
+/// Memory fields migration 2 adds, and what each looks like when it says
+/// nothing.
+///
+/// Every memory payload carries all of these, because the payload builder does
+/// not vary its shape. Refusing on their mere presence would refuse every
+/// memory a Feature 003 daemon sends — including a plain Feature 001 fact — and
+/// SC-326 requires exactly the opposite: ordinary work keeps flowing while the
+/// work this server cannot hold waits.
+///
+/// So the test is whether accepting the memory would **discard** something. A
+/// field at its default discards nothing.
+fn carries_meaning(field: &str, value: &Value) -> bool {
+    match field {
+        "topic_key" | "value_key" => value.is_string(),
+        "importance" => value.as_str().is_some_and(|s| s != "normal"),
+        "pinned" => value.as_bool().unwrap_or(false),
+        "reinforcement_count" => value.as_i64().unwrap_or(0) > 0,
+        // One distinct origin is the memory's own session. Anything a
+        // reinforcement added is what this server would lose.
+        "distinct_origin_count" => value.as_i64().unwrap_or(0) > 1,
+        // The five-key object exists on every payload; what matters is whether
+        // it reports a verification that happened.
+        "verification" => value
+            .get("state")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| s != "unverified"),
+        _ => !value.is_null(),
+    }
+}
+
+const SCHEMA_2_MEMORY_FIELDS: &[&str] = &[
+    "topic_key",
+    "value_key",
+    "importance",
+    "pinned",
+    "reinforcement_count",
+    "distinct_origin_count",
+    "verification",
+];
+
+/// Work this deployment cannot hold **yet** — as distinct from work it will
+/// never accept (FR-415, FR-418, D81).
+///
+/// The refusal names its class, so the daemon can retain the item and deliver
+/// it after the migration runs instead of marking it permanently failed. A
+/// generic `invalid_request` here would be indistinguishable from a privacy
+/// refusal, and retaining those would be exactly wrong.
+fn reject_beyond_capability(schema_version: i64, item: &SyncItem) -> Result<(), ApiError> {
+    if schema_version >= 2 {
+        return Ok(());
+    }
+    if SCHEMA_2_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            codes::UNKNOWN_ENTITY_TYPE,
+            format!(
+                "this deployment is at schema {schema_version} and has nowhere to put \
+                 a `{}`; it will be accepted once the migration runs",
+                item.entity_type
+            ),
+        ));
+    }
+    if item.entity_type == "memory" {
+        if let Some(object) = item.payload.as_object() {
+            for field in SCHEMA_2_MEMORY_FIELDS {
+                if object
+                    .get(*field)
+                    .is_some_and(|v| carries_meaning(field, v))
+                {
+                    return Err(ApiError::new(
+                        StatusCode::CONFLICT,
+                        codes::UNKNOWN_FIELD,
+                        format!(
+                            "this deployment is at schema {schema_version} and has no \
+                             column for `{field}`; it will be accepted once the \
+                             migration runs"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The allowlist enforced on the wire.
 fn reject_forbidden_fields(item: &SyncItem) -> Result<(), ApiError> {
-    if item.entity_type == "observation" || item.entity_type == "observation_ref" {
-        return Err(ApiError::invalid(
-            "observations are local; the server does not accept them",
-        ));
+    if FORBIDDEN_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
+        return Err(ApiError::invalid(format!(
+            "`{}` is local to the machine that produced it; the server does not accept it",
+            item.entity_type
+        )));
     }
     let Some(object) = item.payload.as_object() else {
         return Ok(());
@@ -285,6 +433,7 @@ async fn upsert_session(
 
 async fn upsert_memory(
     tx: &mut Transaction<'_, Postgres>,
+    schema_version: i64,
     project_id: Uuid,
     item: &SyncItem,
 ) -> ApiResult<()> {
@@ -301,16 +450,77 @@ async fn upsert_memory(
         .and_then(|v| v.as_i64())
         .unwrap_or(0) as i32;
 
+    // The Feature 003 columns, from the payload the sender built.
+    //
+    // `authority` is taken as sent — `cairn` or `attested`. The sender never
+    // transmits `remote_*`, and the *receiving daemon* is what maps it, so the
+    // server stores what established the state on the machine that ran the
+    // check rather than a claim about anyone else's (FR-368, D76).
+    let verification = item
+        .payload
+        .get("verification")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+
+    // A schema-1 database has none of the columns below, and naming one is a
+    // hard SQL error rather than a rejection the daemon could act on — which
+    // would strand *every* memory, including the Feature 001 ones this server
+    // can hold perfectly well. `reject_beyond_capability` has already refused
+    // anything that would lose meaning here, so what reaches this branch is a
+    // memory whose Feature 003 fields are all at their defaults (SC-326).
+    if schema_version < 2 {
+        sqlx::query(
+            "INSERT INTO memories
+                (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                 origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+             ON CONFLICT (id) DO UPDATE SET
+                 content = EXCLUDED.content, state = EXCLUDED.state,
+                 superseded_by_id = EXCLUDED.superseded_by_id,
+                 observation_ids = EXCLUDED.observation_ids,
+                 evidence_count = EXCLUDED.evidence_count, updated_at = now()",
+        )
+        .bind(item.entity_id)
+        .bind(project_id)
+        .bind(text(&item.payload, "type"))
+        .bind(text(&item.payload, "scope"))
+        .bind(text(&item.payload, "scope_key"))
+        .bind(text(&item.payload, "content"))
+        .bind(text(&item.payload, "state"))
+        .bind(opt_uuid(&item.payload, "superseded_by_id"))
+        .bind(origin)
+        .bind(observation_ids)
+        .bind(evidence_count)
+        .bind(opt_text(&provenance, "digest"))
+        .execute(&mut **tx)
+        .await?;
+        return Ok(());
+    }
+
     sqlx::query(
         "INSERT INTO memories
             (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
-             origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+             origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at,
+             topic_key, value_key, importance, pinned, reinforcement_count,
+             distinct_origin_count, verification, verification_authority,
+             last_verified_at, verification_basis, evidence_fact_count)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(),
+                 $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
          ON CONFLICT (id) DO UPDATE SET
              content = EXCLUDED.content, state = EXCLUDED.state,
              superseded_by_id = EXCLUDED.superseded_by_id,
              observation_ids = EXCLUDED.observation_ids,
-             evidence_count = EXCLUDED.evidence_count, updated_at = now()",
+             evidence_count = EXCLUDED.evidence_count,
+             topic_key = EXCLUDED.topic_key, value_key = EXCLUDED.value_key,
+             importance = EXCLUDED.importance, pinned = EXCLUDED.pinned,
+             reinforcement_count = EXCLUDED.reinforcement_count,
+             distinct_origin_count = EXCLUDED.distinct_origin_count,
+             verification = EXCLUDED.verification,
+             verification_authority = EXCLUDED.verification_authority,
+             last_verified_at = EXCLUDED.last_verified_at,
+             verification_basis = EXCLUDED.verification_basis,
+             evidence_fact_count = EXCLUDED.evidence_fact_count,
+             updated_at = now()",
     )
     .bind(item.entity_id)
     .bind(project_id)
@@ -324,9 +534,38 @@ async fn upsert_memory(
     .bind(observation_ids)
     .bind(evidence_count)
     .bind(opt_text(&provenance, "digest"))
+    .bind(opt_text(&item.payload, "topic_key"))
+    .bind(opt_text(&item.payload, "value_key"))
+    .bind(opt_text(&item.payload, "importance").unwrap_or_else(|| "normal".to_string()))
+    .bind(
+        item.payload
+            .get("pinned")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    )
+    .bind(int(&item.payload, "reinforcement_count"))
+    .bind(int(&item.payload, "distinct_origin_count"))
+    .bind(opt_text(&verification, "state"))
+    .bind(opt_text(&verification, "authority"))
+    .bind(
+        opt_text(&verification, "last_verified_at")
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+            .map(|d| d.with_timezone(&chrono::Utc)),
+    )
+    .bind(
+        verification
+            .get("basis")
+            .cloned()
+            .unwrap_or_else(|| json!([])),
+    )
+    .bind(int(&verification, "fact_count"))
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+fn int(payload: &Value, key: &str) -> i32 {
+    payload.get(key).and_then(|v| v.as_i64()).unwrap_or(0) as i32
 }
 
 async fn upsert_handoff(
@@ -430,20 +669,13 @@ pub async fn sync_changes(
     let rows = sqlx::query(
         "SELECT * FROM memories
          WHERE project_id = $1 AND updated_at > $2 AND deleted_at IS NULL
-         ORDER BY updated_at ASC LIMIT 500",
+         ORDER BY updated_at ASC LIMIT $3",
     )
     .bind(q.project_id)
     .bind(since)
+    .bind(PAGE)
     .fetch_all(&state.pool)
     .await?;
-
-    let cursor = rows
-        .last()
-        .map(|r| {
-            r.get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
-                .to_rfc3339()
-        })
-        .unwrap_or_else(|| since.to_rfc3339());
 
     let memories: Vec<Value> = rows
         .iter()
@@ -460,11 +692,343 @@ pub async fn sync_changes(
                     "observation_ids": r.get::<Value, _>("observation_ids"),
                     "evidence_count": r.get::<i32, _>("evidence_count"),
                 },
+                // Feature 003. Absent columns read as null on a server whose
+                // 0002 migration has not run, which is what an older peer sees.
+                "topic_key": r.try_get::<Option<String>, _>("topic_key").ok().flatten(),
+                "value_key": r.try_get::<Option<String>, _>("value_key").ok().flatten(),
+                "importance": r.try_get::<Option<String>, _>("importance").ok().flatten(),
+                "pinned": r.try_get::<Option<bool>, _>("pinned").ok().flatten(),
+                "verification": {
+                    "state": r.try_get::<Option<String>, _>("verification").ok().flatten(),
+                    "authority": r
+                        .try_get::<Option<String>, _>("verification_authority")
+                        .ok()
+                        .flatten(),
+                    "last_verified_at": r
+                        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("last_verified_at")
+                        .ok()
+                        .flatten()
+                        .map(|t| t.to_rfc3339()),
+                    "fact_count": r
+                        .try_get::<Option<i32>, _>("evidence_fact_count")
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0),
+                    "basis": r
+                        .try_get::<Option<Value>, _>("verification_basis")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| json!([])),
+                },
             })
         })
         .collect();
 
-    Ok(Json(json!({ "memories": memories, "cursor": cursor })))
+    // The three Feature 003 arrays, read under the **same** cursor as the
+    // memories (FR-413).
+    //
+    // One cursor over `updated_at` across all four is what stops a partial read
+    // leaving a relation whose memory has not arrived: the client holds a
+    // relation it cannot place and retries it, rather than the server handing
+    // out a consistent-looking page that is not.
+    let relations = read_after(&state.pool, q.project_id, since, RELATIONS_SQL).await?;
+    let tasks = read_after(&state.pool, q.project_id, since, TASKS_SQL).await?;
+    let criteria = read_after(&state.pool, q.project_id, since, CRITERIA_SQL).await?;
+    let blockers = read_after(&state.pool, q.project_id, since, BLOCKERS_SQL).await?;
+
+    let cursor =
+        page_cursor(&[&rows, &relations, &tasks, &criteria, &blockers], since).to_rfc3339();
+
+    Ok(Json(json!({
+        "memories": memories,
+        "relations": relations.iter().map(relation_json).collect::<Vec<_>>(),
+        // Tasks are handed back as well as accepted (`contracts/privacy-sync.md`
+        // §What crosses). Without them a criterion arrived naming a `task_id`
+        // that could never arrive, so a task created on one machine existed
+        // nowhere else and US11's two machines could not converge on a state
+        // digest they had no task to compute one from.
+        "tasks": tasks.iter().map(task_json).collect::<Vec<_>>(),
+        "criteria": criteria.iter().map(criterion_json).collect::<Vec<_>>(),
+        "blockers": blockers.iter().map(blocker_json).collect::<Vec<_>>(),
+        "cursor": cursor,
+    })))
+}
+
+/// One read-back page. The four arrays share it, and the cursor respects it.
+const PAGE: i64 = 500;
+
+const RELATIONS_SQL: &str = "SELECT * FROM memory_relations
+     WHERE project_id = $1 AND updated_at > $2 AND deleted_at IS NULL
+     ORDER BY updated_at ASC LIMIT $3";
+const TASKS_SQL: &str = "SELECT * FROM tasks
+     WHERE project_id = $1 AND updated_at > $2
+     ORDER BY updated_at ASC LIMIT $3";
+const CRITERIA_SQL: &str = "SELECT * FROM task_criteria
+     WHERE project_id = $1 AND updated_at > $2
+     ORDER BY updated_at ASC LIMIT $3";
+const BLOCKERS_SQL: &str = "SELECT * FROM task_blockers
+     WHERE project_id = $1 AND updated_at > $2
+     ORDER BY updated_at ASC LIMIT $3";
+
+/// PostgreSQL's `undefined_table`.
+const UNDEFINED_TABLE: &str = "42P01";
+
+/// Rows a project changed after `since`.
+///
+/// A table the 0002 migration has not created yields an empty list: an older
+/// deployment simply has nothing of this kind to hand out, and read-back must
+/// not fail because of it. **Only** that error is absorbed — a dropped
+/// connection or a permission failure must not read as "this deployment has no
+/// relations", because the cursor would then advance past records nobody ever
+/// received.
+async fn read_after(
+    pool: &PgPool,
+    project_id: Uuid,
+    since: chrono::DateTime<chrono::Utc>,
+    sql: &str,
+) -> ApiResult<Vec<sqlx::postgres::PgRow>> {
+    match sqlx::query(sql)
+        .bind(project_id)
+        .bind(since)
+        .bind(PAGE)
+        .fetch_all(pool)
+        .await
+    {
+        Ok(rows) => Ok(rows),
+        Err(sqlx::Error::Database(e)) if e.code().as_deref() == Some(UNDEFINED_TABLE) => {
+            tracing::debug!(error = %e, "read-back skipped a table this deployment lacks");
+            Ok(Vec::new())
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// How far the cursor may advance after a page.
+///
+/// A table that filled its page still has rows the client has not seen, and
+/// some of them may carry an `updated_at` earlier than another table's newest
+/// row. Advancing to the newest row across all four would step over them
+/// permanently, so a full page pins the cursor to its own last row and the
+/// smallest such bound wins. When nothing truncated, every table is exhausted
+/// and the newest row any of them returned is safe.
+///
+/// Re-delivery is the cost, and it is free: every importer is idempotent —
+/// `INSERT OR IGNORE` for memories and relations, upsert by id for criteria and
+/// blockers.
+fn page_cursor(
+    pages: &[&[sqlx::postgres::PgRow]],
+    since: chrono::DateTime<chrono::Utc>,
+) -> chrono::DateTime<chrono::Utc> {
+    let pinned = pages
+        .iter()
+        .filter(|p| p.len() as i64 >= PAGE)
+        .filter_map(|p| newest(p))
+        .min();
+    pinned
+        .or_else(|| pages.iter().filter_map(|p| newest(p)).max())
+        .unwrap_or(since)
+}
+
+fn newest(rows: &[sqlx::postgres::PgRow]) -> Option<chrono::DateTime<chrono::Utc>> {
+    rows.last().and_then(|r| {
+        r.try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+            .ok()
+    })
+}
+
+fn relation_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "from_memory_id": r.get::<Uuid, _>("from_memory_id"),
+        "to_memory_id": r.get::<Uuid, _>("to_memory_id"),
+        "kind": r.get::<String, _>("kind"),
+        "decided_by_session": r.get::<Uuid, _>("decided_by_session"),
+        "basis": r.get::<String, _>("basis"),
+    })
+}
+
+/// A task as a peer receives it.
+///
+/// `local_revision` is deliberately absent: it is a private concurrency token
+/// and is neither transmitted nor stored here (D80). The state digest is absent
+/// for the same reason it is nowhere on the wire — both sides derive it from the
+/// criteria and blockers that did cross, which is what makes two machines
+/// agreeing on it a guarantee rather than a copied value.
+fn task_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": r.get::<Uuid, _>("id"),
+        "title": r.get::<String, _>("title"),
+        "goal": r.get::<String, _>("goal"),
+        "status": r.get::<String, _>("status"),
+        "acceptance_criteria": r
+            .try_get::<Vec<String>, _>("acceptance_criteria")
+            .unwrap_or_default(),
+        "deleted": r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
+            .ok()
+            .flatten()
+            .is_some(),
+    })
+}
+
+fn criterion_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": r.get::<Uuid, _>("id"),
+        "task_id": r.get::<Uuid, _>("task_id"),
+        "ordinal": r.get::<i32, _>("ordinal"),
+        "label": r.get::<String, _>("label"),
+        "text": r.get::<String, _>("text"),
+        "state": r.get::<String, _>("state"),
+        "verification": r.get::<String, _>("verification"),
+        "deleted": r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
+            .ok()
+            .flatten()
+            .is_some(),
+    })
+}
+
+fn blocker_json(r: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": r.get::<Uuid, _>("id"),
+        "task_id": r.get::<Uuid, _>("task_id"),
+        "description": r.get::<String, _>("description"),
+        "state": r.get::<String, _>("state"),
+        "opened_by_session": r.get::<Uuid, _>("opened_by_session"),
+        "cleared_by_session": r
+            .try_get::<Option<Uuid>, _>("cleared_by_session")
+            .ok()
+            .flatten(),
+        "deleted": r
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("deleted_at")
+            .ok()
+            .flatten()
+            .is_some(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Feature 003 entities (`contracts/privacy-sync.md`)
+// ---------------------------------------------------------------------------
+
+/// A reconciliation decision.
+///
+/// `INSERT ... ON CONFLICT DO NOTHING` on the endpoint-pair primary key, so the
+/// same decision arriving from two machines is absorbed rather than duplicated —
+/// idempotent by construction, with no clock consulted (D78, FR-411).
+async fn upsert_relation(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    item: &SyncItem,
+) -> ApiResult<()> {
+    let from = opt_uuid(&item.payload, "from_memory_id")
+        .ok_or_else(|| ApiError::invalid("a relation must name from_memory_id"))?;
+    let to = opt_uuid(&item.payload, "to_memory_id")
+        .ok_or_else(|| ApiError::invalid("a relation must name to_memory_id"))?;
+
+    sqlx::query(
+        "INSERT INTO memory_relations
+            (from_memory_id, to_memory_id, kind, project_id, decided_by_session, basis, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now())
+         ON CONFLICT (from_memory_id, to_memory_id, kind) DO NOTHING",
+    )
+    .bind(from)
+    .bind(to)
+    .bind(text(&item.payload, "kind"))
+    .bind(project_id)
+    .bind(
+        opt_uuid(&item.payload, "decided_by_session")
+            .ok_or_else(|| ApiError::invalid("a relation must name its author"))?,
+    )
+    .bind(text(&item.payload, "basis"))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// One acceptance criterion, by stable id.
+///
+/// Upserted per criterion rather than per task, which is the whole mechanism
+/// behind "two sessions edit different criteria and both survive": different
+/// criteria are different rows and cannot collide (FR-413, SC-317).
+async fn upsert_criterion(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    item: &SyncItem,
+) -> ApiResult<()> {
+    let task_id = opt_uuid(&item.payload, "task_id")
+        .ok_or_else(|| ApiError::invalid("a criterion must name its task"))?;
+
+    sqlx::query(
+        "INSERT INTO task_criteria
+            (id, task_id, project_id, ordinal, label, text, state, verification,
+             updated_at, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now(), $9)
+         ON CONFLICT (id) DO UPDATE SET
+             ordinal = EXCLUDED.ordinal, label = EXCLUDED.label, text = EXCLUDED.text,
+             state = EXCLUDED.state, verification = EXCLUDED.verification,
+             deleted_at = EXCLUDED.deleted_at, updated_at = now()",
+    )
+    .bind(item.entity_id)
+    .bind(task_id)
+    .bind(project_id)
+    .bind(
+        item.payload
+            .get("ordinal")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1) as i32,
+    )
+    .bind(text(&item.payload, "label"))
+    .bind(text(&item.payload, "text"))
+    .bind(text(&item.payload, "state"))
+    .bind(text(&item.payload, "verification"))
+    .bind(deleted_at(&item.payload))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// One blocker. Append-only with a single transition, both ends attributed.
+async fn upsert_blocker(
+    tx: &mut Transaction<'_, Postgres>,
+    project_id: Uuid,
+    item: &SyncItem,
+) -> ApiResult<()> {
+    let task_id = opt_uuid(&item.payload, "task_id")
+        .ok_or_else(|| ApiError::invalid("a blocker must name its task"))?;
+
+    sqlx::query(
+        "INSERT INTO task_blockers
+            (id, task_id, project_id, description, state, opened_by_session,
+             cleared_by_session, updated_at, deleted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, now(), $8)
+         ON CONFLICT (id) DO UPDATE SET
+             state = EXCLUDED.state,
+             cleared_by_session = EXCLUDED.cleared_by_session,
+             deleted_at = EXCLUDED.deleted_at, updated_at = now()",
+    )
+    .bind(item.entity_id)
+    .bind(task_id)
+    .bind(project_id)
+    .bind(text(&item.payload, "description"))
+    .bind(text(&item.payload, "state"))
+    .bind(
+        opt_uuid(&item.payload, "opened_by_session")
+            .ok_or_else(|| ApiError::invalid("a blocker must name who opened it"))?,
+    )
+    .bind(opt_uuid(&item.payload, "cleared_by_session"))
+    .bind(deleted_at(&item.payload))
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// A tombstone timestamp for a payload that reports itself deleted.
+fn deleted_at(payload: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    payload
+        .get("deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        .then(chrono::Utc::now)
 }
 
 #[cfg(test)]

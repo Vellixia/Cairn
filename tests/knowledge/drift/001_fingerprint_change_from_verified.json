@@ -1,0 +1,14 @@
+{
+  "description": "The support moved under an established claim. It owes a recheck, and it is not yet drifted: nothing has looked at the new value.",
+  "input": {
+    "extra": {
+      "from": "verified",
+      "trigger": "fingerprint_changed"
+    }
+  },
+  "expect": {
+    "extra": {
+      "to": "needs_recheck"
+    }
+  }
+}

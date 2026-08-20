@@ -1,0 +1,106 @@
+{
+  "description": "A supersession chain three links deep. Only the head is a current answer, and every predecessor stays intact as history.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The production database is PostgreSQL.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "postgresql",
+        "state": "superseded",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The production database is SQLite.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "sqlite",
+        "state": "superseded",
+        "origin_session": "s2"
+      },
+      {
+        "label": "c",
+        "content": "The production database is MySQL.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "mysql",
+        "state": "superseded",
+        "origin_session": "s3"
+      },
+      {
+        "label": "d",
+        "content": "The production database is CockroachDB.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "infrastructure.production_database",
+        "value_key": "cockroachdb",
+        "origin_session": "s4"
+      }
+    ],
+    "relations": [
+      {
+        "from": "b",
+        "to": "a",
+        "kind": "supersedes",
+        "basis": "explicit_user"
+      },
+      {
+        "from": "c",
+        "to": "b",
+        "kind": "supersedes",
+        "basis": "explicit_user"
+      },
+      {
+        "from": "d",
+        "to": "c",
+        "kind": "supersedes",
+        "basis": "explicit_user"
+      }
+    ]
+  },
+  "expect": {
+    "reconciliation": "settled",
+    "answers": [
+      "d"
+    ],
+    "extra": {
+      "as_of": [
+        {
+          "after_supersession": 0,
+          "effective": [
+            "a"
+          ]
+        },
+        {
+          "after_supersession": 1,
+          "effective": [
+            "b"
+          ]
+        },
+        {
+          "after_supersession": 2,
+          "effective": [
+            "c"
+          ]
+        },
+        {
+          "after_supersession": 3,
+          "effective": [
+            "d"
+          ]
+        }
+      ],
+      "chain": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    }
+  }
+}

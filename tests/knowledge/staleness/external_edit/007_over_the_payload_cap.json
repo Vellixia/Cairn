@@ -1,0 +1,43 @@
+{
+  "description": "The file exceeds the payload cap, so it was fingerprinted by size on both sides. A size match is weaker than a digest match - a same-length edit reads as unchanged - and the class is recorded so the weaker comparison is visible rather than implied.",
+  "input": {
+    "extra": {
+      "assumed": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_id": "01a00000-0000-7000-8000-000000000001",
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "vendor/large.bin",
+            "class": "size",
+            "exists": true,
+            "value": "10485760"
+          }
+        ]
+      },
+      "current": {
+        "branch": "main",
+        "commit": "abc123def456abc123def456abc123def456abcd",
+        "task_exists": true,
+        "worktree_exists": true,
+        "task_state_digest": "d0",
+        "path_fingerprints": [
+          {
+            "path": "vendor/large.bin",
+            "class": "size",
+            "exists": true,
+            "value": "10485760"
+          }
+        ]
+      }
+    }
+  },
+  "expect": {
+    "extra": {
+      "path_outcomes": {
+        "vendor/large.bin": "unchanged"
+      }
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "description": "A project-scoped answer for build.tool and a branch-scoped one that disagrees. They are never simultaneously applicable, so this is a scope exception and not a conflict: the narrower applies in its own context and the broader is the answer it narrows.",
+  "input": {
+    "memories": [
+      {
+        "label": "a",
+        "content": "The workspace is built with Cargo.",
+        "scope": "project",
+        "scope_key": "p1",
+        "topic_key": "build.tool",
+        "value_key": "cargo",
+        "origin_session": "s1"
+      },
+      {
+        "label": "b",
+        "content": "The workspace is built with Bazel.",
+        "scope": "branch",
+        "scope_key": "main",
+        "topic_key": "build.tool",
+        "value_key": "bazel",
+        "origin_session": "s2"
+      }
+    ]
+  },
+  "expect": {
+    "relations": [],
+    "extra": {
+      "proposal_outcome": "created"
+    }
+  }
+}

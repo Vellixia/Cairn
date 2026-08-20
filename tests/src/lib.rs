@@ -12,9 +12,18 @@ use tempfile::TempDir;
 /// An isolated Cairn installation: its own state directory, socket, daemon and
 /// Git repository.
 pub struct Sandbox {
-    pub home: TempDir,
+    /// Shared by reference so a second repository on the same machine can be
+    /// given the same Cairn installation. See [`Sandbox::sibling_project`].
+    pub home: std::sync::Arc<TempDir>,
     pub repo: TempDir,
     pub socket: PathBuf,
+    /// False for a sibling project sharing another sandbox's installation.
+    ///
+    /// One daemon serves the home, so only the sandbox that created it may stop
+    /// it. Without this the first sibling to drop would take the daemon out
+    /// from under every sandbox still using it, and the failure would land in
+    /// whichever test happened to run next.
+    owns_daemon: bool,
 }
 
 impl Sandbox {
@@ -25,7 +34,12 @@ impl Sandbox {
         let socket = sandbox_socket();
 
         let home_path = home.path().to_path_buf();
-        let s = Self { home, repo, socket };
+        let s = Self {
+            home: std::sync::Arc::new(home),
+            repo,
+            socket,
+            owns_daemon: true,
+        };
         s.git(&["init", "--initial-branch=main"]);
         s.git(&["config", "user.email", "test@example.com"]);
         s.git(&["config", "user.name", "Cairn Test"]);
@@ -63,6 +77,32 @@ impl Sandbox {
 
     pub fn repo_path(&self) -> &Path {
         self.repo.path()
+    }
+
+    /// A second repository on the **same machine**: same `CAIRN_HOME`, same
+    /// daemon, same store, a different project.
+    ///
+    /// What cross-project behaviour needs. A second `Sandbox::new()` would be a
+    /// second machine — different state directory, different daemon — and a
+    /// pattern, which is local to a machine and carries no project identity,
+    /// would correctly be invisible there. Testing cross-project reach against
+    /// two machines would prove the opposite of what it looks like.
+    pub fn sibling_project(&self, name: &str) -> Self {
+        let repo = TempDir::new().expect("repo");
+        let sibling = Self {
+            home: std::sync::Arc::clone(&self.home),
+            repo,
+            socket: self.socket.clone(),
+            owns_daemon: false,
+        };
+        sibling.git(&["init", "--initial-branch=main"]);
+        sibling.git(&["config", "user.email", "test@example.com"]);
+        sibling.git(&["config", "user.name", "Cairn Test"]);
+        sibling.git(&["config", "commit.gpgsign", "false"]);
+        sibling.write_file("README.md", &format!("# {name}\n"));
+        sibling.git(&["add", "."]);
+        sibling.git(&["commit", "-m", "init", "--no-gpg-sign"]);
+        sibling
     }
 
     pub fn db_path(&self) -> PathBuf {
@@ -468,6 +508,29 @@ impl Sandbox {
     }
 
     /// Run a single-column query against the local store.
+    /// Run one statement against the sandbox's store.
+    ///
+    /// Read-write, unlike `query_column`. For the few tests that have to put a
+    /// store into a state the surfaces cannot reach — a database carried over
+    /// from an older release, most of all.
+    pub fn exec_sql(&self, sql: &str) {
+        let path = self.db_path();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let url = format!("sqlite://{}", path.display());
+            let pool = sqlx::SqlitePool::connect(&url).await.expect("open store");
+            sqlx::query(&sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("{sql}: {e}"));
+            pool.close().await;
+        });
+    }
+
     pub fn query_column(&self, sql: &str) -> Vec<String> {
         let path = self.db_path();
         let sql = sql.to_string();
@@ -533,6 +596,9 @@ impl Drop for Sandbox {
         // assertion actually failed with a SIGABRT and a core dump. Shutting
         // the daemon down is best effort, so it is guarded rather than
         // asserted.
+        if !self.owns_daemon {
+            return;
+        }
         if let Some(exe) = try_binary("cairn") {
             let _ = Command::new(exe)
                 .args(["daemon", "stop"])
@@ -798,6 +864,24 @@ impl Mcp {
             .unwrap_or_default()
             .to_string()
     }
+
+    /// Call a tool and return the whole `tools/call` result, with the tool's
+    /// own JSON body parsed in place of the text block.
+    ///
+    /// `tool` is the ergonomic form for a test asserting on one string. This is
+    /// what a *comparison* needs: `isError`, the content envelope and every
+    /// field of the body, so that a dropped or renamed field is visible rather
+    /// than swallowed by a `contains` (SC-323).
+    pub fn tool_result(&mut self, name: &str, mut args: Value, cwd: &str) -> Value {
+        args["cwd"] = json!(cwd);
+        let mut result = self.call("tools/call", json!({ "name": name, "arguments": args }));
+        if let Some(text) = result["content"][0]["text"].as_str() {
+            if let Ok(body) = serde_json::from_str::<Value>(text) {
+                result["content"][0]["text"] = body;
+            }
+        }
+        result
+    }
 }
 
 impl Drop for Mcp {
@@ -817,10 +901,67 @@ impl Drop for Mcp {
 /// rather than passing vacuously.
 pub struct Server {
     pub base: String,
+    /// The database this server is serving.
+    ///
+    /// Usually the shared test database. A server pinned to an older schema
+    /// gets one of its own, because a schema is a property of the database and
+    /// a "downgrade" of the shared one is not a thing that exists.
+    pub database_url: String,
+    /// True when this server created its database and should drop it.
+    owns_database: bool,
     child: std::process::Child,
 }
 
 impl Server {
+    /// A server pinned below its own build's schema, on a database of its own
+    /// (T113).
+    ///
+    /// What makes a server "older" is the schema it applied, not the binary
+    /// that applied it, so this is an honest older peer rather than a mock of
+    /// one: the same code paths run, and they refuse the work they have no
+    /// tables for.
+    ///
+    /// Call [`Server::upgraded`] to run the migration against the same data.
+    pub fn start_at_schema(max_version: i64) -> Option<Self> {
+        let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let name = format!("cairn_schema_{}", unique());
+        create_database(&admin, &name);
+        let url = replace_database(&admin, &name);
+        Some(Self::spawn(&url, max_version, true))
+    }
+
+    /// The same database, served by a server that applies every migration.
+    ///
+    /// The upgrade an operator performs: the data stays, the schema moves.
+    ///
+    /// Ownership of the database moves with it, so dropping the old server —
+    /// which is what an upgrade does — does not take the data with it.
+    pub fn upgraded(&mut self) -> Self {
+        let owned = std::mem::take(&mut self.owns_database);
+        Self::spawn(&self.database_url, i64::MAX, owned)
+    }
+
+    /// One scalar count against this server's database.
+    pub fn count(&self, sql: &str) -> i64 {
+        let url = self.database_url.clone();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            let n: i64 = sqlx::query_scalar(&sql)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("query {sql:?} failed: {e}"));
+            pool.close().await;
+            n
+        })
+    }
+
     /// `None` when no test database is configured.
     // The child is owned by `Server` and reaped in `Drop`; it must outlive
     // `start`, which is exactly what clippy's lint cannot see.
@@ -835,17 +976,21 @@ impl Server {
         // sandboxes can be handed the same port between closing the probe and
         // the server binding it — and the loser exits instead of serving.
         // Retrying with a fresh port is the whole remedy.
+        Some(Self::spawn(&url, i64::MAX, false))
+    }
+
+    fn spawn(url: &str, max_version: i64, owns_database: bool) -> Self {
         let mut last = String::new();
         for _ in 0..4 {
-            match Self::try_start(&url) {
-                Ok(server) => return Some(server),
+            match Self::try_start(url, max_version, owns_database) {
+                Ok(server) => return server,
                 Err(e) => last = e,
             }
         }
         panic!("cairn-server would not start: {last}");
     }
 
-    fn try_start(url: &str) -> Result<Self, String> {
+    fn try_start(url: &str, max_version: i64, owns_database: bool) -> Result<Self, String> {
         let port = {
             let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
             let port = probe.local_addr().expect("addr").port();
@@ -859,6 +1004,7 @@ impl Server {
         // connections each exhausts it once enough of them run in parallel —
         // the later servers then never come up, failing tests that have nothing
         // wrong with them.
+        let schema = max_version.to_string();
         let mut child = Command::new(binary("cairn-server"))
             .args([
                 "--addr",
@@ -867,6 +1013,8 @@ impl Server {
                 url,
                 "--max-connections",
                 "4",
+                "--max-schema-version",
+                &schema,
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -881,7 +1029,12 @@ impl Server {
                 return Err(format!("cairn-server at {base} exited early ({status})"));
             }
             if ureq_get(&format!("{base}/api/health")).is_some() {
-                return Ok(Self { base, child });
+                return Ok(Self {
+                    base,
+                    database_url: url.to_string(),
+                    owns_database,
+                    child,
+                });
             }
             std::thread::sleep(std::time::Duration::from_millis(40));
         }
@@ -897,7 +1050,7 @@ impl Server {
     /// server that stored something and merely declined to serve it back
     /// (SC-119, SC-133).
     pub fn dump(&self) -> String {
-        let url = std::env::var("CAIRN_TEST_DATABASE_URL").expect("a test database");
+        let url = self.database_url.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -1034,7 +1187,63 @@ impl Drop for Server {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+        if self.owns_database {
+            drop_database(&self.database_url);
+        }
     }
+}
+
+/// Swap the database name in a PostgreSQL URL.
+fn replace_database(url: &str, name: &str) -> String {
+    match url.rsplit_once('/') {
+        Some((prefix, tail)) => match tail.split_once('?') {
+            Some((_, query)) => format!("{prefix}/{name}?{query}"),
+            None => format!("{prefix}/{name}"),
+        },
+        None => url.to_string(),
+    }
+}
+
+fn create_database(admin_url: &str, name: &str) {
+    run_sql(admin_url, &format!("CREATE DATABASE \"{name}\""));
+}
+
+/// Best effort: a database still holding a connection cannot be dropped, and
+/// the container these tests run against is discarded anyway.
+fn drop_database(url: &str) {
+    let Some((prefix, name)) = url.rsplit_once('/') else {
+        return;
+    };
+    let name = name.split('?').next().unwrap_or(name).to_string();
+    let admin = format!("{prefix}/postgres");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async move {
+        if let Ok(pool) = sqlx::PgPool::connect(&admin).await {
+            let _ = sqlx::query(&format!("DROP DATABASE IF EXISTS \"{name}\" WITH (FORCE)"))
+                .execute(&pool)
+                .await;
+            pool.close().await;
+        }
+    });
+}
+
+fn run_sql(url: &str, sql: &str) {
+    let (url, sql) = (url.to_string(), sql.to_string());
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async move {
+        let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+        sqlx::query(&sql)
+            .execute(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        pool.close().await;
+    });
 }
 
 fn split_response(raw: &str) -> (serde_json::Value, Vec<(String, String)>) {
@@ -1138,4 +1347,789 @@ fn md5_like(bytes: &[u8]) -> u64 {
         h = h.wrapping_mul(0x100000001b3);
     }
     h
+}
+
+/// A store at the **real** v0.1.0-alpha.4 schema, populated with the state a
+/// store in use actually carries.
+///
+/// Feature 003's migration has to be proved against the thing users have, not
+/// against a clean database and not against a hand-written approximation of the
+/// historical DDL. So this builds the fixture by running migrations 1–4 through
+/// `cairn_store::migrate` itself and stops there
+/// (migration.md §What an existing store actually contains).
+///
+/// Everything it writes is fixed — identifiers, timestamps, content — so a test
+/// can compare a table byte for byte before and after migrating and attribute
+/// any difference to the migration rather than to the fixture.
+pub mod alpha4 {
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    /// The schema version this fixture stands the store up at.
+    pub const SCHEMA: i64 = 4;
+
+    /// Identifiers the fixture uses, so assertions can name a row rather than
+    /// rediscover it.
+    pub mod ids {
+        pub const USER: &str = "00000000-0000-7000-8000-0000000000a0";
+        pub const PROJECT_LINKED: &str = "10000000-0000-7000-8000-000000000001";
+        pub const PROJECT_UNLINKED: &str = "10000000-0000-7000-8000-000000000002";
+        pub const SERVER_PROJECT: &str = "1f000000-0000-7000-8000-0000000000ff";
+
+        pub const TASK_EMPTY_CRITERIA: &str = "20000000-0000-7000-8000-000000000001";
+        pub const TASK_DUPLICATE_CRITERIA: &str = "20000000-0000-7000-8000-000000000002";
+        pub const TASK_NORMAL: &str = "20000000-0000-7000-8000-000000000003";
+        /// Tombstoned, and carrying criteria that must produce **no** rows.
+        pub const TASK_DELETED: &str = "20000000-0000-7000-8000-000000000004";
+
+        pub const SESSION_ACTIVE: &str = "30000000-0000-7000-8000-000000000001";
+        /// `handoff_pending = 1`: terminal but owed a handoff (D22).
+        pub const SESSION_OWED_HANDOFF: &str = "30000000-0000-7000-8000-000000000002";
+        pub const SESSION_INTERRUPTED: &str = "30000000-0000-7000-8000-000000000003";
+        pub const SESSION_DELETED: &str = "30000000-0000-7000-8000-000000000004";
+
+        pub const OBS_LIVE: &str = "40000000-0000-7000-8000-000000000001";
+        /// Tombstoned: a `memory_evidence` row points at it and must keep
+        /// resolving to "evidence deleted" (FR-052, FR-505).
+        pub const OBS_DELETED: &str = "40000000-0000-7000-8000-000000000002";
+
+        pub const MEM_ACTIVE_A: &str = "50000000-0000-7000-8000-00000000000a";
+        pub const MEM_ACTIVE_B: &str = "50000000-0000-7000-8000-00000000000b";
+        pub const MEM_STALE: &str = "50000000-0000-7000-8000-00000000000c";
+        pub const MEM_LOCAL_ONLY: &str = "50000000-0000-7000-8000-00000000000d";
+        /// A supersession chain three links deep: C1 → C2 → C3 → C4 (current).
+        pub const MEM_CHAIN_1: &str = "50000000-0000-7000-8000-000000000011";
+        pub const MEM_CHAIN_2: &str = "50000000-0000-7000-8000-000000000012";
+        pub const MEM_CHAIN_3: &str = "50000000-0000-7000-8000-000000000013";
+        pub const MEM_CHAIN_4: &str = "50000000-0000-7000-8000-000000000014";
+
+        pub const HANDOFF_PRE_COMPACT: &str = "60000000-0000-7000-8000-000000000001";
+        pub const HANDOFF_SESSION_END: &str = "60000000-0000-7000-8000-000000000002";
+        pub const HANDOFF_RECOVERED: &str = "60000000-0000-7000-8000-000000000003";
+
+        pub const OUTBOX_PENDING: &str = "70000000-0000-7000-8000-000000000001";
+        pub const OUTBOX_IN_FLIGHT: &str = "70000000-0000-7000-8000-000000000002";
+        pub const OUTBOX_DELIVERED: &str = "70000000-0000-7000-8000-000000000003";
+        pub const OUTBOX_FAILED: &str = "70000000-0000-7000-8000-000000000004";
+    }
+
+    /// Every table an alpha.4 store carries, for row-count and snapshot
+    /// assertions. Ordered so a diff reads top-down.
+    pub const PRE_EXISTING_TABLES: &[&str] = &[
+        "users",
+        "projects",
+        "tasks",
+        "sessions",
+        "observations",
+        "memories",
+        "memory_evidence",
+        "handoffs",
+        "outbox",
+        "sync_meta",
+        "agent_integrations",
+        "manager_integrations",
+        "installed_resources",
+        "resource_bindings",
+        "capability_evidence",
+        "migration_states",
+        "recovery_artifacts",
+    ];
+
+    /// A populated store standing at schema 4.
+    pub struct Alpha4Store {
+        dir: TempDir,
+    }
+
+    impl Alpha4Store {
+        /// Build the fixture: migrations 1–4 through the real path, then the
+        /// state of a store in use.
+        pub fn build() -> Self {
+            let dir = TempDir::new().expect("alpha4 dir");
+            let store = Self { dir };
+            store.block_on(async {
+                let pool = store.open().await;
+                cairn_store::migrate::run_to(&pool, SCHEMA)
+                    .await
+                    .expect("migrations 1-4 apply");
+                populate(&pool).await;
+                pool.close().await;
+            });
+            store
+        }
+
+        pub fn db_path(&self) -> PathBuf {
+            self.dir.path().join("cairn.sqlite3")
+        }
+
+        pub fn dir(&self) -> &Path {
+            self.dir.path()
+        }
+
+        /// Apply every remaining migration — the operation under test.
+        pub fn migrate_to_latest(&self) -> i64 {
+            self.block_on(async {
+                let pool = self.open().await;
+                let v = cairn_store::migrate::run(&pool).await.expect("migrate");
+                pool.close().await;
+                v
+            })
+        }
+
+        /// Apply migrations up to `target`, refusing a store already past it.
+        pub fn migrate_to(&self, target: i64) -> Result<i64, String> {
+            self.block_on(async {
+                let pool = self.open().await;
+                let out = cairn_store::migrate::run_to(&pool, target)
+                    .await
+                    .map_err(|e| e.to_string());
+                pool.close().await;
+                out
+            })
+        }
+
+        pub fn schema_version(&self) -> i64 {
+            // Cast in SQL: `query_scalar::<String>` will not decode an INTEGER
+            // column, and every reader here wants one string type.
+            self.scalar("SELECT CAST(COALESCE(MAX(version), 0) AS TEXT) FROM schema_migrations")
+                .parse()
+                .expect("version is an integer")
+        }
+
+        pub fn row_count(&self, table: &str) -> i64 {
+            self.scalar(&format!("SELECT CAST(COUNT(*) AS TEXT) FROM {table}"))
+                .parse()
+                .expect("count is an integer")
+        }
+
+        /// Row counts for every pre-existing table, for the "zero rows lost"
+        /// assertion (SC-322).
+        pub fn row_counts(&self) -> std::collections::BTreeMap<String, i64> {
+            PRE_EXISTING_TABLES
+                .iter()
+                .map(|t| ((*t).to_string(), self.row_count(t)))
+                .collect()
+        }
+
+        /// Every value of the named columns, ordered by `id`, as one string per
+        /// row — the byte-identity comparison migration.md §Proof asserts.
+        pub fn snapshot(&self, table: &str, columns: &[&str]) -> Vec<String> {
+            let list = columns
+                .iter()
+                .map(|c| format!("COALESCE(CAST({c} AS TEXT), '<null>')"))
+                .collect::<Vec<_>>()
+                .join(" || '\u{1f}' || ");
+            self.query_column(&format!("SELECT {list} FROM {table} ORDER BY rowid"))
+        }
+
+        pub fn query_column(&self, sql: &str) -> Vec<String> {
+            let sql = sql.to_string();
+            self.block_on(async {
+                let pool = self.open().await;
+                let rows: Vec<String> = sqlx::query_scalar(&sql)
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap_or_else(|e| panic!("query {sql:?} failed: {e}"));
+                pool.close().await;
+                rows
+            })
+        }
+
+        pub fn scalar(&self, sql: &str) -> String {
+            self.query_column(sql)
+                .into_iter()
+                .next()
+                .unwrap_or_default()
+        }
+
+        pub fn execute(&self, sql: &str) {
+            self.try_execute(sql)
+                .unwrap_or_else(|e| panic!("execute {sql:?} failed: {e}"));
+        }
+
+        /// Execute, returning the database's error instead of panicking.
+        ///
+        /// A constraint that is never exercised is a constraint that may be
+        /// inert — a `CHECK` calling a JSON1 function, for instance, is
+        /// accepted at `CREATE TABLE` whether or not it does anything at
+        /// insert. Asserting the refusal is the only way to know.
+        pub fn try_execute(&self, sql: &str) -> Result<(), String> {
+            let sql = sql.to_string();
+            self.block_on(async {
+                let pool = self.open().await;
+                let out = sqlx::query(&sql)
+                    .execute(&pool)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| e.to_string());
+                pool.close().await;
+                out
+            })
+        }
+
+        async fn open(&self) -> sqlx::SqlitePool {
+            use sqlx::sqlite::SqliteConnectOptions;
+            let options = SqliteConnectOptions::new()
+                .filename(self.db_path())
+                .create_if_missing(true)
+                .foreign_keys(true);
+            sqlx::SqlitePool::connect_with(options)
+                .await
+                .expect("open alpha4 store")
+        }
+
+        fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime")
+                .block_on(f)
+        }
+    }
+
+    const T0: &str = "2026-01-02T03:04:05Z";
+    const T1: &str = "2026-01-03T03:04:05Z";
+    const T2: &str = "2026-01-04T03:04:05Z";
+    const T3: &str = "2026-01-05T03:04:05Z";
+
+    async fn exec(pool: &sqlx::SqlitePool, sql: &str) {
+        sqlx::query(sql)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("fixture statement failed: {e}\n{sql}"));
+    }
+
+    /// The state migration.md §What an existing store actually contains names.
+    async fn populate(pool: &sqlx::SqlitePool) {
+        use ids::*;
+
+        exec(
+            pool,
+            &format!(
+                "INSERT INTO users (id, email, display_name, created_at)
+                 VALUES ('{USER}', 'dev@example.com', 'Dev', '{T0}')"
+            ),
+        )
+        .await;
+
+        // One linked project and one that never was — `server_project_id` is
+        // set on exactly one of them.
+        exec(pool, &format!(
+            "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked, server_project_id, created_at, updated_at)
+             VALUES ('{PROJECT_LINKED}', 'linked', '/fixture/linked/.git', 'github.com/acme/linked', 1, '{SERVER_PROJECT}', '{T0}', '{T1}'),
+                    ('{PROJECT_UNLINKED}', 'unlinked', '/fixture/unlinked/.git', NULL, 0, NULL, '{T0}', '{T0}')"
+        )).await;
+
+        // Criteria arrays as they really occur: empty, duplicated, ordinary,
+        // and one on a tombstoned task that must produce no criterion rows.
+        exec(pool, &format!(
+            "INSERT INTO tasks (id, project_id, title, goal, acceptance_criteria, status, created_at, updated_at, deleted_at)
+             VALUES ('{TASK_EMPTY_CRITERIA}', '{PROJECT_LINKED}', 'No criteria', 'Ship it', '[]', 'todo', '{T0}', '{T0}', NULL),
+                    ('{TASK_DUPLICATE_CRITERIA}', '{PROJECT_LINKED}', 'Repeated criteria', 'Ship it twice',
+                     '[\"Do the thing\",\"Do the thing\",\"Then stop\"]', 'in_progress', '{T0}', '{T1}', NULL),
+                    ('{TASK_NORMAL}', '{PROJECT_LINKED}', 'Ordinary', 'Ship it once',
+                     '[\"Parse the input\",\"Emit the output\"]', 'todo', '{T1}', '{T1}', NULL),
+                    ('{TASK_DELETED}', '{PROJECT_LINKED}', '', '', '[\"Gone\",\"Also gone\"]', 'done', '{T0}', '{T2}', '{T2}')"
+        )).await;
+
+        exec(pool, &format!(
+            "INSERT INTO sessions (id, project_id, task_id, user_id, agent, branch, commit_sha, worktree_path,
+                                   agent_session_key, previous_session_id, status, started_at, ended_at, last_event_at,
+                                   last_turn_ended_at, daemon_run_id, end_reason, handoff_pending, handoff_attempts,
+                                   handoff_error, deleted_at)
+             VALUES ('{SESSION_ACTIVE}', '{PROJECT_LINKED}', '{TASK_NORMAL}', '{USER}', 'claude-code', 'main', 'aaaa111',
+                     '/fixture/linked', 'agent-key-active', NULL, 'active', '{T1}', NULL, '{T2}', '{T2}',
+                     '{SESSION_ACTIVE}', NULL, 0, 0, NULL, NULL),
+                    ('{SESSION_OWED_HANDOFF}', '{PROJECT_LINKED}', '{TASK_DUPLICATE_CRITERIA}', '{USER}', 'codex', 'main', 'aaaa111',
+                     '/fixture/linked', 'agent-key-owed', NULL, 'completed', '{T0}', '{T1}', '{T1}', NULL,
+                     '{SESSION_OWED_HANDOFF}', 'session_end', 1, 2, 'synthesis deferred', NULL),
+                    ('{SESSION_INTERRUPTED}', '{PROJECT_LINKED}', NULL, '{USER}', 'opencode', 'feature/x', 'bbbb222',
+                     '/fixture/linked', 'agent-key-interrupted', '{SESSION_OWED_HANDOFF}', 'interrupted', '{T0}', '{T1}', '{T1}', NULL,
+                     '{SESSION_INTERRUPTED}', 'idle', 0, 0, NULL, NULL),
+                    ('{SESSION_DELETED}', '{PROJECT_UNLINKED}', NULL, '{USER}', 'claude-code', 'main', NULL,
+                     '/fixture/unlinked', 'agent-key-deleted', NULL, 'completed', '{T0}', '{T0}', '{T0}', NULL,
+                     '{SESSION_DELETED}', NULL, 0, 0, NULL, '{T2}')"
+        )).await;
+
+        exec(pool, &format!(
+            "INSERT INTO observations (id, session_id, type, occurred_at, branch, commit_sha, path, command, exit_code,
+                                       outcome, summary, details, payload_bytes, truncated, vendor_tool, deleted_at)
+             VALUES ('{OBS_LIVE}', '{SESSION_ACTIVE}', 'test_run', '{T1}', 'main', 'aaaa111', NULL,
+                     'cargo test', 0, 'passed', 'suite green', NULL, 32, 0, 'Bash', NULL),
+                    ('{OBS_DELETED}', '{SESSION_OWED_HANDOFF}', 'file_changed', '{T0}', 'main', 'aaaa111', 'src/lib.rs',
+                     NULL, NULL, NULL, '', NULL, 0, 0, NULL, '{T2}')"
+        )).await;
+
+        // The supersession chain is inserted newest-first so each
+        // `superseded_by_id` points at a row that already exists.
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_4}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is CockroachDB.', 'active', NULL, '{SESSION_ACTIVE}', 0, '{T3}', '{T3}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_3}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is MySQL.', 'superseded', '{MEM_CHAIN_4}', '{SESSION_OWED_HANDOFF}', 0, '{T2}', '{T3}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_2}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is SQLite.', 'superseded', '{MEM_CHAIN_3}', '{SESSION_OWED_HANDOFF}', 0, '{T1}', '{T2}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_CHAIN_1}', '{PROJECT_LINKED}', 'decision', 'project', '{PROJECT_LINKED}',
+                     'The production database is PostgreSQL.', 'superseded', '{MEM_CHAIN_2}', '{SESSION_OWED_HANDOFF}', 0, '{T0}', '{T1}', NULL)"
+        )).await;
+        exec(pool, &format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
+                                   origin_session_id, local_only, created_at, updated_at, deleted_at)
+             VALUES ('{MEM_ACTIVE_A}', '{PROJECT_LINKED}', 'convention', 'project', '{PROJECT_LINKED}',
+                     'Errors are returned, never logged and swallowed.', 'active', NULL, '{SESSION_ACTIVE}', 0, '{T0}', '{T0}', NULL),
+                    ('{MEM_ACTIVE_B}', '{PROJECT_LINKED}', 'fact', 'branch', 'feature/x',
+                     'The fixture branch pins the API to port 8080.', 'active', NULL, '{SESSION_INTERRUPTED}', 0, '{T1}', '{T1}', NULL),
+                    ('{MEM_STALE}', '{PROJECT_LINKED}', 'fact', 'branch', 'branch/gone',
+                     'A branch that no longer resolves recorded this.', 'stale', NULL, '{SESSION_INTERRUPTED}', 0, '{T0}', '{T2}', NULL),
+                    ('{MEM_LOCAL_ONLY}', '{PROJECT_LINKED}', 'failure', 'project', '{PROJECT_LINKED}',
+                     'A local-only note that must never reach the server.', 'active', NULL, '{SESSION_ACTIVE}', 1, '{T1}', '{T1}', NULL)"
+        )).await;
+
+        // One reference to a live observation and one to a tombstoned one.
+        exec(
+            pool,
+            &format!(
+                "INSERT INTO memory_evidence (memory_id, observation_id, content_digest)
+             VALUES ('{MEM_ACTIVE_A}', '{OBS_LIVE}', 'digest-live'),
+                    ('{MEM_CHAIN_1}', '{OBS_DELETED}', 'digest-deleted')"
+            ),
+        )
+        .await;
+
+        exec(pool, &format!(
+            "INSERT INTO handoffs (id, session_id, trigger, goal, progress, completed_work, remaining_work, changed_files,
+                                   decisions, failures, tests_executed, repository_state, next_step, agent_note, evidence,
+                                   created_at, deleted_at)
+             VALUES ('{HANDOFF_PRE_COMPACT}', '{SESSION_ACTIVE}', 'pre_compact', 'Ship it once', 'parsing done',
+                     '[\"parser\"]', '[\"emitter\"]', '[\"src/lib.rs\"]', '[]', '[]', '[]', '{{}}', 'write the emitter', NULL, '[\"{OBS_LIVE}\"]', '{T1}', NULL),
+                    ('{HANDOFF_SESSION_END}', '{SESSION_OWED_HANDOFF}', 'session_end', 'Ship it twice', 'stopped',
+                     '[]', '[]', '[]', '[]', '[]', '[]', '{{}}', 'resume', 'an agent note', '[]', '{T1}', NULL),
+                    ('{HANDOFF_RECOVERED}', '{SESSION_INTERRUPTED}', 'recovered', '', 'interrupted',
+                     '[]', '[]', '[]', '[]', '[]', '[]', '{{}}', 'unknown', NULL, '[]', '{T1}', NULL)"
+        )).await;
+
+        // All four outbox states, including a claimed `in_flight` row.
+        exec(pool, &format!(
+            "INSERT INTO outbox (id, project_id, server_project_id, entity_type, entity_id, operation,
+                                 idempotency_key, payload, state, attempts, last_error, created_at, delivered_at, claimed_at)
+             VALUES ('{OUTBOX_PENDING}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'memory', '{MEM_ACTIVE_A}', 'upsert',
+                     'idem-pending', '{{\"id\":\"{MEM_ACTIVE_A}\"}}', 'pending', 0, NULL, '{T1}', NULL, NULL),
+                    ('{OUTBOX_IN_FLIGHT}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'memory', '{MEM_ACTIVE_B}', 'upsert',
+                     'idem-in-flight', '{{\"id\":\"{MEM_ACTIVE_B}\"}}', 'in_flight', 1, NULL, '{T1}', NULL, '{T2}'),
+                    ('{OUTBOX_DELIVERED}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'task', '{TASK_NORMAL}', 'upsert',
+                     'idem-delivered', '{{\"id\":\"{TASK_NORMAL}\"}}', 'delivered', 1, NULL, '{T0}', '{T1}', NULL),
+                    ('{OUTBOX_FAILED}', '{PROJECT_LINKED}', '{SERVER_PROJECT}', 'handoff', '{HANDOFF_SESSION_END}', 'upsert',
+                     'idem-failed', '{{\"id\":\"{HANDOFF_SESSION_END}\"}}', 'failed', 5, 'server refused the content', '{T0}', NULL, NULL)"
+        )).await;
+
+        // A cursor part-way through a pull.
+        exec(
+            pool,
+            &format!(
+                "INSERT INTO sync_meta (project_id, last_success_at, pull_cursor)
+                 VALUES ('{PROJECT_LINKED}', '{T1}', '{T1}')"
+            ),
+        )
+        .await;
+    }
+}
+
+/// The pre-feature baseline (`tests/knowledge/baseline/`).
+///
+/// Two later suites need to know what Cairn produced **before** Feature 003
+/// existed: `us10_min_safe_context::no_regression` (metric 13, SC-308) and
+/// `mcp_backward_compatibility` (metric 36, SC-323). Both are no-regression
+/// claims, and a no-regression claim measured against output recaptured after
+/// the change proves nothing — so the baseline is captured once, committed, and
+/// never regenerated against a Feature 003 build.
+///
+/// # Why normalized rather than raw
+///
+/// A response carries identifiers, timestamps and sandbox paths that differ
+/// every run. Comparing those would fail for reasons that have nothing to do
+/// with regression. [`normalize`] replaces exactly those, by shape, and leaves
+/// every other value — including every field *name* — untouched. What survives
+/// the normalization is what the comparison is actually about.
+pub mod baseline {
+    use serde_json::Value;
+    use std::path::PathBuf;
+
+    pub fn dir() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("knowledge")
+            .join("baseline")
+    }
+
+    pub fn path(name: &str) -> PathBuf {
+        dir().join(name)
+    }
+
+    /// Read a recorded baseline. Absent means the capture step never ran, which
+    /// is a broken checkout rather than a passing test.
+    pub fn load(name: &str) -> Value {
+        let p = path(name);
+        let text = std::fs::read_to_string(&p).unwrap_or_else(|e| {
+            panic!(
+                "baseline {} is missing ({e}); it is committed, not generated at test time",
+                p.display()
+            )
+        });
+        serde_json::from_str(&text).expect("baseline is valid JSON")
+    }
+
+    /// Write a baseline. Only the ignored capture test calls this.
+    pub fn record(name: &str, value: &Value) {
+        std::fs::create_dir_all(dir()).expect("baseline dir");
+        let text = serde_json::to_string_pretty(value).expect("serializes");
+        std::fs::write(path(name), format!("{text}\n")).expect("write baseline");
+    }
+
+    /// Replace values that legitimately differ between two runs.
+    ///
+    /// Field *names* are never touched: a renamed or dropped field is exactly
+    /// the regression these baselines exist to catch.
+    pub fn normalize(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                Value::Object(map.iter().map(|(k, v)| (k.clone(), normalize(v))).collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(normalize).collect()),
+            Value::String(s) => Value::String(normalize_string(s)),
+            other => other.clone(),
+        }
+    }
+
+    fn normalize_string(s: &str) -> String {
+        if is_uuid(s) {
+            return "<uuid>".into();
+        }
+        if is_rfc3339(s) {
+            return "<timestamp>".into();
+        }
+        if is_absolute_path(s) {
+            return "<path>".into();
+        }
+        if is_commit_sha(s) {
+            return "<commit>".into();
+        }
+        if is_sandbox_name(s) {
+            return "<sandbox>".into();
+        }
+        // A string that *contains* one of the above: a rendered briefing, or a
+        // response whose text block embeds a whole JSON document. Replace each
+        // volatile token in place, preserving every delimiter, so the
+        // surrounding prose and every field name still take part in the
+        // comparison.
+        //
+        // Token characters are the ones a volatile value is built from — a
+        // UUID's hyphens, a timestamp's colons, a path's separators — so a
+        // quoted or bracketed value is still seen whole.
+        const IN_TOKEN: fn(char) -> bool =
+            |c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '+' | '/' | '\\');
+
+        let mut out = String::with_capacity(s.len());
+        let mut token = String::new();
+        for ch in s.chars() {
+            if IN_TOKEN(ch) {
+                token.push(ch);
+                continue;
+            }
+            push_token(&mut out, &token);
+            token.clear();
+            out.push(ch);
+        }
+        push_token(&mut out, &token);
+        out
+    }
+
+    fn push_token(out: &mut String, token: &str) {
+        if token.is_empty() {
+            return;
+        }
+        if is_uuid(token) {
+            out.push_str("<uuid>");
+        } else if is_rfc3339(token) {
+            out.push_str("<timestamp>");
+        } else if is_absolute_path(token) {
+            out.push_str("<path>");
+        } else if is_commit_sha(token) {
+            out.push_str("<commit>");
+        } else if is_sandbox_name(token) {
+            out.push_str("<sandbox>");
+        } else {
+            out.push_str(token);
+        }
+    }
+
+    fn is_uuid(s: &str) -> bool {
+        s.len() == 36
+            && s.as_bytes().iter().enumerate().all(|(i, b)| match i {
+                8 | 13 | 18 | 23 => *b == b'-',
+                _ => b.is_ascii_hexdigit(),
+            })
+    }
+
+    fn is_rfc3339(s: &str) -> bool {
+        // `2026-01-02T03:04:05Z` and its offset and fractional forms.
+        s.len() >= 20
+            && s.as_bytes().get(4) == Some(&b'-')
+            && s.as_bytes().get(7) == Some(&b'-')
+            && s.as_bytes().get(10).is_some_and(|b| *b == b'T')
+            && s.chars().take(4).all(|c| c.is_ascii_digit())
+    }
+
+    fn is_absolute_path(s: &str) -> bool {
+        s.starts_with('/')
+            || s.starts_with("\\\\")
+            || (s.len() > 2 && s.as_bytes()[1] == b':' && s.as_bytes()[0].is_ascii_alphabetic())
+    }
+
+    /// A full Git object name. The sandbox commits its own fixture, so this
+    /// differs every run and says nothing about regression.
+    fn is_commit_sha(s: &str) -> bool {
+        s.len() == 40 && s.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// The project name a sandbox derives from its temporary directory —
+    /// `.tmpAb3xY9`. Its *length* is fixed, so the token estimate it
+    /// contributes to stays comparable while the name itself does not.
+    fn is_sandbox_name(s: &str) -> bool {
+        s.len() == 10 && s.starts_with(".tmp") && s[4..].bytes().all(|b| b.is_ascii_alphanumeric())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn field_names_survive_normalization() {
+            let v = json!({"id": "018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b", "count": 3});
+            let n = normalize(&v);
+            assert_eq!(n["id"], "<uuid>");
+            assert_eq!(n["count"], 3);
+            assert!(n.as_object().unwrap().contains_key("id"));
+        }
+
+        #[test]
+        fn timestamps_and_paths_are_replaced() {
+            let v = json!(["2026-01-02T03:04:05Z", "/tmp/x/y", "src/lib.rs"]);
+            let n = normalize(&v);
+            assert_eq!(n[0], "<timestamp>");
+            assert_eq!(n[1], "<path>");
+            assert_eq!(n[2], "src/lib.rs", "a relative path is content, not noise");
+        }
+
+        #[test]
+        fn a_volatile_token_inside_a_sentence_is_replaced_in_place() {
+            let v = json!("session 018f1a2b-3c4d-7e5f-8a9b-0c1d2e3f4a5b ended");
+            assert_eq!(normalize(&v), json!("session <uuid> ended"));
+        }
+    }
+}
+
+/// A real local store with a project, for the knowledge suites.
+///
+/// Feature 003's canonical-knowledge tests need a store and the repository API,
+/// not a daemon or a repository on disk: what they exercise is what the *store*
+/// decides when a proposal arrives. Driving `cairn` over a socket for that would
+/// test the socket.
+///
+/// The suites that need the whole path — `cairn memory add` through the daemon —
+/// use [`Sandbox`] instead, and T042 is where that lands.
+pub mod store_fixture {
+    use cairn_core::domain::{MemoryScope, MemoryType};
+    use cairn_store::knowledge::SubjectRead;
+    use cairn_store::outbox::SyncPolicy;
+    use cairn_store::repo::{self, CreateOutcome, NewMemory};
+    use cairn_store::Store;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    pub struct Fixture {
+        _dir: TempDir,
+        pub store: Store,
+        pub project: Uuid,
+        pub scope_key: String,
+    }
+
+    impl Fixture {
+        pub async fn new() -> Self {
+            let dir = TempDir::new().expect("dir");
+            let store = Store::open(&dir.path().join("cairn.sqlite3"))
+                .await
+                .expect("open");
+            let project = Uuid::now_v7();
+            let now = "2026-01-02T03:04:05Z".to_string();
+            sqlx::query(
+                "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked,
+                                       server_project_id, created_at, updated_at, deleted_at)
+                 VALUES (?1, 'knowledge-fixture', ?2, NULL, 0, NULL, ?3, ?3, NULL)",
+            )
+            .bind(project.to_string())
+            .bind(format!("/fixture/{project}/.git"))
+            .bind(&now)
+            .execute(store.pool())
+            .await
+            .expect("project");
+
+            Self {
+                _dir: dir,
+                store,
+                project,
+                scope_key: project.to_string(),
+            }
+        }
+
+        pub fn blocking() -> (tokio::runtime::Runtime, Self) {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            let f = rt.block_on(Self::new());
+            (rt, f)
+        }
+
+        /// Record a proposal exactly as the store would on a real write.
+        pub async fn propose(
+            &self,
+            session: Uuid,
+            topic: Option<&str>,
+            value: Option<&str>,
+            content: &str,
+        ) -> CreateOutcome {
+            self.propose_scoped(session, MemoryScope::Project, None, topic, value, content)
+                .await
+        }
+
+        pub async fn propose_scoped(
+            &self,
+            session: Uuid,
+            scope: MemoryScope,
+            scope_key: Option<&str>,
+            topic: Option<&str>,
+            value: Option<&str>,
+            content: &str,
+        ) -> CreateOutcome {
+            let key = scope_key.unwrap_or(&self.scope_key).to_string();
+            repo::create_memory_reconciled(
+                &self.store,
+                NewMemory {
+                    project_id: self.project,
+                    kind: MemoryType::Fact,
+                    scope,
+                    scope_key: &key,
+                    content,
+                    origin_session_id: session,
+                    local_only: false,
+                    evidence: &[],
+                    topic_key: topic,
+                    value_key: value,
+                    importance: cairn_core::Importance::Normal,
+                },
+                SyncPolicy {
+                    linked: false,
+                    server_project_id: None,
+                },
+                cairn_store::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+            )
+            .await
+            .expect("propose")
+        }
+
+        pub async fn subject(&self, topic: &str) -> SubjectRead {
+            cairn_store::knowledge::subject(
+                &self.store,
+                self.project,
+                MemoryScope::Project,
+                &self.scope_key,
+                topic,
+                cairn_store::repo::DEFAULT_RECONCILE_MEMBERS_MAX,
+            )
+            .await
+            .expect("subject")
+        }
+
+        pub async fn count(&self, sql: &str) -> i64 {
+            sqlx::query_scalar::<_, i64>(sql)
+                .fetch_one(self.store.pool())
+                .await
+                .unwrap_or_else(|e| panic!("{sql}: {e}"))
+        }
+
+        /// Rewrite a memory's clock columns.
+        ///
+        /// Used only to prove they cannot matter: nothing in the derivation
+        /// reads them, and the way to demonstrate that is to move them and show
+        /// the answer does not.
+        pub async fn set_clock(&self, memory: Uuid, created_at: &str, updated_at: &str) {
+            sqlx::query("UPDATE memories SET created_at = ?2, updated_at = ?3 WHERE id = ?1")
+                .bind(memory.to_string())
+                .bind(created_at)
+                .bind(updated_at)
+                .execute(self.store.pool())
+                .await
+                .expect("set clock");
+        }
+    }
+}
+
+/// The authority rendering, exposed so a test can assert that four authorities
+/// produce four different lines.
+///
+/// The renderer lives in the `cairn` binary, which a test cannot link. Keeping
+/// one copy of the *shape* here and asserting the binary's output matches it in
+/// `us4_evidence::a_configuration_value_verifies_with_its_authority_named` is
+/// how both halves stay honest.
+pub fn render_authority(state: &str, authority: Option<&str>) -> String {
+    match (state, authority) {
+        ("verified", Some("cairn")) => "✓ verified                      (authority: cairn)".into(),
+        ("verified", Some("attested")) => {
+            "✓ verified (attested)           (authority: attested)".into()
+        }
+        ("verified", Some("remote_cairn")) => {
+            "✓ verified elsewhere            (authority: remote_cairn)".into()
+        }
+        ("verified", Some("remote_attested")) => {
+            "✓ verified elsewhere (attested) (authority: remote_attested)".into()
+        }
+        ("verified", None) => "✓ verified                      (authority: unknown)".into(),
+        (other, _) => format!("· {other}"),
+    }
+}
+
+/// One `CAIRN_HOME` for the whole test binary, set before any test reads it.
+///
+/// `CAIRN_HOME` is process-global and Rust runs a binary's tests on threads of
+/// one process, so a per-test `set_var` is a race: a test can promote a pattern
+/// under one home and record its outcome under another, which silently changes
+/// the machine salt between two halves of the same scenario. Anything derived
+/// from that salt — `origin_ref`, and so `is_origin` — then reads as a
+/// different machine's.
+///
+/// The directory is leaked deliberately. It must outlive every test in the
+/// binary, and the process is about to end anyway.
+pub fn shared_home() -> &'static std::path::Path {
+    use std::sync::OnceLock;
+    static HOME: OnceLock<&'static std::path::Path> = OnceLock::new();
+    HOME.get_or_init(|| {
+        let dir = Box::leak(Box::new(
+            tempfile::tempdir().expect("a home for this test binary"),
+        ));
+        std::env::set_var("CAIRN_HOME", dir.path());
+        dir.path()
+    })
 }
