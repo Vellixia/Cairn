@@ -1646,6 +1646,69 @@ Two older assertions hard-coded a count of conditional behaviours next to a rule
 they already checked; both now derive the expected count from the profile, so a
 capability an agent genuinely qualifies for no longer reads as a regression.
 
+### The same conflation, one layer down
+
+Review of the first cut caught a real defect in it. The `context_compacted` arm
+of `canonical_event` asked for a `PostCompaction` briefing, which **restores the
+checkpoint** -- but that event is capture class, so `cairn hook` sends it one-way
+and throws the reply away. It consumed the checkpoint and emitted nothing, which
+meant the session-open arm then found `restore_count = 1` and declined to deliver.
+Whether delivery got observed depended on which of two hooks the vendor happened
+to run first. The first Claude Code run recorded `restore_count = 2` -- two
+restores for one compaction -- which is the race showing up in the data and which
+should have been the tell.
+
+So the arm now captures only: `lifecycle_post_compaction` is already recorded
+before the match, and that is the whole of what the event establishes. Restoration
+belongs where context can reach the model -- the session that opens next for an
+agent that opens one, and `cairn_context(reason=post_compaction)` for an agent
+that does not. The session-open gate also now honours a vendor that names the
+boundary, so a checkpoint consumed by some other path does not silently cost the
+delivery.
+
+`the_post_compaction_hook_restores_without_being_asked` asserted the removed
+behaviour: it fired `PreCompact` and `PostCompact` only and expected a restore.
+Its intent was right and its mechanism was not, so it is now
+`the_compaction_lifecycle_restores_without_being_asked` and fires all three hooks
+in vendor order. It deliberately does not assert the evidence row, because
+`capability_evidence.agent` is a foreign key into `agent_integrations` and the
+sandbox connects no agent -- which is also why the first attempt at that
+assertion saw an empty table rather than a missing row.
+
+### Live evidence, re-run on the final code
+
+| agent | compactions | checkpoint | delivery evidence | mode |
+|---|---|---|---|---|
+| Claude Code | 1 (`/compact`) | `restore_count = 1`, restored 16:13:29 | `context_after_compaction` **established** | **`automatic`** |
+| Codex | 1 real auto-compaction, 2 `SessionStart` | `restore_count = 1`, restored 16:13:59 | `context_after_compaction` **established** | `unavailable_automatic` |
+| OpenCode | 2, driven via `POST /session/{id}/summarize` | `restore_count`, capture complete both sides | **absent** | `agent_initiated` |
+
+Both restores are now exactly one per compaction, where the pre-fix Claude Code
+run showed two. Codex reads `unavailable_automatic` because its hook trust was
+bypassed for the run rather than persisted, and `apply_activation` holds every
+lifecycle capability in `PendingActivation` for a trust-gated agent: the delivery
+capability is proven and the declared mode waits on one interactive approval.
+
+OpenCode is the case that proves the split is doing work. Two real compactions
+produced two `pre_compact` handoffs and verified `lifecycle_pre_compaction` *and*
+`lifecycle_post_compaction` -- capture complete on both sides -- while
+`context_after_compaction` never appeared and the mode stayed `agent_initiated`.
+The reason is structural: **OpenCode never re-opens a session.** One session row
+existed throughout, `lifecycle_session_open` was established once before the first
+compaction and never again. Under the old rule its verified post-compaction
+capture would have counted toward `automatic`.
+
+Its own compaction hook cannot substitute. `experimental.session.compacting`
+offers `output.context[]` and `output.prompt`, and both are *input to the
+summarising model*: a passive capsule pushed through `context` was observed to
+vanish from the summary, while a coercive instruction survived. That is
+model-mediated, so it can bias what a summary preserves but cannot guarantee a
+capsule is present. Two hooks that could -- `experimental.chat.messages.transform`
+and `experimental.chat.system.transform`, both re-applied per request and both
+observed delivering verbatim after a compaction -- are undocumented publicly and
+would be a new delivery mechanism rather than a fix to this one. Recorded as the
+identified path, not taken here.
+
 ## Gate after F14
 
 1,100 passed, 0 failed, 1 ignored, 0 skipped against real PostgreSQL 18.4 with

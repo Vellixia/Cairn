@@ -243,8 +243,12 @@ fn reduced_context_notice(reason: &str) -> String {
 
 /// Emit context on the agent's own supported context surface.
 ///
-/// Claude Code and Codex both read `hookSpecificOutput.additionalContext`;
-/// OpenCode's plugin passes what it reads on stdout straight through.
+/// Claude Code and Codex both read `hookSpecificOutput.additionalContext`.
+///
+/// OpenCode is emitted to as plain stdout, but note that its installed plugin
+/// spawns `cairn hook` with stdout ignored, so nothing written here reaches an
+/// OpenCode session today. OpenCode has no post-compaction session open either,
+/// which is why it derives `agent_initiated` and asks instead.
 fn emit_context(agent: cairn_integrate::AgentId, text: &str) {
     match agent {
         cairn_integrate::AgentId::Opencode => println!("{text}"),

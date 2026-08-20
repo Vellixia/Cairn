@@ -238,20 +238,22 @@ async fn dispatch(
         // `automatic`, whose whole promise is that continuity is restored
         // automatically after compaction, silently got no restoration at all.
         // A mode that over-claims is a defect, not a note (FR-426).
-        CanonicalEvent::ContextCompacted => {
-            crate::handlers::handle(
-                d,
-                cairn_core::wire::Request::Context {
-                    cwd,
-                    agent_session_key: key,
-                    session_id: None,
-                    reason: Some(cairn_core::wire::ContextReason::PostCompaction),
-                    token_budget,
-                    explain: false,
-                },
-            )
-            .await
-        }
+        // Capture only. This event is capture class, so `cairn hook` sends it
+        // one-way and throws the reply away -- there is no channel here to hand
+        // anything back on, for any agent.
+        //
+        // It used to ask for a `PostCompaction` briefing, which *restores* the
+        // checkpoint. Nothing could be delivered from it, so the only effect was
+        // to consume the checkpoint the next session open needs, leaving whether
+        // delivery is observed to depend on which of two hooks the vendor
+        // happens to run first. Restoration belongs where context can actually
+        // reach the model: the session that opens next for an agent that re-opens
+        // one, and `cairn_context(reason=post_compaction)` for an agent that does
+        // not.
+        //
+        // `lifecycle_post_compaction` is already recorded above, which is the
+        // whole of what this event establishes.
+        CanonicalEvent::ContextCompacted => Ok(serde_json::json!({})),
         CanonicalEvent::SessionClosed => {
             crate::handlers::handle(
                 d,
@@ -552,8 +554,12 @@ async fn post_compaction_reopen(
     };
     match cairn_store::continuity::latest(&d.store, session.id).await {
         Ok(Some(c)) => {
-            c.trigger == cairn_core::domain::CheckpointTrigger::ContextCompacting
-                && c.restore_count == 0
+            // An unrestored compaction checkpoint is the signal. A vendor that
+            // names the boundary is believed as well, so a checkpoint that was
+            // somehow already consumed does not silently cost the delivery.
+            named
+                || (c.trigger == cairn_core::domain::CheckpointTrigger::ContextCompacting
+                    && c.restore_count == 0)
         }
         _ => named,
     }

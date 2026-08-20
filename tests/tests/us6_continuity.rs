@@ -57,21 +57,25 @@ fn restored(s: &Sandbox, session: &str) -> Value {
     v["checkpoint"].clone()
 }
 
-/// The post-compaction **hook** restores the checkpoint, with nobody asking
-/// (FR-426, T148).
+/// The compaction lifecycle restores the checkpoint with nobody asking, at the
+/// boundary where context can actually reach the model (FR-426, T148, F14).
 ///
 /// Every other test in this file restores by calling
 /// `cairn context --reason post_compaction` itself. That is what an
-/// `agent_initiated` agent does — and testing only that way is how an agent
-/// deriving `automatic` came to promise a restoration it never performed: the
-/// `PostCompact` hook asked the daemon for a `continuation`, which builds an
-/// ordinary briefing and never touches the checkpoint. Written, never read.
+/// `agent_initiated` agent does, and testing only that way is how an agent
+/// deriving `automatic` came to promise a restoration it never performed.
 ///
-/// Found by driving a real compaction in Claude Code against a real store: the
-/// `context_compacting` checkpoint was there and its `restore_count` was 0.
-/// So this test fires the hooks and asks nothing.
+/// This test fires the hooks and asks nothing. It fires all three, in the order
+/// the vendor sends them, because `PostCompact` is capture class: `cairn hook`
+/// sends it one-way and throws the reply away, so nothing can be delivered from
+/// it for any agent. The boundary that can deliver is the session the agent
+/// opens next -- Claude Code names it with source `compact`. An earlier version
+/// of this test fired only `PreCompact` and `PostCompact` and asserted a restore,
+/// which is why `context_compacted` used to ask for a briefing it could not
+/// return: it consumed the checkpoint the session open needed and emitted
+/// nothing.
 #[test]
-fn the_post_compaction_hook_restores_without_being_asked() {
+fn the_compaction_lifecycle_restores_without_being_asked() {
     let s = Sandbox::new();
     let session = session_with_checkpoint(&s, "compacted", "src/retry.rs");
 
@@ -81,7 +85,7 @@ fn the_post_compaction_hook_restores_without_being_asked() {
     ));
     assert_eq!(before, vec!["0".to_string()], "nothing has restored yet");
 
-    // Exactly what the agent's adapter sends, and nothing else.
+    // Exactly what the agent's adapter sends, in order, and nothing else.
     s.hook(
         "PreCompact",
         json!({ "session_id": "compacted", "trigger": "auto" }),
@@ -90,9 +94,12 @@ fn the_post_compaction_hook_restores_without_being_asked() {
         "PostCompact",
         json!({ "session_id": "compacted", "trigger": "auto" }),
     );
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "compacted", "source": "compact" }),
+    );
 
-    // `context_compacted` is capture class, so the hook returns before the
-    // daemon has finished with it. Poll rather than sleep a fixed time.
+    // Capture-class hooks return before the daemon has finished, so poll.
     let restores = |s: &Sandbox| {
         s.query_column(&format!(
             "SELECT CAST(COALESCE(SUM(restore_count), 0) AS TEXT) FROM continuity_checkpoints
@@ -112,9 +119,17 @@ fn the_post_compaction_hook_restores_without_being_asked() {
     assert_ne!(
         restores(&s),
         "0",
-        "the post-compaction hook did not restore the checkpoint: an agent whose mode is \
+        "the compaction lifecycle did not restore the checkpoint: an agent whose mode is \
          `automatic` was promised a rehydration it never got"
     );
+
+    // The matching `context_after_compaction` evidence row is deliberately not
+    // asserted here: `capability_evidence.agent` is a foreign key into
+    // `agent_integrations`, so evidence can only be recorded for an agent that
+    // has actually been connected, and this sandbox connects none. That the
+    // delivery is recorded as *delivery* is covered by the derivation
+    // regressions above and by the live T148 evidence in the release record,
+    // where both Claude Code and Codex establish it against a real store.
 }
 
 // ---------------------------------------------------------------------------
