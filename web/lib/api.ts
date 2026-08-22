@@ -89,11 +89,6 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ email, password }),
     }),
-  register: (email: string, displayName: string, password: string) =>
-    request<{ id: string }>("/api/auth/register", {
-      method: "POST",
-      body: JSON.stringify({ email, display_name: displayName, password }),
-    }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
 
   /** Personal API tokens: the credential `cairnd` carries (D10). */

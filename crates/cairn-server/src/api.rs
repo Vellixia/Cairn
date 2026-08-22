@@ -18,7 +18,18 @@ pub fn routes() -> Router<AppState> {
         .route("/api/health", get(health))
         .route("/api/version", get(version))
         // Authentication
-        .route("/api/auth/register", post(register))
+        //
+        // There is deliberately no registration route. Self-service account
+        // creation was the first step of a complete compromise chain against
+        // this server: register, look a project up by its public git remote,
+        // join it, then read and write everything in it. Each link is closed
+        // separately below, but this one is closed by removal rather than by a
+        // check, because an account-creation route that anyone can reach has no
+        // safe configuration.
+        //
+        // An operator creates accounts with `cairn-server users add`, which
+        // talks to the database directly and is reachable only by whoever
+        // already controls the host.
         .route("/api/auth/login", post(login))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
@@ -27,7 +38,13 @@ pub fn routes() -> Router<AppState> {
         // Linking (FR-064)
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/lookup", get(lookup_projects))
-        .route("/api/projects/{id}/join", post(join_project))
+        // No join route either, for the same reason. It required only that the
+        // project exist, so naming a UUID was enough to become a member of it —
+        // and `lookup` below handed those UUIDs out. A client attaching a fresh
+        // clone to a project it is already a member of does not need a route:
+        // `GET /api/projects` already reports the caller's memberships, and
+        // `cairn link --project` now checks that list instead of asking to be
+        // added to it.
         // Sync
         .route("/api/sync/batch", post(sync_batch))
         .route("/api/sync/changes", get(sync_changes))
@@ -61,41 +78,6 @@ async fn version(State(state): State<AppState>) -> Json<Value> {
 // ---------------------------------------------------------------------------
 // Authentication
 // ---------------------------------------------------------------------------
-
-#[derive(Deserialize)]
-struct RegisterBody {
-    email: String,
-    display_name: String,
-    password: String,
-}
-
-async fn register(
-    State(state): State<AppState>,
-    Json(body): Json<RegisterBody>,
-) -> ApiResult<impl IntoResponse> {
-    if body.password.len() < 8 {
-        return Err(ApiError::invalid("password must be at least 8 characters"));
-    }
-    let id = Uuid::now_v7();
-    let hash = auth::hash_password(&body.password)?;
-    let result = sqlx::query(
-        "INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(id)
-    .bind(body.email.trim().to_lowercase())
-    .bind(&body.display_name)
-    .bind(hash)
-    .execute(&state.pool)
-    .await;
-
-    match result {
-        Ok(_) => Ok(Json(json!({ "id": id, "email": body.email }))),
-        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
-            Err(ApiError::conflict("that email is already registered"))
-        }
-        Err(e) => Err(e.into()),
-    }
-}
 
 #[derive(Deserialize)]
 struct LoginBody {
@@ -275,29 +257,6 @@ async fn create_project(
     Ok(Json(json!({ "id": id, "name": body.name })))
 }
 
-async fn join_project(
-    State(state): State<AppState>,
-    user: CurrentUser,
-    Path(id): Path<Uuid>,
-) -> ApiResult<Json<Value>> {
-    let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM projects WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?;
-    if exists.is_none() {
-        return Err(ApiError::not_found("no such shared project"));
-    }
-    sqlx::query(
-        "INSERT INTO project_members (project_id, user_id) VALUES ($1, $2)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(id)
-    .bind(user.id)
-    .execute(&state.pool)
-    .await?;
-    Ok(Json(json!({ "id": id, "joined": true })))
-}
-
 #[derive(Deserialize)]
 struct LookupQuery {
     #[serde(default)]
@@ -306,19 +265,30 @@ struct LookupQuery {
 
 /// A discovery *hint*. Returns only projects the caller may already see, and
 /// never links anything on its own (D14).
+///
+/// The doc comment above is what this was always documented to do. The query
+/// did not do it: it matched on `repository_remote` alone, with no reference to
+/// the caller at all. A git remote is not a secret — it is in every clone of
+/// the repository and often on a public forge — so any authenticated account
+/// could turn a remote URL into the project UUIDs behind it, which was exactly
+/// the input the join route needed. The membership join below is the fix; the
+/// comment needed no change, only the SQL.
 async fn lookup_projects(
     State(state): State<AppState>,
-    _user: CurrentUser,
+    user: CurrentUser,
     Query(q): Query<LookupQuery>,
 ) -> ApiResult<Json<Value>> {
     if q.remote.trim().is_empty() {
         return Ok(Json(json!({ "projects": [] })));
     }
     let rows = sqlx::query(
-        "SELECT id, name FROM projects
-         WHERE repository_remote = $1 AND deleted_at IS NULL ORDER BY created_at",
+        "SELECT p.id, p.name FROM projects p
+         JOIN project_members m ON m.project_id = p.id
+         WHERE p.repository_remote = $1 AND p.deleted_at IS NULL AND m.user_id = $2
+         ORDER BY p.created_at",
     )
     .bind(q.remote.trim())
+    .bind(user.id)
     .fetch_all(&state.pool)
     .await?;
     let projects: Vec<Value> = rows

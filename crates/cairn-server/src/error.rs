@@ -33,9 +33,6 @@ impl ApiError {
     pub fn invalid(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "invalid_request", message)
     }
-    pub fn conflict(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, "conflict", message)
-    }
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", message)
     }
@@ -70,7 +67,6 @@ mod tests {
         assert_eq!(ApiError::forbidden("x").status, StatusCode::FORBIDDEN);
         assert_eq!(ApiError::not_found("x").status, StatusCode::NOT_FOUND);
         assert_eq!(ApiError::invalid("x").code, "invalid_request");
-        assert_eq!(ApiError::conflict("x").status, StatusCode::CONFLICT);
         assert_eq!(ApiError::internal("x").code, "internal");
     }
 

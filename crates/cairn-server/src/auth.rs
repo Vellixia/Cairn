@@ -175,6 +175,45 @@ pub async fn ensure_admin(
     ))
 }
 
+/// Create an account. The only way one comes into existence, besides
+/// `ensure_admin`'s environment-defined account.
+///
+/// Not reachable over HTTP by design — see `api::routes`. The validation here
+/// is the same the removed registration route performed; what changed is who
+/// can invoke it.
+pub async fn create_user(
+    pool: &PgPool,
+    email: &str,
+    display_name: &str,
+    password: &str,
+) -> anyhow::Result<(Uuid, String)> {
+    let email = email.trim().to_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        anyhow::bail!("email is not an email address");
+    }
+    if password.chars().count() < MIN_PASSWORD_LEN {
+        anyhow::bail!("password must be at least {MIN_PASSWORD_LEN} characters");
+    }
+    let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
+    let id = Uuid::now_v7();
+    let result = sqlx::query(
+        "INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)",
+    )
+    .bind(id)
+    .bind(&email)
+    .bind(display_name)
+    .bind(hash)
+    .execute(pool)
+    .await;
+    match result {
+        Ok(_) => Ok((id, email)),
+        Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
+            anyhow::bail!("that email already has an account")
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
 async fn user_for_api_token(pool: &PgPool, token: &str) -> ApiResult<Option<Uuid>> {
     let hash = hash_token(token);
     let row: Option<(Uuid,)> = sqlx::query_as(
