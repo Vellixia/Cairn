@@ -12,7 +12,7 @@ mod version;
 
 use axum::http::{header, Method};
 use axum::Router;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use sqlx::PgPool;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -47,8 +47,12 @@ impl AppState {
 #[command(name = "cairn-server", about = "Cairn shared memory server", version)]
 struct Args {
     /// PostgreSQL connection string.
+    // `global` so it can follow a subcommand as well as precede it. A caller
+    // reaching for `cairn-server users add --database-url ...` is writing the
+    // obvious thing, and clap would otherwise refuse it.
     #[arg(
         long,
+        global = true,
         env = "DATABASE_URL",
         default_value = "postgres://cairn:cairn@localhost:5433/cairn"
     )]
@@ -93,6 +97,39 @@ struct Args {
     /// retains the rest until the migration runs (FR-415).
     #[arg(long, env = "CAIRN_MAX_SCHEMA_VERSION", default_value_t = db::SCHEMA_VERSION)]
     max_schema_version: i64,
+    /// Run an operator command instead of serving.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Manage accounts. There is no route that creates one.
+    #[command(subcommand)]
+    Users(UserCommand),
+}
+
+#[derive(Subcommand, Debug)]
+enum UserCommand {
+    /// Create an account.
+    ///
+    /// This exists because `POST /api/auth/register` was removed: it was an
+    /// unauthenticated route that let anyone who could reach the server create
+    /// an account, which was the first step of a complete compromise chain.
+    /// Creating accounts is an operator act, so it happens here — locally,
+    /// against the database, by whoever already controls the host. That is the
+    /// same trust boundary `--admin-email` already sits on.
+    Add {
+        /// Email address. Lowercased and trimmed.
+        #[arg(long)]
+        email: String,
+        /// Human-readable name.
+        #[arg(long)]
+        display_name: String,
+        /// At least 8 characters.
+        #[arg(long, env = "CAIRN_NEW_USER_PASSWORD")]
+        password: String,
+    },
 }
 
 #[tokio::main]
@@ -107,6 +144,15 @@ async fn main() -> anyhow::Result<()> {
         args.max_schema_version,
     )
     .await?;
+
+    // An operator command runs against the schema and exits. It deliberately
+    // happens after `db::connect` — so the migration state is the same one the
+    // server would see — and before `seed_admin`, so creating a user never
+    // depends on the admin variables being set.
+    if let Some(command) = &args.command {
+        return run_command(&pool, command).await;
+    }
+
     seed_admin(&pool, &args).await?;
 
     // What the database actually holds, not what this binary could apply. A
@@ -159,6 +205,24 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %args.addr, "cairn-server listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Run one operator command and return.
+async fn run_command(pool: &PgPool, command: &Command) -> anyhow::Result<()> {
+    match command {
+        Command::Users(UserCommand::Add {
+            email,
+            display_name,
+            password,
+        }) => {
+            let (id, email) = auth::create_user(pool, email, display_name, password).await?;
+            // One line of JSON on stdout: this is a seam for scripts and test
+            // harnesses as much as for a human, and a human reading one line of
+            // JSON is a smaller cost than a script parsing prose.
+            println!("{}", serde_json::json!({ "id": id, "email": email }));
+            Ok(())
+        }
+    }
 }
 
 /// Apply the environment-defined account, before the listener binds.

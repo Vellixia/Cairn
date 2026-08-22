@@ -909,6 +909,15 @@ pub struct Server {
     pub database_url: String,
     /// True when this server created its database and should drop it.
     owns_database: bool,
+    /// The ceiling this server was started with.
+    ///
+    /// Kept because `create_user` runs the same binary against the same
+    /// database, and `cairn-server` applies migrations on connect. Without the
+    /// ceiling, seeding a user against a server deliberately pinned to an older
+    /// schema would migrate that database to the newest one — turning "an older
+    /// peer" into "the current peer" and quietly invalidating every test that
+    /// depends on the distinction.
+    max_schema_version: i64,
     child: std::process::Child,
 }
 
@@ -959,6 +968,48 @@ impl Server {
                 .unwrap_or_else(|e| panic!("query {sql:?} failed: {e}"));
             pool.close().await;
             n
+        })
+    }
+
+    /// Run one statement against this server's database.
+    ///
+    /// Seeding a victim row directly is the point: an authorization test wants
+    /// the row to exist without the attack path having created it, and building
+    /// it through the API would mean satisfying every foreign key on the way in
+    /// — which tests the API, not the guard.
+    pub fn execute(&self, sql: &str) {
+        let url = self.database_url.clone();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            sqlx::query(&sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("execute {sql:?} failed: {e}"));
+            pool.close().await;
+        });
+    }
+
+    /// One text value against this server's database.
+    pub fn text(&self, sql: &str) -> String {
+        let url = self.database_url.clone();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            let v: String = sqlx::query_scalar(&sql)
+                .fetch_one(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("query {sql:?} failed: {e}"));
+            pool.close().await;
+            v
         })
     }
 
@@ -1033,6 +1084,7 @@ impl Server {
                     base,
                     database_url: url.to_string(),
                     owns_database,
+                    max_schema_version: max_version,
                     child,
                 });
             }
@@ -1085,13 +1137,21 @@ impl Server {
         })
     }
 
-    /// Register a user and return a fresh personal API token.
+    /// Create a user and return a fresh personal API token.
+    ///
+    /// The account is created **out of band**, by the server binary's own
+    /// operator subcommand, because there is no route that creates one. The
+    /// registration route this used to call was removed as a security fix: it
+    /// was unauthenticated, so anyone who could reach the server could make an
+    /// account, and that was the first step of a full compromise chain. Nothing
+    /// about the tests needed a public route — only a way to seed an account —
+    /// so the seam moved to the same place an operator uses.
     pub fn new_user_token(&self, label: &str) -> String {
         let email = format!("{label}-{}@example.test", unique());
         let body = serde_json::json!({
             "email": email, "display_name": label, "password": "hunter2hunter2"
         });
-        self.post_json("/api/auth/register", &body, None);
+        self.create_user(&email, label, "hunter2hunter2");
 
         let login = self.post_json_raw("/api/auth/login", &body, None);
         let cookie = login
@@ -1107,6 +1167,37 @@ impl Server {
             Some(&cookie),
         );
         created["token"].as_str().expect("token").to_string()
+    }
+
+    /// Seed an account with `cairn-server users add`.
+    ///
+    /// Runs against this server's own database, so the account exists before
+    /// the first request that needs it. Panics with the subcommand's stderr on
+    /// failure: a test that silently continued without its user would fail
+    /// later, somewhere less informative.
+    pub fn create_user(&self, email: &str, display_name: &str, password: &str) {
+        let out = Command::new(binary("cairn-server"))
+            .args([
+                "--database-url",
+                &self.database_url,
+                "--max-schema-version",
+                &self.max_schema_version.to_string(),
+                "users",
+                "add",
+                "--email",
+                email,
+                "--display-name",
+                display_name,
+                "--password",
+                password,
+            ])
+            .output()
+            .expect("cairn-server runs");
+        assert!(
+            out.status.success(),
+            "cairn-server users add {email}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     pub fn post_json(
@@ -1305,6 +1396,61 @@ pub fn post_json_bearer(
         .output()
         .expect("curl runs");
     serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null)
+}
+
+/// POST and return the HTTP status only, with no credential.
+///
+/// A removed route must answer the same way to an anonymous caller as to any
+/// other, so the assertion is made without one.
+pub fn post_status_anon(base: &str, path: &str, body: &serde_json::Value) -> u16 {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-d",
+            &body.to_string(),
+            &format!("{base}{path}"),
+        ])
+        .output()
+        .expect("curl runs");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
+/// POST and return the HTTP status only, carrying a bearer token.
+pub fn post_status_bearer(base: &str, path: &str, body: &serde_json::Value, token: &str) -> u16 {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            &format!("authorization: Bearer {token}"),
+            "-d",
+            &body.to_string(),
+            &format!("{base}{path}"),
+        ])
+        .output()
+        .expect("curl runs");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
 }
 
 /// Connect a sandbox to a running server with the given token.

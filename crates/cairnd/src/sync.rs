@@ -274,9 +274,37 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
     let c = client(d).await?;
 
     let target = match (server_project_id, create) {
+        // Linking a project the caller is already a member of is a *local*
+        // attach, and now says so.
+        //
+        // It used to `POST /api/projects/{id}/join`, and that route was removed
+        // as a security fix: it granted membership to anyone who could name a
+        // project UUID, and `GET /api/projects/lookup` handed those UUIDs out
+        // for any git remote. Confirming an existing membership needs no grant —
+        // `GET /api/projects` already returns exactly the caller's own
+        // memberships — so the check moves here and the server grants nothing.
+        //
+        // A non-member now gets a refusal naming what to do about it, rather
+        // than silently becoming a member.
         (Some(id), _) => {
-            c.post(&format!("/api/projects/{id}/join"), &json!({}))
-                .await?;
+            let mine = c.get("/api/projects").await?;
+            let is_member =
+                mine.get("projects")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|projects| {
+                        projects.iter().any(|p| {
+                            p.get("id").and_then(|v| v.as_str()) == Some(id.to_string().as_str())
+                        })
+                    });
+            if !is_member {
+                return Err(WireError::new(
+                    codes::UNAUTHORIZED,
+                    format!(
+                        "you are not a member of project {id}; ask a member to add you, \
+                         then run this again"
+                    ),
+                ));
+            }
             id
         }
         (None, true) => {

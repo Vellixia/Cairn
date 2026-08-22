@@ -194,7 +194,7 @@ async fn apply_item(
         ("memory_relation", "upsert") => upsert_relation(&mut tx, project_id, item).await?,
         ("task_criterion", "upsert") => upsert_criterion(&mut tx, project_id, item).await?,
         ("task_blocker", "upsert") => upsert_blocker(&mut tx, project_id, item).await?,
-        (entity, "delete") => tombstone(&mut tx, entity, item.entity_id).await?,
+        (entity, "delete") => tombstone(&mut tx, entity, item.entity_id, project_id).await?,
         (entity, op) => {
             return Err(ApiError::invalid(format!("unsupported {entity}/{op}")));
         }
@@ -355,6 +355,54 @@ fn array(payload: &Value, key: &str) -> Value {
     payload.get(key).cloned().unwrap_or_else(|| json!([]))
 }
 
+/// Refuse unless the caller's own project was the one written.
+///
+/// Every `ON CONFLICT (id) DO UPDATE` in this module carries
+/// `WHERE <table>.project_id = $n`. When the row that already holds that id
+/// belongs to a different project the predicate is false, the update touches
+/// nothing, and `rows_affected()` is zero. A fresh insert reports one, and so
+/// does a legitimate re-upsert, because every one of them sets
+/// `updated_at = now()` — so zero means exactly one thing here.
+///
+/// Putting the check in the predicate rather than in a `SELECT` first is
+/// deliberate. A read followed by a write leaves a window in which the row
+/// arrives between the two; under `READ COMMITTED` the write would then proceed
+/// against a row the read never saw. One statement has no window.
+fn scoped(rows: u64, entity: &str) -> ApiResult<()> {
+    if rows == 0 {
+        return Err(ApiError::forbidden(format!(
+            "that {entity} belongs to a different project"
+        )));
+    }
+    Ok(())
+}
+
+/// Every id must already live in the caller's own project.
+///
+/// Used where a row references another table by id — a relation's two memories,
+/// a criterion's task. `ON CONFLICT` cannot express this, because the reference
+/// is not the conflicting key.
+async fn all_in_project(
+    tx: &mut Transaction<'_, Postgres>,
+    table: &str,
+    ids: &[Uuid],
+    project_id: Uuid,
+    entity: &str,
+) -> ApiResult<()> {
+    let sql = format!("SELECT count(*) FROM {table} WHERE id = ANY($1) AND project_id = $2");
+    let found: i64 = sqlx::query_scalar(&sql)
+        .bind(ids)
+        .bind(project_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    if found != ids.len() as i64 {
+        return Err(ApiError::forbidden(format!(
+            "that {entity} names a row in a different project"
+        )));
+    }
+    Ok(())
+}
+
 async fn upsert_project(
     tx: &mut Transaction<'_, Postgres>,
     project_id: Uuid,
@@ -379,13 +427,14 @@ async fn upsert_task(
     project_id: Uuid,
     item: &SyncItem,
 ) -> ApiResult<()> {
-    sqlx::query(
+    let rows = sqlx::query(
         "INSERT INTO tasks (id, project_id, title, goal, acceptance_criteria, status, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, now())
          ON CONFLICT (id) DO UPDATE SET
              title = EXCLUDED.title, goal = EXCLUDED.goal,
              acceptance_criteria = EXCLUDED.acceptance_criteria,
-             status = EXCLUDED.status, updated_at = now()",
+             status = EXCLUDED.status, updated_at = now()
+         WHERE tasks.project_id = $2",
     )
     .bind(item.entity_id)
     .bind(project_id)
@@ -395,7 +444,7 @@ async fn upsert_task(
     .bind(text(&item.payload, "status"))
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    scoped(rows.rows_affected(), "task")
 }
 
 async fn upsert_session(
@@ -404,7 +453,7 @@ async fn upsert_session(
     user_id: Uuid,
     item: &SyncItem,
 ) -> ApiResult<()> {
-    sqlx::query(
+    let rows = sqlx::query(
         "INSERT INTO sessions
             (id, project_id, task_id, user_id, agent, branch, commit_sha,
              previous_session_id, status, started_at, ended_at, end_reason)
@@ -412,7 +461,8 @@ async fn upsert_session(
          ON CONFLICT (id) DO UPDATE SET
              task_id = EXCLUDED.task_id, status = EXCLUDED.status,
              ended_at = EXCLUDED.ended_at, end_reason = EXCLUDED.end_reason,
-             commit_sha = EXCLUDED.commit_sha",
+             commit_sha = EXCLUDED.commit_sha
+         WHERE sessions.project_id = $2",
     )
     .bind(item.entity_id)
     .bind(project_id)
@@ -428,7 +478,7 @@ async fn upsert_session(
     .bind(opt_text(&item.payload, "end_reason"))
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    scoped(rows.rows_affected(), "session")
 }
 
 async fn upsert_memory(
@@ -469,7 +519,7 @@ async fn upsert_memory(
     // anything that would lose meaning here, so what reaches this branch is a
     // memory whose Feature 003 fields are all at their defaults (SC-326).
     if schema_version < 2 {
-        sqlx::query(
+        let rows = sqlx::query(
             "INSERT INTO memories
                 (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
                  origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at)
@@ -478,7 +528,8 @@ async fn upsert_memory(
                  content = EXCLUDED.content, state = EXCLUDED.state,
                  superseded_by_id = EXCLUDED.superseded_by_id,
                  observation_ids = EXCLUDED.observation_ids,
-                 evidence_count = EXCLUDED.evidence_count, updated_at = now()",
+                 evidence_count = EXCLUDED.evidence_count, updated_at = now()
+         WHERE memories.project_id = $2",
         )
         .bind(item.entity_id)
         .bind(project_id)
@@ -494,10 +545,10 @@ async fn upsert_memory(
         .bind(opt_text(&provenance, "digest"))
         .execute(&mut **tx)
         .await?;
-        return Ok(());
+        return scoped(rows.rows_affected(), "memory");
     }
 
-    sqlx::query(
+    let rows = sqlx::query(
         "INSERT INTO memories
             (id, project_id, type, scope, scope_key, content, state, superseded_by_id,
              origin_session_id, observation_ids, evidence_count, evidence_digest, updated_at,
@@ -520,7 +571,8 @@ async fn upsert_memory(
              last_verified_at = EXCLUDED.last_verified_at,
              verification_basis = EXCLUDED.verification_basis,
              evidence_fact_count = EXCLUDED.evidence_fact_count,
-             updated_at = now()",
+             updated_at = now()
+         WHERE memories.project_id = $2",
     )
     .bind(item.entity_id)
     .bind(project_id)
@@ -561,7 +613,7 @@ async fn upsert_memory(
     .bind(int(&verification, "fact_count"))
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    scoped(rows.rows_affected(), "memory")
 }
 
 fn int(payload: &Value, key: &str) -> i32 {
@@ -578,14 +630,15 @@ async fn upsert_handoff(
         .get("evidence")
         .cloned()
         .unwrap_or_else(|| json!({}));
-    sqlx::query(
+    let rows = sqlx::query(
         "INSERT INTO handoffs
             (id, project_id, session_id, trigger, goal, progress, completed_work,
              remaining_work, changed_files, decisions, failures, tests_executed,
              repository_state, next_step, agent_note, observation_ids, evidence_count)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
          ON CONFLICT (id) DO UPDATE SET
-             agent_note = EXCLUDED.agent_note, next_step = EXCLUDED.next_step",
+             agent_note = EXCLUDED.agent_note, next_step = EXCLUDED.next_step
+         WHERE handoffs.project_id = $2",
     )
     .bind(item.entity_id)
     .bind(project_id)
@@ -619,23 +672,55 @@ async fn upsert_handoff(
     )
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    scoped(rows.rows_affected(), "handoff")
 }
 
 /// A tombstone clears content server-side and is idempotent (FR-052).
-async fn tombstone(tx: &mut Transaction<'_, Postgres>, entity: &str, id: Uuid) -> ApiResult<()> {
+async fn tombstone(
+    tx: &mut Transaction<'_, Postgres>,
+    entity: &str,
+    id: Uuid,
+    project_id: Uuid,
+) -> ApiResult<()> {
+    // `project_id = $2` is the whole point of this function's signature.
+    //
+    // Without it these statements read `WHERE id = $1` and nothing else, and
+    // `id` is supplied by the client. Any member of any project could blank the
+    // content of, and delete, any memory, handoff, session, task or project on
+    // this server given only its UUID — and `sync_batch` had already verified
+    // membership of a *different* project, so the request looked entirely
+    // legitimate on the way in. This was the most destructive of the
+    // authorization defects, because a tombstone also clears the content.
     let sql = match entity {
-        "memory" => "UPDATE memories SET deleted_at = now(), content = '' WHERE id = $1",
+        "memory" => {
+            "UPDATE memories SET deleted_at = now(), content = ''
+             WHERE id = $1 AND project_id = $2"
+        }
         "handoff" => {
             "UPDATE handoffs SET deleted_at = now(), goal = '', progress = '', next_step = '',
-                                 agent_note = NULL WHERE id = $1"
+                                 agent_note = NULL
+             WHERE id = $1 AND project_id = $2"
         }
-        "session" => "UPDATE sessions SET deleted_at = now(), end_reason = NULL WHERE id = $1",
-        "task" => "UPDATE tasks SET deleted_at = now() WHERE id = $1",
-        "project" => "UPDATE projects SET deleted_at = now() WHERE id = $1",
+        "session" => {
+            "UPDATE sessions SET deleted_at = now(), end_reason = NULL
+             WHERE id = $1 AND project_id = $2"
+        }
+        "task" => "UPDATE tasks SET deleted_at = now() WHERE id = $1 AND project_id = $2",
+        // A project's own row has no `project_id` column, so the scope is the
+        // identity: the only project this request may tombstone is the one it
+        // authenticated against.
+        "project" => "UPDATE projects SET deleted_at = now() WHERE id = $1 AND id = $2",
         other => return Err(ApiError::invalid(format!("cannot delete {other}"))),
     };
-    sqlx::query(sql).bind(id).execute(&mut **tx).await?;
+    // Zero rows is left as a no-op rather than an error, because a tombstone is
+    // idempotent by contract (FR-052) and a second delete of an
+    // already-deleted row must still succeed. It also declines to confirm
+    // whether the id exists in some other project, which an error would.
+    sqlx::query(sql)
+        .bind(id)
+        .bind(project_id)
+        .execute(&mut **tx)
+        .await?;
     Ok(())
 }
 
@@ -925,6 +1010,13 @@ async fn upsert_relation(
     let to = opt_uuid(&item.payload, "to_memory_id")
         .ok_or_else(|| ApiError::invalid("a relation must name to_memory_id"))?;
 
+    // A relation is keyed by `(from, to, kind)` and conflicts `DO NOTHING`, so
+    // the `rows_affected` trick the other upserts use cannot work here: a
+    // legitimate duplicate also reports zero. Both endpoints are checked
+    // instead — which is the stronger statement anyway, since it also forbids a
+    // relation that spans two projects rather than only one that overwrites.
+    all_in_project(tx, "memories", &[from, to], project_id, "relation").await?;
+
     sqlx::query(
         "INSERT INTO memory_relations
             (from_memory_id, to_memory_id, kind, project_id, decided_by_session, basis, updated_at)
@@ -958,7 +1050,12 @@ async fn upsert_criterion(
     let task_id = opt_uuid(&item.payload, "task_id")
         .ok_or_else(|| ApiError::invalid("a criterion must name its task"))?;
 
-    sqlx::query(
+    // The id guard below catches an attempt to overwrite another project's
+    // criterion. This catches the other direction: attaching a new criterion to
+    // another project's task, where there is no existing row to conflict with.
+    all_in_project(tx, "tasks", &[task_id], project_id, "criterion").await?;
+
+    let rows = sqlx::query(
         "INSERT INTO task_criteria
             (id, task_id, project_id, ordinal, label, text, state, verification,
              updated_at, deleted_at)
@@ -966,7 +1063,8 @@ async fn upsert_criterion(
          ON CONFLICT (id) DO UPDATE SET
              ordinal = EXCLUDED.ordinal, label = EXCLUDED.label, text = EXCLUDED.text,
              state = EXCLUDED.state, verification = EXCLUDED.verification,
-             deleted_at = EXCLUDED.deleted_at, updated_at = now()",
+             deleted_at = EXCLUDED.deleted_at, updated_at = now()
+         WHERE task_criteria.project_id = $3",
     )
     .bind(item.entity_id)
     .bind(task_id)
@@ -984,7 +1082,7 @@ async fn upsert_criterion(
     .bind(deleted_at(&item.payload))
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    scoped(rows.rows_affected(), "criterion")
 }
 
 /// One blocker. Append-only with a single transition, both ends attributed.
@@ -996,7 +1094,9 @@ async fn upsert_blocker(
     let task_id = opt_uuid(&item.payload, "task_id")
         .ok_or_else(|| ApiError::invalid("a blocker must name its task"))?;
 
-    sqlx::query(
+    all_in_project(tx, "tasks", &[task_id], project_id, "blocker").await?;
+
+    let rows = sqlx::query(
         "INSERT INTO task_blockers
             (id, task_id, project_id, description, state, opened_by_session,
              cleared_by_session, updated_at, deleted_at)
@@ -1004,7 +1104,8 @@ async fn upsert_blocker(
          ON CONFLICT (id) DO UPDATE SET
              state = EXCLUDED.state,
              cleared_by_session = EXCLUDED.cleared_by_session,
-             deleted_at = EXCLUDED.deleted_at, updated_at = now()",
+             deleted_at = EXCLUDED.deleted_at, updated_at = now()
+         WHERE task_blockers.project_id = $3",
     )
     .bind(item.entity_id)
     .bind(task_id)
@@ -1019,7 +1120,7 @@ async fn upsert_blocker(
     .bind(deleted_at(&item.payload))
     .execute(&mut **tx)
     .await?;
-    Ok(())
+    scoped(rows.rows_affected(), "blocker")
 }
 
 /// A tombstone timestamp for a payload that reports itself deleted.
