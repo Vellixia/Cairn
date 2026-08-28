@@ -33,6 +33,7 @@ fn server() -> Option<Server> {
 /// A sandbox linked to `server` as an administrator, so it can ratify.
 struct Admin {
     sandbox: Sandbox,
+    email: String,
 }
 
 fn admin(server: &Server, label: &str) -> Admin {
@@ -63,7 +64,7 @@ fn admin(server: &Server, label: &str) -> Admin {
 
     attach_server(&sandbox, server, &token);
     sandbox.must(&["link", "--project", &project]);
-    Admin { sandbox }
+    Admin { sandbox, email }
 }
 
 /// Propose and ratify one team entry, returning its id.
@@ -461,5 +462,98 @@ fn a_global_subject_read_refuses_a_scope_it_cannot_honour() {
         "a scoped personal subject read was accepted, so the scope was silently \
          ignored: {}",
         refused.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FR-457 — who acted reaches every device, for both transitions
+// ---------------------------------------------------------------------------
+
+/// A retirement carries its actor to a second device, exactly as a ratification
+/// does.
+///
+/// FR-457 requires every state transition to be recorded with who acted *and*
+/// when, and to remain inspectable afterwards. The two halves of the lifecycle
+/// were treated asymmetrically: `ratified_by_user_id` crossed the wire and
+/// `retired_by_user_id` did not — it was not on the record type at all, so even
+/// the machine that performed the retirement could not report it, and a device
+/// that learned of one by pulling saw a timestamp and no actor.
+///
+/// "Who removed this guidance" is the question an operator asks first, and it is
+/// the one the record was least able to answer.
+///
+/// Falsified by dropping `retired_by_user_id` from the wire row, from
+/// `SyncedTeamKnowledge`, or from `team_bare`.
+#[test]
+fn a_retirement_carries_who_acted_to_a_second_device() {
+    let Some(server) = server() else { return };
+    let a = admin(&server, "retire-actor");
+    let topic = format!("release.tags.{}", Uuid::now_v7().simple());
+    let id = ratified(&a, &topic, "release tags are annotated", "annotated", None);
+
+    let retired = a.sandbox.cairn(&["--json", "team", "retire", &id]);
+    assert!(
+        retired.ok(),
+        "retire failed: {}{}",
+        retired.stdout,
+        retired.stderr
+    );
+
+    // The acting device records both halves.
+    let local = a.sandbox.query_column(&format!(
+        "SELECT COALESCE(retired_by_user_id, '') || '|' || COALESCE(retired_at, '') \
+           FROM team_knowledge WHERE id = '{id}'"
+    ));
+    assert!(
+        local.first().is_some_and(|r| {
+            let (who, when) = r.split_once('|').unwrap_or(("", ""));
+            !who.is_empty() && !when.is_empty()
+        }),
+        "the acting device recorded a retirement without its actor: {local:?}"
+    );
+
+    // And a second device, which learns of it only by pulling, records both too.
+    let second = Sandbox::new();
+    second.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@localhost:cairnfixture/retire-b.git",
+    ]);
+    second.must(&["init"]);
+    let token = server.token_for(&a.email, "hunter2hunter2");
+    attach_server(&second, &server, &token);
+    // No `sync now`: that command requires a linked project, and this device has
+    // none — team guidance is server-wide and needs no project at all. The
+    // background worker establishes the team lane from the credentials alone and
+    // pulls on its own schedule, which is exactly the consume-only path this
+    // feature exists to support.
+    second.settle_within(
+        "the second device to receive the retirement",
+        std::time::Duration::from_secs(60),
+        |s| {
+            s.query_column(&format!(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM team_knowledge \
+                  WHERE id = '{id}' AND retired_at IS NOT NULL"
+            )) == vec!["1".to_string()]
+        },
+    );
+
+    let pulled = second.query_column(&format!(
+        "SELECT COALESCE(retired_by_user_id, '') FROM team_knowledge WHERE id = '{id}'"
+    ));
+    assert!(
+        pulled.first().is_some_and(|w| !w.is_empty()),
+        "the retirement reached the second device without its actor, so \"who \
+         removed this guidance\" is answerable only on the server (FR-457): {pulled:?}"
+    );
+
+    // The same is true of ratification, so the two halves stay symmetric.
+    let ratifier = second.query_column(&format!(
+        "SELECT COALESCE(ratified_by_user_id, '') FROM team_knowledge WHERE id = '{id}'"
+    ));
+    assert!(
+        ratifier.first().is_some_and(|w| !w.is_empty()),
+        "the ratification reached the second device without its actor: {ratifier:?}"
     );
 }

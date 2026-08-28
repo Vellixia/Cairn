@@ -39,6 +39,17 @@ existed, was unit-tested, and was reachable from nowhere.
 | `namespace_sync_status` read only `outbox` | a lane whose only job is pulling has no outbox row, so the lane it was actively pulling on was absent from its own status — and so was the gap report attached to it | T114 |
 | `cairn sync now` drained only the project lane | "sync now" was true of one third of what the command is named after | T114 |
 
+## Found during integration
+
+| Defect | Consequence | Origin |
+|---|---|---|
+| `retired_by_user_id` absent from the record type and the wire | "who retired this guidance" was answerable only on the server; two doc comments asserting the shapes matched field for field were false (FR-457) | 004 |
+| four `wal_checkpoint(TRUNCATE)` calls on non-deletion paths, two of them per pulled row | the background pull repeatedly took an exclusive lock while foreground commands wrote | 004 |
+| `integrations::{bind,unbind,remove_agent_if_unbound}` used a deferred transaction and then upgraded the lock | `cairn connect` failed with "database is locked" in roughly half of runs; SQLite refuses a lock upgrade immediately and a busy timeout does not apply | 002, exposed by 004's background writers |
+
+All three repaired. `privacy_integration` now passes eight consecutive runs where it
+had been failing about one in two.
+
 ## The five entry points
 
 `tests/tests/global_content_validation.rs` exercises the same input against all five

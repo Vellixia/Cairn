@@ -769,6 +769,7 @@ fn no_serialized_global_record_carries_an_origin_digest() {
         writer_seq: 3,
         created_at: chrono::Utc::now(),
         superseded_by_id: None,
+        retired_by_user_id: None,
         retired_at: None,
     };
 

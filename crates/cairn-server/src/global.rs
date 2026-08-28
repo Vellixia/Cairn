@@ -676,7 +676,8 @@ pub async fn team_changes(
         "WITH changed AS (
              SELECT id, knowledge_type, content, topic_key, value_key, state,
                     proposed_by_user_id, ratified_by_user_id, ratified_at,
-                    writer_id, writer_seq, created_at, superseded_by_id, retired_at,
+                    writer_id, writer_seq, created_at, superseded_by_id,
+                    retired_by_user_id, retired_at,
                     GREATEST(created_at, ratified_at, retired_at, superseded_at)
                         AS changed_at
                FROM team_knowledge
@@ -714,6 +715,7 @@ pub async fn team_changes(
                 writer_seq: row.get("writer_seq"),
                 created_at: row.get("created_at"),
                 superseded_by_id: row.try_get("superseded_by_id").ok().flatten(),
+                retired_by_user_id: row.try_get("retired_by_user_id").ok().flatten(),
                 retired_at: row.try_get("retired_at").ok().flatten(),
                 applicability: facts.remove(&id).unwrap_or_default(),
             }
@@ -823,9 +825,19 @@ fn personal_row_json(
 /// the local mirror `merge_synced_team` takes. Every name here is a field name
 /// there, and the two lists are the same length, so a pulled row deserializes
 /// into the mirror without a translation layer that could drop something on the
-/// way. `origin_digest` is the one field the mirror has that this does not, and
-/// that asymmetry is the point: the mirror always stores `NULL` for it because
-/// it is local-only and never transmitted (D434, FR-551).
+/// way.
+///
+/// Two fields are deliberately not in both lists, and the asymmetries run in
+/// opposite directions. `origin_digest` is on the mirror and not here: it is
+/// local to the machine that computed it and never transmitted, so the mirror
+/// always stores `NULL` (D434, FR-551). `superseded_at` is on the server table
+/// and not here: it exists only so a supersession can move this route's pull
+/// cursor, and a device has nothing to do with it — what a device needs is
+/// `superseded_by_id`, which does travel.
+///
+/// This list is the thing to check when a column is added to either side. It
+/// silently lost `retired_by_user_id` once, which made "who retired this" a
+/// question only the server could answer (FR-457).
 ///
 /// A named struct rather than [`personal_row_json`]'s positional arguments: at
 /// fifteen fields, two of the same type adjacent (`ratified_at`/`retired_at`,
@@ -850,6 +862,11 @@ struct TeamWireRow {
     writer_seq: i64,
     created_at: chrono::DateTime<chrono::Utc>,
     superseded_by_id: Option<Uuid>,
+    /// Who retired it (FR-457). Emitted for the same reason
+    /// `ratified_by_user_id` is: a transition recorded with a timestamp and no
+    /// actor is half a record, and the half that is missing is the one an
+    /// operator asks for.
+    retired_by_user_id: Option<Uuid>,
     retired_at: Option<chrono::DateTime<chrono::Utc>>,
     applicability: Vec<Value>,
 }
@@ -871,6 +888,7 @@ impl TeamWireRow {
             "writer_seq": self.writer_seq,
             "created_at": self.created_at.to_rfc3339(),
             "superseded_by_id": self.superseded_by_id,
+            "retired_by_user_id": self.retired_by_user_id,
             "retired_at": self.retired_at.map(|t| t.to_rfc3339()),
         })
     }
@@ -1361,6 +1379,7 @@ mod tests {
             writer_seq: 4,
             created_at: chrono::Utc::now(),
             superseded_by_id: None,
+            retired_by_user_id: None,
             retired_at: None,
             applicability: vec![json!({ "kind": "tool", "value": "git" })],
         }
@@ -1393,6 +1412,13 @@ mod tests {
             "writer_seq",
             "created_at",
             "superseded_by_id",
+            // Both halves of the retirement, for the same reason both halves of
+            // the ratification are here: FR-457 asks who acted *and* when, and
+            // this list is where the two schemas are held to agreeing. It sat
+            // without `retired_by_user_id` for as long as the wire row did, so
+            // the parity it asserts was parity on the wrong set — the test
+            // passed and the field reached nobody.
+            "retired_by_user_id",
             "retired_at",
         ]
         .into_iter()

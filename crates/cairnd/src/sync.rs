@@ -911,6 +911,7 @@ async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) 
         writer_seq: row.get("writer_seq").and_then(|v| v.as_i64()).unwrap_or(0),
         created_at,
         superseded_by_id: pulled_uuid(row, "superseded_by_id"),
+        retired_by_user_id: pulled_uuid(row, "retired_by_user_id"),
         retired_at: pulled_time(row, "retired_at"),
     };
 

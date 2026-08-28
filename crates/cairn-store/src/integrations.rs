@@ -12,7 +12,7 @@
 //! only when its last binding goes. That is what keeps the shared `AGENTS.md`
 //! block alive for OpenCode when Codex disconnects.
 
-use crate::{Result, Store};
+use crate::{tx, Result, Store};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -134,7 +134,17 @@ pub async fn list_agents(store: &Store) -> Result<Vec<String>> {
 /// adds only the binding, which is how one `AGENTS.md` block comes to serve
 /// two agents (FR-144, FR-243).
 pub async fn bind(store: &Store, agent: &str, resource: &InstalledResource) -> Result<Uuid> {
-    let mut tx = store.pool().begin().await?;
+    // `tx::begin` (BEGIN IMMEDIATE), never a deferred `pool().begin()`.
+    //
+    // This function reads and then writes inside one transaction. A deferred
+    // transaction takes a read lock first and must upgrade it to write, and
+    // SQLite refuses that upgrade with `SQLITE_BUSY` **immediately** when another
+    // connection has written since the read began — the busy timeout does not
+    // apply to a lock upgrade. So under concurrent writers this failed outright
+    // rather than waiting, and surfaced as `cairn connect` reporting "database is
+    // locked". BEGIN IMMEDIATE takes the write lock up front, which is the whole
+    // reason `tx` exists.
+    let mut tx = tx::begin(store, "bind").await?;
 
     let existing: Option<String> =
         sqlx::query("SELECT id FROM installed_resources WHERE kind = ?1 AND location = ?2")
@@ -207,7 +217,7 @@ pub async fn bind(store: &Store, agent: &str, resource: &InstalledResource) -> R
     .execute(&mut *tx)
     .await?;
 
-    tx.commit().await?;
+    tx::commit(tx, "integrations").await?;
     Ok(id)
 }
 
@@ -229,7 +239,17 @@ pub enum Unbound {
 /// entry — and the caller does the filesystem half only when this says
 /// `ResourceRemoved`.
 pub async fn unbind(store: &Store, agent: &str, kind: &str) -> Result<Unbound> {
-    let mut tx = store.pool().begin().await?;
+    // `tx::begin` (BEGIN IMMEDIATE), never a deferred `pool().begin()`.
+    //
+    // This function reads and then writes inside one transaction. A deferred
+    // transaction takes a read lock first and must upgrade it to write, and
+    // SQLite refuses that upgrade with `SQLITE_BUSY` **immediately** when another
+    // connection has written since the read began — the busy timeout does not
+    // apply to a lock upgrade. So under concurrent writers this failed outright
+    // rather than waiting, and surfaced as `cairn connect` reporting "database is
+    // locked". BEGIN IMMEDIATE takes the write lock up front, which is the whole
+    // reason `tx` exists.
+    let mut tx = tx::begin(store, "unbind").await?;
 
     let resource_id: Option<String> =
         sqlx::query("SELECT resource_id FROM resource_bindings WHERE agent = ?1 AND kind = ?2")
@@ -240,7 +260,7 @@ pub async fn unbind(store: &Store, agent: &str, kind: &str) -> Result<Unbound> {
             .map(|r| r.get("resource_id"));
 
     let Some(resource_id) = resource_id else {
-        tx.commit().await?;
+        tx::commit(tx, "integrations").await?;
         return Ok(Unbound::Nothing);
     };
 
@@ -271,7 +291,7 @@ pub async fn unbind(store: &Store, agent: &str, kind: &str) -> Result<Unbound> {
         }
     };
 
-    tx.commit().await?;
+    tx::commit(tx, "integrations").await?;
     Ok(outcome)
 }
 
@@ -328,7 +348,17 @@ pub async fn bound_resources(store: &Store, agent: &str) -> Result<Vec<BoundReso
 /// An agent whose only remaining resource is manager-owned keeps its record so
 /// the withdrawal stays verifiable (FR-244, D28a).
 pub async fn remove_agent_if_unbound(store: &Store, agent: &str) -> Result<bool> {
-    let mut tx = store.pool().begin().await?;
+    // `tx::begin` (BEGIN IMMEDIATE), never a deferred `pool().begin()`.
+    //
+    // This function reads and then writes inside one transaction. A deferred
+    // transaction takes a read lock first and must upgrade it to write, and
+    // SQLite refuses that upgrade with `SQLITE_BUSY` **immediately** when another
+    // connection has written since the read began — the busy timeout does not
+    // apply to a lock upgrade. So under concurrent writers this failed outright
+    // rather than waiting, and surfaced as `cairn connect` reporting "database is
+    // locked". BEGIN IMMEDIATE takes the write lock up front, which is the whole
+    // reason `tx` exists.
+    let mut tx = tx::begin(store, "remove_agent_if_unbound").await?;
     let remaining: i64 =
         sqlx::query("SELECT COUNT(*) AS n FROM resource_bindings WHERE agent = ?1")
             .bind(agent)
@@ -336,7 +366,7 @@ pub async fn remove_agent_if_unbound(store: &Store, agent: &str) -> Result<bool>
             .await?
             .get("n");
     if remaining > 0 {
-        tx.commit().await?;
+        tx::commit(tx, "integrations").await?;
         return Ok(false);
     }
     sqlx::query("DELETE FROM capability_evidence WHERE agent = ?1")
@@ -347,7 +377,7 @@ pub async fn remove_agent_if_unbound(store: &Store, agent: &str) -> Result<bool>
         .bind(agent)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
+    tx::commit(tx, "integrations").await?;
     Ok(true)
 }
 

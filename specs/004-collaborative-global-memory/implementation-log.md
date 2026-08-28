@@ -745,3 +745,71 @@ The suite was green before this pass and green after it, and the two greens mean
 different things. The first meant "every test passes". The second means "every test
 passes, and the mechanisms the tests describe are reached by the paths users take".
 Only the second is evidence.
+
+---
+
+# Integration pass
+
+Feature 004 committed as `c644d92` on `feat/004-collaborative-global-memory`, and
+integrated onto `main` (`214154f`) in an isolated worktree. Integration itself was
+a fast-forward: the branch was based on main's tip and main had not moved, so there
+were no conflicts to resolve. The integrated tree ran green on the first attempt.
+
+Three things surfaced afterwards that were worth fixing rather than shipping.
+
+## `retired_by_user_id` never left the server
+
+FR-457 asks that every team state transition be recorded with who acted **and**
+when. Ratification satisfied both halves everywhere; retirement satisfied them only
+on the server and on the machine that performed it.
+
+The field was not on `cairn_core::global::TeamKnowledge` at all, so the record type
+could not carry the answer even where the database held it — `cairn team list` had
+no way to say who removed a piece of guidance, and `SyncedTeamKnowledge` had
+nothing to copy. `SyncedTeamKnowledge`'s own doc comment claimed it carried "every
+field `team_knowledge` stores except `origin_digest`", and the server's wire row
+claimed to match it "field for field". Both statements were false, and the field
+they were false about is the one an operator asks for first.
+
+Now carried end to end: record type, wire row, `team_changes` projection, mirror,
+merge. Both doc comments were rewritten to be true, including about `superseded_at`,
+which is genuinely server-local (it exists so a supersession can move the pull
+cursor, and a device has no use for it).
+
+## Four checkpoints that were not deletions
+
+`Store::checkpoint` runs `PRAGMA wal_checkpoint(TRUNCATE)`, takes an exclusive
+lock, and exists for one purpose: so deleted content leaves the write-ahead log
+rather than lingering in an old frame (FR-052). Feature 004 added five calls. One —
+`forget_personal` — is a real content removal and belongs. The other four —
+`ratify_team`, `retire_team`, and both merge paths — change lifecycle columns and
+remove nothing.
+
+The two merge paths were the expensive mistake: they run once per pulled row in the
+background worker, so a machine catching up took an exclusive checkpoint lock
+repeatedly while foreground commands were writing. All four are gone.
+
+## The deferred transaction underneath it
+
+Removing the checkpoints cut `cairn connect` failing with "database is locked" from
+about half of runs to about one in six. It did not remove it, and the residual had
+a different cause that predates this feature.
+
+`integrations::bind`, `unbind` and `remove_agent_if_unbound` opened a **deferred**
+transaction with `pool().begin()`, read, and then wrote. SQLite refuses that lock
+upgrade with `SQLITE_BUSY` *immediately* when another connection has written since
+the read began — a busy timeout does not apply to an upgrade, only to acquisition.
+So under any concurrent writer these failed outright rather than waiting. This is
+precisely what `crates/cairn-store/src/tx.rs` exists to prevent, and its own doc
+comment says so; these three call sites simply never used it.
+
+The defect is Feature 002's. Feature 004 is what made it show: three synchronization
+lanes and a background pull put a second writer on the store where there had usually
+been none. Switched to `tx::begin` (BEGIN IMMEDIATE, with the contention retries the
+rest of the store already gets): eight consecutive runs green, where the same suite
+had been failing roughly one run in two.
+
+Worth stating as the general lesson, because it is the same one this log keeps
+recording: none of these three were found by a failing assertion about the thing
+that was wrong. They were found by asking, of a green suite, *what does this
+actually reach, and who else is writing at the same time?*
