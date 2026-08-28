@@ -194,7 +194,7 @@ pub async fn upsert_personal(
              superseded_by_id = EXCLUDED.superseded_by_id,
              forgotten_at     = EXCLUDED.forgotten_at
          WHERE personal_knowledge.owner_user_id = $2
-        RETURNING id",
+        RETURNING (xmax = 0) AS inserted",
     )
     .bind(entity_id)
     .bind(owner_user_id)
@@ -218,19 +218,37 @@ pub async fn upsert_personal(
     // knowledge is private to one user, so this is the same class of refusal the
     // project-scoped upserts make: an id supplied by a client is not evidence of
     // ownership.
-    if rows.is_none() {
+    let Some(row) = rows else {
         return Err(ApiError::forbidden(
             "that personal knowledge id belongs to a different account",
         ));
+    };
+
+    // **Applicability is written on creation and never again** (FR-440: a
+    // personal entry is immutable after creation, the tombstone excepted).
+    //
+    // The conflict branch above touches two lifecycle columns and deliberately
+    // leaves content alone — but `store_applicability` used to run
+    // unconditionally underneath it, deleting and reinserting the facts. So a
+    // client could re-push an id it already owned and move where an existing
+    // record applies, without forgetting and recreating it: an immutable record
+    // whose *scope* was mutable.
+    //
+    // `xmax = 0` is the Postgres idiom for "this `RETURNING` row came from the
+    // insert, not the conflict update". Checking it is what separates "the
+    // record was just created, store its facts" from "the record already existed,
+    // touch nothing but the lifecycle".
+    let inserted: bool = row.try_get("inserted").unwrap_or(false);
+    if inserted {
+        store_applicability(
+            tx,
+            PERSONAL_APPLICABILITY_DELETE,
+            PERSONAL_APPLICABILITY_INSERT,
+            entity_id,
+            payload,
+        )
+        .await?;
     }
-    store_applicability(
-        tx,
-        PERSONAL_APPLICABILITY_DELETE,
-        PERSONAL_APPLICABILITY_INSERT,
-        entity_id,
-        payload,
-    )
-    .await?;
     Ok(())
 }
 
@@ -244,6 +262,7 @@ pub async fn upsert_personal(
 /// through the administration path and nowhere else (FR-455).
 pub async fn upsert_team(
     tx: &mut Transaction<'_, Postgres>,
+    proposed_by_user_id: Uuid,
     entity_id: Uuid,
     payload: &Value,
 ) -> ApiResult<()> {
@@ -272,19 +291,27 @@ pub async fn upsert_team(
     // The lifecycle travels the other way — server to device, through
     // `GET /api/sync/changes/team` — which is the only direction an
     // administrator's decision can legitimately move.
-    sqlx::query(
+    let inserted = sqlx::query(
         "INSERT INTO team_knowledge
              (id, knowledge_type, content, topic_key, value_key, state,
               proposed_by_user_id, writer_id, writer_seq, created_at)
          VALUES ($1, $2, $3, $4, $5, 'proposed', $6, $7, $8, now())
-         ON CONFLICT (id) DO NOTHING",
+         ON CONFLICT (id) DO NOTHING
+        RETURNING id",
     )
     .bind(entity_id)
     .bind(text(payload, "knowledge_type"))
     .bind(text(payload, "content"))
     .bind(opt_text(payload, "topic_key"))
     .bind(opt_text(payload, "value_key"))
-    .bind(opt_uuid(payload, "proposed_by_user_id"))
+    // **The authenticated caller, never the payload.** `proposed_by_user_id`
+    // used to be read straight out of the pushed item, so a member could name
+    // another account as the proposer — falsifying the attribution FR-459 keeps,
+    // and making the change feed show that account a proposal it never made as
+    // one of its own (FR-464 shows a member their *own* pending proposals).
+    // `apply_item` already knows who is pushing; that is the only answer worth
+    // storing.
+    .bind(proposed_by_user_id)
     .bind(text(payload, "writer_id"))
     .bind(
         payload
@@ -292,16 +319,32 @@ pub async fn upsert_team(
             .and_then(|v| v.as_i64())
             .unwrap_or(0),
     )
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    store_applicability(
-        tx,
-        TEAM_APPLICABILITY_DELETE,
-        TEAM_APPLICABILITY_INSERT,
-        entity_id,
-        payload,
-    )
-    .await?;
+
+    // **Applicability travels with the proposal and never after it.**
+    //
+    // `DO NOTHING` already made an existing row immutable through this path, and
+    // `store_applicability` ran underneath it anyway — deleting and reinserting
+    // the facts of a row it had just declined to touch. Any member holding an id
+    // received from team sync could therefore re-push it with a fresh idempotency
+    // key and re-scope authoritative guidance: make it universal, or hide it from
+    // selected stacks, with no administrator involved. Applicability is part of
+    // what an administrator ratified (FR-460), so changing it is a ratification
+    // decision, not an ingest one.
+    //
+    // `RETURNING id` is `None` exactly when the conflict fired, which is the
+    // signal: facts are stored only for a row this statement actually created.
+    if inserted.is_some() {
+        store_applicability(
+            tx,
+            TEAM_APPLICABILITY_DELETE,
+            TEAM_APPLICABILITY_INSERT,
+            entity_id,
+            payload,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -455,6 +498,22 @@ async fn store_applicability(
 pub struct GlobalChangesQuery {
     #[serde(default)]
     pub since: Option<String>,
+    /// How many rows to return, clamped to `sync::PAGE`.
+    ///
+    /// A client that wants smaller pages may ask for them; it may not ask for
+    /// larger ones, because the page size is the server's protection and not the
+    /// caller's preference. Absent means the full page, so no existing caller
+    /// changes behaviour.
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+impl GlobalChangesQuery {
+    fn page(&self) -> i64 {
+        self.limit
+            .unwrap_or(crate::sync::PAGE)
+            .clamp(1, crate::sync::PAGE)
+    }
 }
 
 /// The capability names a client already polls for on `GET /api/version`
@@ -491,7 +550,7 @@ fn require_capability(schema_version: i64, capability: &str) -> Result<(), ApiEr
 /// One page of changes, and how far the cursor may advance after it.
 pub struct ChangePage {
     pub items: Vec<Value>,
-    pub cursor: chrono::DateTime<chrono::Utc>,
+    pub cursor: PageCursor,
 }
 
 /// `GET /api/sync/changes/personal` — the caller's own personal knowledge
@@ -509,11 +568,11 @@ pub async fn sync_personal_changes(
     Query(q): Query<GlobalChangesQuery>,
 ) -> ApiResult<Json<Value>> {
     require_capability(state.schema_version, PERSONAL_CAPABILITY)?;
-    let since = cursor_of(q.since.as_deref());
-    let page = personal_changes(&state.pool, user.id(), since, crate::sync::PAGE).await?;
+    let since = PageCursor::decode(q.since.as_deref());
+    let page = personal_changes(&state.pool, user.id(), since, q.page()).await?;
     Ok(Json(json!({
         "personal": page.items,
-        "cursor": page.cursor.to_rfc3339(),
+        "cursor": page.cursor.encode(),
     })))
 }
 
@@ -525,32 +584,80 @@ pub async fn sync_team_changes(
     Query(q): Query<GlobalChangesQuery>,
 ) -> ApiResult<Json<Value>> {
     require_capability(state.schema_version, TEAM_CAPABILITY)?;
-    let since = cursor_of(q.since.as_deref());
+    let since = PageCursor::decode(q.since.as_deref());
     let page = team_changes(
         &state.pool,
         user.id(),
         user.role() == ServerRole::Admin,
         since,
-        crate::sync::PAGE,
+        q.page(),
     )
     .await?;
     Ok(Json(json!({
         "team": page.items,
-        "cursor": page.cursor.to_rfc3339(),
+        "cursor": page.cursor.encode(),
     })))
 }
 
-/// The cursor a request asked to resume from.
+/// A resume position: a timestamp **and** the last id at it.
 ///
-/// An unparsable cursor reads as the epoch, matching `sync::sync_changes`
-/// verbatim. Re-delivering from the start is safe because every importer is
-/// idempotent by id, and refusing instead would strand a client whose stored
-/// cursor was written by a version that formatted it differently.
-fn cursor_of(since: Option<&str>) -> chrono::DateTime<chrono::Utc> {
-    since
-        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-        .map(|d| d.with_timezone(&chrono::Utc))
-        .unwrap_or_else(|| chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap())
+/// **The id is what makes a page boundary safe.** With a timestamp alone, a group
+/// of rows sharing one `changed_at` larger than the page limit was split
+/// arbitrarily: the page returned some of them, the cursor advanced to that
+/// timestamp, and the next request's strict `changed_at > $since` skipped every
+/// remaining row at it. Batched tombstones share a `forgotten_at`, and a
+/// migration or a bulk ratification shares an instant, so this is reachable
+/// rather than theoretical — and the rows it drops are dropped permanently,
+/// because nothing ever asks for that instant again.
+///
+/// Ordering and comparison both use the pair, so a boundary inside a tie group
+/// resumes exactly where it stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageCursor {
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub id: Uuid,
+}
+
+impl PageCursor {
+    /// The beginning of time, before any row.
+    fn start() -> Self {
+        Self {
+            at: chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap(),
+            id: Uuid::nil(),
+        }
+    }
+
+    /// `<rfc3339>|<uuid>`. Opaque to the client, which stores and echoes it.
+    fn encode(&self) -> String {
+        format!("{}|{}", self.at.to_rfc3339(), self.id)
+    }
+
+    /// Parse either form.
+    ///
+    /// A bare timestamp is a cursor written by a build that had no id half, and
+    /// it resumes as `(that instant, nil)` — which re-delivers the rows at that
+    /// exact instant once. Every importer is idempotent by id, so a repeat is
+    /// free and a skip would not be; that asymmetry is why this is lenient here
+    /// and strict about ordering everywhere else.
+    fn decode(raw: Option<&str>) -> Self {
+        let Some(raw) = raw else {
+            return Self::start();
+        };
+        let (ts, id) = match raw.split_once('|') {
+            Some((ts, id)) => (ts, Uuid::parse_str(id).unwrap_or_else(|_| Uuid::nil())),
+            None => (raw, Uuid::nil()),
+        };
+        match chrono::DateTime::parse_from_rfc3339(ts) {
+            Ok(at) => Self {
+                at: at.with_timezone(&chrono::Utc),
+                id,
+            },
+            // Unparsable reads as the start, matching `sync::sync_changes`
+            // verbatim: refusing would strand a client whose stored cursor was
+            // written by a version that formatted it differently.
+            Err(_) => Self::start(),
+        }
+    }
 }
 
 /// One page of a user's personal knowledge changed after `since`.
@@ -578,7 +685,7 @@ fn cursor_of(since: Option<&str>) -> chrono::DateTime<chrono::Utc> {
 pub async fn personal_changes(
     pool: &PgPool,
     owner_user_id: Uuid,
-    since: chrono::DateTime<chrono::Utc>,
+    since: PageCursor,
     limit: i64,
 ) -> ApiResult<ChangePage> {
     let rows = sqlx::query(
@@ -590,11 +697,12 @@ pub async fn personal_changes(
               WHERE owner_user_id = $1
          )
          SELECT * FROM changed
-          WHERE changed_at > $2
-          ORDER BY changed_at ASC LIMIT $3",
+          WHERE (changed_at, id) > ($2, $3)
+          ORDER BY changed_at ASC, id ASC LIMIT $4",
     )
     .bind(owner_user_id)
-    .bind(since)
+    .bind(since.at)
+    .bind(since.id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -669,7 +777,7 @@ pub async fn team_changes(
     pool: &PgPool,
     caller_user_id: Uuid,
     caller_is_admin: bool,
-    since: chrono::DateTime<chrono::Utc>,
+    since: PageCursor,
     limit: i64,
 ) -> ApiResult<ChangePage> {
     let rows = sqlx::query(
@@ -683,11 +791,12 @@ pub async fn team_changes(
                FROM team_knowledge
          )
          SELECT * FROM changed
-          WHERE changed_at > $1
-            AND ($2 OR state <> 'proposed' OR proposed_by_user_id = $3)
-          ORDER BY changed_at ASC LIMIT $4",
+          WHERE (changed_at, id) > ($1, $2)
+            AND ($3 OR state <> 'proposed' OR proposed_by_user_id = $4)
+          ORDER BY changed_at ASC, id ASC LIMIT $5",
     )
-    .bind(since)
+    .bind(since.at)
+    .bind(since.id)
     .bind(caller_is_admin)
     .bind(caller_user_id)
     .bind(limit)
@@ -742,14 +851,14 @@ pub async fn team_changes(
 /// A single-table page has nothing to be pinned against. It inherits the same
 /// tie exposure — `PAGE` rows sharing one timestamp with a `>` cursor would
 /// step over the rest — which is unchanged from the route this one follows.
-fn page_cursor(
-    rows: &[sqlx::postgres::PgRow],
-    since: chrono::DateTime<chrono::Utc>,
-) -> chrono::DateTime<chrono::Utc> {
+fn page_cursor(rows: &[sqlx::postgres::PgRow], since: PageCursor) -> PageCursor {
     rows.last()
         .and_then(|r| {
-            r.try_get::<chrono::DateTime<chrono::Utc>, _>("changed_at")
-                .ok()
+            let at = r
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("changed_at")
+                .ok()?;
+            let id = r.try_get::<Uuid, _>("id").ok()?;
+            Some(PageCursor { at, id })
         })
         .unwrap_or(since)
 }
@@ -1506,16 +1615,55 @@ mod tests {
         }
     }
 
-    /// A cursor that cannot be parsed resumes from the epoch rather than from
+    /// A cursor that cannot be parsed resumes from the start rather than from
     /// `now()`, so the failure mode is re-delivery into idempotent importers
     /// instead of a silently skipped window.
     #[test]
-    fn an_unreadable_cursor_resumes_from_the_epoch() {
-        let epoch = chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).unwrap();
-        assert_eq!(cursor_of(None), epoch);
-        assert_eq!(cursor_of(Some("last tuesday")), epoch);
-        let stated = chrono::Utc::now();
-        assert_eq!(cursor_of(Some(&stated.to_rfc3339())), stated);
+    fn an_unreadable_cursor_resumes_from_the_start() {
+        let start = PageCursor::start();
+        assert_eq!(PageCursor::decode(None), start);
+        assert_eq!(PageCursor::decode(Some("last tuesday")), start);
+        assert_eq!(
+            PageCursor::decode(Some("2026-08-01T00:00:00Z|not-a-uuid")).id,
+            Uuid::nil()
+        );
+    }
+
+    /// The cursor round-trips both halves, and a bare timestamp still parses.
+    ///
+    /// A bare timestamp is what a build without the id half wrote. It resumes as
+    /// `(that instant, nil)`, which re-delivers the rows at exactly that instant
+    /// once — free, because every importer is idempotent by id, where a skip
+    /// would not be. That asymmetry is why this is the one lenient parse in the
+    /// pagination path.
+    #[test]
+    fn the_page_cursor_round_trips_and_accepts_the_older_form() {
+        let at = chrono::DateTime::parse_from_rfc3339("2026-08-01T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let id = Uuid::now_v7();
+        let cursor = PageCursor { at, id };
+        assert_eq!(PageCursor::decode(Some(&cursor.encode())), cursor);
+
+        let legacy = PageCursor::decode(Some("2026-08-01T12:00:00Z"));
+        assert_eq!(legacy.at, at);
+        assert_eq!(
+            legacy.id,
+            Uuid::nil(),
+            "a cursor with no id half must resume at the start of its instant, \
+             not past it"
+        );
+    }
+
+    /// The page size is the server's, not the caller's.
+    #[test]
+    fn a_requested_page_size_is_clamped_and_never_exceeds_the_servers() {
+        let ask = |limit: Option<i64>| GlobalChangesQuery { since: None, limit }.page();
+        assert_eq!(ask(None), crate::sync::PAGE);
+        assert_eq!(ask(Some(1)), 1);
+        assert_eq!(ask(Some(0)), 1);
+        assert_eq!(ask(Some(-5)), 1);
+        assert_eq!(ask(Some(crate::sync::PAGE + 1_000)), crate::sync::PAGE);
     }
 
     /// A remote yields its host, organisation and repository parts, because

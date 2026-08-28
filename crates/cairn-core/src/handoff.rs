@@ -138,6 +138,34 @@ fn derive_changed_files(
         .cloned()
         .collect();
     files.retain(|f| !absolute_survivors.contains(f));
+
+    // **Whatever is still absolute here is reduced to its basename, because
+    // FR-531 admits no absolute path in any transmitted field.**
+    //
+    // The pass above drops an absolute path only when a *relative* form of the
+    // same file is also present — which is the symlink case it was written for.
+    // A file with no Git counterpart at all, captured outside the recorded
+    // worktree, has no such pair: an observation of `/outside/repo/notes.rs`
+    // survived every check and travelled whole.
+    //
+    // The basename is kept rather than the entry dropped for the reason the
+    // no-Git-counterpart test already states: this is a mechanism for relativizing
+    // a path, not for silently eating a file. A reader learns that `notes.rs`
+    // changed; nobody learns where the machine keeps it. Where a basename would
+    // be empty or itself look rooted, the entry goes — there is nothing safe left
+    // to say.
+    files = files
+        .into_iter()
+        .filter_map(|f| {
+            if !looks_absolute(&f) {
+                return Some(f);
+            }
+            let base = f.rsplit('/').next().unwrap_or_default().to_string();
+            (!base.is_empty() && !looks_absolute(&base)).then_some(base)
+        })
+        .collect();
+    files.sort();
+    files.dedup();
     files
 }
 
@@ -807,6 +835,71 @@ mod path_shape_tests {
             normalize_separators(r"\\?\UNC\server\share\repo"),
             "//server/share/repo"
         );
+    }
+
+    /// A capture from **outside** the recorded worktree, with no Git counterpart,
+    /// never travels whole.
+    ///
+    /// The suffix-dedup pass drops an absolute path only when a relative form of
+    /// the same file is also present — the symlink case it was written for. A file
+    /// captured outside the worktree has no such pair, so it survived every check
+    /// and the full local path reached `changed_files` and the prose built from
+    /// it, against FR-531's "MUST NOT transmit an absolute local path in any
+    /// field".
+    ///
+    /// The basename is kept rather than the entry dropped: this is a mechanism for
+    /// relativizing a path, not for silently eating a file.
+    ///
+    /// Falsified by removing the final redaction pass.
+    #[test]
+    fn a_capture_outside_the_worktree_is_reduced_to_its_basename() {
+        let outside = "/outside/the/repo/notes.rs";
+        let files = derive_changed_files(
+            &[fixture_at(outside)],
+            // No Git counterpart at all: nothing to pair the absolute path with.
+            &[],
+            "/home/dev/repo",
+        );
+        assert_eq!(
+            files,
+            vec!["notes.rs".to_string()],
+            "an absolute path from outside the worktree survived: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|f| looks_absolute(f)),
+            "an absolute path reached changed_files (FR-531): {files:?}"
+        );
+
+        // The same for a Windows capture outside the root, and for a root-level
+        // file whose basename is all there is to say.
+        for (path, expected) in [
+            (r"D:\elsewhere\notes.rs", "notes.rs"),
+            ("/etc/hosts", "hosts"),
+        ] {
+            let files = derive_changed_files(&[fixture_at(path)], &[], "/home/dev/repo");
+            assert_eq!(files, vec![expected.to_string()], "for {path}");
+        }
+    }
+
+    /// An observation fixture whose only interesting field is its path.
+    fn fixture_at(path: &str) -> Observation {
+        Observation {
+            id: crate::domain::new_id(),
+            session_id: crate::domain::new_id(),
+            kind: ObservationType::FileChanged,
+            occurred_at: chrono::Utc::now(),
+            branch: "main".into(),
+            commit_sha: None,
+            path: Some(path.to_string()),
+            command: None,
+            exit_code: None,
+            outcome: None,
+            summary: "edited a file".into(),
+            details: None,
+            payload_bytes: 0,
+            truncated: false,
+            deleted_at: None,
+        }
     }
 
     /// End to end through `derive_changed_files`: a Windows absolute path under

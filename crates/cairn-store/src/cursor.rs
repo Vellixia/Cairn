@@ -60,11 +60,32 @@ pub async fn rename(store: &Store, from: &SyncNamespace, to: &SyncNamespace) -> 
     if from.key() == to.key() {
         return Ok(());
     }
-    sqlx::query("UPDATE OR REPLACE sync_cursor SET namespace = ?2 WHERE namespace = ?1")
-        .bind(from.key())
-        .bind(to.key())
-        .execute(store.pool())
-        .await?;
+    // **The destination wins a collision, and `UPDATE OR REPLACE` gets that
+    // backwards.**
+    //
+    // `OR REPLACE` resolves a primary-key conflict by *deleting the destination*
+    // and letting the source take its place — so a store that already held a
+    // real `team:<instance>` lane and also a provisional one (the endpoint stopped
+    // reporting its instance for a while, then recovered) would have its
+    // authoritative pull cursor, backoff and capability state replaced by the
+    // provisional row's. The visible cost is a full-history replay from a cursor
+    // that had already advanced; the doc above promised the opposite.
+    //
+    // So: rename only into a key that is free, and otherwise drop the source. The
+    // destination is derived from the id the server actually reported, which is
+    // the better answer by construction.
+    let occupied: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM sync_cursor WHERE namespace = ?1")
+            .bind(to.key())
+            .fetch_optional(store.pool())
+            .await?;
+    if occupied.is_none() {
+        sqlx::query("UPDATE sync_cursor SET namespace = ?2 WHERE namespace = ?1")
+            .bind(from.key())
+            .bind(to.key())
+            .execute(store.pool())
+            .await?;
+    }
     sqlx::query("DELETE FROM sync_cursor WHERE namespace = ?1")
         .bind(from.key())
         .execute(store.pool())
@@ -256,6 +277,84 @@ mod tests {
             Some("2026-02-02T00:00:00Z"),
             "advancing project's cursor moved personal's"
         );
+    }
+
+    /// A rename into an occupied key keeps the **destination**.
+    ///
+    /// `UPDATE OR REPLACE` resolved the collision the other way: it deleted the
+    /// destination and let the provisional row take its place, replacing an
+    /// authoritative pull cursor, backoff and capability state with stale
+    /// provisional values — and the doc comment promised the opposite. The visible
+    /// cost is a full-history replay from a cursor that had already advanced.
+    ///
+    /// Reachable whenever an endpoint stops reporting its instance id for a while
+    /// and later recovers: the provisional lane opens beside the real one.
+    ///
+    /// Falsified by restoring `UPDATE OR REPLACE`.
+    #[tokio::test]
+    async fn renaming_into_an_occupied_key_keeps_the_destinations_state() {
+        let store = Store::open_memory().await.unwrap();
+        let user = Uuid::now_v7();
+        let provisional = SyncNamespace::Personal(Uuid::now_v7(), user);
+        let real = SyncNamespace::Personal(Uuid::now_v7(), user);
+
+        set_pull_cursor(&store, &provisional, "1970-01-01T00:00:00Z")
+            .await
+            .unwrap();
+        set_pull_cursor(&store, &real, "2026-08-01T00:00:00Z")
+            .await
+            .unwrap();
+        set_server_capability(&store, &real, "schema=3;capabilities=team_knowledge")
+            .await
+            .unwrap();
+
+        rename(&store, &provisional, &real).await.unwrap();
+
+        assert_eq!(
+            pull_cursor(&store, &real).await.unwrap().as_deref(),
+            Some("2026-08-01T00:00:00Z"),
+            "the provisional cursor replaced the authoritative one, forcing a \
+             full-history replay"
+        );
+        assert_eq!(
+            server_capability(&store, &real).await.unwrap().as_deref(),
+            Some("schema=3;capabilities=team_knowledge"),
+            "the destination's capability state was lost"
+        );
+        assert_eq!(
+            pull_cursor(&store, &provisional).await.unwrap(),
+            None,
+            "the provisional row was left behind"
+        );
+    }
+
+    /// A rename into a free key still moves everything the lane holds.
+    #[tokio::test]
+    async fn renaming_into_a_free_key_carries_the_lanes_state_across() {
+        let store = Store::open_memory().await.unwrap();
+        let user = Uuid::now_v7();
+        let provisional = SyncNamespace::Personal(Uuid::now_v7(), user);
+        let real = SyncNamespace::Personal(Uuid::now_v7(), user);
+
+        set_pull_cursor(&store, &provisional, "2026-07-01T00:00:00Z")
+            .await
+            .unwrap();
+        set_server_capability(&store, &provisional, "schema=2;capabilities=")
+            .await
+            .unwrap();
+
+        rename(&store, &provisional, &real).await.unwrap();
+
+        assert_eq!(
+            pull_cursor(&store, &real).await.unwrap().as_deref(),
+            Some("2026-07-01T00:00:00Z"),
+            "the lane's cursor did not move with it"
+        );
+        assert_eq!(
+            server_capability(&store, &real).await.unwrap().as_deref(),
+            Some("schema=2;capabilities=")
+        );
+        assert_eq!(pull_cursor(&store, &provisional).await.unwrap(), None);
     }
 
     #[tokio::test]

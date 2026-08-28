@@ -215,7 +215,7 @@ async fn apply_item(
                 crate::global::upsert_personal(&mut tx, user_id, item.entity_id, &item.payload)
                     .await?;
             } else {
-                crate::global::upsert_team(&mut tx, item.entity_id, &item.payload).await?;
+                crate::global::upsert_team(&mut tx, user_id, item.entity_id, &item.payload).await?;
             }
         }
         ("project", "upsert") => upsert_project(&mut tx, project_id, item).await?,
