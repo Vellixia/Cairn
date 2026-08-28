@@ -219,3 +219,76 @@ Gate after round 3: **1436 passed, 0 failed**; `cargo fmt --all --check` and
 `cargo clippy --workspace --all-targets -- -D warnings` clean.
 
 T104 and T194 are unchanged by this round and stay as recorded above.
+
+## Post-integration review, round 4
+
+Round 3 established that a credential change must invalidate the identity learned from it.
+Round 4 is what that repair did not finish: three places that still routed global sync by
+something other than the authenticated account, and one that invalidated the identity only in
+memory.
+
+**The routing guard was at one of two entry points (FR-593).** `cairn sync now` skipped a
+`personal:*` lane whose owner is not the current account. `run_worker` builds its own target
+list — from the outbox, for what needs pushing, and from `sync_cursor`, for what needs pulling
+— and applied no such filter. So the guarantee held exactly as long as a user synchronized by
+hand: on the worker's next tick, thirty seconds later and unprompted, account A's lane was
+drained and pulled under account B's credentials. Both entry points now route through one
+`may_sync_lane`, because a rule enforced at one of two call sites is not enforced.
+
+The pull direction is the serious half, and the one the lane filter alone closes. A
+`GET /api/sync/changes/personal` sent on A's lane while holding B's token returns **B's** rows
+— the server filters that feed by the authenticated caller, correctly — and
+`merge_pulled_personal` files them under the lane's owner, which is A. One account's knowledge
+written into another's partition, on a timer.
+
+**A queued team proposal could change author by being late (FR-594).** The `team:*` lane is
+shared by every account on a server, by design, and the server refuses to trust payload
+identity — also by design, and a round-2 repair. Together those two correct decisions meant an
+undelivered proposal authored as A, pushed after B logged in, was recorded with B as its
+proposer. Global outbox rows now carry `authored_by_user_id` — the *account*, distinct from
+`writer_id`, which names the device — and the claim filters on it. Filtering in the claim
+rather than after it is what keeps this from being a spin: a row claimed and then declined has
+already spent an attempt and moved to `in_flight`, so it would eventually read as a failing
+delivery rather than a waiting one. Unclaimed, it stays `pending`, reports as pending, and goes
+out unchanged when its author returns.
+
+**The batch's authorization project was a fact about the machine's past (FR-595).** A global
+batch carries no project, because personal and team rows belong to none, but
+`POST /api/sync/batch` authorizes by project membership and so needs one. The client offered
+the first *locally linked* project. A store linked as A and authenticated as B named A's
+project, the route refused a caller who is not a member of it, and every global push failed —
+personal and team both, silently, for as long as B stayed logged in. Nothing local can
+distinguish the two cases, because membership is not local state, so the server is asked:
+`GET /api/projects` returns exactly the caller's memberships, intersected with what this
+machine has linked so an established project is preferred. Resolved lazily, on the first
+non-empty batch, so a lane holding only another account's held rows costs no request at all.
+
+**Invalidation was fail-closed for one process (FR-596).** `forget_account_identity` logged a
+config-save failure at debug and returned. The in-memory clear is real, and lasts until the
+next daemon start — which reads the previous account back off disk and pairs it with the *new*
+token, which is FR-591 again, reconstituted by a restart. The save is now propagated, and the
+invalidation moved ahead of every write: when it fails, the old token is still on disk beside
+the old account id and the two still agree. There is no state in which a stored credential and
+a stored identity name different accounts. `logout` follows the same order, and reports a
+failure rather than removing a credential while leaving the identity that outlived it.
+
+Round-4 coverage: two store-level unit tests for the author-scoped claim, and five e2e tests
+for the background pull, team attribution across a switch, membership-based authorization,
+restart persistence, and a credential change whose invalidation cannot reach the disk. Each was
+confirmed to fail against the unfixed code and against no other fix.
+
+Two of them needed the arrangement corrected before they could fail at all, which is worth
+recording because both first drafts were green against the defect:
+
+- The background-pull test passed until the daemon was restarted after the account switch. A
+  restart puts every lane's clock back to due; without it, B's brand-new lane is due at once
+  while A's waits a full pull interval, B's row lands first, and the misfile then fails on the
+  primary key instead of happening.
+- The push-direction version of that test passed because the author filter (FR-594) closes
+  pushing independently. Only pulling isolates FR-593.
+
+Gate after round 4: **1443 passed, 0 failed**; `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and `git diff --check`
+clean.
+
+T104 and T194 are unchanged by this round.

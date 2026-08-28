@@ -844,6 +844,7 @@ async fn enqueue_personal_tx(
         id,
         cairn_core::domain::OutboxOperation::Upsert,
         writer,
+        owner_user_id,
         payload,
     )
     .await
@@ -851,11 +852,14 @@ async fn enqueue_personal_tx(
 
 /// Queue one team row for delivery, inside the caller's transaction.
 ///
-/// See [`enqueue_personal_tx`] for why `writer` is this store's identity.
+/// See [`enqueue_personal_tx`] for why `writer` is this store's identity, and
+/// the `authored_by_user_id` column comment for why `proposed_by` — the account
+/// — has to be recorded separately from it (FR-594).
 async fn enqueue_team_tx(
     tx: &mut sqlx::SqliteConnection,
     id: Uuid,
     writer: Uuid,
+    proposed_by: Uuid,
     payload: &serde_json::Value,
 ) -> Result<bool> {
     let Some(instance) = recorded_team_instance(tx).await? else {
@@ -868,6 +872,7 @@ async fn enqueue_team_tx(
         id,
         cairn_core::domain::OutboxOperation::Upsert,
         writer,
+        proposed_by,
         payload,
     )
     .await
@@ -984,7 +989,8 @@ pub async fn enqueue_team_backlog(store: &Store) -> Result<usize> {
             rows::opt_ts(&row, "retired_at")?,
             rows::opt_uuid(&row, "superseded_by_id")?,
         );
-        if enqueue_team_tx(&mut tx, id, writer, &payload).await? {
+        let proposed_by = rows::uuid(&row, "proposed_by_user_id")?;
+        if enqueue_team_tx(&mut tx, id, writer, proposed_by, &payload).await? {
             queued += 1;
         }
     }
@@ -1830,6 +1836,7 @@ pub async fn propose_team(
         &mut tx,
         id,
         writer,
+        new.proposed_by_user_id,
         &team_payload(
             id,
             new.knowledge_type,
