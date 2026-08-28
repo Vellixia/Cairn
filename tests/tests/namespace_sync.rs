@@ -613,3 +613,119 @@ fn on_a_schema_two_server_the_global_lanes_block_and_project_sync_keeps_draining
     );
     let _ = old.upgraded();
 }
+
+// ---------------------------------------------------------------------------
+// PR #52 review: the pull cursor never passes an unmerged row
+// ---------------------------------------------------------------------------
+
+/// A row that fails to merge holds the cursor, and the next pull re-delivers it.
+///
+/// A merge can fail for a reason that has nothing to do with the row — a
+/// concurrent foreground write turning into a transient SQLite error is the
+/// ordinary case. Advancing anyway meant the next pull asked for changes *after*
+/// the page, so the failed row was never requested again; because a pull is the
+/// only way it can arrive, the record was lost on this device permanently and
+/// silently, with the lane reporting success.
+///
+/// Driven through the real pull by making one row unmergeable in a way the client
+/// cannot fix: a `knowledge_type` the local `CHECK` refuses. The whole page then
+/// fails to land, the cursor stays put, and repairing the row on the server lets
+/// the very next pull deliver everything.
+///
+/// Falsified by advancing the cursor regardless of the merge outcome.
+#[test]
+fn a_row_that_fails_to_merge_holds_the_cursor_until_it_lands() {
+    let Some(server) = server() else { return };
+    let first = device(&server, "cursorhold-a");
+    let cwd = first.sandbox.repo_path().to_string_lossy().to_string();
+    let mut mcp = Mcp::start(&first.sandbox);
+
+    let marker = format!("zz{}", Uuid::now_v7().simple());
+    for n in 0..2 {
+        let created = mcp.tool_result(
+            "cairn_remember",
+            json!({
+                "action": "create",
+                "domain": "personal",
+                "type": "fact",
+                "content": format!("{marker} note {n}"),
+            }),
+            &cwd,
+        );
+        assert_eq!(created["isError"], false, "create failed: {created}");
+    }
+    first.sandbox.must(&["sync", "now"]);
+    first.sandbox.settle_within(
+        "both records to be delivered",
+        Duration::from_secs(30),
+        |s| {
+            s.query_column(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM outbox \
+                  WHERE namespace LIKE 'personal:%' AND state = 'delivered'",
+            ) == vec!["2".to_string()]
+        },
+    );
+
+    // Make one pulled row unmergeable **locally**, by occupying its
+    // `(writer_id, writer_seq)` pair with a decoy before the pull runs. The
+    // local store carries `UNIQUE (writer_id, writer_seq)`, so the insert fails —
+    // standing in for any merge that fails, which is the case the cursor rule is
+    // about. Seeded locally rather than corrupted on the server because the
+    // server enforces the same constraints; there is no invalid row to plant
+    // there, which is itself reassuring.
+    let pair = first.sandbox.query_column(&format!(
+        "SELECT writer_id || '|' || writer_seq FROM personal_knowledge \
+          WHERE content = '{marker} note 0'"
+    ));
+    let (writer, seq) = pair
+        .first()
+        .and_then(|p| p.split_once('|'))
+        .map(|(w, s)| (w.to_string(), s.to_string()))
+        .expect("the record's writer pair");
+
+    let second = second_device(&server, &first.token, first.project, "cursorhold-b");
+    second.stop_daemon();
+    second.execute_sql(&format!(
+        "INSERT INTO personal_knowledge \
+           (id, owner_user_id, knowledge_type, content, content_norm_digest, \
+            writer_id, writer_seq, created_at) \
+         VALUES ('{}', '{}', 'fact', 'a decoy holding the writer pair', 'decoy', \
+                 '{writer}', {seq}, '2026-01-01T00:00:00Z')",
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    ));
+    second.restart_daemon();
+
+    // Give the worker several pull windows. What must never happen is the cursor
+    // moving past a page containing the row that cannot land.
+    second.settle_within(
+        "the second device to establish its personal lane and attempt a pull",
+        Duration::from_secs(60),
+        |s| {
+            !s.query_column("SELECT namespace FROM sync_cursor WHERE namespace LIKE 'personal:%'")
+                .is_empty()
+        },
+    );
+    let held = second.query_column(
+        "SELECT COALESCE(pull_cursor, '') FROM sync_cursor WHERE namespace LIKE 'personal:%'",
+    );
+    assert_eq!(
+        held,
+        vec![String::new()],
+        "the cursor advanced past a page containing an unmergeable row: {held:?}"
+    );
+
+    // Remove the decoy; the very next pull delivers both, because the cursor
+    // never moved past them.
+    second.execute_sql("DELETE FROM personal_knowledge WHERE content_norm_digest = 'decoy'");
+    second.settle_within(
+        "both records to arrive once the collision is gone",
+        Duration::from_secs(90),
+        |s| {
+            s.query_column(&format!(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM personal_knowledge \
+                  WHERE content LIKE '{marker}%'"
+            )) == vec!["2".to_string()]
+        },
+    );
+}

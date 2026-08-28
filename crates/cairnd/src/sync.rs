@@ -737,6 +737,7 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
         .unwrap_or_default();
 
     let mut landed = 0usize;
+    let mut all_merged = true;
     for row in &rows {
         let merged = match namespace {
             SyncNamespace::Personal(..) => merge_pulled_personal(d, row).await,
@@ -745,13 +746,43 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
         };
         if merged {
             landed += 1;
+        } else {
+            all_merged = false;
         }
     }
 
-    if let Some(cursor) = body.get("cursor").and_then(|v| v.as_str()) {
-        cursor::set_pull_cursor(&d.store, namespace, cursor)
-            .await
-            .map_err(storage_err)?;
+    // **The cursor moves only when the whole page landed.**
+    //
+    // A merge can fail for a reason that has nothing to do with the row: a
+    // concurrent foreground write turning into a transient SQLite error is the
+    // ordinary case. Advancing anyway meant the next pull asked for changes
+    // *after* the page, so the failed row was never requested again — and
+    // because a pull is the only way it can arrive, the record was lost on this
+    // device permanently, silently, with the lane reporting success.
+    //
+    // Holding the cursor re-delivers the whole page next time. That is cheap and
+    // safe: every merge here is idempotent by id, and content is written once and
+    // never rewritten, so a row that already landed is a no-op the second time.
+    // Re-reading a page is the right price for never dropping one.
+    //
+    // A row that can *never* merge — one whose server instance does not match
+    // this store's team binding (FR-496) — would otherwise wedge the lane here.
+    // It cannot: `pull_global` refuses to pull a lane whose peer reports a
+    // different instance before reading a single row, so a mismatched row cannot
+    // reach this loop.
+    if all_merged {
+        if let Some(cursor) = body.get("cursor").and_then(|v| v.as_str()) {
+            cursor::set_pull_cursor(&d.store, namespace, cursor)
+                .await
+                .map_err(storage_err)?;
+        }
+    } else {
+        tracing::warn!(
+            namespace = %namespace.key(),
+            landed,
+            of = rows.len(),
+            "holding the pull cursor: not every row in the page merged"
+        );
     }
     Ok(landed)
 }

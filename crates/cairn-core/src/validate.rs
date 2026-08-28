@@ -209,11 +209,20 @@ fn tokens(text: &str) -> impl Iterator<Item = &str> {
 }
 
 fn has_absolute_path(text: &str) -> bool {
-    // A leading `/` on a token, with something after it. `/` alone, and a bare
-    // `and/or`, are not paths; `/Users/alice/tmp` is.
+    // **A rooted token with anything after the slash.** FR-546 defines the class
+    // as an absolute filesystem path, and `/tmp`, `/etc`, `/workspace` and
+    // `/srv` are absolute filesystem paths. The old shape demanded a *second*
+    // slash, so every single-component root passed all five entry points and
+    // could be persisted and synchronized — the most commonly written absolute
+    // paths there are, and the ones a reader is most likely to type from memory.
+    //
+    // The two exclusions the second-slash rule was standing in for are kept
+    // explicitly, because they are the only prose this shape catches by accident:
+    // `/` alone is not a path, and a token whose slash is internal (`and/or`,
+    // `read/write`) never starts with one, so it was never in scope here.
     tokens(text).any(|t| {
-        let t = t.trim_end_matches(['.', ':', '!', '?']);
-        t.starts_with('/') && t.len() > 1 && t[1..].contains('/')
+        let t = t.trim_end_matches(['.', ',', ':', ';', '!', '?', ')', ']']);
+        t.len() > 1 && t.starts_with('/')
     })
 }
 
@@ -1083,5 +1092,63 @@ mod adversarial_project_identity_tests {
                 .class,
             "evaluation_incomplete"
         );
+    }
+}
+
+#[cfg(test)]
+mod rooted_path_tests {
+    use super::*;
+
+    /// A single-component root is an absolute path (FR-546).
+    ///
+    /// The detector demanded a *second* slash, so `/tmp`, `/etc`, `/srv` and
+    /// `/workspace` passed all five entry points and could be persisted and
+    /// synchronized — the most commonly written absolute paths there are.
+    ///
+    /// Falsified by restoring the `t[1..].contains('/')` condition.
+    #[test]
+    fn a_single_component_root_is_refused() {
+        for content in [
+            "the cache lives in /tmp",
+            "config is under /etc",
+            "we mount /workspace",
+            "look in /srv.",
+            "see /var, then /opt",
+            "the build writes to /out)",
+        ] {
+            assert_eq!(
+                validate_global_content(content, None, None, &[], &[])
+                    .err()
+                    .map(|r| r.class),
+                Some("absolute_path"),
+                "`{content}` was accepted"
+            );
+        }
+    }
+
+    /// Multi-component absolute paths still are, and prose still is not.
+    ///
+    /// The second half is what keeps the widening honest: an internal slash never
+    /// starts a token, so `and/or` was never in this class's scope, and `/` alone
+    /// is not a path.
+    #[test]
+    fn prose_with_an_internal_slash_is_still_accepted() {
+        assert_eq!(
+            validate_global_content("the fix lives in /Users/dev/main.rs", None, None, &[], &[])
+                .err()
+                .map(|r| r.class),
+            Some("absolute_path")
+        );
+        for clean in [
+            "prefer read/write over readwrite",
+            "either and/or is fine",
+            "use / as the separator",
+            "a ratio of 3/4",
+        ] {
+            assert!(
+                validate_global_content(clean, None, None, &[], &[]).is_ok(),
+                "`{clean}` was refused as an absolute path"
+            );
+        }
     }
 }

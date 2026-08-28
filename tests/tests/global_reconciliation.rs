@@ -16,7 +16,9 @@
 //! So every test here reads through a surface a user actually reaches — the CLI,
 //! `cairn_search`, `cairn_context` — and never calls a subject function directly.
 
-use cairn_e2e::{attach_server, post_json_status_bearer, Mcp, Sandbox, Server};
+use cairn_e2e::{
+    attach_server, get_json_status_bearer, post_json_status_bearer, Mcp, Sandbox, Server,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -130,25 +132,30 @@ fn a_superseded_team_entry_stops_competing_in_every_canonical_read() {
     let a = admin(&server, "supersede");
     let cwd = a.sandbox.repo_path().to_string_lossy().to_string();
 
-    let topic = format!("style.commit_message.{}", Uuid::now_v7().simple());
+    // A marker unique to this run, in the *content*. The suite shares one server
+    // and team knowledge is server-wide, so every previous run's ratified
+    // guidance is legitimately in this store — and a query matching all of it
+    // would fill the result limit before reaching this run's rows.
+    let run = format!("zz{}", Uuid::now_v7().simple());
+    let topic = format!("style.commit_message.{run}");
     let old = ratified(
         &a,
         &topic,
-        "commit messages are free-form",
+        &format!("{run} commit messages are free-form"),
         "free_form",
         None,
     );
     let new = ratified(
         &a,
         &topic,
-        "commit messages follow Conventional Commits",
+        &format!("{run} commit messages follow Conventional Commits"),
         "conventional",
         Some(&old),
     );
 
     // Search: the replacement is there, the replaced entry is not.
     let mut mcp = Mcp::start(&a.sandbox);
-    let searched = mcp.tool_result("cairn_search", json!({ "query": "commit messages" }), &cwd);
+    let searched = mcp.tool_result("cairn_search", json!({ "query": run.clone() }), &cwd);
     let team = searched["content"][0]["text"]["team"]
         .as_array()
         .cloned()
@@ -170,7 +177,7 @@ fn a_superseded_team_entry_stops_competing_in_every_canonical_read() {
         "the replacement guidance did not reach the briefing:\n{context}"
     );
     assert!(
-        !context.contains("free-form"),
+        !context.contains(&format!("{run} commit messages are free-form")),
         "the superseded guidance is still in the briefing:\n{context}"
     );
 
@@ -555,5 +562,328 @@ fn a_retirement_carries_who_acted_to_a_second_device() {
     assert!(
         ratifier.first().is_some_and(|w| !w.is_empty()),
         "the ratification reached the second device without its actor: {ratifier:?}"
+    );
+}
+
+// ===========================================================================
+// PR #52 review: ingest immutability, attribution, and cursor safety
+// ===========================================================================
+
+/// Re-pushing an existing team id cannot re-scope authoritative guidance.
+///
+/// `DO NOTHING` made the row immutable through ingest, and `store_applicability`
+/// ran underneath it anyway — deleting and reinserting the facts of a row the
+/// statement had just declined to touch. Any member holding an id received from
+/// team sync could re-push it with a fresh idempotency key and make ratified
+/// guidance universal, or hide it from selected stacks, with no administrator
+/// involved. Applicability is part of what an administrator ratified (FR-460), so
+/// changing it is a ratification decision.
+///
+/// Falsified by calling `store_applicability` unconditionally again.
+#[test]
+fn re_pushing_a_team_id_cannot_change_where_it_applies() {
+    let Some(server) = server() else { return };
+    let a = admin(&server, "reingest-applic");
+    let topic = format!("style.imports.{}", Uuid::now_v7().simple());
+
+    // Ratified guidance restricted to one language.
+    let proposed = a.sandbox.json(&[
+        "team",
+        "propose",
+        "imports are grouped std / external / crate",
+        "--topic-key",
+        &topic,
+        "--value-key",
+        "grouped",
+        "--applies-to",
+        "language=rust",
+    ]);
+    let id = proposed["entry"]["id"].as_str().expect("id").to_string();
+    a.sandbox.must(&["sync", "now"]);
+    let out = a.sandbox.cairn(&["team", "ratify", &id]);
+    assert!(out.ok(), "ratify failed: {}{}", out.stdout, out.stderr);
+
+    let before = server.count(&format!(
+        "SELECT COUNT(*) FROM team_knowledge_applicability WHERE team_id = '{id}'"
+    ));
+    assert_eq!(
+        before, 1,
+        "the fixture did not store one applicability fact"
+    );
+
+    // An ordinary member re-pushes the same id with the facts stripped, which
+    // would make the guidance universal.
+    let member_token = server.new_user_token("reingest-member");
+    let (created, status) = post_json_status_bearer(
+        &server.base,
+        "/api/projects",
+        &json!({ "name": "reingest-side", "repository_remote": "git@localhost:x/reingest.git" }),
+        &member_token,
+    );
+    assert_eq!(status, 200, "create project: {created}");
+    let member_project = created["id"].as_str().expect("id").to_string();
+
+    for attack in [json!([]), json!([{ "kind": "language", "value": "go" }])] {
+        let (body, status) = post_json_status_bearer(
+            &server.base,
+            "/api/sync/batch",
+            &json!({
+                "project_id": member_project,
+                "items": [{
+                    "idempotency_key": Uuid::now_v7().to_string(),
+                    "entity_type": "team_knowledge",
+                    "entity_id": id,
+                    "operation": "upsert",
+                    "payload": {
+                        "id": id,
+                        "knowledge_type": "convention",
+                        "content": "imports are grouped std / external / crate",
+                        "topic_key": topic,
+                        "value_key": "grouped",
+                        "writer_id": Uuid::now_v7(),
+                        "writer_seq": 1,
+                        "applicability": attack,
+                    },
+                }],
+            }),
+            &member_token,
+        );
+        assert_eq!(status, 200, "the batch route itself failed: {body}");
+
+        let facts = server.text(&format!(
+            "SELECT COALESCE(string_agg(kind || '=' || value, ',' ORDER BY value), '') \
+               FROM team_knowledge_applicability WHERE team_id = '{id}'"
+        ));
+        assert_eq!(
+            facts, "language=rust",
+            "sync ingest re-scoped ratified team guidance: {attack}"
+        );
+    }
+}
+
+/// A pushed team proposal is attributed to the caller, not to whoever the
+/// payload names.
+///
+/// `proposed_by_user_id` was read straight out of the untrusted item, so a member
+/// could name another account — falsifying the attribution FR-459 keeps, and
+/// making the role-filtered feed show that account a proposal it never made as
+/// one of its own (FR-464 shows a member their *own* pending proposals).
+///
+/// Falsified by binding the payload field again.
+#[test]
+fn a_pushed_team_proposal_is_attributed_to_the_caller() {
+    let Some(server) = server() else { return };
+    let liar_token = server.new_user_token("attrib-liar");
+    // The victim exists only to be named; the test never authenticates as them.
+    let _victim_token = server.new_user_token("attrib-victim");
+
+    let (created, status) = post_json_status_bearer(
+        &server.base,
+        "/api/projects",
+        &json!({ "name": "zephyrworks", "repository_remote": "git@localhost:zephyrworks/x.git" }),
+        &liar_token,
+    );
+    assert_eq!(status, 200, "create project: {created}");
+    let project = created["id"].as_str().expect("id").to_string();
+
+    let liar = server.text(
+        "SELECT id::text FROM users WHERE email LIKE 'attrib-liar%' ORDER BY created_at DESC LIMIT 1",
+    );
+    let victim_user = server.text(
+        "SELECT id::text FROM users WHERE email LIKE 'attrib-victim%' ORDER BY created_at DESC LIMIT 1",
+    );
+    assert_ne!(liar, victim_user, "the fixture needs two distinct accounts");
+
+    let id = Uuid::now_v7();
+    let (body, status) = post_json_status_bearer(
+        &server.base,
+        "/api/sync/batch",
+        &json!({
+            "project_id": project,
+            "items": [{
+                "idempotency_key": Uuid::now_v7().to_string(),
+                "entity_type": "team_knowledge",
+                "entity_id": id,
+                "operation": "upsert",
+                "payload": {
+                    "id": id,
+                    "knowledge_type": "convention",
+                    "content": "guidance pushed under someone else's name",
+                    "writer_id": Uuid::now_v7(),
+                    "writer_seq": 1,
+                    // The lie.
+                    "proposed_by_user_id": victim_user,
+                },
+            }],
+        }),
+        &liar_token,
+    );
+    assert_eq!(status, 200, "the batch route itself failed: {body}");
+    assert_eq!(
+        body["results"][0]["status"].as_str(),
+        Some("applied"),
+        "the proposal was not ingested at all: {body}"
+    );
+
+    let stored = server.text(&format!(
+        "SELECT proposed_by_user_id::text FROM team_knowledge WHERE id = '{id}'"
+    ));
+    assert_eq!(
+        stored, liar,
+        "the proposal was attributed to the account the payload named, not the \
+         caller who pushed it"
+    );
+}
+
+/// Re-pushing an existing personal id cannot change where it applies.
+///
+/// FR-440 makes a personal entry immutable after creation, the tombstone
+/// excepted. The conflict branch of the ingest upsert honours that for content —
+/// and `store_applicability` ran underneath it unconditionally, deleting and
+/// reinserting the facts. A client could therefore re-push an id it already owned
+/// and move an existing record's scope without forgetting and recreating it: an
+/// immutable record whose scope was mutable.
+///
+/// Falsified by calling `store_applicability` unconditionally again.
+#[test]
+fn re_pushing_a_personal_id_cannot_change_where_it_applies() {
+    let Some(server) = server() else { return };
+    let token = server.new_user_token("personal-immutable");
+    let (created, status) = post_json_status_bearer(
+        &server.base,
+        "/api/projects",
+        &json!({ "name": "quillstone", "repository_remote": "git@localhost:quillstone/x.git" }),
+        &token,
+    );
+    assert_eq!(status, 200, "create project: {created}");
+    let project = created["id"].as_str().expect("id").to_string();
+
+    let id = Uuid::now_v7();
+    let push = |applicability: serde_json::Value, seq: i64| {
+        post_json_status_bearer(
+            &server.base,
+            "/api/sync/batch",
+            &json!({
+                "project_id": project,
+                "items": [{
+                    "idempotency_key": Uuid::now_v7().to_string(),
+                    "entity_type": "personal_knowledge",
+                    "entity_id": id,
+                    "operation": "upsert",
+                    "payload": {
+                        "id": id,
+                        "knowledge_type": "fact",
+                        "content": "clippy runs with warnings denied",
+                        "writer_id": Uuid::now_v7(),
+                        "writer_seq": seq,
+                        "applicability": applicability,
+                    },
+                }],
+            }),
+            &token,
+        )
+    };
+
+    let (body, status) = push(json!([{ "kind": "language", "value": "rust" }]), 1);
+    assert_eq!(status, 200, "the batch route itself failed: {body}");
+    assert_eq!(body["results"][0]["status"].as_str(), Some("applied"));
+    assert_eq!(
+        server.count(&format!(
+            "SELECT COUNT(*) FROM personal_knowledge_applicability WHERE personal_id = '{id}'"
+        )),
+        1
+    );
+
+    // Re-push the same id with the facts stripped, and with a different one.
+    for attack in [json!([]), json!([{ "kind": "language", "value": "go" }])] {
+        let (body, status) = push(attack.clone(), 2);
+        assert_eq!(status, 200, "the batch route itself failed: {body}");
+        let facts = server.text(&format!(
+            "SELECT COALESCE(string_agg(kind || '=' || value, ',' ORDER BY value), '') \
+               FROM personal_knowledge_applicability WHERE personal_id = '{id}'"
+        ));
+        assert_eq!(
+            facts, "language=rust",
+            "sync ingest re-scoped an immutable personal record: {attack}"
+        );
+    }
+}
+
+/// A page boundary inside a group of rows sharing one `changed_at` loses nothing.
+///
+/// With a timestamp-only cursor, a tie group larger than the page limit was split
+/// arbitrarily: the page returned some rows, the cursor advanced to that
+/// timestamp, and the next request's strict `changed_at > since` skipped the rest
+/// — permanently, because nothing asks for that instant again. Batched tombstones
+/// share a `forgotten_at` and a bulk ratification shares an instant, so this is
+/// reachable rather than theoretical.
+///
+/// Driven at the real route with a page limit of one, which makes every boundary
+/// a tie boundary.
+///
+/// Falsified by dropping the id from either the ordering or the comparison.
+#[test]
+fn paging_through_rows_that_share_one_timestamp_loses_none_of_them() {
+    let Some(server) = server() else { return };
+    let token = server.new_user_token("tiepage");
+    let email = server.text(
+        "SELECT email FROM users WHERE email LIKE 'tiepage%' ORDER BY created_at DESC LIMIT 1",
+    );
+    let owner = server.text(&format!(
+        "SELECT id::text FROM users WHERE email = '{email}'"
+    ));
+
+    // Six rows, one instant. Seeded directly: the point is the timestamp tie,
+    // and producing one through the API would be timing-dependent.
+    let marker = format!("zz{}", Uuid::now_v7().simple());
+    for n in 0..6 {
+        server.execute(&format!(
+            "INSERT INTO personal_knowledge \
+               (id, owner_user_id, knowledge_type, content, writer_id, writer_seq, created_at) \
+             VALUES ('{}', '{owner}', 'fact', '{marker} row {n}', '{}', {n}, \
+                     '2026-08-01T12:00:00Z')",
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        ));
+    }
+
+    // Walk the feed one row at a time, following the cursor exactly as a client
+    // does, and collect everything it hands back.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..20 {
+        let path = match &cursor {
+            Some(c) => format!(
+                "/api/sync/changes/personal?limit=1&since={}",
+                c.replace('+', "%2B")
+                    .replace(':', "%3A")
+                    .replace('|', "%7C")
+            ),
+            None => "/api/sync/changes/personal?limit=1".to_string(),
+        };
+        let (body, status) = get_json_status_bearer(&server.base, &path, &token);
+        assert_eq!(status, 200, "read-back failed: {body}");
+        let page = body["personal"].as_array().cloned().unwrap_or_default();
+        if page.is_empty() {
+            break;
+        }
+        for row in &page {
+            if let Some(c) = row["content"].as_str() {
+                if c.starts_with(&marker) {
+                    seen.push(c.to_string());
+                }
+            }
+        }
+        cursor = body["cursor"].as_str().map(str::to_string);
+    }
+
+    seen.sort();
+    seen.dedup();
+    assert_eq!(
+        seen.len(),
+        6,
+        "paging one row at a time through six rows sharing one timestamp returned \
+         {} of them: {seen:?}",
+        seen.len()
     );
 }
