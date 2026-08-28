@@ -451,6 +451,23 @@ pub struct MemoryFacts {
     /// Attribution. Read only for distinct-origin accounting, never for
     /// arbitration (FR-322).
     pub origin_session_id: Uuid,
+    //
+    // There is deliberately **no `writer_seq`, and no timestamp of any kind**
+    // (FR-583, FR-493, D-U2, D448).
+    //
+    // This struct is the entire input `derive_subject`'s reconciliation reads.
+    // A writer sequence *is* transmitted with every personal and team record,
+    // because a peer needs it to notice that record 7 arrived and record 6 never
+    // did — but it is diagnostic only, and the way that is enforced is that the
+    // function permitted to decide anything cannot see it. A tiebreak or an
+    // ordering rule that consulted a sequence would have to add a field here
+    // first, which is a visible change to a type whose absences are the
+    // guarantee, rather than a one-line comparison inside a comparator nobody
+    // re-reads.
+    //
+    // `tests/tests/multi_device_convergence.rs` pairs this with the behavioural
+    // half: replaying one corpus under reordered, withheld and renumbered
+    // sequences produces identical canonical output (SC-455).
 }
 
 impl MemoryFacts {
@@ -1787,5 +1804,59 @@ mod proposal_tests {
         let (outcome, relations) = classify_proposal(&proposal, &[existing], MAX);
         assert_eq!(outcome, ProposalOutcome::Created);
         assert!(relations.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod reconciliation_input_tests {
+    use super::*;
+
+    /// `MemoryFacts` carries no writer sequence and no timestamp (FR-583,
+    /// SC-455).
+    ///
+    /// Asserted against the serialized field set rather than by reading the
+    /// struct, so that *adding* such a field fails here. The structural claim is
+    /// the point: reconciliation cannot consult what its only input does not
+    /// carry, so "the sequence is diagnostic only" is a property of the type
+    /// rather than a rule a comparator has to remember.
+    #[test]
+    fn the_reconciliation_input_carries_no_sequence_and_no_clock() {
+        let facts = MemoryFacts::active(Uuid::now_v7(), MemoryScope::Project, "");
+        let rendered = format!("{facts:?}").to_ascii_lowercase();
+        for forbidden in [
+            "writer_seq",
+            "writer_id",
+            "created_at",
+            "updated_at",
+            "timestamp",
+            "sequence",
+        ] {
+            assert!(
+                !rendered.contains(forbidden),
+                "MemoryFacts gained a `{forbidden}` field; reconciliation could now \
+                 order or arbitrate by it (FR-583, FR-493)"
+            );
+        }
+    }
+
+    /// The `Relation` half of the same input, for the same reason.
+    #[test]
+    fn a_relation_carries_no_sequence_and_no_clock() {
+        let rendered = format!(
+            "{:?}",
+            Relation {
+                from: Uuid::now_v7(),
+                to: Uuid::now_v7(),
+                kind: RelationKind::Duplicates,
+                basis: RelationBasis::DeterministicRule,
+            }
+        )
+        .to_ascii_lowercase();
+        for forbidden in ["writer_seq", "created_at", "decided_at", "timestamp"] {
+            assert!(
+                !rendered.contains(forbidden),
+                "Relation gained a `{forbidden}` field (FR-583)"
+            );
+        }
     }
 }

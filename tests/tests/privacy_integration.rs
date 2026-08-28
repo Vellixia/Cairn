@@ -418,7 +418,11 @@ fn nothing_local_escapes() {
         );
     }
 
-    // And the four that *are* syncable are still exactly the four.
+    // And the syncable set is exactly this list — extended by Feature 004, not
+    // loosened. The two knowledge domains and their two relation types travel
+    // (FR-528); `project_traits` and `writer_identity` deliberately do not, and
+    // their absence from `OutboxEntityType` is what makes "they stay local" a
+    // fact about the schema rather than a promise (FR-438, D448).
     let mut syncable: Vec<&str> = OutboxEntityType::ALL.iter().map(|t| t.as_str()).collect();
     syncable.sort();
     assert_eq!(
@@ -427,11 +431,15 @@ fn nothing_local_escapes() {
             "handoff",
             "memory",
             "memory_relation",
+            "personal_knowledge",
+            "personal_knowledge_relation",
             "project",
             "session",
             "task",
             "task_blocker",
             "task_criterion",
+            "team_knowledge",
+            "team_knowledge_relation",
         ],
         "the syncable set changed; every addition to it is a privacy decision"
     );

@@ -163,20 +163,34 @@ nothing else (D49, FR-303).
 **Algorithm**
 
 ```text
-1. drop members that any `supersedes` or `duplicates` relation points *to*
+1. drop the member a `supersedes` relation points *to* (the superseded one)
+   drop the member a `duplicates` relation points *from* (the newer, absorbed one) —
+   the opposite end from `supersedes`: a duplicate's *target* is the survivor,
+   not the member that drops out
+   exception: inside a mutual cycle (A supersedes B and B supersedes A, or the
+   `duplicates` equivalent) neither end drops — a cycle resolves nothing
 2. if none remain                              → Historical,   answers = []
+   unless every member was dropped only by being trapped in a cycle, which
+   decided nothing between them                → Conflicted,   answers = the
+                                                  cycle's members, sorted by id
 3. partition the remainder by value_key
    (members with no value_key form singleton partitions; they never merge)
 4. if one partition
-     if it has one member                      → Settled,      answers = [it]
+     if it has one member with nothing
+          `duplicates` into it                  → Settled,      answers = [it]
+     else if it has one member that absorbed
+          one or more duplicates                 → Reinforced,   answers = [it]
      else if every member shares one
-          content_norm_digest                  → Reinforced,   answers = [representative]
-     else                                      → Corroborated, answers = every distinct
-                                                  content, sorted by rank then id
-5. if several partitions
-     if a `supersedes` relation resolves them  → recurse from 1 with it applied
-     else                                      → Conflicted,   answers = one per partition,
-                                                  sorted by id, no winner
+          content_norm_digest                    → Reinforced,   answers = [representative]
+     else                                        → Corroborated, answers = every distinct
+                                                    content, sorted by rank then id
+5. if several partitions                       → Conflicted,   answers = one per
+                                                  distinct statement in each
+                                                  partition, sorted by id, no winner
+   (no recursion: any `supersedes` relation that could resolve this was already
+   applied once, in step 1, before partitioning ever ran — several partitions
+   surviving step 1 means nothing left to resolve them, not that step 1 needs
+   running again)
 6. narrowed_by = members of the same topic at a narrower scope, from the caller's
    applicable set
 ```
@@ -186,10 +200,14 @@ their content yields `Corroborated` — several answers that agree on the value 
 representative silently standing for all of them.
 
 The **representative** of a reinforced partition is the member with the most supporting evidence
-facts, then the highest verification rank, then the lowest identifier. Verification rank is
-`verified(cairn)` > `verified(attested)` > `needs_recheck` > `unverified` > `drifted` > `conflicted`:
-a deterministic check outranks an attestation, which is what stops an attested claim becoming the
-face of a subject over a checked one. Every tiebreak is a property of the record, never of time.
+facts, then the highest verification rank, then the lowest identifier. Verification rank has
+**seven** tiers, not six — a locally-attested claim's remote counterpart is its own tier, ranked
+between a local deterministic check and any other attestation, because it inherited a Cairn check's
+strength without this machine having run one:
+`verified(cairn)` > `verified(remote_cairn)` > `verified(attested)` > `needs_recheck` >
+`unverified` > `drifted` > `conflicted`. A deterministic check outranks an attestation, which is
+what stops an attested claim becoming the face of a subject over a checked one. Every tiebreak is a
+property of the record, never of time.
 
 `SubjectView.decisions` lists the relations that produced the outcome, so `cairn memory subject`
 can answer "why" (FR-307).

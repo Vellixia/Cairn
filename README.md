@@ -158,15 +158,60 @@ cargo run --release --bin cairn-server -- --web-origin http://127.0.0.1:3100
 cd web && npm install && npm run build && npm run start
 ```
 
-Register in the web UI, create a personal API token, then on each machine:
+There is no sign-up form. An administrator creates the account (see
+[Administering a server](#administering-a-server)), hands over the one-time
+temporary password, and the user changes it on first use. Then, on each machine:
 
 ```bash
+cairn auth login --server http://127.0.0.1:8080   # change the temporary password
 cairn auth token set <token> --server http://127.0.0.1:8080
-cairn link --create            # or: cairn link --project <shared-project-id>
+cairn link --project <shared-project-id>          # or: cairn link --create
 ```
+
+Linking to an existing project needs a membership an administrator or an existing
+member granted first — naming the identifier is not enough:
+
+```bash
+cairn project member add <project-id> dev@example.com
+cairn project member list <project-id>
+cairn project member remove <project-id> dev@example.com
+```
+
+`cairn link` with no `--project` auto-selects only when discovery returns exactly
+one project the caller already belongs to. It never joins anything.
 
 Two clones of one repository at different paths link to the *same* shared project by
 identifier — path is never identity.
+
+## Personal and team knowledge
+
+Alongside project memory, which stays scoped to the repository it came from, a
+server carries two domains that are not:
+
+- **Personal** — yours, across every project and every machine you sign in from.
+  Create it directly, or promote a project memory into it.
+- **Team** — server-wide guidance every account sees. It cannot be authored
+  directly: someone proposes it, an administrator ratifies it, and only then does
+  it become visible. A retired entry stays retired; restoring its guidance means a
+  new proposal.
+
+```bash
+cairn team list
+cairn team propose "Prefer the workspace lockfile over a per-crate one"
+cairn team ratify <id>
+cairn team retire <id>
+```
+
+Both domains are stripped of anything that identifies where they came from.
+Content carrying an absolute path, a home directory, a credentialed URL, an
+environment assignment, a secret-shaped run, a project-identifying token or a
+shell command invocation is refused — locally when you write it, and again at the
+server when it arrives, so a client that skips its own check gains nothing. A
+refusal names the class it tripped and never echoes the content back.
+
+They never displace project context: personal and team sections come last, are
+capped at 15% of the budget, cannot touch the reserved level, and are excluded
+entirely at `depth: "minimum"`.
 
 ## Principles
 
@@ -211,3 +256,48 @@ cd web && npx playwright test                            # UI acceptance
 
 Specification, plan and task ledger live in [`specs/001-cairn-mvp/`](specs/001-cairn-mvp/);
 project principles in [the constitution](.specify/memory/constitution.md).
+
+## Administering a server
+
+Every account on a Cairn server is created by an administrator. There is no
+self-registration and no self-join — both were removed as security fixes, along
+with a project-discovery route that returned projects the caller was not a member
+of.
+
+```bash
+# On the server host, once, to bootstrap:
+CAIRN_ADMIN_EMAIL=you@example.com CAIRN_ADMIN_PASSWORD='...' cairn-server
+
+# Or create an account directly against the database:
+cairn-server users add --email dev@example.com --display-name "Dev" --password '...'
+
+# Thereafter, as an administrator:
+cairn user create --email dev@example.com --display-name "Dev"
+cairn user list
+cairn user promote dev@example.com
+cairn user disable dev@example.com
+cairn user reset-password dev@example.com
+```
+
+`cairn user create` prints a one-time temporary password. It is shown **once** —
+no route reads it back, not even for the administrator who created the account.
+If it is lost, reset it.
+
+**If your users relied on registering or joining themselves**, those two routes
+now answer `410 Gone` and name their replacement in the response body. The
+operator does the work instead:
+
+| A user who used to… | An administrator now runs |
+|---|---|
+| register an account | `cairn user create --email … --display-name …` (`POST /api/admin/users`) |
+| join a project by its identifier | `cairn project member add <project-id> <email>` (`POST /api/projects/{id}/members`) |
+
+A project-discovery lookup returns only projects the caller is already a member
+of, so discovery cannot be used to find something to join.
+
+**Whoever can set the server's environment and restart the process can always
+obtain administrator access.** The account named by `CAIRN_ADMIN_EMAIL` is
+restored to `admin` and `active` on every start, which is the break-glass path
+for an operator who has locked themselves out. It cannot be demoted, disabled or
+reset through the API. See [SECURITY.md](SECURITY.md) for what that means for a
+deployment.

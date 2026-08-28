@@ -46,6 +46,7 @@ pub async fn daemon_with(config: CairnConfig, server: ServerCredentials) -> Daem
         lifecycle_kinds: Arc::new(RwLock::new(HashMap::new())),
         run_id: Uuid::now_v7(),
         config: Arc::new(RwLock::new(config)),
+        traits_refreshed: Arc::new(RwLock::new(std::collections::HashMap::new())),
         user_id,
         started_at: chrono::Utc::now(),
         server: Arc::new(RwLock::new(server)),

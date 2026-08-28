@@ -952,6 +952,21 @@ impl Server {
         Self::spawn(&self.database_url, i64::MAX, owned)
     }
 
+    /// The same upgrade, with the environment naming one account.
+    ///
+    /// The operator who set `CAIRN_ADMIN_EMAIL` before the upgrade, which is
+    /// what decides who becomes the administrator when a pre-role database
+    /// gains roles (FR-414, FR-524).
+    pub fn upgraded_as_admin(&mut self, admin_email: &str) -> Self {
+        let owned = std::mem::take(&mut self.owns_database);
+        Self::spawn_as(
+            &self.database_url,
+            i64::MAX,
+            owned,
+            Some((admin_email, "hunter2hunter2")),
+        )
+    }
+
     /// One scalar count against this server's database.
     pub fn count(&self, sql: &str) -> i64 {
         let url = self.database_url.clone();
@@ -1013,6 +1028,188 @@ impl Server {
         })
     }
 
+    /// A server on a database of its own, with no environment account.
+    ///
+    /// For a test that mutates state global to a server — every account's role,
+    /// say. Sharing the default database would let such a test corrupt every
+    /// other test running beside it, and would let *their* rows corrupt its
+    /// fixture, which is exactly how a race test comes to promote accounts it
+    /// has never heard of.
+    pub fn start_own_database() -> Option<Self> {
+        let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        let name = format!("cairn_own_{}", unique());
+        create_database(&admin, &name);
+        let url = replace_database(&admin, &name);
+        Some(Self::spawn_as(&url, i64::MAX, true, None))
+    }
+
+    /// A server whose environment names one administrator account.
+    ///
+    /// The break-glass identity: `ensure_admin` upserts it on every start, and
+    /// several guarantees are only observable against a server that has one.
+    pub fn start_with_admin(email: &str, password: &str) -> Option<Self> {
+        let admin = std::env::var("CAIRN_TEST_DATABASE_URL")
+            .ok()
+            .filter(|u| !u.is_empty())?;
+        // Its own database: the environment account is global to a server, so
+        // two tests sharing one database would fight over its standing.
+        let name = format!("cairn_admin_{}", unique());
+        create_database(&admin, &name);
+        let url = replace_database(&admin, &name);
+        Some(Self::spawn_as(
+            &url,
+            i64::MAX,
+            true,
+            Some((email, password)),
+        ))
+    }
+
+    /// Restart this server, keeping its database and its environment account.
+    ///
+    /// What an operator does to recover administration (FR-539). Ownership of
+    /// the database moves with it, so dropping the old handle does not take the
+    /// data.
+    pub fn restarted_with_admin(&mut self, email: &str, password: &str) -> Self {
+        let owned = std::mem::take(&mut self.owns_database);
+        Self::spawn_as(&self.database_url, i64::MAX, owned, Some((email, password)))
+    }
+
+    /// A bearer token for an existing account, by password.
+    pub fn token_for(&self, email: &str, password: &str) -> String {
+        let cookie = self.cookie_for_password(email, password);
+        let (body, status) = self.post_with_cookie("/api/tokens", &serde_json::json!({}), &cookie);
+        assert_eq!(status, 200, "minting a token for {email}: {body}");
+        body["token"].as_str().expect("token").to_string()
+    }
+
+    /// Sign in and return the session cookie, panicking if the credential is
+    /// refused.
+    pub fn cookie_for_password(&self, email: &str, password: &str) -> String {
+        self.try_cookie_for_password(email, password)
+            .unwrap_or_else(|| panic!("{email} could not sign in"))
+    }
+
+    /// Sign in, or `None` if the credential is refused.
+    ///
+    /// The `None` case is the interesting one: several requirements are about a
+    /// password that *stops* working — after a disable, after a reset, after a
+    /// change — and a helper that panicked on refusal could not express them.
+    pub fn try_cookie_for_password(&self, email: &str, password: &str) -> Option<String> {
+        let (_, headers) = self.post_json_raw(
+            "/api/auth/login",
+            &serde_json::json!({ "email": email, "password": password }),
+            None,
+        );
+        headers
+            .into_iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
+            .map(|(_, v)| v.split(';').next().unwrap_or_default().to_string())
+            .filter(|c| c.contains('=') && !c.ends_with('='))
+    }
+
+    /// POST with a session cookie, returning the body and the status.
+    pub fn post_with_cookie(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        cookie: &str,
+    ) -> (serde_json::Value, u16) {
+        let out = Command::new("curl")
+            .args([
+                "-s",
+                "-w",
+                "\n%{http_code}",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "-H",
+                &format!("cookie: {cookie}"),
+                "-d",
+                &body.to_string(),
+                &format!("{}{path}", self.base),
+            ])
+            .output()
+            .expect("curl runs");
+        let raw = String::from_utf8_lossy(&out.stdout);
+        let (body, status) = raw.rsplit_once('\n').unwrap_or((&raw, "0"));
+        (
+            serde_json::from_str(body).unwrap_or(serde_json::Value::Null),
+            status.trim().parse().unwrap_or(0),
+        )
+    }
+
+    /// DELETE with a bearer token and a JSON body.
+    pub fn delete_json_bearer(&self, path: &str, body: &serde_json::Value, token: &str) -> u16 {
+        let out = Command::new("curl")
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "DELETE",
+                "-H",
+                "content-type: application/json",
+                "-H",
+                &format!("authorization: Bearer {token}"),
+                "-d",
+                &body.to_string(),
+                &format!("{}{path}", self.base),
+            ])
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    /// DELETE with a bearer token.
+    pub fn delete_with_bearer(&self, path: &str, token: &str) -> u16 {
+        let out = Command::new("curl")
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                "-X",
+                "DELETE",
+                "-H",
+                &format!("authorization: Bearer {token}"),
+                &format!("{}{path}", self.base),
+            ])
+            .output()
+            .expect("curl runs");
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0)
+    }
+
+    /// One text column against this server's database.
+    pub fn query_column(&self, sql: &str) -> Vec<String> {
+        let url = self.database_url.clone();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            let rows: Vec<String> = sqlx::query_scalar(&sql)
+                .fetch_all(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("query {sql:?} failed: {e}"));
+            pool.close().await;
+            rows
+        })
+    }
+
     /// `None` when no test database is configured.
     // The child is owned by `Server` and reaped in `Drop`; it must outlive
     // `start`, which is exactly what clippy's lint cannot see.
@@ -1031,9 +1228,26 @@ impl Server {
     }
 
     fn spawn(url: &str, max_version: i64, owns_database: bool) -> Self {
+        Self::spawn_as(url, max_version, owns_database, None)
+    }
+
+    /// As `spawn`, naming the account the environment defines.
+    ///
+    /// Needed because migration 3's `users.role` backfill reads
+    /// `current_setting('cairn.admin_email')` to decide which existing account
+    /// becomes the administrator, and that value comes from `--admin-email`.
+    /// Without a way to set it, the environment-named branch of the backfill
+    /// has no test — which is exactly how it came to be unreachable in the
+    /// first place: nothing set the value and the fallback branch always ran.
+    fn spawn_as(
+        url: &str,
+        max_version: i64,
+        owns_database: bool,
+        admin: Option<(&str, &str)>,
+    ) -> Self {
         let mut last = String::new();
         for _ in 0..4 {
-            match Self::try_start(url, max_version, owns_database) {
+            match Self::try_start(url, max_version, owns_database, admin) {
                 Ok(server) => return server,
                 Err(e) => last = e,
             }
@@ -1041,14 +1255,73 @@ impl Server {
         panic!("cairn-server would not start: {last}");
     }
 
-    fn try_start(url: &str, max_version: i64, owns_database: bool) -> Result<Self, String> {
-        let port = {
-            let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
-            let port = probe.local_addr().expect("addr").port();
-            drop(probe);
-            port
+    /// Replace this server with one that applies every migration, **at the same
+    /// address**.
+    ///
+    /// The operator's actual upgrade: the process is replaced, the data stays,
+    /// and every client keeps the endpoint it was already configured with. That
+    /// last part is what the capability-upgrade scenario turns on — SC-445 says
+    /// the peer is replaced "at the same configured endpoint", so a replacement
+    /// on a new port would be testing a re-link instead, and a re-link is a local
+    /// write the scenario explicitly forbids.
+    ///
+    /// The old process is killed before the new one binds, because two servers
+    /// cannot hold one port.
+    pub fn upgraded_in_place(&mut self) -> Self {
+        let addr = self
+            .base
+            .strip_prefix("http://")
+            .unwrap_or(&self.base)
+            .to_string();
+        let owned = std::mem::take(&mut self.owns_database);
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        Self::spawn_at(&self.database_url, i64::MAX, owned, None, Some(addr))
+    }
+
+    fn spawn_at(
+        url: &str,
+        max_version: i64,
+        owns_database: bool,
+        admin: Option<(&str, &str)>,
+        addr: Option<String>,
+    ) -> Self {
+        let mut last = String::new();
+        for _ in 0..8 {
+            match Self::try_start_at(url, max_version, owns_database, admin, addr.clone()) {
+                Ok(server) => return server,
+                Err(e) => last = e,
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        panic!("cairn-server would not start: {last}");
+    }
+
+    fn try_start(
+        url: &str,
+        max_version: i64,
+        owns_database: bool,
+        admin: Option<(&str, &str)>,
+    ) -> Result<Self, String> {
+        Self::try_start_at(url, max_version, owns_database, admin, None)
+    }
+
+    fn try_start_at(
+        url: &str,
+        max_version: i64,
+        owns_database: bool,
+        admin: Option<(&str, &str)>,
+        fixed_addr: Option<String>,
+    ) -> Result<Self, String> {
+        let addr = match fixed_addr {
+            Some(addr) => addr,
+            None => {
+                let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("free port");
+                let port = probe.local_addr().expect("addr").port();
+                drop(probe);
+                format!("127.0.0.1:{port}")
+            }
         };
-        let addr = format!("127.0.0.1:{port}");
 
         // A small pool per server. Every test in this suite starts its own
         // server against one PostgreSQL, and the production default of ten
@@ -1056,17 +1329,26 @@ impl Server {
         // the later servers then never come up, failing tests that have nothing
         // wrong with them.
         let schema = max_version.to_string();
+        let mut args: Vec<String> = vec![
+            "--addr".into(),
+            addr.clone(),
+            "--database-url".into(),
+            url.into(),
+            "--max-connections".into(),
+            "4".into(),
+            "--max-schema-version".into(),
+            schema,
+        ];
+        if let Some((email, password)) = admin {
+            // Both, always: the server treats half a pair as a configuration
+            // mistake and refuses to start rather than seeding nothing quietly.
+            args.push("--admin-email".into());
+            args.push(email.into());
+            args.push("--admin-password".into());
+            args.push(password.into());
+        }
         let mut child = Command::new(binary("cairn-server"))
-            .args([
-                "--addr",
-                &addr,
-                "--database-url",
-                url,
-                "--max-connections",
-                "4",
-                "--max-schema-version",
-                &schema,
-            ])
+            .args(&args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -1135,6 +1417,28 @@ impl Server {
             pool.close().await;
             out
         })
+    }
+
+    /// Create a user and return both its id and a fresh token.
+    ///
+    /// The id matters more than it looks. Deriving it afterwards with
+    /// `ORDER BY created_at DESC LIMIT 1` races every other test sharing this
+    /// database — it returns whichever account was created most recently
+    /// *anywhere*, which is usually somebody else's. Returning it from the
+    /// creation removes the guess.
+    pub fn new_user(&self, label: &str) -> (uuid::Uuid, String) {
+        let email = format!("{label}-{}@example.test", unique());
+        self.create_user(&email, label, "hunter2hunter2");
+        let id = self
+            .query_column(&format!(
+                "SELECT id::text FROM users WHERE email = '{email}'"
+            ))
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("no row for the account just created: {email}"))
+            .parse()
+            .expect("uuid");
+        (id, self.token_for(&email, "hunter2hunter2"))
     }
 
     /// Create a user and return a fresh personal API token.
@@ -1209,7 +1513,7 @@ impl Server {
         self.post_json_raw(path, body, cookie).0
     }
 
-    fn post_json_raw(
+    pub fn post_json_raw(
         &self,
         path: &str,
         body: &serde_json::Value,
@@ -1424,6 +1728,89 @@ pub fn post_status_anon(base: &str, path: &str, body: &serde_json::Value) -> u16
         .trim()
         .parse()
         .unwrap_or(0)
+}
+
+/// PATCH with a bearer token, returning the parsed body and the status.
+pub fn patch_json_bearer(
+    base: &str,
+    path: &str,
+    body: &serde_json::Value,
+    token: &str,
+) -> (serde_json::Value, u16) {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-X",
+            "PATCH",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            &format!("authorization: Bearer {token}"),
+            "-d",
+            &body.to_string(),
+            &format!("{base}{path}"),
+        ])
+        .output()
+        .expect("curl runs");
+    split_body_and_status(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// POST with a bearer token, returning the parsed body **and** the status.
+///
+/// Both, because several of this feature's guarantees are about a status and a
+/// body agreeing — an expired token's refusal has to be identical to a revoked
+/// one's in both (SC-452), and a test that compared only one would pass while
+/// the other diverged.
+pub fn post_json_status_bearer(
+    base: &str,
+    path: &str,
+    body: &serde_json::Value,
+    token: &str,
+) -> (serde_json::Value, u16) {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            &format!("authorization: Bearer {token}"),
+            "-d",
+            &body.to_string(),
+            &format!("{base}{path}"),
+        ])
+        .output()
+        .expect("curl runs");
+    split_body_and_status(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// GET with a bearer token, returning the parsed body and the status.
+pub fn get_json_status_bearer(base: &str, path: &str, token: &str) -> (serde_json::Value, u16) {
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            "-H",
+            &format!("authorization: Bearer {token}"),
+            &format!("{base}{path}"),
+        ])
+        .output()
+        .expect("curl runs");
+    split_body_and_status(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn split_body_and_status(raw: &str) -> (serde_json::Value, u16) {
+    let (body, status) = raw.rsplit_once('\n').unwrap_or((raw, "0"));
+    (
+        serde_json::from_str(body).unwrap_or(serde_json::Value::Null),
+        status.trim().parse().unwrap_or(0),
+    )
 }
 
 /// POST and return the HTTP status only, carrying a bearer token.

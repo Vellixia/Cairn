@@ -3,9 +3,16 @@
 **Feature**: `003-project-intelligence`
 
 Feature 001 drew its privacy boundary **structurally**: there is no observation entity type in the
-outbox, no observations table on the server, and an explicit field allowlist enforced on the wire.
-Feature 003 keeps that method. Everything it declines to share, it declines by having nowhere to put
-it — not by a rule someone must remember.
+outbox, no observations table on the server, and a denylist of forbidden field names enforced on the
+wire. Feature 003 keeps that method. Everything it declines to share, it declines by having nowhere to
+put it — not by a rule someone must remember.
+
+*Denylist, not allowlist*: `reject_forbidden_fields` (`crates/cairn-server/src/sync.rs`) refuses a
+fixed list of *forbidden* names; it does not require a fixed list of *permitted* ones. The distinction
+matters for what happens on an unrecognized field — a denylist fails open (an unlisted field is
+accepted) where an allowlist would fail closed — and this contract's own claims below are stated
+against the denylist that is actually deployed, not the allowlist an earlier draft of this document
+assumed.
 
 ## The boundary, by record
 
@@ -102,7 +109,7 @@ is free text a session wrote about local context, and the conservative default a
 A peer receiving `basis: "evidence"` with no identifier reads it correctly: the decision was
 evidence-backed on another machine. Truthful, and it leaks nothing.
 
-## Server schema and allowlist delta
+## Server schema and denylist delta
 
 `cairn-server/migrations/0002_project_intelligence.sql` — additive only.
 
@@ -138,8 +145,16 @@ detail           prior_value      new_value       content_norm_digest
 ```
 
 **New forbidden entity types**: `evidence_fact`, `verification_run`, `continuity_checkpoint`,
-`reusable_pattern`, `pattern_application`, `task_change` — refused outright by name, exactly as
-`observation` is (`reject_forbidden_fields`).
+`reusable_pattern`, `pattern_application`, `task_change`, `observation_ref`, `criterion_evidence`
+— refused outright by name, exactly as `observation` is (`reject_forbidden_fields`).
+
+Eight, not six. The two this list used to omit are the two that name a *reference* rather than a
+payload — `observation_ref` and `criterion_evidence` — and they are the ones a reader would most
+easily talk themselves into allowing, on the grounds that a reference carries no content. It
+carries something worse: a handle into local-only observation storage, which means nothing on any
+other machine while naming something precise on the machine that produced it. The code has always
+refused both (`crates/cairn-core/src/domain.rs`); this document did not say so, and a document
+that lists six of eight forbidden names reads as an exhaustive list that happens to be wrong.
 
 Asserted by `privacy_payloads`, extended: for every forbidden field name and every forbidden entity
 type, a crafted payload is rejected and the rejection names the field.
@@ -220,21 +235,27 @@ server would have stayed refused forever, even after the server was upgraded (D8
 | `failed` | no | **Permanently** refused — the content is not acceptable |
 | `blocked` | **not until the server changes** | Refused for lack of server capability; retained, deliverable later |
 
-**Unblocking.** The server's existing public `/api/version` endpoint gains a `capability` block —
+**Unblocking.** The server's existing public `/api/version` endpoint gains a `capabilities` block —
 additive, unauthenticated, already called by the web UI:
 
 ```json
 { "current": "0.2.0", "schema_version": 2,
-  "capabilities": ["memory_relation", "task_criterion", "task_blocker"] }
+  "capabilities": ["memory_relations", "task_criteria", "task_blockers",
+                    "memory_subject_identity", "memory_verification"] }
 ```
 
+Five names, not three: the field advertises every kind of Feature 003 record this schema version's
+tables can hold, and `memory_subject_identity`/`memory_verification` are as much a capability as the
+two new entity types are — a server that has `memory_relations`'s table but not the subject/
+verification columns on `memories` still cannot accept a Feature 003 memory payload in full.
+
 An **older** server returns no such fields, and that absence is itself the answer: no Feature 003
-capability. So the probe works against the very servers it needs to detect.
+capabilities. So the probe works against the very servers it needs to detect.
 
 ```text
 sync worker, once per drain cycle at most, cached in sync_meta:
-    probe /api/version → observed_capability
-    if observed_capability differs from the recorded one:
+    probe /api/version → observed_capabilities
+    if observed_capabilities differs from the recorded one:
         UPDATE outbox SET state = 'pending', blocked_reason = NULL
          WHERE state = 'blocked'
            AND blocked_reason names a class the new capability now supports
@@ -311,7 +332,7 @@ No deletion ever leaves a dangling reference, and none ever restores content.
 | Guarantee | How it is proved |
 |---|---|
 | Raw observations never sync | No entity type; no server table; `reject_forbidden_fields`; `outbox_cannot_carry_observations` |
-| Evidence content never syncs | No entity type; no server table; 16 forbidden field names; `privacy_payloads` |
+| Evidence content never syncs | No entity type; no server table; 19 forbidden field names added by this feature (27 total on the server's live list, `FORBIDDEN_OBSERVATION_FIELDS`); `privacy_payloads` |
 | Verification runs, checkpoints, patterns, applications, task changes never sync | No entity type; no server table; forbidden entity-type names |
 | A shared memory says only state/authority/instant/count/kinds about evidence | Payload construction test asserting exactly five keys under `verification` |
 | An attested verification never arrives as a deterministic one | `authority` on the wire; `us7_offline_merge::authority_survives` (SC-329) |

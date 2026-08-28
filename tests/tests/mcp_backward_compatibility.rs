@@ -669,3 +669,132 @@ fn every_advertised_action_is_dispatched() {
         "an unknown action no longer reports itself as one, so this test proves nothing: {control}"
     );
 }
+
+// ===========================================================================
+// T188 / FR-527 / SC-430 — Feature 004 added actions and fields, not a tool
+// ===========================================================================
+//
+// The six-tool count is the one thing in this feature that a single well-meaning
+// commit could undo, and it would look like a kindness at the time: personal
+// knowledge and team guidance are each plausibly "their own tool". They are not,
+// and the reason is not aesthetic — six tools is what an agent can be expected to
+// hold in its head, and every tool added is one more thing for it to pick wrongly
+// among.
+//
+// So this feature reached the two new domains through *fields on existing
+// actions*, and the tests below are what stop that from drifting back.
+
+/// Still exactly six tools, and none of the names a seventh would plausibly take.
+///
+/// The forbidden list is the point: asserting a count alone passes on the day
+/// `cairn_remember` is renamed and a seventh appears under the old name.
+#[test]
+fn feature_004_added_no_tool_and_none_of_the_names_one_would_have_taken() {
+    let s = Sandbox::new();
+    let mut mcp = Mcp::start(&s);
+    mcp.call("initialize", json!({}));
+    let listed = mcp.call("tools/list", json!({}));
+    let tools: Vec<String> = listed["tools"]
+        .as_array()
+        .expect("tools")
+        .iter()
+        .filter_map(|t| t["name"].as_str())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        tools.len(),
+        6,
+        "the surface is no longer six tools: {tools:?}"
+    );
+
+    const EXPECTED: &[&str] = &[
+        "cairn_context",
+        "cairn_search",
+        "cairn_remember",
+        "cairn_session",
+        "cairn_task",
+        "cairn_handoff",
+    ];
+    for name in EXPECTED {
+        assert!(
+            tools.iter().any(|t| t == name),
+            "`{name}` is no longer advertised: {tools:?}"
+        );
+    }
+
+    // Names a seventh tool for these domains would have taken.
+    const FORBIDDEN: &[&str] = &[
+        "cairn_personal",
+        "cairn_team",
+        "cairn_global",
+        "cairn_knowledge",
+        "cairn_promote",
+        "cairn_ratify",
+        "cairn_domain",
+        "cairn_traits",
+        "cairn_member",
+        "cairn_user",
+    ];
+    for name in FORBIDDEN {
+        assert!(
+            !tools.iter().any(|t| t == name),
+            "`{name}` was added as a tool; Feature 004 reaches its domains through \
+             fields on the existing six (FR-527)"
+        );
+    }
+}
+
+/// The fields Feature 004 added are additive: absent, every one of them leaves
+/// the pre-004 behaviour exactly as it was.
+///
+/// This is what "additive" has to mean in practice. A `domain` field that
+/// defaulted to `personal`, or a `target` that defaulted to anything but
+/// `pattern`, would be a silent behaviour change for every existing caller — and
+/// the caller most affected is an agent running an older prompt that never
+/// mentions either field.
+#[test]
+fn every_field_feature_004_added_is_absent_by_default_and_changes_nothing() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace")
+            .join("crates/cairn/src/mcp.rs"),
+    )
+    .expect("read mcp.rs");
+
+    // Each new field is advertised, so this test fails if one is quietly dropped
+    // as well as if one becomes required.
+    for field in [
+        "\"domain\"",
+        "\"target\"",
+        "\"applicability_facts\"",
+        "\"domains\"",
+        "\"depth\"",
+    ] {
+        assert!(
+            source.contains(field),
+            "{field} is no longer advertised on any tool, so callers cannot reach \
+             the capability it was added for"
+        );
+    }
+
+    // And none of them is in a `required` list: `required` names only what a
+    // pre-004 caller already sent.
+    for required in source.match_indices("\"required\":") {
+        let tail = &source[required.0..];
+        let end = tail.find(']').map(|i| i + 1).unwrap_or(tail.len());
+        let clause = &tail[..end];
+        for field in [
+            "domain",
+            "target",
+            "applicability_facts",
+            "domains",
+            "depth",
+        ] {
+            assert!(
+                !clause.contains(&format!("\"{field}\"")),
+                "`{field}` is required, which breaks every pre-004 caller: {clause}"
+            );
+        }
+    }
+}

@@ -13,6 +13,19 @@ use cairn_core::wire::{SyncFailure, SyncItem};
 use sqlx::{Row, Sqlite};
 use uuid::Uuid;
 
+/// The four entity types [`enqueue_global`] carries — the ones migration 7's
+/// `outbox.entity_type` CHECK requires a NULL `project_id` for
+/// (`0007_collaborative_global_memory.sql`).
+fn is_global_entity(entity_type: OutboxEntityType) -> bool {
+    matches!(
+        entity_type,
+        OutboxEntityType::PersonalKnowledge
+            | OutboxEntityType::PersonalKnowledgeRelation
+            | OutboxEntityType::TeamKnowledge
+            | OutboxEntityType::TeamKnowledgeRelation
+    )
+}
+
 /// Whether a project may enqueue at all.
 #[derive(Debug, Clone, Copy)]
 pub struct SyncPolicy {
@@ -63,10 +76,19 @@ where
     ));
 
     sqlx::query(
+        // `namespace` is the routing and backoff key migration 0007 added
+        // (D426, D427). Every entity type this function enqueues is
+        // project-scoped, so its namespace is `project:<project_id>` — the same
+        // value 0007's backfill wrote for every pre-existing row, so a row
+        // enqueued before the migration and one enqueued after are routed
+        // identically. The two project-less entity types Feature 004 adds do
+        // not come through here: they carry no `project_id`, which the table's
+        // own CHECK requires, so they get their own enqueue path rather than a
+        // nullable argument here.
         "INSERT OR IGNORE INTO outbox
             (id, project_id, server_project_id, entity_type, entity_id, operation,
-             idempotency_key, payload, state, attempts, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9)",
+             idempotency_key, payload, state, attempts, created_at, namespace)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'pending', 0, ?9, ?10)",
     )
     .bind(new_id().to_string())
     .bind(project_id.to_string())
@@ -77,9 +99,99 @@ where
     .bind(key)
     .bind(body)
     .bind(rows::now_text())
+    .bind(format!("project:{project_id}"))
     .execute(executor)
     .await?;
     Ok(true)
+}
+
+/// Enqueue a personal or team knowledge change (D426, D438, FR-486, FR-491,
+/// FR-568, `contracts/sync-namespaces.md` §1, §6, §7).
+///
+/// Project-less, by construction: `project_id` and `server_project_id` are
+/// always NULL here, which is what migration 7's outbox CHECK requires for
+/// exactly these four entity types — there is no [`SyncPolicy`] gate the way
+/// [`enqueue`] has one, because there is no project to be linked or not.
+///
+/// **The idempotency key differs from [`enqueue`]'s on purpose (§7).** It mixes
+/// in `writer_id`:
+///
+/// ```text
+/// digest("{writer_id}:{entity_type}:{entity_id}:{operation}:{digest(body)}")
+/// ```
+///
+/// rather than `enqueue`'s `digest("{entity_type}:{entity_id}:{operation}:
+/// {digest(body)}")`. Two stores that independently produce byte-identical
+/// content for the same entity id — two devices proposing the same personal
+/// fact before ever syncing with each other — now compute two distinct keys,
+/// so both rows reach the server and are both accepted; `classify_proposal`
+/// (`global-memory.md` §6) decides they are duplicates, rather than the second
+/// one silently colliding with the first at the transport layer and never
+/// reaching reconciliation at all. This function is the **only** place a
+/// project-less row is created, so this is also the only key shape any such
+/// row is ever assigned — nothing here re-keys a row that already exists, and
+/// [`enqueue`]'s project-namespace rows are entirely untouched by this change.
+pub async fn enqueue_global<'e, E>(
+    executor: E,
+    namespace: &SyncNamespace,
+    entity_type: OutboxEntityType,
+    entity_id: Uuid,
+    operation: OutboxOperation,
+    writer_id: Uuid,
+    payload: &serde_json::Value,
+) -> Result<bool>
+where
+    E: sqlx::Executor<'e, Database = Sqlite>,
+{
+    debug_assert!(
+        is_global_entity(entity_type),
+        "enqueue_global called with a project-namespace entity type: {entity_type}"
+    );
+
+    let body = payload.to_string();
+    let key = cairn_core::digest(&format!(
+        "{writer_id}:{entity_type}:{entity_id}:{operation}:{}",
+        cairn_core::digest(&body)
+    ));
+
+    sqlx::query(
+        "INSERT OR IGNORE INTO outbox
+            (id, project_id, server_project_id, entity_type, entity_id, operation,
+             idempotency_key, payload, state, attempts, created_at, namespace)
+         VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, 'pending', 0, ?7, ?8)",
+    )
+    .bind(new_id().to_string())
+    .bind(entity_type.as_str())
+    .bind(entity_id.to_string())
+    .bind(operation.as_str())
+    .bind(key)
+    .bind(body)
+    .bind(rows::now_text())
+    .bind(namespace.key())
+    .execute(executor)
+    .await?;
+    Ok(true)
+}
+
+/// Re-key every outbox row on one namespace.
+///
+/// The rows themselves are untouched — including their `idempotency_key`, which
+/// does not include the namespace and must not change: an entry that was
+/// partially delivered before the re-key has to be recognised as the same entry
+/// afterwards, or it applies twice (FR-562).
+///
+/// Its one caller re-keys a lane opened against a server that had not yet
+/// reported its instance id. See `cairn_store::cursor::rename`.
+pub async fn rename_namespace(store: &Store, from: &str, to: &str) -> Result<u64> {
+    if from == to {
+        return Ok(0);
+    }
+    let result = sqlx::query("UPDATE outbox SET namespace = ?2 WHERE namespace = ?1")
+        .bind(from)
+        .bind(to)
+        .execute(store.pool())
+        .await?;
+    Ok(result.rows_affected())
 }
 
 /// How long a claim may sit unacknowledged before another drainer may take it.
@@ -239,39 +351,6 @@ pub async fn mark_blocked(
     Ok(())
 }
 
-/// Return blocked rows the server can now hold to the ordinary queue.
-///
-/// `entity_types` names what the upgraded server can hold. A row whose kind is
-/// still unsupported **stays blocked**: releasing everything on any capability
-/// change would put work back in front of a server that still cannot take it,
-/// and the futile retry the state exists to prevent would happen anyway.
-///
-/// The idempotency key and the payload are untouched, so the delivery that
-/// follows is **the one that was waiting** rather than a second one. The
-/// server's `sync_state` recognises the key and delivery stays exactly-once
-/// with no change to the claim mechanism (SC-331).
-pub async fn release_blocked(
-    store: &Store,
-    project_id: Uuid,
-    entity_types: &[OutboxEntityType],
-) -> Result<u64> {
-    let mut released = 0;
-    for entity_type in entity_types {
-        let n = sqlx::query(
-            "UPDATE outbox
-                SET state = 'pending', blocked_reason = NULL, blocked_at_capability = NULL
-              WHERE project_id = ?1 AND state = 'blocked' AND entity_type = ?2",
-        )
-        .bind(project_id.to_string())
-        .bind(entity_type.as_str())
-        .execute(store.pool())
-        .await?
-        .rows_affected();
-        released += n;
-    }
-    Ok(released)
-}
-
 /// Blocked rows, and the capability gap each is waiting on.
 pub async fn blocked(store: &Store, project_id: Uuid) -> Result<Vec<BlockedItem>> {
     let rs = sqlx::query(
@@ -392,6 +471,160 @@ pub async fn total(store: &Store, project_id: Uuid) -> Result<i64> {
         .fetch_one(store.pool())
         .await?;
     Ok(n)
+}
+
+// ---------------------------------------------------------------------------
+// Namespace-scoped operations (D426, D427, `contracts/sync-namespaces.md` §4)
+//
+// `personal:*` and `team:*` rows carry no `project_id` at all, so every
+// project-scoped query above needs a namespace-keyed counterpart that works
+// uniformly across all three namespace kinds. For a `project:*` row the two
+// predicates agree — its `namespace` column is always `project:<project_id>`,
+// written by `enqueue` — so these are not a second, divergent implementation;
+// they are the same claim/count/release logic reached through the column every
+// row now carries instead of the one only eight of twelve entity types have.
+//
+// `claim`, `counts`, `blocked`, `blocked_count`, `failures`
+// and `total` above are left exactly as they were: `crates/cairnd/src/
+// recover.rs` and this file's own tests still call `claim(store, project_id,
+// _)` directly, and changing that signature out from under them is not this
+// namespace widening's job.
+// ---------------------------------------------------------------------------
+
+/// [`claim`], scoped by namespace instead of by project.
+///
+/// The only path that can claim a `personal:*` or `team:*` row, since neither
+/// carries a `project_id` for `claim`'s predicate to match against.
+pub async fn claim_namespace(
+    store: &Store,
+    namespace: &str,
+    limit: i64,
+) -> Result<Vec<(Uuid, SyncItem)>> {
+    let now = chrono::Utc::now();
+    let stale_before = rows::ts_text(now - chrono::Duration::seconds(CLAIM_TIMEOUT_SECONDS));
+
+    let rs = sqlx::query(
+        "UPDATE outbox
+            SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1
+          WHERE id IN (
+              SELECT id FROM outbox
+               WHERE namespace = ?2
+                 AND state != 'blocked'
+                 AND (state = 'pending'
+                      OR (state = 'in_flight'
+                          AND (claimed_at IS NULL OR claimed_at < ?3)))
+               ORDER BY created_at, id
+               LIMIT ?4
+          )
+          RETURNING *",
+    )
+    .bind(rows::ts_text(now))
+    .bind(namespace)
+    .bind(stale_before)
+    .bind(limit)
+    .fetch_all(store.pool())
+    .await?;
+
+    // `RETURNING` does not promise an order; the queue is oldest-first —
+    // same sort as `claim`, for the same reason.
+    let mut claimed = rs
+        .iter()
+        .map(|r| {
+            let payload_raw: String = r.try_get("payload")?;
+            let created_at: String = r.try_get("created_at")?;
+            let id = rows::uuid(r, "id")?;
+            Ok((
+                created_at,
+                id,
+                SyncItem {
+                    idempotency_key: r.try_get("idempotency_key")?,
+                    entity_type: rows::enum_val(r, "entity_type")?,
+                    entity_id: rows::uuid(r, "entity_id")?,
+                    operation: rows::enum_val(r, "operation")?,
+                    payload: serde_json::from_str(&payload_raw).unwrap_or(serde_json::Value::Null),
+                },
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    claimed.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+
+    Ok(claimed
+        .into_iter()
+        .map(|(_, id, item)| (id, item))
+        .collect())
+}
+
+/// Release every held row on one namespace whose capability the server now has.
+///
+/// Replaced the project-scoped `release_blocked` outright rather than sitting
+/// beside it: a project's namespace is `project:<id>`, so one function covers
+/// both, and two spellings of "release what is now deliverable" is one more than
+/// this needs.
+pub async fn release_blocked_namespace(
+    store: &Store,
+    namespace: &str,
+    entity_types: &[OutboxEntityType],
+) -> Result<u64> {
+    let mut released = 0;
+    for entity_type in entity_types {
+        let n = sqlx::query(
+            "UPDATE outbox
+                SET state = 'pending', blocked_reason = NULL, blocked_at_capability = NULL
+              WHERE namespace = ?1 AND state = 'blocked' AND entity_type = ?2",
+        )
+        .bind(namespace)
+        .bind(entity_type.as_str())
+        .execute(store.pool())
+        .await?
+        .rows_affected();
+        released += n;
+    }
+    Ok(released)
+}
+
+/// [`counts`], scoped by namespace instead of by project.
+pub async fn counts_namespace(store: &Store, namespace: &str) -> Result<(i64, i64)> {
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox
+          WHERE namespace = ?1 AND state IN ('pending', 'in_flight')",
+    )
+    .bind(namespace)
+    .fetch_one(store.pool())
+    .await?;
+    let failed: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE namespace = ?1 AND state = 'failed'")
+            .bind(namespace)
+            .fetch_one(store.pool())
+            .await?;
+    Ok((pending, failed))
+}
+
+/// [`blocked_count`], scoped by namespace instead of by project.
+pub async fn blocked_count_namespace(store: &Store, namespace: &str) -> Result<i64> {
+    Ok(
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox WHERE namespace = ?1 AND state = 'blocked'",
+        )
+        .bind(namespace)
+        .fetch_one(store.pool())
+        .await?,
+    )
+}
+
+/// Every namespace this store has ever queued work for, whatever its state.
+///
+/// Reads the outbox rather than `sync_cursor` because a namespace can have
+/// queued work before its first successful pull ever ran (a brand-new
+/// `personal:*` note, written before this machine has talked to the server
+/// at all) — `sync_cursor` would miss exactly that namespace until a pull
+/// succeeded once, and the background worker needs to know to drain it before
+/// then, not only to pull it.
+pub async fn known_namespaces(store: &Store) -> Result<Vec<String>> {
+    let rs: Vec<(String,)> =
+        sqlx::query_as("SELECT DISTINCT namespace FROM outbox ORDER BY namespace")
+            .fetch_all(store.pool())
+            .await?;
+    Ok(rs.into_iter().map(|(n,)| n).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1010,5 +1243,339 @@ mod tests {
 
         assert!(claim(&store, project, 10).await.unwrap().is_empty());
         assert_eq!(counts(&store, project).await.unwrap(), (0, 1));
+    }
+
+    // -----------------------------------------------------------------------
+    // `enqueue_global` — the writer-mixed idempotency key (T096, §7)
+    // -----------------------------------------------------------------------
+
+    /// Two stores (two `writer_id`s) producing byte-identical personal content
+    /// for the same entity id must not collide as one row: the whole point of
+    /// mixing `writer_id` into the key is that reconciliation, not the
+    /// transport layer, decides whether they are duplicates (§7, FR-491).
+    #[tokio::test]
+    async fn two_writers_with_identical_content_enqueue_two_distinct_rows() {
+        let store = Store::open_memory().await.unwrap();
+        let namespace = SyncNamespace::Personal(new_id(), new_id());
+        let entity = new_id();
+        let payload = serde_json::json!({ "id": entity, "content": "same fact" });
+
+        let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+        enqueue_global(
+            &mut *tx,
+            &namespace,
+            OutboxEntityType::PersonalKnowledge,
+            entity,
+            OutboxOperation::Upsert,
+            new_id(), // writer A
+            &payload,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+        enqueue_global(
+            &mut *tx,
+            &namespace,
+            OutboxEntityType::PersonalKnowledge,
+            entity,
+            OutboxOperation::Upsert,
+            new_id(), // writer B — different identity, same everything else
+            &payload,
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        assert_eq!(
+            rows_on(&store, &namespace.key()).await,
+            2,
+            "two different writers' identical content must not collide on one outbox row"
+        );
+    }
+
+    /// Rows queued on one namespace, for the assertions below.
+    ///
+    /// A test helper rather than a public accessor: `sync status` computes every
+    /// per-namespace count it reports in one aggregate query
+    /// (`cairnd::handlers::namespace_sync_status`), so a public function per
+    /// count was a second way to ask the same question that no production
+    /// surface used.
+    async fn rows_on(store: &Store, namespace: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox WHERE namespace = ?1")
+            .bind(namespace.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    }
+
+    /// The **same** writer redelivering the same content is still idempotent —
+    /// mixing in `writer_id` must not turn ordinary redelivery into a pile-up.
+    #[tokio::test]
+    async fn the_same_writer_redelivering_identical_content_stays_idempotent() {
+        let store = Store::open_memory().await.unwrap();
+        let namespace = SyncNamespace::Team(new_id());
+        let entity = new_id();
+        let writer = new_id();
+        let payload = serde_json::json!({ "id": entity, "content": "a team fact" });
+
+        for _ in 0..3 {
+            let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+            enqueue_global(
+                &mut *tx,
+                &namespace,
+                OutboxEntityType::TeamKnowledge,
+                entity,
+                OutboxOperation::Upsert,
+                writer,
+                &payload,
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+        assert_eq!(rows_on(&store, &namespace.key()).await, 1);
+    }
+
+    /// `enqueue_global` rows are project-less, exactly as migration 7's CHECK
+    /// requires: `project_id` and `server_project_id` are NULL, never a stray
+    /// zero UUID standing in for "none".
+    #[tokio::test]
+    async fn enqueue_global_rows_carry_no_project_id() {
+        let store = Store::open_memory().await.unwrap();
+        let namespace = SyncNamespace::Team(new_id());
+        let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+        enqueue_global(
+            &mut *tx,
+            &namespace,
+            OutboxEntityType::TeamKnowledge,
+            new_id(),
+            OutboxOperation::Upsert,
+            new_id(),
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+
+        let (project_id, server_project_id): (Option<String>, Option<String>) =
+            sqlx::query_as("SELECT project_id, server_project_id FROM outbox WHERE namespace = ?1")
+                .bind(namespace.key())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(project_id, None);
+        assert_eq!(server_project_id, None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Namespace-scoped claim, block and release (T093, T104, T106, T107)
+    // -----------------------------------------------------------------------
+
+    async fn queue_global_of(store: &Store, namespace: &SyncNamespace, n: usize) {
+        for i in 0..n {
+            let mut tx = crate::tx::begin(store, "queue_global_of").await.unwrap();
+            enqueue_global(
+                &mut *tx,
+                namespace,
+                OutboxEntityType::TeamKnowledge,
+                new_id(),
+                OutboxOperation::Upsert,
+                new_id(),
+                &serde_json::json!({ "i": i }),
+            )
+            .await
+            .unwrap();
+            tx.commit().await.unwrap();
+        }
+    }
+
+    /// A blocked or busy `personal:*` namespace must never surface another
+    /// namespace's rows — the storage-level half of "one namespace's state
+    /// never delays another's" (Invariant 2, FR-488).
+    #[tokio::test]
+    async fn claim_namespace_never_returns_another_namespaces_rows() {
+        let (_dir, store) = file_store().await;
+        let team = SyncNamespace::Team(new_id());
+        let personal = SyncNamespace::Personal(new_id(), new_id());
+        queue_global_of(&store, &team, 3).await;
+        queue_global_of(&store, &personal, 2).await;
+
+        let team_claimed = claim_namespace(&store, &team.key(), 10).await.unwrap();
+        assert_eq!(team_claimed.len(), 3);
+
+        let personal_claimed = claim_namespace(&store, &personal.key(), 10).await.unwrap();
+        assert_eq!(
+            personal_claimed.len(),
+            2,
+            "personal:* must still see its own rows after team:* drained"
+        );
+    }
+
+    /// T108 (FR-502, FR-562): every namespace's unfinished claims release in
+    /// **one** unscoped pass, so a `team:*` claim interrupted mid-flight never
+    /// waits on `project:*` or `personal:*` being released first.
+    #[tokio::test]
+    async fn release_all_claims_covers_every_namespace_in_one_pass() {
+        let (_dir, store) = file_store().await;
+        let project = queue_of(&store, 2).await; // project:<project> via `enqueue`
+        let team = SyncNamespace::Team(new_id());
+        let personal = SyncNamespace::Personal(new_id(), new_id());
+        queue_global_of(&store, &team, 2).await;
+        queue_global_of(&store, &personal, 2).await;
+
+        assert_eq!(claim(&store, project, 10).await.unwrap().len(), 2);
+        assert_eq!(
+            claim_namespace(&store, &team.key(), 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            claim_namespace(&store, &personal.key(), 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // All three namespaces' claims come back in the single unscoped release
+        // `cairnd::recover::release_abandoned_claims` runs once at daemon start —
+        // no per-namespace ordering, no namespace left waiting on another.
+        assert_eq!(release_all_claims(&store).await.unwrap(), 6);
+
+        assert_eq!(claim(&store, project, 10).await.unwrap().len(), 2);
+        assert_eq!(
+            claim_namespace(&store, &team.key(), 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            claim_namespace(&store, &personal.key(), 10)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    /// The capability release/re-probe cycle (T106, T107, §11a), at the
+    /// storage layer: a `blocked` row releases to `pending` with its **original**
+    /// idempotency key intact, and a namespace still holding an unsupported
+    /// entity type stays blocked rather than being swept up by an unrelated
+    /// release.
+    #[tokio::test]
+    async fn release_blocked_namespace_preserves_the_original_idempotency_key() {
+        let (_dir, store) = file_store().await;
+        let namespace = SyncNamespace::Team(new_id());
+        queue_global_of(&store, &namespace, 1).await;
+        let (id, item) = claim_namespace(&store, &namespace.key(), 10)
+            .await
+            .unwrap()
+            .remove(0);
+        let original_key = item.idempotency_key.clone();
+
+        mark_blocked(
+            &store,
+            id,
+            "unknown_entity_type",
+            "schema=2;capabilities=",
+            "the server does not know team_knowledge",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            blocked_count_namespace(&store, &namespace.key())
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Releasing a capability this row does not need leaves it blocked.
+        let released =
+            release_blocked_namespace(&store, &namespace.key(), &[OutboxEntityType::Memory])
+                .await
+                .unwrap();
+        assert_eq!(
+            released, 0,
+            "an unrelated capability must not release this row"
+        );
+        assert_eq!(
+            blocked_count_namespace(&store, &namespace.key())
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Releasing the capability it was actually waiting on frees it, under
+        // the same key it was blocked with.
+        let released =
+            release_blocked_namespace(&store, &namespace.key(), &[OutboxEntityType::TeamKnowledge])
+                .await
+                .unwrap();
+        assert_eq!(released, 1);
+        assert_eq!(
+            blocked_count_namespace(&store, &namespace.key())
+                .await
+                .unwrap(),
+            0
+        );
+
+        let (_, released_item) = claim_namespace(&store, &namespace.key(), 10)
+            .await
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            released_item.idempotency_key, original_key,
+            "a released item must keep the key it was blocked with, so delivery stays exactly-once"
+        );
+    }
+
+    /// A namespace holding both a permanently `failed` row and an ordinary
+    /// `pending` one must still deliver the pending one — the storage-layer
+    /// half of "one bad record does not stall the batch" (§4a).
+    #[tokio::test]
+    async fn a_permanently_failed_row_does_not_block_the_rest_of_its_namespace() {
+        let (_dir, store) = file_store().await;
+        let namespace = SyncNamespace::Personal(new_id(), new_id());
+        queue_global_of(&store, &namespace, 2).await;
+
+        let claimed = claim_namespace(&store, &namespace.key(), 10).await.unwrap();
+        assert_eq!(claimed.len(), 2);
+        let (bad, _) = claimed[0];
+        let (good, _) = claimed[1];
+
+        // An ingest content refusal (422, permanent): `mark_failed`, never
+        // `mark_blocked` — it must not enter `blocked` (§4a, FR-581).
+        mark_failed(&store, bad, "content_rejected: absolute_path")
+            .await
+            .unwrap();
+        mark_delivered(&store, good).await.unwrap();
+
+        let (pending, failed) = counts_namespace(&store, &namespace.key()).await.unwrap();
+        assert_eq!((pending, failed), (0, 1));
+        assert_eq!(
+            blocked_count_namespace(&store, &namespace.key())
+                .await
+                .unwrap(),
+            0,
+            "an ingest refusal must never enter the blocked state"
+        );
+    }
+
+    #[tokio::test]
+    async fn known_namespaces_lists_every_distinct_namespace_with_queued_work() {
+        let (_dir, store) = file_store().await;
+        let project = queue_of(&store, 1).await;
+        let team = SyncNamespace::Team(new_id());
+        queue_global_of(&store, &team, 1).await;
+
+        let known = known_namespaces(&store).await.unwrap();
+        assert!(known.contains(&format!("project:{project}")));
+        assert!(known.contains(&team.key()));
     }
 }

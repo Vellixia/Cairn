@@ -765,3 +765,207 @@ fn rebuilding_a_linked_project_queues_nothing() {
         after - before
     );
 }
+
+// ===========================================================================
+// T189 / FR-442 — the same rebuild obligation, per domain
+// ===========================================================================
+//
+// Personal and team knowledge reuse `classify_proposal` and `derive_subject`
+// unchanged, so the rebuild obligation applies to them too. It applies in a
+// slightly different form, and the difference is worth stating: for project
+// memory there are stored derived values to compare against a recomputation,
+// while the two global domains store **no** derived value at all — their subject
+// reads compute from durable rows on every call.
+//
+// That makes the obligation stronger rather than weaker, and it is what these
+// tests assert: there is nothing cached that could drift, and the computation
+// itself does not depend on the order the durable rows are read in.
+
+fn global_runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+}
+
+/// Neither global domain stores a derived value.
+///
+/// A `reconciliation`, `subject_state` or `answers` column would be a cached
+/// derivation, and a cached derivation is a thing that can disagree with its own
+/// inputs. The project domain has such columns and pays for them with the rebuild
+/// checks above; these two domains avoid the cost by not having them, and this
+/// test is what keeps that true.
+#[test]
+fn no_global_domain_stores_a_derived_value_to_drift() {
+    global_runtime().block_on(async {
+        let store = cairn_store::Store::open_memory().await.unwrap();
+        for table in ["personal_knowledge", "team_knowledge"] {
+            let columns: Vec<String> =
+                sqlx::query_scalar(&format!("SELECT name FROM pragma_table_info('{table}')"))
+                    .fetch_all(store.pool())
+                    .await
+                    .unwrap();
+            assert!(
+                !columns.is_empty(),
+                "{table} does not exist; this test would pass vacuously"
+            );
+            for derived in [
+                "reconciliation",
+                "subject_state",
+                "answers",
+                "answer_count",
+                "distinct_origin_count",
+                "reinforcement_count",
+            ] {
+                assert!(
+                    !columns.iter().any(|c| c == derived),
+                    "{table} stores `{derived}`, a derived value that can disagree with \
+                     the rows it was derived from"
+                );
+            }
+        }
+    });
+}
+
+/// A personal subject derives the same answer however its relations were
+/// recorded.
+///
+/// `derive_subject` consumes relations as a set, and that is what makes
+/// cross-device merge simple: there is no ordering authority to elect. The
+/// project-domain version of this claim is `relation_order_invariance` above; this
+/// is the same claim for a domain that reaches the function through a different
+/// table.
+#[test]
+fn a_personal_subject_derives_the_same_answer_in_any_relation_order() {
+    global_runtime().block_on(async {
+        use cairn_store::global::{create_personal, personal_subject, NewPersonalKnowledge};
+
+        // Two orders of the same three writes. The relations `classify_proposal`
+        // records depend on which rows it has already seen, so writing them in a
+        // different order is what varies the relation set's construction while
+        // leaving the durable facts the same.
+        let mut rendered: Vec<String> = Vec::new();
+        for reversed in [false, true] {
+            let store = cairn_store::Store::open_memory().await.unwrap();
+            let owner = cairn_core::domain::new_id();
+            let mut writes = vec![
+                ("the retry budget is four attempts", "four"),
+                ("retry budget: four attempts", "four"),
+                ("the retry budget is two attempts", "two"),
+            ];
+            if reversed {
+                writes.reverse();
+            }
+            for (content, value) in writes {
+                create_personal(
+                    &store,
+                    NewPersonalKnowledge::direct(
+                        owner,
+                        cairn_core::domain::MemoryType::Fact,
+                        content,
+                        Some("retry.budget"),
+                        Some(value),
+                        Vec::new(),
+                    ),
+                    &[],
+                )
+                .await
+                .expect("create");
+            }
+
+            let subject = personal_subject(&store, owner, "retry.budget")
+                .await
+                .expect("subject");
+            rendered.push(format!(
+                "{:?}|{}|{}",
+                subject.view.reconciliation,
+                subject.view.answers.len(),
+                subject.members.len()
+            ));
+        }
+        assert_eq!(
+            rendered[0], rendered[1],
+            "the order the personal records were written in changed the derived answer"
+        );
+    });
+}
+
+/// Deriving a global subject is a pure read: calling it twice changes nothing.
+///
+/// The companion to `deriving_a_subject_is_a_pure_read` above, for the two
+/// domains that were added after it. A derivation that wrote — a cached answer, a
+/// touched counter — would make recall a write path, which is the thing
+/// `no_read_path_creates_global_content` asserts from the other end.
+#[test]
+fn deriving_a_global_subject_writes_nothing() {
+    global_runtime().block_on(async {
+        use cairn_store::global::{
+            create_personal, personal_subject, propose_team, team_subject, NewPersonalKnowledge,
+            NewTeamKnowledge,
+        };
+
+        let store = cairn_store::Store::open_memory().await.unwrap();
+        let owner = cairn_core::domain::new_id();
+        create_personal(
+            &store,
+            NewPersonalKnowledge::direct(
+                owner,
+                cairn_core::domain::MemoryType::Fact,
+                "the retry budget is four attempts",
+                Some("retry.budget"),
+                Some("four"),
+                Vec::new(),
+            ),
+            &[],
+        )
+        .await
+        .expect("create");
+        propose_team(
+            &store,
+            NewTeamKnowledge::direct(
+                owner,
+                cairn_core::domain::MemoryType::Convention,
+                "release tags are annotated",
+                Some("release.tags"),
+                Some("annotated"),
+                Vec::new(),
+            ),
+            &[],
+        )
+        .await
+        .expect("propose");
+
+        let fingerprint = |store: &cairn_store::Store| {
+            let pool = store.pool().clone();
+            async move {
+                let mut out = String::new();
+                for table in [
+                    "personal_knowledge",
+                    "personal_knowledge_relations",
+                    "team_knowledge",
+                    "team_knowledge_relations",
+                ] {
+                    let n: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table}"))
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                    out.push_str(&format!("{table}={n};"));
+                }
+                out
+            }
+        };
+
+        let before = fingerprint(&store).await;
+        for _ in 0..3 {
+            personal_subject(&store, owner, "retry.budget")
+                .await
+                .unwrap();
+            team_subject(&store, "release.tags").await.unwrap();
+        }
+        assert_eq!(
+            before,
+            fingerprint(&store).await,
+            "deriving a global subject wrote to the store"
+        );
+    });
+}

@@ -26,7 +26,8 @@ pub struct HandoffInputs<'a> {
 pub fn synthesize(input: &HandoffInputs<'_>, trigger: HandoffTrigger) -> Handoff {
     let obs = input.observations;
 
-    let changed_files = derive_changed_files(obs, input.git_changed_files);
+    let changed_files =
+        derive_changed_files(obs, input.git_changed_files, &input.session.worktree_path);
     let tests_executed = derive_tests(obs);
     let failures = derive_failures(obs);
     let decisions = derive_decisions(obs, input.decision_memories);
@@ -79,22 +80,50 @@ fn derive_goal(input: &HandoffInputs<'_>) -> String {
     format!("Unbound session on branch {}", input.session.branch)
 }
 
-fn derive_changed_files(obs: &[Observation], git_changed: &[String]) -> Vec<String> {
+/// Observations carry absolute paths (FR-531); the wire, and the prose
+/// `derive_completed` builds from this list, must carry neither.
+///
+/// Every path is relativized against `worktree_root` *unconditionally* —
+/// not only when a separately-reported relative form of the same file
+/// happens to exist. The earlier version only deduplicated a long/short pair
+/// that were both already present, which left an absolute path standing
+/// whenever Git reported nothing to pair it against — exactly the case of a
+/// file with no Git counterpart (untracked, or outside what `git status`
+/// reports at all).
+fn derive_changed_files(
+    obs: &[Observation],
+    git_changed: &[String],
+    worktree_root: &str,
+) -> Vec<String> {
+    let root = worktree_root.trim_end_matches('/');
+    let relativize = |path: String| -> String {
+        match path.strip_prefix(root) {
+            Some(rest) if rest.starts_with('/') => rest.trim_start_matches('/').to_string(),
+            _ => path,
+        }
+    };
+
     let mut files: Vec<String> = obs
         .iter()
         .filter(|o| o.kind == ObservationType::FileChanged)
         .filter_map(|o| o.path.clone())
+        .map(relativize)
         .chain(git_changed.iter().cloned())
         .collect();
     files.sort();
     files.dedup();
-    // Observations carry absolute paths; Git reports the same file relative to
-    // the repository root. Plain `dedup` cannot see that those are one file, so
-    // two edits arrived as "5 file(s) changed". Where one entry is a
-    // component-aligned suffix of another, keep the shorter, repository-relative
-    // form and drop the absolute duplicate.
-    let absolute_duplicates: Vec<String> = files
+
+    // A path can still look absolute here: `worktree_path` and the path an
+    // observation captured can each be built through a different symlink to
+    // the same directory (`/tmp` is itself a symlink to `/private/tmp` on
+    // macOS), so a prefix strip against the recorded root does not always
+    // fire even though the file is the one Git already reported relatively.
+    // Where a survivor is a component-aligned suffix of another entry, that
+    // other entry is the same file's relative form; keep it and drop the
+    // absolute one.
+    let absolute_survivors: Vec<String> = files
         .iter()
+        .filter(|p| p.starts_with('/'))
         .filter(|long| {
             files
                 .iter()
@@ -102,7 +131,7 @@ fn derive_changed_files(obs: &[Observation], git_changed: &[String]) -> Vec<Stri
         })
         .cloned()
         .collect();
-    files.retain(|f| !absolute_duplicates.contains(f));
+    files.retain(|f| !absolute_survivors.contains(f));
     files
 }
 
@@ -110,11 +139,60 @@ fn derive_tests(obs: &[Observation]) -> Vec<TestRunRecord> {
     obs.iter()
         .filter(|o| o.kind == ObservationType::TestRun)
         .map(|o| TestRunRecord {
-            command: o.command.clone().unwrap_or_else(|| o.summary.clone()),
+            // The runner's name, never the invocation. The field is `runner`
+            // rather than `command` because the server's recursive field-name
+            // denylist refuses a key called `command` wherever it appears —
+            // sanitizing the value would not have been enough (FR-532).
+            runner: o
+                .command
+                .as_deref()
+                .map(test_runner_name)
+                .unwrap_or_else(|| test_runner_name(&o.summary)),
             outcome: o.outcome.clone().unwrap_or_else(|| "unknown".to_string()),
             occurred_at: o.occurred_at,
         })
         .collect()
+}
+
+/// The invoked command with every argument, flag and path dropped (FR-532).
+///
+/// A test command line is exactly the kind of string this handoff must not
+/// carry off the machine: an argument can be an absolute path, a flag value
+/// can be a secret, and a leading `./script.sh` names a location on this
+/// machine specifically. None of that is `derive_tests`'s job to redact
+/// piecemeal — only to omit. What is safe to keep, and useful, is the
+/// runner's own name: `cargo test --workspace -- --nocapture` becomes
+/// `"cargo test"`; `pytest tests/test_foo.py -k slow` becomes `"pytest"`,
+/// because the very next token names a path.
+fn test_runner_name(command: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for token in command.split_whitespace() {
+        let looks_like_an_argument = token.starts_with('-')
+            || token.contains('/')
+            || token.contains('\\')
+            || token.contains('=');
+        if looks_like_an_argument {
+            break;
+        }
+        kept.push(token);
+    }
+    if let Some(name) = (!kept.is_empty()).then(|| kept.join(" ")) {
+        return name;
+    }
+    // Even the first token looked like a path or a flag (e.g. `./run.sh`);
+    // keep only its final path component so a local script's location does
+    // not survive.
+    command
+        .split_whitespace()
+        .next()
+        .map(|first| {
+            first
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(first)
+                .to_string()
+        })
+        .unwrap_or_else(|| "test".to_string())
 }
 
 fn derive_failures(obs: &[Observation]) -> Vec<String> {
@@ -559,10 +637,30 @@ mod tests {
     #[test]
     fn one_file_reported_two_ways_is_one_changed_file() {
         let mut o = obs(ObservationType::FileChanged, "edited confparse");
+        // `/tmp` is itself a symlink to `/private/tmp` on macOS, so this does
+        // not share a prefix with the session's recorded `/tmp/repo` root —
+        // exercising the suffix-based fallback rather than the direct strip.
         o.path = Some("/private/tmp/repo/src/confparse.py".into());
         let observations = vec![o];
-        let out = derive_changed_files(&observations, &["src/confparse.py".to_string()]);
+        let out = derive_changed_files(
+            &observations,
+            &["src/confparse.py".to_string()],
+            "/tmp/repo",
+        );
         assert_eq!(out, vec!["src/confparse.py".to_string()]);
+    }
+
+    /// The case the old suffix-only dedup could not collapse: a file with no
+    /// Git counterpart at all, so there is no relative form to pair against.
+    /// Direct relativization against the recorded worktree root must still
+    /// fire (FR-531, T177).
+    #[test]
+    fn a_file_with_no_git_counterpart_is_still_relativized() {
+        let mut o = obs(ObservationType::FileChanged, "added a new module");
+        o.path = Some("/tmp/repo/src/new_module.rs".into());
+        let observations = vec![o];
+        let out = derive_changed_files(&observations, &[], "/tmp/repo");
+        assert_eq!(out, vec!["src/new_module.rs".to_string()]);
     }
 
     /// A green suite run with Python's stdlib runner is a test command.

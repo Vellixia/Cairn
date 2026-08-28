@@ -233,7 +233,14 @@ fn release_preserves_identity() {
         .expect("block");
 
         let released =
-            outbox::release_blocked(&f.store, f.project, &[OutboxEntityType::MemoryRelation])
+            // By namespace, which is what production does since Feature 004 —
+            // a project's namespace is `project:<id>`, so this is the same set
+            // of rows the daemon's own release reaches.
+            outbox::release_blocked_namespace(
+                &f.store,
+                &cairn_core::domain::SyncNamespace::Project(f.project).key(),
+                &[OutboxEntityType::MemoryRelation],
+            )
                 .await
                 .expect("release");
         assert_eq!(released, 1);
@@ -281,7 +288,14 @@ fn a_partial_upgrade_releases_only_what_it_covers() {
         }
 
         let released =
-            outbox::release_blocked(&f.store, f.project, &[OutboxEntityType::MemoryRelation])
+            // By namespace, which is what production does since Feature 004 —
+            // a project's namespace is `project:<id>`, so this is the same set
+            // of rows the daemon's own release reaches.
+            outbox::release_blocked_namespace(
+                &f.store,
+                &cairn_core::domain::SyncNamespace::Project(f.project).key(),
+                &[OutboxEntityType::MemoryRelation],
+            )
                 .await
                 .expect("release");
         assert_eq!(released, 1);

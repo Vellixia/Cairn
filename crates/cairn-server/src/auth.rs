@@ -12,6 +12,7 @@ use argon2::password_hash::{
 use argon2::Argon2;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use cairn_core::domain::{ServerRole, UserStatus};
 use rand::RngCore;
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -23,10 +24,26 @@ const SESSION_DAYS: i64 = 30;
 /// applies the same floor to accounts created over HTTP.
 pub const MIN_PASSWORD_LEN: usize = 8;
 
-/// The authenticated caller.
+/// The authenticated caller, and its standing on this server.
+///
+/// Role and status travel with the identity rather than being looked up again
+/// per route. A route that had to remember to check `status` is a route that can
+/// forget to, and `FR-410` says a disabled account is refused "by any means" —
+/// which is only true if the refusal happens where the identity is established.
 #[derive(Debug, Clone, Copy)]
 pub struct CurrentUser {
     pub id: Uuid,
+    pub role: ServerRole,
+    pub status: UserStatus,
+    /// While set, this account may reach the password-change route and nothing
+    /// else (FR-407).
+    pub must_change_password: bool,
+}
+
+impl CurrentUser {
+    pub fn is_admin(&self) -> bool {
+        self.role == ServerRole::Admin
+    }
 }
 
 impl FromRequestParts<AppState> for CurrentUser {
@@ -37,19 +54,173 @@ impl FromRequestParts<AppState> for CurrentUser {
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
         // Bearer token first: that is how the daemon authenticates.
-        if let Some(token) = bearer_token(parts) {
-            if let Some(user) = user_for_api_token(&state.pool, &token).await? {
-                return Ok(CurrentUser { id: user });
+        let id = if let Some(token) = bearer_token(parts) {
+            match user_for_api_token(&state.pool, &token, state.schema_version).await? {
+                Some(user) => user,
+                // Revoked, expired, and never-existed are one answer on
+                // purpose: a distinguishable refusal tells the holder of a
+                // stale token that it was once valid for this server, which is
+                // an oracle about both the server's history and the account
+                // (FR-585).
+                None => return Err(ApiError::unauthorized("invalid API token")),
             }
+        } else if let Some(cookie) = session_cookie(parts) {
+            match user_for_web_session(&state.pool, &cookie).await? {
+                Some(user) => user,
+                None => return Err(ApiError::unauthorized("sign in or supply an API token")),
+            }
+        } else {
+            return Err(ApiError::unauthorized("sign in or supply an API token"));
+        };
+
+        let standing = standing_of(&state.pool, id, state.schema_version).await?;
+        // A token minted before the account was disabled is refused here, which
+        // is what makes revocation-at-disable a belt rather than the only line
+        // of defence: even a token the revoking transaction somehow missed
+        // cannot authenticate a disabled account.
+        if standing.status == UserStatus::Disabled {
+            return Err(ApiError::unauthorized("this account is disabled"));
+        }
+        Ok(standing)
+    }
+}
+
+/// One account's standing, read once per request.
+async fn standing_of(pool: &PgPool, id: Uuid, schema_version: i64) -> ApiResult<CurrentUser> {
+    // All three columns arrive with migration 3. A deployment held back for a
+    // staged rollout is a supported configuration, and selecting them
+    // unconditionally made every request to a schema-2 server fail at the
+    // extractor — before any route ran.
+    //
+    // Below schema 3 the answer is the one this server gave before roles
+    // existed: every account is an active member with nothing outstanding.
+    // There is no way for it to be otherwise, because there is nowhere to
+    // record it.
+    if schema_version < 3 {
+        let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+        if exists.is_none() {
             return Err(ApiError::unauthorized("invalid API token"));
         }
-        if let Some(cookie) = session_cookie(parts) {
-            if let Some(user) = user_for_web_session(&state.pool, &cookie).await? {
-                return Ok(CurrentUser { id: user });
-            }
-        }
-        Err(ApiError::unauthorized("sign in or supply an API token"))
+        return Ok(CurrentUser {
+            id,
+            role: ServerRole::Member,
+            status: UserStatus::Active,
+            must_change_password: false,
+        });
     }
+
+    let row: Option<(String, String, bool)> =
+        sqlx::query_as("SELECT role, status, must_change_password FROM users WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    // A credential that resolves to no row is not a credential. This happens
+    // only if the account was deleted between minting and use, and the honest
+    // answer is the same as any other invalid credential.
+    let Some((role, status, must_change_password)) = row else {
+        return Err(ApiError::unauthorized("invalid API token"));
+    };
+    Ok(CurrentUser {
+        id,
+        role: role.parse().unwrap_or(ServerRole::Member),
+        status: status.parse().unwrap_or(UserStatus::Disabled),
+        must_change_password,
+    })
+}
+
+/// An authenticated caller who has nothing outstanding (FR-407).
+///
+/// **This, not `CurrentUser`, is what an ordinary route should take.**
+/// `CurrentUser` establishes *who* is calling and deliberately does not enforce
+/// the password-change gate, because exactly one route must remain reachable
+/// while the gate is up — the password change itself. Every other route wants
+/// this type, and the compiler is what remembers: a new route added later gets
+/// the gate by writing `SettledUser` in its parameter list, and gets it wrong
+/// only by explicitly asking for the ungated type instead.
+#[derive(Debug, Clone, Copy)]
+pub struct SettledUser(pub CurrentUser);
+
+impl SettledUser {
+    pub fn id(&self) -> Uuid {
+        self.0.id
+    }
+    /// This account's role, as the extractor already resolved it.
+    ///
+    /// Below schema 3 it is always `Member`, because there is nowhere to record
+    /// anything else — see [`standing_of`].
+    pub fn role(&self) -> ServerRole {
+        self.0.role
+    }
+    /// This account's status, as the extractor already resolved it.
+    pub fn status(&self) -> UserStatus {
+        self.0.status
+    }
+}
+
+impl FromRequestParts<AppState> for SettledUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        if user.must_change_password {
+            return Err(password_change_required());
+        }
+        Ok(SettledUser(user))
+    }
+}
+
+/// An authenticated caller who is also an administrator (FR-402).
+///
+/// A separate extractor rather than a check inside each handler: the type is the
+/// authorization. A route that takes `AdminUser` cannot be reached by a member,
+/// and a route that forgot to check cannot compile if it declared the right
+/// parameter.
+#[derive(Debug, Clone, Copy)]
+pub struct AdminUser(pub CurrentUser);
+
+impl AdminUser {
+    /// Who is acting. Administration is auditable by nature — "an account was
+    /// created" is not a useful log line without it.
+    pub fn id(&self) -> Uuid {
+        self.0.id
+    }
+}
+
+impl FromRequestParts<AppState> for AdminUser {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let user = CurrentUser::from_request_parts(parts, state).await?;
+        // The password-change gate applies to administrators too: an account
+        // holding a temporary credential authenticates to the change route and
+        // nothing else, whatever its role (FR-407).
+        if user.must_change_password {
+            return Err(password_change_required());
+        }
+        if !user.is_admin() {
+            return Err(ApiError::forbidden("this action requires an administrator"));
+        }
+        Ok(AdminUser(user))
+    }
+}
+
+/// The refusal every route other than the password change returns while an
+/// account still owes a password change (FR-407).
+pub fn password_change_required() -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::FORBIDDEN,
+        "password_change_required",
+        "change this account's password before doing anything else",
+    )
 }
 
 fn bearer_token(parts: &Parts) -> Option<String> {
@@ -72,6 +243,18 @@ fn session_cookie(parts: &Parts) -> Option<String> {
         .filter_map(|c| c.trim().split_once('='))
         .find(|(k, _)| *k == COOKIE_NAME)
         .map(|(_, v)| v.to_string())
+}
+
+/// A one-time password an operator can read out loud and a user can type.
+///
+/// Same CSPRNG as `random_token`, truncated: a bearer token is 32 bytes because
+/// nothing has to type it, while this is typed once and then replaced. 12 hex
+/// characters is 48 bits, which is far short of a bearer token — and correct
+/// here, because this credential authenticates to exactly one route, is
+/// invalidated by the change it exists to permit, and can be reset by an
+/// administrator at any time.
+pub fn temporary_password() -> String {
+    random_token()[..12].to_string()
 }
 
 /// Tokens are compared by hash, never by plaintext.
@@ -150,20 +333,58 @@ pub async fn ensure_admin(
     // `xmax = 0` distinguishes the inserted row from the updated one: an INSERT
     // leaves no deleting transaction behind, an UPDATE does. It is the only way
     // to tell the two apart from a single upsert.
-    let (id, inserted): (Uuid, bool) = sqlx::query_as(
+    // `role` and `status` are restored, not merely set on insert (FR-539).
+    //
+    // This is the break-glass path, and it only works if it restores *authority*
+    // as well as the password. An operator who demoted or disabled the last
+    // administrator has no supported API left to recover through; without these
+    // two assignments a restart would hand them a working password on an account
+    // that still cannot administer anything.
+    //
+    // `must_change_password` is deliberately forced false (FR-540). The
+    // environment re-establishes this password on every start, so a forced
+    // change would be reverted by the next restart — an unbreakable loop rather
+    // than a security measure.
+    // Below schema 3 there are no standing columns to restore — and nothing that
+    // could have demoted or disabled the account either, so the seed reduces to
+    // what it always was. Selecting them unconditionally made a held-back
+    // deployment fail to *start* when an operator supplied the environment
+    // account, which is the one configuration that exists to prevent lockout.
+    let standing_columns: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'users' AND column_name = 'role'
+         )",
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let sql = if standing_columns {
+        "INSERT INTO users (id, email, display_name, password_hash,
+                            role, status, must_change_password)
+         VALUES ($1, $2, $3, $4, 'admin', 'active', false)
+         ON CONFLICT (email) DO UPDATE
+             SET password_hash        = EXCLUDED.password_hash,
+                 display_name         = EXCLUDED.display_name,
+                 role                 = 'admin',
+                 status               = 'active',
+                 must_change_password = false
+         RETURNING id, (xmax = 0) AS inserted"
+    } else {
         "INSERT INTO users (id, email, display_name, password_hash)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (email) DO UPDATE
              SET password_hash = EXCLUDED.password_hash,
                  display_name  = EXCLUDED.display_name
-         RETURNING id, (xmax = 0) AS inserted",
-    )
-    .bind(Uuid::now_v7())
-    .bind(&email)
-    .bind(display_name)
-    .bind(&hash)
-    .fetch_one(pool)
-    .await?;
+         RETURNING id, (xmax = 0) AS inserted"
+    };
+    let (id, inserted): (Uuid, bool) = sqlx::query_as(sql)
+        .bind(Uuid::now_v7())
+        .bind(&email)
+        .bind(display_name)
+        .bind(&hash)
+        .fetch_one(pool)
+        .await?;
 
     Ok((
         id,
@@ -186,6 +407,7 @@ pub async fn create_user(
     email: &str,
     display_name: &str,
     password: &str,
+    must_change_password: bool,
 ) -> anyhow::Result<(Uuid, String)> {
     let email = email.trim().to_lowercase();
     if email.is_empty() || !email.contains('@') {
@@ -196,15 +418,46 @@ pub async fn create_user(
     }
     let hash = hash_password(password).map_err(|e| anyhow::anyhow!(e.message))?;
     let id = Uuid::now_v7();
-    let result = sqlx::query(
-        "INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)",
+    // `must_change_password` arrives with migration 3, and a deployment held back
+    // for a staged rollout is a supported configuration — an operator
+    // provisioning an account on one must not be met with a column error. The
+    // column is checked rather than the schema version because that is the fact
+    // the statement actually depends on.
+    let has_change_flag: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM information_schema.columns
+              WHERE table_name = 'users' AND column_name = 'must_change_password'
+         )",
     )
-    .bind(id)
-    .bind(&email)
-    .bind(display_name)
-    .bind(hash)
-    .execute(pool)
-    .await;
+    .fetch_one(pool)
+    .await?;
+
+    let result = if has_change_flag {
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, password_hash, must_change_password)
+             VALUES ($1, $2, $3, $4, $5)",
+        )
+        .bind(id)
+        .bind(&email)
+        .bind(display_name)
+        .bind(hash)
+        .bind(must_change_password)
+        .execute(pool)
+        .await
+    } else {
+        // Pre-schema-3: there is no flag to set, and nothing reads one. An
+        // account created here is immediately usable, which is the only
+        // behaviour available and the one that was correct before this feature.
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(id)
+        .bind(&email)
+        .bind(display_name)
+        .bind(hash)
+        .execute(pool)
+        .await
+    };
     match result {
         Ok(_) => Ok((id, email)),
         Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
@@ -214,14 +467,29 @@ pub async fn create_user(
     }
 }
 
-async fn user_for_api_token(pool: &PgPool, token: &str) -> ApiResult<Option<Uuid>> {
+async fn user_for_api_token(
+    pool: &PgPool,
+    token: &str,
+    schema_version: i64,
+) -> ApiResult<Option<Uuid>> {
     let hash = hash_token(token);
-    let row: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT user_id FROM api_tokens WHERE token_hash = $1 AND revoked_at IS NULL",
-    )
-    .bind(&hash)
-    .fetch_optional(pool)
-    .await?;
+    // Expiry sits alongside revocation in one predicate, deliberately: the two
+    // then produce the *same* answer at the same place, so no caller can tell
+    // them apart. A distinguishable refusal would tell whoever holds a stale
+    // token that it was once valid for this server (FR-585, SC-452).
+    //
+    // `expires_at` arrives with migration 3, so a held-back deployment has only
+    // the revocation half. That is not a weakening: with no column, no token can
+    // carry an expiry, so the predicate it would satisfy is vacuous.
+    let sql = if schema_version >= 3 {
+        "SELECT user_id FROM api_tokens
+          WHERE token_hash = $1
+            AND revoked_at IS NULL
+            AND (expires_at IS NULL OR expires_at > now())"
+    } else {
+        "SELECT user_id FROM api_tokens WHERE token_hash = $1 AND revoked_at IS NULL"
+    };
+    let row: Option<(Uuid,)> = sqlx::query_as(sql).bind(&hash).fetch_optional(pool).await?;
 
     if let Some((user_id,)) = row {
         sqlx::query("UPDATE api_tokens SET last_used_at = now() WHERE token_hash = $1")

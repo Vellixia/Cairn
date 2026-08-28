@@ -6,8 +6,12 @@
 //! than merely similar.
 
 use crate::{repo, rows, Result, Store};
+use cairn_core::applicability::applies;
+use cairn_core::context::{PersonalRelevance, TeamRelevance};
 use cairn_core::domain::*;
-use cairn_core::wire::{MemoryQuery, MemoryResult, Provenance, RankInfo};
+use cairn_core::wire::{
+    MemoryQuery, MemoryResult, PersonalSearchResult, Provenance, RankInfo, TeamSearchResult,
+};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
@@ -506,6 +510,293 @@ pub async fn memory_for_scope(
     .fetch_all(store.pool())
     .await?;
     rs.iter().map(rows::memory_bare).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Personal and team search (T160, T161, T162, `contracts/recall-
+// composition.md` §7, §8).
+//
+// Each domain is ranked within its own FTS5 index only, using the identical
+// BM25 expression project search already uses above, applied verbatim in
+// shape against `personal_fts`/`personal_knowledge` and
+// `team_fts`/`team_knowledge`. There is deliberately no function that ranks a
+// project result against a personal or team one, or a personal result
+// against a team one: each domain's ranking input is
+// [`cairn_core::context::PersonalRelevance`] /
+// [`cairn_core::context::TeamRelevance`], a distinct type carrying only that
+// domain's score, so a cross-domain comparison does not compile (D425,
+// FR-471, SC-468).
+// ---------------------------------------------------------------------------
+
+pub const GLOBAL_SEARCH_DEFAULT_LIMIT: i64 = 20;
+const GLOBAL_SEARCH_MAX_LIMIT: i64 = 100;
+/// Rows fetched before the applicability predicate (applied in Rust, not
+/// SQL — see `cairn_store::global::recall_personal`'s doc comment for why)
+/// narrows them to `limit`. Mirrors that function's own candidate cap.
+const GLOBAL_SEARCH_CANDIDATE_CAP: i64 = 500;
+
+/// Every applicability fact for `ids`, grouped by the record they belong to.
+///
+/// One small function shared by [`search_personal`] and [`search_team`]
+/// rather than two copies — `table`/`id_col` are fixed call-site literals,
+/// never caller-supplied text, so there is no injection surface in
+/// interpolating them into the query.
+async fn global_applicability_for(
+    store: &Store,
+    table: &str,
+    id_col: &str,
+    ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, Vec<ApplicabilityFact>>> {
+    let mut map: std::collections::HashMap<Uuid, Vec<ApplicabilityFact>> =
+        std::collections::HashMap::new();
+    if ids.is_empty() {
+        return Ok(map);
+    }
+    let placeholders = std::iter::repeat_n("?", ids.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT {id_col} AS owner_id, kind, value FROM {table}
+          WHERE {id_col} IN ({placeholders})
+          ORDER BY {id_col}, kind, value"
+    );
+    let mut q = sqlx::query(&sql);
+    for id in ids {
+        q = q.bind(id.to_string());
+    }
+    let rs = q.fetch_all(store.pool()).await?;
+    for r in &rs {
+        let owner: Uuid = rows::uuid(r, "owner_id")?;
+        let kind: ApplicabilityKind = rows::enum_val(r, "kind")?;
+        let value: String = r.try_get("value")?;
+        map.entry(owner)
+            .or_default()
+            .push(ApplicabilityFact { kind, value });
+    }
+    Ok(map)
+}
+
+/// This owner's personal knowledge, ranked by BM25 within `personal_fts`
+/// alone, filtered by the applicability predicate against `project_traits`
+/// (`contracts/global-memory.md` §4) — the search-response counterpart of
+/// `cairn_store::global::recall_personal`, which orders by recency rather
+/// than relevance and carries no score a caller could rank by (T160, T162,
+/// FR-471).
+pub async fn search_personal(
+    store: &Store,
+    owner_user_id: Uuid,
+    query_text: Option<&str>,
+    project_traits: &[ProjectTrait],
+    limit: i64,
+) -> Result<Vec<PersonalSearchResult>> {
+    let limit = limit.clamp(1, GLOBAL_SEARCH_MAX_LIMIT) as usize;
+
+    let mut sql =
+        String::from("SELECT pk.id, pk.content, pk.topic_key, pk.value_key, pk.created_at");
+    if query_text.is_some() {
+        sql.push_str(
+            ", -bm25(personal_fts) AS relevance FROM personal_knowledge pk \
+               JOIN personal_fts ON personal_fts.rowid = pk.rowid \
+               WHERE personal_fts MATCH ?",
+        );
+    } else {
+        sql.push_str(", 0.0 AS relevance FROM personal_knowledge pk WHERE 1 = 1");
+    }
+    sql.push_str(" AND pk.owner_user_id = ? AND pk.forgotten_at IS NULL LIMIT ?");
+
+    let mut q = sqlx::query(&sql);
+    if let Some(text) = query_text {
+        q = q.bind(fts_query(text));
+    }
+    q = q.bind(owner_user_id.to_string());
+    q = q.bind(GLOBAL_SEARCH_CANDIDATE_CAP);
+    let raw = q.fetch_all(store.pool()).await?;
+
+    let ids: Vec<Uuid> = raw
+        .iter()
+        .map(|r| rows::uuid(r, "id"))
+        .collect::<Result<_>>()?;
+    let mut app_map = global_applicability_for(
+        store,
+        "personal_knowledge_applicability",
+        "personal_id",
+        &ids,
+    )
+    .await?;
+
+    let mut scored: Vec<(PersonalRelevance, PersonalSearchResult)> = Vec::new();
+    for r in &raw {
+        let id: Uuid = rows::uuid(r, "id")?;
+        let applicability = app_map.remove(&id).unwrap_or_default();
+        if !applies(&applicability, project_traits) {
+            continue;
+        }
+        let relevance: f64 = r.try_get("relevance").unwrap_or(0.0);
+        scored.push((
+            PersonalRelevance {
+                knowledge_id: id,
+                relevance,
+            },
+            PersonalSearchResult {
+                id,
+                content: r.try_get("content")?,
+                topic_key: r.try_get("topic_key")?,
+                value_key: r.try_get("value_key")?,
+                created_at: rows::ts(r, "created_at")?,
+                applicability,
+            },
+        ));
+    }
+    // Ranked within this domain's own corpus alone — never against a project
+    // or team score, which no expression here has access to (D425).
+    scored.sort_by(|a, b| {
+        b.0.relevance
+            .partial_cmp(&a.0.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+    Ok(scored.into_iter().map(|(_, result)| result).collect())
+}
+
+/// Authoritative team knowledge, ranked by BM25 within `team_fts` alone,
+/// filtered by the same applicability predicate as [`search_personal`].
+///
+/// **Never a `proposed` row, for any caller, including its own proposer.**
+/// `cairn_search` and `cairn_context` are both "recall" in the sense
+/// `contracts/global-memory.md` §5b's FR-452 means: a proposed entry is
+/// invisible to *all* recall, full stop — the one surface that shows a
+/// proposer their own pending proposals is `cairn team list`
+/// ([`list_team`]), a deliberately narrower administration view this
+/// function does not share code with.
+pub async fn search_team(
+    store: &Store,
+    query_text: Option<&str>,
+    project_traits: &[ProjectTrait],
+    limit: i64,
+) -> Result<Vec<TeamSearchResult>> {
+    let limit = limit.clamp(1, GLOBAL_SEARCH_MAX_LIMIT) as usize;
+
+    let mut sql = String::from("SELECT tk.id, tk.content, tk.topic_key, tk.value_key, tk.state");
+    if query_text.is_some() {
+        sql.push_str(
+            ", -bm25(team_fts) AS relevance FROM team_knowledge tk \
+               JOIN team_fts ON team_fts.rowid = tk.rowid \
+               WHERE team_fts MATCH ?",
+        );
+    } else {
+        sql.push_str(", 0.0 AS relevance FROM team_knowledge tk WHERE 1 = 1");
+    }
+    // The same predicate `recall_team` and `team_subject` use — one definition,
+    // so search cannot disagree with the briefing about what is current
+    // (FR-462).
+    sql.push_str(&format!(
+        " AND {} LIMIT ?",
+        crate::global::team_active_predicate("tk")
+    ));
+
+    let mut q = sqlx::query(&sql);
+    if let Some(text) = query_text {
+        q = q.bind(fts_query(text));
+    }
+    q = q.bind(GLOBAL_SEARCH_CANDIDATE_CAP);
+    let raw = q.fetch_all(store.pool()).await?;
+
+    let ids: Vec<Uuid> = raw
+        .iter()
+        .map(|r| rows::uuid(r, "id"))
+        .collect::<Result<_>>()?;
+    let mut app_map =
+        global_applicability_for(store, "team_knowledge_applicability", "team_id", &ids).await?;
+
+    let mut scored: Vec<(TeamRelevance, TeamSearchResult)> = Vec::new();
+    for r in &raw {
+        let id: Uuid = rows::uuid(r, "id")?;
+        let applicability = app_map.remove(&id).unwrap_or_default();
+        if !applies(&applicability, project_traits) {
+            continue;
+        }
+        let relevance: f64 = r.try_get("relevance").unwrap_or(0.0);
+        scored.push((
+            TeamRelevance {
+                knowledge_id: id,
+                relevance,
+            },
+            TeamSearchResult {
+                id,
+                content: r.try_get("content")?,
+                topic_key: r.try_get("topic_key")?,
+                value_key: r.try_get("value_key")?,
+                state: rows::enum_val(r, "state")?,
+                applicability,
+            },
+        ));
+    }
+    scored.sort_by(|a, b| {
+        b.0.relevance
+            .partial_cmp(&a.0.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(limit);
+    Ok(scored.into_iter().map(|(_, result)| result).collect())
+}
+
+/// Every team-knowledge entry visible to `caller_user_id`, most recent
+/// first, with **no** applicability filtering (T133).
+///
+/// [`search_team`] narrows by a project's derived traits because a search is
+/// always run from inside one project; `cairn team list` is not — it is a
+/// server-wide administration view, so a record naming `language=rust`
+/// belongs in it regardless of what any one project's manifest says. Ranking
+/// is by recency rather than relevance for the same reason `list` commands
+/// elsewhere in Cairn (`cairn memory list`-shaped reads) never take a query.
+pub async fn list_team(
+    store: &Store,
+    caller_user_id: Uuid,
+    caller_is_admin: bool,
+    limit: i64,
+) -> Result<Vec<TeamSearchResult>> {
+    let limit = limit.clamp(1, GLOBAL_SEARCH_MAX_LIMIT);
+
+    let mut sql = String::from(
+        "SELECT tk.id, tk.content, tk.topic_key, tk.value_key, tk.state FROM team_knowledge tk",
+    );
+    if caller_is_admin {
+        sql.push_str(" WHERE tk.state = 'authoritative' OR tk.state = 'proposed'");
+    } else {
+        sql.push_str(
+            " WHERE tk.state = 'authoritative' \
+               OR (tk.state = 'proposed' AND tk.proposed_by_user_id = ?)",
+        );
+    }
+    sql.push_str(" ORDER BY tk.created_at DESC LIMIT ?");
+
+    let mut q = sqlx::query(&sql);
+    if !caller_is_admin {
+        q = q.bind(caller_user_id.to_string());
+    }
+    q = q.bind(limit);
+    let raw = q.fetch_all(store.pool()).await?;
+
+    let ids: Vec<Uuid> = raw
+        .iter()
+        .map(|r| rows::uuid(r, "id"))
+        .collect::<Result<_>>()?;
+    let mut app_map =
+        global_applicability_for(store, "team_knowledge_applicability", "team_id", &ids).await?;
+
+    raw.iter()
+        .map(|r| {
+            let id: Uuid = rows::uuid(r, "id")?;
+            Ok(TeamSearchResult {
+                id,
+                content: r.try_get("content")?,
+                topic_key: r.try_get("topic_key")?,
+                value_key: r.try_get("value_key")?,
+                state: rows::enum_val(r, "state")?,
+                applicability: app_map.remove(&id).unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

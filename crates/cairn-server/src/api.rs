@@ -1,12 +1,12 @@
 //! HTTP routes (contracts/server-api.md).
 
-use crate::auth::{self, CurrentUser};
+use crate::auth::{self, AdminUser, CurrentUser, SettledUser};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use axum::routing::{delete, get, post};
+use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -30,7 +30,25 @@ pub fn routes() -> Router<AppState> {
         // An operator creates accounts with `cairn-server users add`, which
         // talks to the database directly and is reachable only by whoever
         // already controls the host.
+        //
+        // The route itself still answers, because removal is a compatibility
+        // event for every client built before it and `404` is the one status
+        // that cannot say so — it reads identically to a typo'd URL or a route
+        // that never existed. `410 Gone` means "this existed and was
+        // deliberately retired", and the body names the replacement so an
+        // operator holding only the response can act on it (FR-587,
+        // `compatibility.md` §1b).
+        .route("/api/auth/register", post(register_removed))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/password", post(change_password))
+        // Administration. Every route here takes `AdminUser`, so authorization
+        // is the parameter list rather than a check a handler could forget.
+        .route("/api/admin/users", get(list_users).post(create_user))
+        .route("/api/admin/users/{id}", patch(patch_user))
+        .route(
+            "/api/admin/users/{id}/reset-password",
+            post(reset_user_password),
+        )
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
         .route("/api/tokens", get(list_tokens).post(create_token))
@@ -38,6 +56,10 @@ pub fn routes() -> Router<AppState> {
         // Linking (FR-064)
         .route("/api/projects", get(list_projects).post(create_project))
         .route("/api/projects/lookup", get(lookup_projects))
+        .route(
+            "/api/projects/{id}/members",
+            get(list_members).post(add_member).delete(remove_member),
+        )
         // No join route either, for the same reason. It required only that the
         // project exist, so naming a UUID was enough to become a member of it —
         // and `lookup` below handed those UUIDs out. A client attaching a fresh
@@ -45,9 +67,33 @@ pub fn routes() -> Router<AppState> {
         // `GET /api/projects` already reports the caller's memberships, and
         // `cairn link --project` now checks that list instead of asking to be
         // added to it.
+        //
+        // Same `410 Gone` treatment, for the same reason (FR-587).
+        .route("/api/projects/{id}/join", post(join_removed))
         // Sync
         .route("/api/sync/batch", post(sync_batch))
         .route("/api/sync/changes", get(sync_changes))
+        // Read-back for the two non-project domains (T101, T129).
+        //
+        // Two routes rather than one taking a namespace: see
+        // `global::GlobalChangesQuery` for why, the short version being that a
+        // namespace parameter is one field away from being an owner selector,
+        // and personal knowledge must have no parameter capable of naming
+        // someone else's.
+        //
+        // Deliberately **not** extra arrays on `/api/sync/changes`: that route
+        // takes a `project_id` and answers under one cursor, and each namespace
+        // has to keep its own pull position and its own backoff (FR-486,
+        // FR-487, FR-488). Sharing the project route would couple a personal
+        // pull to a project the personal domain does not belong to.
+        .route("/api/sync/changes/personal", get(sync_personal_changes))
+        .route("/api/sync/changes/team", get(sync_team_changes))
+        // The team lifecycle. `AdminUser` on both handlers, so a member reaching
+        // either is refused before the handler runs — an agent has no tool
+        // action shaped like ratification and must not gain one through a route
+        // (FR-455, FR-515).
+        .route("/api/team/{id}/ratify", post(ratify_team))
+        .route("/api/team/{id}/retire", post(retire_team))
         // Read API for the web UI
         .route("/api/projects/{id}", get(project_overview))
         .route("/api/projects/{id}/tasks", get(project_tasks))
@@ -62,6 +108,38 @@ pub fn routes() -> Router<AppState> {
         )
 }
 
+/// The two routes the security prerequisite removed answer here (FR-587).
+///
+/// Neither takes an authentication extractor. A client that used to register
+/// had no account to authenticate with, and a client that used to self-join
+/// deserves to learn the route is gone rather than that its token is wrong —
+/// answering `401` first would hide the actual fact behind an unrelated one.
+///
+/// The message names both the replacement route and the CLI verb, because the
+/// two audiences that hit this are an integrator reading HTTP and an operator
+/// reading a terminal, and neither should have to translate for the other
+/// (`compatibility.md` §1b, SC-458).
+async fn register_removed() -> ApiError {
+    ApiError::new(
+        StatusCode::GONE,
+        "route_removed",
+        "self-registration is disabled; an administrator creates accounts with          `POST /api/admin/users` (`cairn user create`)",
+    )
+}
+
+/// See [`register_removed`].
+///
+/// The path segment is taken as a string rather than parsed as a UUID: a
+/// malformed id would otherwise be refused as a bad request, which says
+/// nothing about the route being gone.
+async fn join_removed(Path(_id): Path<String>) -> ApiError {
+    ApiError::new(
+        StatusCode::GONE,
+        "route_removed",
+        "self-join is disabled; an existing member or admin adds you with          `POST /api/projects/{id}/members` (`cairn project member add`)",
+    )
+}
+
 async fn health() -> Json<Value> {
     Json(json!({ "ok": true }))
 }
@@ -71,7 +149,10 @@ async fn health() -> Json<Value> {
 /// Unauthenticated on purpose: the version of a service is not a secret, and
 /// the sign-in page is a reasonable place to show it.
 async fn version(State(state): State<AppState>) -> Json<Value> {
-    let payload = state.releases.payload(state.schema_version).await;
+    let payload = state
+        .releases
+        .payload(state.schema_version, state.server_instance_id)
+        .await;
     Json(serde_json::to_value(payload).unwrap_or_else(|_| json!({})))
 }
 
@@ -89,7 +170,18 @@ async fn login(
     State(state): State<AppState>,
     Json(body): Json<LoginBody>,
 ) -> ApiResult<impl IntoResponse> {
-    let row = sqlx::query("SELECT id, password_hash FROM users WHERE email = $1")
+    // `status` arrives with migration 3, and a deployment held back for a staged
+    // rollout is a supported configuration — selecting the column unconditionally
+    // made every schema-2 server refuse every login. Same shape as
+    // `auth::create_user`'s check, and for the same reason: the column is what
+    // the statement depends on, not the schema number.
+    let has_status = state.schema_version >= 3;
+    let sql = if has_status {
+        "SELECT id, password_hash, status FROM users WHERE email = $1"
+    } else {
+        "SELECT id, password_hash FROM users WHERE email = $1"
+    };
+    let row = sqlx::query(sql)
         .bind(body.email.trim().to_lowercase())
         .fetch_optional(&state.pool)
         .await?;
@@ -106,6 +198,24 @@ async fn login(
         ));
     }
     let user_id: Uuid = row.try_get("id")?;
+    // A disabled account is refused authentication **by any means**, including a
+    // password that remains otherwise correct (FR-410). Asserted separately from
+    // token revocation by SC-436, because a regression in either must not be
+    // masked by the other still working: revoking tokens without refusing the
+    // password leaves a disabled account able to sign in and mint fresh ones.
+    // Below schema 3 there is no status to read, and no way for an account to be
+    // disabled — so every account is active, which is exactly what this server
+    // did before the column existed.
+    let status: String = if has_status {
+        row.try_get("status")?
+    } else {
+        "active".to_string()
+    };
+    if status != "active" {
+        return Err(ApiError::unauthorized(
+            "no account with that email and password",
+        ));
+    }
     let token = auth::create_web_session(&state.pool, user_id).await?;
 
     let mut headers = HeaderMap::new();
@@ -147,15 +257,23 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
     Ok((out, Json(json!({ "ok": true }))))
 }
 
-async fn me(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
+async fn me(State(state): State<AppState>, user: SettledUser) -> ApiResult<Json<Value>> {
     let row = sqlx::query("SELECT id, email, display_name FROM users WHERE id = $1")
-        .bind(user.id)
+        .bind(user.id())
         .fetch_one(&state.pool)
         .await?;
+    // `role` and `status` come from the extractor rather than a second query:
+    // the extractor already resolved them for this request, including the
+    // schema-2 answer where the columns do not exist. A client that needs to
+    // know whether it may ratify team knowledge asks the server rather than
+    // caching an answer locally — an authority claim verified against a stale
+    // local copy is not verified (FR-464, T121).
     Ok(Json(json!({
         "id": row.try_get::<Uuid, _>("id")?,
         "email": row.try_get::<String, _>("email")?,
         "display_name": row.try_get::<String, _>("display_name")?,
+        "role": user.role().as_str(),
+        "status": user.status().as_str(),
     })))
 }
 
@@ -163,6 +281,10 @@ async fn me(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<
 struct TokenBody {
     #[serde(default = "default_token_name")]
     name: String,
+    /// Optional expiry (FR-417). Omitted or null means no expiry — today's
+    /// behaviour, unchanged for every existing caller.
+    #[serde(default)]
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn default_token_name() -> String {
@@ -172,27 +294,62 @@ fn default_token_name() -> String {
 /// The plaintext is returned exactly once and never stored (D10).
 async fn create_token(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Json(body): Json<TokenBody>,
 ) -> ApiResult<Json<Value>> {
+    // `SettledUser` is doing the important work in the signature above.
+    //
+    // This is the one route where escaping the password-change gate would undo
+    // it entirely: a temporary credential that can mint a bearer token has
+    // bought itself unrestricted access, and the restriction it was under stops
+    // meaning anything (FR-407). The gate lives on the extractor rather than
+    // here so that a route added later inherits it by default instead of
+    // needing to remember.
     let token = auth::random_token();
     let id = Uuid::now_v7();
-    sqlx::query("INSERT INTO api_tokens (id, user_id, name, token_hash) VALUES ($1, $2, $3, $4)")
+    // `expires_at` arrives with migration 3. Below it there is no column to
+    // write, and a caller asking for an expiry on a server that cannot record
+    // one is refused rather than quietly given a token that never expires —
+    // silently downgrading a security control is worse than declining it.
+    if state.schema_version < 3 {
+        if body.expires_at.is_some() {
+            return Err(ApiError::invalid(
+                "this server predates token expiry; upgrade it or omit expires_at",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO api_tokens (id, user_id, name, token_hash) VALUES ($1, $2, $3, $4)",
+        )
         .bind(id)
-        .bind(user.id)
+        .bind(user.id())
         .bind(&body.name)
         .bind(auth::hash_token(&token))
         .execute(&state.pool)
         .await?;
-    Ok(Json(json!({ "id": id, "name": body.name, "token": token })))
+        return Ok(Json(json!({ "id": id, "name": body.name, "token": token })));
+    }
+    sqlx::query(
+        "INSERT INTO api_tokens (id, user_id, name, token_hash, expires_at)
+         VALUES ($1, $2, $3, $4, $5)",
+    )
+    .bind(id)
+    .bind(user.id())
+    .bind(&body.name)
+    .bind(auth::hash_token(&token))
+    .bind(body.expires_at)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(
+        json!({ "id": id, "name": body.name, "token": token, "expires_at": body.expires_at }),
+    ))
 }
 
-async fn list_tokens(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
+async fn list_tokens(State(state): State<AppState>, user: SettledUser) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(
         "SELECT id, name, created_at, last_used_at, revoked_at FROM api_tokens
          WHERE user_id = $1 ORDER BY created_at DESC",
     )
-    .bind(user.id)
+    .bind(user.id())
     .fetch_all(&state.pool)
     .await?;
 
@@ -213,15 +370,348 @@ async fn list_tokens(State(state): State<AppState>, user: CurrentUser) -> ApiRes
 
 async fn revoke_token(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     sqlx::query("UPDATE api_tokens SET revoked_at = now() WHERE id = $1 AND user_id = $2")
         .bind(id)
-        .bind(user.id)
+        .bind(user.id())
         .execute(&state.pool)
         .await?;
     Ok(Json(json!({ "revoked": id })))
+}
+
+// ---------------------------------------------------------------------------
+// Administration (FR-401 through FR-414, FR-553 through FR-559)
+// ---------------------------------------------------------------------------
+
+/// One account, as every admin route reports it.
+fn user_json(row: &sqlx::postgres::PgRow) -> Value {
+    json!({
+        "id": row.get::<Uuid, _>("id"),
+        "email": row.get::<String, _>("email"),
+        "display_name": row.get::<String, _>("display_name"),
+        "role": row.get::<String, _>("role"),
+        "status": row.get::<String, _>("status"),
+        "must_change_password": row.get::<bool, _>("must_change_password"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+    })
+}
+
+const USER_COLUMNS: &str =
+    "id, email, display_name, role, status, must_change_password, created_at";
+
+#[derive(Deserialize)]
+struct CreateUserBody {
+    email: String,
+    display_name: String,
+}
+
+/// `POST /api/admin/users` — the only route that creates an account (FR-401).
+///
+/// The temporary password is returned **once**, in this response, and nowhere
+/// else ever (FR-403). There is no route that reads it back — not for the
+/// administrator who created the account, not for anyone. A password that can be
+/// retrieved after creation is a password stored in retrievable form, whatever
+/// the storage claims.
+async fn create_user(
+    State(state): State<AppState>,
+    actor: AdminUser,
+    Json(body): Json<CreateUserBody>,
+) -> ApiResult<impl IntoResponse> {
+    let temporary = auth::temporary_password();
+    // `must_change_password = true`: the credential above authenticates to the
+    // password-change route and to nothing else (FR-404, FR-407).
+    let created = auth::create_user(
+        &state.pool,
+        &body.email,
+        &body.display_name,
+        &temporary,
+        true,
+    )
+    .await;
+    let (id, email) = match created {
+        Ok(pair) => pair,
+        // The account-exists case is a conflict, not an internal error, and it
+        // is the one failure a caller can act on.
+        Err(e) if e.to_string().contains("already has an account") => {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "email_taken",
+                "that email already has an account",
+            ));
+        }
+        Err(e) => return Err(ApiError::internal(e.to_string())),
+    };
+
+    // The password is never logged, and this line is why the actor is carried on
+    // the extractor: "an account was created" without "by whom" is not an audit
+    // record, it is a statistic.
+    tracing::info!(created_user = %id, by = %actor.id(), "account created");
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "id": id,
+            "email": email,
+            "display_name": body.display_name,
+            "role": "member",
+            "status": "active",
+            "must_change_password": true,
+            "temporary_password": temporary,
+        })),
+    ))
+}
+
+/// `GET /api/admin/users` — every account, its role and its status (FR-411).
+async fn list_users(
+    State(state): State<AppState>,
+    AdminUser(_): AdminUser,
+) -> ApiResult<Json<Value>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {USER_COLUMNS} FROM users ORDER BY created_at"
+    ))
+    .fetch_all(&state.pool)
+    .await?;
+    Ok(Json(
+        json!({ "users": rows.iter().map(user_json).collect::<Vec<_>>() }),
+    ))
+}
+
+#[derive(Deserialize)]
+struct PatchUserBody {
+    #[serde(default)]
+    role: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+/// The one advisory-lock key every admin-count-reducing operation serializes on
+/// (D445, FR-574).
+///
+/// A fixed constant, because two transactions taking *different* keys serialize
+/// against nothing.
+const ADMIN_COUNT_LOCK: i64 = 4_770_040_001;
+
+/// `PATCH /api/admin/users/{id}` — promote, demote, disable, enable (FR-408,
+/// FR-412), under the last-admin guarantee (FR-413, FR-560, FR-574).
+async fn patch_user(
+    State(state): State<AppState>,
+    AdminUser(_): AdminUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<PatchUserBody>,
+) -> ApiResult<Json<Value>> {
+    let role = parse_optional::<cairn_core::domain::ServerRole>(body.role.as_deref(), "role")?;
+    let status =
+        parse_optional::<cairn_core::domain::UserStatus>(body.status.as_deref(), "status")?;
+    if role.is_none() && status.is_none() {
+        return Err(ApiError::invalid("name a role, a status, or both"));
+    }
+
+    let mut tx = state.pool.begin().await?;
+
+    let target: Option<(String,)> = sqlx::query_as("SELECT email FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let Some((target_email,)) = target else {
+        return Err(ApiError::not_found("no such account"));
+    };
+
+    // The environment-named account is refused outright, before any lock: a
+    // change a restart would silently revert is worse than a rejection, because
+    // the operator walks away believing it took (FR-541, FR-542).
+    let reduces_authority = matches!(role, Some(cairn_core::domain::ServerRole::Member))
+        || matches!(status, Some(cairn_core::domain::UserStatus::Disabled));
+    if reduces_authority && state.is_environment_account(&target_email) {
+        return Err(environment_account_refusal());
+    }
+
+    // Serialize *before* reading anything. Two demotions of the last two admins
+    // each individually look legal against the state their own transaction sees;
+    // the lock is what makes the second one see the first one's commit (D436).
+    if reduces_authority {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(ADMIN_COUNT_LOCK)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // One statement. The `EXISTS` and the `UPDATE` are evaluated together, so
+    // there is no read whose result a later write trusts — the anomaly a
+    // count-then-update implementation permits has nowhere to happen.
+    let guard = if reduces_authority {
+        "AND EXISTS (SELECT 1 FROM users
+                      WHERE role = 'admin' AND status = 'active' AND id <> $1)"
+    } else {
+        ""
+    };
+    let updated: Option<sqlx::postgres::PgRow> = sqlx::query(&format!(
+        "UPDATE users
+            SET role   = COALESCE($2, role),
+                status = COALESCE($3, status)
+          WHERE id = $1 {guard}
+        RETURNING {USER_COLUMNS}"
+    ))
+    .bind(id)
+    .bind(role.map(|r| r.as_str()))
+    .bind(status.map(|s| s.as_str()))
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some(row) = updated else {
+        // Zero rows, and the row exists, so the guard is what refused: this
+        // account is the last active administrator.
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "last_admin",
+            "this is the server's only remaining active administrator",
+        ));
+    };
+
+    // Disabling revokes every live token **in the same transaction as the status
+    // change** (FR-409). Two statements in one transaction, not two
+    // transactions: a window in which the account is disabled and its tokens
+    // still work is exactly the window a cached token exploits.
+    //
+    // Re-enabling deliberately does **not** clear `revoked_at` (FR-590). A
+    // re-enabled account mints fresh tokens; it does not inherit the ones it
+    // held before.
+    if matches!(status, Some(cairn_core::domain::UserStatus::Disabled)) {
+        sqlx::query(
+            "UPDATE api_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM web_sessions WHERE user_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    tx.commit().await?;
+    Ok(Json(user_json(&row)))
+}
+
+/// `POST /api/admin/users/{id}/reset-password` (FR-553–FR-559, FR-573).
+async fn reset_user_password(
+    State(state): State<AppState>,
+    AdminUser(_): AdminUser,
+    Path(id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let target: Option<(String,)> = sqlx::query_as("SELECT email FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?;
+    let Some((email,)) = target else {
+        return Err(ApiError::not_found("no such account"));
+    };
+    // Refused for the environment-named account: its password is re-established
+    // from the environment on every start, so a reset would be silently undone
+    // (FR-559).
+    if state.is_environment_account(&email) {
+        return Err(environment_account_refusal());
+    }
+
+    let temporary = auth::temporary_password();
+    let hash = auth::hash_password(&temporary)?;
+    let mut tx = state.pool.begin().await?;
+
+    // The previous password stops working at the same instant the new one starts
+    // (FR-555), and the account owes a change again (FR-557). `status` is
+    // untouched on purpose: resetting a disabled account's password does **not**
+    // re-enable it (FR-558). A reset is a credential operation and re-enabling
+    // is an authority operation; conflating them means an administrator clearing
+    // a forgotten password silently readmits an account they disabled on
+    // purpose.
+    sqlx::query(
+        "UPDATE users
+            SET password_hash = $2, must_change_password = true, password_changed_at = now()
+          WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&hash)
+    .execute(&mut *tx)
+    .await?;
+
+    // Every token the account held is refused from here on (FR-556): a reset
+    // exists because the credential may be compromised, and leaving bearer
+    // tokens alive would leave the compromise alive.
+    sqlx::query(
+        "UPDATE api_tokens SET revoked_at = now() WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query("DELETE FROM web_sessions WHERE user_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+
+    // Returned once, on this response, and never retrievable again (FR-554).
+    Ok(Json(json!({ "id": id, "temporary_password": temporary })))
+}
+
+#[derive(Deserialize)]
+struct ChangePasswordBody {
+    new_password: String,
+}
+
+/// `POST /api/auth/password` — the only route a must-change account may reach
+/// (FR-405, FR-572).
+async fn change_password(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Json(body): Json<ChangePasswordBody>,
+) -> ApiResult<Json<Value>> {
+    if body.new_password.chars().count() < auth::MIN_PASSWORD_LEN {
+        return Err(ApiError::invalid(format!(
+            "password must be at least {} characters",
+            auth::MIN_PASSWORD_LEN
+        )));
+    }
+    let hash = auth::hash_password(&body.new_password)?;
+    // One statement clears the flag and overwrites the hash, so the temporary
+    // credential is invalidated at the same instant the change takes effect
+    // (FR-572). Two statements would leave a window in which both passwords
+    // work.
+    sqlx::query(
+        "UPDATE users
+            SET password_hash = $2, must_change_password = false, password_changed_at = now()
+          WHERE id = $1",
+    )
+    .bind(user.id)
+    .bind(&hash)
+    .execute(&state.pool)
+    .await?;
+    Ok(Json(json!({ "changed": true })))
+}
+
+/// The refusal for any attempt to reduce or reset the environment-named account.
+///
+/// It names the setting, because the operator's next move is to edit that
+/// variable and restart — and a refusal that does not say which one leaves them
+/// guessing at the one account whose configuration is not in the database
+/// (FR-541, FR-559).
+fn environment_account_refusal() -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        "environment_account",
+        "this account is defined by CAIRN_ADMIN_EMAIL; change that environment \
+         setting and restart the server instead",
+    )
+}
+
+fn parse_optional<T: std::str::FromStr>(value: Option<&str>, field: &str) -> ApiResult<Option<T>> {
+    match value {
+        None => Ok(None),
+        Some(raw) => raw
+            .parse::<T>()
+            .map(Some)
+            .map_err(|_| ApiError::invalid(format!("{field} is not one of the permitted values"))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -237,7 +727,7 @@ struct CreateProjectBody {
 
 async fn create_project(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Json(body): Json<CreateProjectBody>,
 ) -> ApiResult<Json<Value>> {
     let id = Uuid::now_v7();
@@ -250,7 +740,7 @@ async fn create_project(
         .await?;
     sqlx::query("INSERT INTO project_members (project_id, user_id) VALUES ($1, $2)")
         .bind(id)
-        .bind(user.id)
+        .bind(user.id())
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
@@ -275,7 +765,7 @@ struct LookupQuery {
 /// comment needed no change, only the SQL.
 async fn lookup_projects(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Query(q): Query<LookupQuery>,
 ) -> ApiResult<Json<Value>> {
     if q.remote.trim().is_empty() {
@@ -288,7 +778,7 @@ async fn lookup_projects(
          ORDER BY p.created_at",
     )
     .bind(q.remote.trim())
-    .bind(user.id)
+    .bind(user.id())
     .fetch_all(&state.pool)
     .await?;
     let projects: Vec<Value> = rows
@@ -298,7 +788,7 @@ async fn lookup_projects(
     Ok(Json(json!({ "projects": projects })))
 }
 
-async fn list_projects(State(state): State<AppState>, user: CurrentUser) -> ApiResult<Json<Value>> {
+async fn list_projects(State(state): State<AppState>, user: SettledUser) -> ApiResult<Json<Value>> {
     let rows = sqlx::query(
         "SELECT p.id, p.name, p.repository_remote, p.created_at
          FROM projects p
@@ -306,7 +796,7 @@ async fn list_projects(State(state): State<AppState>, user: CurrentUser) -> ApiR
          WHERE m.user_id = $1 AND p.deleted_at IS NULL
          ORDER BY p.created_at DESC",
     )
-    .bind(user.id)
+    .bind(user.id())
     .fetch_all(&state.pool)
     .await?;
 
@@ -325,9 +815,179 @@ async fn list_projects(State(state): State<AppState>, user: CurrentUser) -> ApiR
 }
 
 // ---------------------------------------------------------------------------
+// Project membership (FR-418 through FR-427)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct MemberBody {
+    /// Looked up by id, not by email.
+    ///
+    /// An email-addressed grant route is an email-enumeration oracle: a caller
+    /// learns which addresses have accounts by watching which grants return
+    /// `404`. Ids come from `GET /api/admin/users`, which is admin-only.
+    user_id: Uuid,
+}
+
+/// `POST /api/projects/{id}/members` — grant membership (FR-418, FR-419).
+///
+/// **Every grant names somebody else.** A caller cannot add itself: that is the
+/// hole the deleted self-join route was, and re-opening it by accident is what
+/// `SC-465` exists to catch. The check is explicit rather than implied by the
+/// authorization, because "you must already be a member to add someone" and "you
+/// may not add yourself" are different rules and only the second one closes the
+/// hole — an existing member adding itself again is harmless, but a route shaped
+/// to allow it is one refactor away from allowing a non-member to.
+async fn add_member(
+    State(state): State<AppState>,
+    caller: SettledUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<MemberBody>,
+) -> ApiResult<impl IntoResponse> {
+    if body.user_id == caller.id() {
+        return Err(ApiError::forbidden(
+            "a membership grant names someone else; you cannot add yourself",
+        ));
+    }
+    // An existing member, or a server administrator. The admin bypass exists so
+    // membership can be bootstrapped on a project whose members have all been
+    // removed — without it such a project is permanently unreachable, and
+    // FR-419's "an existing member **or an admin**" is what makes that state
+    // recoverable rather than terminal.
+    if !caller.0.is_admin() {
+        auth::require_member(&state.pool, project_id, caller.id()).await?;
+    }
+
+    let exists: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM projects WHERE id = $1")
+        .bind(project_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if exists.is_none() {
+        return Err(ApiError::not_found("no such shared project"));
+    }
+    let target: Option<(Uuid,)> = sqlx::query_as("SELECT id FROM users WHERE id = $1")
+        .bind(body.user_id)
+        .fetch_optional(&state.pool)
+        .await?;
+    if target.is_none() {
+        return Err(ApiError::not_found("no such account"));
+    }
+
+    if state.schema_version < 3 {
+        // `added_by_user_id` arrives with migration 3, and FR-419 requires the
+        // grant to record who made it. A server that cannot record it says so
+        // rather than granting membership with the attribution silently missing
+        // — an unattributed grant is exactly what this route exists to replace.
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "schema_too_old",
+            "this server predates membership grants; upgrade it to schema 3",
+        ));
+    }
+    let inserted = sqlx::query(
+        "INSERT INTO project_members (project_id, user_id, added_by_user_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(project_id)
+    .bind(body.user_id)
+    .bind(caller.id())
+    .execute(&state.pool)
+    .await?;
+    if inserted.rows_affected() == 0 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "already_member",
+            "that account is already a member of this project",
+        ));
+    }
+
+    Ok((
+        StatusCode::CREATED,
+        Json(json!({
+            "project_id": project_id,
+            "user_id": body.user_id,
+            "added_by_user_id": caller.id(),
+        })),
+    ))
+}
+
+/// `DELETE /api/projects/{id}/members` — revoke membership (FR-420, FR-421).
+///
+/// Takes effect on the very next request that checks it: there is no cache and
+/// no session that carries a stale membership decision, because every
+/// project-scoped route re-evaluates `require_member` per request.
+async fn remove_member(
+    State(state): State<AppState>,
+    caller: SettledUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<MemberBody>,
+) -> ApiResult<Json<Value>> {
+    if !caller.0.is_admin() {
+        auth::require_member(&state.pool, project_id, caller.id()).await?;
+    }
+    let removed = sqlx::query("DELETE FROM project_members WHERE project_id = $1 AND user_id = $2")
+        .bind(project_id)
+        .bind(body.user_id)
+        .execute(&state.pool)
+        .await?;
+    if removed.rows_affected() == 0 {
+        return Err(ApiError::not_found("that account is not a member"));
+    }
+    Ok(Json(
+        json!({ "project_id": project_id, "user_id": body.user_id, "removed": true }),
+    ))
+}
+
+/// `GET /api/projects/{id}/members` — the full membership list (FR-427).
+///
+/// A member sees who else is a member; that is not privileged information within
+/// a project someone has already been granted. A non-member is refused, so the
+/// route is not a way to enumerate a project's people from outside it.
+async fn list_members(
+    State(state): State<AppState>,
+    caller: SettledUser,
+    Path(project_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    if !caller.0.is_admin() {
+        auth::require_member(&state.pool, project_id, caller.id()).await?;
+    }
+    if state.schema_version < 3 {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "schema_too_old",
+            "this server predates the membership list; upgrade it to schema 3",
+        ));
+    }
+    let rows = sqlx::query(
+        "SELECT u.id, u.email, u.display_name, m.added_by_user_id, m.created_at
+           FROM project_members m
+           JOIN users u ON u.id = m.user_id
+          WHERE m.project_id = $1
+          ORDER BY m.created_at",
+    )
+    .bind(project_id)
+    .fetch_all(&state.pool)
+    .await?;
+    let members: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "user_id": r.get::<Uuid, _>("id"),
+                "email": r.get::<String, _>("email"),
+                "display_name": r.get::<String, _>("display_name"),
+                "added_by_user_id": r.get::<Option<Uuid>, _>("added_by_user_id"),
+                "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "members": members })))
+}
+
+// ---------------------------------------------------------------------------
 // Sync (FR-055, FR-056)
 // ---------------------------------------------------------------------------
 
+pub use crate::global::{ratify_team, retire_team, sync_personal_changes, sync_team_changes};
 pub use crate::sync::{sync_batch, sync_changes};
 
 // ---------------------------------------------------------------------------
@@ -336,10 +996,10 @@ pub use crate::sync::{sync_batch, sync_changes};
 
 async fn project_overview(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, id, user.id).await?;
+    auth::require_member(&state.pool, id, user.id()).await?;
 
     let project = sqlx::query("SELECT id, name, repository_remote FROM projects WHERE id = $1")
         .bind(id)
@@ -406,11 +1066,11 @@ struct TaskQuery {
 
 async fn project_tasks(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
     Query(q): Query<TaskQuery>,
 ) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, id, user.id).await?;
+    auth::require_member(&state.pool, id, user.id()).await?;
     let rows =
         match &q.status {
             Some(status) => sqlx::query(
@@ -468,10 +1128,10 @@ fn sessions_json(rows: &[sqlx::postgres::PgRow]) -> Vec<Value> {
 
 async fn project_sessions(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, id, user.id).await?;
+    auth::require_member(&state.pool, id, user.id()).await?;
     let rows = sqlx::query(
         "SELECT s.*, EXISTS (
              SELECT 1 FROM handoffs h WHERE h.session_id = s.id AND h.deleted_at IS NULL
@@ -505,7 +1165,7 @@ async fn project_sessions(
 
 async fn session_detail(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     let row = sqlx::query("SELECT * FROM sessions WHERE id = $1")
@@ -514,7 +1174,7 @@ async fn session_detail(
         .await?
         .ok_or_else(|| ApiError::not_found("no such session"))?;
     let project_id: Uuid = row.try_get("project_id")?;
-    auth::require_member(&state.pool, project_id, user.id).await?;
+    auth::require_member(&state.pool, project_id, user.id()).await?;
     Ok(Json(
         json!({ "session": sessions_json(std::slice::from_ref(&row))[0] }),
     ))
@@ -522,7 +1182,7 @@ async fn session_detail(
 
 async fn session_handoff(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     let row = sqlx::query(
@@ -535,7 +1195,7 @@ async fn session_handoff(
     .ok_or_else(|| ApiError::not_found("no handoff for that session"))?;
 
     let project_id: Uuid = row.try_get("project_id")?;
-    auth::require_member(&state.pool, project_id, user.id).await?;
+    auth::require_member(&state.pool, project_id, user.id()).await?;
 
     Ok(Json(json!({ "handoff": handoff_json(&row) })))
 }
@@ -585,11 +1245,11 @@ struct MemoryQueryParams {
 /// the UI and in the agent (D3).
 async fn project_memories(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
     Query(q): Query<MemoryQueryParams>,
 ) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, id, user.id).await?;
+    auth::require_member(&state.pool, id, user.id()).await?;
     let limit = q.limit.unwrap_or(25).clamp(1, 100);
     let want_state = q.state.unwrap_or_else(|| "active".to_string());
 
@@ -649,7 +1309,7 @@ fn memory_json(r: &sqlx::postgres::PgRow) -> Value {
 
 async fn memory_detail(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
     let row = sqlx::query("SELECT * FROM memories WHERE id = $1")
@@ -658,7 +1318,7 @@ async fn memory_detail(
         .await?
         .ok_or_else(|| ApiError::not_found("no such memory"))?;
     let project_id: Uuid = row.try_get("project_id")?;
-    auth::require_member(&state.pool, project_id, user.id).await?;
+    auth::require_member(&state.pool, project_id, user.id()).await?;
 
     // Provenance is references; evidence content is local to the machine that
     // captured it and does not exist here (FR-055, FR-061).
@@ -669,7 +1329,7 @@ async fn memory_detail(
 
 async fn delete_memory(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<impl IntoResponse> {
     let row = sqlx::query("SELECT project_id FROM memories WHERE id = $1")
@@ -678,7 +1338,7 @@ async fn delete_memory(
         .await?
         .ok_or_else(|| ApiError::not_found("no such memory"))?;
     let project_id: Uuid = row.try_get("project_id")?;
-    auth::require_member(&state.pool, project_id, user.id).await?;
+    auth::require_member(&state.pool, project_id, user.id()).await?;
 
     sqlx::query("UPDATE memories SET deleted_at = now(), content = '' WHERE id = $1")
         .bind(id)
@@ -689,10 +1349,10 @@ async fn delete_memory(
 
 async fn project_sync_status(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Path(id): Path<Uuid>,
 ) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, id, user.id).await?;
+    auth::require_member(&state.pool, id, user.id()).await?;
     let row = sqlx::query(
         "SELECT COUNT(*) AS applied, MAX(applied_at) AS last_applied
          FROM sync_state WHERE project_id = $1",

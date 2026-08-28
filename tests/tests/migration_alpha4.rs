@@ -542,10 +542,33 @@ fn full_text_search_returns_the_same_rows_in_the_same_order() {
     store.migrate_to_latest();
 
     assert_eq!(store.query_column(query), before, "FTS ranking changed");
-    assert_eq!(
-        store.query_column("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name"),
-        triggers_before,
-        "an FTS trigger was recreated or dropped"
+
+    // Every trigger that existed before the migration still exists after it.
+    //
+    // This was an equality assertion on the whole trigger set until Feature 004
+    // added `personal_knowledge` and `team_knowledge`, each with its own FTS
+    // table and the same three triggers `memories` has. Those are new triggers
+    // on new tables, which is not what this test is about — its subject is
+    // whether migrating *disturbs* the memories FTS index, and equality on the
+    // whole set answered a different question that happened to coincide while
+    // no other FTS table existed.
+    //
+    // Narrowed rather than deleted: a dropped or renamed `memories_fts_*`
+    // trigger still fails here, which is the whole of what a name comparison
+    // can detect.
+    let triggers_after =
+        store.query_column("SELECT name FROM sqlite_master WHERE type = 'trigger' ORDER BY name");
+    for trigger in &triggers_before {
+        assert!(
+            triggers_after.contains(trigger),
+            "the migration dropped or renamed the {trigger} trigger"
+        );
+    }
+    assert!(
+        triggers_before
+            .iter()
+            .any(|t| t.starts_with("memories_fts")),
+        "the fixture has no memories FTS trigger, so the check above is vacuous"
     );
 }
 

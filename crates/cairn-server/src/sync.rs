@@ -5,7 +5,7 @@
 //! item carrying observation content — or a local-only session field — is
 //! rejected outright.
 
-use crate::auth::{self, CurrentUser};
+use crate::auth::{self, SettledUser};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
 use axum::extract::{Query, State};
@@ -98,7 +98,7 @@ pub struct SyncBatchBody {
 
 pub async fn sync_batch(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Json(body): Json<SyncBatchBody>,
 ) -> ApiResult<Json<Value>> {
     // A batch for an unknown project is rejected: the daemon must link first,
@@ -110,7 +110,7 @@ pub async fn sync_batch(
     if exists.is_none() {
         return Err(ApiError::not_found("unknown project; link before syncing"));
     }
-    auth::require_member(&state.pool, body.project_id, user.id).await?;
+    auth::require_member(&state.pool, body.project_id, user.id()).await?;
 
     let mut results = Vec::with_capacity(body.items.len());
     for item in &body.items {
@@ -119,7 +119,7 @@ pub async fn sync_batch(
             &state.pool,
             state.schema_version,
             body.project_id,
-            user.id,
+            user.id(),
             item,
         )
         .await
@@ -186,6 +186,33 @@ async fn apply_item(
     }
 
     match (item.entity_type.as_str(), item.operation.as_str()) {
+        // The fifth validator entry point (D447, FR-545, FR-577).
+        //
+        // Screened **before** any insert, so a refused item leaves no record and
+        // nothing to roll back — stronger than rolling back, because there is no
+        // window in which the row existed.
+        //
+        // The identities are the union of every project this user belongs to,
+        // which is broader than any client-side check and catches the one case a
+        // client-side check structurally cannot: content naming project X pushed
+        // by a client that was working in project Y.
+        ("personal_knowledge" | "team_knowledge", "upsert") => {
+            let identities = crate::global::identities_for(pool, user_id).await?;
+            if let Err(refusal) = crate::global::screen_global_item(&item.payload, &identities) {
+                // Rolled back explicitly rather than left to the drop: the
+                // `sync_state` claim taken above must not survive, because the
+                // refusal is about the content and a corrected payload deserves
+                // its own attempt rather than being reported a duplicate.
+                tx.rollback().await?;
+                return Err(refusal.into_api_error());
+            }
+            if item.entity_type == "personal_knowledge" {
+                crate::global::upsert_personal(&mut tx, user_id, item.entity_id, &item.payload)
+                    .await?;
+            } else {
+                crate::global::upsert_team(&mut tx, item.entity_id, &item.payload).await?;
+            }
+        }
         ("project", "upsert") => upsert_project(&mut tx, project_id, item).await?,
         ("task", "upsert") => upsert_task(&mut tx, project_id, item).await?,
         ("session", "upsert") => upsert_session(&mut tx, project_id, user_id, item).await?,
@@ -206,6 +233,25 @@ async fn apply_item(
 
 /// Entity types this server can only hold once migration 2 has run.
 const SCHEMA_2_ENTITY_TYPES: &[&str] = &["memory_relation", "task_criterion", "task_blocker"];
+
+/// The four entity types migration **3** adds tables for (FR-498, FR-522).
+///
+/// Held back with the same `unknown_entity_type` class as the schema-2 list, and
+/// for the same reason: the daemon retains the item and delivers it after the
+/// migration runs. Without this list a personal or team item pushed at a
+/// schema-2 deployment passed the capability gate — `reject_beyond_capability`
+/// returned early for any `schema_version >= 2` — and reached `upsert_personal`,
+/// where the missing table surfaced as an internal error. An internal error is
+/// not a held item: the daemon has no way to tell "retry after the upgrade" from
+/// "this server is broken", so the whole namespace would have failed rather than
+/// blocking, and FR-522's guarantee that project sync keeps draining at full
+/// speed alongside it would not hold.
+const SCHEMA_3_ENTITY_TYPES: &[&str] = &[
+    "personal_knowledge",
+    "personal_knowledge_relation",
+    "team_knowledge",
+    "team_knowledge_relation",
+];
 
 /// Memory fields migration 2 adds, and what each looks like when it says
 /// nothing.
@@ -255,19 +301,17 @@ const SCHEMA_2_MEMORY_FIELDS: &[&str] = &[
 /// generic `invalid_request` here would be indistinguishable from a privacy
 /// refusal, and retaining those would be exactly wrong.
 fn reject_beyond_capability(schema_version: i64, item: &SyncItem) -> Result<(), ApiError> {
+    // Newest first: a schema-2 deployment must be told about a `team_knowledge`
+    // item before the `schema_version >= 2` early return below sends it on to a
+    // table that does not exist.
+    if schema_version < 3 && SCHEMA_3_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
+        return Err(held_until_migrated(schema_version, &item.entity_type));
+    }
     if schema_version >= 2 {
         return Ok(());
     }
     if SCHEMA_2_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            codes::UNKNOWN_ENTITY_TYPE,
-            format!(
-                "this deployment is at schema {schema_version} and has nowhere to put \
-                 a `{}`; it will be accepted once the migration runs",
-                item.entity_type
-            ),
-        ));
+        return Err(held_until_migrated(schema_version, &item.entity_type));
     }
     if item.entity_type == "memory" {
         if let Some(object) = item.payload.as_object() {
@@ -292,7 +336,46 @@ fn reject_beyond_capability(schema_version: i64, item: &SyncItem) -> Result<(), 
     Ok(())
 }
 
-/// The allowlist enforced on the wire.
+/// The refusal a client is meant to retain and retry, not fail permanently.
+///
+/// One constructor for both lists, so the class and the wording a daemon
+/// branches on cannot drift between the two schema generations.
+fn held_until_migrated(schema_version: i64, entity_type: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::CONFLICT,
+        codes::UNKNOWN_ENTITY_TYPE,
+        format!(
+            "this deployment is at schema {schema_version} and has nowhere to put \
+             a `{entity_type}`; it will be accepted once the migration runs"
+        ),
+    )
+}
+
+/// True if `field` appears as a key anywhere inside `value`, at any nesting
+/// depth — inside a nested object, or inside an object nested in an array.
+///
+/// A top-level-only check is a check a client can defeat by wrapping the same
+/// forbidden field one level deeper, e.g. `{"provenance": {"summary": "..."}}`.
+/// The privacy boundary is what the field name *means* (observation content,
+/// or local-only session state), not where in the document it sits, so the
+/// search has to follow the payload's whole shape.
+fn contains_key_recursive(value: &Value, field: &str) -> bool {
+    match value {
+        Value::Object(map) => {
+            map.contains_key(field) || map.values().any(|v| contains_key_recursive(v, field))
+        }
+        Value::Array(items) => items.iter().any(|v| contains_key_recursive(v, field)),
+        _ => false,
+    }
+}
+
+/// The denylist enforced on the wire.
+///
+/// Not an allowlist: the client does not have to declare every field it wants
+/// accepted, only avoid the names on `FORBIDDEN_OBSERVATION_FIELDS`,
+/// `FORBIDDEN_ENTITY_TYPES` and `FORBIDDEN_SESSION_FIELDS`. The search is
+/// recursive — see `contains_key_recursive` — so a forbidden name is refused
+/// wherever it appears in the payload, not only at its top level.
 fn reject_forbidden_fields(item: &SyncItem) -> Result<(), ApiError> {
     if FORBIDDEN_ENTITY_TYPES.contains(&item.entity_type.as_str()) {
         return Err(ApiError::invalid(format!(
@@ -300,12 +383,12 @@ fn reject_forbidden_fields(item: &SyncItem) -> Result<(), ApiError> {
             item.entity_type
         )));
     }
-    let Some(object) = item.payload.as_object() else {
+    if item.payload.as_object().is_none() {
         return Ok(());
-    };
+    }
 
     for field in FORBIDDEN_OBSERVATION_FIELDS {
-        if object.contains_key(*field) {
+        if contains_key_recursive(&item.payload, field) {
             return Err(ApiError::invalid(format!(
                 "`{field}` carries observation content, which never leaves the machine"
             )));
@@ -313,7 +396,7 @@ fn reject_forbidden_fields(item: &SyncItem) -> Result<(), ApiError> {
     }
     if item.entity_type == "session" {
         for field in FORBIDDEN_SESSION_FIELDS {
-            if object.contains_key(*field) {
+            if contains_key_recursive(&item.payload, field) {
                 return Err(ApiError::invalid(format!("`{field}` is local-only")));
             }
         }
@@ -739,10 +822,10 @@ pub struct ChangesQuery {
 /// locally searchable (FR-056).
 pub async fn sync_changes(
     State(state): State<AppState>,
-    user: CurrentUser,
+    user: SettledUser,
     Query(q): Query<ChangesQuery>,
 ) -> ApiResult<Json<Value>> {
-    auth::require_member(&state.pool, q.project_id, user.id).await?;
+    auth::require_member(&state.pool, q.project_id, user.id()).await?;
 
     let since = q
         .since
@@ -839,8 +922,10 @@ pub async fn sync_changes(
     })))
 }
 
-/// One read-back page. The four arrays share it, and the cursor respects it.
-const PAGE: i64 = 500;
+/// One read-back page. The four arrays share it, and the cursor respects it —
+/// as do the personal and team read-backs in [`crate::global`], so one page size
+/// governs every pull rather than each namespace inventing its own.
+pub(crate) const PAGE: i64 = 500;
 
 const RELATIONS_SQL: &str = "SELECT * FROM memory_relations
      WHERE project_id = $1 AND updated_at > $2 AND deleted_at IS NULL

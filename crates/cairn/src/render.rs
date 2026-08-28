@@ -171,6 +171,15 @@ pub fn briefing(payload: &ContextPayload) -> String {
         }
     }
 
+    // Personal, then team — the last two sections in `SECTION_ORDER`, and the
+    // last two rendered here for the same reason: project truth outranks
+    // knowledge that was never observed against this project at all
+    // (`contracts/recall-composition.md` §4). Plain lines, exactly like
+    // `known_failures`/`decisions` above — there is no field for a selection
+    // reason to occupy (FR-478, D451).
+    section(&mut out, "Personal notes", &b.personal_notes);
+    section(&mut out, "Team guidance", &b.team_guidance);
+
     out.push_str(&format!(
         "\n---\n{} of {} estimated tokens",
         payload.estimated_tokens, payload.budget
@@ -211,7 +220,7 @@ pub fn handoff(h: &Handoff) -> String {
     if !h.tests_executed.is_empty() {
         out.push_str("\n## Tests executed\n");
         for t in &h.tests_executed {
-            out.push_str(&format!("- {} — {}\n", t.command, t.outcome));
+            out.push_str(&format!("- {} — {}\n", t.runner, t.outcome));
         }
     }
 
@@ -562,12 +571,21 @@ pub fn subject(v: &serde_json::Value) -> String {
     let s = &v["subject"];
     let mut out = String::new();
     let state = s["reconciliation"].as_str().unwrap_or("unknown");
-    out.push_str(&format!(
-        "# {} ({}:{})\n\n",
-        s["topic_key"].as_str().unwrap_or("?"),
-        s["scope"].as_str().unwrap_or("?"),
-        s["scope_key"].as_str().unwrap_or("?")
-    ));
+    // A project subject is identified by its scope; a personal or team subject
+    // has none, and printing `(?:?)` for it would look like missing data rather
+    // than a category that does not apply.
+    match s["domain"].as_str() {
+        Some(domain) => out.push_str(&format!(
+            "# {} ({domain})\n\n",
+            s["topic_key"].as_str().unwrap_or("?")
+        )),
+        None => out.push_str(&format!(
+            "# {} ({}:{})\n\n",
+            s["topic_key"].as_str().unwrap_or("?"),
+            s["scope"].as_str().unwrap_or("?"),
+            s["scope_key"].as_str().unwrap_or("?")
+        )),
+    }
     out.push_str(&format!("**Reconciliation**: {state}\n"));
 
     let answers = s["answers"].as_array().cloned().unwrap_or_default();
@@ -1096,6 +1114,8 @@ mod tests {
                 }],
                 previous_next_action: None,
                 patterns: Vec::new(),
+                personal_notes: Vec::new(),
+                team_guidance: Vec::new(),
             },
             estimated_tokens: 100,
             budget: 1000,
@@ -1138,6 +1158,8 @@ mod tests {
                 constraints: Vec::new(),
                 previous_next_action: None,
                 patterns: Vec::new(),
+                personal_notes: Vec::new(),
+                team_guidance: Vec::new(),
             },
             estimated_tokens: 100,
             budget: 1000,
@@ -1168,6 +1190,8 @@ mod tests {
                 constraints: Vec::new(),
                 previous_next_action: None,
                 patterns: Vec::new(),
+                personal_notes: Vec::new(),
+                team_guidance: Vec::new(),
             },
             estimated_tokens: 100,
             budget: 1000,
@@ -1197,6 +1221,8 @@ mod tests {
                 constraints: Vec::new(),
                 previous_next_action: None,
                 patterns: Vec::new(),
+                personal_notes: Vec::new(),
+                team_guidance: Vec::new(),
             },
             estimated_tokens: 999,
             budget: 1000,

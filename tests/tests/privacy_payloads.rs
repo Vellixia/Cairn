@@ -339,6 +339,107 @@ fn a_handoff_built_from_adapter_events_carries_no_conversation_content() {
 }
 
 // ---------------------------------------------------------------------------
+// T176/T177 — `changed_files` and the `completed_work` prose built from it
+// carry repository-relative paths only, never absolute ones (FR-531, SC-431)
+// ---------------------------------------------------------------------------
+
+/// A file with no Git counterpart at all — gitignored, so `git status`, and
+/// therefore `git_changed_files`, never names it in any form.
+///
+/// This is the case the previous "keep the shorter of a long/short pair"
+/// dedup could not collapse: that logic only fires when a *paired* relative
+/// form is already present in the same list to match the absolute one
+/// against. With no Git counterpart to pair against, the absolute path used
+/// to survive untouched. The fix relativizes every path against the
+/// session's own recorded worktree root, unconditionally, so a path with no
+/// pair is still corrected rather than passing through.
+#[test]
+fn a_handoff_carries_no_absolute_path_for_a_file_git_never_reports() {
+    let s = Sandbox::new();
+    s.install_agent("claude-code");
+    s.must(&["init"]);
+
+    s.write_file(".gitignore", "generated/\n");
+    let ignored_relative = "generated/ignored_module.rs";
+    s.write_file(ignored_relative, "pub fn generated() {}\n");
+    // The daemon records the session's worktree root canonicalized
+    // (`cairn_git::discover`), so the absolute path this fixture feeds
+    // through the hook is canonicalized the same way — otherwise this test
+    // would be exercising a platform symlink quirk (macOS's `/var` is itself
+    // a symlink to `/private/var`) rather than the "no Git counterpart" case
+    // it exists to prove. That distinct symlink-mismatch case already has
+    // its own coverage: `derive_changed_files`'s suffix-based fallback in
+    // `handoff.rs`, and the `one_file_reported_two_ways_is_one_changed_file`
+    // unit test.
+    let ignored_absolute = std::fs::canonicalize(s.repo_dir().join(ignored_relative))
+        .expect("the file was just written")
+        .to_str()
+        .expect("a UTF-8 sandbox path")
+        .to_string();
+
+    s.hook(
+        "SessionStart",
+        json!({ "session_id": "no-git-counterpart", "source": "startup" }),
+    );
+    s.settle_session_count(1);
+    // A real agent's own `tool_input.file_path` is absolute (the doc comment
+    // at `handoff.rs`'s `derive_changed_files` says so outright) — the
+    // fixture matches that rather than a synthetic relative path, or it would
+    // not exercise the bug this test exists to catch.
+    s.hook(
+        "PostToolUse",
+        json!({
+            "session_id": "no-git-counterpart",
+            "tool_name": "Edit",
+            "tool_input": { "file_path": ignored_absolute }
+        }),
+    );
+    s.hook(
+        "SessionEnd",
+        json!({ "session_id": "no-git-counterpart", "reason": "clear" }),
+    );
+    s.settle_handoff("session_end");
+
+    let handoff = s.json(&["handoff", "show"])["handoff"].clone();
+
+    // The file was captured — this is a test about relativizing a path, not
+    // about an exclusion (a different mechanism entirely) silently eating it.
+    let changed = handoff["changed_files"].as_array().expect("changed_files");
+    assert!(
+        changed.iter().any(|f| f.as_str() == Some(ignored_relative)),
+        "the file Git never reports was not captured at all: {changed:?}"
+    );
+
+    // Neither the exact absolute path nor the repository root it was built
+    // from survives anywhere in the transmitted object — not in
+    // `changed_files`, and not in the `completed_work` prose formatted from
+    // it either.
+    let text = handoff.to_string();
+    assert!(
+        !text.contains(&ignored_absolute),
+        "the absolute path survived somewhere in the handoff: {text}"
+    );
+    let repo_root = std::fs::canonicalize(s.repo_dir())
+        .expect("the sandbox repository exists")
+        .to_str()
+        .expect("a UTF-8 sandbox path")
+        .to_string();
+    assert!(
+        !text.contains(&repo_root),
+        "the repository's absolute root leaked into the handoff: {text}"
+    );
+    let completed = handoff["completed_work"]
+        .as_array()
+        .expect("completed_work");
+    assert!(
+        completed
+            .iter()
+            .any(|c| c.as_str().unwrap_or_default().contains(ignored_relative)),
+        "completed_work did not describe the change at all: {completed:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // T132 — the wire refuses every newly forbidden name, by name (FR-506, SC-316)
 // ---------------------------------------------------------------------------
 
@@ -516,4 +617,269 @@ fn every_forbidden_entity_type_is_refused() {
             "the server has a `{table}` table, which it must never have"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// T175/T180 — the wire check recurses, so nesting cannot launder a forbidden
+// field past it (FR-535)
+// ---------------------------------------------------------------------------
+
+/// Payloads shaped exactly the way `promotion-privacy.md` §6 identified: a
+/// forbidden field one level inside a nested object, or inside an object
+/// nested in an array — which `object.contains_key(field)` at the top level
+/// alone cannot see. This is the proof that `reject_forbidden_fields`
+/// actually recurses: if it regressed to a top-level-only check, every one
+/// of these would be **accepted** instead of rejected.
+#[test]
+fn a_forbidden_field_nested_inside_the_payload_is_still_refused() {
+    let Some((server, _s, token, project_id)) = linked_server() else {
+        eprintln!("SKIPPED: set CAIRN_TEST_DATABASE_URL to run the server suite");
+        return;
+    };
+
+    let cases: [(&str, serde_json::Value); 3] = [
+        (
+            "summary",
+            json!({
+                "content": "a legitimate memory",
+                // One level inside a nested object.
+                "provenance": { "summary": "an observation summary that must never travel" }
+            }),
+        ),
+        (
+            "path",
+            json!({
+                "content": "a legitimate memory",
+                // One level inside an object nested in an array.
+                "evidence": [{ "path": "/Users/dev/secret-project/file.rs" }]
+            }),
+        ),
+        (
+            "command",
+            json!({
+                "content": "a legitimate memory",
+                "tests_executed": [{ "command": "cargo test --workspace", "outcome": "passed" }]
+            }),
+        ),
+    ];
+
+    let items: Vec<serde_json::Value> = cases
+        .iter()
+        .enumerate()
+        .map(|(i, (_, payload))| item("memory", &format!("nested-forbidden-{i}"), payload.clone()))
+        .collect();
+
+    let out = cairn_e2e::post_json_bearer(
+        &server.base,
+        "/api/sync/batch",
+        &json!({ "project_id": project_id, "items": items }),
+        &token,
+    );
+    let results = out["results"].as_array().expect("results");
+    assert_eq!(results.len(), cases.len(), "{out}");
+
+    for (result, (field, _)) in results.iter().zip(cases.iter()) {
+        assert_eq!(
+            result["status"], "rejected",
+            "a `{field}` nested inside the payload was accepted — the old \
+             top-level-only check would have passed this too: {out}"
+        );
+        let message = result["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(field),
+            "the refusal for a nested `{field}` does not name it: {message}"
+        );
+    }
+
+    // And none of the leaked content reached storage either — the API
+    // answer alone cannot make that claim.
+    let dump = server.dump();
+    assert!(
+        !dump.contains("secret-project"),
+        "a nested absolute path reached storage"
+    );
+    assert!(
+        !dump.contains("must never travel"),
+        "a nested observation summary reached storage"
+    );
+    assert!(
+        !dump.contains("cargo test --workspace"),
+        "a nested command string reached storage"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Feature 004 — the origin digest is local only (FR-551, SC-441)
+// ---------------------------------------------------------------------------
+
+/// The salted origin digest never reaches the wire, asserted **by
+/// construction** rather than by inspecting one payload (T021).
+///
+/// The reason this matters more than it looks: the server knows every project
+/// identity it holds. A transmitted digest of a project id is therefore a
+/// lookup away from being reversed by the one party in the system best placed
+/// to reverse it — enumerate the identities, digest each, compare. The salt
+/// makes that intractable only while the salt stays local, and the digest
+/// travelling would hand over the other half.
+///
+/// So the assertion is about the *type*, not a sample: a record carrying a
+/// digest serializes without it. A field added later without `#[serde(skip)]`
+/// fails this.
+#[test]
+fn no_serialized_global_record_carries_an_origin_digest() {
+    use cairn_core::domain::{ApplicabilityFact, ApplicabilityKind, MemoryType, TeamState};
+    use cairn_core::global::{PersonalKnowledge, TeamKnowledge};
+    use uuid::Uuid;
+
+    // A distinctive value, so a leak is unmistakable in the serialized form
+    // rather than something a substring search could plausibly miss.
+    let digest = "ORIGIN_DIGEST_THAT_MUST_NOT_TRAVEL".to_string();
+
+    let personal = PersonalKnowledge {
+        id: Uuid::now_v7(),
+        owner_user_id: Uuid::now_v7(),
+        knowledge_type: MemoryType::Convention,
+        content: "prefer thiserror over hand-rolled Display impls".into(),
+        topic_key: Some("errors.display".into()),
+        value_key: Some("thiserror".into()),
+        origin_digest: Some(digest.clone()),
+        applicability: vec![ApplicabilityFact {
+            kind: ApplicabilityKind::Language,
+            value: "rust".into(),
+        }],
+        writer_id: Uuid::now_v7(),
+        writer_seq: 7,
+        created_at: chrono::Utc::now(),
+        superseded_by_id: None,
+        forgotten_at: None,
+    };
+    let team = TeamKnowledge {
+        id: Uuid::now_v7(),
+        knowledge_type: MemoryType::Convention,
+        content: "retry flaky integration tests up to three times".into(),
+        topic_key: Some("ci.retries".into()),
+        value_key: Some("three".into()),
+        origin_digest: Some(digest.clone()),
+        applicability: vec![],
+        state: TeamState::Authoritative,
+        proposed_by_user_id: Uuid::now_v7(),
+        ratified_by_user_id: Some(Uuid::now_v7()),
+        ratified_at: Some(chrono::Utc::now()),
+        writer_id: Uuid::now_v7(),
+        writer_seq: 3,
+        created_at: chrono::Utc::now(),
+        superseded_by_id: None,
+        retired_at: None,
+    };
+
+    for (label, json) in [
+        (
+            "personal",
+            serde_json::to_string(&personal).expect("serialize"),
+        ),
+        ("team", serde_json::to_string(&team).expect("serialize")),
+    ] {
+        assert!(
+            !json.contains(&digest),
+            "{label} serialized its origin digest: {json}"
+        );
+        assert!(
+            !json.contains("origin_digest"),
+            "{label} serialized an origin_digest field: {json}"
+        );
+        // The record itself must still be there — a test that passed because
+        // serialization produced nothing would prove nothing.
+        assert!(
+            json.contains("content"),
+            "{label} serialized nothing recognizable: {json}"
+        );
+    }
+}
+
+/// The digest field is present on the in-memory type and absent from the wire.
+///
+/// Stated as its own assertion because the two halves are separately
+/// breakable: dropping the field entirely would satisfy the test above while
+/// losing the feature (FR-516), and dropping `#[serde(skip)]` would keep the
+/// feature while leaking it.
+#[test]
+fn the_digest_exists_locally_even_though_it_never_travels() {
+    let digest = cairn_core::global::origin_digest("machine-salt", uuid::Uuid::now_v7());
+    assert!(
+        !digest.is_empty(),
+        "the origin digest is computed locally (FR-516); only its transmission is forbidden"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// T072 / SC-469 — a project's derived traits never leave the machine (FR-438)
+// ---------------------------------------------------------------------------
+
+/// `project_traits` appears in no transmitted payload and no server table.
+///
+/// Structural, and asserted two ways. The first is the one that cannot be
+/// bypassed: `OutboxEntityType` has no `project_traits` variant, so an outbox
+/// row for one is not something the code declines to write — it is something
+/// that cannot be spelled. The second walks a corpus of projects whose traits
+/// are all distinct, so a trait that *did* start synchronizing would show up as
+/// a recognizable token rather than as a collision with another project's.
+#[test]
+fn a_projects_derived_traits_appear_in_no_payload_and_no_server_table() {
+    use cairn_core::domain::{OutboxEntityType, ProjectTrait};
+    use std::str::FromStr;
+
+    // Structural: there is no entity type for them.
+    assert!(
+        OutboxEntityType::from_str("project_traits").is_err(),
+        "`project_traits` can be named as an outbox entity type, so a row for it \
+         can be written and traits would synchronize (FR-438)"
+    );
+    assert!(
+        OutboxEntityType::from_str("writer_identity").is_err(),
+        "`writer_identity` can be named as an outbox entity type; a store's own \
+         opaque registry must stay local (D448)"
+    );
+
+    // And by value: a corpus whose traits are all distinct, serialized through
+    // every type that crosses the wire.
+    let corpus = [
+        ProjectTrait {
+            kind: cairn_core::domain::ApplicabilityKind::Language,
+            value: "distinctivelangalpha".to_string(),
+        },
+        ProjectTrait {
+            kind: cairn_core::domain::ApplicabilityKind::Tool,
+            value: "distinctivetoolbeta".to_string(),
+        },
+    ];
+    // A trait is not a member of any wire type, so there is nothing to serialize
+    // it *into* — which is the assertion. Confirmed by checking that the two
+    // global record types, the only ones that carry applicability at all, carry
+    // no trait field.
+    let personal = serde_json::to_string(&cairn_core::global::PersonalKnowledge {
+        id: uuid::Uuid::now_v7(),
+        owner_user_id: uuid::Uuid::now_v7(),
+        knowledge_type: cairn_core::domain::MemoryType::Convention,
+        content: "ordinary guidance".into(),
+        topic_key: None,
+        value_key: None,
+        origin_digest: None,
+        applicability: vec![],
+        writer_id: uuid::Uuid::now_v7(),
+        writer_seq: 1,
+        created_at: chrono::Utc::now(),
+        superseded_by_id: None,
+        forgotten_at: None,
+    })
+    .expect("serialize");
+    for t in &corpus {
+        assert!(
+            !personal.contains(&t.value),
+            "a serialized record carried a project trait: {personal}"
+        );
+    }
+    assert!(
+        !personal.contains("project_traits") && !personal.contains("traits"),
+        "a serialized record has a traits field: {personal}"
+    );
 }

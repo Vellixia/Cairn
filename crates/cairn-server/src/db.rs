@@ -11,6 +11,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "project_intelligence",
         include_str!("../migrations/0002_project_intelligence.sql"),
     ),
+    (
+        3,
+        "collaborative_global_memory",
+        include_str!("../migrations/0003_collaborative_global_memory.sql"),
+    ),
 ];
 
 /// The highest migration this build carries.
@@ -18,7 +23,7 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
 /// Not what the server advertises: a deployment can be held at a lower schema
 /// deliberately, and what it can actually hold is the schema it **applied**.
 /// See [`applied_version`].
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 /// The pool size a single server takes from PostgreSQL.
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
@@ -30,13 +35,32 @@ pub const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 /// operator is ready. It is also the only honest way to exercise a server an
 /// upgraded peer has to cope with, because what makes a server "older" is the
 /// schema it applied and not the binary that applied it (FR-415).
-pub async fn connect(url: &str, max_connections: u32, max_version: i64) -> anyhow::Result<PgPool> {
+/// Open the pool and bring the schema up, telling the migrations which account
+/// the environment names.
+///
+/// Migration 3's `users.role` backfill reads `current_setting('cairn.admin_email')`
+/// to decide which existing account becomes the administrator (FR-414, FR-524).
+/// Nothing set that value until this function existed, so the environment-named
+/// branch of the backfill could never fire and every migrating deployment fell
+/// through to "oldest account by `created_at`" — silently, because the fallback
+/// is a legitimate outcome and produces an admin either way.
+///
+/// It is set per transaction rather than per pool because that is the only scope
+/// a migration can rely on: a pooled connection is handed out and returned, and
+/// a `SET` that outlived the transaction would leak the operator's email into
+/// unrelated sessions.
+pub async fn connect(
+    url: &str,
+    max_connections: u32,
+    max_version: i64,
+    admin_email: Option<&str>,
+) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(max_connections.max(1))
         .acquire_timeout(Duration::from_secs(10))
         .connect(url)
         .await?;
-    migrate(&pool, max_version).await?;
+    migrate(&pool, max_version, admin_email).await?;
     Ok(pool)
 }
 
@@ -58,7 +82,11 @@ pub async fn applied_version(pool: &PgPool) -> anyhow::Result<i64> {
 ///
 /// Stops at `max_version`, which is [`SCHEMA_VERSION`] unless an operator held
 /// the deployment back.
-pub async fn migrate(pool: &PgPool, max_version: i64) -> anyhow::Result<()> {
+pub async fn migrate(
+    pool: &PgPool,
+    max_version: i64,
+    admin_email: Option<&str>,
+) -> anyhow::Result<()> {
     pool.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
              version    BIGINT PRIMARY KEY,
@@ -78,6 +106,16 @@ pub async fn migrate(pool: &PgPool, max_version: i64) -> anyhow::Result<()> {
             continue;
         }
         let mut tx = pool.begin().await?;
+        // Inside the transaction, so it is visible to the script and gone
+        // afterwards. `set_config(..., true)` is the local form — `SET LOCAL`
+        // cannot take a bound parameter, and interpolating an operator-supplied
+        // email into DDL is not a trade worth making.
+        if let Some(email) = admin_email.map(str::trim).filter(|e| !e.is_empty()) {
+            sqlx::query("SELECT set_config('cairn.admin_email', $1, true)")
+                .bind(email.to_lowercase())
+                .execute(&mut *tx)
+                .await?;
+        }
         // PostgreSQL runs a multi-statement script in one call.
         tx.execute(*sql).await?;
         sqlx::query("INSERT INTO schema_migrations (version, name) VALUES ($1, $2)")

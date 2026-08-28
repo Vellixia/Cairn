@@ -21,6 +21,21 @@ pub struct CairnConfig {
     pub excluded_commands: Vec<String>,
     /// Base URL of the Cairn server, when one is configured.
     pub server_url: Option<String>,
+    /// The account id this machine authenticates as on `server_url`, and the
+    /// owning identity of its personal knowledge (FR-567, FR-568).
+    ///
+    /// **Not the same thing as the local user id.** A user account is
+    /// per-server: the same human is a different account, with a different id,
+    /// on every server they link to. Personal knowledge is partitioned by the
+    /// account that owns it, so keying it on the local identity instead would
+    /// merge two servers' personal knowledge into one pool the moment a store
+    /// was relinked — which is exactly the merge `sync-namespaces.md` §10 says
+    /// must not happen.
+    ///
+    /// Persisted rather than re-fetched, because a daemon that restarts offline
+    /// must still know which identity it holds. Losing it would silently
+    /// repartition every existing row under the local id.
+    pub server_account_id: Option<uuid::Uuid>,
 
     // -----------------------------------------------------------------------
     // Feature 003 bounds (FR-500, research D75)
@@ -93,6 +108,7 @@ impl Default for CairnConfig {
             excluded_paths: Vec::new(),
             excluded_commands: Vec::new(),
             server_url: None,
+            server_account_id: None,
 
             min_safe_context_fraction: 0.40,
             min_context_budget_tokens: 600,

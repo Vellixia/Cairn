@@ -3,10 +3,12 @@
 use crate::state::{git_branches, git_status, repo_state, storage_err, Daemon, Resolved};
 use crate::{briefing, capture, handoffs};
 use cairn_core::domain::*;
+use cairn_core::validate::ProjectIdentity;
 use cairn_core::wire::*;
 use cairn_store::repo;
 use cairn_store::search::{self, SearchContext};
 use serde_json::json;
+use sqlx::Row;
 use uuid::Uuid;
 
 type Reply = Result<serde_json::Value, WireError>;
@@ -245,6 +247,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             reason,
             token_budget,
             explain,
+            depth,
         } => {
             context(
                 d,
@@ -254,6 +257,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 reason,
                 token_budget,
                 explain,
+                depth,
             )
             .await
         }
@@ -630,27 +634,42 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             topic_key,
             value_key,
             importance,
-        } => {
-            memory_create(
-                d,
-                &cwd,
-                agent_session_key,
-                session_id,
-                kind,
-                scope,
-                scope_key,
-                content,
-                evidence_observation_ids,
-                local_only,
-                None,
-                SubjectProposal {
-                    topic_key,
-                    value_key,
-                    importance,
-                },
-            )
-            .await
-        }
+            domain,
+        } => match domain {
+            // FR-455, FR-527: no MCP action authors team knowledge directly.
+            // Team is reached only by `cairn team propose` or by
+            // `action: "promote", target: "team"` — never by `create`.
+            Some(KnowledgeDomain::Team) => Err(WireError::invalid(
+                "domain: \"team\" cannot be created through cairn_remember; team knowledge \
+                 is reached only by proposal (`cairn team propose`) or by \
+                 `action: \"promote\", target: \"team\"` — no MCP action authors \
+                 authoritative team policy directly",
+            )),
+            Some(KnowledgeDomain::Personal) => {
+                personal_create(d, &cwd, kind, content, topic_key, value_key).await
+            }
+            None | Some(KnowledgeDomain::Project) => {
+                memory_create(
+                    d,
+                    &cwd,
+                    agent_session_key,
+                    session_id,
+                    kind,
+                    scope,
+                    scope_key,
+                    content,
+                    evidence_observation_ids,
+                    local_only,
+                    None,
+                    SubjectProposal {
+                        topic_key,
+                        value_key,
+                        importance,
+                    },
+                )
+                .await
+            }
+        },
         Request::MemorySupersede {
             cwd,
             agent_session_key,
@@ -691,7 +710,15 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             topic_key,
             scope,
             scope_key,
-        } => memory_subject(d, &cwd, topic_key, scope, scope_key).await,
+            domain,
+        } => match domain.unwrap_or(KnowledgeDomain::Project) {
+            KnowledgeDomain::Project => memory_subject(d, &cwd, topic_key, scope, scope_key).await,
+            // The **production caller** of `personal_subject`/`team_subject`
+            // (T078, T127). Without one, the reconciliation those functions
+            // derive — dedup, conflict, an admin's supersession — was recorded
+            // on every write and read by nothing a user could reach.
+            domain => global_subject(d, domain, topic_key).await,
+        },
         Request::RebuildDerived { cwd } => rebuild_derived(d, &cwd).await,
         Request::PatternList { cwd, trust, signal } => {
             crate::patterns::list(d, &cwd, trust, signal).await
@@ -708,23 +735,67 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             approach,
             constraints,
             dry_run,
+            target,
+            applicability_facts,
         } => {
-            crate::patterns::promote(
-                d,
-                &cwd,
-                crate::patterns::PromoteRequest {
-                    memory_id,
-                    title,
-                    problem,
-                    signals,
-                    applicability,
-                    root_cause,
-                    approach,
-                    constraints,
-                    dry_run,
-                },
-            )
-            .await
+            // Absent means `pattern`, so a caller naming none gets today's
+            // behaviour unchanged (T080, FR-506, D415).
+            match target.unwrap_or(PromotionTarget::Pattern) {
+                PromotionTarget::Pattern => {
+                    crate::patterns::promote(
+                        d,
+                        &cwd,
+                        crate::patterns::PromoteRequest {
+                            memory_id,
+                            title,
+                            problem,
+                            signals,
+                            applicability,
+                            root_cause,
+                            approach,
+                            constraints,
+                            dry_run,
+                        },
+                    )
+                    .await
+                }
+                target @ (PromotionTarget::Personal | PromotionTarget::Team) => {
+                    if dry_run {
+                        return Err(WireError::invalid(
+                            "dry_run is not supported for target: \"personal\" or \"team\"; \
+                             the promotion gate has no preview mode for these targets",
+                        ));
+                    }
+                    let facts = parse_applicability_facts(&applicability_facts)?;
+                    let r = d.resolve(&cwd).await?;
+                    // The source project's whole identity — its name and every
+                    // token its remote contributes — the same set direct
+                    // creation screens against. Screening a promotion against
+                    // the name alone made this the weaker of two entry points
+                    // for the same content.
+                    let identities = current_project_identities(&r.project);
+                    // Real project-membership data lives on the server and
+                    // this daemon does not cache it locally yet — the same
+                    // gap `promote::promote`'s own doc names for the `Team`
+                    // arm, which refuses unconditionally regardless of this
+                    // value today. `linked` is the closest local proxy: a
+                    // project shared with a server at all, versus one that
+                    // is not.
+                    let promoter_is_project_member = r.project.linked;
+                    let new_id = crate::promote::promote(
+                        &d.store,
+                        memory_id,
+                        target,
+                        d.owner_identity().await,
+                        r.project.id,
+                        &identities,
+                        promoter_is_project_member,
+                        facts,
+                    )
+                    .await?;
+                    Ok(json!({ "id": new_id, "target": target }))
+                }
+            }
         }
         Request::PatternOutcome {
             cwd,
@@ -748,6 +819,29 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             .await
         }
         Request::PatternForget { cwd, id } => crate::patterns::forget(d, &cwd, id).await,
+
+        Request::TeamList { all } => team_list(d, all).await,
+        Request::TeamPropose {
+            cwd,
+            content,
+            knowledge_type,
+            topic_key,
+            value_key,
+            applicability,
+        } => {
+            team_propose(
+                d,
+                &cwd,
+                content,
+                knowledge_type,
+                topic_key,
+                value_key,
+                applicability,
+            )
+            .await
+        }
+        Request::TeamRatify { id, supersedes } => team_ratify(d, id, supersedes).await,
+        Request::TeamRetire { id } => team_retire(d, id).await,
         Request::MemoryReinforce {
             cwd,
             agent_session_key,
@@ -827,13 +921,32 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             all,
             explain,
         } => verify_now(d, &cwd, memory_id, all, explain).await,
-        Request::MemoryForget { cwd, memory_id } => {
-            let r = d.resolve(&cwd).await?;
-            repo::delete_memory(&d.store, memory_id, r.policy)
-                .await
-                .map_err(storage_err)?;
-            Ok(json!({ "deleted": memory_id }))
-        }
+        Request::MemoryForget {
+            cwd,
+            memory_id,
+            domain,
+        } => match domain {
+            // A team entry's lifecycle only advances through `cairn team
+            // retire`, by an admin (`contracts/global-memory.md` §5b) — never
+            // through this tool.
+            Some(KnowledgeDomain::Team) => Err(WireError::invalid(
+                "domain: \"team\" cannot be forgotten through cairn_remember; \
+                 use `cairn team retire` (admin only)",
+            )),
+            Some(KnowledgeDomain::Personal) => {
+                cairn_store::global::forget_personal(&d.store, memory_id, d.owner_identity().await)
+                    .await
+                    .map_err(storage_err)?;
+                Ok(json!({ "deleted": memory_id, "domain": "personal" }))
+            }
+            None | Some(KnowledgeDomain::Project) => {
+                let r = d.resolve(&cwd).await?;
+                repo::delete_memory(&d.store, memory_id, r.policy)
+                    .await
+                    .map_err(storage_err)?;
+                Ok(json!({ "deleted": memory_id }))
+            }
+        },
         Request::MemoryGet { cwd, memory_id } => {
             let r = d.resolve(&cwd).await?;
             // Feature 001's answer first, and whole.
@@ -921,8 +1034,37 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         }
         Request::AuthLogout => crate::sync::logout(d).await,
         Request::AuthStatus => crate::sync::auth_status(d).await,
-        Request::SyncStatus { cwd } => crate::sync::status(d, &cwd).await,
+        Request::AuthChangePassword { new_password } => {
+            crate::sync::change_password(d, &new_password).await
+        }
+        Request::SyncStatus { cwd } => sync_status(d, &cwd).await,
         Request::SyncNow { cwd } => crate::sync::sync_now(d, &cwd).await,
+
+        Request::AdminUserCreate {
+            email,
+            display_name,
+        } => crate::sync::admin_user_create(d, &email, &display_name).await,
+        Request::AdminUserList => crate::sync::admin_user_list(d).await,
+        Request::AdminUserPatch {
+            email,
+            role,
+            status,
+        } => crate::sync::admin_user_patch(d, &email, role, status).await,
+        Request::ResetPassword { email } => crate::sync::admin_reset_password(d, &email).await,
+
+        Request::PersonalList { query, limit } => personal_list(d, query, limit).await,
+        Request::PersonalForget { id } => personal_forget(d, id).await,
+        Request::ProjectTraits { cwd } => project_traits(d, &cwd).await,
+
+        Request::ProjectMemberAdd { project_id, email } => {
+            crate::sync::project_member_add(d, project_id, &email).await
+        }
+        Request::ProjectMemberRemove { project_id, email } => {
+            crate::sync::project_member_remove(d, project_id, &email).await
+        }
+        Request::ProjectMemberList { project_id } => {
+            crate::sync::project_member_list(d, project_id).await
+        }
     }
 }
 
@@ -1329,14 +1471,23 @@ async fn observe(
 // Context
 // ---------------------------------------------------------------------------
 
+/// Eight arguments, one past the lint's limit, and each one is read.
+///
+/// `reason` decides the post-compaction path; `depth` decides whether the global
+/// sections are assembled at all (FR-477); the rest were already load-bearing.
+/// Bundling them into a request struct would only move the same eight values
+/// behind one name — this function's caller destructures them straight out of
+/// `Request::Context`, so a struct would be that variant with a second name.
+#[allow(clippy::too_many_arguments)]
 async fn context(
     d: &Daemon,
     cwd: &str,
     agent_session_key: Option<String>,
     session_id: Option<Uuid>,
-    _reason: Option<ContextReason>,
+    reason: Option<ContextReason>,
     token_budget: Option<usize>,
     explain: bool,
+    depth: Option<cairn_core::wire::ContextDepth>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let budget = token_budget.unwrap_or(d.config.read().await.context_budget_tokens);
@@ -1346,7 +1497,10 @@ async fn context(
     // another agent's task goal (FR-010, M1).
     let session = session_for_read(d, &r, session_id, agent_session_key.as_deref()).await?;
 
-    let payload = briefing::build(d, &r, session.as_ref(), budget, false, explain).await?;
+    // Absent means `standard` — today's full assembly — so a caller that has
+    // never named `depth` sees no change (FR-481, T156).
+    let depth = depth.unwrap_or(cairn_core::wire::ContextDepth::Standard);
+    let payload = briefing::build(d, &r, session.as_ref(), budget, false, explain, depth).await?;
     let mut out = serde_json::to_value(payload).unwrap_or(json!({}));
 
     // The mode Cairn can honestly promise this agent — derived from Feature
@@ -1358,7 +1512,7 @@ async fn context(
     }
 
     // A post-compaction refresh is where a checkpoint is restored.
-    if _reason == Some(ContextReason::PostCompaction) {
+    if reason == Some(ContextReason::PostCompaction) {
         if let Some(restored) = restore_checkpoint(d, &r, session.as_ref()).await {
             if let Some(o) = out.as_object_mut() {
                 o.insert("checkpoint".into(), restored);
@@ -1986,6 +2140,86 @@ async fn memory_subject(
     }))
 }
 
+/// `cairn memory subject --domain personal|team` (T078, T127; FR-442, FR-462).
+///
+/// The derivation is `derive_subject`, unchanged and shared with project memory
+/// — that shared-ness is FR-442's actual requirement ("the same deterministic
+/// reconciliation already used for project memory"), and it is only a real
+/// property if the same function is what answers a user's question in all three
+/// domains.
+///
+/// Neither `scope` nor `scope_key` appears here. A personal or team record has
+/// no scope: personal knowledge follows an account across every project, and
+/// team guidance is a server-wide default. Accepting a scope and ignoring it
+/// would be worse than refusing one.
+async fn global_subject(d: &Daemon, domain: KnowledgeDomain, topic_key: String) -> Reply {
+    let normalized = cairn_core::knowledge::normalize_topic_key(&topic_key).ok_or_else(|| {
+        WireError::new(
+            codes::INVALID_TOPIC_KEY,
+            "that topic key has no representable characters",
+        )
+    })?;
+
+    let (view, members, contents) = match domain {
+        KnowledgeDomain::Personal => {
+            let owner = d.owner_identity().await;
+            let read = cairn_store::global::personal_subject(&d.store, owner, &normalized)
+                .await
+                .map_err(storage_err)?;
+            let mut contents: std::collections::BTreeMap<Uuid, String> = Default::default();
+            for id in &read.view.answers {
+                if let Ok(record) = cairn_store::global::get_personal(&d.store, *id, owner).await {
+                    contents.insert(*id, record.content);
+                }
+            }
+            (read.view, read.members, contents)
+        }
+        KnowledgeDomain::Team => {
+            let read = cairn_store::global::team_subject(&d.store, &normalized)
+                .await
+                .map_err(storage_err)?;
+            let mut contents: std::collections::BTreeMap<Uuid, String> = Default::default();
+            for id in &read.view.answers {
+                if let Ok(record) = cairn_store::global::team_entry(&d.store, *id).await {
+                    contents.insert(*id, record.content);
+                }
+            }
+            (read.view, read.members, contents)
+        }
+        KnowledgeDomain::Project => unreachable!("dispatched to memory_subject above"),
+    };
+
+    if members.is_empty() {
+        return Err(WireError::new(
+            codes::SUBJECT_NOT_FOUND,
+            format!("no {} subject {normalized}", domain.as_str()),
+        ));
+    }
+
+    Ok(json!({
+        "subject": {
+            "topic_key": normalized,
+            "domain": domain.as_str(),
+            "reconciliation": view.reconciliation,
+            "answers": view.answers,
+            "narrowed_by": view.narrowed_by,
+            "accounting": view.accounting.iter().map(|a| json!({
+                "memory_id": a.memory_id,
+                "duplicates": a.duplicates,
+                "distinct_origins": a.distinct_origins,
+            })).collect::<Vec<_>>(),
+            "decisions": view.decisions.iter().map(|r| json!({
+                "from": r.from, "to": r.to, "kind": r.kind, "basis": r.basis,
+            })).collect::<Vec<_>>(),
+            "members": members.iter().map(|m| json!({
+                "id": m.id,
+                "value_key": m.value_key,
+                "content": contents.get(&m.id),
+            })).collect::<Vec<_>>(),
+        }
+    }))
+}
+
 /// Record that a session confirms an existing memory is still true (FR-321).
 async fn memory_reinforce(
     d: &Daemon,
@@ -2094,6 +2328,116 @@ async fn memory_reconcile(
         "basis": basis,
         "recorded": wrote,
     }))
+}
+
+/// Parse `"kind=value"` strings into `(ApplicabilityKind, String)` pairs,
+/// refusing rather than silently dropping a value outside the closed
+/// `language | tool` vocabulary or a string with no `=` (T080, FR-434,
+/// FR-514).
+fn parse_applicability_facts(
+    raw: &[String],
+) -> Result<Vec<(ApplicabilityKind, String)>, WireError> {
+    raw.iter()
+        .map(|s| {
+            let (kind_str, value) = s.split_once('=').ok_or_else(|| {
+                WireError::invalid(format!(
+                    "applicability_facts entries must be \"kind=value\" (language|tool); got {s:?}"
+                ))
+            })?;
+            let kind: ApplicabilityKind = kind_str.parse().map_err(|_| {
+                WireError::invalid(format!(
+                    "unknown applicability kind {kind_str:?}; must be \"language\" or \"tool\""
+                ))
+            })?;
+            Ok((kind, value.to_string()))
+        })
+        .collect()
+}
+
+/// The identity tokens for the project currently being worked in, if any —
+/// what `create_personal` and personal/team promotion screen `content`
+/// against (`contracts/global-memory.md` §"D446", T074, T079).
+///
+/// The client-side counterpart of `cairn_server::global::identities_for`: that
+/// function unions every project a *user* is a member of, because the server
+/// cannot know which project a client was in; this one only ever has the one
+/// project in front of it, so it derives tokens from that project alone. Same
+/// rule for what counts as a token — a project's name, plus the host,
+/// organisation and repository parts of its remote — deliberately duplicated
+/// here rather than imported, because the server's version reads Postgres
+/// rows this client never has.
+fn current_project_identities(project: &Project) -> Vec<ProjectIdentity> {
+    let mut out = Vec::new();
+    let name = project.name.trim();
+    if !name.is_empty() {
+        out.push(ProjectIdentity(name.to_string()));
+    }
+    if let Some(remote) = &project.repository_remote {
+        out.extend(remote_identity_tokens(remote));
+    }
+    out
+}
+
+/// The host, organisation and repository parts of a git remote. See
+/// [`current_project_identities`].
+fn remote_identity_tokens(remote: &str) -> Vec<ProjectIdentity> {
+    const STRUCTURAL: &[&str] = &["git", "ssh", "www", "http", "https", "com", "org", "net"];
+    remote
+        .trim_end_matches(".git")
+        .split(['/', ':', '@'])
+        .filter(|part| {
+            !part.is_empty()
+                && part.len() >= 3
+                && !STRUCTURAL.contains(&part.to_ascii_lowercase().as_str())
+        })
+        .map(|part| ProjectIdentity(part.to_string()))
+        .collect()
+}
+
+/// `cairn_remember action: "create", domain: "personal"` (T079, FR-431).
+///
+/// This is the first of `validate_global_content`'s five entry points
+/// (`create_personal` runs it internally, T074) — there is no separate call
+/// here, only the identities to screen against and the write itself.
+async fn personal_create(
+    d: &Daemon,
+    cwd: &str,
+    kind: MemoryType,
+    content: String,
+    topic_key: Option<String>,
+    value_key: Option<String>,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let content = cairn_core::redact::redact(&content);
+    let identities = current_project_identities(&r.project);
+
+    let new = cairn_store::global::NewPersonalKnowledge::direct(
+        d.owner_identity().await,
+        kind,
+        &content,
+        topic_key.as_deref(),
+        value_key.as_deref(),
+        // No applicability argument on direct creation via `cairn_remember`
+        // today (FR-435): an entry created with none applies to every
+        // project, which is the ordinary case this tool exists for.
+        Vec::new(),
+    );
+    let outcome = cairn_store::global::create_personal(&d.store, new, &identities)
+        .await
+        .map_err(|e| WireError::new(codes::INVALID_REQUEST, e.to_string()))?;
+
+    let report = ReconciliationReport::build(
+        &outcome.reconciliation,
+        outcome.subject.as_deref(),
+        outcome.relation_recorded,
+        outcome.matched_value_key.clone(),
+    );
+    let mut body = json!({ "memory": outcome.record, "domain": "personal" });
+    body["reconciliation"] = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
+    if !outcome.notes.is_empty() {
+        body["notes"] = json!(outcome.notes);
+    }
+    Ok(body)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2295,11 +2639,77 @@ async fn memory_search(
         session_id: session.as_ref().map(|s| s.id),
     };
     let include_patterns = query.include_patterns;
-    let results = search::search(&d.store, r.project.id, &query, &ctx)
-        .await
-        .map_err(storage_err)?;
+    // Absent means all three (FR-472). A caller with no personal or team
+    // knowledge of their own sees zero difference from one who never
+    // touches either domain (FR-481, T164): searching those domains against
+    // an empty store costs one query each and returns `[]`, exactly what an
+    // omitted field would have shown.
+    let domains = query.domains.clone().unwrap_or_else(|| {
+        vec![
+            KnowledgeDomain::Project,
+            KnowledgeDomain::Personal,
+            KnowledgeDomain::Team,
+        ]
+    });
+
+    // `results`/`total` describe project results only, computed exactly as
+    // they always were — before `personal[]`/`team[]` are considered at all
+    // (D424, FR-469, FR-470). A caller that excluded `project` from
+    // `domains` gets none, the same way excluding `personal`/`team` gets
+    // those two `[]`.
+    let results = if domains.contains(&KnowledgeDomain::Project) {
+        search::search(&d.store, r.project.id, &query, &ctx)
+            .await
+            .map_err(storage_err)?
+    } else {
+        Vec::new()
+    };
     let total = results.len();
     let mut payload = serde_json::to_value(SearchPayload { results, total }).unwrap_or(json!({}));
+
+    // Two more **sibling** arrays, spliced in exactly as `patterns[]` is
+    // below — never merged into `results` (§7, FR-469). Each is ranked
+    // within its own FTS5 corpus alone (T162); there is no comparator that
+    // ranks one against `results` or against each other (D425, FR-471).
+    if let Some(object) = payload.as_object_mut() {
+        let limit = query.limit.unwrap_or(search::GLOBAL_SEARCH_DEFAULT_LIMIT);
+        let needs_traits = domains.contains(&KnowledgeDomain::Personal)
+            || domains.contains(&KnowledgeDomain::Team);
+        let traits = if needs_traits {
+            d.project_traits(&r).await
+        } else {
+            Vec::new()
+        };
+
+        let personal = if domains.contains(&KnowledgeDomain::Personal) {
+            search::search_personal(
+                &d.store,
+                d.owner_identity().await,
+                query.query.as_deref(),
+                &traits,
+                limit,
+            )
+            .await
+            .map_err(storage_err)?
+        } else {
+            Vec::new()
+        };
+        object.insert("personal".into(), json!(personal));
+
+        let team = if domains.contains(&KnowledgeDomain::Team) {
+            // Authoritative only, for every caller including its own
+            // proposer — a proposed entry is invisible to *all* recall
+            // (FR-452); `cairn team list` is the one surface that shows a
+            // proposer their own pending proposals, and it does not share
+            // this function.
+            search::search_team(&d.store, query.query.as_deref(), &traits, limit)
+                .await
+                .map_err(storage_err)?
+        } else {
+            Vec::new()
+        };
+        object.insert("team".into(), json!(team));
+    }
 
     // A **separate** array, and only when asked for. Merging a pattern into
     // `results` would hand a caller another project's knowledge among its own
@@ -2337,6 +2747,384 @@ async fn memory_search(
         }
     }
     Ok(payload)
+}
+
+/// Who is asking, resolved fresh from `GET /api/auth/me` every call (T132,
+/// FR-464) — never from a role this daemon cached locally, for the same
+/// reason `crates/cairn-server/src/api.rs`'s own `me` handler comment gives:
+/// an authority claim verified against a stale local copy is not verified.
+///
+/// Unlike ratification and retirement (`team_ratify`/`team_retire`, T121),
+/// listing is safe to *degrade* rather than refuse when the server cannot be
+/// asked: a member-scoped view is exactly what an unelevated caller would
+/// see anyway, so an unreachable server here costs nothing but the (rarer)
+/// admin-scoped listing, never a permission it should not have had.
+async fn team_viewer(d: &Daemon) -> cairn_store::global::TeamViewer {
+    match crate::sync::auth_me(d).await {
+        Ok(me) if me.get("role").and_then(|r| r.as_str()) == Some(ServerRole::Admin.as_str()) => {
+            cairn_store::global::TeamViewer::Admin
+        }
+        _ => cairn_store::global::TeamViewer::Member(d.owner_identity().await),
+    }
+}
+
+/// `cairn team list` (T132, T133, FR-464).
+///
+/// Reads whatever this store already holds for `team_knowledge` — populated
+/// once sync pulls authoritative and (for the proposer or an admin) proposed
+/// rows down from the server. `--all` asks for admin scope explicitly; a
+/// caller who is not an admin is told so rather than having the request
+/// silently downgraded to the same view an absent `--all` would have given —
+/// silence there would read as "there is nothing more to see" when the truth
+/// is "you may not see more".
+async fn team_list(d: &Daemon, all: bool) -> Reply {
+    let viewer = team_viewer(d).await;
+    if all && !matches!(viewer, cairn_store::global::TeamViewer::Admin) {
+        return Err(WireError::new(
+            codes::UNAUTHORIZED,
+            "--all requests every state from every proposer, which only a server \
+             administrator may see; showing your own view instead — run `cairn team list` \
+             without --all, or ask an admin",
+        ));
+    }
+    let entries =
+        cairn_store::global::list_team(&d.store, &viewer, cairn_store::global::RECALL_MAX_LIMIT)
+            .await
+            .map_err(storage_err)?;
+    Ok(json!({ "entries": entries }))
+}
+
+/// `cairn team propose` (T133, FR-451, FR-455). Always lands `proposed` —
+/// no path from this handler ever reaches `authoritative`; only
+/// [`team_ratify`], gated by the server's own admin check, does that.
+///
+/// No `cwd` on the request (this section's wire.rs module note explains
+/// why team knowledge carries none), so there is no current project's
+/// identity tokens to screen `content` against — `validate_global_content`
+/// (run inside `propose_team`) is given none, which its own signature
+/// allows.
+async fn team_propose(
+    d: &Daemon,
+    cwd: &str,
+    content: String,
+    knowledge_type: Option<MemoryType>,
+    topic_key: Option<String>,
+    value_key: Option<String>,
+    applicability: Vec<String>,
+) -> Reply {
+    let facts = parse_applicability_facts(&applicability)?;
+    let applicability: Vec<ApplicabilityFact> = facts
+        .into_iter()
+        .map(|(kind, value)| ApplicabilityFact { kind, value })
+        .collect();
+    let content = cairn_core::redact::redact(&content);
+    let r = d.resolve(cwd).await?;
+    let identities = current_project_identities(&r.project);
+
+    let new = cairn_store::global::NewTeamKnowledge::direct(
+        d.owner_identity().await,
+        // `fact` is the same default `cairn memory add --type` gives a
+        // caller who names none.
+        knowledge_type.unwrap_or(MemoryType::Fact),
+        &content,
+        topic_key.as_deref(),
+        value_key.as_deref(),
+        applicability,
+    );
+    // The third entry point screens against the project the proposer is working
+    // in (T123, FR-580) — not against an empty set, which would pass the
+    // `project_identifying` class by definition and make this the one surface of
+    // five where naming a project is permitted.
+    let outcome = cairn_store::global::propose_team(&d.store, new, &identities)
+        .await
+        .map_err(|e| WireError::new(codes::INVALID_REQUEST, e.to_string()))?;
+
+    let report = ReconciliationReport::build(
+        &outcome.reconciliation,
+        outcome.subject.as_deref(),
+        outcome.relation_recorded,
+        outcome.matched_value_key.clone(),
+    );
+    let mut body = json!({ "entry": outcome.record });
+    body["reconciliation"] = serde_json::to_value(&report).unwrap_or(serde_json::Value::Null);
+    if !outcome.notes.is_empty() {
+        body["notes"] = json!(outcome.notes);
+    }
+    Ok(body)
+}
+
+/// `cairn team ratify` (T119, T121, T133, FR-453–FR-455, FR-457).
+///
+/// **Authorization is the server's alone.** `POST /api/team/{id}/ratify` is
+/// gated by the server's own admin-only extractor — the same shape
+/// `admin_user_patch` already trusts for account administration — so this
+/// handler makes no local role decision at all; a client-side check in
+/// front of a server check that already exists would be a second
+/// implementation of that decision, and (T121's whole point) a staler one.
+/// The server route is admin-gated at
+/// `crates/cairn-server/src/**` by another party as of this writing; this
+/// call is written against `POST /api/team/{id}/ratify` as its contract.
+///
+/// An unreachable server or a missing credential refuses here exactly as it
+/// does for every other server-mediated write (`crate::sync::client`) —
+/// there is no local-only fallback, so a member's own machine can never
+/// decide its own authority merely because the server could not be asked.
+///
+/// The local store is updated only *after* the server confirms, so
+/// `cairn team list` on this machine reflects the ratification immediately
+/// rather than waiting for the next sync pull. A `state_conflict` from that
+/// local apply, once the server has already succeeded, means this store's
+/// own copy already reflects the transition (an earlier pull, or an earlier
+/// call that reached the store but not its caller) — not a real
+/// disagreement — so it is reported as the server's own success rather than
+/// surfaced as an error.
+async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
+    // The server decides, and it can only decide about a row it has. A proposal
+    // made on this machine and not yet delivered is the one case where that is
+    // surprising, so the refusal says which of the two it is rather than leaving
+    // an administrator to guess whether the id was wrong.
+    let remote = crate::sync::team_ratify_remote(d, id, supersedes)
+        .await
+        .map_err(|e| {
+            if e.code == codes::NOT_FOUND {
+                WireError::new(
+                    codes::NOT_FOUND,
+                    format!(
+                        "the server has no team knowledge entry {id}. If it was proposed \
+                         on this machine, it has not been delivered yet — run `cairn sync \
+                         now` and ratify again."
+                    ),
+                )
+            } else {
+                e
+            }
+        })?;
+    match cairn_store::global::ratify_team(&d.store, id, d.owner_identity().await, supersedes).await
+    {
+        Ok(record) => Ok(json!({ "entry": record })),
+        Err(cairn_store::StoreError::Refused { code, .. })
+            if code == cairn_store::global::STATE_CONFLICT =>
+        {
+            Ok(remote)
+        }
+        Err(e) => Err(storage_err(e)),
+    }
+}
+
+/// `cairn team retire` (T119, T121, T133, FR-456, FR-457, FR-461, FR-465).
+/// Same server-authorizes, local-applies-after shape as [`team_ratify`], and
+/// the same `state_conflict`-after-server-success treatment.
+async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
+    let remote = crate::sync::team_retire_remote(d, id).await?;
+    match cairn_store::global::retire_team(&d.store, id, d.owner_identity().await).await {
+        Ok(record) => Ok(json!({ "entry": record })),
+        Err(cairn_store::StoreError::Refused { code, .. })
+            if code == cairn_store::global::STATE_CONFLICT =>
+        {
+            Ok(remote)
+        }
+        Err(e) => Err(storage_err(e)),
+    }
+}
+
+/// `cairn personal list` (T082, FR-434).
+///
+/// Unfiltered by the project the caller happens to be standing in: this is
+/// "show me everything I hold", not a recall composed for one project's
+/// context. It therefore calls `list_personal`, which has no applicability
+/// predicate at all — **not** `recall_personal` with an empty trait slice, which
+/// is a different thing wearing the same shape: `applies` returns `false` for
+/// every record carrying a fact when the trait set is empty, so that spelling
+/// hid precisely the records a user had bothered to scope.
+async fn personal_list(d: &Daemon, query: Option<String>, limit: Option<i64>) -> Reply {
+    let entries = cairn_store::global::list_personal(
+        &d.store,
+        d.owner_identity().await,
+        query.as_deref(),
+        limit.unwrap_or(cairn_store::global::RECALL_DEFAULT_LIMIT),
+    )
+    .await
+    .map_err(storage_err)?;
+    Ok(json!({ "entries": entries }))
+}
+
+/// `cairn personal forget` (T082, FR-440, FR-441). Scoped to the caller's
+/// own account by the store call this forwards to — `forget_personal`
+/// answers a wrong id and a wrong owner's id identically (FR-432), so this
+/// can never confirm or deny another account's entry.
+async fn personal_forget(d: &Daemon, id: Uuid) -> Reply {
+    cairn_store::global::forget_personal(&d.store, id, d.owner_identity().await)
+        .await
+        .map_err(storage_err)?;
+    Ok(json!({ "deleted": id, "domain": "personal" }))
+}
+
+/// `cairn traits` (T082, D413, FR-437) — this project's derived stack
+/// traits, the same set applicability matching reads at recall time.
+async fn project_traits(d: &Daemon, cwd: &str) -> Reply {
+    let r = d.resolve(cwd).await?;
+    // Derived here rather than read, so `cairn traits` answers with what this
+    // working tree actually implies right now (FR-439). Reading the table alone
+    // reported an empty set forever, because nothing wrote it.
+    let traits = d.project_traits(&r).await;
+    Ok(json!({ "traits": traits }))
+}
+
+/// `cairn sync status`, extended with a per-namespace breakdown (T109,
+/// FR-487).
+///
+/// `crate::sync::status` is unchanged — it still builds and returns
+/// [`SyncStatusPayload`] exactly as it always has, so every existing
+/// assertion against `linked`/`pending`/`failed`/`degradation` continues to
+/// hold. `namespaces` is spliced onto the serialized envelope as a sibling
+/// field, the same way `patterns[]` rides alongside `SearchPayload` above —
+/// which is what keeps this addition out of a struct
+/// (`crates/cairnd/src/sync.rs`) this feature does not own.
+async fn sync_status(d: &Daemon, cwd: &str) -> Reply {
+    let mut payload = crate::sync::status(d, cwd).await?;
+    let r = d.resolve(cwd).await?;
+
+    let namespaces = namespace_sync_status(d, r.project.id).await?;
+    if let Some(object) = payload.as_object_mut() {
+        object.insert("namespaces".into(), json!(namespaces));
+    }
+    Ok(payload)
+}
+
+/// One row per namespace this local store actually holds outbox entries for
+/// (D426, D427, `contracts/sync-namespaces.md`) — this project's own, plus
+/// this user's `personal:*` namespace and any `team:*` namespace, both of
+/// which are project-independent and so are reported regardless of which
+/// project `cwd` resolves to.
+async fn namespace_sync_status(
+    d: &Daemon,
+    project_id: Uuid,
+) -> Result<Vec<NamespaceSyncStatus>, WireError> {
+    let project_key = SyncNamespace::Project(project_id).key();
+    let personal_pattern = format!("personal:%:{}", d.owner_identity().await);
+    let rows = sqlx::query(
+        "SELECT namespace,
+                SUM(CASE WHEN state IN ('pending', 'in_flight') THEN 1 ELSE 0 END) AS pending,
+                SUM(CASE WHEN state = 'failed' THEN 1 ELSE 0 END) AS failed,
+                SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) AS blocked
+           FROM outbox
+          WHERE namespace = ?1 OR namespace LIKE ?2 OR namespace LIKE 'team:%'
+          GROUP BY namespace
+          ORDER BY namespace",
+    )
+    .bind(&project_key)
+    .bind(&personal_pattern)
+    .fetch_all(d.store.pool())
+    .await
+    // A raw query returns `sqlx::Error`, not the store's own error type, so
+    // `storage_err` does not apply here — it maps `StoreError`'s named refusals
+    // onto their contract codes, and there are none to map from a bare query.
+    .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
+
+    let mut out: Vec<NamespaceSyncStatus> = rows
+        .iter()
+        .map(|row| {
+            let namespace: String = row.try_get("namespace").unwrap_or_default();
+            let kind = if namespace.starts_with("personal:") {
+                KnowledgeDomain::Personal
+            } else if namespace.starts_with("team:") {
+                KnowledgeDomain::Team
+            } else {
+                KnowledgeDomain::Project
+            };
+            NamespaceSyncStatus {
+                namespace,
+                kind,
+                pending: row.try_get::<i64, _>("pending").unwrap_or(0),
+                failed: row.try_get::<i64, _>("failed").unwrap_or(0),
+                blocked: row.try_get::<i64, _>("blocked").unwrap_or(0),
+                gaps: Vec::new(),
+            }
+        })
+        .collect();
+
+    // Every lane this store has established, whether or not it has ever queued
+    // anything into it.
+    //
+    // The query above reads `outbox`, which answers "what has work to push".
+    // That is the wrong question for a lane whose whole job is pulling: a device
+    // that only ever *receives* personal knowledge has no outbox row for it, so
+    // the lane it is actively pulling on would not appear in its own status at
+    // all — and neither would the gap report attached to it, which is the one
+    // place a missing record is ever mentioned (SC-450).
+    let owner = d.owner_identity().await;
+    if let Ok(established) = cairn_store::cursor::established(&d.store).await {
+        for namespace in established {
+            let (kind, key) = match namespace {
+                SyncNamespace::Personal(_, user) if user == owner => {
+                    (KnowledgeDomain::Personal, namespace.key())
+                }
+                // Another identity's lane. Held on this store and deliberately
+                // not surfaced: recall shows only the currently linked
+                // identity, and so does this (FR-567).
+                SyncNamespace::Personal(..) => continue,
+                SyncNamespace::Team(_) => (KnowledgeDomain::Team, namespace.key()),
+                SyncNamespace::Project(_) => continue,
+            };
+            if !out.iter().any(|n| n.namespace == key) {
+                out.push(NamespaceSyncStatus {
+                    namespace: key,
+                    kind,
+                    pending: 0,
+                    failed: 0,
+                    blocked: 0,
+                    gaps: Vec::new(),
+                });
+            }
+        }
+    }
+
+    // This project's own namespace is always reported, even with nothing
+    // queued yet.
+    if !out.iter().any(|n| n.namespace == project_key) {
+        out.push(NamespaceSyncStatus {
+            namespace: project_key,
+            kind: KnowledgeDomain::Project,
+            pending: 0,
+            failed: 0,
+            blocked: 0,
+            gaps: Vec::new(),
+        });
+    }
+
+    // Gap detection, per domain, attached to the lane it belongs to (T097,
+    // T114, SC-450). Read here rather than during the pull, because a gap is a
+    // property of what the store *holds* — a record that never arrives never
+    // runs any code, so nothing on the pull path is in a position to notice its
+    // absence.
+    let personal_gaps =
+        cairn_store::global::personal_writer_gaps(&d.store, d.owner_identity().await)
+            .await
+            .unwrap_or_default();
+    let team_gaps = cairn_store::global::team_writer_gaps(&d.store)
+        .await
+        .unwrap_or_default();
+    for entry in &mut out {
+        let source = match entry.kind {
+            KnowledgeDomain::Personal => &personal_gaps,
+            KnowledgeDomain::Team => &team_gaps,
+            // A project memory carries no writer sequence: the columns arrived
+            // with the two global domains and `memories` was deliberately not
+            // rebuilt to gain them (FR-521).
+            KnowledgeDomain::Project => continue,
+        };
+        entry.gaps = source
+            .iter()
+            .map(|g| WriterSequenceGap {
+                writer_id: g.writer_id,
+                missing: g.missing.clone(),
+                highest_seen: g.highest_seen,
+            })
+            .collect();
+    }
+
+    out.sort_by(|a, b| a.namespace.cmp(&b.namespace));
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -2878,6 +3666,8 @@ mod tests {
                 topic_key: None,
                 value_key: None,
                 importance: None,
+
+                domain: None,
             },
         )
         .await;
