@@ -884,3 +884,103 @@ fn a_projects_derived_traits_appear_in_no_payload_and_no_server_table() {
         "a serialized record has a traits field: {personal}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// A handoff carrying a completed test run reaches the server (FR-532, FR-535)
+// ---------------------------------------------------------------------------
+
+/// A handoff with `tests_executed` is accepted, and one carrying real
+/// observation content still is not.
+///
+/// **This is the test whose absence let a whole class of handoff become
+/// undeliverable.** Two changes met here and neither was visible alone: FR-532
+/// renamed `TestRunRecord.command` to `runner` precisely so a handoff with a test
+/// run would not trip the field-name denylist, and FR-535 then made that denylist
+/// recursive — at which point `outcome`, a name on the list because an
+/// observation has one, matched `tests_executed[].outcome` and refused every such
+/// handoff outright.
+///
+/// Nothing in the Rust suite pushed a handoff with a test run at a real server,
+/// so nothing failed. A Playwright test in the web suite did, for unrelated
+/// reasons, three layers away from the cause.
+///
+/// Falsified by returning `outcome` to the recursive list — or by removing the
+/// second half of this test, which is what keeps the relaxation honest.
+#[test]
+fn a_handoff_with_a_test_run_is_accepted_and_observation_content_still_is_not() {
+    let Some(server) = cairn_e2e::Server::start() else {
+        eprintln!("SKIPPED: set CAIRN_TEST_DATABASE_URL to run the payload suite");
+        return;
+    };
+    let token = server.new_user_token("handoff-testrun");
+    let remote = format!("git@localhost:cairnfixture/{}.git", uuid::Uuid::now_v7());
+    let (created, status) = cairn_e2e::post_json_status_bearer(
+        &server.base,
+        "/api/projects",
+        &serde_json::json!({ "name": "handoff-testrun", "repository_remote": remote }),
+        &token,
+    );
+    assert_eq!(status, 200, "create project: {created}");
+    let project = created["id"].as_str().expect("id").to_string();
+
+    let push = |payload: serde_json::Value| {
+        cairn_e2e::post_json_status_bearer(
+            &server.base,
+            "/api/sync/batch",
+            &serde_json::json!({
+                "project_id": project,
+                "items": [{
+                    "idempotency_key": uuid::Uuid::now_v7().to_string(),
+                    "entity_type": "handoff",
+                    "entity_id": uuid::Uuid::now_v7().to_string(),
+                    "operation": "upsert",
+                    "payload": payload,
+                }],
+            }),
+            &token,
+        )
+    };
+
+    // The shape a real handoff has, `outcome` nested inside `tests_executed`.
+    let (body, status) = push(serde_json::json!({
+        "session_id": uuid::Uuid::now_v7(),
+        "trigger": "session_end",
+        "goal": "requests over the limit get 429",
+        "next_step": "fix the open failure",
+        "completed_work": ["changed 1 file"],
+        "remaining_work": [],
+        "changed_files": ["src/limiter.rs"],
+        "decisions": [],
+        "failures": [],
+        "tests_executed": [{ "runner": "cargo test", "outcome": "failed" }],
+    }));
+    assert_eq!(status, 200, "the batch route itself failed: {body}");
+    assert_eq!(
+        body["results"][0]["status"].as_str(),
+        Some("applied"),
+        "a handoff carrying a completed test run was refused, so no session that \
+         ran tests can ever synchronize its handoff: {body}"
+    );
+
+    // And the boundary the name was on the list for still holds: an
+    // observation-shaped payload is refused.
+    for forbidden in [
+        serde_json::json!({ "session_id": uuid::Uuid::now_v7(), "outcome": "failed" }),
+        serde_json::json!({
+            "session_id": uuid::Uuid::now_v7(),
+            "tests_executed": [{ "runner": "cargo test", "command": "cargo test --workspace" }],
+        }),
+        serde_json::json!({
+            "session_id": uuid::Uuid::now_v7(),
+            "evidence": { "observed_value": "42 requests" },
+        }),
+    ] {
+        let (body, status) = push(forbidden.clone());
+        assert_eq!(status, 200, "the batch route itself failed: {body}");
+        assert_eq!(
+            body["results"][0]["status"].as_str(),
+            Some("rejected"),
+            "observation content was accepted: {forbidden} -> {body}"
+        );
+    }
+}
