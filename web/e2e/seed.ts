@@ -256,7 +256,11 @@ export async function seed(): Promise<Seeded> {
             changed_files: ["src/limiter.rs"],
             decisions: ["Chose a token bucket"],
             failures: ["Test failed: cargo test"],
-            tests_executed: [{ command: "cargo test", outcome: "failed" }],
+            // `runner`, not `command`. The server's wire check screens field
+            // *names* recursively, so a `command` key anywhere inside a handoff
+            // payload is refused outright (FR-532) — this seed's handoff never
+            // landed, and the session page then had no handoff to render at all.
+            tests_executed: [{ runner: "cargo test", outcome: "failed" }],
             repository_state: {
               branch: "main",
               commit_sha: "abc1234",

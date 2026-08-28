@@ -96,7 +96,7 @@ export default function HandoffPage({
                   {handoff.data.handoff.tests_executed.map((t, i) => (
                     <li key={i} className="flex flex-wrap items-center gap-2">
                       <code className="bg-muted rounded px-1.5 py-0.5 font-mono text-xs">
-                        {t.command}
+                        {t.runner}
                       </code>
                       <span className="text-muted-foreground text-xs">
                         {t.outcome}
