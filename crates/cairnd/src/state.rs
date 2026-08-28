@@ -34,6 +34,15 @@ pub struct Daemon {
     /// reconciled at startup (FR-009, D16).
     pub run_id: Uuid,
     pub config: Arc<RwLock<CairnConfig>>,
+    /// When each project's traits were last derived from its working tree.
+    ///
+    /// Derivation is cheap — eleven `Path::exists` calls and one directory
+    /// listing — but it is still a filesystem read plus a write transaction, and
+    /// `resolve` runs on every request. This bounds it to once per project per
+    /// [`TRAIT_REFRESH_INTERVAL`] instead.
+    pub traits_refreshed: Arc<RwLock<std::collections::HashMap<Uuid, std::time::Instant>>>,
+    /// This machine's own local identity, minted once by
+    /// `repo::ensure_local_user`. Owns everything project-scoped.
     pub user_id: Uuid,
     pub started_at: chrono::DateTime<chrono::Utc>,
     pub server: Arc<RwLock<ServerCredentials>>,
@@ -128,6 +137,11 @@ impl Daemon {
 pub struct ServerCredentials {
     pub url: Option<String>,
     pub token: Option<String>,
+    /// The account id this token belongs to on `url`, once learned.
+    ///
+    /// See [`cairn_core::config::CairnConfig::server_account_id`] for why this
+    /// is not the local user id.
+    pub account_id: Option<uuid::Uuid>,
 }
 
 impl ServerCredentials {
@@ -140,7 +154,91 @@ impl ServerCredentials {
         Self {
             url: config.server_url.clone(),
             token,
+            account_id: config.server_account_id,
         }
+    }
+}
+
+/// How long a project's derived traits are trusted before being re-derived.
+///
+/// A manifest appearing mid-session — `cargo init` in a fresh repository, a
+/// `Dockerfile` added — becomes visible to applicability matching within this
+/// window rather than at the next daemon restart.
+pub const TRAIT_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+impl Daemon {
+    /// This project's traits, derived from its working tree if they are stale.
+    ///
+    /// **The one production entry point for project traits** (FR-437, FR-439).
+    /// Every applicability-sensitive read goes through here, so there is one
+    /// place where "the traits are current" becomes true and no reader can
+    /// accidentally consult an empty set.
+    ///
+    /// It is an accessor rather than a step inside `resolve` because `resolve`
+    /// runs on every request and most requests do not care about traits;
+    /// deriving there would pay for a filesystem scan and a write transaction on
+    /// every session event. Refreshing here, bounded by
+    /// [`TRAIT_REFRESH_INTERVAL`], pays for it only when something is about to
+    /// read the answer.
+    ///
+    /// A derivation failure returns whatever is already stored rather than an
+    /// error. Traits narrow what recall admits; failing a briefing because a
+    /// directory could not be listed would trade a smaller answer for no answer.
+    pub async fn project_traits(&self, r: &Resolved) -> Vec<cairn_core::domain::ProjectTrait> {
+        let due = {
+            let seen = self.traits_refreshed.read().await;
+            match seen.get(&r.project.id) {
+                Some(at) => at.elapsed() >= TRAIT_REFRESH_INTERVAL,
+                None => true,
+            }
+        };
+
+        if due {
+            let worktree = r.repo.worktree_path.clone();
+            match cairn_store::traits::refresh_traits(&self.store, r.project.id, &worktree).await {
+                Ok(derived) => {
+                    self.traits_refreshed
+                        .write()
+                        .await
+                        .insert(r.project.id, std::time::Instant::now());
+                    return derived;
+                }
+                Err(e) => {
+                    tracing::debug!(project = %r.project.id, error = %e, "traits not refreshed");
+                }
+            }
+        }
+
+        cairn_store::traits::traits_for_project(&self.store, r.project.id)
+            .await
+            .unwrap_or_default()
+    }
+
+    /// The identity that owns this machine's global knowledge — personal
+    /// records, and the proposer and actor recorded on team ones.
+    ///
+    /// The linked server's account id when there is one, and the local user id
+    /// otherwise. Those are different identities on purpose (FR-567, FR-568): a
+    /// user account is per-server, so the same human on two servers is two
+    /// accounts, and their personal knowledge must sit in two disjoint sets of
+    /// rows rather than one pool. Keying on the local id would merge them the
+    /// moment a store was relinked, and there would be no way to unmerge them
+    /// afterwards.
+    ///
+    /// Team knowledge uses the same identity for the same reason: the server
+    /// records `proposed_by_user_id` and `ratified_by_user_id` as *its* account
+    /// ids, so a locally recorded proposal keyed on the local identity would
+    /// stop being the caller's own proposal the moment the row came back from a
+    /// pull — and the role-filtered listing that shows a member their own
+    /// pending proposals would stop showing it.
+    ///
+    /// Notes written before any link are owned by the local id, and stay owned
+    /// by it. Linking later does not reassign them to whichever account the
+    /// machine now authenticates as: that would attribute work to an identity
+    /// that did not do it, and would push it to a server the user had not chosen
+    /// to send it to when they wrote it.
+    pub async fn owner_identity(&self) -> Uuid {
+        self.server.read().await.account_id.unwrap_or(self.user_id)
     }
 }
 
@@ -193,8 +291,18 @@ impl Daemon {
     }
 
     /// Forget a cached instance, so a re-registered checkout is re-discovered.
+    ///
+    /// Also drops every project's trait-refresh stamp. `forget_repo` is the
+    /// daemon's one "this checkout is not what I thought it was" signal — `cairn
+    /// init` is its only caller — and a working tree that changed identity is
+    /// exactly the case where derived traits must not be trusted for the rest of
+    /// the refresh interval. Clearing the whole map rather than one entry costs
+    /// one re-derivation per project and avoids having to know which project the
+    /// stale `cwd` belonged to, which is the question `forget_repo` is being
+    /// told it cannot answer.
     pub async fn forget_repo(&self, cwd: &str) {
         self.repos.write().await.remove(cwd);
+        self.traits_refreshed.write().await.clear();
     }
 }
 

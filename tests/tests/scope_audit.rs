@@ -380,11 +380,27 @@ fn feature_003_added_no_scope_and_no_precedence() {
             .join("crates/cairn-store/src/search.rs"),
     )
     .expect("search.rs");
-    let bucket = ranking
-        .split("fn scope_bucket")
-        .nth(1)
-        .and_then(|s| s.split("\n}").next())
-        .unwrap_or_default();
+
+    // `scope_bucket` is a SQL column alias produced by a `CASE m.scope WHEN
+    // ... AS scope_bucket` expression, not a Rust function — there is no
+    // `fn scope_bucket` anywhere in this codebase. The original test looked
+    // for one anyway: `.split("fn scope_bucket").nth(1)` never matched, so
+    // `.unwrap_or_default()` silently produced `""`, and every assertion
+    // below passed against an empty string for the test's entire life
+    // (T174). `.expect()` in place of `.unwrap_or_default()` turns "the
+    // thing I'm inspecting doesn't exist" into a hard failure instead of a
+    // vacuous pass — which is the whole fix: this test must break, loudly,
+    // the moment scope precedence moves or is renamed out from under it.
+    let case_start = ranking.find("CASE m.scope").expect(
+        "the scope_bucket CASE expression is missing from search.rs — \
+         has scope precedence moved, been renamed, or been removed?",
+    );
+    let alias_offset = ranking[case_start..].find("AS scope_bucket").expect(
+        "`AS scope_bucket` is missing from search.rs — has the precedence \
+         column been renamed?",
+    );
+    let bucket = &ranking[case_start..case_start + alias_offset];
+
     for forbidden in [
         "importance",
         "pinned",
@@ -396,6 +412,28 @@ fn feature_003_added_no_scope_and_no_precedence() {
             "`{forbidden}` takes part in scope precedence: {bucket}"
         );
     }
+
+    // Excluding those signals from the bucket expression proves nothing on
+    // its own unless the bucket actually governs ordering ahead of
+    // relevance — a differently-shaped `ORDER BY` could still let a
+    // relevance or importance signal outrank scope even with a "clean"
+    // bucket expression sitting unused elsewhere in the file.
+    let order_by_start = ranking.find("ORDER BY scope_bucket").expect(
+        "the query no longer orders by scope_bucket — has scope precedence \
+         been dropped from the ORDER BY clause?",
+    );
+    let order_by = &ranking[order_by_start..];
+    let bucket_pos = order_by
+        .find("scope_bucket")
+        .expect("unreachable: matched above");
+    let relevance_pos = order_by
+        .find("relevance")
+        .expect("`relevance` is missing from the ORDER BY clause");
+    assert!(
+        bucket_pos < relevance_pos,
+        "scope_bucket must be ordered before relevance, or scope no longer \
+         dominates: {order_by}"
+    );
 }
 
 /// No vocabulary, taxonomy or registry of topic keys exists anywhere (FR-314).

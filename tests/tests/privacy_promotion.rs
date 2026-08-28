@@ -570,3 +570,121 @@ fn attested_source() {
         );
     }
 }
+
+// ===========================================================================
+// T151 / SC-423 — a promoted record outlives its source
+// ===========================================================================
+//
+// Promotion copies; it does not link (FR-519). Nothing on a personal or team
+// record points back at the project memory it came from, which is why forgetting
+// or deleting that memory leaves the promoted record alone.
+//
+// That is worth a test rather than a comment because the natural implementation
+// is the other one. A `source_memory_id` column is the obvious way to record
+// provenance, it is what every other relation in this schema does, and it would
+// be wrong twice over: it would name a row in a project the promoted record has
+// deliberately shed every trace of, and it would make forgetting the source
+// either cascade or dangle.
+
+/// Forgetting the source project memory leaves the promoted personal record
+/// exactly as it was.
+///
+/// Falsified by adding a cascade, a tombstone propagation, or a foreign key from
+/// `personal_knowledge` back to `memories`.
+#[test]
+fn forgetting_a_promoted_source_leaves_the_personal_record_untouched() {
+    let s = cairn_e2e::Sandbox::new();
+    let mut mcp = cairn_e2e::Mcp::start(&s);
+    let cwd = s.repo_path().to_string_lossy().to_string();
+
+    // A subject key is required: the gate's `no_subject` check refuses a source
+    // that could not participate in reconciliation at the far end.
+    let source = s.json(&[
+        "memory",
+        "add",
+        "--type",
+        "convention",
+        "--scope",
+        "project",
+        "--topic-key",
+        "build.cache",
+        "--value-key",
+        "clear_on_stale",
+        "Clear the build cache when a stale artifact is suspected",
+    ]);
+    let source_id = source["memory"]["id"].as_str().expect("memory id");
+
+    let promoted = mcp.tool_result(
+        "cairn_remember",
+        serde_json::json!({
+            "action": "promote",
+            "target": "personal",
+            "memory_id": source_id,
+        }),
+        &cwd,
+    );
+    assert_eq!(promoted["isError"], false, "promotion failed: {promoted}");
+    let promoted_id = promoted["content"][0]["text"]["id"]
+        .as_str()
+        .expect("promoted id")
+        .to_string();
+
+    let before = s.query_column(&format!(
+        "SELECT content || '|' || COALESCE(topic_key,'') || '|' || COALESCE(forgotten_at,'') \
+           FROM personal_knowledge WHERE id = '{promoted_id}'"
+    ));
+    assert_eq!(before.len(), 1, "the promoted record is missing");
+
+    // Forget the source, then delete it outright — both mutations, because
+    // either could be the one that cascades.
+    let forgotten = s.cairn(&["memory", "forget", source_id]);
+    assert!(forgotten.ok(), "forget failed: {}", forgotten.stderr);
+    let deleted = s.cairn(&["delete", "memory", source_id]);
+    assert!(deleted.ok(), "delete failed: {}", deleted.stderr);
+
+    let after = s.query_column(&format!(
+        "SELECT content || '|' || COALESCE(topic_key,'') || '|' || COALESCE(forgotten_at,'') \
+           FROM personal_knowledge WHERE id = '{promoted_id}'"
+    ));
+    assert_eq!(
+        before, after,
+        "forgetting or deleting the source changed the promoted record"
+    );
+}
+
+/// There is no live reference, asserted against the schema rather than against
+/// behaviour.
+///
+/// The behavioural test above would still pass on a schema that carried a
+/// nullable `source_memory_id` nobody had wired a cascade to yet. This one fails
+/// the moment such a column exists, which is the point at which the mistake is
+/// cheap to undo.
+#[test]
+fn no_promoted_record_carries_a_reference_to_its_source() {
+    let s = cairn_e2e::Sandbox::new();
+
+    for table in ["personal_knowledge", "team_knowledge"] {
+        let columns = s.query_column(&format!("SELECT name FROM pragma_table_info('{table}')"));
+        assert!(
+            !columns.is_empty(),
+            "{table} does not exist; this test would pass vacuously"
+        );
+        for column in &columns {
+            assert!(
+                !column.contains("memory")
+                    && !column.contains("source_id")
+                    && !column.contains("project"),
+                "{table} carries `{column}`, a reference back to the project the \
+                 promoted record deliberately sheds (FR-517, FR-519)"
+            );
+        }
+        // And no foreign key out of the table at all beyond its own domain.
+        let foreign = s.query_column(&format!(
+            "SELECT \"table\" FROM pragma_foreign_key_list('{table}')"
+        ));
+        assert!(
+            foreign.iter().all(|t| t.starts_with(table)),
+            "{table} has a foreign key out of its own domain: {foreign:?}"
+        );
+    }
+}

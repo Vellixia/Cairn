@@ -7,7 +7,7 @@
 
 use crate::client;
 use crate::render;
-use cairn_core::wire::{ContextPayload, MemoryQuery, Request, WireError};
+use cairn_core::wire::{ContextDepth, ContextPayload, MemoryQuery, Request, WireError};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
@@ -162,6 +162,10 @@ fn tool_definitions() -> Vec<Value> {
                     "as_of": { "type": "string", "description": "What was effective at this instant, RFC 3339" },
                     "pinned": { "type": "boolean" },
                     "include_patterns": { "type": "boolean", "description": "Patterns in a separate array, never mixed into results" },
+                    // Absent means all three. Each domain is ranked within its
+                    // own corpus and returned in its own array; there is no
+                    // comparator across them (FR-471, FR-472).
+                    "domains": { "type": "array", "items": { "type": "string", "enum": ["project", "personal", "team"] }, "description": "Which knowledge domains to search. Omit for all three; personal and team return sibling arrays, never merged into results" },
                     "agent_session_key": { "type": "string", "description": "Your own session identifier, so scope precedence uses your task" },
                     "session_id": { "type": "string", "description": "Cairn session id, as an alternative to agent_session_key" }
                 },
@@ -193,6 +197,13 @@ fn tool_definitions() -> Vec<Value> {
                     "evidence_observation_ids": { "type": "array", "items": { "type": "string" } },
                     "local_only": { "type": "boolean" },
                     "memory_id": { "type": "string" },
+                    // create / forget. `team` is deliberately absent from this
+                    // enum: no MCP action authors or mutates team knowledge
+                    // directly, because ratification of proposed team
+                    // guidance is an administrator action with no MCP surface
+                    // at all (FR-455, FR-527). Sending "team" anyway is
+                    // refused, not silently accepted or coerced.
+                    "domain": { "type": "string", "enum": ["project", "personal"], "description": "Whose knowledge this is (create) or which domain's tombstone-only mutation to apply (forget). Defaults to `project`." },
                     // create / supersede
                     "topic_key": { "type": "string", "description": "The subject this states something about. A key that will not normalize is reported and the memory is stored free-form." },
                     "value_key": { "type": "string", "description": "The comparable value it asserts. Needs a topic_key." },
@@ -217,11 +228,36 @@ fn tool_definitions() -> Vec<Value> {
                     "rationale": { "type": "string" },
                     // promote / record_outcome
                     "signals": { "type": "array", "items": { "type": "string" } },
-                    "applicability": { "type": "array", "items": { "type": "string" } },
+                    "applicability": { "type": "array", "items": { "type": "string" }, "description": "Free-text applicability conditions. Only meaningful when `target` is `pattern` (the default)." },
                     "root_cause": { "type": "string" },
                     "approach": { "type": "string" },
                     "constraints": { "type": "array", "items": { "type": "string" } },
                     "dry_run": { "type": "boolean" },
+                    // What this promotion targets. Absent means `pattern`, so
+                    // a caller naming none keeps today's behaviour unchanged
+                    // (FR-506, D415).
+                    "target": { "type": "string", "enum": ["pattern", "personal", "team"], "description": "Defaults to `pattern`. `personal` and `team` promote into that domain instead, using `applicability_facts` rather than `applicability` for their conditions." },
+                    // Structured conditions for a `personal`/`team` target,
+                    // distinct from the free-text `applicability` above (which
+                    // stays a pattern's own condition list).
+                    //
+                    // Flat `kind=value` strings, not an array of objects. The
+                    // shape is not a style choice: an action's parameters are
+                    // flat here by rule (D70), because a nested object is how a
+                    // tool grows sub-operations, and `mcp_backward_compatibility`
+                    // enforces it. `Vec<String>` is also what the wire type has
+                    // always been, so this removes a conversion rather than
+                    // adding one.
+                    //
+                    // `kind` is a closed vocabulary — `language` or `tool`, nothing else,
+                    // because both are derivable from files in a working tree
+                    // with no content read (D410, D414). A `kind` outside it
+                    // is refused, never silently dropped, so a promotion never
+                    // ends up applying under a narrower condition than asked
+                    // for (FR-434, FR-514). `value` is open text; a malformed
+                    // one is the validator's business downstream, not this
+                    // schema's.
+                    "applicability_facts": { "type": "array", "items": { "type": "string" }, "description": "`kind=value` conditions for a `personal`/`team` promotion, e.g. `language=rust`, `tool=cargo`. `kind` must be `language` or `tool`; anything else is refused, never dropped. Ignored when target is `pattern`." },
                     "pattern_id": { "type": "string" },
                     "outcome": { "type": "string", "enum": ["resolved", "not_applicable", "failed"] },
                     "alternative_cause": { "type": "string" },
@@ -352,6 +388,16 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .map(|v| v as usize),
                 // The six tools are fixed; diagnostics stay a CLI affordance.
                 explain: false,
+
+                // `minimum` excludes personal_notes/team_guidance entirely;
+                // absent means `standard`, today's full assembly, so a
+                // caller that has never named this sees no change (FR-481).
+                // `ContextDepth` has no `FromStr` (it derives only `Serialize`
+                // / `Deserialize`), so this goes through serde rather than
+                // `enum_arg`.
+                depth: args
+                    .get("depth")
+                    .and_then(|v| serde_json::from_value::<ContextDepth>(v.clone()).ok()),
             })
             .await?;
             // The agent gets the rendered briefing plus the raw envelope, so it
@@ -393,6 +439,12 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     .unwrap_or(false),
                 verification: enum_arg(args, "verification"),
                 authority: enum_arg(args, "authority"),
+
+                // Absent stays absent rather than becoming an explicit list of
+                // all three: the daemon's default is the thing the contract
+                // documents, and duplicating it here would let the two drift
+                // (FR-472).
+                domains: enum_list(args, "domains"),
             };
             let value = client::send(&Request::MemorySearch {
                 cwd,
@@ -431,6 +483,8 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                             topic_key: str_arg(args, "topic_key"),
                             value_key: str_arg(args, "value_key"),
                             importance: enum_arg(args, "importance"),
+
+                            domain: knowledge_domain_arg(args)?,
                         })
                         .await?
                     } else {
@@ -456,6 +510,8 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                     client::send(&Request::MemoryForget {
                         cwd,
                         memory_id: uuid_arg(args, "memory_id")?,
+
+                        domain: knowledge_domain_arg(args)?,
                     })
                     .await?
                 }
@@ -538,6 +594,11 @@ async fn dispatch(name: &str, args: &Value) -> Result<String, WireError> {
                         approach: str_arg(args, "approach"),
                         constraints: str_list(args, "constraints"),
                         dry_run: bool_arg(args, "dry_run"),
+
+                        // Absent means `pattern`, so a caller naming none
+                        // gets today's behaviour unchanged (FR-506, D415).
+                        target: enum_arg(args, "target"),
+                        applicability_facts: applicability_facts_arg(args)?,
                     })
                     .await?
                 }
@@ -823,6 +884,81 @@ fn uuid_list(args: &Value, key: &str) -> Vec<uuid::Uuid> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// A list of enum-valued strings, or `None` when the caller omitted the key.
+///
+/// Absent and present-but-empty are different requests and stay different: an
+/// omitted `domains` searches every domain, an explicitly empty one searches
+/// none. An unparseable member is dropped rather than failing the call, the
+/// same way [`enum_arg`] treats a scalar.
+fn enum_list<T: std::str::FromStr>(args: &Value, key: &str) -> Option<Vec<T>> {
+    args.get(key).and_then(|v| v.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|v| v.as_str())
+            .filter_map(|s| s.parse().ok())
+            .collect()
+    })
+}
+
+/// `domain` for `cairn_remember`'s `create`/`forget`: `project` (default) or
+/// `personal` only. `KnowledgeDomain` still has a `Team` variant — this is
+/// where it gets refused rather than forwarded. No MCP action authors or
+/// mutates team knowledge directly: team guidance is proposed and then
+/// ratified by a server administrator, and ratification has no MCP surface
+/// at all (FR-455, FR-527). `handlers.rs` refuses `domain: "team"` again
+/// daemon-side; this is the surface-level half of that same refusal, not a
+/// substitute for it.
+fn knowledge_domain_arg(args: &Value) -> Result<Option<cairn_core::KnowledgeDomain>, WireError> {
+    let domain = enum_arg::<cairn_core::KnowledgeDomain>(args, "domain");
+    if domain == Some(cairn_core::KnowledgeDomain::Team) {
+        return Err(WireError::invalid(
+            "domain \"team\" is refused here: team knowledge is proposed and ratified by an \
+             administrator, and no MCP action authors it directly (FR-455, FR-527)",
+        ));
+    }
+    Ok(domain)
+}
+
+/// `applicability_facts` for `cairn_remember action=promote`: `(kind,
+/// value)` pairs, formatted as `"kind=value"` strings, the encoding
+/// `Request::PatternPromote` expects on the wire. `kind` is the closed
+/// `language | tool` vocabulary (D410, D414) — an entry outside it is
+/// refused with an error naming the value, never dropped by a `filter_map`,
+/// because a promotion that silently lost a condition would apply more
+/// broadly than the caller asked for (FR-434, FR-514). A malformed `value`
+/// is passed through as-is; screening it is the content validator's job
+/// downstream, not this schema's.
+fn applicability_facts_arg(args: &Value) -> Result<Vec<String>, WireError> {
+    let Some(items) = args.get("applicability_facts").and_then(|v| v.as_array()) else {
+        return Ok(Vec::new());
+    };
+    items
+        .iter()
+        .map(|item| {
+            let raw = item.as_str().ok_or_else(|| {
+                WireError::invalid("applicability_facts[] entries are `kind=value` strings")
+            })?;
+            // Refused, never dropped (FR-434, FR-514). A silently discarded
+            // condition is worse than a refusal: the promotion still lands, and
+            // it lands applying *more* widely than the caller asked for — the one
+            // direction a mistake here must never go.
+            let (kind, _value) = raw.split_once('=').ok_or_else(|| {
+                WireError::invalid(format!(
+                    "applicability_facts[] entry `{raw}` is not `kind=value`"
+                ))
+            })?;
+            kind.trim()
+                .parse::<cairn_core::ApplicabilityKind>()
+                .map_err(|_| {
+                    WireError::invalid(format!(
+                        "applicability_facts[] kind `{kind}` is outside the closed \
+                         vocabulary (language | tool)"
+                    ))
+                })?;
+            Ok(raw.to_string())
+        })
+        .collect()
 }
 
 fn string_list(args: &Value, key: &str) -> Vec<String> {

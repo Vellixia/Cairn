@@ -3,6 +3,7 @@
 //!
 //! No I/O lives here. Git access is `cairn-git`, storage is `cairn-store`.
 
+pub mod applicability;
 pub mod bound;
 pub mod budget;
 pub mod config;
@@ -10,16 +11,19 @@ pub mod context;
 pub mod continuity;
 pub mod corpus;
 pub mod domain;
+pub mod global;
 pub mod handoff;
 pub mod knowledge;
 pub mod lifecycle;
 pub mod paths;
 pub mod patterns;
+pub mod promotion;
 pub mod redact;
 pub mod release;
 pub mod startup;
 pub mod tasks;
 pub mod tools;
+pub mod validate;
 pub mod verify;
 pub mod wire;
 

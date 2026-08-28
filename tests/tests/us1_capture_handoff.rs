@@ -62,7 +62,22 @@ fn handoff_names_the_changed_file_the_failing_test_and_a_next_step() {
         .expect("tests_executed");
     assert_eq!(tests.len(), 1);
     assert_eq!(tests[0]["outcome"], "failed");
-    assert!(tests[0]["command"].as_str().unwrap().contains("cargo test"));
+    // `runner`, not `command`. The field was renamed rather than sanitized in
+    // place (FR-532): the server's wire denylist screens *field names* and now
+    // recurses, so a key literally called `command` nested inside
+    // `tests_executed` was refused on sight however clean its value was — every
+    // handoff carrying a completed test run would have been rejected. The value
+    // is now the runner's name with flags and paths already stripped.
+    assert_eq!(
+        tests[0]["runner"].as_str().unwrap(),
+        "cargo test",
+        "the runner name should be the invocation with its flags and paths removed"
+    );
+    assert!(
+        tests[0].get("command").is_none(),
+        "a `command` key is back on a test run; the recursive wire denylist will \
+         refuse every handoff that carries one"
+    );
 
     let failures = handoff["failures"].as_array().expect("failures");
     assert!(failures
@@ -299,10 +314,14 @@ fn a_full_claude_session_stores_exactly_what_feature_001_stored() {
         .expect("tests_executed");
     assert_eq!(tests.len(), 1);
     assert_eq!(tests[0]["outcome"], "failed");
-    assert!(tests[0]["command"]
+    assert!(tests[0]["runner"]
         .as_str()
         .unwrap_or_default()
         .contains("cargo test"));
+    assert!(
+        tests[0].get("command").is_none(),
+        "a `command` key is back on a test run (FR-532)"
+    );
 
     let failures = handoff["failures"].as_array().expect("failures");
     assert!(failures

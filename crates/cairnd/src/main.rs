@@ -12,6 +12,7 @@ mod handlers;
 mod handoffs;
 mod integrations;
 mod patterns;
+mod promote;
 mod recover;
 mod state;
 mod sync;
@@ -98,6 +99,7 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         lifecycle_kinds: Arc::new(RwLock::new(Default::default())),
         run_id: new_id(),
         config: Arc::new(RwLock::new(config)),
+        traits_refreshed: Arc::new(RwLock::new(std::collections::HashMap::new())),
         user_id,
         started_at: chrono::Utc::now(),
         server: Arc::new(RwLock::new(server)),

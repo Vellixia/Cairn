@@ -50,6 +50,14 @@ pub const SECTION_ORDER: &[&str] = &[
     // authoritative thing in a briefing, so it is the first thing a tight
     // budget drops (FR-398).
     "patterns",
+    // Feature 004. Both after every project-scoped section, and personal
+    // ahead of team: the same specificity gradient the order above already
+    // expresses (task > branch > project) continues past "now" — personal
+    // knowledge is specific to the one account asking, team guidance is the
+    // server-wide default with no actor-specific claim at all (FR-476, D422,
+    // `contracts/recall-composition.md` §4).
+    "personal_notes",
+    "team_guidance",
 ];
 
 /// Sections whose loss means the briefing is materially degraded (SC-003).
@@ -75,6 +83,15 @@ pub struct ContextInputs<'a> {
     /// Everything Feature 003 adds. Defaulted, so a caller that has none of it
     /// gets Feature 001's briefing unchanged.
     pub level0: Level0<'a>,
+    /// Feature 004's personal candidates, already filtered by applicability and
+    /// ranked within their own domain by the caller.
+    ///
+    /// Empty is the ordinary case and costs nothing: `admit_global` treats empty
+    /// slices as "nothing to admit, zero spend", which is also how a
+    /// `depth: "minimum"` request excludes both sections (FR-477).
+    pub personal_notes: &'a [PersonalCandidate],
+    /// Feature 004's team candidates, same treatment.
+    pub team_guidance: &'a [TeamCandidate],
 }
 
 /// The Level 0 inputs. All plain data — this crate never reaches the store.
@@ -103,7 +120,24 @@ pub struct Caps {
     /// `floor(limit * min_safe_context_fraction)` is computed by the caller from
     /// config; this is the fraction already applied.
     pub reserve_fraction: f64,
+    /// The ceiling on combined `personal_notes` + `team_guidance` spend, as a
+    /// fraction of the **total** budget (D421, D450, FR-474).
+    ///
+    /// Independent of `reserve_fraction` on purpose: the reserve bounds what
+    /// Level 1 and Level 2 may take from Level 0's share, while this bounds
+    /// what global sections may take from *everyone's* share, including their
+    /// own. A pinned constant rather than a caller-chosen number in practice —
+    /// see [`GLOBAL_SHARE_MAX`] — but a `Caps` field, like `reserve_fraction`,
+    /// so it travels with the rest of the budget configuration instead of
+    /// being threaded through every call site separately.
+    pub global_share_max: f64,
 }
+
+/// `global_share_max`, pinned rather than left to the caller (D450): an
+/// unnamed "documented fraction" is a requirement no two implementations
+/// could be tested against identically. `Caps::default()` uses this value;
+/// nothing in this module reads a different one today.
+pub const GLOBAL_SHARE_MAX: f64 = 0.15;
 
 impl Default for Caps {
     fn default() -> Self {
@@ -112,12 +146,19 @@ impl Default for Caps {
             warnings_in_context_max: 5,
             pins_in_context_max: 4,
             reserve_fraction: 0.40,
+            global_share_max: GLOBAL_SHARE_MAX,
         }
     }
 }
 
 /// Assemble a briefing that fits `budget_tokens` estimated tokens.
 pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPayload {
+    // This expression's only inputs are `budget_tokens` and a compile-time
+    // fraction. Personal and team knowledge are not read anywhere above this
+    // line, are not part of `Level0`, and `admit_global` — the function that
+    // does read them — is not called until Level 1, after `release_reserve`
+    // has already run. There is no arithmetic expression here that could
+    // admit a global byte count into `reserve` (D420, FR-473).
     let reserve = (budget_tokens as f64 * input.level0.caps.reserve_fraction).floor() as usize;
     let mut budget = Budget::with_reserve(budget_tokens, reserve);
     let mut omitted: Vec<String> = Vec::new();
@@ -147,6 +188,8 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
         constraints: Vec::new(),
         previous_next_action: None,
         patterns: Vec::new(),
+        personal_notes: Vec::new(),
+        team_guidance: Vec::new(),
     };
 
     // ---- Level 0 -----------------------------------------------------------
@@ -229,6 +272,24 @@ pub fn assemble(input: &ContextInputs<'_>, budget_tokens: usize) -> ContextPaylo
                     budget.take_while_fits(input.patterns.iter().cloned(), pattern_cost);
                 briefing.patterns.len() == input.patterns.len()
             }
+            // The two global sections are admitted together, because their
+            // shared cap is a property of the pair rather than of either one
+            // (D421, D449). `personal_notes` runs the admission; `team_guidance`
+            // reads what it already produced.
+            "personal_notes" => {
+                let (personal, team) = admit_global(
+                    &mut budget,
+                    &mut selection,
+                    input.personal_notes,
+                    input.team_guidance,
+                    input.level0.caps.global_share_max,
+                );
+                let complete = personal.len() == input.personal_notes.len();
+                briefing.personal_notes = personal;
+                briefing.team_guidance = team;
+                complete
+            }
+            "team_guidance" => briefing.team_guidance.len() == input.team_guidance.len(),
             _ => true,
         };
         if !admitted {
@@ -275,6 +336,222 @@ fn pattern_cost(p: &BriefingPattern) -> usize {
         + p.check_this_first.as_deref().map(estimate).unwrap_or(0)
         // The label, the trust word and the field names.
         + 12
+}
+
+// ---------------------------------------------------------------------------
+// Level 1 — the two global sections (`contracts/recall-composition.md`)
+// ---------------------------------------------------------------------------
+
+/// A personal-knowledge candidate for `personal_notes` (FR-476, D422).
+///
+/// Deliberately not `crate::global::PersonalKnowledge` directly: this module
+/// never reaches the store (module doc), so it needs only what a candidate
+/// costs and what it says, the same reduction `BriefingPattern` already
+/// performs on a richer stored record.
+///
+/// `importance` is carried and **never read** by anything in this module. An
+/// importance hint changes neither a section's position in `SECTION_ORDER`
+/// nor its reserve eligibility (FR-482) — the field sits here, populated, so
+/// that claim is checkable (`importance_hint_changes_nothing`, below) rather
+/// than true only because nothing offered a hint to ignore.
+#[derive(Debug, Clone)]
+pub struct PersonalCandidate {
+    pub id: uuid::Uuid,
+    pub content: String,
+    pub importance: Importance,
+}
+
+/// A team-knowledge candidate for `team_guidance`. See [`PersonalCandidate`];
+/// the two are kept as distinct types rather than one shared struct because
+/// nothing about this feature promises they stay identical — team knowledge
+/// may grow fields (e.g. its ratification state) that a personal record must
+/// never carry, and a shared type would be the thing that quietly let one
+/// leak into the other.
+#[derive(Debug, Clone)]
+pub struct TeamCandidate {
+    pub id: uuid::Uuid,
+    pub content: String,
+    pub importance: Importance,
+}
+
+/// One project result's rank within `memory_fts` — nothing else (D425, FR-471).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ProjectRelevance {
+    pub memory_id: uuid::Uuid,
+    pub relevance: f64,
+}
+
+/// One personal result's rank within `personal_fts` — nothing else.
+///
+/// `PersonalRelevance`, `TeamRelevance` and [`ProjectRelevance`] each carry
+/// only their own domain's score. A `4.1` here and a `4.1` there are not the
+/// same claim — one is "well-matched against this user's own knowledge," the
+/// other "well-matched against this project's" — and BM25's score is a
+/// function of term statistics *within one corpus*, so there is no honest
+/// conversion between them. Nothing normalizes one against the other, and
+/// nothing could: no type exists in which a project score and a personal or
+/// team score coexist, and no function accepts two of these three types at
+/// once, so a cross-domain relevance comparison does not compile (D425,
+/// FR-471, SC-468, `contracts/recall-composition.md` §8).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PersonalRelevance {
+    pub knowledge_id: uuid::Uuid,
+    pub relevance: f64,
+}
+
+/// One team result's rank within `team_fts` — nothing else. See
+/// [`PersonalRelevance`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TeamRelevance {
+    pub knowledge_id: uuid::Uuid,
+    pub relevance: f64,
+}
+
+/// Admit `personal_notes` then `team_guidance`, the last two entries in
+/// `SECTION_ORDER`, bounded by the two independent caps
+/// `contracts/recall-composition.md` §3 describes (D421, D449, D450, FR-474,
+/// FR-475, FR-584).
+///
+/// Callers must invoke this only after `release_reserve()` has already run
+/// and every project-priority section has already spent what it is going to
+/// spend — `Budget::remaining_non_reserve` only means what its name claims
+/// once that is true. This function itself never spends via
+/// `try_spend_reserved`; it draws exclusively on `try_spend`, the same call
+/// every other Level 1 section uses, which is what makes "no personal or team
+/// byte is ever admitted via the reserve" true regardless of when this runs
+/// relative to `release_reserve` (D420, Invariant 2).
+///
+/// Personal is admitted before team, always (FR-476): the two share one
+/// combined cap, and whichever runs out of room second is the one a tight
+/// budget drops. Returns the admitted content as plain strings — the same
+/// shape `decisions` and `known_failures` already render in, which is what
+/// makes "the rendered form has no reason field" a property of the type
+/// rather than a promise a renderer keeps (FR-478, D451): a `String` has
+/// nowhere to put one. Every inclusion and exclusion is additionally recorded
+/// on `sel` with a reason from the vocabulary project sections already use
+/// (§4a) — `explain`-only, never reaching the returned content.
+///
+/// A future `depth: "minimum"` gate (FR-477, not this feature's task here —
+/// see `contracts/recall-composition.md` §5) needs no change to this
+/// signature: a caller that must exclude both sections unconditionally can
+/// simply pass empty `personal`/`team` slices, which this function already
+/// treats as "nothing to admit" with zero spend either way.
+pub fn admit_global(
+    budget: &mut Budget,
+    sel: &mut Selection,
+    personal: &[PersonalCandidate],
+    team: &[TeamCandidate],
+    global_share_max: f64,
+) -> (Vec<String>, Vec<String>) {
+    // Fixed the moment the budget is known; does not vary with how much any
+    // other section spends (D421, Invariant 3).
+    let global_cap = (budget.limit() as f64 * global_share_max).floor() as usize;
+    // A snapshot, taken once, of the non-reserve pool *before either global
+    // section has spent anything from it* — not a value re-read from `budget`
+    // on every item.
+    //
+    // `Budget::remaining_non_reserve` is a live query: read again after this
+    // function's own spending, it would report `general_remaining()` (which
+    // keeps shrinking correctly) capped at `limit - reserve_initial` (which
+    // does not shrink at all, since that quantity is fixed the moment the
+    // budget is created). While `general_remaining()` still exceeds that
+    // fixed cap — exactly the regime a large released reserve produces — a
+    // second live read would not reflect what this function *itself* already
+    // spent, and repeated admissions could walk straight past the ceiling
+    // this function exists to enforce. Snapshotting once and decrementing by
+    // an explicit running total keeps the ceiling honest across every item in
+    // both sections.
+    let non_reserve_ceiling = budget.remaining_non_reserve();
+    let mut global_spent = 0usize;
+
+    let personal_items: Vec<(uuid::Uuid, String)> =
+        personal.iter().map(|c| (c.id, c.content.clone())).collect();
+    let team_items: Vec<(uuid::Uuid, String)> =
+        team.iter().map(|c| (c.id, c.content.clone())).collect();
+
+    let notes = admit_global_section(
+        budget,
+        sel,
+        "personal_notes",
+        &personal_items,
+        global_cap,
+        non_reserve_ceiling,
+        &mut global_spent,
+    );
+    let guidance = admit_global_section(
+        budget,
+        sel,
+        "team_guidance",
+        &team_items,
+        global_cap,
+        non_reserve_ceiling,
+        &mut global_spent,
+    );
+    (notes, guidance)
+}
+
+/// One global section's admission loop. Stops at the first candidate that
+/// does not fit rather than skipping ahead — the caller's order is a priority
+/// order, exactly as `Budget::take_while_fits` already documents for every
+/// other section.
+fn admit_global_section(
+    budget: &mut Budget,
+    sel: &mut Selection,
+    kind: &str,
+    items: &[(uuid::Uuid, String)],
+    global_cap: usize,
+    non_reserve_ceiling: usize,
+    global_spent: &mut usize,
+) -> Vec<String> {
+    let mut kept = Vec::new();
+    for (id, content) in items {
+        let cost = estimate(content) + 1;
+        // The two independent limits (D421, FR-474): the fraction of the
+        // whole budget not yet spent by global sections, and the pool that
+        // excludes whatever `release_reserve()` returned — never
+        // `general_remaining()` directly, which is exactly the D449 defect.
+        // Both are measured against `global_spent`, this function's own
+        // running total, not against a fresh `Budget` query (see the
+        // snapshot note in `admit_global`).
+        let cap_left = global_cap.saturating_sub(*global_spent);
+        let pool_left = non_reserve_ceiling.saturating_sub(*global_spent);
+        let allowance = cap_left.min(pool_left);
+        if cost > allowance {
+            note_omission(
+                sel,
+                kind,
+                items.len() - kept.len(),
+                // Whichever term was smaller is the one that actually bound —
+                // stating one without the other is not enough (§3).
+                if cap_left < pool_left {
+                    OmissionReason::CapReached
+                } else {
+                    OmissionReason::BudgetExhausted
+                },
+                "cairn recall --domain personal|team",
+            );
+            return kept;
+        }
+        // `cost <= allowance <= pool_left <= general_remaining()`, so this
+        // cannot fail — `try_spend` (never `try_spend_reserved`) is the call
+        // that keeps this section off the reserve unconditionally.
+        let spent = budget.try_spend(cost);
+        debug_assert!(spent, "allowance already bounds cost by general_remaining");
+        *global_spent += cost;
+        kept.push(content.clone());
+        sel.included.push(SelectedItem {
+            level: ContextLevel::Relevant,
+            kind: kind.to_string(),
+            id: id.to_string(),
+            // Reusing the vocabulary project sections already use (§4a):
+            // admitted for the same reason project content is — it matched
+            // the requester's scope, here "their own account" or "their
+            // team" rather than "this project."
+            reasons: vec![SelectionReason::ScopeMatch],
+            cost,
+        });
+    }
+    kept
 }
 
 // ---------------------------------------------------------------------------
@@ -674,6 +951,8 @@ mod tests {
             has_history: true,
             degraded: false,
             level0: Level0::default(),
+            personal_notes: &[],
+            team_guidance: &[],
         }
     }
 
@@ -774,5 +1053,288 @@ mod tests {
         let mut i = inputs(&p, &[]);
         i.degraded = true;
         assert!(assemble(&i, 3000).degraded);
+    }
+
+    // -- `admit_global`, Phase 8 (`contracts/recall-composition.md`) -------
+
+    fn personal(content: &str) -> PersonalCandidate {
+        PersonalCandidate {
+            id: new_id(),
+            content: content.to_string(),
+            importance: Importance::Normal,
+        }
+    }
+
+    fn team(content: &str) -> TeamCandidate {
+        TeamCandidate {
+            id: new_id(),
+            content: content.to_string(),
+            importance: Importance::Normal,
+        }
+    }
+
+    #[test]
+    fn global_spend_is_zero_when_project_sections_consume_the_entire_pool() {
+        // Example C, `contracts/recall-composition.md` §6: real global
+        // content is present and would otherwise be admitted, but the pool it
+        // would draw from is empty before either domain is even considered
+        // (FR-475, SC-418).
+        let mut b = Budget::with_reserve(3000, 1200);
+        assert!(b.try_spend_reserved(1200));
+        b.release_reserve();
+        assert!(
+            b.try_spend(1800),
+            "project sections spend the entire remainder"
+        );
+        assert_eq!(b.general_remaining(), 0);
+
+        let mut sel = Selection::default();
+        let personal = vec![personal("a durable personal note")];
+        let team_items = vec![team("a ratified team default")];
+        let (notes, guidance) =
+            admit_global(&mut b, &mut sel, &personal, &team_items, GLOBAL_SHARE_MAX);
+
+        assert!(notes.is_empty());
+        assert!(guidance.is_empty());
+        assert_eq!(b.spent(), 3000, "not one global byte was charged");
+    }
+
+    #[test]
+    fn global_spend_excludes_released_reserve_d449() {
+        // The defect this feature exists to prevent: a large, mostly unspent
+        // reserve is released, inflating `general_remaining()`, but global
+        // sections must be bounded by the non-reserve pool alone (D449,
+        // FR-584, SC-451).
+        let mut b = Budget::with_reserve(1000, 900);
+        assert!(b.try_spend_reserved(10));
+        b.release_reserve();
+        assert_eq!(b.general_remaining(), 990);
+        assert_eq!(b.remaining_non_reserve(), 100);
+
+        let mut sel = Selection::default();
+        // Sized to fit the (buggy) 990 general_remaining and the 150 cap, but
+        // not the correct 100-token non-reserve pool.
+        let big = "x".repeat(400); // ~115 estimated tokens
+        let personal = vec![personal(&big)];
+        let (notes, _) = admit_global(&mut b, &mut sel, &personal, &[], GLOBAL_SHARE_MAX);
+
+        assert!(
+            notes.is_empty(),
+            "a defect that read general_remaining() would have admitted this"
+        );
+        assert_eq!(b.spent(), 10, "global spent nothing beyond Level 0");
+    }
+
+    #[test]
+    fn the_fraction_binds_when_the_pool_is_roomy() {
+        // Example A, §6: both sections fit — bounded by neither term.
+        let mut b = Budget::with_reserve(3000, 1200);
+        assert!(b.try_spend_reserved(350));
+        b.release_reserve();
+        assert!(b.try_spend(2000));
+        assert_eq!(b.remaining_non_reserve(), 650);
+
+        let mut sel = Selection::default();
+        let personal = vec![personal(&"p".repeat(690))]; // ~200 tokens
+        let team_items = vec![team(&"t".repeat(345))]; // ~100 tokens
+        let (notes, guidance) =
+            admit_global(&mut b, &mut sel, &personal, &team_items, GLOBAL_SHARE_MAX);
+
+        assert_eq!(notes.len(), 1, "personal fits under the 450 cap");
+        assert_eq!(guidance.len(), 1, "team fits in the cap's remainder");
+        assert!(b.spent() <= 3000);
+    }
+
+    #[test]
+    fn the_pool_binds_when_the_fraction_does_not() {
+        // The sharper differentiator: the pool the never-reserved fraction of
+        // the budget provides is *smaller* than the 0.15 cap, so it must bind
+        // even though `general_remaining()` looks ample thanks to a large
+        // released reserve sitting in it. A snapshot taken once and
+        // decremented by this function's own running spend (not re-read from
+        // `Budget` per item) is what keeps a second candidate from spending
+        // past the 100-token ceiling the first one left almost none of.
+        let mut b = Budget::with_reserve(1000, 900);
+        assert!(b.try_spend_reserved(10));
+        b.release_reserve();
+        // global_cap = floor(1000 * 0.15) = 150; remaining_non_reserve = 100.
+        assert_eq!(b.remaining_non_reserve(), 100);
+        assert!(
+            b.general_remaining() > 900,
+            "the released reserve dwarfs the true pool"
+        );
+
+        let mut sel = Selection::default();
+        let ninety = "p".repeat(315); // 90 estimated tokens
+        let item_cost = estimate(&ninety) + 1;
+        assert!(
+            item_cost < 100,
+            "each item alone must fit the 100-token pool"
+        );
+        assert!(item_cost * 2 > 100, "but two of them together must not");
+        let personal = vec![personal(&ninety), personal(&ninety)];
+        let (notes, _) = admit_global(&mut b, &mut sel, &personal, &[], GLOBAL_SHARE_MAX);
+
+        assert_eq!(
+            notes.len(),
+            1,
+            "the second item must not spend the 100-token pool a second time over"
+        );
+        assert_eq!(b.spent(), 10 + item_cost);
+    }
+
+    #[test]
+    fn the_cap_binds_before_the_pool_does() {
+        // Example D, §6: 2000 tokens of general pool remain unspent, and team
+        // guidance is still truncated, because the 0.15-of-budget ceiling is
+        // a property of the budget, not of how generous the remainder is.
+        let mut b = Budget::with_reserve(3000, 1200);
+        assert!(b.try_spend_reserved(200));
+        b.release_reserve();
+        assert!(b.try_spend(500));
+        assert_eq!(b.remaining_non_reserve(), 1800);
+
+        let mut sel = Selection::default();
+        let personal = vec![personal(&"p".repeat(1035))]; // ~300 tokens
+        let team_items = vec![team(&"t".repeat(1380))]; // ~400 tokens, wants more than the cap has left
+        let (notes, guidance) =
+            admit_global(&mut b, &mut sel, &personal, &team_items, GLOBAL_SHARE_MAX);
+
+        assert_eq!(notes.len(), 1, "personal's 300 fits under the 450 cap");
+        assert!(
+            guidance.is_empty(),
+            "team's 400 does not fit the cap's 150 remainder"
+        );
+        assert!(
+            b.general_remaining() > 1500,
+            "ample general pool remained — the cap bound independently of it"
+        );
+        let omission = sel
+            .omitted
+            .iter()
+            .find(|o| o.kind == "team_guidance")
+            .expect("team_guidance was omitted");
+        assert_eq!(omission.reason, OmissionReason::CapReached);
+    }
+
+    #[test]
+    fn personal_is_admitted_before_team_when_only_one_fits() {
+        // FR-476, SC-462: the boundary that actually distinguishes the two
+        // orderings — only enough combined room for one.
+        let mut b = Budget::with_reserve(1000, 0);
+        b.release_reserve();
+        // global_cap = floor(1000 * 0.15) = 150.
+        let content = "w".repeat(345); // ~100 tokens each
+        let personal = vec![personal(&content)];
+        let team_items = vec![team(&content)];
+
+        let mut sel = Selection::default();
+        let (notes, guidance) =
+            admit_global(&mut b, &mut sel, &personal, &team_items, GLOBAL_SHARE_MAX);
+
+        assert_eq!(notes.len(), 1, "personal is admitted");
+        assert!(guidance.is_empty(), "team loses the tiebreak, not personal");
+    }
+
+    #[test]
+    fn importance_hint_changes_nothing() {
+        // FR-482, SC-464: every supported hint value leaves the assembled
+        // output byte-identical. Nothing in `admit_global` reads
+        // `importance`, so this is really asserting that fact rather than
+        // discovering it.
+        let mut baseline: Option<(Vec<String>, Vec<String>)> = None;
+        for importance in [Importance::High, Importance::Normal, Importance::Low] {
+            let mut b = Budget::with_reserve(3000, 1200);
+            assert!(b.try_spend_reserved(350));
+            b.release_reserve();
+            assert!(b.try_spend(2000));
+            let mut sel = Selection::default();
+            let personal = vec![PersonalCandidate {
+                id: new_id(),
+                content: "identical content".into(),
+                importance,
+            }];
+            let team_items = vec![TeamCandidate {
+                id: new_id(),
+                content: "identical guidance".into(),
+                importance,
+            }];
+            let out = admit_global(&mut b, &mut sel, &personal, &team_items, GLOBAL_SHARE_MAX);
+            match &baseline {
+                None => baseline = Some(out),
+                Some(expected) => assert_eq!(
+                    &out, expected,
+                    "importance {importance:?} changed the assembled output"
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn estimated_tokens_never_exceeds_budget_across_a_matrix() {
+        // FR-480: the existing invariant, re-verified with both new terms in
+        // play, across the documented minimum and default budgets and a
+        // spread in between.
+        for budget_tokens in [600usize, 900, 1500, 3000, 5000] {
+            let reserve = (budget_tokens as f64 * 0.40).floor() as usize;
+            let mut b = Budget::with_reserve(budget_tokens, reserve);
+            // Simulate Level 0 taking a modest, varying share of the reserve.
+            let _ = b.try_spend_reserved(reserve / 4);
+            b.release_reserve();
+            // Simulate project sections spending most, but not all, of what
+            // remains.
+            let _ = b.try_spend(b.general_remaining() * 3 / 4);
+
+            let mut sel = Selection::default();
+            let personal: Vec<PersonalCandidate> = (0..20)
+                .map(|i| personal(&format!("personal note number {i} with some prose in it")))
+                .collect();
+            let team_items: Vec<TeamCandidate> = (0..20)
+                .map(|i| team(&format!("team guidance number {i} with some prose in it")))
+                .collect();
+            admit_global(&mut b, &mut sel, &personal, &team_items, GLOBAL_SHARE_MAX);
+
+            assert!(
+                b.spent() <= budget_tokens,
+                "budget {budget_tokens}: spent {} over limit",
+                b.spent()
+            );
+        }
+    }
+
+    #[test]
+    fn rendered_global_items_carry_no_reason_field() {
+        // FR-478, D451: a reason is produced on the diagnostic path (`sel`)
+        // and the rendered form (`Vec<String>`) has nowhere to hold one —
+        // inspected field by field, which for a bare `String` is exhaustive.
+        let mut b = Budget::with_reserve(1000, 0);
+        b.release_reserve();
+        let personal = vec![personal("keep this exact text")];
+        let mut sel = Selection::default();
+        let (notes, _) = admit_global(&mut b, &mut sel, &personal, &[], GLOBAL_SHARE_MAX);
+
+        assert_eq!(notes, vec!["keep this exact text".to_string()]);
+        assert_eq!(sel.included.len(), 1);
+        assert_eq!(sel.included[0].reasons, vec![SelectionReason::ScopeMatch]);
+    }
+
+    #[test]
+    fn global_never_draws_from_an_unreleased_reserve() {
+        // Invariant 2: personal and team sections call only `try_spend`, so
+        // this must hold even if invoked before `release_reserve` runs — a
+        // defensive property of the function, not merely of call order.
+        let mut b = Budget::with_reserve(1000, 900);
+        // Deliberately no `release_reserve()` call.
+        let mut sel = Selection::default();
+        let personal = vec![personal(&"p".repeat(170))]; // ~49 tokens, fits the 100 non-reserve pool
+        let (notes, _) = admit_global(&mut b, &mut sel, &personal, &[], GLOBAL_SHARE_MAX);
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(
+            b.reserve_used(),
+            0,
+            "spend went through try_spend, never try_spend_reserved"
+        );
+        assert_eq!(b.remaining(), 1000 - (estimate(&"p".repeat(170)) + 1));
     }
 }

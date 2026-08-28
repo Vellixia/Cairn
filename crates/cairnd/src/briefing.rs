@@ -4,13 +4,19 @@
 //! database and the working tree.
 
 use crate::state::{repo_state, Daemon, Resolved};
-use cairn_core::context::{assemble, ContextInputs};
+use cairn_core::context::{assemble, ContextInputs, PersonalCandidate, TeamCandidate};
 use cairn_core::domain::*;
-use cairn_core::wire::{codes, BriefingPattern, ContextPayload, WireError};
+use cairn_core::wire::{codes, BriefingPattern, ContextDepth, ContextPayload, WireError};
 use cairn_store::{repo, search};
 use uuid::Uuid;
 
 const MEMORY_PER_SCOPE: i64 = 12;
+/// How many personal or team candidates are read per briefing, before
+/// `admit_global`'s own budget caps decide how many actually fit
+/// (`contracts/recall-composition.md` §3, §6). Kept small and separate from
+/// [`MEMORY_PER_SCOPE`]: these are two more project-independent sections
+/// competing for a combined 15%-of-budget ceiling, not a fourth project scope.
+const GLOBAL_PER_BRIEFING: i64 = 12;
 
 /// Build the briefing for the current working context.
 ///
@@ -23,6 +29,7 @@ pub async fn build(
     budget: usize,
     degraded: bool,
     explain: bool,
+    depth: ContextDepth,
 ) -> Result<ContextPayload, WireError> {
     let store = &daemon.store;
     let project = &resolved.project;
@@ -91,6 +98,23 @@ pub async fn build(
         warnings_in_context_max: config.warnings_in_context_max,
         pins_in_context_max: config.pins_in_context_max,
         reserve_fraction: config.min_safe_context_fraction,
+        // Pinned, not caller-chosen (D450): an unnamed fraction is an
+        // unimplementable requirement, and the ceiling has to be the same number
+        // a test asserts against.
+        global_share_max: cairn_core::context::GLOBAL_SHARE_MAX,
+    };
+
+    // `depth: "minimum"` excludes both global sections entirely,
+    // unconditionally — no importance hint, budget outcome or configuration
+    // overrides this (FR-477, T157). The gate sits here, before either
+    // domain's fetch runs at all: at minimum depth `global_candidates`
+    // (below) is never called, not merely filtered afterward — the same
+    // "the function cannot see the thing that would violate it" argument
+    // `contracts/recall-composition.md` §2 makes for the reserve.
+    let (personal_notes, team_guidance) = if depth.is_minimum() {
+        (Vec::new(), Vec::new())
+    } else {
+        global_candidates(daemon, resolved).await
     };
 
     Ok(assemble(
@@ -105,6 +129,14 @@ pub async fn build(
                 explain,
                 caps,
             },
+            // `admit_global` treats an empty slice as "nothing to admit,
+            // zero spend" either way, which is what makes a caller with no
+            // personal or team knowledge of their own byte-identical to one
+            // who never touches either domain (FR-481, T164) — and what
+            // makes `depth: "minimum"` above correct without a second code
+            // path.
+            personal_notes: &personal_notes,
+            team_guidance: &team_guidance,
             project,
             repository,
             task: task.as_ref(),
@@ -120,6 +152,80 @@ pub async fn build(
         },
         budget,
     ))
+}
+
+/// `personal_notes` and `team_guidance` candidates, best-first, for
+/// `admit_global` to spend the combined 15%-of-budget ceiling on
+/// (`contracts/recall-composition.md` §3, §4, T156).
+///
+/// Personal is recency-ordered (`recall_personal`, no query text at
+/// assembly time — a briefing is not a search); team is `authoritative`
+/// only, for every caller including its own proposer, exactly as
+/// `cairn_search`'s `team[]` array is (FR-452) — a proposed entry is
+/// invisible to *all* recall, and a passive briefing is recall. Both are
+/// filtered by this project's derived traits (`contracts/global-
+/// memory.md` §4). Neither carries an importance of its own — no field
+/// exists for one on either domain's record (FR-513) — so both map to
+/// `Importance::Normal` uniformly; `admit_global` does not read this field
+/// today regardless (FR-482).
+///
+/// Errors here degrade to empty rather than failing the briefing, the same
+/// rule [`level1_patterns`] follows: neither domain is the least bit more
+/// authoritative than a project's own memory, so losing one is never worth
+/// losing the whole briefing over.
+async fn global_candidates(
+    daemon: &Daemon,
+    resolved: &Resolved,
+) -> (Vec<PersonalCandidate>, Vec<TeamCandidate>) {
+    // `Daemon::project_traits`, never `traits_for_project` directly: the
+    // accessor is what derives them when they are stale, and reading the table
+    // straight would have meant a briefing composed against whatever was last
+    // written — which, before this existed, was nothing at all, so every
+    // applicability-restricted record was silently excluded from every project.
+    let traits = daemon.project_traits(resolved).await;
+
+    let personal = cairn_store::global::recall_personal(
+        &daemon.store,
+        daemon.owner_identity().await,
+        None,
+        None,
+        &traits,
+        GLOBAL_PER_BRIEFING,
+    )
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|p| PersonalCandidate {
+        id: p.id,
+        content: p.content,
+        importance: cairn_core::domain::Importance::Normal,
+    })
+    .collect();
+
+    // `recall_team`, mirroring `recall_personal` above — not `search_team`.
+    //
+    // The two differ in ordering and the difference matters here: `search_team`
+    // ranks by BM25 over a query, and a briefing has no query, so every row would
+    // score zero and the order would fall to an arbitrary tiebreak. Recall orders
+    // by recency, which is a defensible answer to "which guidance should an agent
+    // see first" when nothing has been asked. Search keeps its ranking for the
+    // surface that actually has a query.
+    //
+    // Both consult the one active-entry predicate (`team_active_predicate`), so
+    // they cannot disagree about what is current — only about what to show first.
+    let team =
+        cairn_store::global::recall_team(&daemon.store, None, None, &traits, GLOBAL_PER_BRIEFING)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| TeamCandidate {
+                id: t.id,
+                content: t.content,
+                importance: cairn_core::domain::Importance::Normal,
+            })
+            .collect();
+
+    (personal, team)
 }
 
 /// Prior patterns whose signals this project's own recorded signals match

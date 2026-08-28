@@ -7,6 +7,7 @@ mod api;
 mod auth;
 mod db;
 mod error;
+mod global;
 mod sync;
 mod version;
 
@@ -16,6 +17,7 @@ use clap::{Parser, Subcommand};
 use sqlx::PgPool;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,9 +28,36 @@ pub struct AppState {
     pub secure_cookies: bool,
     /// The highest migration this database has applied (FR-415).
     pub schema_version: i64,
+    /// This server's own identity, established once and never reassigned
+    /// (FR-415). A local store pins its team knowledge to it, so it has to be
+    /// the same value across restarts — which is why it is read from the
+    /// database rather than generated here.
+    ///
+    /// `None` below schema 3: the table arrives with migration 3, and a
+    /// deployment held back for a staged rollout has no instance identity yet.
+    /// A client sees the field absent and correctly concludes this server cannot
+    /// hold team knowledge — which is the same conclusion the capability list
+    /// gives it.
+    pub server_instance_id: Option<Uuid>,
+    /// The account named by `CAIRN_ADMIN_EMAIL`, if any.
+    ///
+    /// Carried on the state because two routes must refuse to touch it, and
+    /// both need to know which account it is. `None` when the operator seeded
+    /// nothing — in which case no account is exempt.
+    pub environment_account: Option<String>,
 }
 
 impl AppState {
+    /// Is this the account the environment defines?
+    ///
+    /// Compared on the same normalized form `ensure_admin` upserts by, so the
+    /// two never disagree about which row they mean.
+    pub fn is_environment_account(&self, email: &str) -> bool {
+        self.environment_account
+            .as_deref()
+            .is_some_and(|configured| configured == email.trim().to_lowercase())
+    }
+
     /// The `Secure` attribute, or nothing.
     ///
     /// Marking the cookie `Secure` on a plain-HTTP deployment would make the
@@ -129,6 +158,17 @@ enum UserCommand {
         /// At least 8 characters.
         #[arg(long, env = "CAIRN_NEW_USER_PASSWORD")]
         password: String,
+        /// Require the account to change this password before doing anything
+        /// else.
+        ///
+        /// Off by default here, and on by default for `POST /api/admin/users`.
+        /// The two differ because the operator's intent differs: this
+        /// subcommand's caller *chose* the password and typed it, which is how
+        /// scripted provisioning works, and forcing a change would break it. The
+        /// HTTP route generates a password the new account has never seen, and
+        /// there a forced change is the whole point.
+        #[arg(long)]
+        must_change_password: bool,
     },
 }
 
@@ -138,10 +178,14 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     // Migrations run on start, so a fresh deployment needs no separate step.
+    // The admin email reaches the migrations as well as `seed_admin` below:
+    // migration 3's role backfill needs to know which existing account the
+    // environment names before it picks one (FR-414, FR-524).
     let pool = db::connect(
         &args.database_url,
         args.max_connections,
         args.max_schema_version,
+        args.admin_email.as_deref(),
     )
     .await?;
 
@@ -175,11 +219,34 @@ async fn main() -> anyhow::Result<()> {
             "session cookies are not marked Secure; set CAIRN_WEB_ORIGIN to an https origin"
         );
     }
+    // Read, not generated: migration 3 inserts exactly one row and nothing ever
+    // replaces it, so this value survives every restart. Generating it here
+    // would mint a new identity on each start and every linked store's team
+    // knowledge would look like it came from a different server.
+    //
+    // Absent below schema 3, because the table arrives with migration 3 — and a
+    // deployment held back for a staged rollout is a supported configuration, not
+    // an error. Reading it unconditionally made every schema-pinned server fail
+    // to start with `relation "server_instance" does not exist`.
+    let server_instance_id: Option<Uuid> = if schema_version >= 3 {
+        sqlx::query_scalar("SELECT id FROM server_instance LIMIT 1")
+            .fetch_optional(&pool)
+            .await?
+    } else {
+        None
+    };
+
     let state = AppState {
         pool,
         secure_cookies,
         releases: version::ReleaseCache::new(),
         schema_version,
+        server_instance_id,
+        environment_account: args
+            .admin_email
+            .as_deref()
+            .map(|e| e.trim().to_lowercase())
+            .filter(|e| !e.is_empty()),
     };
 
     // A credentialed browser request cannot be paired with wildcard headers or
@@ -214,8 +281,16 @@ async fn run_command(pool: &PgPool, command: &Command) -> anyhow::Result<()> {
             email,
             display_name,
             password,
+            must_change_password,
         }) => {
-            let (id, email) = auth::create_user(pool, email, display_name, password).await?;
+            // The same `auth::create_user` the HTTP route calls. One mechanism,
+            // two entry points: an operator with shell access, and an
+            // administrator with a token. Neither is a second implementation of
+            // account creation, which is what keeps validation and hashing from
+            // drifting apart between them.
+            let (id, email) =
+                auth::create_user(pool, email, display_name, password, *must_change_password)
+                    .await?;
             // One line of JSON on stdout: this is a seam for scripts and test
             // harnesses as much as for a human, and a human reading one line of
             // JSON is a smaller cost than a script parsing prose.

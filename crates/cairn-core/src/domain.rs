@@ -170,6 +170,20 @@ text_enum!(
         MemoryRelation => "memory_relation",
         TaskCriterion => "task_criterion",
         TaskBlocker => "task_blocker",
+        // Feature 004's four (FR-528). Twelve names, not ten: the two relation
+        // types are here because both relations tables exist in server Postgres
+        // as well as locally, and a table on the server is reachable only through
+        // the outbox. A relation also names *two* rows and belongs to neither, so
+        // unlike an applicability fact — which rides inside its knowledge row's
+        // payload — it has nowhere else to travel.
+        //
+        // `project_traits` and `writer_identity` are deliberately absent, and
+        // that absence is what makes "they stay local" a property of the schema
+        // rather than a promise (FR-438, FR-503).
+        PersonalKnowledge => "personal_knowledge",
+        PersonalKnowledgeRelation => "personal_knowledge_relation",
+        TeamKnowledge => "team_knowledge",
+        TeamKnowledgeRelation => "team_knowledge_relation",
     }
 );
 
@@ -756,6 +770,170 @@ text_enum!(
     }
 );
 
+text_enum!(
+    /// Whose knowledge a record belongs to (D401, FR-521).
+    ///
+    /// **Orthogonal to [`MemoryScope`], not an extension of it.** Scope answers
+    /// "how narrow inside a project"; a domain answers "whose knowledge is
+    /// this". That distinction is the whole reason `MemoryScope` gains no fifth
+    /// variant and `memories` is not rebuilt: personal and team knowledge live
+    /// in their own tables with no `project_id` column at all, following the
+    /// precedent `reusable_patterns` set — a record that cannot name a project
+    /// cannot leak one.
+    KnowledgeDomain, "knowledge domain", {
+        Project => "project",
+        Personal => "personal",
+        Team => "team",
+    }
+);
+
+text_enum!(
+    /// The closed vocabulary an applicability fact's *kind* is drawn from
+    /// (D410, D414, FR-569).
+    ///
+    /// Exactly two members, and both are derivable deterministically from files
+    /// present in a working tree — a manifest or lockfile being there, with no
+    /// semantic content read and no model invoked.
+    ///
+    /// `topic` is **not** a member. It was removed (D439, FR-569) because it
+    /// cannot be derived that way, and a vocabulary member that can never match
+    /// would silently make every record carrying it inapplicable everywhere —
+    /// a filter that quietly excludes is worse than no filter. Richer
+    /// applicability that needs content inspection is deferred to Feature 005.
+    ///
+    /// This constrains a fact's *kind* only. Its **value** is an open string,
+    /// because the set of language and tool names is open by nature, and it is
+    /// screened by [`crate::validate::validate_global_content`] rather than by
+    /// this enum (FR-578). Reading "closed vocabulary" as "this field is safe"
+    /// is the mistake FR-579 exists to prevent.
+    ApplicabilityKind, "applicability kind", {
+        Language => "language",
+        Tool => "tool",
+    }
+);
+
+text_enum!(
+    /// A team entry's lifecycle (FR-451–FR-465), advanced only by
+    /// compare-and-swap on the expected state (D409, FR-454).
+    ///
+    /// An agent may reach `Proposed` and nothing else. Only a human
+    /// administrator makes team-wide guidance authoritative (FR-455, FR-515).
+    TeamState, "team knowledge state", {
+        Proposed => "proposed",
+        Authoritative => "authoritative",
+        Retired => "retired",
+    }
+);
+
+text_enum!(
+    /// What a promotion targets (FR-506, D415).
+    ///
+    /// `Pattern` is the default, so today's `cairn_remember action=promote`
+    /// behavior is unchanged for a caller that names no target.
+    PromotionTarget, "promotion target", {
+        Pattern => "pattern",
+        Personal => "personal",
+        Team => "team",
+    }
+);
+
+text_enum!(
+    /// A user's server-level standing (FR-402).
+    ///
+    /// Server-level, not per project: project authority is membership in
+    /// `project_members` and nothing else. The two are deliberately different
+    /// words for different things throughout.
+    ServerRole, "server role", {
+        Admin => "admin",
+        Member => "member",
+    }
+);
+
+text_enum!(
+    /// Whether an account can authenticate at all (FR-408–FR-410).
+    ///
+    /// Distinct from [`ServerRole`] and from project membership: a disabled
+    /// admin is still an admin and still a member of its projects, and is
+    /// refused anyway.
+    UserStatus, "user status", {
+        Active => "active",
+        Disabled => "disabled",
+    }
+);
+
+/// One condition under which a record applies to a project (D410).
+///
+/// A record with **no** facts is universal (D411, FR-435) — the empty set means
+/// "applies everywhere", not "applies nowhere". See
+/// [`crate::applicability::applies`] for the matching rule.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ApplicabilityFact {
+    pub kind: ApplicabilityKind,
+    /// Normalized, then `[a-z0-9_]{1,64}` (D410, FR-446). Open text, screened
+    /// by the content validator rather than by a vocabulary (FR-578).
+    pub value: String,
+}
+
+/// A fact about a project's stack, derived from its working tree (D413, FR-437).
+///
+/// **Never synchronized** (FR-438). Traits are how a project answers "does this
+/// record apply to me", and the answer is a property of the machine's own
+/// checkout — there is no `OutboxEntityType` variant for them and no server
+/// table, which is what makes "it stays local" a fact about the schema rather
+/// than a promise (SC-469).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectTrait {
+    pub kind: ApplicabilityKind,
+    pub value: String,
+}
+
+/// One of the three independent synchronization lanes (D426, FR-486).
+///
+/// Each variant carries the identity that makes its cursor key unique.
+/// `Personal` carries **both** the server instance and the owning account
+/// (D438, FR-568) rather than the account alone: personal knowledge is not
+/// server-bound the way team knowledge is, but a user identity *is* per-server,
+/// so the same human on two servers is two different accounts. Keying on both
+/// is what stops those two identities from merging into one namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SyncNamespace {
+    Project(Uuid),
+    /// `(server_instance_id, user_id)`.
+    Personal(Uuid, Uuid),
+    Team(Uuid),
+}
+
+impl SyncNamespace {
+    /// The cursor key. Stable, and the only thing that partitions one lane from
+    /// another.
+    pub fn key(&self) -> String {
+        match self {
+            SyncNamespace::Project(project) => format!("project:{project}"),
+            SyncNamespace::Personal(instance, user) => format!("personal:{instance}:{user}"),
+            SyncNamespace::Team(instance) => format!("team:{instance}"),
+        }
+    }
+}
+
+/// A single local store's opaque, durable identity (D407, FR-490).
+///
+/// **Not a device registry entry.** It has no name, no lifecycle, no server row
+/// and nothing an operator administers — the brief explicitly does not want a
+/// Device subsystem, and API tokens remain the per-device credential. What this
+/// exists for is narrower: it joins the outbox idempotency-key input so that two
+/// stores producing byte-identical content are never mistaken for one write
+/// (FR-491). Without it, two devices of the same user emitting the same payload
+/// collide as a duplicate and one device's write is silently discarded.
+///
+/// The `writer_id` stamped on a record *does* cross the wire (FR-582); this
+/// registry row does not. What travels is the stamp, not the table that minted
+/// it (D448).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriterIdentity {
+    pub writer_id: Uuid,
+    pub created_at: DateTime<Utc>,
+}
+
 /// A tracked Git repository under Cairn.
 ///
 /// `id` and `git_common_dir` are local. `server_project_id` is the shared
@@ -910,9 +1088,22 @@ impl RepositoryState {
 }
 
 /// A test the session executed, as recorded on a handoff.
+///
+/// The field that used to hold the invocation is now `runner`, and it holds the
+/// **runner's name** rather than the command line — `cargo test`, not
+/// `cargo test --workspace --all-targets -- --nocapture` (FR-532).
+///
+/// Renaming it, rather than sanitizing its contents, is deliberate and is what
+/// makes the guarantee hold. The server's wire check is a *field-name* denylist,
+/// and as of this feature it recurses into nested structures — so a key still
+/// literally named `command`, nested inside a `tests_executed` array, is refused
+/// on sight regardless of how carefully its value was cleaned. A handoff
+/// carrying a completed test run would have been rejected outright. The key has
+/// to disappear, not merely its contents.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TestRunRecord {
-    pub command: String,
+    /// The test runner's name, with flags and paths already stripped.
+    pub runner: String,
     pub outcome: String,
     pub occurred_at: DateTime<Utc>,
 }
@@ -1003,11 +1194,36 @@ mod tests {
             );
         }
 
-        // And the three Feature 003 additions, which are the whole of the delta
-        // (D66). A fourth arriving unnoticed changes this count.
-        assert_eq!(OutboxEntityType::ALL.len(), 8);
+        // The additions, feature by feature, and the count. One arriving
+        // unnoticed changes this number — which is the point of asserting it
+        // rather than only the names.
+        assert_eq!(OutboxEntityType::ALL.len(), 12);
+        // Feature 003's three (D66).
         for added in ["memory_relation", "task_criterion", "task_blocker"] {
             assert!(OutboxEntityType::from_str(added).is_ok(), "{added}");
+        }
+        // Feature 004's four (FR-528). The two relation types are here because
+        // both relations tables exist on the server as well as locally, and a
+        // relation belongs to neither of the two rows it names — so unlike an
+        // applicability fact it cannot travel inside a parent's payload.
+        for added in [
+            "personal_knowledge",
+            "personal_knowledge_relation",
+            "team_knowledge",
+            "team_knowledge_relation",
+        ] {
+            assert!(OutboxEntityType::from_str(added).is_ok(), "{added}");
+        }
+        // And the two Feature 004 records that must stay local, checked here
+        // rather than only in the block above, because their absence is the
+        // guarantee: a `project_traits` variant would make traits synchronizable
+        // (FR-438), and a `writer_identity` variant would put a store's own
+        // opaque registry on the wire (D448).
+        for local_only in ["project_traits", "writer_identity"] {
+            assert!(
+                OutboxEntityType::from_str(local_only).is_err(),
+                "{local_only} has an outbox entity type; it is local state and must not"
+            );
         }
     }
 

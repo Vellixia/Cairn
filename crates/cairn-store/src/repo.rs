@@ -1668,6 +1668,70 @@ pub async fn session_is_deleted(store: &Store, id: Uuid) -> Result<bool> {
 }
 
 // ---------------------------------------------------------------------------
+// Writer identity (D407, FR-490)
+// ---------------------------------------------------------------------------
+
+/// This store's opaque writer identity.
+///
+/// Seeded exactly once, by migration 7's finish hook (`migrate::finish`,
+/// `seed_writer_identity`) — this is only a reader, never a generator. The
+/// singleton row it reads is guaranteed to exist by the migration that created
+/// it, in the same transaction, the same way `writer_identity`'s own `CHECK (id
+/// = 1)` guarantees there is never more than one (`0007_collaborative_global_
+/// memory.sql`). A store that predates migration 7 cannot reach this function
+/// with a linked personal or team namespace, because nothing routes to one
+/// before the migration that creates both the table and the row has run.
+pub async fn writer_identity(store: &Store) -> Result<Uuid> {
+    let row = sqlx::query("SELECT writer_id FROM writer_identity WHERE id = 1")
+        .fetch_one(store.pool())
+        .await?;
+    rows::uuid(&row, "writer_id")
+}
+
+/// The next sequence number in this writer's `personal_knowledge` stream
+/// (D408, FR-445, FR-492).
+///
+/// Derived from what is already stored rather than tracked by a separate
+/// counter row: `MAX(writer_seq) + 1` over this store's own `writer_id` is
+/// exactly as monotonic as a dedicated counter would be, because this store is
+/// the only writer that can ever produce a row bearing its own `writer_id` —
+/// every row bearing a *different* `writer_id` reached this table by import,
+/// never by a local write here. Call inside the same transaction that inserts
+/// the record: SQLite serializes writers, so the daemon and the CLI can never
+/// observe (and then both consume) the same next value.
+///
+/// `writer_seq` is diagnostic only (§9 of the contract) — this function hands
+/// out the next number for a record to carry, and nothing here or downstream
+/// ever compares one writer's sequence against another's to decide anything.
+pub async fn next_personal_writer_seq(
+    tx: &mut sqlx::SqliteConnection,
+    writer_id: Uuid,
+) -> Result<i64> {
+    let next: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(writer_seq), 0) + 1 FROM personal_knowledge WHERE writer_id = ?1",
+    )
+    .bind(writer_id.to_string())
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(next)
+}
+
+/// The next sequence number in this writer's `team_knowledge` stream. Same
+/// construction as [`next_personal_writer_seq`], over the separate `team_
+/// knowledge` sequence space `team_knowledge_writer_seq`'s unique index keeps
+/// (`0007_collaborative_global_memory.sql`) — personal and team are different
+/// streams for the same writer, not one shared counter.
+pub async fn next_team_writer_seq(tx: &mut sqlx::SqliteConnection, writer_id: Uuid) -> Result<i64> {
+    let next: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(writer_seq), 0) + 1 FROM team_knowledge WHERE writer_id = ?1",
+    )
+    .bind(writer_id.to_string())
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(next)
+}
+
+// ---------------------------------------------------------------------------
 // Sync metadata
 // ---------------------------------------------------------------------------
 
@@ -2647,4 +2711,84 @@ pub async fn subject_adoption(store: &Store, project_id: Uuid) -> Result<Subject
               WHERE project_id = ?1 AND deleted_at IS NULL AND verification = 'drifted'")
         .await?,
     })
+}
+
+#[cfg(test)]
+mod writer_identity_tests {
+    use super::*;
+    use crate::Store;
+
+    /// Migration 7's finish hook seeds the singleton row; this is only
+    /// asserting the reader sees it, not creating it.
+    #[tokio::test]
+    async fn writer_identity_is_present_and_stable_after_migration() {
+        let store = Store::open_memory().await.unwrap();
+        let first = writer_identity(&store).await.unwrap();
+        let second = writer_identity(&store).await.unwrap();
+        assert_eq!(
+            first, second,
+            "the same store must always read the same writer_id"
+        );
+    }
+
+    /// A fresh writer's first personal record is sequence 1, and it climbs by
+    /// one per record — never compared to any other writer's stream.
+    #[tokio::test]
+    async fn personal_writer_seq_climbs_from_one_and_never_repeats() {
+        let store = Store::open_memory().await.unwrap();
+        let writer = writer_identity(&store).await.unwrap();
+
+        let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+        let first = next_personal_writer_seq(&mut tx, writer).await.unwrap();
+        assert_eq!(first, 1);
+        insert_personal_row(&mut tx, writer, first).await;
+        tx.commit().await.unwrap();
+
+        let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+        let second = next_personal_writer_seq(&mut tx, writer).await.unwrap();
+        assert_eq!(second, 2);
+        tx.commit().await.unwrap();
+    }
+
+    /// Personal and team are separate sequence spaces for the same writer
+    /// (`personal_knowledge_writer_seq` and `team_knowledge_writer_seq` are two
+    /// distinct unique indexes, over two distinct tables) — a personal write
+    /// must not advance the team counter or vice versa.
+    #[tokio::test]
+    async fn personal_and_team_sequences_are_independent_for_the_same_writer() {
+        let store = Store::open_memory().await.unwrap();
+        let writer = writer_identity(&store).await.unwrap();
+
+        let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+        let personal_first = next_personal_writer_seq(&mut tx, writer).await.unwrap();
+        insert_personal_row(&mut tx, writer, personal_first).await;
+        tx.commit().await.unwrap();
+
+        // The team stream has had no writes at all yet, so it still starts at 1
+        // regardless of how far the personal stream has climbed.
+        let mut tx = crate::tx::begin(&store, "test").await.unwrap();
+        let team_first = next_team_writer_seq(&mut tx, writer).await.unwrap();
+        assert_eq!(
+            team_first, 1,
+            "an unrelated domain's counter must not inherit another's progress"
+        );
+        tx.commit().await.unwrap();
+    }
+
+    async fn insert_personal_row(tx: &mut sqlx::SqliteConnection, writer: Uuid, seq: i64) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO personal_knowledge
+                (id, owner_user_id, knowledge_type, content, writer_id, writer_seq, created_at)
+             VALUES (?1, ?2, 'fact', 'a personal note', ?3, ?4, ?5)",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(Uuid::now_v7().to_string())
+        .bind(writer.to_string())
+        .bind(seq)
+        .bind(&now)
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    }
 }

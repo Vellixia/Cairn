@@ -9,7 +9,42 @@ schemas, and the wire protocol without a deprecation period.
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **Five authorization holes in the sync and link paths.** Self-registration and
+  self-join are gone; project discovery is scoped to the caller's memberships;
+  tombstones and sync upserts carry a `project_id` predicate, so one project's
+  records can no longer overwrite or delete another's. An operator now creates
+  accounts with `cairn-server users add` rather than a public route.
+
+### Added — Feature 004, collaborative global memory (in progress)
+
+Two knowledge domains that follow the *person* rather than the project:
+**personal** memory, private to one account and synchronized across that
+account's devices, and **team** memory, proposed by any member and made
+authoritative only by an administrator.
+
+Cairn gains no `MemoryScope::Global`. Scope answers "how narrow inside a
+project"; a new orthogonal **domain** answers "whose knowledge is this", and the
+two never meet — which is what leaves the `memories` table, its four-variant
+`CHECK` and every Feature 003 reconciliation semantic untouched.
+
+Landed so far (Phase 2, the foundation):
+
+- `KnowledgeDomain`, `ApplicabilityKind`, `TeamState`, `PromotionTarget`,
+  `ServerRole`, `UserStatus`, `ApplicabilityFact`, `ProjectTrait`,
+  `SyncNamespace`, `WriterIdentity`
+- `PersonalKnowledge` and `TeamKnowledge`, neither of which has a field for a
+  project identifier, an evidence reference, an observation identifier, or
+  verification of any kind
+- the applicability match predicate — AND across kinds, OR within a kind, no
+  facts means universal
+- `validate_global_content`, the one implementation of nine content rejection
+  classes, run at every path that can create global knowledge
+- the eight-check promotion gate, which delegates content screening to that
+  validator rather than repeating it
+- the salted, machine-local origin digest, which never crosses the wire
+- both migrations: local `0007`, server `0003`
 
 ## [0.1.0-alpha.5] — 2026-08-21
 

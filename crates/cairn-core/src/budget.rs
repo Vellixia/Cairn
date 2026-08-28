@@ -106,6 +106,35 @@ impl Budget {
         self.remaining().saturating_sub(self.reserve_withheld)
     }
 
+    /// What personal or team ("global") sections may still draw on — **not**
+    /// `general_remaining()` (D449, FR-584).
+    ///
+    /// After [`Budget::release_reserve`], `general_remaining()` includes
+    /// whatever Level 0 did not spend: tokens withheld for critical *project*
+    /// state and found unnecessary. That headroom was released back to
+    /// project-priority content, which is what it was withheld for in the
+    /// first place — global sections did not earn it by anyone's admission.
+    /// Reusing `general_remaining()` here is exactly the defect (D449) this
+    /// method exists to prevent: a project with little critical state
+    /// releases most of its reserve, and if global could spend it, exactly
+    /// the projects with the least established truth of their own would hand
+    /// the largest share of their briefing to project-independent guidance.
+    ///
+    /// `general_remaining().min(limit - reserve_initial)` is a safe bound
+    /// either way: it can never exceed what is actually left (the first
+    /// term), and it can never exceed what was never reserved to begin with
+    /// (the second, a fixed quantity unaffected by how much of the reserve
+    /// Level 0 went on to spend or release) — which is exactly the two facts
+    /// a defect could get wrong. Once other Level 1 sections have spent
+    /// enough that less remains than was ever reserved, this equals
+    /// `general_remaining()` exactly; it diverges only while released
+    /// reserve is still sitting unspent in the general pool, which is the
+    /// one situation this method exists to guard.
+    pub fn remaining_non_reserve(&self) -> usize {
+        self.general_remaining()
+            .min(self.limit.saturating_sub(self.reserve_initial))
+    }
+
     /// The reserve as configured.
     pub fn reserve(&self) -> usize {
         self.reserve_initial
@@ -334,6 +363,79 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- `remaining_non_reserve`, the D449 defect (FR-584, SC-451) ---------
+
+    #[test]
+    fn remaining_non_reserve_equals_general_remaining_when_nothing_was_released() {
+        // The reserve was fully used, so there is nothing released for
+        // `remaining_non_reserve` to have to exclude — it should read exactly
+        // as `general_remaining()` does.
+        let mut b = Budget::with_reserve(3000, 1200);
+        assert!(b.try_spend_reserved(1200));
+        b.release_reserve();
+        assert_eq!(b.reserve_released(), 0);
+        assert_eq!(b.remaining_non_reserve(), b.general_remaining());
+        assert_eq!(b.remaining_non_reserve(), 1800);
+    }
+
+    #[test]
+    fn remaining_non_reserve_excludes_a_large_released_reserve() {
+        // D449: a reserve Level 0 barely touched must not thereby become
+        // space global sections may spend. `general_remaining()` alone would
+        // report nearly the whole budget here; `remaining_non_reserve` must
+        // not.
+        let mut b = Budget::with_reserve(1000, 900);
+        assert!(b.try_spend_reserved(10));
+        b.release_reserve();
+        assert_eq!(b.reserve_released(), 890);
+        assert_eq!(b.general_remaining(), 990, "released reserve inflates this");
+        assert_eq!(
+            b.remaining_non_reserve(),
+            100,
+            "but not the non-reserve pool, which was never more than limit - reserve"
+        );
+        assert!(b.remaining_non_reserve() < b.general_remaining());
+    }
+
+    #[test]
+    fn remaining_non_reserve_shrinks_as_the_general_pool_is_spent() {
+        // Once other Level 1 sections have spent enough that less remains
+        // than was ever reserved, the two methods agree again (Example A's
+        // arithmetic, `contracts/recall-composition.md` §6).
+        let mut b = Budget::with_reserve(3000, 1200);
+        assert!(b.try_spend_reserved(350));
+        b.release_reserve();
+        assert_eq!(
+            b.remaining_non_reserve(),
+            1800,
+            "the untouched non-reserve pool"
+        );
+        assert!(b.try_spend(2000));
+        assert_eq!(b.general_remaining(), 650);
+        assert_eq!(
+            b.remaining_non_reserve(),
+            650,
+            "now equal — nothing left to cap"
+        );
+    }
+
+    #[test]
+    fn remaining_non_reserve_is_unaffected_by_whether_the_reserve_was_released_yet() {
+        // Invariant 2: global sections call only `try_spend`, never
+        // `try_spend_reserved`, so this method must behave safely even if
+        // consulted before `release_reserve` runs — it should never expose
+        // more than the pool that was never reserved, reserve state aside.
+        let mut b = Budget::with_reserve(1000, 900);
+        assert_eq!(b.remaining_non_reserve(), 100);
+        assert!(b.try_spend(50));
+        assert_eq!(b.remaining_non_reserve(), 50);
+        assert_eq!(
+            b.reserve_used(),
+            0,
+            "untouched — spend went through try_spend only"
+        );
     }
 
     #[test]

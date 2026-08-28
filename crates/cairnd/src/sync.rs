@@ -4,43 +4,190 @@
 //! records produced by others. Delivery is idempotent, offline is normal, and
 //! an unlinked project never produces a request.
 
-use crate::state::{storage_err, Daemon};
+use crate::state::{storage_err, Daemon, Resolved};
 use cairn_core::domain::*;
 use cairn_core::wire::*;
-use cairn_store::{outbox, repo};
+use cairn_store::{cursor, outbox, repo};
 use serde_json::json;
-use std::time::Duration;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 const BATCH: i64 = 100;
 
-/// How often the background worker looks for queued work.
+/// How often the background worker checks whether any namespace has work due.
+///
+/// This is the *check* cadence, not the *pull* cadence (§5,
+/// `contracts/sync-namespaces.md`) — see [`PULL_INTERVAL_SECONDS`], which is
+/// the interval that actually paces requests to the server.
 const WORKER_TICK: Duration = Duration::from_millis(500);
 /// Backoff after a transient failure: doubles to a ceiling, then holds.
+///
+/// Applied **per namespace** (D427, FR-497): each namespace this daemon
+/// services keeps its own [`NamespaceClock`], so a `project:*` namespace
+/// backing off from a rate limit never slows `personal:*` or `team:*`'s own
+/// retry timing, and vice versa. Before this feature `run_worker` kept one
+/// `Duration` shared by the whole loop body — the process-global backoff
+/// `contracts/sync-namespaces.md` §4 names as the defect this replaces.
 const BACKOFF_MIN: Duration = Duration::from_millis(500);
 const BACKOFF_MAX: Duration = Duration::from_secs(30);
-/// How often a project holding **only** retained work asks the server whether
-/// it has been upgraded (FR-418).
+/// How often a namespace holding **only** retained work asks the server
+/// whether it has been upgraded (FR-418, FR-561, §11a).
 ///
 /// Slower than the worker tick on purpose. There is nothing to send, so this is
 /// a single small request every few seconds rather than one every half second —
 /// and noticing an upgrade a few seconds late costs nothing, while never
-/// noticing it costs the whole promise.
+/// noticing it costs the whole promise. Also per namespace, for the same
+/// reason backoff is: a `team:*` namespace blocked on a missing capability
+/// re-probes on its own schedule, never delaying `project:*`'s own probe or
+/// drain (§11a, Invariant 16).
 const CAPABILITY_PROBE: Duration = Duration::from_secs(5);
+/// How often each namespace pulls, independent of whether it has anything
+/// pending to push (FR-489, FR-589, §5).
+///
+/// **The fix for the conditional-pull defect.** `pull` used to run only after
+/// a successful `drain`, which itself only ran when the outbox held pending or
+/// blocked work — so a consume-only machine (one that only *reads* team or
+/// personal knowledge and never writes any of its own) never called `pull` in
+/// the background at all. The fix moves `pull` outside that gate entirely and
+/// paces it with this interval instead of `WORKER_TICK`: without an interval
+/// of its own, "the pull-due timer has elapsed" would be true on *every* tick,
+/// and each namespace would poll the server twice a second forever — three
+/// namespaces, six requests per second per machine, whether or not anything
+/// changed. `SC-412` asserts against this exact number (twice this interval),
+/// so a passing test does not depend on landing inside a single window.
+const PULL_INTERVAL_SECONDS: u64 = 30;
 
 type Reply = Result<serde_json::Value, WireError>;
+
+/// One namespace's independent backoff, probe and pull scheduling (D427,
+/// FR-489, FR-497, §4, §5, §11a).
+///
+/// `run_worker` keeps one of these per namespace `key()` rather than the single
+/// `backoff: Duration` and `last_probe: Instant` it used to hold for the whole
+/// process — that sharing is exactly the process-global backoff
+/// `contracts/sync-namespaces.md` §4 names as the defect this replaces. This
+/// state lives only for the worker task's lifetime; `sync_cursor.backoff_until`
+/// (`cairn_store::cursor`) is the durable counterpart a fresh process consults
+/// before it has doubled anything of its own.
+struct NamespaceClock {
+    backoff: Duration,
+    /// Not attempted again before this instant. A transient failure pushes it
+    /// forward by `backoff`; success resets it to "now", so a healthy
+    /// namespace is never held back by a backoff it does not have.
+    retry_after: Instant,
+    last_probe: Instant,
+    last_pull: Instant,
+}
+
+impl NamespaceClock {
+    /// Due for everything immediately — a namespace seen for the first time,
+    /// or a daemon that just started next to an already-upgraded server,
+    /// should not wait out a full interval before its first attempt.
+    fn due_now(now: Instant) -> Self {
+        Self {
+            backoff: BACKOFF_MIN,
+            retry_after: now,
+            last_probe: now - CAPABILITY_PROBE,
+            last_pull: now - Duration::from_secs(PULL_INTERVAL_SECONDS),
+        }
+    }
+
+    fn probe_due(&self, now: Instant) -> bool {
+        now.duration_since(self.last_probe) >= CAPABILITY_PROBE
+    }
+
+    fn pull_due(&self, now: Instant) -> bool {
+        now.duration_since(self.last_pull) >= Duration::from_secs(PULL_INTERVAL_SECONDS)
+    }
+
+    /// Record that this namespace just pulled.
+    ///
+    /// Separate from [`Self::record`], which folds in an *outcome*, because the
+    /// two answer different questions: `record` decides when to retry after a
+    /// failure, this decides when the next scheduled pull is due. Conflating
+    /// them is what left `last_pull` never advancing — `record` ran on every
+    /// tick and touched only the backoff, so `pull_due` stayed true forever and
+    /// `WORKER_TICK` became the pull frequency. Three namespaces polling twice a
+    /// second, indefinitely, is precisely the unbounded poll
+    /// `PULL_INTERVAL_SECONDS` exists to prevent (`sync-namespaces.md` §5), and
+    /// backoff does not save it because these requests succeed.
+    ///
+    /// Marked whether the pull succeeded or not. A failed pull is still an
+    /// attempt, and retrying it sooner is `retry_after`'s job — the backoff
+    /// clock — not this one's.
+    fn mark_pulled(&mut self, now: Instant) {
+        self.last_pull = now;
+    }
+
+    /// Record that this namespace just re-read the server's capabilities. See
+    /// [`Self::mark_pulled`].
+    fn mark_probed(&mut self, now: Instant) {
+        self.last_probe = now;
+    }
+
+    /// Fold one attempt's outcome in. `Ok` clears the backoff entirely rather
+    /// than merely not-doubling it: a namespace that just succeeded is exactly
+    /// as eligible as one that has never failed (Invariant 2).
+    fn record(&mut self, now: Instant, outcome: NamespaceOutcome) {
+        match outcome {
+            NamespaceOutcome::Transient => {
+                self.retry_after = now + self.backoff;
+                self.backoff = (self.backoff * 2).min(BACKOFF_MAX);
+            }
+            NamespaceOutcome::Ok => {
+                self.backoff = BACKOFF_MIN;
+                self.retry_after = now;
+            }
+        }
+    }
+}
+
+/// What one namespace's attempt this tick came to — the input
+/// [`NamespaceClock::record`] folds into that namespace's own backoff, and
+/// nobody else's (Invariant 2, FR-488).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamespaceOutcome {
+    Ok,
+    Transient,
+}
+
+/// One lane this daemon services (§1, D426).
+///
+/// `Global` covers both `personal:*` and `team:*`: both are project-less and
+/// driven the same way from here — [`drain_global`] dispatches on the
+/// namespace's own key, and neither needs anything `Project` carries.
+enum NamespaceTarget {
+    Project {
+        project_id: Uuid,
+        server_project_id: Uuid,
+    },
+    Global(SyncNamespace),
+}
+
+impl NamespaceTarget {
+    fn key(&self) -> String {
+        match self {
+            NamespaceTarget::Project { project_id, .. } => {
+                SyncNamespace::Project(*project_id).key()
+            }
+            NamespaceTarget::Global(ns) => ns.key(),
+        }
+    }
+}
 
 /// Drain the outbox automatically, forever (FR-056, D9).
 ///
 /// `cairn sync now` stays available as an explicit trigger, but it is not the
 /// only one: work queued while the server was unreachable is delivered when it
-/// comes back, with no manual step. Transient failures back off; permanent
-/// rejections are already recorded as `failed` by `drain` and are not retried.
+/// comes back, with no manual step. Transient failures back off **per
+/// namespace** (D427); permanent rejections are already recorded as `failed`
+/// by `drain`/`drain_global` and are not retried, and never count as transient
+/// (§4a) — an ingest content refusal must never throttle the namespace it
+/// arrived in.
 pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
-    let mut backoff = BACKOFF_MIN;
-    // Due immediately, so a daemon starting up next to an already-upgraded
-    // server does not wait an interval before noticing.
-    let mut last_probe = std::time::Instant::now() - CAPABILITY_PROBE;
+    let mut clocks: HashMap<String, NamespaceClock> = HashMap::new();
+    let mut establish_clock = NamespaceClock::due_now(Instant::now());
     loop {
         tokio::time::sleep(WORKER_TICK).await;
 
@@ -52,71 +199,753 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
             }
         };
 
-        let probe_due = last_probe.elapsed() >= CAPABILITY_PROBE;
-        let mut probed = false;
-        let mut hit_transient = false;
-        for project in projects.iter().filter(|p| p.linked) {
-            let Some(server_project_id) = project.server_project_id else {
-                continue;
-            };
+        let mut targets: Vec<NamespaceTarget> = projects
+            .iter()
+            .filter(|p| p.linked)
+            .filter_map(|p| {
+                p.server_project_id
+                    .map(|server_project_id| NamespaceTarget::Project {
+                        project_id: p.id,
+                        server_project_id,
+                    })
+            })
+            .collect();
 
-            // Nothing queued: no request, no credentials needed, no noise.
-            let (pending, _) = match outbox::counts(&daemon.store, project.id).await {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            if pending == 0 {
-                // Retained work is **not** pending, and a project holding only
-                // retained work would otherwise never enter a drain again — so
-                // the capability probe would never run, and the upgrade this
-                // machine is waiting for would never be noticed. "Delivered
-                // automatically when the server is upgraded" is the promise
-                // FR-418 makes and `sync status` repeats to the user; without
-                // this it would need a manual `cairn sync now` to come true.
-                //
-                // Rarely, though. There is nothing to send, so this is one
-                // small request per interval, not one per tick.
-                let blocked = outbox::blocked_count(&daemon.store, project.id)
-                    .await
-                    .unwrap_or(0);
-                if blocked == 0 || !probe_due {
+        // `personal:*`/`team:*` namespaces this store has ever queued work
+        // for. Discovered from the outbox rather than assumed absent: a
+        // namespace can hold queued work before its first successful pull
+        // (`outbox::known_namespaces`'s own reasoning), and a namespace with
+        // nothing queued yet and no pull route to try (§5's fix is stated for
+        // `project:*`; a personal/team pull endpoint is a later addition) is
+        // not worth inventing a target for.
+        // Every global lane this store knows about, from two sources that
+        // answer different questions. The outbox answers "what has work
+        // queued", which is what a lane needs to *push*. `sync_cursor` answers
+        // "what lanes exist at all", which is what a lane needs to *pull* — and
+        // a consume-only machine has the second and not the first. Taking only
+        // the first is the defect §5 describes: it made the pull unreachable on
+        // exactly the machines that had nothing but pulling to do.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        if let Ok(known) = outbox::known_namespaces(&daemon.store).await {
+            for key in known {
+                if let Some(ns) = parse_global_namespace(&key) {
+                    if seen.insert(key) {
+                        targets.push(NamespaceTarget::Global(ns));
+                    }
+                }
+            }
+        }
+        if let Ok(established) = cursor::established(&daemon.store).await {
+            for ns in established {
+                if matches!(ns, SyncNamespace::Project(_)) {
                     continue;
                 }
-                probed = true;
-            }
-
-            match drain(&daemon, project.id, server_project_id).await {
-                Ok((applied, duplicate, rejected)) => {
-                    if applied + duplicate > 0 {
-                        tracing::info!(
-                            project = %project.id, applied, duplicate, rejected,
-                            "background sync delivered queued work"
-                        );
-                    }
-                    if rejected == 0 {
-                        let _ = repo::record_sync_success(&daemon.store, project.id).await;
-                    }
-                    let _ = pull(&daemon, project.id, server_project_id).await;
-                }
-                Err(e) => {
-                    // Offline, unauthenticated, or the server is down: keep the
-                    // work queued and try again later.
-                    hit_transient = true;
-                    tracing::debug!(project = %project.id, error = %e, "sync deferred");
+                if seen.insert(ns.key()) {
+                    targets.push(NamespaceTarget::Global(ns));
                 }
             }
         }
 
-        if probed {
-            last_probe = std::time::Instant::now();
+        // A store that is linked and authenticated but has never established
+        // its global lanes gets them here, on the pull cadence rather than every
+        // tick: the probe is one `GET /api/version`, and doing it twice a second
+        // forever would be the unbounded poll §5 warns about.
+        if targets
+            .iter()
+            .all(|t| matches!(t, NamespaceTarget::Project { .. }))
+            && establish_clock.pull_due(Instant::now())
+        {
+            establish_clock.mark_pulled(Instant::now());
+            let _ = establish_global_namespaces(&daemon).await;
         }
-        if hit_transient {
-            tokio::time::sleep(backoff).await;
-            backoff = (backoff * 2).min(BACKOFF_MAX);
-        } else {
-            backoff = BACKOFF_MIN;
+
+        let now = Instant::now();
+        for target in &targets {
+            let key = target.key();
+            let due = {
+                let clock = clocks
+                    .entry(key.clone())
+                    .or_insert_with(|| NamespaceClock::due_now(now));
+                now >= clock.retry_after
+            };
+            if !due {
+                // This namespace's own backoff has not elapsed yet — and only
+                // this namespace's: every other target in this same tick is
+                // still evaluated against its own clock (Invariant 2, FR-488).
+                continue;
+            }
+
+            let outcome = match target {
+                NamespaceTarget::Project {
+                    project_id,
+                    server_project_id,
+                } => {
+                    let clock = clocks.get_mut(&key).expect("just inserted above");
+                    process_project_namespace(&daemon, *project_id, *server_project_id, clock, now)
+                        .await
+                }
+                NamespaceTarget::Global(ns) => {
+                    let clock = clocks.get_mut(&key).expect("just inserted above");
+                    process_global_namespace(&daemon, ns, clock, now).await
+                }
+            };
+            clocks
+                .get_mut(&key)
+                .expect("just inserted above")
+                .record(now, outcome);
         }
     }
+}
+
+/// Drain (if due) and pull (on its own interval) one linked project.
+async fn process_project_namespace(
+    d: &Daemon,
+    project_id: Uuid,
+    server_project_id: Uuid,
+    clock: &mut NamespaceClock,
+    now: Instant,
+) -> NamespaceOutcome {
+    let mut transient = false;
+
+    let (pending, _) = match outbox::counts(&d.store, project_id).await {
+        Ok(c) => c,
+        // A local read failure is not a reason to punish this namespace's
+        // retry timing — it says nothing about the server at all.
+        Err(_) => return NamespaceOutcome::Ok,
+    };
+    let blocked = if pending == 0 {
+        outbox::blocked_count(&d.store, project_id)
+            .await
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let probe_due = clock.probe_due(now);
+
+    // Nothing queued and nothing blocked worth re-probing: no request, no
+    // credentials needed, no noise (unchanged from before this feature).
+    if pending > 0 || (blocked > 0 && probe_due) {
+        // The drain re-reads `GET /api/version` on every run, so the probe
+        // clock advances whenever a drain happens — not only when the
+        // `probe_due` gate is what let it happen. The gate exists to stop a
+        // namespace holding *only* blocked work from re-reading capabilities on
+        // every tick; it is not the sole occasion on which a read occurs.
+        clock.mark_probed(now);
+        match drain(d, project_id, server_project_id).await {
+            Ok((applied, duplicate, rejected)) => {
+                if applied + duplicate > 0 {
+                    tracing::info!(
+                        project = %project_id, applied, duplicate, rejected,
+                        "background sync delivered queued work"
+                    );
+                }
+                if rejected == 0 {
+                    let _ =
+                        cursor::record_success(&d.store, &SyncNamespace::Project(project_id)).await;
+                }
+            }
+            Err(e) => {
+                transient = true;
+                tracing::debug!(project = %project_id, error = %e, "sync deferred");
+            }
+        }
+    }
+
+    // T094 fix (FR-489, Invariant 3): pull runs on its own interval,
+    // unconditionally — never gated on `pending == 0`. A project that only
+    // ever consumes shared records still gets them.
+    if clock.pull_due(now) {
+        clock.mark_pulled(now);
+        if pull(d, project_id, server_project_id).await.is_err() {
+            transient = true;
+        }
+    }
+
+    if transient {
+        NamespaceOutcome::Transient
+    } else {
+        NamespaceOutcome::Ok
+    }
+}
+
+/// Drain (if due) and pull (if due) a personal or team namespace.
+///
+/// **The pull is unconditional** — not gated on there being anything pending or
+/// blocked to push first (FR-489, `sync-namespaces.md` §5). That gating is the
+/// defect this feature had to correct in the project lane, and it bites harder
+/// here: personal and (especially) team knowledge is the first content a machine
+/// can legitimately only ever consume, so a member who never proposes anything
+/// would otherwise never learn that an admin ratified something.
+async fn process_global_namespace(
+    d: &Daemon,
+    namespace: &SyncNamespace,
+    clock: &mut NamespaceClock,
+    now: Instant,
+) -> NamespaceOutcome {
+    let mut transient = false;
+    let key = namespace.key();
+
+    let (pending, _) = outbox::counts_namespace(&d.store, &key)
+        .await
+        .unwrap_or((0, 0));
+    let blocked = if pending == 0 {
+        outbox::blocked_count_namespace(&d.store, &key)
+            .await
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    let probe_due = clock.probe_due(now);
+
+    if pending > 0 || (blocked > 0 && probe_due) {
+        // The drain re-reads `GET /api/version` on every run, so the probe
+        // clock advances whenever a drain happens — not only when the
+        // `probe_due` gate is what let it happen. The gate exists to stop a
+        // namespace holding *only* blocked work from re-reading capabilities on
+        // every tick; it is not the sole occasion on which a read occurs.
+        clock.mark_probed(now);
+        match drain_global(d, namespace).await {
+            Ok((applied, duplicate, rejected)) => {
+                if applied + duplicate > 0 {
+                    tracing::info!(
+                        namespace = %key, applied, duplicate, rejected,
+                        "background sync delivered queued global knowledge"
+                    );
+                }
+                if rejected == 0 {
+                    let _ = cursor::record_success(&d.store, namespace).await;
+                }
+            }
+            Err(e) => {
+                transient = true;
+                tracing::debug!(namespace = %key, error = %e, "global sync deferred");
+            }
+        }
+    }
+
+    if clock.pull_due(now) {
+        clock.mark_pulled(now);
+        match pull_global(d, namespace).await {
+            Ok(landed) if landed > 0 => {
+                tracing::info!(namespace = %key, landed, "pulled global knowledge");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                transient = true;
+                tracing::debug!(namespace = %key, error = %e, "global pull deferred");
+            }
+        }
+    }
+
+    if transient {
+        NamespaceOutcome::Transient
+    } else {
+        NamespaceOutcome::Ok
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Establishing and pulling the global namespaces (T101, T129 client half)
+// ---------------------------------------------------------------------------
+
+/// A stand-in instance id for a peer that has not reported one.
+///
+/// Deterministic in the configured endpoint, so the same server yields the same
+/// lane on every start and across daemon restarts — a lane whose key moved on
+/// restart would orphan whatever it held.
+///
+/// Not a guess at the server's real identity, and never treated as one: it
+/// exists only so that a lane can be opened, held and reported before the server
+/// is able to identify itself, and it is replaced the moment the server does.
+/// Team knowledge binding still keys on the reported id, so a restored backup at
+/// the same endpoint is still a different instance and still refused (FR-496) —
+/// the provisional id is not what that check consults.
+fn provisional_instance(url: &str) -> Uuid {
+    let digest = cairn_core::digest(&format!("cairn-provisional-instance:{}", url.trim()));
+    let mut bytes = [0u8; 16];
+    for (slot, pair) in bytes.iter_mut().zip(digest.as_bytes().chunks(2)) {
+        *slot = u8::from_str_radix(std::str::from_utf8(pair).unwrap_or("00"), 16).unwrap_or(0);
+    }
+    Uuid::from_bytes(bytes)
+}
+
+/// Read this token's account id from `GET /api/auth/me` and record it.
+///
+/// Best-effort: an unreachable server leaves whatever was already known, which
+/// is the honest answer — the identity did not change because the network did.
+/// Returns whether an identity is now known at all.
+async fn learn_account_identity(d: &Daemon) -> bool {
+    let Ok(client) = client(d).await else {
+        return d.server.read().await.account_id.is_some();
+    };
+    let Ok(body) = client.get("/api/auth/me").await else {
+        return d.server.read().await.account_id.is_some();
+    };
+    let Some(id) = body
+        .get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return d.server.read().await.account_id.is_some();
+    };
+
+    d.server.write().await.account_id = Some(id);
+    let mut config = d.config.write().await;
+    if config.server_account_id != Some(id) {
+        config.server_account_id = Some(id);
+        if let Err(e) = config.save() {
+            tracing::debug!(error = %e, "could not persist the server account id");
+        }
+    }
+    true
+}
+
+/// Make sure this store has a `personal:*` and a `team:*` lane, so the worker
+/// has something to pull on.
+///
+/// **This is what makes a consume-only machine work** (FR-489,
+/// `sync-namespaces.md` §5). Namespace discovery used to be
+/// `outbox::known_namespaces` alone — the set of lanes with queued work — which
+/// is empty on a machine that has never written personal or team knowledge of
+/// its own. Such a machine would never pull, so a member who only ever reads
+/// team guidance would never see an admin's ratification. Personal and team
+/// knowledge are the first content a machine can legitimately only ever consume;
+/// every earlier entity type could at least in principle be produced locally,
+/// which is why this gap did not exist before.
+///
+/// The server instance id comes from `GET /api/version`, which already carries
+/// it (FR-416) — there is no handshake to add. Without one there is no namespace
+/// key to form, so a server below schema 3 establishes nothing and this returns
+/// `None`: correct rather than degraded, since such a server has nowhere to put
+/// either domain anyway.
+///
+/// Establishing also backfills. A user records personal notes before ever
+/// linking a server, and those are precisely the ones they most want on their
+/// second machine; without the backfill everything written before the link would
+/// be stranded — recorded, recallable locally, permanently invisible elsewhere.
+/// This mirrors [`backfill`], which does the same for a project's pre-link
+/// history.
+async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
+    // A lane key names the owning account, so there is nothing to establish
+    // until the account is known. A daemon that started with a token but no
+    // recorded identity — the very first run after an upgrade, or one whose
+    // config predates the field — learns it here.
+    if d.server.read().await.account_id.is_none() && !learn_account_identity(d).await {
+        return None;
+    }
+    let url = d.server.read().await.url.clone()?;
+    let client = client(d).await.ok()?;
+    let body = client.get("/api/version").await.ok()?;
+    let reported: Option<Uuid> = body
+        .get("server_instance_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    let owner = d.owner_identity().await;
+    let provisional = provisional_instance(&url);
+    let instance = reported.unwrap_or(provisional);
+
+    // A server below schema 3 has no `server_instance` table and so reports no
+    // id, and until now that meant no lane could be formed — which meant a
+    // personal write against such a server was **never queued at all**. That is
+    // not the behaviour §11a describes: it says content queued against a server
+    // that cannot accept it is *held*, released automatically once the peer
+    // supports it. Content that was never queued is not held; it is invisible,
+    // and `cairn sync status` has nothing to report.
+    //
+    // So the lane opens under a provisional id derived from the configured
+    // endpoint, and re-keys itself to the real id the moment the server reports
+    // one. The endpoint is the right thing to derive from because it is exactly
+    // what §11a's upgrade scenario holds fixed: "that peer is replaced by a
+    // supporting server **at the same configured endpoint**".
+    //
+    // Re-keying moves the cursor, the backoff, the capability fingerprint and
+    // every queued row, and touches no `idempotency_key` — so an entry that was
+    // in flight across the re-key is still recognised as the same entry and
+    // applies exactly once (FR-562).
+    if reported.is_some() {
+        for (from, to) in [
+            (
+                SyncNamespace::Personal(provisional, owner),
+                SyncNamespace::Personal(instance, owner),
+            ),
+            (
+                SyncNamespace::Team(provisional),
+                SyncNamespace::Team(instance),
+            ),
+        ] {
+            let moved = outbox::rename_namespace(&d.store, &from.key(), &to.key())
+                .await
+                .unwrap_or(0);
+            if let Err(e) = cursor::rename(&d.store, &from, &to).await {
+                tracing::debug!(error = %e, "could not re-key a provisional lane");
+            } else if moved > 0 {
+                tracing::info!(
+                    from = %from.key(), to = %to.key(), rows = moved,
+                    "re-keyed a provisional lane now that the server reported its instance"
+                );
+            }
+        }
+    }
+
+    let personal = SyncNamespace::Personal(instance, owner);
+    let team = SyncNamespace::Team(instance);
+
+    // **A store may hold several `personal:*` lanes and exactly one `team:*`
+    // lane** (D438, FR-495, FR-496).
+    //
+    // The asymmetry is the design: personal knowledge is partitioned by owning
+    // account, so two identities coexist; team knowledge is a claim about one
+    // server's ratification history, and blending two deployments' guidance is
+    // what FR-496 forbids. That refusal is implemented by
+    // `bind_team_server_instance_tx`, which asks "which instance is this store's
+    // team corpus bound to?" by reading the recorded `team:*` lane — so opening a
+    // second one makes the question ambiguous, and the answer became whichever
+    // row the query happened to return first. Relinking to a second server then
+    // silently merged its guidance into a corpus bound to the first.
+    //
+    // So the second lane is never opened. The store keeps pulling team knowledge
+    // from the instance it is bound to, and a genuine move to a different server
+    // is an explicit act (a fresh store, or an unlink) rather than a side effect
+    // of `cairn auth token set`.
+    let already_bound = cursor::established(&d.store)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find_map(|ns| match ns {
+            SyncNamespace::Team(existing) => Some(existing),
+            _ => None,
+        });
+    let team_is_ours = match already_bound {
+        Some(existing) if existing != instance => {
+            tracing::warn!(
+                bound_to = %existing, now_linked_to = %instance,
+                "this store's team knowledge belongs to another server instance; \
+                 not opening a second team lane (FR-496)"
+            );
+            false
+        }
+        _ => true,
+    };
+
+    let lanes: Vec<&SyncNamespace> = if team_is_ours {
+        vec![&personal, &team]
+    } else {
+        vec![&personal]
+    };
+    for namespace in lanes {
+        if let Err(e) = cursor::establish(&d.store, namespace).await {
+            tracing::debug!(namespace = %namespace.key(), error = %e, "could not establish namespace");
+            return None;
+        }
+    }
+
+    // Both backfills are idempotent by the outbox's own key, so running them on
+    // every establish costs one query per row and enqueues nothing twice.
+    match cairn_store::global::enqueue_personal_backlog(&d.store, owner).await {
+        Ok(n) if n > 0 => tracing::info!(
+            queued = n,
+            "queued personal knowledge written before this link"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::debug!(error = %e, "personal backlog not queued"),
+    }
+    match cairn_store::global::enqueue_team_backlog(&d.store).await {
+        Ok(n) if n > 0 => {
+            tracing::info!(queued = n, "queued team proposals written before this link")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::debug!(error = %e, "team backlog not queued"),
+    }
+
+    Some(instance)
+}
+
+/// Pull one global namespace's changes and merge them into this store.
+///
+/// Returns how many rows landed. A row that fails to merge is counted as not
+/// landed and the cursor still advances past the page: the alternative is a
+/// single unmergeable row wedging the lane forever, and every merge here is
+/// idempotent by id, so a row that becomes mergeable later arrives again on the
+/// next full pull rather than being lost. A *transport* failure returns `Err`
+/// and does not advance the cursor, which is the case that must retry.
+async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, WireError> {
+    let c = client(d).await?;
+
+    // **A lane only ever pulls from the instance it names** (FR-495, FR-496).
+    //
+    // The lane key carries a server instance id, and until this check existed
+    // that id was treated as a fact about where the rows came from — while the
+    // HTTP client points at whatever server the current token belongs to. After
+    // `cairn auth token set` moved a store to a second deployment, the old
+    // `team:<A>` lane happily pulled server B and merged B's ratified guidance
+    // into a corpus bound to A, labelled as A's. `merge_synced_team` could not
+    // catch it: it was handed the lane's instance, which matched by construction.
+    //
+    // Confirming the peer here is the only place the two can be compared, and it
+    // is one `GET /api/version` — the same endpoint the drain already polls for
+    // capabilities every cycle.
+    let lane_instance = match namespace {
+        SyncNamespace::Personal(instance, _) | SyncNamespace::Team(instance) => Some(*instance),
+        SyncNamespace::Project(_) => None,
+    };
+    if let Some(expected) = lane_instance {
+        let url = d.server.read().await.url.clone().unwrap_or_default();
+        // A peer that reports no instance is one below schema 3, and the lane it
+        // corresponds to is the provisional one derived from the endpoint — the
+        // same identity `establish_global_namespaces` would have used, so the two
+        // agree without a special case.
+        let reported = match c.get("/api/version").await {
+            Ok(body) => body
+                .get("server_instance_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .unwrap_or_else(|| provisional_instance(&url)),
+            // Offline: nothing to pull anyway, and refusing here would be
+            // indistinguishable from a mismatch.
+            Err(e) => return Err(e),
+        };
+        if reported != expected {
+            tracing::debug!(
+                lane = %namespace.key(), peer = %reported,
+                "not pulling: this lane belongs to a different server instance"
+            );
+            return Ok(0);
+        }
+    }
+
+    let since = cursor::pull_cursor(&d.store, namespace)
+        .await
+        .map_err(storage_err)?;
+
+    let (path, array) = match namespace {
+        SyncNamespace::Personal(..) => ("/api/sync/changes/personal", "personal"),
+        SyncNamespace::Team(_) => ("/api/sync/changes/team", "team"),
+        // `project:*` has its own puller with its own entity types.
+        SyncNamespace::Project(_) => return Ok(0),
+    };
+    let path = match &since {
+        Some(cursor) => format!("{path}?since={}", urlencode(cursor)),
+        None => path.to_string(),
+    };
+    let body = c.get(&path).await?;
+
+    let rows = body
+        .get(array)
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    let mut landed = 0usize;
+    for row in &rows {
+        let merged = match namespace {
+            SyncNamespace::Personal(..) => merge_pulled_personal(d, row).await,
+            SyncNamespace::Team(instance) => merge_pulled_team(d, *instance, row).await,
+            SyncNamespace::Project(_) => false,
+        };
+        if merged {
+            landed += 1;
+        }
+    }
+
+    if let Some(cursor) = body.get("cursor").and_then(|v| v.as_str()) {
+        cursor::set_pull_cursor(&d.store, namespace, cursor)
+            .await
+            .map_err(storage_err)?;
+    }
+    Ok(landed)
+}
+
+/// Applicability facts out of a pulled row.
+///
+/// A fact whose `kind` is outside the closed `language | tool` vocabulary is
+/// dropped rather than guessed at, the same way the server's own ingest does:
+/// inventing a kind here to carry the value through would be a second, looser
+/// vocabulary living beside the closed one.
+fn pulled_applicability(row: &serde_json::Value) -> Vec<ApplicabilityFact> {
+    row.get("applicability")
+        .and_then(|v| v.as_array())
+        .map(|facts| {
+            facts
+                .iter()
+                .filter_map(|f| {
+                    let kind: ApplicabilityKind =
+                        f.get("kind").and_then(|v| v.as_str())?.parse().ok()?;
+                    Some(ApplicabilityFact {
+                        kind,
+                        value: f.get("value").and_then(|v| v.as_str())?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn pulled_uuid(row: &serde_json::Value, field: &str) -> Option<Uuid> {
+    row.get(field)
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+fn pulled_time(row: &serde_json::Value, field: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    row.get(field)
+        .and_then(|v| v.as_str())
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+}
+
+/// One pulled personal row into this store.
+///
+/// The owner is this daemon's own identity, not a field of the payload: the
+/// route this row came from returns only the caller's own personal knowledge, so
+/// trusting a payload field would be accepting a claim the transport already
+/// answered — and answering it twice, differently, is how a record ends up filed
+/// under the wrong identity.
+async fn merge_pulled_personal(d: &Daemon, row: &serde_json::Value) -> bool {
+    let Some(id) = pulled_uuid(row, "id") else {
+        return false;
+    };
+    let Some(writer_id) = pulled_uuid(row, "writer_id") else {
+        return false;
+    };
+    let Some(created_at) = pulled_time(row, "created_at") else {
+        return false;
+    };
+    let knowledge_type: MemoryType = row
+        .get("knowledge_type")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(MemoryType::Fact);
+
+    let incoming = cairn_store::global::SyncedPersonalKnowledge {
+        id,
+        owner_user_id: d.owner_identity().await,
+        knowledge_type,
+        content: row
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        topic_key: row
+            .get("topic_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        value_key: row
+            .get("value_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        applicability: pulled_applicability(row),
+        writer_id,
+        writer_seq: row.get("writer_seq").and_then(|v| v.as_i64()).unwrap_or(0),
+        created_at,
+        superseded_by_id: pulled_uuid(row, "superseded_by_id"),
+        forgotten_at: pulled_time(row, "forgotten_at"),
+    };
+
+    match cairn_store::global::merge_synced_personal(&d.store, incoming).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::debug!(personal = %id, error = %e, "a pulled personal row did not merge");
+            false
+        }
+    }
+}
+
+/// One pulled team row into this store.
+///
+/// `merge_synced_team` refuses a row from a server instance other than the one
+/// this store's team corpus is already bound to, and that refusal is not a
+/// transport failure: it means the operator pointed this store at a different
+/// deployment, and blending two servers' ratification histories is exactly what
+/// must not happen silently (`sync-namespaces.md` §10). It is logged and the row
+/// is skipped, so the lane keeps working for everything else.
+async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) -> bool {
+    let Some(id) = pulled_uuid(row, "id") else {
+        return false;
+    };
+    let Some(writer_id) = pulled_uuid(row, "writer_id") else {
+        return false;
+    };
+    let Some(created_at) = pulled_time(row, "created_at") else {
+        return false;
+    };
+    let Some(proposed_by_user_id) = pulled_uuid(row, "proposed_by_user_id") else {
+        return false;
+    };
+    let Ok(state) = row
+        .get("state")
+        .and_then(|v| v.as_str())
+        .unwrap_or("proposed")
+        .parse::<TeamState>()
+    else {
+        return false;
+    };
+    let knowledge_type: MemoryType = row
+        .get("knowledge_type")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(MemoryType::Fact);
+
+    let incoming = cairn_store::global::SyncedTeamKnowledge {
+        id,
+        knowledge_type,
+        content: row
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        topic_key: row
+            .get("topic_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        value_key: row
+            .get("value_key")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        applicability: pulled_applicability(row),
+        state,
+        proposed_by_user_id,
+        ratified_by_user_id: pulled_uuid(row, "ratified_by_user_id"),
+        ratified_at: pulled_time(row, "ratified_at"),
+        writer_id,
+        writer_seq: row.get("writer_seq").and_then(|v| v.as_i64()).unwrap_or(0),
+        created_at,
+        superseded_by_id: pulled_uuid(row, "superseded_by_id"),
+        retired_at: pulled_time(row, "retired_at"),
+    };
+
+    match cairn_store::global::merge_synced_team(&d.store, instance, incoming).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::debug!(team = %id, error = %e, "a pulled team row did not merge");
+            false
+        }
+    }
+}
+
+/// Recover a `personal:*`/`team:*` namespace from the plain string
+/// `outbox::known_namespaces` returns.
+///
+/// `SyncNamespace` has no public parser (`key()` is one-way, by design — it is
+/// a cursor key, not a wire format), so this reads the same three shapes
+/// `key()` produces rather than adding one to `cairn_core` (out of this task's
+/// file ownership). `project:*` rows are excluded: `run_worker` already builds
+/// project targets from `repo::list_projects`, which is the authoritative
+/// source for a project's *current* `server_project_id` — parsing it back out
+/// of a namespace string here would risk drifting from that if a project were
+/// ever re-linked to a different server project.
+fn parse_global_namespace(key: &str) -> Option<SyncNamespace> {
+    if let Some(rest) = key.strip_prefix("personal:") {
+        let (instance, user) = rest.split_once(':')?;
+        return Some(SyncNamespace::Personal(
+            Uuid::parse_str(instance).ok()?,
+            Uuid::parse_str(user).ok()?,
+        ));
+    }
+    if let Some(rest) = key.strip_prefix("team:") {
+        return Some(SyncNamespace::Team(Uuid::parse_str(rest).ok()?));
+    }
+    None
 }
 
 struct Client {
@@ -172,6 +1001,46 @@ impl Client {
             .http
             .get(format!("{}{path}", self.base))
             .bearer_auth(&self.token)
+            .send()
+            .await
+            .map_err(unreachable_err)?;
+        decode(response).await
+    }
+
+    /// `PATCH /api/admin/users/{id}` is the only route this daemon calls with
+    /// this verb, but it earns its own method rather than an inline
+    /// `reqwest::Client` call so it shares `decode`'s error mapping with
+    /// `post`/`get` above.
+    async fn patch(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, WireError> {
+        let response = self
+            .http
+            .patch(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(unreachable_err)?;
+        decode(response).await
+    }
+
+    /// `DELETE /api/projects/{id}/members` is this daemon's only `DELETE`
+    /// with a body (T063) — a body on `DELETE` is unusual but valid HTTP,
+    /// and axum's route for it already expects one (`api.rs`'s
+    /// `MemberBody` extractor on `remove_member`).
+    async fn delete(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<serde_json::Value, WireError> {
+        let response = self
+            .http
+            .delete(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .json(body)
             .send()
             .await
             .map_err(unreachable_err)?;
@@ -235,7 +1104,111 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
             .save()
             .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
     }
-    Ok(json!({ "token_stored": true, "server_url": creds.url }))
+    let url = creds.url.clone();
+    drop(creds);
+
+    // Learn which account this token belongs to, and persist it. Personal
+    // knowledge is partitioned by the owning account (FR-567, FR-568), so this
+    // is not a nicety: without it every identity this machine ever holds shares
+    // one pool of rows, and relinking to a second server would merge two
+    // people's-worth of notes with no way to separate them afterwards.
+    //
+    // Persisted rather than re-fetched, because a daemon that restarts offline
+    // must still know which identity it holds — falling back to the local id
+    // would silently reassign every existing row.
+    learn_account_identity(d).await;
+
+    // Establish the two global lanes now rather than waiting for the worker's
+    // next establish window (up to `PULL_INTERVAL_SECONDS`). `cairn auth token
+    // set` is the moment a user expects their personal knowledge to start
+    // moving, and a lane that does not exist yet cannot pull. Failure here is
+    // not an error for this command: authenticating succeeded, and the worker
+    // will try again on its own schedule.
+    let established = establish_global_namespaces(d).await.is_some();
+
+    Ok(json!({
+        "token_stored": true,
+        "server_url": url,
+        "global_namespaces_established": established,
+    }))
+}
+
+/// Select the one shared project this repository already belongs to.
+///
+/// Exactly one match is selected; zero and more-than-one are **refused**, not
+/// guessed (FR-425). Guessing among memberships the caller already holds is
+/// still a decision only the human should make when it is ambiguous — the
+/// single-match case is safe *because* it is unambiguous, not because
+/// auto-selection is safe in general.
+async fn auto_link(d: &Daemon, r: &Resolved) -> Reply {
+    let Some(remote) = r
+        .project
+        .repository_remote
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    else {
+        return Err(WireError::new(
+            codes::INVALID_REQUEST,
+            "this repository has no remote, so there is nothing to match a shared project \
+             against; pass --project <id> or --create",
+        ));
+    };
+
+    let c = client(d).await?;
+    let found = c
+        .get(&format!(
+            "/api/projects/lookup?remote={}",
+            urlencode(remote)
+        ))
+        .await?;
+    let candidates: Vec<&serde_json::Value> = found
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+
+    match candidates.as_slice() {
+        [only] => {
+            let id = only
+                .get("id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| {
+                    WireError::new(codes::SERVER_UNAVAILABLE, "lookup returned no project id")
+                })?;
+            // Attach locally, exactly as `--project <id>` would. No grant call:
+            // lookup already proved the membership by returning the row.
+            attach(d, r, id).await
+        }
+        [] => Err(WireError::new(
+            codes::NOT_FOUND,
+            "no shared project matches this repository and you are not a member of one. \
+             Ask an admin or an existing member to add you (`cairn project member add`), \
+             or pass --create to make a new shared project, or --project <id> if you \
+             already know it",
+        )),
+        many => {
+            let listed: Vec<String> = many
+                .iter()
+                .map(|p| {
+                    format!(
+                        "{} ({})",
+                        p.get("id").and_then(|v| v.as_str()).unwrap_or("?"),
+                        p.get("name").and_then(|v| v.as_str()).unwrap_or("?")
+                    )
+                })
+                .collect();
+            Err(WireError::new(
+                codes::AMBIGUOUS_SESSION,
+                format!(
+                    "{} shared projects match this repository's remote and you are a member \
+                     of all of them: {}. Specify one with --project <id>",
+                    many.len(),
+                    listed.join(", ")
+                ),
+            ))
+        }
+    }
 }
 
 /// Whether this machine holds a credential, and for which server.
@@ -251,10 +1224,210 @@ pub async fn auth_status(d: &Daemon) -> Reply {
     }))
 }
 
+/// `GET /api/auth/me`: this account's id, role and status, verified fresh
+/// against the server on every call (T121, FR-464).
+///
+/// This is the one route an authority decision may be made from. Nothing in
+/// this daemon caches a role locally and trusts it later — an authority
+/// claim checked against a stale local copy is not checked at all, which is
+/// exactly the gap FR-464's own comment on the server's `me` handler names.
+/// Every caller of this function inherits its failure mode too: an
+/// unreachable server or a missing credential surfaces as this same
+/// `Err`, not as an empty or default role.
+pub async fn auth_me(d: &Daemon) -> Reply {
+    let c = client(d).await?;
+    c.get("/api/auth/me").await
+}
+
 pub async fn logout(d: &Daemon) -> Reply {
     let _ = std::fs::remove_file(cairn_core::paths::token_path());
     d.server.write().await.token = None;
     Ok(json!({ "token_stored": false }))
+}
+
+/// `POST /api/auth/password` (FR-405, `contracts/identity-administration.md`
+/// §5). Self-service: the caller changes its own password with whatever
+/// credential it is already holding, including a `must_change_password`
+/// account's temporary one — this is the one route that stays reachable
+/// while that flag is set.
+pub async fn change_password(d: &Daemon, new_password: &str) -> Reply {
+    let c = client(d).await?;
+    c.post(
+        "/api/auth/password",
+        &json!({ "new_password": new_password }),
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Administration (`contracts/identity-administration.md` §2, §2a, §9).
+//
+// Every account operation the CLI knows only by email; the server's routes
+// are addressed by row id. This is where that gap is closed — by asking
+// `GET /api/admin/users` first — rather than by the CLI ever learning or
+// holding a uuid for an account.
+// ---------------------------------------------------------------------------
+
+/// Find one account by email, case-insensitively (emails are stored
+/// lower-cased, `crates/cairn-server/src/auth.rs:354`), from the one route
+/// that lists them all (FR-411).
+async fn find_user(c: &Client, email: &str) -> Result<serde_json::Value, WireError> {
+    let needle = email.trim().to_lowercase();
+    let listed = c.get("/api/admin/users").await?;
+    listed
+        .get("users")
+        .and_then(|v| v.as_array())
+        .and_then(|users| {
+            users
+                .iter()
+                .find(|u| u.get("email").and_then(|e| e.as_str()) == Some(needle.as_str()))
+        })
+        .cloned()
+        .ok_or_else(|| WireError::not_found(format!("no account with email {email}")))
+}
+
+/// `POST /api/admin/users` (FR-401). The temporary password in the response
+/// is shown to the caller exactly once — there is no route that reads it back
+/// (FR-403).
+pub async fn admin_user_create(d: &Daemon, email: &str, display_name: &str) -> Reply {
+    let c = client(d).await?;
+    c.post(
+        "/api/admin/users",
+        &json!({ "email": email, "display_name": display_name }),
+    )
+    .await
+}
+
+/// `GET /api/admin/users`: every account, its role and its status (FR-411).
+pub async fn admin_user_list(d: &Daemon) -> Reply {
+    let c = client(d).await?;
+    c.get("/api/admin/users").await
+}
+
+/// `PATCH /api/admin/users/{id}`: promote, demote, disable or enable one
+/// account (FR-402, FR-408, FR-412), addressed by email.
+pub async fn admin_user_patch(
+    d: &Daemon,
+    email: &str,
+    role: Option<ServerRole>,
+    status: Option<UserStatus>,
+) -> Reply {
+    let c = client(d).await?;
+    let target = find_user(&c, email).await?;
+    let id = target.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+        WireError::new(codes::SERVER_UNAVAILABLE, "server returned no account id")
+    })?;
+    let mut body = json!({});
+    if let Some(role) = role {
+        body["role"] = json!(role.as_str());
+    }
+    if let Some(status) = status {
+        body["status"] = json!(status.as_str());
+    }
+    c.patch(&format!("/api/admin/users/{id}"), &body).await
+}
+
+/// `POST /api/admin/users/{id}/reset-password` (FR-553–FR-559). The target's
+/// current `status` rides along in the reply — read from the same lookup that
+/// resolved the email — so the CLI can say when a reset landed on an account
+/// that remains disabled (FR-558) without a second round trip.
+pub async fn admin_reset_password(d: &Daemon, email: &str) -> Reply {
+    let c = client(d).await?;
+    let target = find_user(&c, email).await?;
+    let id = target.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+        WireError::new(codes::SERVER_UNAVAILABLE, "server returned no account id")
+    })?;
+    let mut reset = c
+        .post(&format!("/api/admin/users/{id}/reset-password"), &json!({}))
+        .await?;
+    if let Some(object) = reset.as_object_mut() {
+        object
+            .entry("email")
+            .or_insert_with(|| target.get("email").cloned().unwrap_or(json!(email)));
+        object
+            .entry("status")
+            .or_insert_with(|| target.get("status").cloned().unwrap_or(json!(null)));
+    }
+    Ok(reset)
+}
+
+// ---------------------------------------------------------------------------
+// Team knowledge lifecycle (`contracts/global-memory.md` §5b, T121, T133).
+//
+// Ratification and retirement are administrator-only, and that authorization
+// is the server's alone: each route below is gated by the server's own
+// admin-only extractor, the same shape `admin_user_patch` already trusts for
+// account administration. This daemon makes no local role decision in front
+// of it — see `crates/cairnd/src/handlers.rs`'s `team_ratify`/`team_retire`
+// for why, and for what happens to the local store once the server confirms.
+// ---------------------------------------------------------------------------
+
+/// `POST /api/team/{id}/ratify` (T121, T133). Compare-and-swap on the
+/// entry's expected state, refusing by naming its actual one — the same
+/// discipline the local store's own `ratify_team` (T119) keeps, mirrored
+/// here because the server is where this transition is actually authorized.
+pub async fn team_ratify_remote(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
+    let c = client(d).await?;
+    let mut body = json!({});
+    if let Some(sup) = supersedes {
+        body["supersedes"] = json!(sup);
+    }
+    c.post(&format!("/api/team/{id}/ratify"), &body).await
+}
+
+/// `POST /api/team/{id}/retire` (T121, T133). Same admin gate and
+/// compare-and-swap shape as [`team_ratify_remote`].
+pub async fn team_retire_remote(d: &Daemon, id: Uuid) -> Reply {
+    let c = client(d).await?;
+    c.post(&format!("/api/team/{id}/retire"), &json!({})).await
+}
+
+// ---------------------------------------------------------------------------
+// Shared-project membership (`contracts/identity-administration.md` §9a,
+// T063). Every route the server exposes here is addressed by user id
+// (`api.rs`'s `MemberBody`, deliberately — see its own doc comment on why an
+// email-addressed grant route would be an enumeration oracle); this is where
+// that is closed the same way [`admin_user_patch`] closes it for accounts,
+// by asking `GET /api/admin/users` first rather than the CLI ever learning
+// or holding a uuid.
+// ---------------------------------------------------------------------------
+
+/// `POST /api/projects/{id}/members` — grant membership by email (T063,
+/// FR-418, FR-419).
+pub async fn project_member_add(d: &Daemon, project_id: Uuid, email: &str) -> Reply {
+    let c = client(d).await?;
+    let target = find_user(&c, email).await?;
+    let user_id = target.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+        WireError::new(codes::SERVER_UNAVAILABLE, "server returned no account id")
+    })?;
+    c.post(
+        &format!("/api/projects/{project_id}/members"),
+        &json!({ "user_id": user_id }),
+    )
+    .await
+}
+
+/// `DELETE /api/projects/{id}/members` — revoke membership by email (T063,
+/// FR-420, FR-421). Same email-to-id resolution as [`project_member_add`].
+pub async fn project_member_remove(d: &Daemon, project_id: Uuid, email: &str) -> Reply {
+    let c = client(d).await?;
+    let target = find_user(&c, email).await?;
+    let user_id = target.get("id").and_then(|v| v.as_str()).ok_or_else(|| {
+        WireError::new(codes::SERVER_UNAVAILABLE, "server returned no account id")
+    })?;
+    c.delete(
+        &format!("/api/projects/{project_id}/members"),
+        &json!({ "user_id": user_id }),
+    )
+    .await
+}
+
+/// `GET /api/projects/{id}/members` — the full membership list (T063,
+/// FR-427). No email resolution needed: the server already returns email
+/// and display name alongside each member's id.
+pub async fn project_member_list(d: &Daemon, project_id: Uuid) -> Reply {
+    let c = client(d).await?;
+    c.get(&format!("/api/projects/{project_id}/members")).await
 }
 
 /// Opt a project into sharing.
@@ -265,10 +1438,36 @@ pub async fn logout(d: &Daemon) -> Reply {
 pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create: bool) -> Reply {
     let r = d.resolve(cwd).await?;
 
-    // No arguments is a question, not an instruction: "am I linked?". It is
-    // answered entirely from local state, before any server is contacted.
-    if server_project_id.is_none() && !create {
+    // No arguments, already linked: a question, not an instruction — "am I
+    // linked?" — answered entirely from local state, before any server is
+    // contacted.
+    if server_project_id.is_none() && !create && r.project.server_project_id.is_some() {
         return link_status(d, &r).await;
+    }
+
+    // No arguments, not yet linked: attempt safe auto-link (FR-424, FR-425,
+    // D14). This is the cloned-repository case — a teammate who has been granted
+    // membership out of band runs `cairn link` in a fresh clone and expects it to
+    // find the project.
+    //
+    // Safe because of what it draws from, not because auto-selection is
+    // inherently safe: `GET /api/projects/lookup` returns **only** projects the
+    // caller is already a member of (server `api.rs`, membership join), so the
+    // candidate set cannot contain anything the caller was not already entitled
+    // to. There is no membership-granting call on this path at all — the deleted
+    // join route was exactly that, and this replaces it with a *selection* among
+    // rows the caller already holds.
+    if server_project_id.is_none() && !create {
+        // Only when a server is actually configured. Bare `link` on a machine
+        // with no credential is still a question — "am I linked?" — and must be
+        // answered from local state, exactly as it was before auto-link existed.
+        // Reaching for the network here turned a local status query into a
+        // connection error, which is a worse answer to a question the store can
+        // answer on its own.
+        if d.server.read().await.token.is_none() {
+            return link_status(d, &r).await;
+        }
+        return auto_link(d, &r).await;
     }
 
     let c = client(d).await?;
@@ -332,6 +1531,16 @@ pub async fn link(d: &Daemon, cwd: &str, server_project_id: Option<Uuid>, create
         }
     };
 
+    attach(d, &r, target).await
+}
+
+/// Record the local project as linked to `target` and seed the outbox.
+///
+/// Shared by the explicit `--project`, `--create` and auto-link paths so all
+/// three attach identically. Auto-link in particular must be indistinguishable
+/// from the explicit form once the target is chosen — the whole claim is that it
+/// only *chooses*, and choosing differently is the only thing it does.
+async fn attach(d: &Daemon, r: &Resolved, target: Uuid) -> Reply {
     let project = repo::link_project(&d.store, r.project.id, target)
         .await
         .map_err(storage_err)?;
@@ -577,7 +1786,7 @@ pub async fn status(d: &Daemon, cwd: &str) -> Reply {
         server_url: d.server.read().await.url.clone(),
         pending,
         failed,
-        last_success_at: repo::last_sync_success(&d.store, r.project.id)
+        last_success_at: cursor::last_success_at(&d.store, &SyncNamespace::Project(r.project.id))
             .await
             .map_err(storage_err)?,
         failures: outbox::failures(&d.store, r.project.id)
@@ -599,7 +1808,7 @@ pub async fn degradation(d: &Daemon, project_id: Uuid) -> Option<SyncDegradation
     if items.is_empty() {
         return None;
     }
-    let capability = repo::server_capability(&d.store, project_id)
+    let capability = cursor::server_capability(&d.store, &SyncNamespace::Project(project_id))
         .await
         .ok()
         .flatten()
@@ -647,14 +1856,47 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
         .server_project_id
         .ok_or_else(|| WireError::new(codes::NOT_LINKED, "linked project has no server id"))?;
 
-    let (applied, duplicate, rejected) = drain(d, r.project.id, server_project_id).await?;
-    let pulled = pull(d, r.project.id, server_project_id).await.unwrap_or(0);
+    let (mut applied, mut duplicate, mut rejected) =
+        drain(d, r.project.id, server_project_id).await?;
+    let mut pulled = pull(d, r.project.id, server_project_id).await.unwrap_or(0);
 
     if rejected == 0 {
-        repo::record_sync_success(&d.store, r.project.id)
+        cursor::record_success(&d.store, &SyncNamespace::Project(r.project.id))
             .await
             .map_err(storage_err)?;
     }
+
+    // Every lane, not only this project's. `cairn sync now` is what a user runs
+    // when they want their machine caught up *now*, and answering only for the
+    // project lane meant personal and team knowledge moved solely on the
+    // background worker's 30-second cadence — so "sync now" was true of one
+    // third of what the command is named after, and a user who ran it and then
+    // checked the other machine would reasonably conclude sync was broken.
+    //
+    // Lanes are established first, because a store authenticated since the last
+    // establish window has none yet and there would be nothing to drain.
+    let _ = establish_global_namespaces(d).await;
+    let lanes = cursor::established(&d.store).await.unwrap_or_default();
+    for namespace in lanes {
+        if matches!(namespace, SyncNamespace::Project(_)) {
+            continue;
+        }
+        // Another identity's lane is held on this store and not synchronized:
+        // this machine is not authenticated as that account, so it has no
+        // standing to push or pull for it (FR-567).
+        if let SyncNamespace::Personal(_, user) = namespace {
+            if user != d.owner_identity().await {
+                continue;
+            }
+        }
+        if let Ok((a, dup, rej)) = drain_global(d, &namespace).await {
+            applied += a;
+            duplicate += dup;
+            rejected += rej;
+        }
+        pulled += pull_global(d, &namespace).await.unwrap_or(0);
+    }
+
     Ok(json!({
         "applied": applied,
         "duplicate": duplicate,
@@ -683,7 +1925,7 @@ async fn drain(
     // empty queue: the probe is cheap, but a request per row against a server
     // that just refused everything is exactly the futile traffic `blocked`
     // exists to avoid (FR-418).
-    let capability = refresh_capability(d, project_id).await;
+    let capability = refresh_capability(d, &SyncNamespace::Project(project_id)).await;
 
     let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
     let mut connection: Option<Client> = None;
@@ -806,7 +2048,167 @@ async fn drain(
     Ok((applied, duplicate, rejected))
 }
 
-/// Ask the server what it can hold, and release anything it now can (T111).
+/// Any one linked project's server id, to authenticate a personal/team push
+/// through (T100).
+///
+/// `POST /api/sync/batch` (`crates/cairn-server/src/sync.rs`) still requires a
+/// `project_id` on every request, including one carrying only project-less
+/// `personal_knowledge`/`team_knowledge` items: the server's `apply_item`
+/// checks membership on it (`auth::require_member`) and then dispatches by the
+/// item's own `entity_type`, never by that project id — for the
+/// `"personal_knowledge" | "team_knowledge"` arm the project id is an
+/// authorization context only, not an attribution. Any project this account
+/// belongs to satisfies it. A store with no linked project at all has nothing
+/// to authenticate a personal or team push through yet.
+async fn any_linked_project(d: &Daemon) -> Option<Uuid> {
+    let projects = repo::list_projects(&d.store).await.ok()?;
+    projects
+        .into_iter()
+        .find(|p| p.linked)
+        .and_then(|p| p.server_project_id)
+}
+
+/// [`drain`], for a `personal:*`/`team:*` namespace (T093, T100, T106, T107).
+///
+/// Same claim → send → record-outcome shape as `drain`, over
+/// [`outbox::claim_namespace`] instead of the project-scoped [`outbox::claim`]
+/// — personal and team rows carry no `project_id` for that one to match
+/// against. The two refusal paths (§4a) are unchanged from `drain`: a
+/// capability refusal (`409 unknown_entity_type`) still calls
+/// [`outbox::mark_blocked`], and an ingest content refusal (`422
+/// content_rejected`, not in [`codes::CAPABILITY_REFUSALS`]) still falls to
+/// [`outbox::mark_failed`] — permanent, never `blocked`, never throttling this
+/// namespace's backoff, because the outcome only ever reads as
+/// [`NamespaceOutcome::Transient`] when the *request itself* failed, never
+/// when an item in a successful response was refused.
+async fn drain_global(
+    d: &Daemon,
+    namespace: &SyncNamespace,
+) -> Result<(usize, usize, usize), WireError> {
+    // Same single-drainer discipline `drain` uses, and the same lock: claiming
+    // is what makes two concurrent drains correct, this is what keeps them
+    // orderly, and there is no reason a project drain and a global drain
+    // running at once would be more correct interleaved than serialized.
+    let _drain_guard = d.sync_drain.lock().await;
+
+    let capability = refresh_capability(d, namespace).await;
+    let key = namespace.key();
+
+    let Some(auth_project) = any_linked_project(d).await else {
+        return Ok((0, 0, 0));
+    };
+
+    let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
+    let mut connection: Option<Client> = None;
+
+    loop {
+        let batch = outbox::claim_namespace(&d.store, &key, BATCH)
+            .await
+            .map_err(storage_err)?;
+        if batch.is_empty() {
+            break;
+        }
+
+        if connection.is_none() {
+            match client(d).await {
+                Ok(c) => connection = Some(c),
+                Err(e) => {
+                    release(d, &batch, &e.message).await?;
+                    return Err(e);
+                }
+            }
+        }
+        let c = connection.as_ref().expect("a client was just built");
+
+        let items: Vec<SyncItem> = batch.iter().map(|(_, item)| item.clone()).collect();
+        let body = serde_json::to_value(SyncBatch {
+            project_id: auth_project,
+            items,
+        })
+        .unwrap_or(json!({}));
+
+        let response = match c.post("/api/sync/batch", &body).await {
+            Ok(v) => v,
+            Err(e) => {
+                release(d, &batch, &e.message).await?;
+                return Err(e);
+            }
+        };
+
+        let parsed: SyncBatchResponse = match serde_json::from_value(response) {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                let err = WireError::new(codes::SERVER_UNAVAILABLE, e.to_string());
+                release(d, &batch, &err.message).await?;
+                return Err(err);
+            }
+        };
+
+        for (row_id, item) in &batch {
+            let result = parsed
+                .results
+                .iter()
+                .find(|r| r.idempotency_key == item.idempotency_key);
+            match result.map(|r| r.status) {
+                Some(SyncItemStatus::Applied) => {
+                    outbox::mark_delivered(&d.store, *row_id)
+                        .await
+                        .map_err(storage_err)?;
+                    applied += 1;
+                }
+                Some(SyncItemStatus::Duplicate) => {
+                    outbox::mark_delivered(&d.store, *row_id)
+                        .await
+                        .map_err(storage_err)?;
+                    duplicate += 1;
+                }
+                Some(SyncItemStatus::Rejected) => {
+                    let error = result.and_then(|r| r.error.as_ref());
+                    let msg = error
+                        .map(|e| e.message.clone())
+                        .unwrap_or_else(|| "rejected".into());
+
+                    // §4a's two refusals, exactly as `drain` branches them:
+                    // capability (409, recoverable, held) vs content (422,
+                    // permanent, never blocked) — decided by the typed `code`,
+                    // never by matching on `msg`.
+                    match error.map(|e| e.code.as_str()) {
+                        Some(code) if codes::CAPABILITY_REFUSALS.contains(&code) => {
+                            outbox::mark_blocked(&d.store, *row_id, code, &capability, &msg)
+                                .await
+                                .map_err(storage_err)?;
+                            blocked += 1;
+                        }
+                        _ => {
+                            outbox::mark_failed(&d.store, *row_id, &msg)
+                                .await
+                                .map_err(storage_err)?;
+                            rejected += 1;
+                        }
+                    }
+                }
+                None => {
+                    outbox::mark_retryable(&d.store, *row_id, "no result for item")
+                        .await
+                        .map_err(storage_err)?;
+                }
+            }
+        }
+        if batch.len() < BATCH as usize {
+            break;
+        }
+    }
+    if blocked > 0 {
+        tracing::info!(
+            namespace = %key, blocked, capability = %capability,
+            "work retained for a server that cannot hold it yet"
+        );
+    }
+    Ok((applied, duplicate, rejected))
+}
+
+/// Ask the server what it can hold, and release anything it now can (T111,
+/// T106, T107).
 ///
 /// Returns the capability as an opaque string, which is what a blocked row
 /// records so a person can see *what* it is waiting for.
@@ -816,18 +2218,26 @@ async fn drain(
 /// is why there is no probe endpoint and no negotiation — `GET /api/version`
 /// already existed, and adding to it additively meant an old server needed no
 /// change at all (D81).
-async fn refresh_capability(d: &Daemon, project_id: Uuid) -> String {
+///
+/// **Namespace-generic (§11a).** The one probe implementation serves
+/// `project:*`, `personal:*` and `team:*` alike: it reads `capabilities`
+/// (never resends a held item — FR-561, the distinction §11a insists on), and
+/// on a change it releases *this namespace's own* `blocked` rows
+/// (`outbox::release_blocked_namespace`) with their original idempotency key
+/// intact (FR-562) and records the fingerprint under this namespace's own
+/// `sync_cursor` row (`cairn_store::cursor`) — never another namespace's.
+async fn refresh_capability(d: &Daemon, namespace: &SyncNamespace) -> String {
     let Ok(client) = client(d).await else {
         // Offline. Whatever was last known still describes the server better
         // than nothing does.
-        return repo::server_capability(&d.store, project_id)
+        return cursor::server_capability(&d.store, namespace)
             .await
             .ok()
             .flatten()
             .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
     };
     let Ok(body) = client.get("/api/version").await else {
-        return repo::server_capability(&d.store, project_id)
+        return cursor::server_capability(&d.store, namespace)
             .await
             .ok()
             .flatten()
@@ -851,7 +2261,7 @@ async fn refresh_capability(d: &Daemon, project_id: Uuid) -> String {
     names.sort();
     let capability = format!("schema={schema};capabilities={}", names.join(","));
 
-    let previous = repo::server_capability(&d.store, project_id)
+    let previous = cursor::server_capability(&d.store, namespace)
         .await
         .ok()
         .flatten();
@@ -862,7 +2272,8 @@ async fn refresh_capability(d: &Daemon, project_id: Uuid) -> String {
     // The capability changed. Anything the server can now hold goes back into
     // the ordinary queue with its original idempotency key, and the ordinary
     // drain — the one about to run — delivers it. Nothing here sends anything
-    // itself, so there is no second delivery path to keep exactly-once.
+    // itself, so there is no second delivery path to keep exactly-once
+    // (FR-562, SC-331's precedent restated for schema 3).
     let releasable: Vec<OutboxEntityType> = ENTITY_CAPABILITIES
         .iter()
         // Every capability the type can wait on must be present. Releasing a
@@ -871,15 +2282,15 @@ async fn refresh_capability(d: &Daemon, project_id: Uuid) -> String {
         .filter(|(_, needs)| needs.iter().all(|need| names.iter().any(|n| n == need)))
         .map(|(entity, _)| *entity)
         .collect();
-    match outbox::release_blocked(&d.store, project_id, &releasable).await {
+    match outbox::release_blocked_namespace(&d.store, &namespace.key(), &releasable).await {
         Ok(n) if n > 0 => tracing::info!(
-            project = %project_id, released = n, capability = %capability,
+            namespace = %namespace.key(), released = n, capability = %capability,
             "the server gained a capability; retained work returns to the queue"
         ),
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "could not release retained work"),
     }
-    let _ = repo::set_server_capability(&d.store, project_id, &capability).await;
+    let _ = cursor::set_server_capability(&d.store, namespace, &capability).await;
     capability
 }
 
@@ -904,6 +2315,16 @@ const ENTITY_CAPABILITIES: &[(OutboxEntityType, &[&str])] = &[
         OutboxEntityType::Memory,
         &["memory_subject_identity", "memory_verification"],
     ),
+    // Feature 004 (FR-498, FR-522). A server that predates schema 3 causes only
+    // these four entity types to be held — never the project namespace, which is
+    // what per-namespace backoff exists to guarantee.
+    (OutboxEntityType::PersonalKnowledge, &["personal_knowledge"]),
+    (
+        OutboxEntityType::PersonalKnowledgeRelation,
+        &["personal_knowledge"],
+    ),
+    (OutboxEntityType::TeamKnowledge, &["team_knowledge"]),
+    (OutboxEntityType::TeamKnowledgeRelation, &["team_knowledge"]),
 ];
 
 /// Hand a claimed batch back to the queue after a transient failure.
@@ -924,13 +2345,13 @@ async fn release(d: &Daemon, batch: &[(Uuid, SyncItem)], error: &str) -> Result<
 /// include a teammate's memory (FR-056).
 async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<usize, WireError> {
     let c = client(d).await?;
-    let since = repo::pull_cursor(&d.store, project_id)
+    let since = cursor::pull_cursor(&d.store, &SyncNamespace::Project(project_id))
         .await
         .map_err(storage_err)?;
     let path = match &since {
-        Some(cursor) => format!(
+        Some(since_cursor) => format!(
             "/api/sync/changes?project_id={server_project_id}&since={}",
-            urlencode(cursor)
+            urlencode(since_cursor)
         ),
         None => format!("/api/sync/changes?project_id={server_project_id}"),
     };
@@ -1020,8 +2441,8 @@ async fn pull(d: &Daemon, project_id: Uuid, server_project_id: Uuid) -> Result<u
     // without waiting for another pull (#44).
     count += replay_deferred(d, project_id).await;
 
-    if let Some(cursor) = body.get("cursor").and_then(|c| c.as_str()) {
-        repo::set_pull_cursor(&d.store, project_id, cursor)
+    if let Some(next_cursor) = body.get("cursor").and_then(|c| c.as_str()) {
+        cursor::set_pull_cursor(&d.store, &SyncNamespace::Project(project_id), next_cursor)
             .await
             .map_err(storage_err)?;
     }
@@ -1568,6 +2989,173 @@ mod tests {
     use crate::state::ServerCredentials;
     use crate::testsupport as fx;
 
+    // -------------------------------------------------------------------
+    // `NamespaceClock` — per-namespace backoff, probe and pull scheduling
+    // (T093, T094, T106, T107)
+    // -------------------------------------------------------------------
+
+    /// The core claim of T093: two namespaces' clocks are two independent
+    /// `Duration`s, not one shared value. A transient failure recorded against
+    /// one must not move the other's `retry_after` at all — the same guarantee
+    /// `contracts/sync-namespaces.md` §4 states as "a `project:*` namespace
+    /// hitting the server's rate limit backs off on its own schedule while
+    /// `personal:*` and `team:*` continue retrying at `BACKOFF_MIN` on theirs."
+    #[test]
+    fn a_transient_failure_on_one_namespace_never_moves_another_namespaces_clock() {
+        let now = Instant::now();
+        let mut struggling = NamespaceClock::due_now(now);
+        let healthy = NamespaceClock::due_now(now);
+
+        struggling.record(now, NamespaceOutcome::Transient);
+        struggling.record(now, NamespaceOutcome::Transient);
+
+        assert!(
+            struggling.retry_after > now,
+            "a namespace with two transient failures must not be immediately eligible again"
+        );
+        assert!(
+            struggling.backoff > BACKOFF_MIN,
+            "backoff must have doubled at least once"
+        );
+        // The namespace that never failed is exactly as eligible as it was at
+        // creation — nothing about the other namespace's struggle reached it.
+        assert_eq!(healthy.retry_after, now);
+        assert_eq!(healthy.backoff, BACKOFF_MIN);
+    }
+
+    /// Backoff doubles on repeated failure and is capped at `BACKOFF_MAX`,
+    /// then a single success clears it back to `BACKOFF_MIN` outright — not
+    /// merely halved, so a namespace that just recovered is as eligible as one
+    /// that never failed (Invariant 2).
+    #[test]
+    fn backoff_doubles_to_a_ceiling_and_a_success_clears_it_entirely() {
+        let now = Instant::now();
+        let mut clock = NamespaceClock::due_now(now);
+
+        for _ in 0..10 {
+            clock.record(now, NamespaceOutcome::Transient);
+        }
+        assert_eq!(
+            clock.backoff, BACKOFF_MAX,
+            "backoff must not exceed the ceiling"
+        );
+
+        clock.record(now, NamespaceOutcome::Ok);
+        assert_eq!(
+            clock.backoff, BACKOFF_MIN,
+            "a success must clear backoff outright"
+        );
+        assert_eq!(
+            clock.retry_after, now,
+            "a successful namespace is immediately eligible again"
+        );
+    }
+
+    /// A fresh clock is due for its probe and its pull immediately — a
+    /// namespace seen for the first time, or a daemon that just restarted,
+    /// must not wait a full interval before its first attempt (FR-489,
+    /// Invariant 3).
+    /// The pull and probe clocks actually advance.
+    ///
+    /// They did not. `record` folded in an outcome and touched only the backoff,
+    /// so nothing in production ever moved `last_pull` or `last_probe`: both
+    /// predicates stayed true from the first tick onward and `WORKER_TICK`
+    /// became the pull frequency — three namespaces issuing six requests a
+    /// second, forever, against a server that answers every one of them
+    /// successfully so backoff never engages. The interval constant existed and
+    /// described nothing.
+    ///
+    /// Falsified by removing either `mark_` call from the processing functions,
+    /// or by folding them back into `record`.
+    #[test]
+    fn marking_a_pull_or_a_probe_is_what_advances_its_clock() {
+        let now = Instant::now();
+        let mut clock = NamespaceClock::due_now(now);
+        assert!(clock.pull_due(now) && clock.probe_due(now));
+
+        clock.mark_pulled(now);
+        clock.mark_probed(now);
+        assert!(
+            !clock.pull_due(now) && !clock.probe_due(now),
+            "marking did not advance the clock"
+        );
+
+        // An outcome is a different thing and must not reset either one: a
+        // namespace that just succeeded is eligible to *retry* immediately, and
+        // is not thereby due for another scheduled pull.
+        clock.record(now, NamespaceOutcome::Ok);
+        assert!(
+            !clock.pull_due(now),
+            "recording a successful outcome made the namespace due for another pull"
+        );
+        clock.record(now, NamespaceOutcome::Transient);
+        assert!(
+            !clock.pull_due(now),
+            "recording a transient failure made the namespace due for another pull"
+        );
+
+        assert!(clock.pull_due(now + Duration::from_secs(PULL_INTERVAL_SECONDS)));
+        assert!(clock.probe_due(now + CAPABILITY_PROBE));
+    }
+
+    #[test]
+    fn a_fresh_clock_is_due_for_probe_and_pull_immediately() {
+        let now = Instant::now();
+        let clock = NamespaceClock::due_now(now);
+        assert!(clock.probe_due(now));
+        assert!(clock.pull_due(now));
+    }
+
+    /// T094, the conditional-pull fix, at the unit level: the pull-due timer
+    /// is `PULL_INTERVAL_SECONDS`, not `WORKER_TICK` — a tick that has not
+    /// covered the interval yet must not read as pull-due, or every namespace
+    /// would poll the server on every 500ms tick forever (§5's exact
+    /// objection to "just move the call out of the `pending == 0` guard").
+    #[test]
+    fn pull_is_not_due_again_before_the_interval_elapses() {
+        let start = Instant::now();
+        let mut clock = NamespaceClock::due_now(start);
+        clock.last_pull = start; // as if a pull just happened
+
+        let one_tick_later = start + WORKER_TICK;
+        assert!(
+            !clock.pull_due(one_tick_later),
+            "a single worker tick must not be enough to make the next pull due"
+        );
+
+        let after_the_interval = start + Duration::from_secs(PULL_INTERVAL_SECONDS);
+        assert!(clock.pull_due(after_the_interval));
+    }
+
+    // -------------------------------------------------------------------
+    // `parse_global_namespace`
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn parse_global_namespace_round_trips_personal_and_team_keys() {
+        let personal = SyncNamespace::Personal(new_id(), new_id());
+        let team = SyncNamespace::Team(new_id());
+
+        assert_eq!(parse_global_namespace(&personal.key()), Some(personal));
+        assert_eq!(parse_global_namespace(&team.key()), Some(team));
+    }
+
+    /// `project:*` keys are deliberately not recovered here — `run_worker`
+    /// builds project targets from `repo::list_projects`, the authoritative
+    /// source, not by reparsing a namespace string.
+    #[test]
+    fn parse_global_namespace_never_recovers_a_project_namespace() {
+        let project = SyncNamespace::Project(new_id());
+        assert_eq!(parse_global_namespace(&project.key()), None);
+    }
+
+    #[test]
+    fn parse_global_namespace_rejects_garbage() {
+        assert_eq!(parse_global_namespace("nonsense"), None);
+        assert_eq!(parse_global_namespace("personal:not-a-uuid:also-not"), None);
+        assert_eq!(parse_global_namespace("team:not-a-uuid"), None);
+    }
+
     /// A linked project must report the link it has.
     ///
     /// This is the regression this release is named for: bare `cairn link`
@@ -1967,6 +3555,9 @@ mod tests {
             ServerCredentials {
                 url: Some("http://127.0.0.1:1".to_string()),
                 token: Some("irrelevant".to_string()),
+                // No account identity: this daemon has never reached a server,
+                // which is the situation under test.
+                account_id: None,
             },
         )
         .await;

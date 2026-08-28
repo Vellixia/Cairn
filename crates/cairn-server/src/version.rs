@@ -9,6 +9,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// How long a lookup stands before it is worth asking again.
 ///
@@ -37,6 +38,24 @@ pub const SCHEMA_2_CAPABILITIES: &[&str] = &[
     "memory_verification",
 ];
 
+/// What a Feature 004 daemon must know before it queues personal or team
+/// knowledge here (FR-521, FR-529).
+///
+/// Extends `SCHEMA_2_CAPABILITIES` additively — every Feature 003 capability
+/// name stays present, unchanged — with the two new domains this schema
+/// version's tables can hold. A server that predates this field answers
+/// without it, the same "absence is the answer" discipline `SCHEMA_2_CAPABILITIES`
+/// established: no probe endpoint, no version table, just the field itself.
+pub const SCHEMA_3_CAPABILITIES: &[&str] = &[
+    "memory_relations",
+    "task_criteria",
+    "task_blockers",
+    "memory_subject_identity",
+    "memory_verification",
+    "personal_knowledge",
+    "team_knowledge",
+];
+
 /// What a deployment at `schema_version` can hold.
 ///
 /// Derived from the schema the database **applied**, so a server held at an
@@ -44,7 +63,9 @@ pub const SCHEMA_2_CAPABILITIES: &[&str] = &[
 /// could do. Advertising a capability whose table is absent would make the
 /// daemon queue work that then fails on every attempt.
 pub fn capabilities_for(schema_version: i64) -> &'static [&'static str] {
-    if schema_version >= 2 {
+    if schema_version >= 3 {
+        SCHEMA_3_CAPABILITIES
+    } else if schema_version >= 2 {
         SCHEMA_2_CAPABILITIES
     } else {
         &[]
@@ -69,6 +90,16 @@ pub struct VersionPayload {
     pub schema_version: i64,
     /// What kinds of Feature 003 record this deployment can hold.
     pub capabilities: Vec<String>,
+    /// This server's own identity, established once and never reassigned
+    /// (FR-415, FR-416).
+    ///
+    /// Discoverable by every client that can reach the server, because a local
+    /// store has to pin its team knowledge to one instance and refuse a second
+    /// one's — which it cannot do without a way to ask "which server is this?".
+    ///
+    /// Absent below schema 3, where the table it comes from does not exist yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_instance_id: Option<Uuid>,
 }
 
 #[derive(Default)]
@@ -92,7 +123,11 @@ impl ReleaseCache {
     /// A failed lookup is not an error for the caller: the deployment still
     /// knows its own version, and "we could not reach GitHub" is a better
     /// answer than a 500.
-    pub async fn payload(&self, schema_version: i64) -> VersionPayload {
+    pub async fn payload(
+        &self,
+        schema_version: i64,
+        server_instance_id: Option<Uuid>,
+    ) -> VersionPayload {
         if self.is_stale().await {
             self.refresh().await;
         }
@@ -111,6 +146,7 @@ impl ReleaseCache {
                 .iter()
                 .map(|c| c.to_string())
                 .collect(),
+            server_instance_id,
         }
     }
 
@@ -188,6 +224,7 @@ mod tests {
                 .iter()
                 .map(|c| c.to_string())
                 .collect(),
+            server_instance_id: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"current\":\"0.1.0\""));
@@ -211,6 +248,7 @@ mod tests {
                 .iter()
                 .map(|c| c.to_string())
                 .collect(),
+            server_instance_id: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"tag\":\"v0.2.0\""));

@@ -667,3 +667,162 @@ fn symmetric_relation() {
         }
     });
 }
+
+// ===========================================================================
+// T139 — the same invariance, extended to the two new domains (FR-492, FR-493)
+// ===========================================================================
+//
+// The corpus above covers project memory. Personal and team knowledge reuse the
+// same `classify_proposal`/`derive_subject` machinery, so the invariant ought to
+// carry over — but "ought to" is the word this test exists to remove. The two new
+// domains reach that machinery through different write paths, and the team domain
+// has something project memory does not: a lifecycle with `ratified_at` and
+// `retired_at` timestamps sitting right next to the records being ordered. A
+// comparator that reached for the nearest available timestamp would find one
+// here and nowhere else.
+
+/// Swapping the clocks on two personal records changes nothing about the answer
+/// derived from them.
+///
+/// Falsified by any ordering on `created_at` in the personal read path.
+#[test]
+fn personal_knowledge_is_clock_independent() {
+    runtime().block_on(async {
+        use cairn_store::global::{
+            merge_synced_personal, personal_subject, SyncedPersonalKnowledge,
+        };
+
+        let owner = cairn_core::domain::new_id();
+        let early = chrono::Utc::now() - chrono::Duration::hours(6);
+        let late = chrono::Utc::now();
+
+        // The same two records, merged twice with the timestamps exchanged.
+        let mut rendered: Vec<String> = Vec::new();
+        for (first_at, second_at) in [(early, late), (late, early)] {
+            let store = Store::open_memory().await.unwrap();
+            for (content, value, at) in [
+                ("the retry budget is four attempts", "four", first_at),
+                ("the retry budget is two attempts", "two", second_at),
+            ] {
+                merge_synced_personal(
+                    &store,
+                    SyncedPersonalKnowledge {
+                        id: cairn_core::domain::new_id(),
+                        owner_user_id: owner,
+                        knowledge_type: MemoryType::Fact,
+                        content: content.into(),
+                        topic_key: Some("retry.budget".into()),
+                        value_key: Some(value.into()),
+                        applicability: Vec::new(),
+                        writer_id: cairn_core::domain::new_id(),
+                        writer_seq: 1,
+                        created_at: at,
+                        superseded_by_id: None,
+                        forgotten_at: None,
+                    },
+                )
+                .await
+                .expect("merge");
+            }
+
+            let subject = personal_subject(&store, owner, "retry.budget")
+                .await
+                .expect("subject");
+            rendered.push(format!(
+                "{:?}|{}",
+                subject.view.reconciliation,
+                subject.members.len()
+            ));
+        }
+        assert_eq!(
+            rendered[0], rendered[1],
+            "swapping two personal records' clocks changed the derived answer"
+        );
+    });
+}
+
+/// Ratification order does not decide which of two disagreeing team entries is
+/// the answer, and neither does the clock.
+///
+/// The two are asserted together because they are the same mistake in two forms:
+/// "whichever was ratified more recently" is a write-order rule, and
+/// "whichever has the later `ratified_at`" is a timestamp rule, and this domain is
+/// the only one in Cairn that offers both.
+///
+/// Falsified by any code path that orders two `authoritative` rows to pick a
+/// winner.
+#[test]
+fn team_ratification_order_and_clock_decide_nothing() {
+    runtime().block_on(async {
+        use cairn_store::global::{propose_team, ratify_team, team_subject, NewTeamKnowledge};
+
+        let mut rendered: Vec<String> = Vec::new();
+        for ratify_the_second_first in [false, true] {
+            let store = Store::open_memory().await.unwrap();
+            let admin = cairn_core::domain::new_id();
+
+            let mut ids = Vec::new();
+            for (content, value) in [
+                (
+                    "commit messages follow Conventional Commits",
+                    "conventional",
+                ),
+                ("commit messages are free-form", "free_form"),
+            ] {
+                let outcome = propose_team(
+                    &store,
+                    NewTeamKnowledge::direct(
+                        cairn_core::domain::new_id(),
+                        MemoryType::Convention,
+                        content,
+                        Some("style.commit_message"),
+                        Some(value),
+                        Vec::new(),
+                    ),
+                    &[],
+                )
+                .await
+                .expect("propose");
+                ids.push(outcome.record.id);
+            }
+            if ratify_the_second_first {
+                ids.reverse();
+            }
+            for id in &ids {
+                ratify_team(&store, *id, admin, None).await.expect("ratify");
+            }
+
+            // Then move the recorded ratification clocks so the *other* one
+            // looks newer, which a timestamp rule would notice and a correct
+            // implementation cannot.
+            let earlier = (chrono::Utc::now() - chrono::Duration::hours(6)).to_rfc3339();
+            sqlx::query("UPDATE team_knowledge SET ratified_at = ?1 WHERE id = ?2")
+                .bind(&earlier)
+                .bind(ids[1].to_string())
+                .execute(store.pool())
+                .await
+                .unwrap();
+
+            let subject = team_subject(&store, "style.commit_message")
+                .await
+                .expect("subject");
+            let mut answers = subject.view.answers.clone();
+            answers.sort();
+            rendered.push(format!(
+                "{:?}|{}|{}",
+                subject.view.reconciliation,
+                subject.members.len(),
+                answers.len()
+            ));
+        }
+        assert_eq!(
+            rendered[0], rendered[1],
+            "ratification order changed which team entries are the answer"
+        );
+        assert!(
+            rendered[0].contains("Conflicted"),
+            "two disagreeing authoritative entries did not surface as a conflict: {}",
+            rendered[0]
+        );
+    });
+}

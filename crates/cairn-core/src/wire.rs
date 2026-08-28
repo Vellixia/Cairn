@@ -235,6 +235,40 @@ pub mod codes {
         PATTERN_NOT_FOUND,
         OUTCOME_ALREADY_RECORDED,
     ];
+
+    // -----------------------------------------------------------------------
+    // Feature 004 identity and administration
+    // (`contracts/identity-administration.md` §10).
+    //
+    // These are **server** codes, named here so a caller compares against a
+    // constant rather than a string literal it typed by hand — the daemon
+    // never constructs them itself, only forwards what the server already
+    // said (`cairnd::sync::decode`).
+    // -----------------------------------------------------------------------
+    pub const FORBIDDEN: &str = "forbidden";
+    pub const PASSWORD_CHANGE_REQUIRED: &str = "password_change_required";
+    pub const PASSWORD_TOO_SHORT: &str = "password_too_short";
+    pub const INVALID_CREDENTIALS: &str = "invalid_credentials";
+    pub const EMAIL_TAKEN: &str = "email_taken";
+    pub const LAST_ADMIN: &str = "last_admin";
+    /// The one route this feature's server code actually returns (patching or
+    /// resetting the environment-named account), rather than the
+    /// `env_admin_reset_refused` name the prose contract used before the code
+    /// was written — `crates/cairn-server/src/api.rs`'s
+    /// `environment_account_refusal()` is the source of truth.
+    pub const ENVIRONMENT_ACCOUNT: &str = "environment_account";
+
+    /// Every Feature 004 identity/administration code, for the uniqueness
+    /// test below.
+    pub const IDENTITY_CODES: &[&str] = &[
+        FORBIDDEN,
+        PASSWORD_CHANGE_REQUIRED,
+        PASSWORD_TOO_SHORT,
+        INVALID_CREDENTIALS,
+        EMAIL_TAKEN,
+        LAST_ADMIN,
+        ENVIRONMENT_ACCOUNT,
+    ];
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -313,6 +347,27 @@ pub enum ContextReason {
     /// This is where a checkpoint is **restored**; it is never where one is
     /// written (`contracts/continuity-context.md` §When one is written).
     PostCompaction,
+}
+
+/// How much of the briefing to assemble
+/// (`contracts/recall-composition.md` §5, FR-477).
+///
+/// `Minimum` is Level 0 only: `personal_notes` and `team_guidance` are never
+/// fetched and never admitted, unconditionally — no importance hint, budget
+/// outcome, or configuration overrides this. `Standard` is today's full
+/// assembly, and it is also what an absent `depth` means, which is what makes
+/// a caller that has never named this field see no change (FR-481).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextDepth {
+    Minimum,
+    Standard,
+}
+
+impl ContextDepth {
+    pub fn is_minimum(&self) -> bool {
+        matches!(self, ContextDepth::Minimum)
+    }
 }
 
 /// What a capture hook observed, before the daemon filters and stores it.
@@ -415,6 +470,15 @@ pub struct MemoryQuery {
     /// own memories (FR-406, SC-312).
     #[serde(default)]
     pub include_patterns: bool,
+
+    /// Which knowledge domains to search. Absent means all three —
+    /// `project`, `personal`, `team` — so a caller that has never named this
+    /// field sees no change (FR-472). `results`/`total` still describe
+    /// `project` alone; `personal`/`team` ride the response as sibling
+    /// arrays the handler splices in, never merged into `results`
+    /// (`contracts/recall-composition.md` §7).
+    #[serde(default)]
+    pub domains: Option<Vec<KnowledgeDomain>>,
 }
 
 /// Everything the daemon can be asked to do.
@@ -624,6 +688,11 @@ pub enum Request {
         /// is why it is opt-in rather than always present (FR-463).
         #[serde(default)]
         explain: bool,
+        /// `minimum` excludes `personal_notes`/`team_guidance` entirely,
+        /// unconditionally (FR-477). Absent means `standard`, today's full
+        /// assembly (`contracts/recall-composition.md` §5).
+        #[serde(default)]
+        depth: Option<ContextDepth>,
     },
 
     SessionCheckpoint {
@@ -805,6 +874,12 @@ pub enum Request {
         value_key: Option<String>,
         #[serde(default)]
         importance: Option<Importance>,
+        /// `project` (the default an absent field means) or `personal`.
+        /// `team` is refused outright — no MCP action authors team knowledge
+        /// directly; team is reached only by proposal or promotion (FR-431,
+        /// FR-455, FR-517, FR-527).
+        #[serde(default)]
+        domain: Option<KnowledgeDomain>,
     },
     MemorySupersede {
         cwd: String,
@@ -838,6 +913,12 @@ pub enum Request {
     MemoryForget {
         cwd: String,
         memory_id: Uuid,
+        /// `project` (the default) or `personal` — forgets that domain's
+        /// tombstone-only mutation (FR-441). `team` is refused: a team
+        /// entry's lifecycle only advances through `cairn team retire`, by
+        /// an admin, never through this tool.
+        #[serde(default)]
+        domain: Option<KnowledgeDomain>,
     },
     MemoryGet {
         cwd: String,
@@ -902,6 +983,20 @@ pub enum Request {
         constraints: Vec<String>,
         #[serde(default)]
         dry_run: bool,
+        /// What this promotes into. Absent means `pattern`, so a caller
+        /// naming none gets today's behaviour unchanged (FR-506, D415).
+        #[serde(default)]
+        target: Option<PromotionTarget>,
+        /// `(kind, value)` pairs the promoted record applies to, as
+        /// `"kind=value"` strings — `language=rust`, `tool=docker` — screened
+        /// against the closed `language | tool` vocabulary before this
+        /// reaches the promotion gate; a value naming neither is refused
+        /// rather than silently dropped (FR-434, FR-514). Meaningful only
+        /// when `target` is `personal` or `team`; ignored for `target:
+        /// pattern`, which keeps using `applicability` above for its own
+        /// free-text conditions.
+        #[serde(default)]
+        applicability_facts: Vec<String>,
     },
     /// Record what happened when a pattern was applied here (FR-401, FR-404).
     PatternOutcome {
@@ -923,6 +1018,117 @@ pub enum Request {
         id: Uuid,
     },
 
+    // ---- Team knowledge (`contracts/global-memory.md` §5b, T133) ---------
+    //
+    // `list`/`propose` are reachable by any member; `ratify`/`retire` are
+    // reachable only by an admin, and only through this CLI surface or the
+    // server's own administration path — never through `cairn_remember`
+    // (FR-455). Only `propose` carries a `cwd`, and it carries one for a
+    // single reason: T123 requires the proposal to be screened against the
+    // identities of the project the proposer is working in, and there is no
+    // other way to learn which that is. Every *authorization* check on these
+    // four (project membership, admin standing) is still answered by the
+    // server from the caller's token, the same as `AdminUserCreate` and its
+    // siblings above — the `cwd` is an input to the privacy screen, never to a
+    // permission decision.
+    //
+    // Screening against an empty identity set would not have been a smaller
+    // version of this. `validate_global_content` passes the
+    // `project_identifying` class when it has no identities to compare against
+    // (FR-580, the one documented fail-open), so a proposal made with no `cwd`
+    // would be the one entry point of five at which naming a project is
+    // allowed — and content only has to get in once.
+    /// `authoritative` entries, plus the caller's own `proposed` ones. `all`
+    /// additionally asks for every state, honored only for an admin caller
+    /// (FR-464).
+    TeamList {
+        #[serde(default)]
+        all: bool,
+    },
+    /// Any member of at least one project may propose; the row lands
+    /// `proposed` and nothing else — no path from here ever reaches
+    /// `authoritative` (FR-451, FR-455).
+    TeamPropose {
+        cwd: String,
+        content: String,
+        #[serde(default)]
+        knowledge_type: Option<MemoryType>,
+        #[serde(default)]
+        topic_key: Option<String>,
+        #[serde(default)]
+        value_key: Option<String>,
+        /// `"kind=value"` strings, screened against the closed
+        /// `language | tool` vocabulary (FR-446).
+        #[serde(default)]
+        applicability: Vec<String>,
+    },
+    /// Admin only. Moves `proposed` to `authoritative` by compare-and-swap on
+    /// the entry's current state, never last-write-wins (D409, FR-454).
+    TeamRatify {
+        id: Uuid,
+        /// This ratification's own explicit `supersedes` relation (T127, §6,
+        /// D431) — the one place that relation kind is ever recorded, and
+        /// only on the ratifying admin's say-so, never inferred.
+        #[serde(default)]
+        supersedes: Option<Uuid>,
+    },
+    /// Admin only. Moves `authoritative` to `retired`; never reversible by
+    /// re-ratifying (FR-465).
+    TeamRetire {
+        id: Uuid,
+    },
+
+    // ---- Personal knowledge (`contracts/global-memory.md` §5a, T082) ------
+    //
+    // Reads and the one tombstone mutation, over `personal_knowledge`. No
+    // `cwd`: like team knowledge, personal knowledge follows the account,
+    // not any one project — `recall_personal` filters by applicability at
+    // read time inside briefing/search composition, but a caller's own
+    // listing here shows everything they hold, unfiltered by the project
+    // they happen to be standing in.
+    /// This account's own personal entries (T082, FR-434–FR-436).
+    PersonalList {
+        #[serde(default)]
+        query: Option<String>,
+        #[serde(default)]
+        limit: Option<i64>,
+    },
+    /// Tombstone one entry: content cleared, nothing else touched (FR-440,
+    /// FR-441). Scoped to the caller's own account by the store call this
+    /// forwards to — a caller cannot forget another account's entry, or
+    /// even learn that one exists at that id.
+    PersonalForget {
+        id: Uuid,
+    },
+
+    /// This project's derived stack traits — the same set applicability
+    /// matching reads at recall time (D413, FR-437, T082).
+    ProjectTraits {
+        cwd: String,
+    },
+
+    // ---- Shared-project membership (`contracts/identity-
+    // administration.md` §9a, T063) ---------------------------------------
+    //
+    // Every route below is addressed by email, resolved to a server-side row
+    // id the same way `AdminUserPatch` is (FR-418–FR-427) — the CLI never
+    // learns or holds a project member's uuid.
+    /// `POST /api/projects/{id}/members`. Grants membership; refused for
+    /// anyone but an existing member or a server admin (FR-418, FR-419).
+    ProjectMemberAdd {
+        project_id: Uuid,
+        email: String,
+    },
+    /// `DELETE /api/projects/{id}/members` (FR-420, FR-421).
+    ProjectMemberRemove {
+        project_id: Uuid,
+        email: String,
+    },
+    /// `GET /api/projects/{id}/members` (FR-427).
+    ProjectMemberList {
+        project_id: Uuid,
+    },
+
     /// Inspect a subject: its members, its canonical answer or answers, its
     /// reconciliation state, and the decisions that produced it (FR-307).
     MemorySubject {
@@ -932,6 +1138,16 @@ pub enum Request {
         scope: Option<MemoryScope>,
         #[serde(default)]
         scope_key: Option<String>,
+        /// Which domain's subject to read. Absent means `project`, so every
+        /// pre-004 caller is unaffected.
+        ///
+        /// A domain is not a scope, and this field is why: `scope`/`scope_key`
+        /// describe how long a *project* memory stays relevant and mean nothing
+        /// to the other two domains, which have no scope at all. Naming a domain
+        /// selects which corpus and which relations table the derivation reads,
+        /// and nothing else about the read changes (FR-442, FR-462; T078, T127).
+        #[serde(default)]
+        domain: Option<KnowledgeDomain>,
     },
     /// A session confirms an existing memory is still true (FR-321).
     ///
@@ -1060,11 +1276,53 @@ pub enum Request {
     },
     AuthLogout,
     AuthStatus,
+    /// Change the caller's own password (FR-405, `contracts/identity-
+    /// administration.md` §5). Reachable regardless of `must_change_password`
+    /// — it is the one route that is.
+    AuthChangePassword {
+        new_password: String,
+    },
     SyncStatus {
         cwd: String,
     },
     SyncNow {
         cwd: String,
+    },
+
+    // -----------------------------------------------------------------------
+    // Administration (`contracts/identity-administration.md` §2, §2a, §9).
+    //
+    // Every one of these is daemon-mediated exactly like `Link`/`AuthTokenSet`
+    // above: the CLI never holds a bearer token, and the daemon is what makes
+    // the HTTP call. None of these carries `cwd` — an account is server-wide,
+    // not project-scoped, so there is no repository to resolve.
+    // -----------------------------------------------------------------------
+    /// `POST /api/admin/users` (FR-401). Admin-only; the server enforces that,
+    /// this only carries the request. The response's `temporary_password` is
+    /// shown to the operator exactly once — there is no route that reads it
+    /// back (FR-403).
+    AdminUserCreate {
+        email: String,
+        display_name: String,
+    },
+    /// `GET /api/admin/users`: every account, its role and its status
+    /// (FR-411).
+    AdminUserList,
+    /// `PATCH /api/admin/users/{id}`: promote, demote, disable or enable one
+    /// account (FR-402, FR-408, FR-412), addressed by email — the CLI never
+    /// has to learn or hold a server-side row id.
+    AdminUserPatch {
+        email: String,
+        #[serde(default)]
+        role: Option<ServerRole>,
+        #[serde(default)]
+        status: Option<UserStatus>,
+    },
+    /// `POST /api/admin/users/{id}/reset-password` (FR-553–FR-559). The new
+    /// temporary password is returned exactly once, and never again by any
+    /// route (FR-554).
+    ResetPassword {
+        email: String,
     },
 }
 
@@ -1307,6 +1565,39 @@ pub struct SearchPayload {
     pub total: usize,
 }
 
+/// One personal-knowledge search result (`contracts/recall-composition.md`
+/// §7). Spliced onto a search response as a **sibling** `personal` array,
+/// exactly as `patterns[]` already is — never merged into `SearchPayload`'s
+/// own `results`, so `total` continues to describe project results alone
+/// (FR-469, FR-470).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersonalSearchResult {
+    pub id: Uuid,
+    pub content: String,
+    pub topic_key: Option<String>,
+    pub value_key: Option<String>,
+    pub created_at: DateTime<Utc>,
+    /// `(kind, value)` pairs from the closed `language | tool` vocabulary —
+    /// never this record's own `topic_key`, a different question entirely
+    /// (D439, FR-570).
+    pub applicability: Vec<ApplicabilityFact>,
+}
+
+/// One team-knowledge search result. See [`PersonalSearchResult`].
+///
+/// Only ever `authoritative`, or `proposed` and owned by (or visible to an
+/// admin alongside) the caller — the same visibility predicate every
+/// team-knowledge read carries (`contracts/global-memory.md` §5b, FR-452).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TeamSearchResult {
+    pub id: Uuid,
+    pub content: String,
+    pub topic_key: Option<String>,
+    pub value_key: Option<String>,
+    pub state: TeamState,
+    pub applicability: Vec<ApplicabilityFact>,
+}
+
 /// What a `create` turned out to mean for the subject it joined
 /// (`contracts/mcp-tools.md` §`cairn_remember`).
 ///
@@ -1407,6 +1698,22 @@ pub struct Briefing {
     pub decisions: Vec<String>,
     pub known_failures: Vec<String>,
     pub memory: BriefingMemory,
+    // ---- Feature 004's two global sections, last in the priority order.
+    //
+    // `Vec<String>` deliberately, exactly like `decisions` and `known_failures`:
+    // rendered lines and nothing else. There is **no field here for a selection
+    // reason** (FR-478, D451), and that absence is the enforcement — reasons are
+    // produced on the diagnostic path and the rendered type has nowhere to put
+    // one, so a renderer cannot leak them by forgetting to omit them.
+    //
+    // Skipped when empty, so a caller with no personal or team knowledge gets
+    // byte-identical output to one that never touched either domain (FR-481).
+    /// Personal knowledge admitted to this briefing (FR-476).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub personal_notes: Vec<String>,
+    /// Authoritative team guidance admitted to this briefing (FR-476).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub team_guidance: Vec<String>,
     pub no_prior_history: bool,
     // ---- Feature 003. Every one is skipped when empty, so a project with no
     // Level 0 content produces exactly the bytes Feature 001 produced (FR-442).
@@ -1605,6 +1912,51 @@ pub struct SyncStatusPayload {
     pub degradation: Option<SyncDegradation>,
 }
 
+/// One synchronization namespace's outbox standing (FR-487,
+/// `contracts/sync-namespaces.md`).
+///
+/// Spliced onto `cairn sync status`'s response as a sibling `namespaces`
+/// array — the same way `patterns[]` rides alongside `SearchPayload` — rather
+/// than added to [`SyncStatusPayload`] itself, so that struct's existing
+/// project-scoped `pending`/`failed` keep meaning exactly what they meant
+/// before this feature. A project always has exactly one `project` row here;
+/// `personal`/`team` rows are present only once this store has ever queued
+/// something in that namespace (D426, D427, FR-486).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespaceSyncStatus {
+    /// The cursor key, e.g. `project:<id>`, `personal:<instance>:<user>`,
+    /// `team:<instance>` (`SyncNamespace::key`).
+    pub namespace: String,
+    pub kind: KnowledgeDomain,
+    pub pending: i64,
+    pub failed: i64,
+    pub blocked: i64,
+    /// Holes in one writer's own sequence, as this store observes them
+    /// (FR-492, SC-450).
+    ///
+    /// **Diagnostic only, and reported here because nowhere else would say it.**
+    /// A gap nobody surfaces is indistinguishable from a stream that had no gap,
+    /// which is the whole reason `writer_seq` crosses the wire at all — it is
+    /// useless to the store that minted it and useful only to whoever receives
+    /// it. Nothing in recall, reconciliation or ordering reads this: `MemoryFacts`
+    /// has no `writer_seq` field, so a tiebreak that consulted one would not
+    /// compile (FR-583).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<WriterSequenceGap>,
+}
+
+/// One writer's missing sequence numbers, in the shape `cairn sync status`
+/// renders.
+///
+/// Carries no content and no identity beyond the opaque writer id: a gap says
+/// that something did not arrive, not what it was.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WriterSequenceGap {
+    pub writer_id: Uuid,
+    pub missing: Vec<i64>,
+    pub highest_seen: i64,
+}
+
 /// What a server cannot hold, and what happens next.
 /// What `cairn status` says about the subject mechanism's reach.
 ///
@@ -1696,16 +2048,15 @@ pub const REJECTED_SESSION_FIELDS: &[&str] = &[
     "last_turn_ended_at",
 ];
 
-/// Fields that would carry observation content. Rejected everywhere (FR-055).
-pub const REJECTED_OBSERVATION_FIELDS: &[&str] = &[
-    "summary",
-    "path",
-    "command",
-    "details",
-    "observations",
-    "outcome",
-    "exit_code",
-];
+// `REJECTED_OBSERVATION_FIELDS` used to live here: seven names from Feature
+// 001, presented as if it were the same boundary as the server's live,
+// enforced `FORBIDDEN_OBSERVATION_FIELDS` (`crates/cairn-server/src/sync.rs`,
+// twenty-seven names as of Feature 003). Nothing in the workspace read it —
+// grepping for the identifier turns up only its own declaration and this
+// note — so it was documentation-shaped code that happened to compile, and a
+// twenty-item-short list presented as the boundary is worse than no list at
+// all. The server's list is the single source of truth for what the wire
+// rejects; see `cairn_server::sync::FORBIDDEN_OBSERVATION_FIELDS` (FR-534).
 
 #[cfg(test)]
 mod tests {
@@ -1792,6 +2143,7 @@ mod feature_003_code_tests {
         let mut all: Vec<&str> = Vec::new();
         all.extend_from_slice(INTEGRATION_CODES);
         all.extend_from_slice(INTELLIGENCE_CODES);
+        all.extend_from_slice(IDENTITY_CODES);
         all.extend_from_slice(&[
             NOT_A_REPOSITORY,
             NO_ACTIVE_SESSION,

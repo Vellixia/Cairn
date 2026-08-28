@@ -3,13 +3,25 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
 #[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub code: &'static str,
     pub message: String,
+    /// Fields the caller must be able to *act* on, merged into the error object
+    /// beside `code` and `message`.
+    ///
+    /// A refusal whose remedy depends on a specific value — which state a team
+    /// entry is actually in, for instance — puts that value here rather than
+    /// only in the sentence. A client that has to regex a message to decide what
+    /// to do next is a client that breaks when the sentence is reworded, and the
+    /// sentence exists for a person to read.
+    ///
+    /// Never overrides `code` or `message`: those two are the shape every
+    /// existing consumer already depends on.
+    pub detail: Option<Value>,
 }
 
 impl ApiError {
@@ -18,7 +30,14 @@ impl ApiError {
             status,
             code,
             message: message.into(),
+            detail: None,
         }
+    }
+    /// Attach the fields above. An object; anything else is ignored, because
+    /// there is no key to merge a bare value under.
+    pub fn with_detail(mut self, detail: Value) -> Self {
+        self.detail = Some(detail);
+        self
     }
     pub fn unauthorized(message: impl Into<String>) -> Self {
         Self::new(StatusCode::UNAUTHORIZED, "unauthorized", message)
@@ -40,9 +59,31 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let body = json!({ "error": { "code": self.code, "message": self.message } });
-        (self.status, Json(body)).into_response()
+        (
+            self.status,
+            Json(error_body(self.code, &self.message, self.detail)),
+        )
+            .into_response()
     }
+}
+
+/// The one error body shape, built where a test can reach it without a running
+/// server.
+fn error_body(code: &'static str, message: &str, detail: Option<Value>) -> Value {
+    let mut error = serde_json::Map::new();
+    error.insert("code".to_string(), json!(code));
+    error.insert("message".to_string(), json!(message));
+    if let Some(Value::Object(detail)) = detail {
+        for (key, value) in detail {
+            // `code` and `message` are what every existing consumer matches on.
+            // A detail field is additional information, never a way to restate
+            // the two facts the shape guarantees.
+            if !error.contains_key(&key) {
+                error.insert(key, value);
+            }
+        }
+    }
+    json!({ "error": error })
 }
 
 impl From<sqlx::Error> for ApiError {
@@ -68,6 +109,35 @@ mod tests {
         assert_eq!(ApiError::not_found("x").status, StatusCode::NOT_FOUND);
         assert_eq!(ApiError::invalid("x").code, "invalid_request");
         assert_eq!(ApiError::internal("x").code, "internal");
+    }
+
+    /// A detail field rides beside `code` and `message`, and neither of those
+    /// can be displaced by one — a refusal that could rename its own `code`
+    /// would be a refusal no client could match on.
+    #[test]
+    fn a_detail_field_joins_the_error_object_without_displacing_it() {
+        let body = error_body(
+            "state_conflict",
+            "team knowledge is at state retired, not the state this request required",
+            Some(json!({ "state": "retired", "code": "hijacked" })),
+        );
+        assert_eq!(body["error"]["code"], "state_conflict");
+        assert_eq!(body["error"]["state"], "retired");
+        assert!(body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("at state retired"));
+    }
+
+    /// An error with nothing attached keeps the two-field shape Feature 001's
+    /// clients were written against.
+    #[test]
+    fn an_error_without_detail_carries_exactly_code_and_message() {
+        let body = error_body("not_found", "no such record", None);
+        assert_eq!(
+            body,
+            json!({ "error": { "code": "not_found", "message": "no such record" } })
+        );
     }
 
     #[test]

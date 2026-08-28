@@ -172,6 +172,10 @@ async fn dispatch(
                     reason: Some(reason),
                     token_budget,
                     explain: false,
+                    // A lifecycle-delivered briefing has always been the full
+                    // assembly; this event carries no depth of its own to
+                    // forward (T156).
+                    depth: None,
                 },
             )
             .await;

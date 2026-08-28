@@ -7,8 +7,10 @@
 pub mod constraints;
 pub mod continuity;
 pub mod criteria;
+pub mod cursor;
 pub mod diag;
 pub mod evidence;
+pub mod global;
 pub mod integrations;
 pub mod knowledge;
 pub mod migrate;
@@ -17,6 +19,7 @@ pub mod patterns;
 pub mod repo;
 pub mod rows;
 pub mod search;
+pub mod traits;
 pub mod tx;
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};

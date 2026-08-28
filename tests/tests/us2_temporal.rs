@@ -30,6 +30,8 @@ fn query() -> MemoryQuery {
         include_patterns: false,
         verification: None,
         authority: None,
+
+        domains: None,
     }
 }
 

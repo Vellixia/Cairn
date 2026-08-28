@@ -122,6 +122,8 @@ fn assemble_case(case_input: &serde_json::Map<String, Value>) -> Value {
             pins: &pins,
             ..Default::default()
         },
+        personal_notes: &[],
+        team_guidance: &[],
     };
 
     serde_json::to_value(assemble(&input, n("budget"))).expect("the payload serializes")
@@ -306,6 +308,8 @@ fn critical_content_survives() {
             pins: &pins,
             ..Default::default()
         },
+        personal_notes: &[],
+        team_guidance: &[],
     };
 
     // The documented minimum. Tier 0a's worst case is O(1) and fits it.
@@ -476,6 +480,8 @@ fn action_order() {
             criteria: &criteria,
             ..Default::default()
         },
+        personal_notes: &[],
+        team_guidance: &[],
     };
 
     // A budget generous enough that all five fit, so the assertion is about

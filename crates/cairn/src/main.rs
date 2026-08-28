@@ -171,6 +171,10 @@ enum Command {
         /// returned on request (FR-462, FR-463).
         #[arg(long)]
         explain: bool,
+        /// `minimum` excludes personal notes and team guidance entirely
+        /// (FR-477). Absent means `standard`, today's full assembly.
+        #[arg(long)]
+        depth: Option<String>,
     },
     /// Capture exclusions.
     Privacy {
@@ -197,6 +201,37 @@ enum Command {
     Auth {
         #[command(subcommand)]
         action: AuthAction,
+    },
+    /// Server-side accounts: admin-only (`contracts/identity-
+    /// administration.md` §9).
+    ///
+    /// Every subcommand forwards to `/api/admin/users` and reports whatever
+    /// the server decides — there is no local authorization decision here,
+    /// only whatever a `403 forbidden` from a non-admin caller looks like.
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+    },
+    /// Server-wide team knowledge (`contracts/global-memory.md` §5b).
+    ///
+    /// `list`/`propose` are reachable by any member; `ratify`/`retire` are
+    /// admin-only, authorized by the server alone.
+    Team {
+        #[command(subcommand)]
+        action: TeamAction,
+    },
+    /// This account's own personal, project-independent knowledge.
+    Personal {
+        #[command(subcommand)]
+        action: PersonalAction,
+    },
+    /// This project's derived stack traits — what applicability matching
+    /// reads at recall time.
+    Traits,
+    /// Shared projects: membership.
+    Project {
+        #[command(subcommand)]
+        action: ProjectAction,
     },
     /// Synchronization.
     Sync {
@@ -624,6 +659,13 @@ enum MemoryAction {
         scope: Option<String>,
         #[arg(long)]
         scope_key: Option<String>,
+        /// `project` (the default), `personal` or `team`.
+        ///
+        /// A domain is not a scope: `--scope` describes how long a project
+        /// memory stays relevant and means nothing to the other two, which have
+        /// none. Naming a domain reads that corpus and its own relations.
+        #[arg(long)]
+        domain: Option<String>,
     },
     /// Confirm that an existing memory is still true.
     ///
@@ -759,6 +801,119 @@ enum AuthAction {
     Logout,
     /// Whether a credential is stored, and for which server.
     Status,
+    /// Change the caller's own password (FR-405). The only route reachable
+    /// while an admin-created account still owes its first change.
+    ChangePassword {
+        /// Read from stdin when omitted, so it never lands in shell history —
+        /// the same convention `auth token set` already uses.
+        #[arg(long = "new-password")]
+        new_password: Option<String>,
+    },
+}
+
+/// `cairn user` (`contracts/identity-administration.md` §9). Every command
+/// takes an email — never a server-side row id, which the CLI never learns —
+/// except `create`, which mints the account the email will belong to, and
+/// `list`, which names none.
+#[derive(Subcommand)]
+enum UserAction {
+    /// Create an account. The temporary password this prints is shown
+    /// exactly once: there is no route, ever, that reads it back (FR-403).
+    /// If it is lost, the remedy is `cairn user reset-password`.
+    Create {
+        #[arg(long)]
+        email: String,
+        #[arg(long = "display-name")]
+        display_name: String,
+    },
+    /// Every account, its role and its status (FR-411).
+    List,
+    /// Revoke an account's ability to authenticate. Every live API token it
+    /// holds is revoked in the same server transaction (FR-409, FR-410).
+    Disable { email: String },
+    /// Restore an account's ability to authenticate. Tokens revoked by a
+    /// prior disable are not restored (FR-590).
+    Enable { email: String },
+    /// Grant server-level admin standing (FR-412).
+    Promote { email: String },
+    /// Remove server-level admin standing. Refused when this account is the
+    /// server's only remaining active administrator (FR-413).
+    Demote { email: String },
+    /// Issue a new temporary password and revoke every token the account
+    /// holds (FR-553–FR-559). The password is shown exactly once, the same
+    /// discipline `create` follows.
+    ResetPassword { email: String },
+}
+
+/// `cairn team` (`contracts/global-memory.md` §5b, T133).
+#[derive(Subcommand)]
+enum TeamAction {
+    /// `authoritative` entries, plus your own `proposed` ones.
+    List {
+        /// Every state, from every proposer. Admin only (FR-464); a
+        /// non-admin caller is told so rather than silently downgraded.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Propose an entry. Lands `proposed`; only an admin can ratify it.
+    Propose {
+        content: String,
+        #[arg(long = "type", default_value = "fact")]
+        kind: String,
+        #[arg(long = "topic-key")]
+        topic_key: Option<String>,
+        #[arg(long = "value-key")]
+        value_key: Option<String>,
+        /// `kind=value`, `language` or `tool` only. Repeatable.
+        #[arg(long = "applies-to")]
+        applies_to: Vec<String>,
+    },
+    /// Admin only, authorized by the server. `proposed` → `authoritative`.
+    Ratify {
+        id: Uuid,
+        /// Record that this ratified entry supersedes an existing one
+        /// (an explicit admin decision, never inferred).
+        #[arg(long)]
+        supersedes: Option<Uuid>,
+    },
+    /// Admin only, authorized by the server. `authoritative` → `retired`;
+    /// never reversible by re-ratifying.
+    Retire { id: Uuid },
+}
+
+/// `cairn personal` — this account's own personal, project-independent
+/// knowledge (`contracts/global-memory.md` §5a, T082).
+#[derive(Subcommand)]
+enum PersonalAction {
+    List {
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long)]
+        limit: Option<i64>,
+    },
+    /// Tombstone one entry: content cleared, nothing else touched.
+    Forget { id: Uuid },
+}
+
+/// `cairn project member` (`contracts/identity-administration.md` §9a,
+/// T063).
+#[derive(Subcommand)]
+enum ProjectAction {
+    /// Shared-project membership.
+    Member {
+        #[command(subcommand)]
+        action: MemberAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum MemberAction {
+    /// Grant membership. Reachable by an existing member or a server admin.
+    Add { project_id: Uuid, email: String },
+    /// Revoke membership.
+    Remove { project_id: Uuid, email: String },
+    /// The full membership list.
+    List { project_id: Uuid },
 }
 
 #[derive(Subcommand)]
@@ -1024,6 +1179,7 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
             session,
             reason,
             explain,
+            depth,
         } => {
             let reason = match reason {
                 Some(r) => Some(match r.as_str() {
@@ -1035,6 +1191,14 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
                 }),
                 None => Some(ContextReason::Refresh),
             };
+            let depth = match depth {
+                Some(d) => Some(match d.as_str() {
+                    "minimum" => ContextDepth::Minimum,
+                    "standard" => ContextDepth::Standard,
+                    other => return Err(WireError::invalid(format!("unknown depth `{other}`"))),
+                }),
+                None => None,
+            };
             let v = client::send(&Request::Context {
                 cwd: cwd(),
                 agent_session_key: None,
@@ -1042,6 +1206,7 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
                 reason,
                 token_budget: *budget,
                 explain: *explain,
+                depth,
             })
             .await?;
             let payload: ContextPayload =
@@ -1105,6 +1270,26 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         }
 
         Command::Auth { action } => auth(action).await,
+        Command::User { action } => user(action).await,
+        Command::Team { action } => team(action).await,
+        Command::Personal { action } => personal(action).await,
+        Command::Traits => {
+            let v = client::send(&Request::ProjectTraits { cwd: cwd() }).await?;
+            let traits = v["traits"].as_array().cloned().unwrap_or_default();
+            let mut text = String::new();
+            if traits.is_empty() {
+                text.push_str("No derived traits for this project.\n");
+            }
+            for t in &traits {
+                text.push_str(&format!(
+                    "{:<10} {}\n",
+                    t["kind"].as_str().unwrap_or(""),
+                    t["value"].as_str().unwrap_or(""),
+                ));
+            }
+            Ok(Output::with(v, text))
+        }
+        Command::Project { action } => project(action).await,
         Command::Update { check } => update_command(*check).await,
         Command::Sync { action } => sync(action).await,
         Command::Daemon { action } => daemon(action).await,
@@ -1657,6 +1842,8 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 importance,
                 evidence_observation_ids: evidence.clone(),
                 local_only: *local_only,
+
+                domain: None,
             })
             .await?;
             let text = format!(
@@ -1715,16 +1902,30 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             topic_key,
             scope,
             scope_key,
+            domain,
         } => {
             let scope = match scope {
                 Some(s) => Some(parse_enum::<MemoryScope>("scope", s)?),
                 None => None,
             };
+            let domain = match domain {
+                Some(d) => Some(parse_enum::<KnowledgeDomain>("domain", d)?),
+                None => None,
+            };
+            if domain.is_some_and(|d| d != KnowledgeDomain::Project)
+                && (scope.is_some() || scope_key.is_some())
+            {
+                return Err(WireError::invalid(
+                    "--scope and --scope-key apply to project memory only; personal and \
+                     team knowledge have no scope",
+                ));
+            }
             let v = client::send(&Request::MemorySubject {
                 cwd: cwd(),
                 topic_key: topic_key.clone(),
                 scope,
                 scope_key: scope_key.clone(),
+                domain,
             })
             .await?;
             let text = render::subject(&v);
@@ -1828,6 +2029,8 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                     Some(a) => Some(parse_enum("authority", a)?),
                     None => None,
                 },
+
+                domains: None,
             };
             let v = client::send(&Request::MemorySearch {
                 cwd: cwd(),
@@ -1881,6 +2084,8 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
             let v = client::send(&Request::MemoryForget {
                 cwd: cwd(),
                 memory_id: *id,
+
+                domain: None,
             })
             .await?;
             Ok(Output::with(v, "Memory deleted.\n".into()))
@@ -1982,6 +2187,305 @@ async fn auth(action: &AuthAction) -> Result<Output, WireError> {
                 "Token   {}\nServer  {server}\n",
                 if authenticated { "stored" } else { "none" },
             );
+            Ok(Output::with(v, text))
+        }
+        AuthAction::ChangePassword { new_password } => {
+            let new_password = match new_password {
+                Some(p) => p.clone(),
+                None => prompt_line("New password: ")?,
+            };
+            if new_password.is_empty() {
+                return Err(WireError::invalid("no new password supplied"));
+            }
+            let v = client::send(&Request::AuthChangePassword { new_password }).await?;
+            Ok(Output::with(
+                v,
+                "Password changed. Every existing web session for this account was ended; \
+                 API tokens you already minted are unaffected.\n"
+                    .into(),
+            ))
+        }
+    }
+}
+
+/// A single line read from stdin, with the prompt written to stderr so it
+/// never lands in `--json` output. Not masked — this crate carries no
+/// terminal-echo dependency — the same tradeoff `auth token set` already
+/// makes for the token itself.
+fn prompt_line(prompt: &str) -> Result<String, WireError> {
+    use std::io::Write;
+    eprint!("{prompt}");
+    std::io::stderr()
+        .flush()
+        .map_err(|e| WireError::invalid(e.to_string()))?;
+    let mut buf = String::new();
+    std::io::stdin()
+        .read_line(&mut buf)
+        .map_err(|e| WireError::invalid(e.to_string()))?;
+    Ok(buf.trim().to_string())
+}
+
+/// `cairn user` (`contracts/identity-administration.md` §9). Every
+/// subcommand is daemon-mediated like `link`/`auth` above — the daemon holds
+/// the token and makes the HTTP call, never this process.
+async fn user(action: &UserAction) -> Result<Output, WireError> {
+    match action {
+        UserAction::Create {
+            email,
+            display_name,
+        } => {
+            let v = client::send(&Request::AdminUserCreate {
+                email: email.clone(),
+                display_name: display_name.clone(),
+            })
+            .await?;
+            let email = v.get("email").and_then(|e| e.as_str()).unwrap_or(email);
+            let temporary = v
+                .get("temporary_password")
+                .and_then(|p| p.as_str())
+                .unwrap_or("");
+            let text = format!(
+                "Created {email}. Temporary password: {temporary}\n\
+                 This password is shown once, right here, and is never stored anywhere it \
+                 can be read back — not even by the administrator who ran this command. If \
+                 it is lost before the account's first sign-in, the remedy is \
+                 `cairn user reset-password {email}`.\n\
+                 They must change it before doing anything else.\n"
+            );
+            Ok(Output::with(v, text))
+        }
+
+        UserAction::List => {
+            let v = client::send(&Request::AdminUserList).await?;
+            let users = v["users"].as_array().cloned().unwrap_or_default();
+            let mut text = format!(
+                "{:<32} {:<7} {:<9} {:<21} {}\n",
+                "EMAIL", "ROLE", "STATUS", "MUST_CHANGE_PASSWORD", "CREATED_AT"
+            );
+            if users.is_empty() {
+                text.push_str("no accounts\n");
+            }
+            for u in &users {
+                text.push_str(&format!(
+                    "{:<32} {:<7} {:<9} {:<21} {}\n",
+                    u["email"].as_str().unwrap_or(""),
+                    u["role"].as_str().unwrap_or(""),
+                    u["status"].as_str().unwrap_or(""),
+                    u["must_change_password"]
+                        .as_bool()
+                        .unwrap_or(false)
+                        .to_string(),
+                    u["created_at"].as_str().unwrap_or(""),
+                ));
+            }
+            Ok(Output::with(v, text))
+        }
+
+        UserAction::Disable { email } => {
+            let v = client::send(&Request::AdminUserPatch {
+                email: email.clone(),
+                role: None,
+                status: Some(UserStatus::Disabled),
+            })
+            .await?;
+            Ok(Output::with(
+                v,
+                format!(
+                    "Disabled {email}. Its active API tokens were revoked in the same \
+                     transaction and stop working immediately.\n"
+                ),
+            ))
+        }
+        UserAction::Enable { email } => {
+            let v = client::send(&Request::AdminUserPatch {
+                email: email.clone(),
+                role: None,
+                status: Some(UserStatus::Active),
+            })
+            .await?;
+            Ok(Output::with(
+                v,
+                format!("Enabled {email}. Existing tokens remain revoked; mint a new one.\n"),
+            ))
+        }
+        UserAction::Promote { email } => {
+            let v = client::send(&Request::AdminUserPatch {
+                email: email.clone(),
+                role: Some(ServerRole::Admin),
+                status: None,
+            })
+            .await?;
+            Ok(Output::with(v, format!("{email} is now admin.\n")))
+        }
+        UserAction::Demote { email } => {
+            let v = client::send(&Request::AdminUserPatch {
+                email: email.clone(),
+                role: Some(ServerRole::Member),
+                status: None,
+            })
+            .await?;
+            Ok(Output::with(v, format!("{email} is now member.\n")))
+        }
+
+        UserAction::ResetPassword { email } => {
+            let v = client::send(&Request::ResetPassword {
+                email: email.clone(),
+            })
+            .await?;
+            let temporary = v
+                .get("temporary_password")
+                .and_then(|p| p.as_str())
+                .unwrap_or("");
+            let disabled = v.get("status").and_then(|s| s.as_str()) == Some("disabled");
+            let mut text = format!(
+                "Reset {email}. Temporary password: {temporary}\n\
+                 This password is shown once, right here, and cannot be retrieved again. \
+                 Every existing token this account held was revoked.\n"
+            );
+            if disabled {
+                text.push_str(
+                    "The account remains disabled and cannot authenticate until an \
+                     administrator re-enables it with `cairn user enable`.\n",
+                );
+            } else {
+                text.push_str("They must change it before doing anything else.\n");
+            }
+            Ok(Output::with(v, text))
+        }
+    }
+}
+
+/// `cairn team` (`contracts/global-memory.md` §5b, T133).
+async fn team(action: &TeamAction) -> Result<Output, WireError> {
+    match action {
+        TeamAction::List { all } => {
+            let v = client::send(&Request::TeamList { all: *all }).await?;
+            let entries = v["entries"].as_array().cloned().unwrap_or_default();
+            let mut text = format!(
+                "{:<38} {:<13} {:<16} {}\n",
+                "ID", "STATE", "TOPIC", "CONTENT"
+            );
+            if entries.is_empty() {
+                text.push_str("no entries\n");
+            }
+            for e in &entries {
+                text.push_str(&format!(
+                    "{:<38} {:<13} {:<16} {}\n",
+                    e["id"].as_str().unwrap_or(""),
+                    e["state"].as_str().unwrap_or(""),
+                    e["topic_key"].as_str().unwrap_or(""),
+                    e["content"].as_str().unwrap_or(""),
+                ));
+            }
+            Ok(Output::with(v, text))
+        }
+        TeamAction::Propose {
+            content,
+            kind,
+            topic_key,
+            value_key,
+            applies_to,
+        } => {
+            let v = client::send(&Request::TeamPropose {
+                cwd: cwd(),
+                content: content.clone(),
+                knowledge_type: Some(parse_enum::<MemoryType>("type", kind)?),
+                topic_key: topic_key.clone(),
+                value_key: value_key.clone(),
+                applicability: applies_to.clone(),
+            })
+            .await?;
+            Ok(Output::with(
+                v.clone(),
+                format!("proposed {}\n", v["entry"]["id"].as_str().unwrap_or("")),
+            ))
+        }
+        TeamAction::Ratify { id, supersedes } => {
+            let v = client::send(&Request::TeamRatify {
+                id: *id,
+                supersedes: *supersedes,
+            })
+            .await?;
+            Ok(Output::with(v, format!("ratified {id}\n")))
+        }
+        TeamAction::Retire { id } => {
+            let v = client::send(&Request::TeamRetire { id: *id }).await?;
+            Ok(Output::with(v, format!("retired {id}\n")))
+        }
+    }
+}
+
+/// `cairn personal` — this account's own personal knowledge (T082).
+async fn personal(action: &PersonalAction) -> Result<Output, WireError> {
+    match action {
+        PersonalAction::List { query, limit } => {
+            let v = client::send(&Request::PersonalList {
+                query: query.clone(),
+                limit: *limit,
+            })
+            .await?;
+            let entries = v["entries"].as_array().cloned().unwrap_or_default();
+            let mut text = format!("{:<38} {:<16} {}\n", "ID", "TOPIC", "CONTENT");
+            if entries.is_empty() {
+                text.push_str("no entries\n");
+            }
+            for e in &entries {
+                text.push_str(&format!(
+                    "{:<38} {:<16} {}\n",
+                    e["id"].as_str().unwrap_or(""),
+                    e["topic_key"].as_str().unwrap_or(""),
+                    e["content"].as_str().unwrap_or(""),
+                ));
+            }
+            Ok(Output::with(v, text))
+        }
+        PersonalAction::Forget { id } => {
+            let v = client::send(&Request::PersonalForget { id: *id }).await?;
+            Ok(Output::with(v, format!("forgotten {id}\n")))
+        }
+    }
+}
+
+/// `cairn project member` (T063).
+async fn project(action: &ProjectAction) -> Result<Output, WireError> {
+    let ProjectAction::Member { action } = action;
+    match action {
+        MemberAction::Add { project_id, email } => {
+            let v = client::send(&Request::ProjectMemberAdd {
+                project_id: *project_id,
+                email: email.clone(),
+            })
+            .await?;
+            Ok(Output::with(v, format!("added {email} to {project_id}\n")))
+        }
+        MemberAction::Remove { project_id, email } => {
+            let v = client::send(&Request::ProjectMemberRemove {
+                project_id: *project_id,
+                email: email.clone(),
+            })
+            .await?;
+            Ok(Output::with(
+                v,
+                format!("removed {email} from {project_id}\n"),
+            ))
+        }
+        MemberAction::List { project_id } => {
+            let v = client::send(&Request::ProjectMemberList {
+                project_id: *project_id,
+            })
+            .await?;
+            let members = v["members"].as_array().cloned().unwrap_or_default();
+            let mut text = format!("{:<32} {}\n", "EMAIL", "DISPLAY_NAME");
+            if members.is_empty() {
+                text.push_str("no members\n");
+            }
+            for m in &members {
+                text.push_str(&format!(
+                    "{:<32} {}\n",
+                    m["email"].as_str().unwrap_or(""),
+                    m["display_name"].as_str().unwrap_or(""),
+                ));
+            }
             Ok(Output::with(v, text))
         }
     }
@@ -2099,6 +2603,9 @@ async fn pattern(action: &PatternAction) -> Result<Output, WireError> {
                 approach: approach.clone(),
                 constraints: constraints.clone(),
                 dry_run: *dry_run,
+
+                target: None,
+                applicability_facts: Vec::new(),
             })
             .await?;
             let text = if *dry_run {
@@ -2185,6 +2692,70 @@ async fn sync(action: &SyncAction) -> Result<Output, WireError> {
                     d.server_capability,
                     d.note
                 ));
+            }
+            // Per-namespace breakdown (T109, FR-487): `project:*` is always
+            // present; `personal:*`/`team:*` appear only once this store has
+            // ever queued something in that namespace.
+            if let Some(namespaces) = v.get("namespaces").and_then(|n| n.as_array()) {
+                text.push_str("Namespaces\n");
+                for n in namespaces {
+                    let key = n["namespace"].as_str().unwrap_or("");
+                    let kind = n["kind"].as_str().unwrap_or("");
+                    let pending = n["pending"].as_i64().unwrap_or(0);
+                    let failed = n["failed"].as_i64().unwrap_or(0);
+                    let blocked = n["blocked"].as_i64().unwrap_or(0);
+                    // Derived, not carried on the payload: a namespace has no
+                    // `state` field of its own, only these three counts —
+                    // this is the same "worst first" ordering `SyncStatusPayload`
+                    // already gives `Blocked`/`Failed`/`Pending` above.
+                    let state = if blocked > 0 {
+                        "blocked"
+                    } else if failed > 0 {
+                        "failed"
+                    } else if pending > 0 {
+                        "pending"
+                    } else {
+                        "current"
+                    };
+                    text.push_str(&format!(
+                        "  {key:<32} {state:<8} pending={pending} failed={failed} blocked={blocked}\n"
+                    ));
+                    // The one degradation reason this payload carries is
+                    // project-scoped (`SyncDegradation` above); a `personal:*`
+                    // or `team:*` namespace's own blocked reason is not on
+                    // this payload yet, so it is only ever attributed to the
+                    // namespace it is actually about, never guessed for
+                    // another.
+                    if blocked > 0 && kind == "project" {
+                        if let Some(d) = &s.degradation {
+                            text.push_str(&format!("    {}\n", d.note));
+                        }
+                    }
+                    // Holes in a writer's own sequence (FR-492, SC-450).
+                    // Reported here and nowhere else, because a gap nobody
+                    // surfaces is indistinguishable from a stream that had
+                    // none — and this is the whole reason `writer_seq` travels
+                    // at all. Diagnostic: nothing acts on it, and the operator
+                    // reading it is the point.
+                    for gap in n["gaps"].as_array().unwrap_or(&Vec::new()) {
+                        let missing: Vec<String> = gap["missing"]
+                            .as_array()
+                            .unwrap_or(&Vec::new())
+                            .iter()
+                            .map(|v| v.to_string())
+                            .collect();
+                        if missing.is_empty() {
+                            continue;
+                        }
+                        text.push_str(&format!(
+                            "    gap: writer {} is missing {} of {} (never arrived: {})\n",
+                            gap["writer_id"].as_str().unwrap_or("?"),
+                            missing.len(),
+                            gap["highest_seen"].as_i64().unwrap_or(0),
+                            missing.join(", ")
+                        ));
+                    }
+                }
             }
             Ok(Output::with(v, text))
         }

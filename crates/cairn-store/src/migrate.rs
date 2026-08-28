@@ -33,6 +33,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "sync_deferred",
         include_str!("../migrations/0006_sync_deferred.sql"),
     ),
+    (
+        7,
+        "collaborative_global_memory",
+        include_str!("../migrations/0007_collaborative_global_memory.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.
@@ -123,6 +128,7 @@ pub async fn run_to(pool: &SqlitePool, target: i64) -> Result<i64, MigrateError>
 async fn finish(version: i64, tx: &mut sqlx::SqliteConnection) -> Result<(), MigrateError> {
     match version {
         5 => criteria_from_acceptance_arrays(tx).await,
+        7 => seed_writer_identity(tx).await,
         _ => Ok(()),
     }
 }
@@ -177,6 +183,25 @@ async fn criteria_from_acceptance_arrays(
             .await?;
         }
     }
+    Ok(())
+}
+
+/// Migration 7, step 4 — this store's one-time opaque writer identity
+/// (data-model.md §2.10, migration.md §Local migration step 4).
+///
+/// Not expressible in the migration's own SQL script: it needs a fresh UUID,
+/// which SQLite cannot generate honestly, and unlike a UUIDv7 identifier this
+/// value carries no ordering claim to get wrong — but it must be minted
+/// exactly once. Runs inside the same transaction as the rest of migration 7,
+/// after its script and before `schema_migrations` is written, so an
+/// interruption before this step commits still rolls the whole migration
+/// back, leaving no `writer_identity` row and the store on schema 6.
+async fn seed_writer_identity(tx: &mut sqlx::SqliteConnection) -> Result<(), MigrateError> {
+    sqlx::query("INSERT INTO writer_identity (id, writer_id, created_at) VALUES (1, ?1, ?2)")
+        .bind(uuid::Uuid::now_v7().to_string())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
     Ok(())
 }
 
