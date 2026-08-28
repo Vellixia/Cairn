@@ -474,6 +474,36 @@ fn provisional_instance(url: &str) -> Uuid {
 /// Best-effort: an unreachable server leaves whatever was already known, which
 /// is the honest answer — the identity did not change because the network did.
 /// Returns whether an identity is now known at all.
+/// Drop the account identity this store believes it holds, in memory and on
+/// disk, so the next authenticated call has to learn it again.
+///
+/// **A credential that changed cannot be trusted to name the same account.**
+/// `account_id` is persisted precisely so a daemon that restarts offline still
+/// knows whose personal partition it is holding (FR-567) — but that durability
+/// cuts the other way when the credential itself changes. `learn_account_identity`
+/// is best-effort by design: on an unreachable server it reports success if an id
+/// is *already* recorded. Set a second account's token while offline and that
+/// contract returns "identity known" while the id still names the first account —
+/// and `establish_global_namespaces` then skips relearning for exactly the same
+/// reason, because the field is `Some`. Account B would read and write under
+/// account A's personal partition, with no failure anywhere to notice.
+///
+/// So a credential change invalidates the identity and the daemon fails closed:
+/// `owner_identity` falls back to this machine's local id, which is nobody's
+/// account partition, and no `personal:*` lane can be keyed at all until a live
+/// `GET /api/auth/me` says who is authenticated (FR-591). Losing A's rows from view is the
+/// point — they belong to A, and this process is no longer A.
+async fn forget_account_identity(d: &Daemon) {
+    d.server.write().await.account_id = None;
+    let mut config = d.config.write().await;
+    if config.server_account_id.is_some() {
+        config.server_account_id = None;
+        if let Err(e) = config.save() {
+            tracing::debug!(error = %e, "could not clear the stored server account id");
+        }
+    }
+}
+
 async fn learn_account_identity(d: &Daemon) -> bool {
     let Ok(client) = client(d).await else {
         return d.server.read().await.account_id.is_some();
@@ -740,7 +770,7 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
     let mut all_merged = true;
     for row in &rows {
         let merged = match namespace {
-            SyncNamespace::Personal(..) => merge_pulled_personal(d, row).await,
+            SyncNamespace::Personal(_, owner) => merge_pulled_personal(d, *owner, row).await,
             SyncNamespace::Team(instance) => merge_pulled_team(d, *instance, row).await,
             SyncNamespace::Project(_) => false,
         };
@@ -770,6 +800,65 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
     // It cannot: `pull_global` refuses to pull a lane whose peer reports a
     // different instance before reading a single row, so a mismatched row cannot
     // reach this loop.
+    // **A cursor is a position in one caller's feed, and the `team:*` feed is
+    // caller-dependent** (FR-592, `contracts/sync-namespaces.md` §1a).
+    //
+    // A pending proposal reaches its author and any admin and nobody else, so
+    // "everything after this cursor" means something different once the caller's
+    // view widens. A `personal:*` lane cannot hit this — its key already carries
+    // the owning account, so a second identity gets a second lane and a second
+    // cursor. `team:*` deliberately has no identity in its key, because a store
+    // binds to exactly one server's team corpus (FR-496), so the view it was
+    // reading has to be recorded beside the cursor instead.
+    //
+    // When the server reports a different view from the one the stored cursor was
+    // built under — a member promoted to admin, or this machine now
+    // authenticating as someone else — the cursor is discarded rather than
+    // advanced, and the next pull walks the lane from the beginning. This page's
+    // rows still merge: they are real, and every team merge is idempotent by id,
+    // so re-reading them next cycle costs a request and changes nothing. What
+    // must not happen is advancing past rows that were invisible a moment ago and
+    // are visible now.
+    //
+    // A server that reports no `visibility` at all is one that predates this
+    // field; there is nothing to compare, so the cursor behaves as it did before
+    // and no lane is reset on every pull.
+    let reported_visibility = body.get("visibility").and_then(|v| v.as_str());
+    if let Some(reported) = reported_visibility {
+        let stored = cursor::visibility_context(&d.store, namespace)
+            .await
+            .map_err(storage_err)?;
+        if stored.as_deref() != Some(reported) {
+            // A lane with no cursor yet is already reading from the beginning, so
+            // there is nothing stale to discard and this page's cursor is
+            // trustworthy — record the view and let it advance. Only a lane that
+            // *has* a position built under some other view has to start over.
+            // (A store upgraded from before this field has a position and no
+            // recorded view, which is exactly a view it cannot vouch for.)
+            let stale_position = since.is_some();
+
+            if stale_position {
+                // Order matters: the cursor is cleared before the new context is
+                // recorded, so a failure between the two leaves the lane looking
+                // stale and it resets again next cycle. The reverse order could
+                // record the new view over a cursor that never got cleared.
+                cursor::clear_pull_cursor(&d.store, namespace)
+                    .await
+                    .map_err(storage_err)?;
+            }
+            cursor::set_visibility_context(&d.store, namespace, reported)
+                .await
+                .map_err(storage_err)?;
+            if stale_position {
+                tracing::info!(
+                    namespace = %namespace.key(),
+                    "re-reading this lane from the beginning: the caller's view of it changed"
+                );
+                return Ok(landed);
+            }
+        }
+    }
+
     if all_merged {
         if let Some(cursor) = body.get("cursor").and_then(|v| v.as_str()) {
             cursor::set_pull_cursor(&d.store, namespace, cursor)
@@ -832,7 +921,18 @@ fn pulled_time(row: &serde_json::Value, field: &str) -> Option<chrono::DateTime<
 /// trusting a payload field would be accepting a claim the transport already
 /// answered — and answering it twice, differently, is how a record ends up filed
 /// under the wrong identity.
-async fn merge_pulled_personal(d: &Daemon, row: &serde_json::Value) -> bool {
+/// Land one pulled personal row under the account whose lane delivered it.
+///
+/// **The owner comes from the lane key, not from `owner_identity`.** The two
+/// agree in the ordinary case and are not the same thing: a lane key is fixed
+/// when the lane is established, while `owner_identity` is whatever this daemon
+/// currently believes it is authenticated as — and that can change underneath a
+/// pull (a token set for a second account, or a stale id invalidated by
+/// [`forget_account_identity`]). Reading it here would attribute one account's
+/// rows to whoever happened to be current when the page landed, which is the
+/// same partition-crossing this lane key exists to prevent (FR-567, FR-568).
+/// A lane that names an account is the authority on whose rows it carries.
+async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> bool {
     let Some(id) = pulled_uuid(row, "id") else {
         return false;
     };
@@ -850,7 +950,7 @@ async fn merge_pulled_personal(d: &Daemon, row: &serde_json::Value) -> bool {
 
     let incoming = cairn_store::global::SyncedPersonalKnowledge {
         id,
-        owner_user_id: d.owner_identity().await,
+        owner_user_id: owner,
         knowledge_type,
         content: row
             .get("content")
@@ -1127,6 +1227,10 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
     }
 
     let mut creds = d.server.write().await;
+    let credential_changed = creds.token.as_deref() != Some(token.trim())
+        || server_url
+            .as_ref()
+            .is_some_and(|u| creds.url.as_ref() != Some(u));
     creds.token = Some(token.trim().to_string());
     if let Some(url) = server_url {
         creds.url = Some(url.clone());
@@ -1138,6 +1242,21 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
     }
     let url = creds.url.clone();
     drop(creds);
+
+    // A different token, or the same token against a different server, may name
+    // a different account — so the recorded identity is no longer evidence of
+    // anything and is dropped before the lookup rather than after it. See
+    // [`forget_account_identity`]: the lookup below is allowed to fail, and if
+    // the stale id survived that failure this daemon would keep operating inside
+    // the previous account's personal partition.
+    //
+    // Re-setting the *same* credential is not a change and keeps the identity.
+    // That case is common and offline-friendly (`cairn auth token set` re-run
+    // from a script), and invalidating there would strand a user's own personal
+    // rows every time they re-applied a token they already held.
+    if credential_changed {
+        forget_account_identity(d).await;
+    }
 
     // Learn which account this token belongs to, and persist it. Personal
     // knowledge is partitioned by the owning account (FR-567, FR-568), so this
@@ -1274,6 +1393,12 @@ pub async fn auth_me(d: &Daemon) -> Reply {
 pub async fn logout(d: &Daemon) -> Reply {
     let _ = std::fs::remove_file(cairn_core::paths::token_path());
     d.server.write().await.token = None;
+    // Logging out ends this process's claim to that account, so the identity
+    // goes with the credential. Left behind, it would keep steering local
+    // personal writes into the logged-out account's partition — and would still
+    // be sitting there, looking authoritative, when a different person logs in
+    // on this machine (see [`forget_account_identity`]).
+    forget_account_identity(d).await;
     Ok(json!({ "token_stored": false }))
 }
 

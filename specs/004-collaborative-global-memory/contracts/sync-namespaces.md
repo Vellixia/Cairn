@@ -35,6 +35,49 @@ A machine linked to one project has exactly one `project:*` namespace, exactly o
 `personal:*` namespace **per identity it has ever linked** (see §10 — a store may hold more
 than one), and exactly one `team:*` namespace per server it is linked to.
 
+## 1a. A `team:*` cursor is a position in one caller's feed (FR-592)
+
+The table above is also a table of what each key *omits*, and one omission has a
+consequence the others do not.
+
+`personal:<instance>:<user>` carries its owner, so two identities on one machine get two
+lanes and two cursors, and neither can walk into the other's rows. `team:<instance>` carries
+no identity at all — deliberately, because a store binds to exactly one server's team corpus
+(§10, FR-496) and a second `team:*` lane is what that binding forbids. But the team **feed**
+is not the same feed for every caller: a `proposed` row is visible to its author and to any
+admin, and to nobody else (`global-memory.md` §5b). So a `team:*` cursor is a position in a
+feed whose contents depend on who asked, recorded under a key that does not say who asked.
+
+Two events widen a caller's view without changing a single row:
+
+| Event | What becomes newly visible |
+|---|---|
+| a member is promoted to admin | every other member's pending proposals |
+| the machine authenticates as a different account | that account's own pending proposals |
+
+A monotonic cursor cannot recover from either. Pending rows the old view excluded are older
+than the cursor, so "everything after this cursor" never asks for them again — and a pull is
+the only way they can arrive. An admin's store would be permanently missing the proposals
+that admin exists to ratify.
+
+**The contract.** `GET /api/sync/changes/team` returns a `visibility` field alongside
+`cursor`: an opaque string derived from the **authenticated** caller — `SettledUser`, never
+anything the caller sent — that differs whenever the filter above would differ. The client
+stores it beside the cursor (`sync_cursor.visibility_context`). When the reported value
+differs from the stored one **and** a cursor is already recorded, the client discards the
+cursor instead of advancing it and re-reads the lane from the beginning.
+
+The re-read is cheap in the only currency that matters here: every team merge is idempotent
+by id, and team content is written once and never rewritten, so re-delivering a row is a
+no-op. A lane with no cursor yet is already reading from the beginning, so it records the
+context and advances normally rather than restarting for nothing.
+
+A server that reports no `visibility` predates the field. There is nothing to compare, the
+cursor behaves exactly as it did before, and no lane resets on every pull.
+
+`personal:*` needs none of this: the server filters that feed by the owning account, and the
+lane key already names it, so a different identity is a different lane by construction.
+
 ## 2. `sync_cursor` replaces `sync_meta`'s single cursor
 
 Today, `sync_meta` (`crates/cairn-store/migrations/0001_init.sql:180-184`) is keyed

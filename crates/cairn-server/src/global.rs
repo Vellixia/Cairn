@@ -578,6 +578,15 @@ pub async fn sync_personal_changes(
 
 /// `GET /api/sync/changes/team` — server-wide team knowledge, filtered by what
 /// the caller's role permits (T129, FR-463, FR-464).
+/// A stable, opaque-to-the-client statement of whose view a team page reflects.
+///
+/// Two values are compared for equality and nothing else, so the format only
+/// has to distinguish every pair of views that produce different feeds — which
+/// is exactly (actor, role), the two inputs to `team_changes`'s filter.
+fn visibility_fingerprint(user_id: Uuid, role: ServerRole) -> String {
+    format!("{user_id}:{}", role.as_str())
+}
+
 pub async fn sync_team_changes(
     State(state): State<AppState>,
     user: SettledUser,
@@ -596,6 +605,22 @@ pub async fn sync_team_changes(
     Ok(Json(json!({
         "team": page.items,
         "cursor": page.cursor.encode(),
+        // Which caller's view of the team feed this page was computed for
+        // (FR-592, `contracts/sync-namespaces.md` §1a).
+        //
+        // The filter above is not the same filter for every caller: a `proposed`
+        // row reaches its author and any admin, and no one else. So a cursor
+        // handed back here is a position in *this* caller's feed, and it stops
+        // being a valid position the moment that view widens — a member promoted
+        // to admin, or a machine relinked to a second account, would otherwise
+        // keep a cursor that has already walked past rows it can now see, and a
+        // monotonic cursor never revisits them.
+        //
+        // The client cannot compute this itself. It can read its own account id
+        // from a token, but the role is the server's to state, and role is half
+        // of what decides the filter. It comes from `SettledUser` — the
+        // authenticated actor — never from anything the caller sent.
+        "visibility": visibility_fingerprint(user.id(), user.role()),
     })))
 }
 

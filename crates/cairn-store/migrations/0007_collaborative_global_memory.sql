@@ -318,7 +318,28 @@ CREATE TABLE IF NOT EXISTS sync_cursor (
     -- The last capability fingerprint observed for whatever this namespace
     -- talks to, replacing sync_meta.server_capability's single value
     -- (FR-498).
-    server_capability TEXT
+    server_capability TEXT,
+    -- The visibility context under which `pull_cursor` was last advanced
+    -- (FR-592, `contracts/sync-namespaces.md` §1a).
+    --
+    -- A cursor is only meaningful relative to the feed it walked, and the
+    -- `team:*` feed is not the same feed for every caller: a proposal that is
+    -- still pending is visible to its author and to admins, and to nobody else.
+    -- The lane key is `team:<server_instance_id>` with no identity in it — on
+    -- purpose, because a store binds to exactly one server's team corpus
+    -- (FR-496) — so unlike `personal:<instance>:<user>`, whose key already
+    -- separates one account's cursor from another's, `team:*` has nowhere in its
+    -- key to record whose view it was reading.
+    --
+    -- Without that record a widening of the caller's view silently loses rows.
+    -- A member promoted to admin, or a machine relinked to a second account,
+    -- inherits a cursor that has already walked past proposals it could not see
+    -- then and can see now, and a monotonic cursor never asks for them again.
+    -- Storing the server's own statement of the caller's view here lets the
+    -- client notice the change and re-read the lane from the beginning; every
+    -- team merge is idempotent by id, so a full re-read costs bandwidth and
+    -- nothing else.
+    visibility_context TEXT
 );
 
 -- ---------------------------------------------------------------------------

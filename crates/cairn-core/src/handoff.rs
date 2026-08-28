@@ -277,14 +277,33 @@ fn test_runner_name(command: &str) -> String {
         .unwrap_or_else(|| "test".to_string())
 }
 
+/// What went wrong, in terms safe to transmit (FR-531, FR-532).
+///
+/// **The runner's name, never the invocation.** `derive_tests` has always
+/// sanitized the command it records, for reasons its own doc comment states at
+/// length: an argument can be an absolute path, a flag value can be a secret, and
+/// a leading `./script.sh` names a location on this machine specifically. This
+/// function formatted the *raw* command into `Test failed: {…}` — and its output
+/// reaches three transmitted fields, because `derive_remaining`, `derive_progress`
+/// and `derive_next_step` all build prose from it. So the string
+/// `derive_tests` was careful to omit travelled anyway, one field over.
+///
+/// The same sanitizer answers both. A reader learns `cargo test` failed, which is
+/// the actionable part; nobody learns the flags it was given.
 fn derive_failures(obs: &[Observation]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for o in obs {
         match o.kind {
+            // A summary is redacted at capture, which is what makes it the safe
+            // half of an observation to carry.
             ObservationType::Error => out.push(o.summary.clone()),
             ObservationType::TestRun if o.outcome.as_deref() == Some("failed") => {
-                let cmd = o.command.clone().unwrap_or_else(|| o.summary.clone());
-                out.push(format!("Test failed: {cmd}"));
+                let runner = o
+                    .command
+                    .as_deref()
+                    .map(test_runner_name)
+                    .unwrap_or_else(|| test_runner_name(&o.summary));
+                out.push(format!("Test failed: {runner}"));
             }
             _ => {}
         }
@@ -502,6 +521,44 @@ mod tests {
             truncated: false,
             deleted_at: None,
         }
+    }
+
+    /// Nothing derived from a failed test run carries the raw invocation.
+    ///
+    /// Through `synthesize`, the production entry point, because the leak that
+    /// motivated this was not in `failures` alone: `remaining_work`, `progress`
+    /// and `next_step` are all built from the same strings, so one unsanitized
+    /// formatting reached several transmitted fields at once (FR-531, FR-532).
+    #[test]
+    fn no_handoff_field_carries_a_raw_failed_test_command() {
+        let s = session();
+        let mut test = obs(ObservationType::TestRun, "the suite failed");
+        test.command = Some("/opt/ci/bin/pytest -k private_case --token=hunter2".into());
+        test.outcome = Some("failed".into());
+
+        let observations = vec![test];
+        let h = synthesize(
+            &HandoffInputs {
+                session: &s,
+                task: None,
+                observations: &observations,
+                decision_memories: &[],
+                repository_state: RepositoryState::default(),
+                git_changed_files: &[],
+                agent_note: None,
+            },
+            HandoffTrigger::SessionEnd,
+        );
+
+        let everything = serde_json::to_string(&h).expect("a handoff serializes");
+        for leaked in ["/opt/ci", "private_case", "hunter2", "--token"] {
+            assert!(
+                !everything.contains(leaked),
+                "the handoff carried {leaked}: {everything}"
+            );
+        }
+        // The actionable half survives: a reader still learns which runner failed.
+        assert_eq!(h.failures, vec!["Test failed: pytest".to_string()]);
     }
 
     #[test]
@@ -763,6 +820,88 @@ mod tests {
 #[cfg(test)]
 mod path_shape_tests {
     use super::*;
+
+    /// Build a failed `TestRun` observation with a given command.
+    fn failed_test(command: &str) -> Observation {
+        let mut o = failed_run("a test run failed");
+        o.command = Some(command.to_string());
+        o
+    }
+
+    fn failed_run(summary: &str) -> Observation {
+        Observation {
+            id: crate::domain::new_id(),
+            session_id: crate::domain::new_id(),
+            kind: ObservationType::TestRun,
+            occurred_at: chrono::Utc::now(),
+            branch: "main".into(),
+            commit_sha: None,
+            path: None,
+            command: None,
+            exit_code: Some(1),
+            outcome: Some("failed".into()),
+            summary: summary.into(),
+            details: None,
+            payload_bytes: summary.len() as i64,
+            truncated: false,
+            deleted_at: None,
+        }
+    }
+
+    /// A POSIX absolute path in a failed test command does not reach the handoff.
+    ///
+    /// `derive_tests` has always sanitized the command it records; `derive_failures`
+    /// formatted the raw one into `Test failed: {…}`, and that string reaches the
+    /// wire in `failures` and in the prose `derive_remaining`, `derive_progress`
+    /// and `derive_next_step` build from it. Capture-time redaction does not close
+    /// this: `redact::redact` matches secret *shapes*, and a home directory is not
+    /// one (FR-531, FR-532).
+    #[test]
+    fn a_failed_test_command_carries_no_posix_path() {
+        let out = derive_failures(&[failed_test("/Users/dev/work/repo/run-tests.sh --all")]);
+        assert_eq!(out, vec!["Test failed: run-tests.sh".to_string()]);
+    }
+
+    /// The same guarantee for Windows shapes, asserted on every platform for the
+    /// reason `a_windows_path_relativizes_against_a_windows_root` gives.
+    #[test]
+    fn a_failed_test_command_carries_no_windows_path() {
+        let command = format!(r"C:{0}Users{0}dev{0}repo{0}test.exe /verbose", SEP);
+        let out = derive_failures(&[failed_test(&command)]);
+        assert_eq!(out, vec!["Test failed: test.exe".to_string()]);
+    }
+
+    /// A UNC path is a path shape too, and its share name is as identifying as a
+    /// home directory.
+    #[test]
+    fn a_failed_test_command_carries_no_unc_path() {
+        let command = format!(r"{0}{0}buildbox{0}share{0}suite.bat", SEP);
+        let out = derive_failures(&[failed_test(&command)]);
+        assert_eq!(out, vec!["Test failed: suite.bat".to_string()]);
+    }
+
+    /// An argument can be a credential, and it is dropped whether or not
+    /// `redact::redact` recognises its shape.
+    ///
+    /// `--db-password=hunter2` is the case that matters: it is unmistakably a
+    /// secret to a human and matches no secret pattern, so nothing upstream of
+    /// this function removes it. Keeping only the runner name is what makes the
+    /// guarantee independent of the redactor's pattern list.
+    #[test]
+    fn a_failed_test_command_carries_no_argument_or_secret() {
+        let out = derive_failures(&[failed_test(
+            "cargo test --db-password=hunter2 -- --exact secret_case",
+        )]);
+        assert_eq!(out, vec!["Test failed: cargo test".to_string()]);
+    }
+
+    /// A failed run with no command falls back to the summary, sanitized the same
+    /// way — the fallback is not a second, unscreened door.
+    #[test]
+    fn a_failed_test_without_a_command_is_sanitized_too() {
+        let out = derive_failures(&[failed_run("/Users/dev/x.sh blew up")]);
+        assert_eq!(out, vec!["Test failed: x.sh".to_string()]);
+    }
 
     /// Windows-shaped paths relativize, on every platform.
     ///
