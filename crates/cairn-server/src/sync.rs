@@ -18,12 +18,17 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use uuid::Uuid;
 
 /// Fields that would carry observation content. Never accepted (FR-055).
+///
+/// Refused **at any depth** — see `contains_key_recursive` and FR-535. Every
+/// name here describes content: what a command printed, where a file lives, what
+/// a check observed. A name generic enough that a legitimate payload might use it
+/// for something else does not belong on this list; it belongs on
+/// [`FORBIDDEN_OBSERVATION_FIELDS_TOP_LEVEL`].
 const FORBIDDEN_OBSERVATION_FIELDS: &[&str] = &[
     "summary",
     "path",
     "command",
     "details",
-    "outcome",
     "exit_code",
     "observations",
     // ---- Feature 003 (FR-506) -------------------------------------------
@@ -232,6 +237,26 @@ async fn apply_item(
 }
 
 /// Entity types this server can only hold once migration 2 has run.
+/// Observation field names too generic to refuse at every depth.
+///
+/// **`outcome` is the whole list, and it is here because refusing it recursively
+/// broke a payload the feature depends on.** An observation has an `outcome`, so
+/// the name was added to the recursive list — but so does `TestRunRecord`, where
+/// it holds a two-value verdict ("passed" / "failed") and nothing else. Once
+/// FR-535 made the search recursive, every handoff carrying a completed test run
+/// was refused outright: exactly the failure the `command` → `runner` rename
+/// (FR-532) had just been made to prevent, reintroduced under a different name,
+/// and invisible because no test pushed a handoff with a test run at a real
+/// server.
+///
+/// Refusing it at the top level keeps what the name was added for. An
+/// observation-shaped payload has `outcome` as its *own* field, so a payload
+/// smuggling one under a permitted entity type is still refused here — and
+/// `observation` is refused wholesale by `FORBIDDEN_ENTITY_TYPES` besides. What
+/// the top-level check gives up is refusing the word wherever it appears, and
+/// the word alone was never the thing worth refusing.
+const FORBIDDEN_OBSERVATION_FIELDS_TOP_LEVEL: &[&str] = &["outcome"];
+
 const SCHEMA_2_ENTITY_TYPES: &[&str] = &["memory_relation", "task_criterion", "task_blocker"];
 
 /// The four entity types migration **3** adds tables for (FR-498, FR-522).
@@ -392,6 +417,16 @@ fn reject_forbidden_fields(item: &SyncItem) -> Result<(), ApiError> {
             return Err(ApiError::invalid(format!(
                 "`{field}` carries observation content, which never leaves the machine"
             )));
+        }
+    }
+    // Top level only. See the constant for why the depth differs.
+    if let Some(object) = item.payload.as_object() {
+        for field in FORBIDDEN_OBSERVATION_FIELDS_TOP_LEVEL {
+            if object.contains_key(*field) {
+                return Err(ApiError::invalid(format!(
+                    "`{field}` carries observation content, which never leaves the machine"
+                )));
+            }
         }
     }
     if item.entity_type == "session" {
