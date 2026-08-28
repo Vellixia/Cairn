@@ -699,6 +699,13 @@ CREATE TABLE IF NOT EXISTS team_knowledge (
     writer_seq          BIGINT NOT NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     superseded_by_id    UUID,
+    -- Server-only, and only for the pull cursor. `GET /api/sync/changes/team`
+    -- orders on GREATEST of a row's own timestamps, so a change carrying no
+    -- timestamp cannot move a device past it: a supersession that set only
+    -- `superseded_by_id` would reach the ratifying device and leave every other
+    -- device serving guidance an administrator had replaced (FR-462). Not on the
+    -- local schema and not on the wire — what a device needs is the pointer.
+    superseded_at       TIMESTAMPTZ,
     retired_by_user_id  UUID REFERENCES users(id),
     retired_at          TIMESTAMPTZ,
     CHECK (value_key IS NULL OR topic_key IS NOT NULL),
@@ -1086,7 +1093,15 @@ central non-coupling constraint (FR-521), not something left to hold by prose al
 | `personal_knowledge.origin_digest`, `team_knowledge.origin_digest` | Local-only and machine-salted, exactly like `content_norm_digest` above (D434, FR-516, FR-551). MUST NOT be transmitted: the server already knows every project identity, so a transmitted digest could be brute-forced against that list to recover which project a promotion came from. Origin recognition is therefore per-machine only — two devices of the same user will not correlate promotions from the same project, an accepted limitation of keeping the digest off the wire (FR-552). |
 | `project_traits` (whole table) | Derived per-machine from the working tree at link/refresh time; a value on one machine (e.g. a `pnpm-lock.yaml` present only in a developer's uncommitted local checkout state) has no reason to be true on another machine's copy of the same project (D413, FR-438). Verified by SC-469: across a corpus of projects whose traits are all distinct, no trait appears in any transmitted payload or any server table. |
 | `writer_identity` (whole table) | A store's own opaque **registry** — its own identity record and how it was created — has no meaning to any other party and is consumed only locally, as an input to the outbox idempotency-key hash (D407, FR-491). This is narrower than it used to read: `writer_identity` the table stays local-only, but the stamp it produces (`writer_id`, `writer_seq`) does not — see the row above the table, and §4a/§4b, for why the stamp travels while the registry that minted it does not (D448). |
-| `sync_cursor.backoff_until`, `.server_capability` | Purely local scheduling and capability-cache state, the same category `sync_meta.server_capability` already was (`0005_project_intelligence.sql:389`). |
+| `sync_cursor.backoff_until`, `.server_capability` | Purely local scheduling and capability-cache state, the same category `sync_meta.server_capability` already was (`0005_project_intelligence.sql:389`). `backoff_until` is additionally **unwritten**: per-namespace backoff is held in memory per worker task, which is what `contracts/sync-namespaces.md` §4 asks for, and the accessors for the column were removed rather than left implying durable state. |
+| `team_knowledge.superseded_at` (server only) | Exists so a supersession can move this route's pull cursor, nothing more — `GET /api/sync/changes/team` orders on `GREATEST` of a row's own timestamps, and a change with no timestamp cannot move a device past it (FR-462). What a device needs is `superseded_by_id`, which **does** travel; the instant the server recorded it is the server's own bookkeeping. Not on the local schema at all. |
+
+**`team_knowledge.retired_by_user_id` is NOT in this table.** It travels, for the same reason
+`ratified_by_user_id` does: FR-457 asks that every state transition be recorded with who acted *and*
+when, and a replica holding the timestamp without the actor answers half the question — the half that
+matters least. It was absent from the record type and from the wire for most of this feature's
+development, which made "who removed this guidance" answerable only on the server, and falsified two doc
+comments that claimed the local mirror and the wire row matched field for field.
 
 **`personal_knowledge.writer_id`/`writer_seq` and `team_knowledge.writer_id`/`writer_seq` are NOT in this
 table.** An earlier draft listed them here, which could not coexist with §2.1/§2.5 declaring both `NOT
