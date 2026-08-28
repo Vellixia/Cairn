@@ -218,7 +218,15 @@ export interface Handoff {
   changed_files: string[];
   decisions: string[];
   failures: string[];
-  tests_executed: { command: string; outcome: string }[];
+  /**
+   * The runner's name, with flags and paths already stripped.
+   *
+   * Named `runner`, not `command`: a handoff carries no command string
+   * (FR-532). The recursive wire denylist screens *field names*, so a key
+   * called `command` anywhere inside a handoff payload is refused on sight,
+   * which would make every handoff carrying a completed test run undeliverable.
+   */
+  tests_executed: { runner: string; outcome: string }[];
   repository_state: {
     branch: string;
     commit_sha: string | null;
