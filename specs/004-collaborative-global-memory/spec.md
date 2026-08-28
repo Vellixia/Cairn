@@ -748,6 +748,15 @@ the subject section it amends.
 - **FR-590**: Re-enabling a disabled account MUST NOT restore any token revoked while it
   was disabled; a re-enabled account MUST obtain fresh credentials through the ordinary
   token-minting route. (amends Identity, roles and account lifecycle)
+- **FR-591**: A stored account identity MUST be invalidated when the credential it was
+  learned from changes, and the daemon MUST fail closed — establishing no `personal:*` lane
+  and attributing no knowledge to the previous account — until a live authenticated identity
+  lookup succeeds. (amends Identity, roles and account lifecycle)
+- **FR-592**: A `team:*` pull cursor MUST record the caller visibility context under which
+  it was advanced, and MUST be discarded rather than advanced when the server reports a
+  different context, so that a widening of the caller's view of the team feed cannot skip
+  rows that view now includes. (amends Synchronization, namespaces and multi-device
+  concurrency)
 
 ### Key Entities
 

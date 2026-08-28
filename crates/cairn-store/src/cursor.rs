@@ -158,6 +158,56 @@ pub async fn set_pull_cursor(store: &Store, namespace: &SyncNamespace, cursor: &
     Ok(())
 }
 
+/// Forget one namespace's pull position, so the next pull re-reads the lane
+/// from the beginning.
+///
+/// Used when the *meaning* of the stored cursor has lapsed rather than when a
+/// pull failed — see `visibility_context`. A held cursor re-delivers one page;
+/// this re-delivers the lane.
+pub async fn clear_pull_cursor(store: &Store, namespace: &SyncNamespace) -> Result<()> {
+    sqlx::query("UPDATE sync_cursor SET pull_cursor = NULL WHERE namespace = ?1")
+        .bind(namespace.key())
+        .execute(store.pool())
+        .await?;
+    Ok(())
+}
+
+/// The visibility context under which this namespace's cursor was last
+/// advanced, as the server itself reported it.
+///
+/// See the column comment in `0007_collaborative_global_memory.sql` for why a
+/// `team:*` cursor needs this and a `personal:*` cursor does not.
+pub async fn visibility_context(
+    store: &Store,
+    namespace: &SyncNamespace,
+) -> Result<Option<String>> {
+    let row = sqlx::query("SELECT visibility_context FROM sync_cursor WHERE namespace = ?1")
+        .bind(namespace.key())
+        .fetch_optional(store.pool())
+        .await?;
+    Ok(row.and_then(|r| {
+        r.try_get::<Option<String>, _>("visibility_context")
+            .ok()
+            .flatten()
+    }))
+}
+
+pub async fn set_visibility_context(
+    store: &Store,
+    namespace: &SyncNamespace,
+    context: &str,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO sync_cursor (namespace, visibility_context) VALUES (?1, ?2)
+         ON CONFLICT(namespace) DO UPDATE SET visibility_context = ?2",
+    )
+    .bind(namespace.key())
+    .bind(context)
+    .execute(store.pool())
+    .await?;
+    Ok(())
+}
+
 pub async fn last_success_at(
     store: &Store,
     namespace: &SyncNamespace,

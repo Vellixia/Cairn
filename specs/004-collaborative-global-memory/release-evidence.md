@@ -159,3 +159,63 @@ defect class this feature has now found thirteen instances of.
 consume-only device that receives knowledge it never wrote, and `capability_upgrade_e2e.rs`
 exercises the staged-rollout path against a real schema-2 server upgraded in place. What is not
 done is a human executing `quickstart.md` on two physical machines and recording the transcript.
+
+## Post-integration review, round 3
+
+Three defects, and all three are the same shape as the ones before them: a value learned once
+and trusted afterwards, in a place where the thing it described had moved on.
+
+**A raw failed test command reached transmitted handoff fields.** `derive_tests` sanitized the
+command it recorded and said so in its own comment — "the runner's name, never the invocation" —
+while `derive_failures`, ten lines away, formatted the *raw* command into `Test failed: {…}`.
+That string is not confined to `failures`: `derive_remaining`, `derive_progress` and
+`derive_next_step` all build prose from it, so one unsanitized format reached several
+transmitted fields at once. Capture-time redaction does not close it, because `redact::redact`
+matches secret *shapes*, and neither `/Users/dev/work/repo` nor `--db-password=hunter2` is one.
+Both paths now go through `test_runner_name`, the single implementation. Six unit tests over
+strings cover POSIX, Windows, UNC, a secret-bearing argument, the summary fallback, and the
+whole `synthesize` output serialized and searched for every fragment.
+
+**A token switch could keep the previous account's identity (FR-591).** `account_id` is
+persisted deliberately, so a daemon restarting offline still knows whose personal partition it
+holds; falling back to the machine's local id would silently reassign every existing row. But
+`learn_account_identity` is best-effort — offline, it reports success whenever an id is
+*already* recorded — and `establish_global_namespaces` skipped relearning for exactly the same
+reason, because the field was `Some`. Set a second account's token while offline and account B
+read and wrote inside account A's partition, with no failure reported anywhere. A credential
+change now invalidates the identity in memory and on disk and the daemon fails closed: no
+`personal:*` lane can be keyed and nothing is attributed to the previous account until a live
+`GET /api/auth/me` answers. Re-setting the *same* credential is not a change and keeps the
+identity, which is the common offline-friendly case. `logout` was the sibling — it dropped the
+token and left the id sitting there looking authoritative — and now drops both.
+
+A second sibling was fixed without a test that can fail today: `merge_pulled_personal` stamped
+`owner_user_id` from `owner_identity()` rather than from the lane key that delivered the row.
+The two agree in the ordinary case and are not the same thing, and the lane key is the authority
+on whose rows it carries. Driving them apart requires an identity change mid-pull, which no
+deterministic surface exposes; recorded here as hardening rather than as covered behaviour.
+
+**A `team:*` cursor ignored whose feed it had walked (FR-592).** A `personal:*` key carries its
+owner, so two identities get two lanes and two cursors. A `team:*` key carries only the server
+instance — deliberately, since a store binds to one server's team corpus — while the team feed
+is *not* the same feed for every caller: a pending proposal reaches its author and any admin and
+nobody else. A member promoted to admin therefore inherited a cursor that had already walked
+past proposals it could not see then and can see now, and a monotonic cursor never asks again.
+An admin's store was permanently missing the proposals that admin exists to ratify.
+
+`GET /api/sync/changes/team` now returns a `visibility` fingerprint derived from `SettledUser`
+— the authenticated actor, never payload — and the client stores it in
+`sync_cursor.visibility_context`. A reported value that differs from the stored one discards the
+cursor instead of advancing it, and the lane re-reads from the beginning; every team merge is
+idempotent by id, so the cost is one request. A lane with no cursor yet advances normally rather
+than restarting for nothing, and a server that reports no `visibility` behaves exactly as
+before. The client could not compute this itself: role is half of what decides the filter, and
+role is the server's to state.
+
+Each of the five new e2e tests and all six new unit tests were confirmed to fail against the
+unfixed code, and to fail only against their own fix.
+
+Gate after round 3: **1436 passed, 0 failed**; `cargo fmt --all --check` and
+`cargo clippy --workspace --all-targets -- -D warnings` clean.
+
+T104 and T194 are unchanged by this round and stay as recorded above.
