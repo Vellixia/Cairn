@@ -418,6 +418,26 @@ CREATE TABLE outbox_new (
     -- types it is `personal:<server_instance_id>:<owner_user_id>` (D438,
     -- FR-568) or `team:<server_instance_id>`.
     namespace             TEXT NOT NULL,
+    -- Which *account* authored this row, for the global entity types only
+    -- (FR-594). NULL for every project-namespace row, whose authorization is
+    -- project membership and nothing else.
+    --
+    -- Distinct from `writer_id`, which names the *device*: two devices of one
+    -- account have two writer ids and one authored_by_user_id, which is exactly
+    -- the distinction that makes this column necessary. A `personal:*` lane key
+    -- already carries its owner, so the column is redundant there and populated
+    -- anyway for uniformity; a `team:*` lane carries no identity at all, because
+    -- one server has one team corpus that every account on it shares (FR-496).
+    --
+    -- That sharing is what needed guarding. A proposal authored while
+    -- authenticated as A and not yet delivered sat in this queue as an ordinary
+    -- `team:*` row; log in as B and the next drain pushed it, and the server —
+    -- correctly refusing to trust payload identity — attributed it to B. The
+    -- proposal changed author by being late. Claiming now matches on this
+    -- column, so such a row is simply not claimed until A is authenticated
+    -- again, which is the same "held, released automatically" shape §11a uses
+    -- for content a peer cannot yet accept.
+    authored_by_user_id   TEXT,
     -- Project-less for exactly the four domain types, populated for every
     -- other one. A relation between two personal records has no more of a
     -- project than the records do.

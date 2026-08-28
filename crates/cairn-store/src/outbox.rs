@@ -131,6 +131,12 @@ where
 /// project-less row is created, so this is also the only key shape any such
 /// row is ever assigned — nothing here re-keys a row that already exists, and
 /// [`enqueue`]'s project-namespace rows are entirely untouched by this change.
+/// Eight arguments, one past the lint's limit. The eighth is
+/// `authored_by_user_id`, and collapsing it into `writer_id` is exactly the
+/// conflation this function exists to keep apart: one names the device, the other
+/// the account (FR-594). A struct would be these same eight values behind one
+/// name, since every caller supplies all of them.
+#[allow(clippy::too_many_arguments)]
 pub async fn enqueue_global<'e, E>(
     executor: E,
     namespace: &SyncNamespace,
@@ -138,6 +144,11 @@ pub async fn enqueue_global<'e, E>(
     entity_id: Uuid,
     operation: OutboxOperation,
     writer_id: Uuid,
+    // The account that authored this row — not this device's `writer_id`. See
+    // the `authored_by_user_id` column comment in
+    // `0007_collaborative_global_memory.sql` for why the two differ and why a
+    // shared `team:*` lane needs the account recorded (FR-594).
+    authored_by_user_id: Uuid,
     payload: &serde_json::Value,
 ) -> Result<bool>
 where
@@ -157,8 +168,9 @@ where
     sqlx::query(
         "INSERT OR IGNORE INTO outbox
             (id, project_id, server_project_id, entity_type, entity_id, operation,
-             idempotency_key, payload, state, attempts, created_at, namespace)
-         VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, 'pending', 0, ?7, ?8)",
+             idempotency_key, payload, state, attempts, created_at, namespace,
+             authored_by_user_id)
+         VALUES (?1, NULL, NULL, ?2, ?3, ?4, ?5, ?6, 'pending', 0, ?7, ?8, ?9)",
     )
     .bind(new_id().to_string())
     .bind(entity_type.as_str())
@@ -168,6 +180,7 @@ where
     .bind(body)
     .bind(rows::now_text())
     .bind(namespace.key())
+    .bind(authored_by_user_id.to_string())
     .execute(executor)
     .await?;
     Ok(true)
@@ -495,14 +508,48 @@ pub async fn total(store: &Store, project_id: Uuid) -> Result<i64> {
 ///
 /// The only path that can claim a `personal:*` or `team:*` row, since neither
 /// carries a `project_id` for `claim`'s predicate to match against.
+/// As [`claim_namespace`], claiming only rows the given account authored.
+///
+/// **Held, not claimed** (FR-594). Filtering in the claim rather than after it is
+/// what keeps this from being a spin: a row skipped after claiming would already
+/// have had `attempts` incremented and `state` moved to `in_flight`, so every
+/// drain cycle would take another attempt against a row it was never going to
+/// send, and the row would eventually look like a failing delivery instead of a
+/// waiting one. A row that is never claimed simply stays `pending`, reports as
+/// pending, and goes out unchanged the moment its author is authenticated again.
+///
+/// Rows with no recorded author — every project-namespace row, and any global row
+/// written before this column existed — are claimable by anyone, which preserves
+/// exactly the behaviour they had.
+pub async fn claim_namespace_for_author(
+    store: &Store,
+    namespace: &str,
+    author: Uuid,
+    limit: i64,
+) -> Result<Vec<(Uuid, SyncItem)>> {
+    claim_in(store, namespace, Some(author), limit).await
+}
+
 pub async fn claim_namespace(
     store: &Store,
     namespace: &str,
     limit: i64,
 ) -> Result<Vec<(Uuid, SyncItem)>> {
+    claim_in(store, namespace, None, limit).await
+}
+
+async fn claim_in(
+    store: &Store,
+    namespace: &str,
+    author: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<(Uuid, SyncItem)>> {
     let now = chrono::Utc::now();
     let stale_before = rows::ts_text(now - chrono::Duration::seconds(CLAIM_TIMEOUT_SECONDS));
 
+    // `?5 IS NULL` makes the unfiltered case one statement rather than two: with
+    // no author bound the predicate is constant-true and the plan is the one
+    // `outbox_claimable` already serves.
     let rs = sqlx::query(
         "UPDATE outbox
             SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1
@@ -513,6 +560,9 @@ pub async fn claim_namespace(
                  AND (state = 'pending'
                       OR (state = 'in_flight'
                           AND (claimed_at IS NULL OR claimed_at < ?3)))
+                 AND (?5 IS NULL
+                      OR authored_by_user_id IS NULL
+                      OR authored_by_user_id = ?5)
                ORDER BY created_at, id
                LIMIT ?4
           )
@@ -522,6 +572,7 @@ pub async fn claim_namespace(
     .bind(namespace)
     .bind(stale_before)
     .bind(limit)
+    .bind(author.map(|a| a.to_string()))
     .fetch_all(store.pool())
     .await?;
 
@@ -1268,6 +1319,7 @@ mod tests {
             entity,
             OutboxOperation::Upsert,
             new_id(), // writer A
+            new_id(), // authored by some account
             &payload,
         )
         .await
@@ -1282,6 +1334,7 @@ mod tests {
             entity,
             OutboxOperation::Upsert,
             new_id(), // writer B — different identity, same everything else
+            new_id(), // authored by some account
             &payload,
         )
         .await
@@ -1329,6 +1382,7 @@ mod tests {
                 entity,
                 OutboxOperation::Upsert,
                 writer,
+                new_id(),
                 &payload,
             )
             .await
@@ -1353,6 +1407,7 @@ mod tests {
             new_id(),
             OutboxOperation::Upsert,
             new_id(),
+            new_id(),
             &serde_json::json!({}),
         )
         .await
@@ -1373,7 +1428,65 @@ mod tests {
     // Namespace-scoped claim, block and release (T093, T104, T106, T107)
     // -----------------------------------------------------------------------
 
+    /// A shared `team:*` lane holds another account's queued rows instead of
+    /// letting the current account send them (FR-594).
+    ///
+    /// The row stays `pending` rather than being claimed and skipped: a claim
+    /// increments `attempts` and moves the row to `in_flight`, so a drain that
+    /// claimed and then declined would spend an attempt per cycle on a row it was
+    /// never going to send, and the row would eventually read as a failing
+    /// delivery rather than a waiting one.
+    #[tokio::test]
+    async fn a_claim_scoped_to_one_author_leaves_another_accounts_rows_pending() {
+        let store = Store::open_memory().await.unwrap();
+        let namespace = SyncNamespace::Team(new_id());
+        let (account_a, account_b) = (new_id(), new_id());
+        queue_global_authored_by(&store, &namespace, account_a, 2).await;
+        queue_global_authored_by(&store, &namespace, account_b, 3).await;
+
+        let as_b = claim_namespace_for_author(&store, &namespace.key(), account_b, 100)
+            .await
+            .unwrap();
+        assert_eq!(as_b.len(), 3, "B claimed rows that are not B's to send");
+
+        let (pending, _) = counts_namespace(&store, &namespace.key()).await.unwrap();
+        assert_eq!(
+            pending, 5,
+            "A's rows must still be pending, not consumed and not failed"
+        );
+
+        // A logging back in finds its own work exactly as it left it.
+        let as_a = claim_namespace_for_author(&store, &namespace.key(), account_a, 100)
+            .await
+            .unwrap();
+        assert_eq!(as_a.len(), 2, "A's own rows were not released back to A");
+    }
+
+    /// An unfiltered claim still takes everything, so project lanes and any row
+    /// written before this column existed behave exactly as before.
+    #[tokio::test]
+    async fn an_unscoped_claim_is_unchanged_by_the_author_column() {
+        let store = Store::open_memory().await.unwrap();
+        let namespace = SyncNamespace::Team(new_id());
+        queue_global_authored_by(&store, &namespace, new_id(), 2).await;
+        queue_global_authored_by(&store, &namespace, new_id(), 2).await;
+
+        let all = claim_namespace(&store, &namespace.key(), 100)
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 4);
+    }
+
     async fn queue_global_of(store: &Store, namespace: &SyncNamespace, n: usize) {
+        queue_global_authored_by(store, namespace, new_id(), n).await
+    }
+
+    async fn queue_global_authored_by(
+        store: &Store,
+        namespace: &SyncNamespace,
+        author: Uuid,
+        n: usize,
+    ) {
         for i in 0..n {
             let mut tx = crate::tx::begin(store, "queue_global_of").await.unwrap();
             enqueue_global(
@@ -1383,6 +1496,7 @@ mod tests {
                 new_id(),
                 OutboxOperation::Upsert,
                 new_id(),
+                author,
                 &serde_json::json!({ "i": i }),
             )
             .await

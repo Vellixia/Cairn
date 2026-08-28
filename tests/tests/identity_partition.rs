@@ -444,3 +444,357 @@ fn the_team_visibility_context_tracks_the_authenticated_caller() {
         "a role change did not register as a change of view"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 3. The routing invariant, at every entry point that pushes or pulls
+// ---------------------------------------------------------------------------
+
+fn lanes(s: &Sandbox) -> Vec<String> {
+    s.query_column("SELECT namespace FROM sync_cursor ORDER BY namespace")
+}
+
+fn personal_lane_of(s: &Sandbox, account: &str) -> Option<String> {
+    lanes(s)
+        .into_iter()
+        .find(|n| n.starts_with("personal:") && n.ends_with(account))
+}
+
+fn pending_on(s: &Sandbox, namespace: &str) -> i64 {
+    s.query_column(&format!(
+        "SELECT CAST(COUNT(*) AS TEXT) FROM outbox \
+         WHERE namespace = '{namespace}' AND state IN ('pending', 'in_flight')"
+    ))
+    .first()
+    .and_then(|n| n.parse().ok())
+    .unwrap_or(0)
+}
+
+/// The background worker will not pull a personal lane belonging to an account
+/// this machine is no longer authenticated as.
+///
+/// The guard existed in `cairn sync now` and nowhere else, so the guarantee held
+/// only for as long as a user synchronized by hand. On the worker's next tick —
+/// thirty seconds later, unprompted — A's lane was drained and pulled under B's
+/// credentials (FR-593).
+///
+/// **The pull direction is what this asserts**, because it is the one the lane
+/// filter alone prevents: pushing is separately closed by the author filter on
+/// the claim (FR-594), so a test written against pushing passes even with the
+/// worker's filter removed. A `GET /api/sync/changes/personal` sent on A's lane
+/// while holding B's token returns *B's* rows — the server filters that feed by
+/// the authenticated caller — and `merge_pulled_personal` files them under the
+/// lane's owner, which is A.
+///
+/// Two details of the arrangement are load-bearing, and both were found by
+/// watching an earlier version of this test pass against the defect:
+///
+/// - **A's note is written after the first `sync now`, and never delivered.** A
+///   lane with queued work is discovered from the outbox, which the worker reads
+///   before `sync_cursor`, so A's lane is pulled before B's within a tick. The
+///   other order hides the bug: B's row lands under B first, and the misfile then
+///   fails on the primary key instead of happening.
+/// - **The assertion is on the owner of the row that arrived**, not on its
+///   absence. Waiting for a row under B and then checking A would time out rather
+///   than fail, because a misfiled row makes the correct insert conflict.
+///
+/// Falsified by removing the `may_sync_lane` filter from `run_worker`'s target
+/// construction: B's note arrives owned by A.
+#[test]
+fn the_background_worker_will_not_pull_a_foreign_personal_lane() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "worker-a");
+    let b = device(&server, "worker-b");
+
+    let a_id = server_account_id(&server, &a.email);
+    let b_id = server_account_id(&server, &b.email);
+
+    // A's lane, established and pulled once, with its cursor at the beginning.
+    a.sandbox.must(&["sync", "now"]);
+    let a_lane = personal_lane_of(&a.sandbox, &a_id).expect("A's personal lane");
+
+    // Queued and deliberately not delivered, so A's lane is discovered from the
+    // outbox and therefore reached first on a tick.
+    remember_personal(&a.sandbox, "a note that stays in the queue");
+    assert!(
+        pending_on(&a.sandbox, &a_lane) > 0,
+        "nothing is queued on A's lane, so the worker would not reach it first"
+    );
+
+    // B has personal knowledge of its own on the server, written from B's own
+    // device. This is what a wrongly routed pull delivers.
+    let marker = format!("worker-marker-{}", Uuid::now_v7().simple());
+    remember_personal(&b.sandbox, &format!("the worker {marker} ticks"));
+    b.sandbox.must(&["sync", "now"]);
+    assert_eq!(
+        server.count(&format!(
+            "SELECT count(*) FROM personal_knowledge \
+             WHERE owner_user_id = '{b_id}' AND content LIKE '%{marker}%'"
+        )),
+        1,
+        "B's note never reached the server, so this test would pass vacuously"
+    );
+
+    // B takes over A's machine. A's lane stays on the store — that is the design,
+    // since a store legitimately holds several identities' knowledge.
+    attach_server(&a.sandbox, &server, &b.token);
+    assert!(
+        lanes(&a.sandbox).contains(&a_lane),
+        "A's lane vanished; this test needs it present to prove it is not pulled"
+    );
+
+    // Restarted, so every lane's clock starts due. Without this, A's lane is due
+    // one `PULL_INTERVAL_SECONDS` after its last pull while B's brand-new lane is
+    // due at once — B's row lands first, and the misfile then fails on the
+    // primary key instead of happening. A restart is not a contrivance: it is the
+    // ordinary state of a machine that was switched to another account and then
+    // used again later.
+    a.sandbox.restart_daemon();
+
+    // No `sync now` from here on: the worker is the entry point under test.
+    let owner_column =
+        format!("SELECT owner_user_id FROM personal_knowledge WHERE content LIKE '%{marker}%'");
+    a.sandbox.settle_within(
+        "the worker to deliver B's personal knowledge to this machine",
+        std::time::Duration::from_secs(90),
+        |s| !s.query_column(&owner_column).is_empty(),
+    );
+
+    assert_eq!(
+        a.sandbox.query_column(&owner_column),
+        vec![b_id],
+        "the background worker pulled account A's lane while authenticated as \
+         account B, filing B's personal knowledge into A's partition"
+    );
+}
+
+/// A team proposal authored as A is not submitted after B logs in.
+///
+/// The `team:*` lane is shared by every account on a server, by design, and the
+/// server correctly refuses to trust payload identity — so an undelivered
+/// proposal pushed under the wrong token is recorded with the wrong proposer. The
+/// proposal would change author by being late. It is held instead, and goes out
+/// unchanged when A returns (FR-594).
+///
+/// Falsified by restoring the unfiltered `claim_namespace` in `drain_global`: the
+/// server records B as the proposer of A's text.
+#[test]
+fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "attrib-a");
+    let b = device(&server, "attrib-b");
+
+    let a_id = server_account_id(&server, &a.email);
+    let b_id = server_account_id(&server, &b.email);
+
+    let topic = format!("attrib-{}", Uuid::now_v7().simple());
+    let proposed = a.sandbox.json(&[
+        "team",
+        "propose",
+        "hold the cursor when a page does not fully merge",
+        "--topic-key",
+        &topic,
+        "--value-key",
+        "holdcursor",
+    ]);
+    let id = proposed["entry"]["id"].as_str().expect("an id").to_string();
+
+    // B logs in on this machine before A's proposal was ever delivered.
+    attach_server(&a.sandbox, &server, &b.token);
+    a.sandbox.must(&["sync", "now"]);
+
+    let submitted = server.count(&format!(
+        "SELECT count(*) FROM team_knowledge WHERE id = '{id}'"
+    ));
+    assert_eq!(
+        submitted, 0,
+        "A's undelivered proposal was pushed while authenticated as B"
+    );
+    let wrong = server.count(&format!(
+        "SELECT count(*) FROM team_knowledge WHERE proposed_by_user_id = '{b_id}' \
+         AND topic_key = '{topic}'"
+    ));
+    assert_eq!(wrong, 0, "the proposal was attributed to B");
+
+    // A returns, and the proposal goes out under its own author.
+    attach_server(&a.sandbox, &server, &a.token);
+    a.sandbox.must(&["sync", "now"]);
+    let now_there = server.query_column(&format!(
+        "SELECT proposed_by_user_id::text FROM team_knowledge WHERE id = '{id}'"
+    ));
+    assert_eq!(
+        now_there,
+        vec![a_id],
+        "the held proposal did not go out as A once A was authenticated again"
+    );
+}
+
+/// Global push uses a project the **authenticated account** belongs to.
+///
+/// The batch route authorizes by project membership, and the client offered the
+/// first *locally linked* project — a fact about this machine's past, not about
+/// who holds the token. A store linked as A and authenticated as B named A's
+/// project, the route refused a caller who is not a member, and every global push
+/// failed silently for as long as B stayed logged in (FR-595).
+///
+/// B here is a member of no project A linked, which is what makes the old
+/// behaviour fail and the new behaviour succeed.
+///
+/// Falsified by restoring `any_linked_project`: B's own personal knowledge never
+/// reaches the server, because the batch is authorized against A's project.
+#[test]
+fn global_push_authorizes_against_a_project_this_account_belongs_to() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "authproj-a");
+
+    // A second account with a project of its own, so it is a member of something
+    // — and not of A's.
+    let b_email = format!("authproj-b-{}@example.test", Uuid::now_v7().simple());
+    server.create_user(&b_email, "authproj-b", "correct-horse-battery");
+    let b_token = server.token_for(&b_email, "correct-horse-battery");
+    let (created, status) = post_json_status_bearer(
+        &server.base,
+        "/api/projects",
+        &json!({ "name": "authproj-b", "repository_remote": "git@localhost:cairnfixture/authproj-b.git" }),
+        &b_token,
+    );
+    assert_eq!(status, 200, "create B's project: {created}");
+
+    // The store keeps A's link — the stale local fact — while authenticating as B.
+    attach_server(&a.sandbox, &server, &b_token);
+    let b_id = server_account_id(&server, &b_email);
+
+    let marker = format!("authproj-marker-{}", Uuid::now_v7().simple());
+    remember_personal(&a.sandbox, &format!("the batch {marker} authorizes"));
+    a.sandbox.must(&["sync", "now"]);
+
+    let landed = server.count(&format!(
+        "SELECT count(*) FROM personal_knowledge \
+         WHERE owner_user_id = '{b_id}' AND content LIKE '%{marker}%'"
+    ));
+    assert_eq!(
+        landed, 1,
+        "B's own personal knowledge never reached the server: the batch was \
+         authorized against a project B is not a member of"
+    );
+}
+
+/// A cleared account identity stays cleared across a daemon restart.
+///
+/// Clearing only the in-memory copy is fail-closed for the life of one process.
+/// The config still named the previous account, so the next start read it back
+/// and paired it with the *new* token — FR-591 reconstituted by a restart, which
+/// is why the config write is now propagated rather than logged (FR-596).
+///
+/// Falsified by returning `Ok(())` from `forget_account_identity` regardless of
+/// the save: the restarted daemon attributes new personal writes to A.
+#[test]
+fn a_cleared_account_identity_survives_a_daemon_restart() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "restart-a");
+    let b = device(&server, "restart-b");
+
+    a.sandbox.must(&["sync", "now"]);
+    let a_id = server_account_id(&server, &a.email);
+    assert_eq!(
+        account_id_in_config(&a.sandbox).as_deref(),
+        Some(a_id.as_str())
+    );
+
+    // Offline switch, so nothing relearns the identity.
+    let out = a.sandbox.cairn(&[
+        "auth",
+        "token",
+        "set",
+        &b.token,
+        "--server",
+        "http://127.0.0.1:1",
+    ]);
+    assert!(out.ok(), "auth token set failed: {}", out.stderr);
+    assert_eq!(account_id_in_config(&a.sandbox), None);
+
+    a.sandbox.restart_daemon();
+    assert_eq!(
+        account_id_in_config(&a.sandbox),
+        None,
+        "the restarted daemon read the previous account back off disk"
+    );
+
+    // And the restarted daemon does not file new knowledge under A.
+    let marker = format!("restart-marker-{}", Uuid::now_v7().simple());
+    remember_personal(&a.sandbox, &format!("the restart {marker} holds"));
+    let owner_of_marker = a.sandbox.query_column(&format!(
+        "SELECT owner_user_id FROM personal_knowledge WHERE content LIKE '%{marker}%'"
+    ));
+    assert_eq!(owner_of_marker.len(), 1, "the note was not recorded");
+    assert_ne!(
+        owner_of_marker[0], a_id,
+        "the restarted daemon attributed a new note to the previous account"
+    );
+}
+
+/// Set the read-only flag on a path, cross-platform.
+fn set_readonly(path: &std::path::Path, readonly: bool) {
+    let mut perms = std::fs::metadata(path)
+        .expect("the file exists")
+        .permissions();
+    perms.set_readonly(readonly);
+    std::fs::set_permissions(path, perms).expect("permissions are settable");
+}
+
+/// A credential change that cannot durably invalidate the stale account identity
+/// fails, and changes nothing.
+///
+/// Clearing only the in-memory copy is fail-closed for the life of one process
+/// and no longer: the config still names the previous account, so the next daemon
+/// start reads it back and pairs it with the **new** token — FR-591
+/// reconstituted by a restart. The save failure used to be logged at debug and
+/// the command reported success over exactly that state (FR-596).
+///
+/// So the invalidation happens before anything is written down. When it fails,
+/// the old token is still on disk beside the old account id and the two still
+/// agree: there is no state in which a credential and an identity name different
+/// accounts. The caller is told, rather than left to discover it at the next
+/// restart.
+///
+/// Falsified by ignoring the config-save error in `forget_account_identity`, or
+/// by moving the invalidation back after the token write: the command succeeds
+/// and the token on disk becomes B's while the recorded account stays A's.
+#[test]
+fn a_credential_change_that_cannot_clear_the_stale_identity_fails_and_changes_nothing() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "durable-a");
+    let b = device(&server, "durable-b");
+
+    a.sandbox.must(&["sync", "now"]);
+    let a_id = server_account_id(&server, &a.email);
+    assert_eq!(
+        account_id_in_config(&a.sandbox).as_deref(),
+        Some(a_id.as_str())
+    );
+
+    let token_file = a.sandbox.cairn_home().join("token");
+    let config_file = a.sandbox.cairn_home().join("config.json");
+    let token_before = std::fs::read_to_string(&token_file).expect("a stored token");
+
+    set_readonly(&config_file, true);
+    let out = a.sandbox.cairn(&["auth", "token", "set", &b.token]);
+    set_readonly(&config_file, false);
+
+    assert!(
+        !out.ok(),
+        "a token change that could not clear the recorded account reported success: {}{}",
+        out.stdout,
+        out.stderr
+    );
+    assert_eq!(
+        account_id_in_config(&a.sandbox).as_deref(),
+        Some(a_id.as_str()),
+        "the recorded account changed even though the save failed"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&token_file).expect("a stored token"),
+        token_before,
+        "the new token was written while the previous account's identity stayed \
+         on disk — the exact pairing that fails closed only until a restart"
+    );
+}

@@ -225,10 +225,20 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
         // a consume-only machine has the second and not the first. Taking only
         // the first is the defect §5 describes: it made the pull unreachable on
         // exactly the machines that had nothing but pulling to do.
+        //
+        // Both sources are filtered through [`may_sync_lane`], the same rule
+        // `cairn sync now` applies. The worker used to skip it, so a lane
+        // belonging to an account this machine is no longer authenticated as was
+        // pushed and pulled under the current account's credentials on the next
+        // tick — thirty seconds later, with no one having asked for a sync
+        // (FR-593).
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         if let Ok(known) = outbox::known_namespaces(&daemon.store).await {
             for key in known {
                 if let Some(ns) = parse_global_namespace(&key) {
+                    if !may_sync_lane(&daemon, &ns).await {
+                        continue;
+                    }
                     if seen.insert(key) {
                         targets.push(NamespaceTarget::Global(ns));
                     }
@@ -238,6 +248,9 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
         if let Ok(established) = cursor::established(&daemon.store).await {
             for ns in established {
                 if matches!(ns, SyncNamespace::Project(_)) {
+                    continue;
+                }
+                if !may_sync_lane(&daemon, &ns).await {
                     continue;
                 }
                 if seen.insert(ns.key()) {
@@ -493,15 +506,31 @@ fn provisional_instance(url: &str) -> Uuid {
 /// account partition, and no `personal:*` lane can be keyed at all until a live
 /// `GET /api/auth/me` says who is authenticated (FR-591). Losing A's rows from view is the
 /// point — they belong to A, and this process is no longer A.
-async fn forget_account_identity(d: &Daemon) {
+async fn forget_account_identity(d: &Daemon) -> Result<(), WireError> {
     d.server.write().await.account_id = None;
     let mut config = d.config.write().await;
     if config.server_account_id.is_some() {
         config.server_account_id = None;
-        if let Err(e) = config.save() {
-            tracing::debug!(error = %e, "could not clear the stored server account id");
-        }
+        // **Failing closed has to reach the disk** (FR-596). Clearing only the
+        // in-memory copy is fail-closed for the life of this process and no
+        // longer: the config still names the previous account, so the next daemon
+        // start reads it back and pairs it with the *new* token — which is
+        // exactly the state FR-591 exists to prevent, reconstituted by a restart.
+        // A caller that cannot be told this happened would report a successful
+        // credential change over a store that is one restart away from writing
+        // into someone else's partition, so the error is propagated rather than
+        // logged.
+        config.save().map_err(|e| {
+            WireError::new(
+                codes::STORAGE_UNAVAILABLE,
+                format!(
+                    "could not clear the recorded server account identity, so the \
+                     credential was left unchanged: {e}"
+                ),
+            )
+        })?;
     }
+    Ok(())
 }
 
 async fn learn_account_identity(d: &Daemon) -> bool {
@@ -699,6 +728,56 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
 /// idempotent by id, so a row that becomes mergeable later arrives again on the
 /// next full pull rather than being lost. A *transport* failure returns `Err`
 /// and does not advance the cursor, which is the case that must retry.
+/// Whether this daemon, as currently authenticated, may synchronize `namespace`.
+///
+/// **The routing invariant for every global lane, in one place** (FR-567,
+/// FR-593). A `personal:*` key names the account that owns the rows in it, and
+/// this machine has standing to push or pull that lane only while it is
+/// authenticated as that account. After `cairn auth token set` moves a store to a
+/// second account, the first account's lane is still recorded here — that is the
+/// design, since a store legitimately holds several identities' personal
+/// knowledge (§10) — and it must simply sit still.
+///
+/// This began as an inline check inside `sync_now` and nowhere else, which is why
+/// it is a function now. The background worker builds its own target list from
+/// the outbox and from `sync_cursor` and had no such check, so the guarantee held
+/// for exactly as long as a user only ever synchronized by hand: on the worker's
+/// next tick — every thirty seconds, unprompted — A's personal lane was drained
+/// and pulled under B's credentials. A rule enforced at one of two call sites is
+/// not enforced.
+///
+/// `team:*` is deliberately not filtered here. A store binds to one server's team
+/// corpus and every account on that server reads the same corpus (FR-496), so
+/// there is no per-identity team lane to hold back. What *is* per-identity about
+/// team knowledge is who authored a queued proposal, and that is enforced where
+/// the proposal is claimed rather than by refusing the whole lane — see
+/// [`drain_global`].
+async fn may_sync_lane(d: &Daemon, namespace: &SyncNamespace) -> bool {
+    match namespace {
+        SyncNamespace::Personal(_, owner) => *owner == d.owner_identity().await,
+        SyncNamespace::Team(_) | SyncNamespace::Project(_) => true,
+    }
+}
+
+/// Every global lane this store may synchronize as the account it currently
+/// holds, established first so a freshly authenticated store has lanes to return.
+///
+/// Both entry points — `cairn sync now` and the background worker — route through
+/// this, so neither can acquire a lane the other would refuse.
+async fn syncable_global_lanes(d: &Daemon) -> Vec<SyncNamespace> {
+    let _ = establish_global_namespaces(d).await;
+    let mut out = Vec::new();
+    for namespace in cursor::established(&d.store).await.unwrap_or_default() {
+        if matches!(namespace, SyncNamespace::Project(_)) {
+            continue;
+        }
+        if may_sync_lane(d, &namespace).await {
+            out.push(namespace);
+        }
+    }
+    out
+}
+
 async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, WireError> {
     let c = client(d).await?;
 
@@ -1217,6 +1296,31 @@ async fn decode(response: reqwest::Response) -> Result<serde_json::Value, WireEr
 pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> Reply {
     cairn_core::paths::ensure_home()
         .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
+
+    // A different token, or the same token against a different server, may name
+    // a different account, so the recorded identity stops being evidence of
+    // anything. It is dropped **before** any of this is written down, which is
+    // what makes a failure here harmless: nothing has changed yet, so the store
+    // keeps the old token beside the old account id and the two still agree. The
+    // reverse order — write the credential, then try to clear the identity —
+    // leaves a new token paired with a stale account id on disk if the second
+    // step fails, which is FR-591 again, one restart away (FR-596).
+    //
+    // Re-setting the *same* credential is not a change and keeps the identity.
+    // That case is common and offline-friendly (`cairn auth token set` re-run
+    // from a script), and invalidating there would strand a user's own personal
+    // rows every time they re-applied a token they already held.
+    let credential_changed = {
+        let creds = d.server.read().await;
+        creds.token.as_deref() != Some(token.trim())
+            || server_url
+                .as_ref()
+                .is_some_and(|u| creds.url.as_ref() != Some(u))
+    };
+    if credential_changed {
+        forget_account_identity(d).await?;
+    }
+
     let path = cairn_core::paths::token_path();
     std::fs::write(&path, token.trim())
         .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
@@ -1227,10 +1331,6 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
     }
 
     let mut creds = d.server.write().await;
-    let credential_changed = creds.token.as_deref() != Some(token.trim())
-        || server_url
-            .as_ref()
-            .is_some_and(|u| creds.url.as_ref() != Some(u));
     creds.token = Some(token.trim().to_string());
     if let Some(url) = server_url {
         creds.url = Some(url.clone());
@@ -1242,21 +1342,6 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
     }
     let url = creds.url.clone();
     drop(creds);
-
-    // A different token, or the same token against a different server, may name
-    // a different account — so the recorded identity is no longer evidence of
-    // anything and is dropped before the lookup rather than after it. See
-    // [`forget_account_identity`]: the lookup below is allowed to fail, and if
-    // the stale id survived that failure this daemon would keep operating inside
-    // the previous account's personal partition.
-    //
-    // Re-setting the *same* credential is not a change and keeps the identity.
-    // That case is common and offline-friendly (`cairn auth token set` re-run
-    // from a script), and invalidating there would strand a user's own personal
-    // rows every time they re-applied a token they already held.
-    if credential_changed {
-        forget_account_identity(d).await;
-    }
 
     // Learn which account this token belongs to, and persist it. Personal
     // knowledge is partitioned by the owning account (FR-567, FR-568), so this
@@ -1391,14 +1476,20 @@ pub async fn auth_me(d: &Daemon) -> Reply {
 }
 
 pub async fn logout(d: &Daemon) -> Reply {
+    // Logging out ends this process's claim to that account, so the identity goes
+    // with the credential — and goes *first*, for the reason [`set_token`] gives.
+    // Left behind, it would keep steering local personal writes into the
+    // logged-out account's partition, and would still be sitting there looking
+    // authoritative when a different person logs in on this machine.
+    //
+    // If it cannot be cleared durably the token stays too, and the caller is told
+    // the logout did not complete. A logout that removed the credential but left
+    // the identity would be the worse outcome of the two: no token to correct the
+    // record with, and a machine still attributing knowledge to whoever last used
+    // it (FR-596).
+    forget_account_identity(d).await?;
     let _ = std::fs::remove_file(cairn_core::paths::token_path());
     d.server.write().await.token = None;
-    // Logging out ends this process's claim to that account, so the identity
-    // goes with the credential. Left behind, it would keep steering local
-    // personal writes into the logged-out account's partition — and would still
-    // be sitting there, looking authoritative, when a different person logs in
-    // on this machine (see [`forget_account_identity`]).
-    forget_account_identity(d).await;
     Ok(json!({ "token_stored": false }))
 }
 
@@ -2032,20 +2123,7 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
     //
     // Lanes are established first, because a store authenticated since the last
     // establish window has none yet and there would be nothing to drain.
-    let _ = establish_global_namespaces(d).await;
-    let lanes = cursor::established(&d.store).await.unwrap_or_default();
-    for namespace in lanes {
-        if matches!(namespace, SyncNamespace::Project(_)) {
-            continue;
-        }
-        // Another identity's lane is held on this store and not synchronized:
-        // this machine is not authenticated as that account, so it has no
-        // standing to push or pull for it (FR-567).
-        if let SyncNamespace::Personal(_, user) = namespace {
-            if user != d.owner_identity().await {
-                continue;
-            }
-        }
+    for namespace in syncable_global_lanes(d).await {
         if let Ok((a, dup, rej)) = drain_global(d, &namespace).await {
             applied += a;
             duplicate += dup;
@@ -2217,12 +2295,61 @@ async fn drain(
 /// authorization context only, not an attribution. Any project this account
 /// belongs to satisfies it. A store with no linked project at all has nothing
 /// to authenticate a personal or team push through yet.
-async fn any_linked_project(d: &Daemon) -> Option<Uuid> {
-    let projects = repo::list_projects(&d.store).await.ok()?;
-    projects
+/// A server project the **currently authenticated account** is a member of, for
+/// the `project_id` that `POST /api/sync/batch` authorizes against (FR-595).
+///
+/// A global batch carries no project — a personal or team row belongs to none —
+/// but the route still needs one, because project membership is what it checks a
+/// caller against. This picked the first locally linked project, and "locally
+/// linked" is a fact about this machine's past, not about who is holding the
+/// token now: a store linked as A and then authenticated as B offered A's
+/// project, the route refused a caller who is not a member of it, and **every**
+/// global push failed — personal and team both, silently, for as long as B stayed
+/// logged in. Nothing in the local store can distinguish the two cases, because
+/// membership is not local state.
+///
+/// So the server is asked. `GET /api/projects` returns exactly the caller's
+/// memberships, from the authenticated identity rather than from anything sent,
+/// and the answer is intersected with what this machine has linked so an
+/// established local project is preferred over an unrelated one the account
+/// happens to belong to. Ordering is by id so the choice is stable across calls
+/// and across devices — a batch's authorization project is not otherwise
+/// meaningful, and a stable one keeps this testable.
+///
+/// `None` means this account is a member of no project the route would accept,
+/// and the drain holds its work rather than sending a batch that cannot be
+/// authorized. That is the same outcome as the old "no linked project" branch,
+/// reached for a reason that is now true.
+async fn authorization_project(d: &Daemon) -> Option<Uuid> {
+    let client = client(d).await.ok()?;
+    let body = client.get("/api/projects").await.ok()?;
+    let mut mine: Vec<Uuid> = body
+        .get("projects")
+        .and_then(|v| v.as_array())
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
+                .filter_map(|s| Uuid::parse_str(s).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    if mine.is_empty() {
+        return None;
+    }
+    mine.sort();
+
+    let linked: std::collections::HashSet<Uuid> = repo::list_projects(&d.store)
+        .await
+        .unwrap_or_default()
         .into_iter()
-        .find(|p| p.linked)
-        .and_then(|p| p.server_project_id)
+        .filter(|p| p.linked)
+        .filter_map(|p| p.server_project_id)
+        .collect();
+
+    mine.iter()
+        .find(|id| linked.contains(id))
+        .or_else(|| mine.first())
+        .copied()
 }
 
 /// [`drain`], for a `personal:*`/`team:*` namespace (T093, T100, T106, T107).
@@ -2251,15 +2378,27 @@ async fn drain_global(
     let capability = refresh_capability(d, namespace).await;
     let key = namespace.key();
 
-    let Some(auth_project) = any_linked_project(d).await else {
-        return Ok((0, 0, 0));
-    };
+    // Only rows this account authored (FR-594). A `team:*` lane is shared by
+    // every account on the server, so an undelivered proposal written as A would
+    // otherwise be pushed once B logs in — and the server, right to distrust
+    // payload identity, would record B as its proposer. See
+    // [`outbox::claim_namespace_for_author`] for why the filter belongs in the
+    // claim.
+    let author = d.owner_identity().await;
+
+    // Resolved on the first non-empty batch, not up front. The namespace's
+    // pending count includes rows held for another account's author, so a lane
+    // whose only queued work belongs to a logged-out identity reaches this
+    // function on every tick with nothing it may send — and asking the server
+    // which projects this account belongs to in order to send nothing is a
+    // request every thirty seconds, forever.
+    let mut auth_project: Option<Uuid> = None;
 
     let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
     let mut connection: Option<Client> = None;
 
     loop {
-        let batch = outbox::claim_namespace(&d.store, &key, BATCH)
+        let batch = outbox::claim_namespace_for_author(&d.store, &key, author, BATCH)
             .await
             .map_err(storage_err)?;
         if batch.is_empty() {
@@ -2277,12 +2416,25 @@ async fn drain_global(
         }
         let c = connection.as_ref().expect("a client was just built");
 
+        if auth_project.is_none() {
+            auth_project = authorization_project(d).await;
+        }
+        let Some(project_id) = auth_project else {
+            // Nothing this batch could be authorized against. The rows go back to
+            // `pending` rather than counting as failures: the account will belong
+            // to a project, or a different account will log in, and neither is
+            // this row's fault.
+            tracing::debug!(
+                namespace = %key,
+                "holding this batch: the authenticated account belongs to no project \
+                 the sync route would authorize"
+            );
+            release(d, &batch, "no authorization project for this account").await?;
+            break;
+        };
+
         let items: Vec<SyncItem> = batch.iter().map(|(_, item)| item.clone()).collect();
-        let body = serde_json::to_value(SyncBatch {
-            project_id: auth_project,
-            items,
-        })
-        .unwrap_or(json!({}));
+        let body = serde_json::to_value(SyncBatch { project_id, items }).unwrap_or(json!({}));
 
         let response = match c.post("/api/sync/batch", &body).await {
             Ok(v) => v,

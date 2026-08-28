@@ -757,6 +757,21 @@ the subject section it amends.
   different context, so that a widening of the caller's view of the team feed cannot skip
   rows that view now includes. (amends Synchronization, namespaces and multi-device
   concurrency)
+- **FR-593**: Every entry point that synchronizes a global namespace — foreground and
+  background alike — MUST refuse to push or pull a `personal:*` lane whose owning account is
+  not the account this daemon is currently authenticated as. (amends Synchronization,
+  namespaces and multi-device concurrency)
+- **FR-594**: A queued global row MUST record the account that authored it, and MUST NOT be
+  claimed for delivery while a different account is authenticated; such a row is held and
+  delivered unchanged once its author is authenticated again. (amends Synchronization,
+  namespaces and multi-device concurrency)
+- **FR-595**: The project a global sync batch is authorized against MUST be one the
+  authenticated account is a member of, established from the server rather than from this
+  machine's local link records. (amends Synchronization, namespaces and multi-device
+  concurrency)
+- **FR-596**: Invalidating a stale account identity MUST be durable before a credential
+  change or logout reports success; a credential MUST NOT be recorded alongside an account
+  identity that names a different account. (amends Identity, roles and account lifecycle)
 
 ### Key Entities
 
