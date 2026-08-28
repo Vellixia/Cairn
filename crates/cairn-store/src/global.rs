@@ -1505,6 +1505,7 @@ fn team_bare(row: &SqliteRow) -> Result<TeamKnowledge> {
         writer_seq: row.try_get("writer_seq")?,
         created_at: rows::ts(row, "created_at")?,
         superseded_by_id: rows::opt_uuid(row, "superseded_by_id")?,
+        retired_by_user_id: rows::opt_uuid(row, "retired_by_user_id")?,
         retired_at: rows::opt_ts(row, "retired_at")?,
     })
 }
@@ -2015,7 +2016,20 @@ pub async fn ratify_team(
     }
 
     tx::commit(tx, "ratify_team").await?;
-    store.checkpoint().await?;
+    // No `store.checkpoint()` here.
+    //
+    // `PRAGMA wal_checkpoint(TRUNCATE)` takes an exclusive lock and is reserved
+    // for **deletions** — it exists so removed content leaves the write-ahead log
+    // rather than lingering in an old frame (FR-052, `Store::checkpoint`). This
+    // path removes nothing: it changes a lifecycle column and leaves content
+    // untouched.
+    //
+    // Calling it here cost real concurrency. The pull path runs it once per
+    // merged row in the background worker, so a machine catching up took an
+    // exclusive checkpoint lock repeatedly while foreground commands were
+    // writing, and `cairn connect` began failing with "database is locked" about
+    // half the time — under a busy timeout that a truncating checkpoint does not
+    // wait out.
     team_row_any_state(store, id).await
 }
 
@@ -2059,7 +2073,20 @@ pub async fn retire_team(
     }
 
     tx::commit(tx, "retire_team").await?;
-    store.checkpoint().await?;
+    // No `store.checkpoint()` here.
+    //
+    // `PRAGMA wal_checkpoint(TRUNCATE)` takes an exclusive lock and is reserved
+    // for **deletions** — it exists so removed content leaves the write-ahead log
+    // rather than lingering in an old frame (FR-052, `Store::checkpoint`). This
+    // path removes nothing: it changes a lifecycle column and leaves content
+    // untouched.
+    //
+    // Calling it here cost real concurrency. The pull path runs it once per
+    // merged row in the background worker, so a machine catching up took an
+    // exclusive checkpoint lock repeatedly while foreground commands were
+    // writing, and `cairn connect` began failing with "database is locked" about
+    // half the time — under a busy timeout that a truncating checkpoint does not
+    // wait out.
     team_row_any_state(store, id).await
 }
 
@@ -2279,11 +2306,21 @@ async fn team_relations_touching(store: &Store, ids: &[Uuid]) -> Result<Vec<Rela
 // ---------------------------------------------------------------------------
 
 /// One team_knowledge row as synchronized from a specific server instance —
-/// the shape a future pull-apply caller (Phase 6/7's synchronization layer,
-/// outside this file) hands to [`merge_synced_team`]. Carries every field
-/// `team_knowledge` stores except `origin_digest`, which is local-only and
-/// never transmitted (§6, D434) — a synchronized row therefore never carries
-/// one; [`merge_synced_team`] always stores `NULL` for it.
+/// the shape the pull-apply caller (`cairnd::sync::merge_pulled_team`) hands to
+/// [`merge_synced_team`].
+///
+/// Carries every field `team_knowledge` stores except `origin_digest`, which is
+/// local-only and never transmitted (§6, D434) — a synchronized row therefore
+/// never carries one; [`merge_synced_team`] always stores `NULL` for it.
+///
+/// **`retired_by_user_id` is one of those fields, and it was missing.** FR-457
+/// requires every state transition to record who acted *and* when, and the two
+/// halves of the lifecycle were treated asymmetrically: ratification's actor
+/// crossed the wire, retirement's did not. A device that learned of a retirement
+/// by pulling it saw the timestamp and no actor, so "who removed this guidance"
+/// was answerable on the server and on the machine that did it, and nowhere
+/// else. That is a smaller record than the requirement asks for, and it also
+/// falsified this type's own stated invariant.
 pub struct SyncedTeamKnowledge {
     pub id: Uuid,
     pub knowledge_type: MemoryType,
@@ -2299,6 +2336,10 @@ pub struct SyncedTeamKnowledge {
     pub writer_seq: i64,
     pub created_at: DateTime<Utc>,
     pub superseded_by_id: Option<Uuid>,
+    /// Who retired it (FR-457). Travels for the same reason
+    /// `ratified_by_user_id` does: the transition is not fully recorded without
+    /// it.
+    pub retired_by_user_id: Option<Uuid>,
     pub retired_at: Option<DateTime<Utc>>,
 }
 
@@ -2353,8 +2394,9 @@ pub async fn merge_synced_team(
             "INSERT INTO team_knowledge
                 (id, knowledge_type, content, topic_key, value_key, content_norm_digest,
                  origin_digest, state, proposed_by_user_id, ratified_by_user_id, ratified_at,
-                 writer_id, writer_seq, created_at, superseded_by_id, retired_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                 writer_id, writer_seq, created_at, superseded_by_id, retired_by_user_id,
+                 retired_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )
         .bind(incoming.id.to_string())
         .bind(incoming.knowledge_type.as_str())
@@ -2370,6 +2412,7 @@ pub async fn merge_synced_team(
         .bind(incoming.writer_seq)
         .bind(rows::ts_text(incoming.created_at))
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
+        .bind(incoming.retired_by_user_id.map(|u| u.to_string()))
         .bind(incoming.retired_at.map(rows::ts_text))
         .execute(&mut *tx)
         .await?;
@@ -2389,7 +2432,7 @@ pub async fn merge_synced_team(
         sqlx::query(
             "UPDATE team_knowledge
                 SET state = ?1, ratified_by_user_id = ?2, ratified_at = ?3,
-                    retired_at = ?4, superseded_by_id = ?5
+                    retired_at = ?4, superseded_by_id = ?5, retired_by_user_id = ?7
               WHERE id = ?6",
         )
         .bind(incoming.state.as_str())
@@ -2398,12 +2441,26 @@ pub async fn merge_synced_team(
         .bind(incoming.retired_at.map(rows::ts_text))
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
         .bind(incoming.id.to_string())
+        .bind(incoming.retired_by_user_id.map(|u| u.to_string()))
         .execute(&mut *tx)
         .await?;
     }
 
     tx::commit(tx, "merge_synced_team").await?;
-    store.checkpoint().await?;
+    // No `store.checkpoint()` here.
+    //
+    // `PRAGMA wal_checkpoint(TRUNCATE)` takes an exclusive lock and is reserved
+    // for **deletions** — it exists so removed content leaves the write-ahead log
+    // rather than lingering in an old frame (FR-052, `Store::checkpoint`). This
+    // path removes nothing: it changes a lifecycle column and leaves content
+    // untouched.
+    //
+    // Calling it here cost real concurrency. The pull path runs it once per
+    // merged row in the background worker, so a machine catching up took an
+    // exclusive checkpoint lock repeatedly while foreground commands were
+    // writing, and `cairn connect` began failing with "database is locked" about
+    // half the time — under a busy timeout that a truncating checkpoint does not
+    // wait out.
     team_row_any_state(store, incoming.id).await
 }
 
@@ -2532,7 +2589,20 @@ pub async fn merge_synced_personal(
     }
 
     tx::commit(tx, "merge_synced_personal").await?;
-    store.checkpoint().await?;
+    // No `store.checkpoint()` here.
+    //
+    // `PRAGMA wal_checkpoint(TRUNCATE)` takes an exclusive lock and is reserved
+    // for **deletions** — it exists so removed content leaves the write-ahead log
+    // rather than lingering in an old frame (FR-052, `Store::checkpoint`). This
+    // path removes nothing: it changes a lifecycle column and leaves content
+    // untouched.
+    //
+    // Calling it here cost real concurrency. The pull path runs it once per
+    // merged row in the background worker, so a machine catching up took an
+    // exclusive checkpoint lock repeatedly while foreground commands were
+    // writing, and `cairn connect` began failing with "database is locked" about
+    // half the time — under a busy timeout that a truncating checkpoint does not
+    // wait out.
     get_personal(store, incoming.id, incoming.owner_user_id).await
 }
 
@@ -4243,6 +4313,7 @@ mod tests {
             writer_seq: 1,
             created_at: chrono::Utc::now(),
             superseded_by_id: None,
+            retired_by_user_id: None,
             retired_at: None,
         };
         let merged = merge_synced_team(&store, a, row).await.unwrap();
@@ -4277,6 +4348,7 @@ mod tests {
             writer_seq: 1,
             created_at: chrono::Utc::now(),
             superseded_by_id: None,
+            retired_by_user_id: None,
             retired_at: None,
         };
         merge_synced_team(&store, a, first).await.unwrap();
@@ -4297,6 +4369,7 @@ mod tests {
             writer_seq: 1,
             created_at: chrono::Utc::now(),
             superseded_by_id: None,
+            retired_by_user_id: None,
             retired_at: None,
         };
         let err = merge_synced_team(&store, b, second).await.unwrap_err();

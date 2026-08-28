@@ -90,6 +90,15 @@ pub struct TeamKnowledge {
     pub writer_seq: i64,
     pub created_at: DateTime<Utc>,
     pub superseded_by_id: Option<Uuid>,
+    /// Who retired it, alongside `retired_at` (FR-457).
+    ///
+    /// The column existed on both schemas from the start; this field did not,
+    /// so the record type could not carry the answer even where the database
+    /// held it — `cairn team list` had no way to say who removed a piece of
+    /// guidance, and the synchronized mirror had nothing to copy. A timestamp
+    /// alone does not record who acted, and retirement is the transition most
+    /// worth attributing: it removes guidance from every account on the server.
+    pub retired_by_user_id: Option<Uuid>,
     pub retired_at: Option<DateTime<Utc>>,
 }
 
