@@ -95,11 +95,17 @@ fn derive_changed_files(
     git_changed: &[String],
     worktree_root: &str,
 ) -> Vec<String> {
-    let root = worktree_root.trim_end_matches('/');
+    let root = normalize_separators(worktree_root)
+        .trim_end_matches('/')
+        .to_string();
     let relativize = |path: String| -> String {
-        match path.strip_prefix(root) {
+        let normalized = normalize_separators(&path);
+        match normalized.strip_prefix(&root) {
             Some(rest) if rest.starts_with('/') => rest.trim_start_matches('/').to_string(),
-            _ => path,
+            // Not under the recorded root: keep the normalized form anyway, so
+            // the absolute-survivor pass below can recognise it and so the two
+            // sides of every later comparison use one separator.
+            _ => normalized,
         }
     };
 
@@ -108,7 +114,7 @@ fn derive_changed_files(
         .filter(|o| o.kind == ObservationType::FileChanged)
         .filter_map(|o| o.path.clone())
         .map(relativize)
-        .chain(git_changed.iter().cloned())
+        .chain(git_changed.iter().map(|g| normalize_separators(g)))
         .collect();
     files.sort();
     files.dedup();
@@ -123,7 +129,7 @@ fn derive_changed_files(
     // absolute one.
     let absolute_survivors: Vec<String> = files
         .iter()
-        .filter(|p| p.starts_with('/'))
+        .filter(|p| looks_absolute(p))
         .filter(|long| {
             files
                 .iter()
@@ -133,6 +139,54 @@ fn derive_changed_files(
         .collect();
     files.retain(|f| !absolute_survivors.contains(f));
     files
+}
+
+/// One separator, and no verbatim prefix, so two paths can be compared.
+///
+/// **This function is why FR-531 held on macOS and Linux and not on Windows.**
+/// The relativizer compared with `'/'` and tested "looks absolute" with
+/// `starts_with('/')`, so on Windows a captured drive path matched neither the
+/// recorded root nor the absolute check: nothing relativized, nothing was even
+/// recognised as absolute, and the full path reached `changed_files` and the
+/// prose built from it. A leak the platform decided.
+///
+/// Forward slashes are also the right output form: Git reports paths that way on
+/// every platform, so a relativized path and a Git-reported one are directly
+/// comparable, which the dedup above depends on.
+fn normalize_separators(path: &str) -> String {
+    // The Windows verbatim prefix. Present on any path that has been through
+    // `canonicalize`, absent on the one an agent's hook reports — so the two
+    // would never share a prefix while only one carried it.
+    let unc = "\\\\?\\UNC\\";
+    let verbatim = "\\\\?\\";
+    let stripped = if let Some(rest) = path.strip_prefix(unc) {
+        format!("{}{}", "\\\\", rest)
+    } else if let Some(rest) = path.strip_prefix(verbatim) {
+        rest.to_string()
+    } else {
+        path.to_string()
+    };
+    stripped.replace(SEP, "/")
+}
+
+/// The native separator this function normalizes away.
+const SEP: char = '\\';
+
+/// Whether a path is absolute on **any** supported platform.
+///
+/// POSIX (`/etc/passwd`), a Windows drive (`C:/src`, after normalization), and a
+/// UNC share (`//host/share`). Checked by shape rather than by
+/// `Path::is_absolute`, which answers for the platform this build runs on — and
+/// the path being screened may have been captured on another.
+fn looks_absolute(path: &str) -> bool {
+    if path.starts_with('/') {
+        return true;
+    }
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'/' || bytes[2] == SEP as u8)
 }
 
 fn derive_tests(obs: &[Observation]) -> Vec<TestRunRecord> {
@@ -674,6 +728,120 @@ mod tests {
         assert!(
             progress.contains("1 test command(s) run"),
             "progress was {progress:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod path_shape_tests {
+    use super::*;
+
+    /// Windows-shaped paths relativize, on every platform.
+    ///
+    /// **Asserted here rather than only end to end**, because the end-to-end test
+    /// for FR-531 runs on whichever platform the runner is, and the bug it caught
+    /// existed for exactly as long as no Windows runner had executed it. A pure
+    /// function over strings can be given a Windows path on Linux, so the
+    /// guarantee stops depending on where the suite happens to run.
+    #[test]
+    fn a_windows_path_relativizes_against_a_windows_root() {
+        let root = r"C:\Users\dev\repo";
+        let verbatim_root = r"\\?\C:\Users\dev\repo";
+        for r in [root, verbatim_root] {
+            assert_eq!(
+                normalize_separators(r"\\?\C:\Users\dev\repo\src\lib.rs")
+                    .strip_prefix(normalize_separators(r).trim_end_matches('/'))
+                    .map(|s| s.trim_start_matches('/')),
+                Some("src/lib.rs"),
+                "a captured Windows path did not relativize against root {r}"
+            );
+        }
+    }
+
+    /// A POSIX path still relativizes exactly as it did.
+    #[test]
+    fn a_posix_path_is_unaffected() {
+        assert_eq!(
+            normalize_separators("/home/dev/repo/src/lib.rs"),
+            "/home/dev/repo/src/lib.rs"
+        );
+        assert_eq!(normalize_separators("src/lib.rs"), "src/lib.rs");
+    }
+
+    /// Every absolute shape is recognised, and a relative one is not.
+    ///
+    /// The Windows rows are the ones that mattered: `looks_absolute` used to be
+    /// `starts_with('/')`, so a drive path was classified relative and the
+    /// absolute-survivor pass never considered it.
+    #[test]
+    fn every_absolute_shape_is_recognised_on_every_platform() {
+        for absolute in [
+            "/etc/passwd",
+            "/home/dev/repo/src/lib.rs",
+            "C:/Users/dev/repo/src/lib.rs",
+            r"C:\Users\dev\repo\src\lib.rs",
+            "d:/tmp/x",
+        ] {
+            assert!(
+                looks_absolute(absolute),
+                "`{absolute}` was not recognised as absolute, so FR-531's screen \
+                 would not consider it"
+            );
+        }
+        for relative in ["src/lib.rs", r"src\lib.rs", ".gitignore", "", "C:", "CC:/x"] {
+            assert!(
+                !looks_absolute(relative),
+                "`{relative}` was treated as absolute"
+            );
+        }
+    }
+
+    /// The verbatim prefix is stripped, including its UNC form.
+    #[test]
+    fn the_windows_verbatim_prefix_is_stripped() {
+        assert_eq!(
+            normalize_separators(r"\\?\C:\Users\dev\repo"),
+            "C:/Users/dev/repo"
+        );
+        assert_eq!(
+            normalize_separators(r"\\?\UNC\server\share\repo"),
+            "//server/share/repo"
+        );
+    }
+
+    /// End to end through `derive_changed_files`: a Windows absolute path under
+    /// the recorded root comes out relative, and never absolute.
+    #[test]
+    fn derive_changed_files_relativizes_a_windows_capture() {
+        let obs = vec![Observation {
+            id: crate::domain::new_id(),
+            session_id: crate::domain::new_id(),
+            kind: ObservationType::FileChanged,
+            occurred_at: chrono::Utc::now(),
+            branch: "main".into(),
+            commit_sha: None,
+            path: Some(r"\\?\C:\Users\runneradmin\Temp\repo\generated\ignored_module.rs".into()),
+            command: None,
+            exit_code: None,
+            outcome: None,
+            summary: "edited a generated module".into(),
+            details: None,
+            payload_bytes: 0,
+            truncated: false,
+            deleted_at: None,
+        }];
+        let files = derive_changed_files(
+            &obs,
+            &[".gitignore".into()],
+            r"C:\Users\runneradmin\Temp\repo",
+        );
+        assert!(
+            files.contains(&"generated/ignored_module.rs".to_string()),
+            "the Windows capture did not relativize: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|f| looks_absolute(f)),
+            "an absolute path survived into changed_files (FR-531): {files:?}"
         );
     }
 }
