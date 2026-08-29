@@ -1,6 +1,12 @@
 # Feature Specification: Server-Authoritative Autonomous Memory
 
-**Feature Branch**: `005-server-authoritative-autonomous-memory`
+**Feature Directory**: `specs/005-server-authoritative-autonomous-memory`
+
+**Git Branch**: `feature-005-spec`
+
+The two differ, which is expected: this repository's `create-new-feature.sh` creates no git
+branch, so the directory name and the working branch are independent. Both are recorded rather
+than one being assumed from the other.
 
 **Created**: 2026-08-29
 
@@ -148,7 +154,8 @@ capability.
 
 **Independent Test**: Interrupt the connection to the server mid-session, continue the
 agent's work, restore the connection, and assert that the agent was never blocked, that
-queued events drained exactly once, and that no knowledge was created locally that competes
+queued events produced exactly one canonical event each, and that no knowledge was created
+locally that competes
 with the server's.
 
 **Acceptance Scenarios**:
@@ -159,8 +166,9 @@ with the server's.
 2. **Given** an unreachable server, **When** safe events are produced, **Then** they are
    spooled locally and no durable knowledge is created locally that the server has not
    accepted.
-3. **Given** spooled events and a restored server, **When** delivery retries, **Then** every
-   event is accepted exactly once however many times it is replayed.
+3. **Given** spooled events and a restored server, **When** delivery retries, **Then** however
+   many times delivery is retried, at most one canonical event and one consolidation input
+   exist. A retry answered `duplicate` is a success, not a failure.
 4. **Given** an unreachable server, **When** a session requests context, **Then** Cairn
    either serves a cached briefing explicitly labelled as cached and possibly stale, or
    reports that fresh knowledge is unavailable — never presenting cached content as current.
@@ -280,9 +288,29 @@ server or explicitly reported as unmigrated, with authority switching only if th
 - **Semantic extraction proposes a candidate containing a secret.** The deterministic gate
   refuses it. The refusal is counted and its reason is named; the offending text is not
   stored, logged, or transmitted.
-- **Semantic extraction is unavailable or fails.** Safe events continue to be captured and
-  persisted; consolidation reports a backlog rather than dropping the events it could not
-  process.
+- **Semantic extraction is unavailable or fails.** Safe events continue to be captured,
+  transmitted and persisted; the backlog grows and is reported, and no event is dropped for
+  want of an extractor. Ingestion is never throttled to protect consolidation.
+- **The server restarts mid-consolidation.** Durable progress state means the interrupted work
+  is reclaimed and completed, and no already-consolidated event is consolidated a second time.
+- **A model proposes a key that does not survive validation.** The candidate is refused and the
+  refusal is recorded. Cairn does not repair the key into a plausible one, because repairing it
+  would change which existing knowledge the candidate collides with.
+- **A model proposes a source event reference that does not exist, or belongs to another
+  project.** The candidate is refused rather than persisted with an unverifiable citation.
+- **A vendor supplies an absolute path to a file inside the repository.** This is the ordinary
+  case, not an error. The adapter relativizes it against the repository root locally and a valid
+  `repo_file` crosses; the root itself never leaves the machine.
+- **A vendor supplies a path outside the repository.** The event carries an out-of-repository
+  disposition and no `repo_file`. It is neither transmitted as an absolute path nor discarded.
+- **A vendor supplies no file identity in any form.** The event records identity as unavailable
+  from the vendor.
+- **A malformed or hostile client sends an absolute, drive-prefixed or traversal-bearing
+  `repo_file`.** The server refuses it by its own validation, independently of what the client
+  should have done. Local relativization is how the field is produced correctly; server-side
+  refusal is how the rule is enforced.
+- **A Feature 004 client contacts a server that has cut over.** Its knowledge synchronization is
+  refused with `upgrade_required`; its local data is untouched; its agent keeps working.
 - **Two consolidation runs propose near-identical knowledge in different words.** The
   deterministic identity of a candidate — not its wording — decides whether it is new, so
   the second run reinforces rather than creating a near-duplicate.
@@ -318,8 +346,9 @@ server or explicitly reported as unmigrated, with authority switching only if th
   about a record the server owns, the server's state is correct by definition.
 - **FR-702**: The local store MUST NOT be the authoritative owner of any durable knowledge
   that the server is capable of holding. Its role is confined to spooling unsent events,
-  holding machine-local integration and operational state, holding transient material for
-  the privacy boundary, and holding a bounded non-authoritative cache.
+  holding machine-local integration and operational state, and holding a bounded
+  non-authoritative cache. Raw material read during capture is held in memory for the duration
+  of that work and is not a storage role (FR-763).
 - **FR-703**: Deleting the local store MUST NOT destroy project, personal or team knowledge
   that the server has already accepted.
 - **FR-704**: Following local-store loss, Cairn MUST restore server-accepted knowledge
@@ -449,8 +478,33 @@ server or explicitly reported as unmigrated, with authority switching only if th
 
 ### The local privacy boundary
 
-- **FR-749**: Rich vendor material MAY be processed transiently on the machine that produced
-  it. Only material approved by the privacy boundary may be transmitted.
+The local machine performs vendor parsing, semantic event normalization, redaction, the
+deterministic secret, path and privacy checks, and bounded safe-event construction. It does
+**not** perform semantic knowledge extraction. Extraction is server-side work over events the
+privacy boundary has already approved, and is specified under Consolidation.
+
+- **FR-749**: Rich vendor material MAY be read transiently on the machine that produced it,
+  for the sole purpose of parsing it, normalizing it into canonical events, redacting it and
+  evaluating the deterministic privacy checks. Only material the privacy boundary approves may
+  be transmitted. The machine MUST NOT retain the raw material beyond that work, and MUST NOT
+  perform semantic knowledge extraction over it.
+- **FR-749a**: This local work is larger than today's — more vendor fields, more event kinds,
+  more content to redact — while the existing capture deadlines are preserved. The specification
+  therefore requires the richer local pipeline to fit within those deadlines. If measurement
+  shows the work cannot fit, the deadline budget MUST be restated explicitly rather than allowed
+  to erode by degrees, because the agent's critical path is what Principle III protects first.
+- **FR-749b**: A capture-class event that exceeds its deadline MUST NOT become an agent-facing
+  failure. The hook MUST still exit successfully, MUST NOT block the agent, and MUST NOT surface
+  an error to the vendor. The event may be dropped.
+- **FR-749c**: A deadline-driven drop is nonetheless a capture failure in Cairn's own account of
+  itself, and MUST NOT be silent. Cairn MUST record a local disposition distinguishing it from
+  other outcomes — a `capture_deadline_exceeded` disposition or equivalent — and MUST surface it
+  in capture health and counters. Fail-soft describes what the agent experiences, not what Cairn
+  is permitted to know: a drop the agent never notices is exactly the drop Principle X forbids
+  Cairn from reporting as health.
+- **FR-749d**: The record of a deadline drop MUST carry no rejected or raw content. It carries
+  the disposition, the event kind where already determined, the agent and the session — nothing
+  from the payload that was being processed when the deadline expired.
 - **FR-750**: Full conversation transcripts MUST NOT be persisted, locally or centrally. There
   is no configuration under which Cairn stores one; the prohibition is absolute, matching the
   Out of Scope entry that states it.
@@ -466,11 +520,13 @@ server or explicitly reported as unmigrated, with authority switching only if th
   network call, so that it can be tested exhaustively against an adversarial corpus.
 - **FR-757**: A refusal by the privacy boundary MUST identify the check that refused, and the
   refusal record MUST be structurally incapable of carrying the refused content.
-- **FR-758**: Where semantic extraction is used to derive structure from event material, it
-  MUST be separated from privacy enforcement. A model MUST NOT be the sole or final gate on
-  whether material may be transmitted or persisted.
-- **FR-759**: Output of semantic extraction MUST pass the same deterministic privacy checks as
-  any other candidate content, and MUST be refused on the same terms.
+- **FR-758**: Semantic extraction and privacy enforcement MUST remain separate acts, wherever
+  each runs. A model MUST NOT be the sole or final gate on whether material may be transmitted
+  or persisted.
+- **FR-759**: Output of semantic extraction MUST pass the same deterministic checks that govern
+  any other candidate content, and MUST be refused on the same terms. Extraction running on the
+  server does not exempt its output from validation; it is subject to the same single
+  implementation of each rejection class that FR-760 requires.
 - **FR-760**: Cairn MUST maintain exactly one implementation of each privacy rejection class,
   so that two entry points cannot drift apart.
 - **FR-761**: Existing user controls MUST continue to hold: path and content exclusion,
@@ -478,14 +534,22 @@ server or explicitly reported as unmigrated, with authority switching only if th
 - **FR-762**: Promotion of knowledge from one domain to a wider one MUST remain an explicit
   act passing the existing fail-closed gate. Consolidation MUST NOT promote across domains as
   a side effect.
-- **FR-763**: Material held transiently for extraction MUST be discarded once extraction
-  completes or fails, and MUST NOT outlive the boundary that created it.
-- **FR-763a**: Extraction MUST have an execution home that can actually hold the material it
-  extracts from. The per-event capture process is short-lived and runs under a capture deadline
-  measured in milliseconds, and FR-730 forbids the raw payload reaching the daemon; extraction
-  therefore requires a named transient boundary that is neither of those. That boundary MUST be
-  on the machine that produced the material, MUST erase it on completion or failure, MUST NOT
-  place it on the agent's critical path, and MUST NOT be reachable by any other subsystem.
+- **FR-763**: Raw vendor material held transiently on the local machine MUST be discarded once
+  parsing, redaction and the privacy checks complete or fail, and MUST NOT outlive that work.
+  It MUST NOT be written to durable local storage, and MUST NOT be retained pending any later
+  extraction step.
+- **FR-763a**: Semantic knowledge extraction MUST run on the server, over `SafeCanonicalEvent`
+  records that the privacy boundary has already approved and that the server has already
+  persisted. No new local transient extraction process is introduced. This is what removes the
+  conflict between rich extraction and the local capture path: the per-event capture process is
+  short-lived and runs under a millisecond-scale deadline, and FR-730 forbids the raw payload
+  reaching the daemon — so extraction is moved to the one place that legitimately holds
+  material rich enough to extract from, namely the approved events themselves.
+- **FR-763b**: Extraction MUST operate only on data the server was already permitted to hold.
+  It MUST NOT be granted a side channel to raw vendor payloads, transcripts, raw tool output,
+  secrets or absolute local paths, none of which ever reach the server. If a safe event does not
+  carry enough information to extract a claim, no claim is extracted; the missing material MUST
+  NOT be fetched from the machine that produced it.
 - **FR-764**: Where a deterministic check cannot be evaluated because required input is
   missing, the boundary MUST refuse rather than proceed.
 
@@ -529,10 +593,39 @@ server or explicitly reported as unmigrated, with authority switching only if th
   forbidden content by asking.
 - **FR-777a**: The safe-event schema MUST NOT declare a field name that the synchronization
   boundary refuses. Two boundaries on one server disagreeing about the same name is precisely
-  the drift FR-760 forbids for rejection classes. Where a safe event must carry information that
-  a refused name would have described, it MUST use a distinct, explicitly defined field whose
-  contents are constrained by the schema — and that definition MUST be recorded as a deliberate
-  decision, not introduced by whichever implementation needs it first.
+  the drift FR-760 forbids for rejection classes.
+- **FR-777a1**: This obligation is general, not satisfied by renaming one field. The refused
+  set includes `summary`, `command`, `details`, `exit_code`, `outcome` and `content_norm_digest`
+  — every one of which is the natural name for something a command, test or tool-failure event
+  must carry. The safe-event schema MUST therefore define its own distinct, explicitly named
+  and individually constrained field for each such value, and the mapping from canonical
+  meaning to field name MUST be stated once in the contract rather than settled per
+  implementation. `repo_file` is the first instance of this rule, not an exception to it.
+- **FR-777b**: File identity on a safe event MUST be carried by a field named `repo_file`,
+  holding repository-relative file identity only. The refused name `path` MUST NOT be reused,
+  and `repo_file` MUST NOT be permitted to carry anything a repository-relative path could not
+  express.
+- **FR-777c**: A `repo_file` value MUST be relative, slash-normalized and non-empty. It MUST
+  NOT contain a `..` traversal segment, MUST NOT begin with `/`, and MUST NOT carry a
+  drive-letter or UNC prefix. Its maximum length MUST be stated as a number in the contract and
+  enforced. A value failing any of these MUST cause the event to be refused.
+- **FR-777d**: The server MUST validate `repo_file` independently of the client, applying the
+  same rules. A client that constructs the field correctly is not the mechanism by which the
+  rule holds; the server's own check is.
+- **FR-777e**: Most vendors report an absolute path. Relativizing it against the repository
+  root is local normalization work and MUST happen on the machine, before the event is
+  constructed. The repository root is machine configuration and MUST NOT be transmitted; only
+  the relative result crosses.
+- **FR-777f**: A file that lies outside the repository — a path that cannot be expressed
+  relative to the root without traversal — MUST be recorded as out-of-repository, carrying no
+  `repo_file`. Cairn MUST NOT transmit it, MUST NOT truncate it into something that looks
+  repository-relative, and MUST NOT discard the event merely because its file lies outside.
+- **FR-777g**: Where a vendor genuinely supplies no file identity in any form, the event MUST
+  record identity as unavailable from the vendor. Cairn MUST NOT synthesize a `repo_file`, MUST
+  NOT substitute the working directory or a tool name for one, and MUST NOT downgrade the event
+  to a generic command in order to avoid the absence. FR-720 treats a path the adapter could
+  have extracted and did not as a capture defect; FR-777f and this requirement cover the two
+  cases that are genuinely not defects.
 - **FR-778**: Ingestion failures MUST be observable: their rate, their reasons and their
   backlog MUST be reportable.
 - **FR-779**: Events MUST be attributable to the project and account under whose credentials
@@ -574,14 +667,55 @@ server or explicitly reported as unmigrated, with authority switching only if th
 
 ### Automatic consolidation
 
-- **FR-793**: Cairn MUST produce durable knowledge from accepted safe events without
-  requiring an agent or human to invoke a memory-creation tool.
+- **FR-793**: Cairn MUST produce durable knowledge from accepted safe events without requiring
+  an agent or human to invoke a memory-creation tool.
+- **FR-793a**: Consolidation MUST run as in-process background work inside the existing server
+  process. It MUST NOT be a new service, a broker, a distributed worker platform, or work driven
+  by a client. Client-driven consolidation is specifically excluded: it would return the
+  decision about what becomes durable knowledge to the edge, which is the arrangement this
+  feature exists to end.
+- **FR-793a1**: Because consolidation shares a process and a connection pool with request
+  serving, its resource share MUST be bounded and stated — its concurrency, its batch size and
+  its share of the connection pool. FR-814's prohibition on back-pressure is not achievable by
+  intention alone; it is achievable because consolidation cannot consume the capacity ingestion
+  needs. Principle II independently requires deferred work to be bounded.
+- **FR-793b**: Consolidation progress MUST be durable in PostgreSQL. The server MUST record
+  which accepted events have been consolidated and which remain outstanding, such that a server
+  restart at any point loses no completed consolidation work. Re-deriving over events whose
+  claim was abandoned mid-pass is permitted and expected; what MUST NOT happen is a second
+  durable effect from it, which FR-797 guarantees.
+- **FR-793c**: The consolidation backlog MUST be a queryable, bounded-report resource: its
+  depth, its oldest outstanding event and its failure count MUST be reportable.
+- **FR-793d**: A consolidation pass MUST claim its work so that concurrent passes within the
+  process cannot consolidate the same events twice, and a claim abandoned by a restart MUST
+  become reclaimable rather than stranding the work.
 - **FR-794**: Consolidation MUST produce *candidates*. A candidate is not knowledge until it
   has passed Cairn's governance rules.
 - **FR-795**: Candidates MUST be expressed using the existing durable vocabulary — fact,
   decision, convention, failure, procedure. Feature 005 introduces no sixth kind.
 - **FR-796**: Each candidate MUST carry a deterministic identity derived from its subject and
-  claim — its topic key and value key — and not from the wording of its content.
+  claim — its normalized topic key and value key — and not from the wording of its content.
+- **FR-796d**: Normalized key identity is the identity consolidation uses for duplicate,
+  conflict and reinforcement decisions on the server. The existing exact content-digest rule is
+  not available there: `content_norm_digest` is a refused field name at the synchronization
+  boundary and SC-731 forbids weakening that refusal, so the server cannot hold the value the
+  existing rule compares. The specification therefore requires key identity to be sufficient
+  for server-side reconciliation on its own, and does NOT require the content digest to be
+  reproduced centrally. Where the digest rule continues to operate on records that already have
+  one, it remains as it is; FR-823 and FR-824 preserve the relation kinds and the key concepts,
+  not the storage location of a local implementation detail.
+- **FR-796a**: A model-proposed topic key or value key is an input, never the identity itself.
+  Cairn MUST normalize and validate every proposed key through its own deterministic function
+  before that key is used for duplicate, conflict or reinforcement decisions. Syntactic variants
+  of one key — differing by case, by separator, or by surrounding whitespace, such as
+  `Storage Authority`, `storage_authority` and `storage-authority` — MUST resolve to a single
+  canonical representation.
+- **FR-796b**: A proposed key that does not survive normalization and validation MUST cause the
+  candidate to be refused, with the refusal recorded under the same fixed vocabulary as any
+  other refusal. Cairn MUST NOT silently repair a malformed key into a plausible one, because a
+  repaired key silently changes which existing knowledge the candidate collides with.
+- **FR-796c**: Identity normalization MUST NOT require embeddings or any similarity model. It is
+  a deterministic syntactic function, and two keys are the same key or they are different keys.
 - **FR-797**: Consolidation MUST be idempotent with respect to its input: running it again
   over the same accepted events MUST NOT create additional knowledge, additional relations, or
   additional reinforcement.
@@ -592,6 +726,11 @@ server or explicitly reported as unmigrated, with authority switching only if th
   be identifiable as consolidation-authored corroboration rather than a second copy of the
   claim, MUST NOT be returned by recall as independent knowledge, and MUST NOT be counted as a
   distinct claim anywhere a user reads a count of what Cairn knows.
+- **FR-798b**: A corroboration endpoint MUST carry a deterministic identity derived from the
+  candidate's normalized keys and the source events it was drawn from, so that re-deriving it
+  after an abandoned claim yields the same endpoint rather than a second one. Without this,
+  a mid-pass restart would add a corroboration record and a relation on every retry, which
+  FR-797 and SC-703 forbid.
 - **FR-799**: A candidate that asserts a different value for a subject already held under the
   same topic and an overlapping scope MUST record a conflict, using the existing conflict
   machinery.
@@ -615,15 +754,56 @@ server or explicitly reported as unmigrated, with authority switching only if th
 - **FR-804**: A candidate MUST pass domain and scope resolution, the deterministic privacy
   checks, duplicate handling, reconciliation and persistence constraints before becoming
   durable. Failing any of these MUST prevent persistence.
+- **FR-804a**: Candidate refusals MUST be recorded under a fixed, enumerated vocabulary of
+  reasons, distinct from the event-rejection vocabulary FR-741 defines and covering at minimum:
+  key normalization failure, privacy refusal, unverifiable source reference, domain or scope
+  unresolvable, and conflict-with-existing. As with event rejections, a refusal record MUST NOT
+  carry the content that caused it.
 - **FR-805**: A model MAY propose candidates. It MUST NOT decide whether a candidate becomes
   durable knowledge, what domain it belongs to, or whether it supersedes anything.
+- **FR-805a**: A model performing extraction MUST receive only `SafeCanonicalEvent` records
+  that Cairn was already permitted to persist centrally. It MUST NOT receive raw vendor
+  payloads, transcripts, raw tool output, secrets, absolute local paths, or any other material
+  the privacy boundary refused.
+- **FR-805a1**: Server-held is not the same as readable-by-anyone, and extraction MUST be scoped
+  the way every other read path is. An extraction request MUST be confined to the events of one
+  project and one account context, and MUST NOT be handed a cross-project or cross-account
+  corpus. Nothing else in Cairn reads without a membership guard, and extraction MUST NOT be the
+  exception.
+- **FR-805b**: A model MAY propose candidate content, the knowledge kind, a topic key, a value
+  key, and references to the source events it drew from. It MUST NOT determine durability,
+  authorization, domain ownership, scope, privacy acceptance, reconciliation outcomes,
+  verification, or supersession. Each remains a Cairn decision made by deterministic rules, and
+  each MUST be reachable without consulting a model at all.
+- **FR-805c**: Source event references a model proposes MUST be verified to exist, to belong to
+  the same project and session context being consolidated, and to have been accepted by the
+  server. A candidate citing an event that fails any of those checks MUST be refused rather than
+  persisted with an unverifiable citation.
+- **FR-805d**: Where extraction is performed by any party other than the operator of the Cairn
+  server, that party is a second recipient at a second boundary. Its identity and its use MUST
+  be disclosed to affected users as plainly as the Cairn server connection itself, at a
+  comparable point and in comparable terms. Cairn MUST NOT forward a safe event to a
+  third-party extractor that has not been disclosed. The fact that the material was permitted
+  to reach the user's own server MUST NOT be treated as permission to forward it onward.
+- **FR-805e**: A third-party extractor's retention and training behaviour MUST NOT be assumed.
+  Cairn MUST NOT enable a hosted extractor unless the deployment has established, from the
+  provider's current documentation, what that provider does with submitted content. Where
+  compliance cannot be established, the hosted extractor MUST NOT be enabled and the condition
+  MUST be reported, rather than being enabled on the assumption that a default configuration is
+  acceptable.
+- **FR-805f**: Extraction MUST be replaceable without changing anything else in the pipeline.
+  No requirement in this feature may depend on a particular extractor, a particular provider, or
+  a hosted extractor existing at all; an operator MUST be able to run Cairn with a
+  self-hosted or deterministic extractor and lose no guarantee other than extraction quality.
 - **FR-806**: Consolidation MUST be able to run without embeddings, using structured
   extraction, topic and value keys, exact matching, and full-text search. Server-side full-text
   search presently covers project memory only; personal and team knowledge have no server-side
   text index. Extending indexing to the domains consolidation must match against is therefore
   in scope, and MUST NOT be assumed to already exist.
-- **FR-807**: Consolidation MUST record its runs: what input range was processed, how many
-  candidates were produced, how many were accepted, and how many were refused and why.
+- **FR-807**: Consolidation MUST record its runs: which events a pass claimed, how many
+  candidates were produced, how many were accepted, and how many were refused and why. A pass
+  is described by the set of events it claimed, not by a contiguous range, because an
+  interruption leaves the consolidated set non-contiguous.
 - **FR-808**: A consolidation run that fails MUST leave its input eligible for reprocessing
   and MUST NOT partially persist a candidate.
 - **FR-809**: Consolidation MUST NOT ratify team guidance. It may produce a team proposal;
@@ -636,14 +816,36 @@ server or explicitly reported as unmigrated, with authority switching only if th
   the personal domain; this is its team counterpart.
 - **FR-810**: Consolidation MUST NOT create personal knowledge for a user other than the one
   whose events it processed.
+- **FR-810a**: Consolidation runs without an authenticated caller, so the owner it assigns MUST
+  come from the account binding the server recorded when it accepted the events (FR-779), never
+  from event body content and never from model output. This is how a caller-less process
+  satisfies the rule that identity is established rather than asserted.
 - **FR-811**: Verification MUST continue to be derived from verification runs and attached
   evidence. Consolidation MUST NOT assert that knowledge is verified.
+- **FR-811a**: Raw evidence facts and verification runs remain local-only (FR-707). Server-held
+  knowledge MAY carry a derived verification *summary* — the verification state, its authority,
+  and when it was last established — because a state a user cannot see centrally is a state the
+  web control plane cannot report.
+- **FR-811b**: A verification summary MUST be derived from verification runs that actually
+  occurred, and MUST NOT be settable by a client or a model asserting a state directly. The
+  server MUST NOT accept `verified` as a claim; it MUST accept only an attested report of a run,
+  bound to the account and project it came from, and derive the stored state itself under the
+  same rules that derive it locally today.
+- **FR-811c**: A verification summary MUST NOT carry raw evidence: no observed values, no source
+  locators, no digests of file content, no command output, no local paths. It carries state,
+  authority, a timestamp and counts.
+- **FR-811d**: Where a summary cannot be established — because the run was local-only, or its
+  report was refused — the server MUST hold the knowledge as unverified rather than inheriting a
+  state it cannot justify. Unverified is a truthful answer; an unsubstantiated `verified` is the
+  overclaim Principle X forbids.
 - **FR-812**: A candidate derived from activity Cairn could not attribute to a project MUST
   NOT be attributed to one by guesswork.
-- **FR-813**: Consolidation MUST be observable while running: its backlog, its throughput and
-  its failures MUST be reportable.
+- **FR-813**: Consolidation MUST be observable while running: its throughput and its failures
+  MUST be reportable alongside the backlog FR-793c requires.
 - **FR-814**: Consolidation MUST NOT be a precondition for capture. Events MUST continue to be
-  accepted while consolidation is unavailable or backlogged.
+  accepted, and safe events MUST continue to be persisted, while consolidation is unavailable,
+  failing or arbitrarily backlogged. A consolidation backlog MUST NOT apply back-pressure to
+  ingestion, and MUST NOT be reported to a client as an ingestion failure.
 - **FR-815**: The explicit memory-creation surface MUST remain. `cairn_remember` MUST continue
   to create durable knowledge immediately, without waiting for consolidation heuristics. Here
   "immediately" means without waiting for consolidation — not without waiting for the server.
@@ -678,12 +880,65 @@ server or explicitly reported as unmigrated, with authority switching only if th
   a human administrator may ratify or retire MUST be preserved.
 - **FR-826**: Cross-project guidance MUST NOT become the basis of a verification claim.
 
+### Supported agents and delivery points
+
+This section fixes the population that SC-701, SC-706, SC-708 and SC-712 measure against, so
+that it cannot be narrowed by an implementation. It is derived from each vendor's current
+official documentation, checked on 2026-08-30, and from the adapters on `main`.
+
+| Capability | Claude Code | Codex CLI | OpenCode |
+|---|---|---|---|
+| Capture events | documented, stable | documented, stable | documented (v1 bus events + plugin hooks) |
+| Session-open delivery | documented, stable | documented, stable | no stable documented injection point |
+| Prompt-time retrieval | documented, stable | documented, stable | exists in v2 beta; Cairn declines to depend on it |
+| Post-compaction opportunity | via session-open `compact` trigger | via session-open `compact` trigger | pre-compaction only |
+| Receipt acknowledgement | none | none | none |
+| MCP | yes | yes | yes |
+
+- **FR-838a**: Feature 005 commits to automatic capture for **Claude Code**, **Codex CLI** and
+  **OpenCode**. It commits to automatic context delivery for **Claude Code** and **Codex CLI**
+  only.
+- **FR-838b**: OpenCode is a supported capture agent whose automatic delivery Cairn does NOT
+  commit to in this feature. This is a Cairn decision, not a vendor absence, and MUST be
+  reported as such. OpenCode 2 does expose prompt and context delivery hooks; they are beta,
+  and the vendor states its plugin APIs may change. OpenCode v1's injection points exist in the
+  published type definitions but are absent from the documentation and carry experimental
+  names. Cairn declines to make an automatic-delivery guarantee that rests on an unstable
+  vendor surface. The capability MUST therefore be reported as **declined by Cairn**, with the
+  reason recorded, and MUST NOT be reported as unsupported by the vendor, which would be untrue.
+  OpenCode remains required for automatic capture and for manual MCP use. If the surface
+  stabilizes, delivery may be added without a specification change, because FR-828 states the
+  requirement by capability rather than by vendor.
+- **FR-838c**: Both committed agents expose a prompt-time hook that fires before the model
+  processes a user prompt and accepts returned context. Prompt-time retrieval is therefore an
+  available delivery point for both, and MUST be treated as a capability the capture matrix
+  declares per agent, not as an assumption about all agents.
+- **FR-838d**: Post-compaction delivery MUST NOT be implemented by returning context from a
+  post-compaction event. At least one committed vendor documents that its post-compaction event
+  cannot carry returned context at all. The supported mechanism for both committed agents is
+  delivery at session open, distinguished by the trigger that opened the session: both document
+  a session-start source value of `compact`. Post-compaction delivery is therefore an
+  established capability for Claude Code and Codex CLI, not an open vendor question.
+- **FR-838e**: No receipt-acknowledgement mechanism was established for any committed agent
+  from the official documentation reviewed on 2026-08-30. That is an absence of evidence, not a
+  vendor statement that none exists, and MUST be recorded as such: receipt status is
+  `unavailable / no evidence`, never `vendor does not support it`. Cairn MUST NOT claim
+  confirmed receipt for any agent unless a named vendor mechanism establishes it, at which point
+  the matrix entry changes on that evidence.
+- **FR-838f**: Agents reachable only through generic MCP remain supported for manual use and are
+  NOT part of the automatic capture or delivery population. Their capability MUST be reported as
+  absent rather than healthy.
+
 ### Automatic retrieval and bounded context
 
 - **FR-827**: Relevant knowledge MUST reach an agent's session without the agent or the user
-  invoking a Cairn tool.
+  invoking a Cairn tool, at one or more of the delivery points that agent's declared capability
+  matrix records as available.
 - **FR-828**: Retrieval MUST be driven by the session's own context — the project, the branch,
-  the bound task where one exists, and the activity in the session.
+  the bound task where one exists, and the activity in the session. Where an agent exposes a
+  prompt-time delivery point, retrieval MAY additionally be driven by the prompt about to be
+  processed. Cairn MUST NOT require a prompt-time hook from an agent whose vendor does not
+  provide one.
 - **FR-829**: Automatic context MUST be bounded. The existing budget discipline, including the
   reserve for project knowledge and the ceiling on personal and team guidance, MUST continue
   to hold.
@@ -704,12 +959,12 @@ server or explicitly reported as unmigrated, with authority switching only if th
   briefing levels, and the level reached MUST be recorded on the briefing and in its retrieval
   trace. Latency MUST NOT produce an unbounded family of briefings.
 - **FR-837**: Where retrieval is served from cache, the briefing MUST say so.
-- **FR-838**: Automatic retrieval MUST deliver at session open, which is the only automatic
-  delivery point that exists today. Post-compaction restoration currently reaches an agent only
-  where that agent reopens a session after compacting, or where a tool call asks for it — the
-  post-compaction event itself carries nothing back, for any vendor. Feature 005 MUST either
-  preserve that arrangement or state the new delivery point it adds; it MUST NOT describe
-  post-compaction delivery as an existing behaviour being continued.
+- **FR-838**: Automatic retrieval MUST deliver at session open for every agent whose matrix
+  records session-open delivery, and MAY additionally deliver at a prompt-time point where the
+  matrix records one. Post-compaction restoration reaches an agent through a session opened by
+  compaction, not through the post-compaction event itself, which at least one committed vendor
+  documents as unable to carry returned context. Feature 005 MUST NOT describe post-compaction
+  delivery as an existing behaviour being continued.
 
 ### Retrieval traces and delivery telemetry
 
@@ -792,6 +1047,13 @@ server or explicitly reported as unmigrated, with authority switching only if th
   whose authority is being transferred.
 - **FR-866**: Migration MUST NOT lose project memory, personal knowledge or team knowledge.
 - **FR-867**: Migration MUST NOT reassign authorship, domain or scope of any existing record.
+- **FR-867a**: Migration MUST normalize the topic and value keys of existing records using the
+  same deterministic function FR-796a applies to new candidates. Without this, a normalized
+  candidate stops colliding with a legacy record carrying an un-normalized key, and duplicate,
+  conflict and reinforcement detection silently degrade against exactly the knowledge users
+  already have. Normalizing a key is not reassigning a record's domain, scope or authorship, and
+  where two existing records normalize to one key the collision MUST be surfaced through the
+  ordinary conflict machinery rather than resolved by discarding one.
 - **FR-868**: Migration MUST NOT create duplicate canonical knowledge as a result of retry.
 - **FR-869**: Migration MUST be resumable. An interruption at any point MUST be recoverable by
   running it again.
@@ -806,17 +1068,42 @@ server or explicitly reported as unmigrated, with authority switching only if th
   blocked.
 - **FR-874**: Writer identity and writer sequence MUST be retained as provenance and
   delivery-gap detection. They MUST NOT be repurposed to resolve authority between replicas.
-- **FR-875**: Server instance binding MUST be preserved across migration.
-- **FR-876**: Synchronization machinery that exists only because authority was duplicated —
-  offline multi-writer convergence over knowledge the server now owns — MUST NOT be removed
-  while any store bound to the same server instance is still unmigrated. Migration is per store,
-  but authority is per server: a user whose second device has not migrated still authors
-  locally, and a first device that has discarded convergence has no way to resolve the
-  divergence. Either every bound store has migrated, or the server MUST refuse the unmigrated
-  store; the specification requires one of those to be chosen and enforced rather than left to
-  timing.
+- **FR-875**: Server instance binding MUST be preserved across migration and across cutover,
+  including for a client refused under FR-876b: a refused client MUST still be able to establish
+  that it is bound to the same server instance, so an upgrade prompt cannot be induced by
+  pointing a client at a different server.
+- **FR-876**: A server MUST have an explicit authority mode, and its transition to
+  server-authoritative mode MUST be an observable cutover rather than an emergent state.
+- **FR-876a**: Before cutover, a Feature 004 client MUST be able to migrate normally.
+- **FR-876b**: After cutover, a pre-005 client MUST NOT perform knowledge synchronization that
+  assumes local authority. The server MUST refuse such a write with an explicit, distinguishable
+  result meaning `upgrade_required` — not a generic error and not a silent success.
+- **FR-876b1**: The server cannot determine how an already-shipped client reacts to a result
+  code that did not exist when that client was built; a pre-005 client will route an unknown
+  refusal into its existing blocked-or-failed branch. What the specification requires is
+  therefore what the server controls: the refusal MUST be permanent rather than
+  capability-shaped, so that a client treating it as deferrable makes no progress and loses no
+  data, and the condition MUST be visible to the operator. An upgraded client MUST recognise
+  `upgrade_required` and stop retrying, surfacing the upgrade to the user.
+- **FR-876c**: An `upgrade_required` refusal MUST leave the legacy client's local data intact.
+  Cairn MUST NOT delete, demote, truncate or rewrite the local store of a client it has just
+  refused. The client is out of date, not wrong.
+- **FR-876d**: After that client upgrades, it MUST be able to run the Feature 005 migration,
+  and its local replicas MUST be demoted only after canonical possession has been established
+  for the records concerned, exactly as FR-865 and FR-872 require for any other store.
+- **FR-876e**: Two different mechanisms must not be confused here. The *dual-authority
+  convergence system* — offline multi-writer merge over knowledge the server now owns — may be
+  retired at cutover, because a returning pre-005 client is refused rather than merged. The
+  *migration path* — draining a store's remaining queued writes and establishing canonical
+  possession — MUST survive cutover, because FR-876d requires clients to migrate after it. The
+  migration path belongs to the upgraded client and the migration tooling, not to the legacy
+  convergence system, and retiring the latter MUST NOT remove the former. This supersedes the
+  earlier condition that convergence removal wait until every store bound to the server had
+  migrated, which made retirement contingent on a device that might never return.
 - **FR-877**: An installation that has not migrated MUST continue to function under the
-  Feature 004 semantics until it does.
+  Feature 004 semantics for as long as the server it is bound to has not cut over. Once that
+  server has cut over, the client's knowledge synchronization is refused per FR-876b while its
+  local data remains readable to it; ordinary local agent operation MUST NOT break.
 - **FR-878**: Migration MUST be demonstrable on a populated store, and its guarantees MUST be
   asserted by tests rather than described.
 
@@ -920,8 +1207,14 @@ server or explicitly reported as unmigrated, with authority switching only if th
   supports.
 - **EdgeSpool**: The local queue of safe events awaiting acceptance, with its depth, its oldest
   entry, its retry state and its bound. It holds unsent work, never an alternative truth.
-- **AuthorityMode**: Whether a given local store has migrated to server authority, is
-  mid-migration, or still operates under Feature 004 semantics.
+- **AuthorityMode**: Whether a server has cut over to server-authoritative mode, and whether a
+  given local store has migrated, is mid-migration, or still operates under Feature 004
+  semantics. The server's mode is what makes `upgrade_required` answerable.
+- **ConsolidationBacklog**: The durable record of which accepted events remain to be
+  consolidated, including claim state, so that progress survives a restart and outstanding work
+  is reportable rather than inferred.
+- **ExtractionInput**: The bounded set of already-approved safe events handed to extraction. It
+  is the complete description of what any extractor, model or otherwise, is permitted to see.
 - **DurabilityClass**: For a category of local data, whether its loss is recoverable from the
   server, recoverable by re-deriving it, or permanent. The vocabulary behind the claim that
   deleting the local store is safe.
@@ -987,9 +1280,10 @@ feature's tests, and a single counterexample fails it.
 
 - **SC-701**: On a fresh project, a single coding session that invokes no Cairn tool produces at
   least one durable knowledge record whose claim is judged accurate by a reviewer against a
-  pre-registered rubric, for every agent on the feature's declared supported-agent list.
-  Accuracy is a reviewed judgement and is recorded as such; the automated portion asserts
-  existence, provenance resolution and rubric completion, and fails if any is missing.
+  pre-registered rubric, for every agent FR-838a commits to automatic capture — Claude Code,
+  Codex CLI and OpenCode. Accuracy is a reviewed judgement recorded as such; the automated
+  portion asserts existence, provenance resolution and rubric completion, and fails if any is
+  missing.
 - **SC-702**: 100% of durable records produced by consolidation resolve to the session and the
   events they were derived from; zero have unresolvable provenance.
 - **SC-703**: Re-running consolidation over an unchanged set of accepted events produces zero
@@ -998,17 +1292,19 @@ feature's tests, and a single counterexample fails it.
 - **SC-704**: Zero candidates containing material the deterministic privacy checks refuse are
   persisted, across an adversarial corpus exercising every refusal class.
 - **SC-705**: Zero refusal records contain any portion of the content they refused.
-- **SC-706**: For every vendor signal on the feature's declared per-agent capture matrix, Cairn
-  either captures it or reports it as unsupported, declined or unimplemented; zero are silently
-  dropped. The matrix is declared before implementation and is the population under test, so the
-  criterion cannot be satisfied by narrowing the list.
+- **SC-706**: For every vendor signal on the per-agent capture matrix declared under FR-838a,
+  Cairn either captures it or reports it as unsupported, declined or unimplemented; zero are
+  silently dropped. The matrix is fixed before implementation and is the population under test,
+  so the criterion cannot be satisfied by narrowing the list.
 - **SC-707**: For a file-changing tool on every supported agent, the changed file's identity is
   captured or is explicitly recorded as unavailable from the vendor; zero are recorded as a
   generic command.
 - **SC-708**: A second session in a related area receives relevant prior knowledge with no tool
-  call, for every agent on the declared supported-agent list whose capture matrix records
-  context delivery as supported. Membership of that list is fixed before testing; an agent whose
-  delivery fails is a failure, not a reclassification.
+  call, for every agent FR-838a commits to automatic delivery — Claude Code and Codex CLI — at
+  each delivery point that agent's matrix records as available. OpenCode is excluded from this
+  criterion by FR-838b and its exclusion is a recorded vendor limitation, not a reclassification
+  of a failure; an OpenCode delivery failure is reported as unavailable-from-vendor and an
+  OpenCode *capture* failure still fails SC-701 and SC-706.
 - **SC-709**: 100% of delivered briefings are within their stated budget; zero exceed it.
 - **SC-710**: In 100% of briefings where project knowledge alone would fill the reserve,
   personal and team guidance occupy none of it.
@@ -1016,10 +1312,11 @@ feature's tests, and a single counterexample fails it.
   rule admitted it and what budget remained at that point — sufficient for a reviewer to
   reproduce the same selection by hand from the recorded inputs. An explanation that does not
   permit that reproduction does not satisfy this criterion.
-- **SC-712**: Delivery status reports acknowledgement as confirmed only for agents whose
-  declared capture matrix records acknowledgement as supported; for every other agent on the
-  declared list it reports acknowledgement unavailable. Zero agents report a confirmation their
-  matrix entry does not license.
+- **SC-712**: Delivery status reports acknowledgement as confirmed for zero agents, because no
+  acknowledgement mechanism has been established from reviewed vendor documentation (FR-838e);
+  all report `unavailable / no evidence`. Zero report acknowledgement as unsupported-by-vendor,
+  which the evidence does not license. Should a named vendor mechanism be established, the
+  criterion becomes: confirmed only where the matrix records acknowledgement as supported.
 - **SC-713**: After deleting and recreating the local store, 100% of project, personal and team
   knowledge the server had accepted is reachable again, with no manual repair step.
 - **SC-714**: After the same deletion, Cairn enumerates every category of data that did not
@@ -1070,11 +1367,71 @@ feature's tests, and a single counterexample fails it.
   reinforce rather than creating a new record, across a pre-registered paraphrase corpus of at
   least fifty claim pairs spanning all five knowledge kinds. The corpus is fixed before
   implementation.
-- **SC-737**: The feature's dependency manifest gains zero datastore, broker, worker-platform
-  or service dependencies, asserted by comparing the manifest against its pre-feature baseline
-  and failing on any added entry in those categories.
+- **SC-737**: The feature's dependency manifest gains zero datastore, broker or
+  worker-platform dependencies, asserted by comparing the manifest against its pre-feature
+  baseline and failing on any added entry in those categories. An extraction model provider, if
+  one is configured, is declared separately as an extraction dependency and is governed by
+  FR-805a and FR-805a1 rather than counted here — it stores nothing and coordinates nothing.
 - **SC-738**: Reusable patterns survive deletion of the local store in 100% of trials, closing
   the gap Feature 004 deferred.
+- **SC-739**: Restarting the server at each of at least twenty pre-registered points during
+  consolidation, including mid-pass, yields the same durable knowledge, the same relations and
+  the same reinforcement counts as an uninterrupted run over the same events, and leaves zero
+  events permanently unconsolidated. Re-derivation after an abandoned claim is expected; a
+  second durable effect from it is a failure.
+- **SC-740**: With consolidation stopped and a backlog of at least ten thousand outstanding
+  events, event ingestion accepts and persists safe events at a median latency within 20% of its
+  latency at an empty backlog, over at least ten trials, and zero ingestion requests are refused
+  with a backlog-derived reason.
+- **SC-741**: Against an adversarial corpus that attempts to carry raw payloads, transcripts,
+  raw tool output, secrets and absolute paths through capture, zero instances reach the
+  extraction stage, asserted by inspecting exactly what extraction was handed. The corpus must
+  attempt the ingress rather than assume the schema prevents it, and must include material that
+  is well-formed for the safe-event schema but carries a secret inside an approved text field.
+- **SC-742**: With the extractor replaced by a stub emitting adversarial output — claiming
+  durability, a foreign domain, a wider scope, verified status, supersession of existing
+  records, and another account's ownership — zero of those claims take effect. Every resulting
+  durability, authorization, domain, scope, privacy, verification and supersession outcome is
+  identical to the outcome produced with the stub emitting nothing.
+- **SC-743**: 100% of `repo_file` values that are absolute, drive-prefixed, UNC-prefixed,
+  traversal-bearing, empty, or longer than the contract's stated maximum are refused by the
+  server, asserted against an adversarial corpus covering every listed form on both POSIX and
+  Windows shapes. The contract states that maximum as a number; an unstated bound fails this
+  criterion.
+- **SC-744**: For every supported agent, a file-changing tool produces either a valid
+  `repo_file`, an out-of-repository marker, or an explicit unavailable-from-vendor marker —
+  and never a synthesized value, a working-directory substitute, or a degradation to a generic
+  command. The population is every supported agent's file-changing tools, so an agent reporting
+  absolute paths is tested rather than excluded.
+- **SC-745**: Syntactic variants of one key resolve to a single canonical identity across a
+  pre-registered corpus of at least fifty variant groups; zero variant pairs produce two
+  distinct records. Separately, 100% of keys that fail validation refuse their candidate and
+  zero are repaired into a different valid key.
+- **SC-746**: After cutover, 100% of pre-005 knowledge-synchronization writes receive an
+  explicit `upgrade_required` result distinguishable from a generic error and from a
+  capability-shaped deferral; zero are silently accepted; and the condition is visible to the
+  operator. An upgraded client receiving it stops retrying and surfaces the upgrade, asserted on
+  the upgraded client rather than on the legacy binary.
+- **SC-747**: After an `upgrade_required` refusal, zero durable knowledge records in the legacy
+  client's local store are deleted, demoted, truncated or rewritten by Cairn, asserted by
+  comparing record-level content before and after rather than by comparing file bytes. The
+  client's ordinary local capture and recall continue to function.
+- **SC-748**: The consolidation backlog's depth, oldest outstanding event and failure count are
+  retrievable at any time, including while a pass is running and immediately after a restart.
+- **SC-749**: Extraction requests are confined to one project and one account context in 100% of
+  trials; zero requests carry events from a project or account the request was not scoped to.
+- **SC-750**: After migration, 100% of pre-existing records carry normalized keys, and a
+  candidate matching a legacy record's normalized key collides with it rather than creating a
+  second record, over a corpus seeded with un-normalized legacy keys.
+- **SC-751**: Every safe-event field carrying a value whose natural name is refused by the
+  synchronization boundary uses a distinct declared name; zero refused names appear in the
+  safe-event schema.
+- **SC-752**: Inducing capture-deadline expiry produces zero agent-facing errors and zero
+  blocked agent operations, while 100% of the resulting drops appear in capture health with a
+  deadline-specific disposition. A drop that is invisible to health fails this criterion just as
+  an agent-facing error does.
+- **SC-753**: Zero deadline-drop records contain any portion of the payload being processed when
+  the deadline expired.
 
 ---
 
@@ -1084,39 +1441,75 @@ feature's tests, and a single counterexample fails it.
 
 Most ambiguities in the initial direction were resolvable from current `main`, the Feature
 001–004 contracts, and the constitution, and were resolved as Assumptions below. Three
-questions remain that a reasonable reader could answer in materially different ways with
-materially different consequences, and they are left open rather than defaulted.
+questions could not be, and were carried openly rather than defaulted. They are closed in the
+session below.
 
-- Q: Where does consolidation execute? → **[NEEDS CLARIFICATION: the server today has no
-  scheduler, background worker, timer or async job of any kind (`crates/cairn-server/src/`
-  contains no `tokio::spawn` or interval task; it is a single request-serving process).
-  Consolidation therefore needs an execution home that does not exist yet. The candidates are:
-  (a) an in-process background task inside the existing server, (b) a scheduled pass triggered
-  by ordinary request traffic, (c) a pass driven by each client's daemon against server APIs.
-  Each has different failure, fairness and privacy consequences, and (c) partially reopens the
-  question of where knowledge is decided.]**
+### Session 2026-08-30
 
-- Q: What performs semantic extraction, and where does it run? → **[NEEDS CLARIFICATION: two
-  problems, not one. (i) If extraction runs against a local model, no raw material leaves the
-  machine. If it calls a hosted model, raw material leaves to a third party — which the privacy
-  architecture otherwise forbids and no principle contemplates. (ii) Independently of the
-  model's location, *no existing process is eligible to host extraction*: the per-event capture
-  process is short-lived and runs under a millisecond-scale deadline, and FR-730 forbids the raw
-  payload reaching the daemon. FR-763a states the properties the transient boundary must have;
-  what that boundary actually is remains open. This is the highest-consequence open question in
-  this specification.]**
+The three open questions are now decided, together with three further decisions the first
+pass had left implicit. Each is recorded with what was rejected and why, so a later reader can
+see that the alternative was considered rather than missed.
 
-- Q: Under what field name may a repository-relative path cross the safe-event boundary? →
-  **[NEEDS CLARIFICATION: an earlier framing of this question — that repository-relative paths
-  cannot cross the boundary at all today — is factually wrong and is corrected here. Handoffs
-  are a synchronized entity and the server already stores `changed_files`, a list of
-  repository-relative paths, which appears on neither refusal list
-  (`crates/cairn-server/migrations/0001_init.sql:127`, `crates/cairn-server/src/sync.rs:772`).
-  What the boundary refuses is the *field name* `path`, together with `path_fingerprints`, at
-  any depth. So the real question is narrow and answerable: under what explicitly defined field
-  name, with what constraints, may a safe event carry repository-relative file identity — given
-  that FR-777a forbids the safe-event schema from reusing a name the other boundary refuses.
-  This is a smaller decision than it first appeared, but it is still a decision.]**
+- Q: Where does consolidation execute? → A: **In-process background work inside the existing
+  server process.** PostgreSQL holds durable backlog and progress state, so a restart loses no
+  completed work; an abandoned claim may be reclaimed and re-executed, and re-execution
+  produces no duplicate durable effect. Rejected: a new service, a broker or a distributed
+  worker platform,
+  all of which Principle II forbids without a requirement that exists today; and client-driven
+  consolidation, which was rejected on stronger grounds than cost — it would return the
+  decision about what becomes durable knowledge to the edge, which is the arrangement this
+  feature exists to end. (FR-793a–FR-793d, FR-814, SC-739, SC-740)
+
+- Q: What performs semantic extraction, and where does it run? → A: **On the server, over
+  already-approved `SafeCanonicalEvent` records.** The local machine performs vendor parsing,
+  normalization, redaction, the deterministic privacy checks and bounded safe-event
+  construction — and nothing more. This dissolves the problem rather than solving it: the first
+  pass looked for a local process able to hold rich material long enough to extract from it and
+  found that none was eligible, then specified a new local transient boundary to fill the gap —
+  a requirement since deleted, its identifier now reused for the server-side rule. Moving extraction behind the privacy boundary removes the need for that
+  boundary altogether. Rejected: inventing a local transient extraction process, which added a
+  new place for private material to live in exchange for nothing. (FR-749, FR-763, FR-763a,
+  FR-763b)
+
+- Q: May a model perform extraction, and what may it see? → A: **Yes, restricted to
+  `SafeCanonicalEvent` records Cairn was already permitted to persist centrally, scoped to one
+  project and one account context.** An earlier answer justified a hosted model on the grounds
+  that the material had already legitimately left the machine, so no new egress occurred. That
+  reasoning is withdrawn: it is the derivation-as-loophole argument Constitution v1.2.1
+  Principle V explicitly refuses. A third-party extractor is a **second recipient at a second
+  boundary**, and being permitted to reach the user's own server does not permit forwarding
+  anywhere else. A third-party extractor therefore remains possible, but only with the naming,
+  disclosure and scoping duties FR-805d imposes. The model may propose content, kind, topic key,
+  value key and source event references; it may not decide durability, authorization, domain
+  ownership, scope, privacy acceptance, reconciliation, verification or supersession.
+  (FR-805a–FR-805e, SC-741, SC-742, SC-752, SC-753)
+
+- Q: Under what field name may a repository-relative path cross the safe-event boundary? → A:
+  **`repo_file`**, carrying repository-relative file identity only — relative, slash-normalized,
+  non-empty, bounded, no `..` traversal, no leading `/`, no drive or UNC prefix, and validated
+  independently by the server. The refused name `path` is not reused. Where a vendor supplies no
+  file identity in any form, the event records it as unavailable; a file outside the repository
+  is recorded as out-of-repository; and an absolute vendor path — the common case — is
+  relativized locally against the repository root, which is never itself transmitted.
+  (FR-777b–FR-777g, SC-743, SC-744, SC-751)
+
+- Q: How is a model-proposed key turned into canonical identity? → A: **Cairn normalizes and
+  validates it deterministically before it is used for anything.** A proposed key is an input,
+  never the identity. `Storage Authority`, `storage_authority` and `storage-authority` resolve
+  to one canonical representation. A key that fails validation refuses the candidate rather
+  than being silently repaired, because a repaired key changes which existing knowledge the
+  candidate collides with. Rejected: trusting model output as identity, and introducing
+  embeddings to reconcile variants — the problem is syntactic, and a syntactic function solves
+  it. (FR-796a–FR-796c, SC-745)
+
+- Q: What happens to a Feature 004 client after the server cuts over to server-authoritative
+  mode? → A: **Its knowledge synchronization is refused with an explicit `upgrade_required`
+  result, and its local data is left intact.** It upgrades, migrates, establishes canonical
+  possession, and only then are its local replicas demoted. Rejected: preserving the
+  dual-authority convergence system indefinitely against the possibility that a dormant device
+  returns — that made retirement of the machinery contingent on a device that might never come
+  back, and it is the reason the first pass could not state when convergence could be removed.
+  (FR-876–FR-877, SC-746, SC-747)
 
 ---
 
@@ -1131,6 +1524,26 @@ materially different consequences, and they are left open rather than defaulted.
 - The existing promotion gate's shape — a pure, fail-closed function whose rejection type
   cannot carry rejected text — is the right model for governing consolidation output, and is
   extended rather than duplicated.
+- Moving extraction to the server does not weaken the privacy boundary, because the boundary
+  is unchanged and still runs locally: the server only ever sees what that boundary already
+  approved. Extraction gains richer material than a millisecond-budget hook could produce, and
+  gains it without any new class of data leaving the machine.
+- Extraction runs on the server; whether the extractor is a model the server operator runs
+  themselves or a third-party service is a deployment choice, not an architectural one. A
+  third-party extractor is permitted but carries the naming, disclosure and scoping duties
+  Principle V sets out, and the baseline assumes no particular extractor.
+- **No hosted extraction provider is selected by this specification, and none is assumed
+  compliant.** Provider retention and training behaviour is configuration-, account- and
+  model-dependent; a default hosted API configuration cannot be assumed to satisfy Constitution
+  v1.2.1's requirement that a third-party extractor store nothing and coordinate nothing.
+  Before any hosted extractor is selected during planning, Phase 0 MUST establish from the
+  provider's current official documentation: the provider, the model, the endpoint, customer
+  content retention, whether submitted content is used for training or model improvement,
+  eligibility for a zero-retention or no-training mode, prompt or application-state caching,
+  project and account isolation, the disclosure the provider requires be made to end users, and
+  the behaviour when a compliant mode is unavailable. If compliance cannot be established for
+  the actual deployment, the plan MUST evaluate a compliant self-hosted or deterministic
+  alternative, or report the blocker. It MUST NOT record compliance it did not verify.
 - Structured matching on topic and value keys plus full-text search is sufficient for
   consolidation's duplicate and conflict detection. Embeddings are not required, and are not
   adopted on the possibility that they might help.
@@ -1186,7 +1599,14 @@ materially different consequences, and they are left open rather than defaulted.
   which is the point of the vendor-aware architecture. A generic adapter that guesses at an
   unknown vendor's semantics would reintroduce exactly the flattening this feature removes.
 - **A new message broker, distributed worker platform or microservice decomposition** — the
-  existing Rust server and daemon are extended.
+  existing Rust server and daemon are extended; consolidation is in-process background work.
+- **Client-driven consolidation** — rejected on architecture rather than cost. Deciding what
+  becomes durable knowledge at the edge is the arrangement this feature exists to end.
+- **A local transient extraction process** — considered and removed. Moving extraction behind
+  the privacy boundary makes it unnecessary, and it would have created a new place for private
+  material to live in exchange for nothing.
+- **Indefinite dual-authority convergence for dormant legacy devices** — a returning pre-005
+  client is refused with `upgrade_required`, not merged.
 - **Organizations, multiple teams per server, or nested groups** — unchanged from Feature 004.
 - **SSO, OAuth, multi-factor authentication or cross-server federation** — authentication is
   unchanged in kind.

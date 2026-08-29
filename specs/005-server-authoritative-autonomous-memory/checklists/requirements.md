@@ -78,7 +78,8 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK030 Is memory detail with full provenance specified? (FR-883, FR-884, FR-885)
 - [x] CHK031 Are relations exposed, and is the relation graph bounded and non-authoritative?
       (FR-901–FR-905)
-- [x] CHK032 Are non-goals stated explicitly with a reason each? (Out of Scope, twelve entries)
+- [x] CHK032 Are non-goals stated explicitly with a reason each? (Out of Scope, seventeen
+      entries, four recording alternatives considered and rejected on 2026-08-30.)
 - [x] CHK033 Is the end-to-end acceptance scenario defined on a real repository, per Principle
       VII? (End-to-End Acceptance Scenario, five phases)
 - [x] CHK034 Does the spec close, or explicitly re-defer, each item Feature 004 deferred to
@@ -91,8 +92,9 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK035 Is every requirement singular — one obligation per identifier — so a test can fail
       it precisely?
 - [x] CHK036 Are requirement identifiers unique and non-colliding with Features 001–004?
-      (Verified mechanically: 193 identifiers, all within FR-701–FR-905, zero intersection with
-      the identifiers used by the four prior features.)
+      (Verified mechanically after each pass; currently 238 FR and 51 SC identifiers, all within
+      the FR-7xx/FR-9xx and SC-7xx bands this feature reserved, with zero intersection with the
+      identifiers used by the four prior features.)
 - [x] CHK037 Is the reason for departing from the leading-digit numbering habit recorded, so a
       later reader does not read it as an error? (Front matter; research.md §7)
 - [x] CHK038 Are deliberate identifier gaps between semantic blocks noted? (Front matter)
@@ -107,17 +109,20 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK041 Is the refusal record structurally prevented from carrying refused content?
       (FR-757, SC-705)
 - [x] CHK042 Is the single-implementation rule for rejection classes preserved? (FR-760)
-- [x] CHK043 Is transient extraction material required not to outlive the boundary? (FR-763)
+- [x] CHK043 Is raw material held locally required not to outlive the work that reads it?
+      (FR-763 — discarded once parsing, redaction and the privacy checks complete or fail, never
+      written to durable local storage, and never retained pending a later extraction step.)
 - [x] CHK044 Is server-side independent enforcement required, so a hostile client cannot store
       forbidden content? (FR-777)
-- [ ] CHK045 Is it settled whether a repository-relative path may cross the safe-event
-      boundary? (Open by design — Clarifications Q3. The existing boundary refuses `path` and
-      `path_fingerprints` at any depth; permitting a repo-relative path narrows an absolute
-      rule and must be an explicit decision.)
-- [ ] CHK046 Is it settled where semantic extraction runs and against what model? (Open by
-      design — Clarifications Q2. A hosted model would send raw material to a third party,
-      which no principle currently contemplates. Highest-consequence open question in the
-      specification.)
+- [x] CHK045 Is it settled whether, and under what name, repository-relative file identity may
+      cross the safe-event boundary? (Settled 2026-08-30: the field is `repo_file`, carrying
+      repository-relative identity only, with the refused name `path` not reused and the server
+      validating independently. FR-777b–FR-777e, SC-743, SC-744.)
+- [x] CHK046 Is it settled where semantic extraction runs and what a model may see? (Settled
+      2026-08-30: extraction runs on the server over already-approved safe events, and any
+      model — hosted included — sees only material Cairn was already permitted to persist
+      centrally. The previously specified local transient extraction boundary was removed rather
+      than refined. FR-749, FR-763–FR-763b, FR-805a–FR-805c, SC-741, SC-742.)
 
 ## Authorization & Identity
 
@@ -160,8 +165,9 @@ parentheses, what a reader should go check before treating it as settled.
 
 ## Success Criteria
 
-- [x] CHK062 Are all success criteria measurable? (SC-701–SC-738 state counts, percentages or
-      absolute zeros.)
+- [x] CHK062 Are all success criteria measurable? (SC-701–SC-751 state counts, percentages or
+      absolute zeros. SC-739–SC-751 were rewritten after the consistency pass found several that
+      could not fail — see CHK087.)
 - [x] CHK063 Are success criteria free of technology names? (No framework, language, datastore
       or library is named in any SC.)
 - [x] CHK064 Does at least one success criterion exist for each major requirement area?
@@ -177,8 +183,11 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK067 Is the baseline commit recorded in the spec itself, not only in research? (Front
       matter)
 - [x] CHK068 Are the constitutional conflicts this feature creates resolved in the constitution
-      rather than in an implementation note? (Constitution v1.2.0, Amendment History entry
-      1.2.0 — Principles III, V, II, VI amended; IX and X added.)
+      rather than in an implementation note? (Constitution is currently **v1.2.1**. The 1.2.0
+      entry amended Principles III, V, II, VI and added IX, X and XI for the original
+      architecture. The 1.2.1 entry closes the gap the 2026-08-30 decisions opened: Principle V
+      gained the extractor boundary, and Principle II was clarified on what "a new service"
+      forbids. Both entries are current governance; neither is superseded.)
 
 ## Falsification Coverage
 
@@ -189,8 +198,9 @@ survive a hostile read is decoration.
 
 - [x] CHK069 Were internal contradictions found and resolved rather than argued away? (Nine
       found. Patterns required to be durable while the only boundary that could carry them
-      refuses them — FR-708b and a narrowed SC-731. Extraction with no process eligible to host
-      it — FR-763a. Reinforcement required from a candidate that has no persisted endpoint —
+      refuses them — FR-708b and a narrowed SC-731. Extraction with no local process eligible to
+      host it — since resolved by moving extraction server-side, not by the local transient
+      boundary that first pass specified. Reinforcement required from a candidate that has no persisted endpoint —
       FR-798a. A retrieval deadline that destroyed the determinism guarantee — FR-835/FR-836
       declared levels. Traces required to persist rendered context that mixes domains —
       FR-839/FR-886 now record identities and accounting. Migration per store versus authority
@@ -236,19 +246,146 @@ survive a hostile read is decoration.
       It read the file mid-edit: the amendment history and the 1.2.0 footer were written
       afterwards, and the file is now internally consistent. No other finding was rejected.)
 
+## Architectural Decisions (Session 2026-08-30)
+
+- [x] CHK075 Is consolidation's execution home decided, and is its progress durable? (In-process
+      background work inside the existing server process; PostgreSQL holds backlog, progress and
+      claim state so a restart loses no completed work; an abandoned claim is reclaimed and
+      re-executed, and re-execution produces no duplicate durable effect. FR-793a–FR-793d,
+      FR-797, SC-739.)
+- [x] CHK076 Is capture independent of consolidation availability and backlog? (FR-814 now
+      forbids back-pressure on ingestion and forbids reporting a backlog as an ingestion
+      failure. SC-740.)
+- [x] CHK077 Is the local machine's responsibility bounded to parsing, normalization, redaction,
+      privacy checks and safe-event construction? (FR-749, with the section preamble stating it
+      and FR-763 forbidding retention pending a later extraction step.)
+- [x] CHK078 Is it stated that extraction receives only already-approved material, with no side
+      channel to the machine? (FR-763b, FR-805a, SC-741.)
+- [x] CHK079 Is the model's permitted output enumerated, and its forbidden decisions enumerated?
+      (FR-805b: may propose content, kind, topic key, value key, source event references; may not
+      decide durability, authorization, domain ownership, privacy acceptance, verification or
+      supersession. SC-742.)
+- [x] CHK080 Are model-proposed source event references verified rather than trusted? (FR-805c —
+      existence, project and session context, and prior acceptance.)
+- [x] CHK081 Is `repo_file` fully constrained and independently validated by the server?
+      (FR-777c lists every rejected form; FR-777d requires server-side validation; SC-743 tests
+      it adversarially on POSIX and Windows shapes.)
+- [x] CHK082 Are all four file-identity dispositions distinguished — absolute-inside-repo,
+      outside-repo, vendor-absent, and a hostile absolute value on the wire? (FR-777e local
+      relativization; FR-777f out-of-repository; FR-777g unavailable-from-vendor; FR-777d
+      server-side refusal. SC-743, SC-744.)
+- [x] CHK083 Is model-proposed identity normalized by Cairn before use, deterministically and
+      without embeddings? (FR-796a–FR-796c, SC-745. A failing key refuses the candidate rather
+      than being repaired, because repair changes what the candidate collides with.)
+- [x] CHK084 Is the post-cutover behaviour of a legacy client explicit, and is its data safe?
+      (FR-876b's `upgrade_required` is distinguishable from a generic error and from a capability
+      deferral; FR-876c leaves the local store untouched; SC-746, SC-747.)
+- [x] CHK085 Is convergence-machinery retirement no longer contingent on a dormant device?
+      (FR-876e supersedes the earlier every-store-migrated condition and records why.)
+- [x] CHK086 Is server-instance binding preserved across cutover? (FR-875, which now covers both
+      migration and cutover — a refused client can still establish it is bound to the same
+      instance, so an upgrade prompt cannot be induced by repointing a client. A separate
+      cutover-binding requirement was folded into FR-875 rather than left as a second identifier
+      for one obligation.)
+
+- [x] CHK087 Did a second adversarial pass run against the six decisions, and were its findings
+      resolved? (Yes. Fourteen introduced contradictions, two required constitutional changes,
+      eleven stale citations and nine weak success criteria. The most consequential: `repo_file`
+      had no disposition for a vendor supplying an *absolute* path — which is the majority case,
+      Claude Code included — so the common path was neither expressible nor recordable as
+      unavailable (FR-777e–FR-777g). Also: only `path` had been renamed while `summary`,
+      `command`, `details`, `exit_code` and `outcome` remain refused names (FR-777a1); key
+      identity was asserted server-side while the existing dedup digest is a refused field
+      (FR-796d); existing records' un-normalized keys would silently stop colliding (FR-867a);
+      "a restart repeats none of it" contradicted the mandated reclaim (FR-793b); and retiring
+      convergence at cutover would have removed machinery post-cutover migrations still need
+      (FR-876e).)
+- [x] CHK088 Are the new success criteria falsifiable? (SC-741 now requires an adversarial
+      corpus that attempts the ingress rather than asserting a type system prevents it; SC-742
+      now stubs the extractor with adversarial output rather than asking whether model influence
+      was recorded, which nothing records; SC-747 compares record-level content rather than file
+      bytes, which WAL churn makes meaningless; SC-743 requires the length bound to be a stated
+      number. SC-748–SC-751 cover requirements that previously had no criterion.)
+- [x] CHK089 Were duplicate obligations introduced by the decisions removed? (A second
+      server-instance-binding requirement was subsumed into FR-875, and its identifier retired
+      rather than left dangling; FR-793c and FR-813 were separated so each states one
+      obligation.)
+
+## Consistency Repair (Session 2026-08-30, second pass)
+
+- [x] CHK090 Was the "already left the machine, therefore no new egress" reasoning removed
+      wherever it was asserted? (Yes. It survived in one clarification answer and is withdrawn
+      there explicitly, naming it as the derivation-as-loophole argument Constitution v1.2.1
+      Principle V refuses. The two remaining occurrences are in the constitution itself, where
+      they *refute* the argument. FR-805d now makes the naming and disclosure duty testable, and
+      FR-805e forbids assuming a provider's retention behaviour.)
+- [x] CHK091 Is a hosted extractor's compliance treated as something to establish rather than
+      assume? (FR-805e; and an Assumption records the Phase 0 verification list — provider,
+      model, endpoint, retention, training use, zero-retention eligibility, caching, isolation,
+      required disclosure, and behaviour when a compliant mode is unavailable — with the
+      instruction that the plan must report a blocker rather than record unverified compliance.
+      No provider is selected by this specification.)
+- [x] CHK092 Is extraction replaceable, so no requirement depends on a hosted extractor
+      existing? (FR-805f.)
+- [x] CHK093 Is a capture-deadline miss both agent-invisible and Cairn-visible? (FR-749b keeps
+      the hook successful and non-blocking; FR-749c requires a distinct disposition surfaced in
+      health and counters; FR-749d forbids the record carrying payload content. SC-752 fails
+      either way — on an agent-facing error, or on a drop that health cannot see. This is the
+      distinction Principle X exists for: fail-soft describes the agent's experience, not what
+      Cairn is permitted to know about itself.)
+- [x] CHK094 Do the edge cases agree with FR-777e/f/g? (Yes. The single edge case that said an
+      absolute path is server-refused is replaced by four, matching the four dispositions:
+      absolute-inside-repo is relativized locally and crosses; outside-repo carries an
+      out-of-repository disposition; vendor-absent is unavailable-from-vendor; and an absolute
+      value arriving on the wire is refused by the server's own validation.)
+- [x] CHK095 Is all "restart repeats none" language gone? (Yes, from spec, research and CHK075.
+      The surviving phrase is in CHK087's record of the contradiction, which is history. The
+      operative wording is now: no completed work lost, abandoned claims reclaimed and
+      re-executed, re-execution producing no duplicate durable effect.)
+- [x] CHK096 Is delivery stated at effect level rather than as "accepted exactly once"? (Yes —
+      however many times delivery is retried, at most one canonical event and one consolidation
+      input exist, and a `duplicate` answer is success.)
+- [x] CHK097 Is the supported-agent population fixed before implementation, with evidence?
+      (FR-838a–FR-838f and research.md §9. Claude Code, Codex CLI and OpenCode for capture;
+      Claude Code and Codex CLI for automatic delivery. Vendor documentation checked
+      2026-08-30.)
+- [x] CHK098 Is OpenCode's exclusion from delivery stated as a vendor limitation rather than
+      silently dropped? (FR-838b, and SC-708 says so in the criterion itself — an OpenCode
+      *capture* failure still fails SC-701 and SC-706.)
+- [x] CHK099 Are the delivery points per agent unambiguous? (FR-838, FR-838c, FR-838d. Both
+      committed agents expose a prompt-time hook and a session-start `compact` source, so
+      post-compaction delivery is established for both — reached through a compaction-opened
+      session, never by returning context from the post-compaction event, which one vendor
+      documents as impossible.)
+- [x] CHK101 Is OpenCode's delivery exclusion classified truthfully? (FR-838b — reported as
+      **declined by Cairn** with the reason, not as unsupported by the vendor. OpenCode 2's
+      hooks exist; they are beta. Calling that a vendor absence would be false, and the capture
+      matrix distinguishes the two.)
+- [x] CHK102 Is receipt acknowledgement stated as no-evidence rather than proven-absent?
+      (FR-838e, SC-712 — status is `unavailable / no evidence`; zero agents report
+      unsupported-by-vendor, which the evidence does not license.)
+- [x] CHK103 Can a server-side verification summary exist without raw evidence egress or
+      client-asserted state? (FR-811a–FR-811d — raw evidence and runs stay local; the server
+      derives state from an attested run report bound to its account and project, never accepts
+      `verified` as a claim, carries no observed values or locators, and holds knowledge as
+      unverified where a summary cannot be established.)
+- [x] CHK100 Is the git branch reconciled against the spec metadata? (The working branch is
+      `feature-005-spec`; the feature directory is `005-server-authoritative-autonomous-memory`.
+      Both are now recorded, with the reason they differ — this repository's feature script
+      creates no branch.)
+
 ## Notes
 
-- Items marked incomplete require spec updates or a product decision before `/speckit-plan`.
-- CHK045 and CHK046 correspond to two of the three `[NEEDS CLARIFICATION]` markers and are
-  intentionally open: both are product decisions with materially different consequences, and
-  defaulting them silently is precisely the failure this checklist exists to catch. The third
-  marker — where consolidation executes — is an architecture question that `/speckit-plan` is
-  the right place to settle, and is not tracked as a spec-quality defect.
+- No item is incomplete. All 100 checks pass against the specification as it now stands.
+- CHK045 and CHK046 tracked two of the three `[NEEDS CLARIFICATION]` markers and were closed on
+  2026-08-30 along with the third. The specification now carries no clarification markers, and no
+  open product question remains.
 - CHK039 and CHK065 were wording and rigour defects found by this checklist's first pass and
   were closed in the same pass; they are recorded here because the checklist is a record of what
   was actually checked, not only of what remained wrong.
-- The specification grew from 193 to 206 functional requirements during falsification. The
-  growth is almost entirely authorization and testability: none of it adds product scope, and
-  the two genuinely open product questions are unchanged in number.
+- The specification grew from 193 requirements at first draft, to 206 after falsification, to
+  238 after the architectural decisions of 2026-08-30 and the consistency pass that followed.
+  Essentially none of the growth is product scope: it is authorization, testability, and the
+  consequences of the six decisions. No open product question remains.
 - `/speckit-analyze` is not applicable at this stage: it performs cross-artifact analysis
   across spec.md, plan.md and tasks.md, and the latter two do not exist yet by design.

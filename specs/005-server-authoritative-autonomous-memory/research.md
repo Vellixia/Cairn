@@ -303,10 +303,10 @@ enough to state plainly. `handoff` is a synchronized entity type, and the server
 the web client (`crates/cairn-server/migrations/0001_init.sql:127`,
 `crates/cairn-server/src/sync.rs:754,772`, `crates/cairn-server/src/api.rs:1212`).
 `changed_files` is on neither refusal list. What the boundary refuses is a set of **field
-names**, not path data as a category. The open question in the specification is therefore
-narrower than it first appeared: not *whether* repository-relative file identity may cross, but
-under what explicitly defined field name it may, given that reusing a refused name would make
-two boundaries on one server disagree about the same name.
+names**, not path data as a category. The question was therefore narrower than it first
+appeared: not *whether* repository-relative file identity may cross, but under what explicitly
+defined field name it may, given that reusing a refused name would make two boundaries on one
+server disagree about the same name. It was settled on 2026-08-30 as `repo_file` (§8).
 
 **Consequence for reusable patterns.** `reusable_pattern` is on the refused entity-type list,
 and a pattern row additionally carries `signal_digest`, `origin_ref` and `sanitization_report`
@@ -536,7 +536,7 @@ user reads.
 | server instance binding | closes same-URL-different-server attack | **KEEP** — security-critical |
 | local personal/team replicas | offline authority | **REPURPOSE** — bounded non-authoritative cache |
 | server→local merge (lifecycle-advance-only) | both sides could author | **SIMPLIFY** after migration completes; **required during** it |
-| offline multi-writer convergence | authority was duplicated | **REMOVE** — the reason ceases to exist |
+| offline multi-writer convergence | authority was duplicated | **REMOVE** at cutover — a returning pre-005 client is refused with `upgrade_required`, not merged, so removal is not contingent on every bound store having migrated |
 | `sync_deferred` | pulled child arrived before parent | **KEEP** |
 
 ---
@@ -560,11 +560,99 @@ number by scanning `specs/`, copies the spec template, and rewrites `.specify/fe
 
 ---
 
-## 8. Open questions carried into the specification
+## 8. Questions carried into the specification, and how they were closed
 
-1. Where consolidation executes — the server has no scheduler of any kind today (§3.5).
-2. What model, if any, performs semantic extraction, and where it runs.
-3. Whether a repository-relative path may cross the new event boundary, given that
-   `path` and even `path_fingerprints` are refused on the existing one (§3.2).
+All three were resolved on 2026-08-30, together with three further decisions the first pass
+had left implicit. `spec.md` now carries no `[NEEDS CLARIFICATION]` marker.
 
-These are recorded as `[NEEDS CLARIFICATION]` in `spec.md` rather than silently defaulted.
+1. **Where consolidation executes.** The server has no scheduler of any kind today (§3.5), so
+   this needed an answer rather than an assumption. Resolved: in-process background work inside
+   the existing server process, with durable backlog and progress state in PostgreSQL so a
+   restart loses no completed work, an abandoned claim is reclaimed and re-executed, and
+   re-execution produces no duplicate durable effect. The relevant research finding is §3.5's — the server
+   is a single request-serving process — which makes this an addition to that process rather
+   than a discovery that one already exists.
+
+2. **What performs semantic extraction, and where.** Resolved: on the server, over
+   already-approved safe events. This is the decision that most changed the specification, and
+   it did so by dissolving a problem rather than solving it. The first pass established that no
+   existing local process is eligible to host extraction — the capture process is short-lived
+   and runs under a millisecond-scale deadline (`crates/cairn-core/src/config.rs`, capture
+   deadline; §1.10), and the raw payload never reaches the daemon (§1.10) — and then specified a
+   new local transient boundary to fill the gap. Moving extraction behind the privacy boundary
+   removes the need for that boundary entirely, at no cost to §1.9's redaction ordering, which
+   still runs locally and unchanged.
+
+3. **Whether, and under what name, repository-relative file identity may cross.** §3.2's
+   correction established that the boundary refuses field *names*, not path data — `changed_files`
+   already crosses on handoffs. Resolved: a field named `repo_file`, carrying repository-relative
+   identity only, validated independently by the server, with the refused name `path` not reused.
+
+Three further decisions were taken at the same time and are recorded in `spec.md`'s
+Clarifications: what a model may see and decide; how a model-proposed key becomes canonical
+identity (Cairn normalizes deterministically — §4.3's exact-digest finding is why a syntactic
+function, not a similarity model, is the right instrument); and what happens to a Feature 004
+client after cutover (`upgrade_required`, local data intact), which is what finally makes §6's
+"REMOVE — offline multi-writer convergence" actionable rather than contingent on a dormant
+device returning.
+
+---
+
+## 9. Vendor capability evidence (checked 2026-08-30)
+
+Sources: Claude Code hooks reference and guide at `code.claude.com/docs/en/hooks` and
+`/hooks-guide` (pages render no publication date); Codex CLI hooks at
+`learn.chatgpt.com/docs/hooks` with changelog entries 0.149.0 (2026-08-20) and 0.150.0
+(2026-08-26); OpenCode plugins at `opencode.ai/docs/plugins/` (last updated 2026-08-28), its
+published plugin SDK type definitions, and the OpenCode 2 beta docs at `opencode.ai/v2/docs/`.
+
+| Capability | Claude Code | Codex CLI | OpenCode |
+|---|---|---|---|
+| Capture events | documented, stable | documented, stable | documented (v1 bus + plugin hooks) |
+| Session-open delivery | `additionalContext` | `additionalContext` | none documented |
+| Prompt-time retrieval | prompt-submit hook, returns `additionalContext` | prompt-submit hook, returns `additionalContext` | exists in v2 beta; Cairn declines to depend on it |
+| Post-compaction | via session open, `compact` trigger | via session open, `compact` trigger | pre-compaction only |
+| Receipt acknowledgement | none established | none established | none established |
+| MCP | yes | yes | yes |
+
+### 9.1 Corrections this research forced
+
+- **Codex has a documented prompt-time hook.** The working assumption carried into this repair
+  was that it might not, and that Cairn should not claim one without an official current source.
+  The source exists: Codex's hooks documentation specifies a prompt-submit hook returning
+  `hookSpecificOutput.additionalContext`, structurally near-identical to Claude Code's. Feature
+  005 may therefore commit to prompt-time retrieval for Codex as well as Claude Code. Note this
+  is a *vendor* capability that Cairn's adapters do not yet use — §1.6 records that both
+  adapters currently decline the prompt-submit event.
+
+- **Post-compaction context cannot be returned from the post-compaction event.** Claude Code's
+  documentation states its post-compaction event does not support `additionalContext` at all;
+  the documented mechanism is a session-open hook distinguished by a `compact` trigger. This
+  independently confirms §1.11's code finding — the post-compaction arm is a no-op — and means
+  the limitation is the vendor's design, not a Cairn omission.
+
+- **OpenCode delivery is declined by Cairn, not absent from the vendor.** OpenCode 2 does expose
+  prompt and context delivery hooks; they are beta, and the vendor states plugin APIs may
+  change. v1's injection points exist in the published type definitions but are undocumented and
+  experimentally named. The capability exists; what Cairn declines is a guarantee resting on an
+  unstable surface. Recording this as "vendor does not support it" would be false, and the
+  capture matrix distinguishes the two (FR-838b). Capture is committed.
+
+### 9.2 Not established
+
+Carried into planning rather than assumed:
+
+- Publication dates for the Claude Code hooks pages; the version in which Codex's prompt-submit
+  hook first shipped; whether Codex's hooks are formally designated GA (inferred from the
+  absence of a beta label, which is weaker than a positive statement).
+- ~~Codex's session-open compaction trigger~~ — **since established**: Codex documents a
+  session-start source value of `compact`, as Claude Code does. Post-compaction delivery through
+  session open is therefore settled for both committed agents (FR-838d).
+- Whether OpenCode v1's message-mutation hook reliably injects text the model actually sees;
+  only the type signature was verified, never the behaviour.
+- Whether OpenCode 2 has any session-start hook, and whether its `prompt` hook can return
+  context or only intercept it.
+- Receipt acknowledgement on any agent. No mechanism was established from the official
+  documentation reviewed; this is an absence of evidence, **not** a vendor statement that none
+  exists. FR-838e fixes the reported status at `unavailable / no evidence` and requires a named
+  vendor mechanism before any confirmed-receipt claim.

@@ -18,7 +18,13 @@ phase leaves nothing runnable, the phase is wrongly scoped.
 
 Prefer the smallest component set that satisfies the current requirement. New
 infrastructure (a broker, a cache tier, a second datastore, a new service) must
-be justified by a requirement that exists today, not by anticipated scale.
+be justified by a requirement that exists today, not by anticipated scale. What
+this forbids is new infrastructure that holds state or coordinates work — another
+place for truth to live, or another thing that must be running for Cairn to be
+correct. A stateless computation Cairn calls out to, which stores nothing,
+coordinates nothing, and whose absence degrades a feature rather than breaking the
+system, is a dependency to be justified and disclosed under Principle V, not a
+component of the architecture.
 Speculative machinery — embeddings, decay models, confidence engines, distributed
 coordination — is out of scope until real usage demonstrates need. A *graph* is
 out of scope as a datastore and as a modelling ambition; a bounded view over
@@ -49,8 +55,8 @@ leave the developer's agent working normally.
 
 The server is the canonical owner of durable knowledge. The local store is edge
 state — a spool for work not yet accepted, machine-local integration and
-operational state, transient material for the privacy boundary, and a bounded
-cache. It is not a second knowledge universe, and it does not hold an
+operational state, and a bounded cache. Raw material read during capture lives in
+memory for the length of that work and is not a storage role. It is not a second knowledge universe, and it does not hold an
 authoritative copy that the server must later be reconciled against.
 
 While the server is unreachable, capture and privacy processing continue and safe
@@ -103,9 +109,11 @@ Raw observations, evidence, verification runs, absolute local paths, tool output
 raw vendor payloads and machine configuration never leave the machine that
 produced them. Repository-relative file identity is not in that set — it already
 travels as part of a handoff — but it crosses only under an explicitly defined
-field, never by reusing a name a boundary refuses. Rich source material may be processed transiently on that machine; only
-structure the privacy boundary has approved may be transmitted, and the transient
-material does not outlive the boundary that created it.
+field, never by reusing a name a boundary refuses.
+
+Rich source material may be processed transiently on the machine that produced
+it; only structure the privacy boundary has approved may be transmitted, and the
+transient material does not outlive the work that created it.
 
 Structured information derived from private material may cross the boundary where
 it passes a deterministic gate that fails closed. Derivation is not a loophole: the
@@ -118,6 +126,15 @@ Semantic extraction and privacy enforcement are different acts. A model may prop
 what captured activity means. A model may never be the gate that decides whether
 material is safe to transmit or persist — that decision is deterministic, or it does
 not happen.
+
+Extraction may read only what the gate already approved, and reading it is a second
+boundary, not a consequence of the first. That a record was permitted to reach the
+user's own server does not by itself permit forwarding it to anyone else. Where
+extraction is performed by a party other than the server operator, that party is
+named, its use is disclosed as plainly as the server connection itself, and it
+receives material scoped the way every other reader is scoped — one project, one
+account context, never a corpus. "It had already left the machine" is not a reason;
+it is the derivation-as-loophole argument this principle exists to refuse.
 
 Moving knowledge from one domain to a wider one is always an explicit act, never a
 side effect. Structural prevention is preferred to procedural rules: a record that
@@ -256,6 +273,40 @@ removed. When a requirement and a principle conflict, the conflict is resolved
 in the spec — not silently in the implementation.
 
 ## Amendment History
+
+### 1.2.1 — 2026-08-30
+
+Adopted while closing Feature 005's remaining architectural questions. One of those
+decisions — that semantic extraction runs on the server and may be performed by a
+model, including a hosted one — outran Principle V as amended in 1.2.0, and the gap
+is closed here rather than in the specification.
+
+- **Principle V** gained the extractor boundary. v1.2.0 established that sharing is a
+  choice about a boundary, made once at the point of connection: the user's machine to
+  the user's server. A hosted extractor is a *second* recipient at a *second* boundary,
+  disclosed at neither. The specification's own reasoning for permitting it — that the
+  material had already legitimately left the machine, so no new egress occurs — is
+  precisely the derivation-as-loophole move that 1.2.0 tightened Principle V to refuse,
+  and it was not sound. The principle now requires that reading approved material is
+  itself a boundary, that a third-party extractor be named and disclosed as plainly as
+  the server connection, and that it be scoped like every other reader — one project,
+  one account context, never a corpus.
+
+- **Principle II** was clarified on what "a new service" forbids. The ban is on new
+  infrastructure that holds state or coordinates work: another place for truth to live,
+  or another thing that must be running for Cairn to be correct. A stateless computation
+  that stores nothing, coordinates nothing, and whose absence degrades a feature rather
+  than breaking the system is a dependency to be justified and disclosed under Principle
+  V, not a component of the architecture. Without this, the principle read as forbidding
+  an extraction model outright while the same document permitted one, and the feature's
+  own success criterion asserting "zero service dependencies" was a third reading again.
+
+- Consolidation as in-process background work needed no amendment: v1.2.0's Principle II
+  already names consolidation as deferred work belonging inside the existing processes,
+  and requires it to be bounded, observable and restartable. Decision 4's `repo_file`
+  needed none either: v1.2.0's Principle V already states that repository-relative file
+  identity crosses "only under an explicitly defined field, never by reusing a name a
+  boundary refuses". Both are recorded here as checked rather than assumed.
 
 ### 1.2.0 — 2026-08-29
 
@@ -426,4 +477,4 @@ that applies across projects.
 - Product Constraints gained: one server is one team; the tool surface does not
   grow for new domains; proposing is not ratifying.
 
-**Version**: 1.2.0 | **Ratified**: 2026-08-07 | **Last Amended**: 2026-08-29
+**Version**: 1.2.1 | **Ratified**: 2026-08-07 | **Last Amended**: 2026-08-30
