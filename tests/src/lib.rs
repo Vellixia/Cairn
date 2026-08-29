@@ -1267,6 +1267,31 @@ impl Server {
     ///
     /// The old process is killed before the new one binds, because two servers
     /// cannot hold one port.
+    /// A **different deployment** at the same address: the process is replaced and
+    /// given a database of its own, so it mints its own `server_instance` id.
+    ///
+    /// The counterpart to [`upgraded_in_place`](Self::upgraded_in_place), and the
+    /// distinction that matters for FR-495/496: an upgrade keeps the corpus and
+    /// the identity, a replacement keeps neither. A client that treats "same URL"
+    /// as "same server" cannot tell them apart, which is what this exists to
+    /// catch. Restoring a deployment from backup onto a fresh database, or
+    /// standing a new one up at an address that used to serve another, both look
+    /// like this.
+    pub fn replaced_at_same_address(&mut self) -> Self {
+        let addr = self
+            .base
+            .strip_prefix("http://")
+            .unwrap_or(&self.base)
+            .to_string();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+
+        let name = format!("cairn_replacement_{}", unique());
+        create_database(&self.database_url, &name);
+        let url = replace_database(&self.database_url, &name);
+        Self::spawn_at(&url, i64::MAX, true, None, Some(addr))
+    }
+
     pub fn upgraded_in_place(&mut self) -> Self {
         let addr = self
             .base

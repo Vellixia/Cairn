@@ -232,13 +232,36 @@ impl Daemon {
     /// pull — and the role-filtered listing that shows a member their own
     /// pending proposals would stop showing it.
     ///
-    /// Notes written before any link are owned by the local id, and stay owned
-    /// by it. Linking later does not reassign them to whichever account the
+    /// Notes written before any link are owned by
+    /// [`UNATTRIBUTED_OWNER`](cairn_core::domain::UNATTRIBUTED_OWNER), and stay
+    /// owned by it. Linking later does not reassign them to whichever account the
     /// machine now authenticates as: that would attribute work to an identity
     /// that did not do it, and would push it to a server the user had not chosen
     /// to send it to when they wrote it.
+    ///
+    /// **The fallback is not this machine's id** (FR-603). It was, and that made
+    /// a local machine identity look like an account: it is identity-shaped, it
+    /// is a component of a `personal:*` lane key, and every routing decision that
+    /// asked "whose knowledge is this" got a confident answer naming something
+    /// the server has never heard of. The sentinel cannot be mistaken for an
+    /// account by any comparison, and no lane can be keyed by it.
+    ///
+    /// **Only local reads and local personal writes may call this.** Anything
+    /// that routes, enqueues, pushes or pulls must call
+    /// [`account_identity`](Self::account_identity) and fail closed when it
+    /// returns `None`.
     pub async fn owner_identity(&self) -> Uuid {
-        self.server.read().await.account_id.unwrap_or(self.user_id)
+        self.account_identity()
+            .await
+            .unwrap_or(cairn_core::domain::UNATTRIBUTED_OWNER)
+    }
+
+    /// The account this machine is authenticated as, or `None`.
+    ///
+    /// No fallback, by design: a caller that needs an account and has none must
+    /// refuse, not substitute. See [`owner_identity`](Self::owner_identity).
+    pub async fn account_identity(&self) -> Option<Uuid> {
+        self.server.read().await.account_id
     }
 }
 

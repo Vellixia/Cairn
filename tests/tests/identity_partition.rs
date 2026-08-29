@@ -844,117 +844,120 @@ fn a_credential_change_that_cannot_clear_the_stale_identity_fails_and_changes_no
 // 4. One credential snapshot per operation (FR-597, FR-598, FR-599)
 // ---------------------------------------------------------------------------
 
-fn delivered_on(s: &Sandbox, namespace: &str) -> i64 {
-    s.query_column(&format!(
-        "SELECT CAST(COUNT(*) AS TEXT) FROM outbox \
-         WHERE namespace = '{namespace}' AND state = 'delivered'"
-    ))
-    .first()
-    .and_then(|n| n.parse().ok())
-    .unwrap_or(0)
-}
-
-/// Global work is never pushed to a server the lane does not name.
+/// A team lane bound to one server does not take content from another, even
+/// when the other answers at the same URL.
 ///
-/// `pull_global` checked the peer's instance against the lane's; `drain_global`
-/// did not, so after a relink it went on posting `team:<A>` rows at server B.
-/// Nothing reported it — a push the peer accepts looks like a successful
-/// delivery, and the row was marked delivered against a server that was never
-/// meant to receive it (FR-598).
+/// `is_this_peer` briefly accepted the provisional id derived from the endpoint,
+/// so that a lane opened against a server below schema 3 kept working once that
+/// peer was upgraded in place (§11a). It bought upgrade liveness with the
+/// isolation FR-495 and FR-496 are for: an endpoint is not an identity, so a
+/// deployment **replaced** at the same URL — restored from backup, or simply a
+/// different server stood up on that address — matched the same provisional id
+/// and inherited the previous server's team lane (FR-601).
 ///
-/// **The row carries no author, which is what makes this reachable.** A
-/// `personal:*` lane is already held back by its owner (FR-593) and an authored
-/// row by its author (FR-594), so with those two in place the instance check is
-/// only reached by a row neither covers: a `team:*` row — the lane has no
-/// identity in its key by design — whose `authored_by_user_id` is NULL. That is
-/// not a contrived value. Migration 0007 rebuilds the outbox and adds the column,
-/// and its `INSERT … SELECT` carries no author across, so **every row queued
-/// before this feature has one**, and an upgraded store that relinks is exactly
-/// this test.
+/// The replacement here has a database of its own, so it mints its own instance
+/// id and ratifies guidance of its own. None of it may reach a store bound to the
+/// server that used to answer there.
 ///
-/// Falsified by removing the `admits` check from `drain_global`: the row is
-/// delivered, and lands in server B's tables.
+/// Falsified by restoring the provisional acceptance in `is_this_peer`: the
+/// replacement's guidance merges into a corpus bound to its predecessor.
 #[test]
-fn global_work_is_never_pushed_to_a_server_the_lane_does_not_name() {
-    let Some(server_a) = Server::start_own_database() else {
+fn a_replacement_server_at_the_same_url_does_not_inherit_the_team_corpus() {
+    let Some(mut original) = Server::start_own_database() else {
         eprintln!("SKIPPED: set CAIRN_TEST_DATABASE_URL to run the identity suite");
         return;
     };
-    let Some(server_b) = Server::start_own_database() else {
-        return;
-    };
 
-    let a = device(&server_a, "relink-a");
+    let a = device(&original, "replaced-a");
     a.sandbox.must(&["sync", "now"]);
+    let bound_lane = team_lane(&a.sandbox);
 
-    // A proposal queued against server A's team lane.
-    let topic = format!("relink-{}", Uuid::now_v7().simple());
-    let proposed = a.sandbox.json(&[
+    // A different deployment answers at the same address, with its own corpus.
+    let replacement = original.replaced_at_same_address();
+    let admin_email = format!("replaced-admin-{}@example.test", Uuid::now_v7().simple());
+    replacement.create_user(&admin_email, "replaced-admin", "correct-horse-battery");
+    replacement.execute(&format!(
+        "UPDATE users SET role = 'admin' WHERE email = '{admin_email}'"
+    ));
+    let admin_token = replacement.token_for(&admin_email, "correct-horse-battery");
+
+    // Neither the topic nor the content may echo the project's name: the content
+    // screen refuses project-identifying text (FR-517).
+    let topic = format!("budget-{}", Uuid::now_v7().simple());
+    let (created, status) = post_json_status_bearer(
+        &replacement.base,
+        "/api/projects",
+        &json!({ "name": "replaced", "repository_remote": "git@localhost:cairnfixture/replaced.git" }),
+        &admin_token,
+    );
+    assert_eq!(status, 200, "create the replacement's project: {created}");
+
+    // Guidance that exists only on the replacement.
+    let marker = format!("kestrel-{}", Uuid::now_v7().simple());
+    let other = Sandbox::new();
+    other.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@localhost:cairnfixture/replaced.git",
+    ]);
+    other.must(&["init"]);
+    attach_server(&other, &replacement, &admin_token);
+    other.must(&["link", "--project", created["id"].as_str().expect("id")]);
+    let proposed = other.json(&[
         "team",
         "propose",
-        "bind a push to the instance its lane names",
+        &format!("the {marker} budget is per lane"),
         "--topic-key",
         &topic,
         "--value-key",
-        "bindpush",
+        "perlane",
     ]);
     let id = proposed["entry"]["id"].as_str().expect("an id").to_string();
-    let team = team_lane(&a.sandbox);
-
-    // Server A goes away before the row can be delivered to it — otherwise the
-    // worker delivers it within a tick, correctly, and this measures a race.
-    drop(server_a);
-
-    // Aged into the state an upgraded store's rows are in: queued, and with no
-    // recorded author, because the column did not exist when they were written.
-    a.sandbox.execute_sql(&format!(
-        "UPDATE outbox SET state = 'pending', delivered_at = NULL, claimed_at = NULL, \
-                authored_by_user_id = NULL WHERE entity_id = '{id}'"
-    ));
-    let queued = pending_on(&a.sandbox, &team);
-    assert!(queued > 0, "nothing was queued against server A");
-
-    // The machine is relinked to a different deployment. The team lane is still
-    // on the store, still naming server A's instance (FR-496 forbids a second).
-    let b_token = server_b.new_user_token("relink-b");
-    // B needs a project of its own on server B, or the batch is refused for
-    // want of an authorization project (FR-595) and this test would pass
-    // without ever reaching the instance check.
-    let (created, status) = post_json_status_bearer(
-        &server_b.base,
-        "/api/projects",
-        &json!({ "name": "relink-b", "repository_remote": "git@localhost:cairnfixture/relink-b.git" }),
-        &b_token,
+    other.must(&["sync", "now"]);
+    let ratify = other.cairn(&["team", "ratify", &id]);
+    assert!(ratify.ok(), "ratify failed: {}", ratify.stderr);
+    assert_eq!(
+        replacement.count(&format!(
+            "SELECT count(*) FROM team_knowledge WHERE id = '{id}'"
+        )),
+        1,
+        "the replacement never received its own guidance"
     );
-    assert_eq!(status, 200, "create B's project: {created}");
 
-    let out = a
-        .sandbox
-        .cairn(&["auth", "token", "set", &b_token, "--server", &server_b.base]);
-    assert!(out.ok(), "auth token set failed: {}", out.stderr);
-    assert!(
-        lanes(&a.sandbox).contains(&team),
-        "the team lane vanished; this test needs it present to prove it is not pushed"
+    // The user signs in again at the same URL — which is what actually happens
+    // after a deployment is replaced, since every token the predecessor issued
+    // died with it. Without this the store simply fails to authenticate and the
+    // test proves nothing: the isolation being asserted is only reached once the
+    // credentials are good.
+    let a_email = format!("replaced-again-{}@example.test", Uuid::now_v7().simple());
+    replacement.create_user(&a_email, "replaced-again", "correct-horse-battery");
+    let a_new_token = replacement.token_for(&a_email, "correct-horse-battery");
+    post_json_status_bearer(
+        &replacement.base,
+        &format!(
+            "/api/projects/{}/members",
+            created["id"].as_str().expect("id")
+        ),
+        &json!({ "user_id": server_account_id(&replacement, &a_email) }),
+        &admin_token,
     );
+    attach_server(&a.sandbox, &replacement, &a_new_token);
 
     a.sandbox.must(&["sync", "now"]);
 
-    // Asserted as "never delivered", not as "still exactly pending": retries
-    // against the now-unreachable server A move the row through `in_flight` and
-    // can exhaust its attempts, which is ordinary bookkeeping and not this
-    // test's subject. What must never happen is a delivery.
     assert_eq!(
-        delivered_on(&a.sandbox, &team),
-        0,
-        "rows were marked delivered against server B"
+        lanes(&a.sandbox)
+            .into_iter()
+            .filter(|n| n.starts_with("team:"))
+            .collect::<Vec<_>>(),
+        vec![bound_lane],
+        "a second team lane was opened for the replacement (FR-496)"
     );
-    let _ = queued;
-    assert_eq!(
-        server_b.count(&format!(
-            "SELECT count(*) FROM team_knowledge WHERE id = '{id}'"
-        )),
-        0,
-        "server B received knowledge queued for server A"
+    assert!(
+        !local_team_ids(&a.sandbox).contains(&id),
+        "guidance ratified by a different deployment at the same URL was merged \
+         into a corpus bound to its predecessor"
     );
 }
 
@@ -1128,5 +1131,194 @@ fn switching_accounts_during_sync_never_splits_an_operation() {
     assert!(
         misfiled.is_empty(),
         "an operation routed as one account and authenticated as another: {misfiled:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5. One proven routing identity: credential, account, instance (FR-600–FR-603)
+// ---------------------------------------------------------------------------
+
+/// An identity learned under one credential is never recorded beside another.
+///
+/// `GET /api/auth/me` means "who is *this token*", so its answer is only about
+/// the token that was sent — and `cairn auth token set` can complete while it is
+/// in flight. The reply was written blindly, recording account A as this
+/// machine's identity at a moment when the machine already held B's token: the
+/// stale pairing FR-591 forbids, arrived at from the other side — not a value
+/// that outlived its credential, but one that never matched the credential it was
+/// stored beside (FR-600).
+///
+/// Driven by switching credentials continuously while identity learning runs, and
+/// checked as an invariant over the whole run: whatever account is recorded must
+/// be the one the stored token actually belongs to.
+///
+/// Falsified by dropping the compare-and-set from `learn_account_identity`.
+#[test]
+fn a_learned_identity_is_never_recorded_beside_another_credential() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "learncas-a");
+    let b = device(&server, "learncas-b");
+
+    let a_id = server_account_id(&server, &a.email);
+    let b_id = server_account_id(&server, &b.email);
+
+    let machine = second_device_for(&server, &a.token);
+
+    // Switch credentials continuously. Identity learning runs inside
+    // `auth token set` itself, so overlapping calls are the race: each asks the
+    // server who its token belongs to, and the answers come back interleaved.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    std::thread::scope(|scope| {
+        let (ta, tb) = (a.token.as_str(), b.token.as_str());
+        for offset in 0..2 {
+            let machine = &machine;
+            scope.spawn(move || {
+                let mut round = offset;
+                while std::time::Instant::now() < deadline {
+                    let token = if round % 2 == 0 { tb } else { ta };
+                    let _ = machine.cairn(&["auth", "token", "set", token]);
+                    round += 1;
+                }
+            });
+        }
+    });
+
+    // Checked at rest, not while switching. The token file and the daemon's
+    // in-memory credential are written a moment apart during a switch, so a
+    // sampler that reads one and then the other can tear and report a mismatch
+    // that never existed. Quiescing removes the tear; what it cannot remove is a
+    // *stale* write, which is the defect — an answer about one token committed
+    // after another had replaced it stays wrong until something learns again.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    let stored =
+        std::fs::read_to_string(machine.cairn_home().join("token")).expect("a stored token");
+    let truth = server.get_json("/api/auth/me", stored.trim());
+    let truth = truth["id"].as_str().expect("the server names the account");
+    assert_eq!(
+        account_id_in_config(&machine).as_deref(),
+        Some(truth),
+        "the recorded account is not the one the stored token belongs to \
+         (expected {truth}; a is {a_id}, b is {b_id})"
+    );
+}
+
+/// Personal knowledge written before any account is known is owned by nobody,
+/// never by this machine's local identity.
+///
+/// A machine id is identity-shaped, is a component of a `personal:*` lane key,
+/// and compares equal to nothing on the server, so a row carrying one is
+/// indistinguishable at a glance from a row belonging to an account nobody here
+/// can see. The nil sentinel says "no account" in a way no account can match, and
+/// nothing owned by it is enqueued, pushed, or pulled (FR-603).
+///
+/// Falsified by restoring the `unwrap_or(self.user_id)` fallback: the row is
+/// owned by a real-looking id that is not an account.
+#[test]
+fn global_knowledge_written_offline_is_owned_by_no_account() {
+    let sandbox = Sandbox::new();
+    sandbox.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@localhost:cairnfixture/offline-global.git",
+    ]);
+    sandbox.must(&["init"]);
+
+    // Never authenticated: no token, no server.
+    let marker = format!("kestrel-{}", Uuid::now_v7().simple());
+    remember_personal(&sandbox, &format!("the estimator {marker} rounds down"));
+
+    assert_eq!(
+        sandbox.query_column("SELECT DISTINCT owner_user_id FROM personal_knowledge"),
+        vec!["00000000-0000-0000-0000-000000000000".to_string()],
+        "a note written with no account was attributed to a real-looking identity"
+    );
+    // Nothing was queued for a lane that cannot exist.
+    assert!(
+        lanes(&sandbox).iter().all(|n| !n.starts_with("personal:")),
+        "a personal lane was keyed for an account that is not known: {:?}",
+        lanes(&sandbox)
+    );
+    assert_eq!(
+        sandbox
+            .query_column(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM outbox WHERE namespace LIKE 'personal:%'"
+            )
+            .first()
+            .map(String::as_str),
+        Some("0"),
+        "unattributed knowledge was queued for delivery"
+    );
+
+    // And team knowledge, which is a proposal to a specific server's corpus, is
+    // refused outright rather than recorded under nobody.
+    let refused = sandbox.cairn(&[
+        "team",
+        "propose",
+        "hold a proposal until an account is known",
+        "--topic-key",
+        "holding",
+        "--value-key",
+        "held",
+    ]);
+    assert!(
+        !refused.ok(),
+        "a team proposal was accepted with no account to attribute it to: {}",
+        refused.stdout
+    );
+}
+
+/// The store refuses to hold a global outbox row with no author.
+///
+/// The claim's author filter first read `authored_by_user_id IS NULL OR = ?`, on
+/// the reasoning that a row predating the column should keep working — but "no
+/// recorded author" then meant "deliverable under whichever account is logged
+/// in", which is the misattribution the filter exists to prevent, spelled as
+/// backward compatibility. There is nothing to be compatible with: the global
+/// entity types arrive with the migration that adds the column, so no global row
+/// has ever lacked an author (FR-602).
+///
+/// Asserted against the schema, because that is where the guarantee now lives —
+/// a row that somehow lacked an author is refused at write time rather than
+/// misdelivered later. Project rows keep a NULL author and keep working.
+#[test]
+fn a_global_outbox_row_cannot_exist_without_an_author() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "nullauthor-a");
+
+    let topic = format!("budget-{}", Uuid::now_v7().simple());
+    let proposed = a.sandbox.json(&[
+        "team",
+        "propose",
+        "every queued global row names its author",
+        "--topic-key",
+        &topic,
+        "--value-key",
+        "named",
+    ]);
+    let id = proposed["entry"]["id"].as_str().expect("an id").to_string();
+
+    // Applied directly against the store, because no daemon route can do this —
+    // which is the point: the guarantee is the schema's, not a caller's.
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        a.sandbox.execute_sql(&format!(
+            "UPDATE outbox SET authored_by_user_id = NULL WHERE entity_id = '{id}'"
+        ));
+    }));
+    assert!(
+        outcome.is_err(),
+        "the store accepted a global outbox row with no author"
+    );
+
+    // Project rows are unaffected: their authorization is project membership.
+    let project_rows: Vec<String> = a.sandbox.query_column(
+        "SELECT CAST(COUNT(*) AS TEXT) FROM outbox \
+         WHERE namespace LIKE 'project:%' AND authored_by_user_id IS NULL",
+    );
+    assert_ne!(
+        project_rows.first().map(String::as_str),
+        Some("0"),
+        "project rows should still carry no author"
     );
 }

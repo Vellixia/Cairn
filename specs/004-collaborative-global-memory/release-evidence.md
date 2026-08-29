@@ -365,3 +365,93 @@ Gate after round 5: **1446 passed, 0 failed**; `cargo fmt --all -- --check`,
 clean.
 
 T104 and T194 are unchanged by this round.
+
+## Post-integration review, round 6
+
+Round 5 made a credential, an account and a server instance into one snapshot per operation.
+Round 6 is about the places that still produced or consumed those three separately — and one
+place where "no account" was quietly answered with a value that looked like one.
+
+**An identity was recorded without proving the credential that earned it (FR-600).**
+`GET /api/auth/me` means "who is *this token*", so its answer is only about the token that was
+sent, and `cairn auth token set` can complete while it is in flight. The reply was written
+blindly. That is FR-591's stale pairing arrived at from the other side: not a value that
+outlived its credential, but one that never matched the credential it was stored beside.
+Learning now snapshots the credential it asks with and commits under the write lock only if
+that credential is still the stored one.
+
+**An unknown account was answered with this machine's local id (FR-603).** `owner_identity`
+fell back to `Daemon::user_id`, so every routing decision that asked "whose knowledge is this"
+got a confident answer naming something no server has ever issued — and a machine id is
+identity-shaped, is a component of a `personal:*` lane key, and compares equal to nothing
+remote. There are two honest answers and this was neither:
+
+- Where an account is *required* — the guard, lane admission, the drain's author, every team
+  operation — the answer is now a refusal. Team knowledge is a proposal to one deployment's
+  corpus; without an account there is no corpus to propose to.
+- Where knowledge may legitimately precede any account — a personal note written before this
+  machine ever authenticated, which is the local-first property personal memory is built on —
+  the owner is `UNATTRIBUTED_OWNER`, the nil UUID. It says "no account" in a way no account can
+  match, no lane is keyed by it, and nothing owned by it is enqueued, pushed or pulled. Such
+  rows are **not** adopted when an account is later learned, which is the decision
+  `owner_identity` has always documented for the local id it replaces: reassigning them would
+  attribute work to an identity that did not do it.
+
+**A missing author meant "anyone" (FR-602).** The claim read `authored_by_user_id IS NULL OR =
+?`, on the reasonable-looking ground that a row predating the column should keep working — but
+"no recorded author" then meant "deliverable under whichever account is logged in", which is the
+misattribution FR-594 exists to prevent, spelled as backward compatibility. There is nothing to
+be compatible with: the four global entity types arrive with the migration that adds the column,
+so the outbox rebuild can only carry project rows across and every global row that has ever
+existed was written by code that records an author. A CHECK now says so, and the claim requires
+a real match.
+
+**An endpoint was treated as an identity (FR-601).** `is_this_peer` accepted the provisional id
+derived from the endpoint, so a lane opened against a server below schema 3 kept working once
+that peer was upgraded in place. It bought §11a's liveness with §10's isolation. The
+reconciliation is a division of labour, now written into `sync-namespaces.md` §1b:
+**establishment decides identity, operations require it.** Resolving a provisional lane is
+establishment's job, and the worker now runs establishment on its own cadence rather than only
+when a store has no global lanes at all — which is what made the re-key unreachable in the
+background and forced the loophole. Operations compare exactly.
+
+One scope note, stated plainly: the loophole's *harmful* case could not be constructed. A
+provisional lane belongs to a peer below schema 3, which has no global corpus, so there is
+nothing of another server's to inherit; and a lane naming a real instance never matched a
+provisional id anyway. The strict check is kept because it removes the conflation from the
+code, not because a test drove it there. What the new test does cover is the reachable
+isolation property: a **replacement** deployment at the same URL, re-authenticated, must not
+merge its guidance into a corpus bound to its predecessor — and that test fails without the
+instance check on the pull path.
+
+**A gap the compare-and-set opened, and the repair.** Discarding a raced lookup is correct, and
+so is dropping the identity on a credential change — but both leave a window where the account
+is simply not known yet, and nothing retried promptly: establishment relearns on its own
+cadence, up to `PULL_INTERVAL_SECONDS` away. Refusing `cairn team propose` for that long would
+report a failure of ours as one of the user's. `require_account` now asks once before refusing,
+so the refusal means what it says: this machine cannot establish who it is. This was found by
+the existing `a_superseded_team_entry_stops_competing_in_every_canonical_read` turning flaky —
+8/8 on the previous head, roughly half failing after the change — and bisected to the refusal
+rather than guessed at.
+
+Round-6 coverage: four e2e tests — a credential switched continuously while identity learning
+runs, global knowledge created with no account at all, an authorless global outbox row, and a
+replacement deployment at the same URL — plus the migration test extended to state the author
+constraint at the schema. Each was confirmed to fail against the unfixed code.
+
+Two are falsified against a widened window, and it is worth saying why rather than burying it:
+the real gap between reading a credential and committing an answer about it is microseconds, and
+a probabilistic test that only sometimes lands is not evidence either way. Widened, the defect
+lands on nearly every run. The repairs do not narrow those windows; they remove them.
+
+The credential-switch test is also checked **at rest** rather than while switching: the token
+file and the daemon's in-memory credential are written a moment apart during a switch, so a
+sampler that reads one and then the other can tear and report a mismatch that never existed. An
+earlier draft did exactly that and failed under parallel load for a reason that was not a
+defect. Quiescing removes the tear; what it cannot remove is a stale write, which is the defect.
+
+Gate after round 6: **1449 passed, 0 failed**; `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and `git diff --check`
+clean.
+
+T104 and T194 are unchanged by this round.

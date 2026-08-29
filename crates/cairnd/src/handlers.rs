@@ -2764,6 +2764,9 @@ async fn team_viewer(d: &Daemon) -> cairn_store::global::TeamViewer {
         Ok(me) if me.get("role").and_then(|r| r.as_str()) == Some(ServerRole::Admin.as_str()) => {
             cairn_store::global::TeamViewer::Admin
         }
+        // Unauthenticated, the sentinel matches no proposer, which is the right
+        // answer: a caller with no account has no pending proposals of its own to
+        // be shown (FR-603).
         _ => cairn_store::global::TeamViewer::Member(d.owner_identity().await),
     }
 }
@@ -2822,7 +2825,7 @@ async fn team_propose(
     let identities = current_project_identities(&r.project);
 
     let new = cairn_store::global::NewTeamKnowledge::direct(
-        d.owner_identity().await,
+        require_account(d).await?,
         // `fact` is the same default `cairn memory add --type` gives a
         // caller who names none.
         knowledge_type.unwrap_or(MemoryType::Fact),
@@ -2899,8 +2902,8 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
                 e
             }
         })?;
-    match cairn_store::global::ratify_team(&d.store, id, d.owner_identity().await, supersedes).await
-    {
+    let account = require_account(d).await?;
+    match cairn_store::global::ratify_team(&d.store, id, account, supersedes).await {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
@@ -2911,12 +2914,46 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
     }
 }
 
+/// The authenticated account, or a refusal (FR-603).
+///
+/// For the operations that are *about* a server: team knowledge is a proposal to
+/// one deployment's corpus, and ratification and retirement are decisions inside
+/// it. None of them mean anything without an account, and none of them may fall
+/// back to a local identity — a proposal recorded under one would sit in the
+/// queue forever, unclaimable by any account, which is fail-closed but silent.
+/// Refusing says so.
+async fn require_account(d: &Daemon) -> Result<Uuid, WireError> {
+    if let Some(account) = d.account_identity().await {
+        return Ok(account);
+    }
+    // Not knowing yet is not the same as having no account, and the difference is
+    // one request. The identity is dropped whenever a credential changes (FR-591)
+    // and a lookup racing that change is discarded rather than committed
+    // (FR-600) — both correct, and both leave a window in which the account is
+    // simply not known yet. Nothing retries promptly: namespace establishment
+    // relearns on its own cadence, which is up to `PULL_INTERVAL_SECONDS` away,
+    // and refusing a `cairn team propose` for that long because the daemon has
+    // not gotten around to asking would be a failure of ours reported as one of
+    // the user's.
+    //
+    // So ask now, and refuse only if the answer does not come. That keeps the
+    // refusal meaning what it says: this machine cannot establish who it is.
+    crate::sync::learn_account_identity(d).await;
+    d.account_identity().await.ok_or_else(|| {
+        WireError::new(
+            codes::UNAUTHORIZED,
+            "this needs a signed-in account; run `cairn auth token set`",
+        )
+    })
+}
+
 /// `cairn team retire` (T119, T121, T133, FR-456, FR-457, FR-461, FR-465).
 /// Same server-authorizes, local-applies-after shape as [`team_ratify`], and
 /// the same `state_conflict`-after-server-success treatment.
 async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
     let remote = crate::sync::team_retire_remote(d, id).await?;
-    match cairn_store::global::retire_team(&d.store, id, d.owner_identity().await).await {
+    let account = require_account(d).await?;
+    match cairn_store::global::retire_team(&d.store, id, account).await {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>

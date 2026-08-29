@@ -262,20 +262,46 @@ fn the_widened_entity_type_check_admits_four_and_still_refuses_the_rest() {
     let store = alpha5_store();
     store.migrate_to_latest();
 
+    // A global row names its author and a project row does not (FR-602) — the
+    // other CHECK this table carries, and the one that decides which account a
+    // queued row may ever be delivered under.
     let insert = |entity_type: &str, project: Option<&str>| -> Result<(), String> {
         let id = Uuid::now_v7();
-        let (project_sql, namespace) = match project {
-            Some(p) => (format!("'{p}'"), format!("project:{p}")),
-            None => ("NULL".to_string(), "personal:x:y".to_string()),
+        let (project_sql, namespace, author) = match project {
+            Some(p) => (format!("'{p}'"), format!("project:{p}"), "NULL".to_string()),
+            None => (
+                "NULL".to_string(),
+                "personal:x:y".to_string(),
+                format!("'{}'", Uuid::now_v7()),
+            ),
         };
         store.try_execute(&format!(
             "INSERT INTO outbox
                  (id, project_id, server_project_id, entity_type, entity_id, operation,
-                  idempotency_key, payload, state, attempts, created_at, namespace)
+                  idempotency_key, payload, state, attempts, created_at, namespace,
+                  authored_by_user_id)
              VALUES ('{id}', {project_sql}, NULL, '{entity_type}', '{id}', 'upsert',
-                     'key-{id}', '{{}}', 'pending', 0, '2026-01-01T00:00:00Z', '{namespace}')"
+                     'key-{id}', '{{}}', 'pending', 0, '2026-01-01T00:00:00Z', '{namespace}',
+                     {author})"
         ))
     };
+
+    // An authorless global row is refused by the schema, so "no recorded author"
+    // can never come to mean "deliverable under whichever account is logged in".
+    let id = Uuid::now_v7();
+    assert!(
+        store
+            .try_execute(&format!(
+                "INSERT INTO outbox
+                     (id, project_id, server_project_id, entity_type, entity_id, operation,
+                      idempotency_key, payload, state, attempts, created_at, namespace)
+                 VALUES ('{id}', NULL, NULL, 'personal_knowledge', '{id}', 'upsert',
+                         'key-{id}', '{{}}', 'pending', 0, '2026-01-01T00:00:00Z',
+                         'personal:x:y')"
+            ))
+            .is_err(),
+        "a global outbox row was accepted with no author (FR-602)"
+    );
 
     // Four, not two: both relations tables exist on the server as well as
     // locally, and a table on the server is reachable only through the outbox.
