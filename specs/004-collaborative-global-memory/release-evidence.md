@@ -292,3 +292,76 @@ Gate after round 4: **1443 passed, 0 failed**; `cargo fmt --all -- --check`,
 clean.
 
 T104 and T194 are unchanged by this round.
+
+## Post-integration review, round 5
+
+Rounds 3 and 4 each added a check. Round 5 is the round where adding a fourth would have been
+the wrong move: two of these three defects exist *because* the checks were separate reads.
+
+**Routing and authentication came from two reads of one field (FR-597).** A global operation
+decides two things that must agree — whose lane this is, and whom we are authenticating as —
+and they came from `owner_identity` and `client` respectively, with a network round trip in
+between. `cairn auth token set` writes that same field. A switch landing in the window
+produced an operation routed as A and authenticated as B: the pairing FR-593 and FR-567
+forbid, reached through timing rather than through a missing check. A third check would have
+been a third read.
+
+So `GlobalGuard` snapshots the account, the token, the endpoint and the peer's instance under
+one lock acquisition, and every later decision in the operation reads the snapshot. A switch
+during an operation can no longer split it — the operation finishes coherently as whoever it
+started as, and the next one picks up the new identity. `establish_global_namespaces` took the
+same treatment: it read the credential four times to build a lane key that is then durable in
+`sync_cursor` and routes every later push and pull.
+
+**Pushing was not bound to the lane's instance (FR-598).** `pull_global` compared the peer's
+instance against the lane's; `drain_global` never did, so after a relink it went on posting
+rows at a server the lane does not name. Nothing reported it: a push the peer accepts looks
+like a delivery, and the rows were marked delivered against a server that was never meant to
+receive them. `GlobalGuard::admits` now answers for both directions, so a lane cannot be
+admitted for writing on terms that would refuse it for reading.
+
+Reaching that check took some care, and the finding is worth stating precisely. With FR-593
+holding back a lane whose owner is not the current account, and FR-594 holding back a row whose
+author is not, the instance check is only *reached* by a row neither covers: a `team:*` row —
+that lane has no identity in its key by design — with no recorded author. That is not a
+contrived value. Migration 0007 rebuilds the outbox and adds `authored_by_user_id`, and its
+`INSERT … SELECT` carries no author across, so every row queued before this feature has one.
+An upgraded store that relinks is exactly the case.
+
+The same repair broke the §11a upgrade scenario before it was right. A lane opened against a
+server below schema 3 is keyed by an id derived from the endpoint, because such a server
+reports none; when that peer is replaced by a supporting server *at the same configured
+endpoint* it starts reporting a real id, and the lane holding the content waiting for exactly
+this is still keyed by the provisional one until the re-key lands. Refusing in that gap
+stranded the held content the scenario exists to release. `is_this_peer` treats the two ids as
+one identity, for the same reason `establish_global_namespaces` already did — and a different
+endpoint yields a different provisional id as well as a different real one, so the relink
+refusal is untouched.
+
+**Held foreign work was polled for twice a second (FR-599).** The claim is author-scoped
+(FR-594); the count the worker gated on was not. A `team:*` lane whose only queued rows were
+authored by a logged-out account looked busy on every `WORKER_TICK`: the drain ran, refreshed
+capabilities over the network, and claimed nothing. `claimable_counts_for_author` uses the same
+predicate as the claim, so "the worker thinks there is work" and "the claim returns work"
+cannot disagree.
+
+Round-5 coverage: three e2e tests, for concurrent credential switching during sync, for a push
+after a relink, and for an idle queue of foreign work. Three notes on making them mean
+something, since each first draft did not:
+
+- The two queue-based tests **construct** the undelivered precondition rather than racing for
+  it. A daemon delivers its own queued work within a tick, correctly, so a test that queues and
+  then switches is measuring which happened first. Undoing the delivery on both sides restores
+  the state the defect needs.
+- The relink test needed the second account to hold a project of its own, or FR-595 refused the
+  batch for want of an authorization project and the instance check was never reached.
+- The concurrency test is falsified against a build that splits the credential read **with the
+  gap widened**. The real gap is microseconds, and a probabilistic test that only sometimes
+  lands is not evidence either way. Widened, both markers come back filed under the wrong
+  account. The guard does not narrow that window; it removes it.
+
+Gate after round 5: **1446 passed, 0 failed**; `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and `git diff --check`
+clean.
+
+T104 and T194 are unchanged by this round.

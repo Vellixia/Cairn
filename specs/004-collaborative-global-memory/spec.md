@@ -772,6 +772,18 @@ the subject section it amends.
 - **FR-596**: Invalidating a stale account identity MUST be durable before a credential
   change or logout reports success; a credential MUST NOT be recorded alongside an account
   identity that names a different account. (amends Identity, roles and account lifecycle)
+- **FR-597**: A global synchronization operation MUST decide lane routing and authenticate
+  from a single credential snapshot, so that a credential change concurrent with the
+  operation cannot produce one routed as one account and authenticated as another. (amends
+  Synchronization, namespaces and multi-device concurrency)
+- **FR-598**: A global push MUST refuse a lane whose server instance is not the peer's,
+  under the same rule a global pull applies; a lane keyed by the provisional id derived from
+  the configured endpoint names that same peer once it reports a real id. (amends
+  Synchronization, namespaces and multi-device concurrency)
+- **FR-599**: Whether a namespace is worth draining MUST be decided by the work the current
+  account may actually claim, so that a queue holding only another account's held rows
+  causes no network request. (amends Synchronization, namespaces and multi-device
+  concurrency)
 
 ### Key Entities
 

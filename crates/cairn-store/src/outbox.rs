@@ -651,6 +651,50 @@ pub async fn counts_namespace(store: &Store, namespace: &str) -> Result<(i64, i6
 }
 
 /// [`blocked_count`], scoped by namespace instead of by project.
+/// Pending and blocked counts for **the work a given account may actually
+/// send**, which is what decides whether a lane is worth a drain at all
+/// (FR-599).
+///
+/// `counts_namespace` answers "what is queued here", and for a shared `team:*`
+/// lane that includes rows held for another account's author (FR-594). The
+/// worker read the unscoped count, saw work, and called the drain — which
+/// refreshed capabilities over the network and then claimed nothing, because the
+/// claim *is* author-scoped. At a 500 ms tick that is a `GET /api/version`
+/// twice a second, forever, for a queue that cannot move until someone logs back
+/// in.
+///
+/// The predicate matches [`claim_namespace_for_author`] exactly, including its
+/// treatment of a NULL author as claimable by anyone, so "the worker thinks
+/// there is work" and "the claim returns work" cannot disagree.
+pub async fn claimable_counts_for_author(
+    store: &Store,
+    namespace: &str,
+    author: Uuid,
+) -> Result<(i64, i64)> {
+    let author = author.to_string();
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox
+          WHERE namespace = ?1
+            AND state IN ('pending', 'in_flight')
+            AND (authored_by_user_id IS NULL OR authored_by_user_id = ?2)",
+    )
+    .bind(namespace)
+    .bind(&author)
+    .fetch_one(store.pool())
+    .await?;
+    let blocked: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM outbox
+          WHERE namespace = ?1
+            AND state = 'blocked'
+            AND (authored_by_user_id IS NULL OR authored_by_user_id = ?2)",
+    )
+    .bind(namespace)
+    .bind(&author)
+    .fetch_one(store.pool())
+    .await?;
+    Ok((pending, blocked))
+}
+
 pub async fn blocked_count_namespace(store: &Store, namespace: &str) -> Result<i64> {
     Ok(
         sqlx::query_scalar(
