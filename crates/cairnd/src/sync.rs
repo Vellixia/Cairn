@@ -398,16 +398,22 @@ async fn process_global_namespace(
     let mut transient = false;
     let key = namespace.key();
 
-    let (pending, _) = outbox::counts_namespace(&d.store, &key)
+    // **Scoped to what this account may actually send** (FR-599). The unscoped
+    // count includes rows held for another account's author, so a lane whose only
+    // queued work belongs to a logged-out identity looked busy on every tick: the
+    // drain ran, refreshed capabilities over the network, and claimed nothing,
+    // because the claim is author-scoped and this count was not. At `WORKER_TICK`
+    // that is two `GET /api/version` a second against a queue that cannot move.
+    //
+    // Reading the account here rather than inside the drain is deliberate: this
+    // decides only whether to *attempt* an operation, and the operation takes its
+    // own credential snapshot. A switch between the two costs at most one drain
+    // that declines to claim anything — never a misrouted one.
+    let author = d.owner_identity().await;
+    let (pending, blocked) = outbox::claimable_counts_for_author(&d.store, &key, author)
         .await
         .unwrap_or((0, 0));
-    let blocked = if pending == 0 {
-        outbox::blocked_count_namespace(&d.store, &key)
-            .await
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let blocked = if pending == 0 { blocked } else { 0 };
     let probe_due = clock.probe_due(now);
 
     if pending > 0 || (blocked > 0 && probe_due) {
@@ -592,17 +598,26 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
     if d.server.read().await.account_id.is_none() && !learn_account_identity(d).await {
         return None;
     }
-    let url = d.server.read().await.url.clone()?;
-    let client = client(d).await.ok()?;
-    let body = client.get("/api/version").await.ok()?;
-    let reported: Option<Uuid> = body
+
+    // One credential read for the account, the endpoint and the peer's instance
+    // (FR-597). These were four separate reads of `Daemon::server` with a network
+    // call among them, and a lane key is built from two of them — so an account
+    // switch landing in the middle opened a lane named for one account against a
+    // server learned under another's token. That lane is durable: it is written
+    // to `sync_cursor` and every later push and pull routes by it.
+    let guard = GlobalGuard::acquire(d).await.ok()?;
+    let reported: Option<Uuid> = guard
+        .version
         .get("server_instance_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    let owner = d.owner_identity().await;
-    let provisional = provisional_instance(&url);
-    let instance = reported.unwrap_or(provisional);
+    let owner = guard.account;
+    let provisional = provisional_instance(&guard.base);
+    // Identical to `reported.unwrap_or(provisional)` — the guard already made
+    // that substitution — and taken from the guard so the lane this establishes
+    // and the lane every later operation admits are decided by one rule.
+    let instance = guard.peer_instance;
 
     // A server below schema 3 has no `server_instance` table and so reports no
     // id, and until now that meant no lane could be formed — which meant a
@@ -728,6 +743,150 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
 /// idempotent by id, so a row that becomes mergeable later arrives again on the
 /// next full pull rather than being lost. A *transport* failure returns `Err`
 /// and does not advance the cursor, which is the case that must retry.
+/// Everything one global synchronization operation is allowed to act on, read
+/// **once** (FR-597).
+///
+/// **The routing invariant lives here, not at the call sites.** A global
+/// operation makes two decisions that must agree: *whose lane is this* and *whom
+/// am I authenticating as*. Those came from two separate reads of
+/// `Daemon::server` — `owner_identity` for the first, `client` for the second —
+/// with the network in between. `cairn auth token set` writes that same field, so
+/// an account switch landing between the reads produced an operation routed as A
+/// and authenticated as B: exactly the pairing FR-593 and FR-567 exist to
+/// forbid, reached through a window rather than through a missing check. Adding a
+/// third check would have added a third read.
+///
+/// So the credential is snapshotted under one lock and every later decision reads
+/// the snapshot. A switch during the operation cannot split it: the operation
+/// finishes coherently as whoever it started as, and the next one picks up the
+/// new identity.
+///
+/// The peer's instance id is part of the snapshot for the same reason. Only
+/// `pull_global` checked it, so after a relink `drain_global` happily pushed
+/// `team:A` and `personal:A:*` rows at server B — the mirror image of the pull
+/// this repair originally added, and invisible because a push reports success
+/// (FR-598). [`admits`](Self::admits) answers both questions at once, so a lane
+/// cannot be admitted for pushing on terms that would refuse it for pulling.
+struct GlobalGuard {
+    /// The account this operation is authenticated as, from the same read that
+    /// produced [`client`](Self::client).
+    account: Uuid,
+    client: Client,
+    /// The instance the peer reports, or the provisional id derived from the
+    /// endpoint when it reports none (a server below schema 3) — the same
+    /// substitution `establish_global_namespaces` makes, so the two agree without
+    /// a special case.
+    peer_instance: Uuid,
+    /// `GET /api/version`'s body, kept so a drain's capability refresh reads the
+    /// response this guard already paid for rather than fetching it again under a
+    /// credential that may since have changed.
+    version: serde_json::Value,
+    /// The endpoint this guard authenticated against, from the same read — so a
+    /// caller deriving a provisional instance id from it derives it from the
+    /// server it actually talked to.
+    base: String,
+}
+
+impl GlobalGuard {
+    async fn acquire(d: &Daemon) -> Result<GlobalGuard, WireError> {
+        // One read. `account`, `token` and `url` come out of the same lock
+        // acquisition, so they describe one identity by construction rather than
+        // by three reads happening to agree.
+        let (account, url, token) = {
+            let creds = d.server.read().await;
+            (
+                creds.account_id.unwrap_or(d.user_id),
+                creds.url.clone(),
+                creds.token.clone(),
+            )
+        };
+        let base = url.ok_or_else(|| {
+            WireError::new(
+                codes::NOT_LINKED,
+                "no server configured; run `cairn auth token set`",
+            )
+        })?;
+        let token = token.ok_or_else(|| {
+            WireError::new(
+                codes::UNAUTHORIZED,
+                "no API token; run `cairn auth token set`",
+            )
+        })?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|e| WireError::new(codes::SERVER_UNAVAILABLE, e.to_string()))?;
+        let base = base.trim_end_matches('/').to_string();
+        let client = Client {
+            base: base.clone(),
+            token,
+            http,
+        };
+
+        let version = client.get("/api/version").await?;
+        let peer_instance = version
+            .get("server_instance_id")
+            .and_then(|v| v.as_str())
+            .and_then(|s| Uuid::parse_str(s).ok())
+            .unwrap_or_else(|| provisional_instance(&base));
+
+        Ok(GlobalGuard {
+            account,
+            client,
+            peer_instance,
+            version,
+            base,
+        })
+    }
+
+    /// Whether this operation may act on `namespace` at all — for pushing and for
+    /// pulling alike, since a lane admitted for one and refused for the other is
+    /// how the push side came to have no instance check.
+    ///
+    /// A `personal:*` key names both the owning account and the server instance,
+    /// and both must match. A `team:*` key names only the instance, because one
+    /// server has one team corpus that every account on it shares (FR-496); which
+    /// account may push *into* it is a question about the queued row's author,
+    /// answered by the claim (FR-594), not about the lane.
+    fn admits(&self, namespace: &SyncNamespace) -> bool {
+        match namespace {
+            SyncNamespace::Personal(instance, owner) => {
+                *owner == self.account && self.is_this_peer(*instance)
+            }
+            SyncNamespace::Team(instance) => self.is_this_peer(*instance),
+            // Project lanes are authorized by membership and have their own
+            // drain; nothing here should be routing one.
+            SyncNamespace::Project(_) => false,
+        }
+    }
+
+    /// Whether `instance` names the peer this guard is talking to.
+    ///
+    /// The provisional id counts, and must: a lane opened against a server below
+    /// schema 3 is keyed by an id derived from the endpoint, because such a server
+    /// reports none (§11a). When that peer is later "replaced by a supporting
+    /// server **at the same configured endpoint**", it starts reporting a real
+    /// id — and the lane holding the content that was waiting for exactly this is
+    /// still keyed by the provisional one until
+    /// [`establish_global_namespaces`] re-keys it. Refusing in that gap would
+    /// strand the held content this scenario exists to release, so the two ids
+    /// are one identity here for the same reason they are one identity there.
+    ///
+    /// It does not weaken the relink refusal: a different endpoint yields a
+    /// different provisional id as well as a different real one, so neither
+    /// matches.
+    fn is_this_peer(&self, instance: Uuid) -> bool {
+        instance == self.peer_instance || instance == provisional_instance(&self.base)
+    }
+
+    fn refuse(&self, namespace: &SyncNamespace, verb: &str) {
+        tracing::debug!(
+            lane = %namespace.key(), peer = %self.peer_instance, account = %self.account,
+            "not {verb}: this lane belongs to another account or another server instance"
+        );
+    }
+}
+
 /// Whether this daemon, as currently authenticated, may synchronize `namespace`.
 ///
 /// **The routing invariant for every global lane, in one place** (FR-567,
@@ -752,6 +911,14 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
 /// team knowledge is who authored a queued proposal, and that is enforced where
 /// the proposal is claimed rather than by refusing the whole lane — see
 /// [`drain_global`].
+///
+/// **This is a pre-filter, and no longer the guarantee.** It reads the account
+/// on its own, so between building a target list and acting on one the answer can
+/// go stale — which is the window FR-597 describes. The refusal that counts is
+/// [`GlobalGuard::admits`], inside the operation, against a credential that
+/// cannot change underneath it. Keeping this one is still worth it: it stops the
+/// worker from opening an operation, and therefore a request, for a lane it
+/// already knows is not ours.
 async fn may_sync_lane(d: &Daemon, namespace: &SyncNamespace) -> bool {
     match namespace {
         SyncNamespace::Personal(_, owner) => *owner == d.owner_identity().await,
@@ -779,49 +946,16 @@ async fn syncable_global_lanes(d: &Daemon) -> Vec<SyncNamespace> {
 }
 
 async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, WireError> {
-    let c = client(d).await?;
-
-    // **A lane only ever pulls from the instance it names** (FR-495, FR-496).
-    //
-    // The lane key carries a server instance id, and until this check existed
-    // that id was treated as a fact about where the rows came from — while the
-    // HTTP client points at whatever server the current token belongs to. After
-    // `cairn auth token set` moved a store to a second deployment, the old
-    // `team:<A>` lane happily pulled server B and merged B's ratified guidance
-    // into a corpus bound to A, labelled as A's. `merge_synced_team` could not
-    // catch it: it was handed the lane's instance, which matched by construction.
-    //
-    // Confirming the peer here is the only place the two can be compared, and it
-    // is one `GET /api/version` — the same endpoint the drain already polls for
-    // capabilities every cycle.
-    let lane_instance = match namespace {
-        SyncNamespace::Personal(instance, _) | SyncNamespace::Team(instance) => Some(*instance),
-        SyncNamespace::Project(_) => None,
-    };
-    if let Some(expected) = lane_instance {
-        let url = d.server.read().await.url.clone().unwrap_or_default();
-        // A peer that reports no instance is one below schema 3, and the lane it
-        // corresponds to is the provisional one derived from the endpoint — the
-        // same identity `establish_global_namespaces` would have used, so the two
-        // agree without a special case.
-        let reported = match c.get("/api/version").await {
-            Ok(body) => body
-                .get("server_instance_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| Uuid::parse_str(s).ok())
-                .unwrap_or_else(|| provisional_instance(&url)),
-            // Offline: nothing to pull anyway, and refusing here would be
-            // indistinguishable from a mismatch.
-            Err(e) => return Err(e),
-        };
-        if reported != expected {
-            tracing::debug!(
-                lane = %namespace.key(), peer = %reported,
-                "not pulling: this lane belongs to a different server instance"
-            );
-            return Ok(0);
-        }
+    // **A lane only ever pulls as the account it names, from the instance it
+    // names** (FR-495, FR-496, FR-597). Both halves come from one credential
+    // read — see [`GlobalGuard`], which is where this check used to be written
+    // out inline against a separately-read client.
+    let guard = GlobalGuard::acquire(d).await?;
+    if !guard.admits(namespace) {
+        guard.refuse(namespace, "pulling");
+        return Ok(0);
     }
+    let c = &guard.client;
 
     let since = cursor::pull_cursor(&d.store, namespace)
         .await
@@ -2320,9 +2454,8 @@ async fn drain(
 /// and the drain holds its work rather than sending a batch that cannot be
 /// authorized. That is the same outcome as the old "no linked project" branch,
 /// reached for a reason that is now true.
-async fn authorization_project(d: &Daemon) -> Option<Uuid> {
-    let client = client(d).await.ok()?;
-    let body = client.get("/api/projects").await.ok()?;
+async fn authorization_project(guard: &GlobalGuard, d: &Daemon) -> Option<Uuid> {
+    let body = guard.client.get("/api/projects").await.ok()?;
     let mut mine: Vec<Uuid> = body
         .get("projects")
         .and_then(|v| v.as_array())
@@ -2375,7 +2508,26 @@ async fn drain_global(
     // running at once would be more correct interleaved than serialized.
     let _drain_guard = d.sync_drain.lock().await;
 
-    let capability = refresh_capability(d, namespace).await;
+    // **Pushing is bound to the lane's instance exactly as pulling is**
+    // (FR-598). Only `pull_global` checked, so after `cairn auth token set`
+    // moved a store to a second deployment, this function went on posting
+    // `team:<A>` and `personal:<A>:*` rows at server B. Nothing reported it: a
+    // push that the peer accepts looks like a successful delivery, and the rows
+    // were marked delivered against a server that was never supposed to receive
+    // them. The pull-side repair that added the check for reading did not add it
+    // for writing, which is the asymmetry [`GlobalGuard::admits`] now removes by
+    // answering for both.
+    //
+    // Acquiring the guard is also the credential snapshot (FR-597): the account
+    // this drain filters rows by and the token it sends them with come from one
+    // read, so a switch mid-drain cannot route as A while authenticating as B.
+    let guard = GlobalGuard::acquire(d).await?;
+    if !guard.admits(namespace) {
+        guard.refuse(namespace, "pushing");
+        return Ok((0, 0, 0));
+    }
+
+    let capability = capability_from(&guard.version, d, namespace).await;
     let key = namespace.key();
 
     // Only rows this account authored (FR-594). A `team:*` lane is shared by
@@ -2383,8 +2535,8 @@ async fn drain_global(
     // otherwise be pushed once B logs in — and the server, right to distrust
     // payload identity, would record B as its proposer. See
     // [`outbox::claim_namespace_for_author`] for why the filter belongs in the
-    // claim.
-    let author = d.owner_identity().await;
+    // claim. Taken from the guard, not re-read, for the reason above.
+    let author = guard.account;
 
     // Resolved on the first non-empty batch, not up front. The namespace's
     // pending count includes rows held for another account's author, so a lane
@@ -2395,7 +2547,6 @@ async fn drain_global(
     let mut auth_project: Option<Uuid> = None;
 
     let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
-    let mut connection: Option<Client> = None;
 
     loop {
         let batch = outbox::claim_namespace_for_author(&d.store, &key, author, BATCH)
@@ -2405,19 +2556,13 @@ async fn drain_global(
             break;
         }
 
-        if connection.is_none() {
-            match client(d).await {
-                Ok(c) => connection = Some(c),
-                Err(e) => {
-                    release(d, &batch, &e.message).await?;
-                    return Err(e);
-                }
-            }
-        }
-        let c = connection.as_ref().expect("a client was just built");
+        // The guard's client, not a fresh one: the account this batch was
+        // claimed for and the token it is sent with must be the same read
+        // (FR-597).
+        let c = &guard.client;
 
         if auth_project.is_none() {
-            auth_project = authorization_project(d).await;
+            auth_project = authorization_project(&guard, d).await;
         }
         let Some(project_id) = auth_project else {
             // Nothing this batch could be authorized against. The rows go back to
@@ -2539,20 +2684,34 @@ async fn refresh_capability(d: &Daemon, namespace: &SyncNamespace) -> String {
     let Ok(client) = client(d).await else {
         // Offline. Whatever was last known still describes the server better
         // than nothing does.
-        return cursor::server_capability(&d.store, namespace)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+        return last_known_capability(d, namespace).await;
     };
     let Ok(body) = client.get("/api/version").await else {
-        return cursor::server_capability(&d.store, namespace)
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string());
+        return last_known_capability(d, namespace).await;
     };
+    capability_from(&body, d, namespace).await
+}
 
+async fn last_known_capability(d: &Daemon, namespace: &SyncNamespace) -> String {
+    cursor::server_capability(&d.store, namespace)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| UNKNOWN_CAPABILITY.to_string())
+}
+
+/// As [`refresh_capability`], over a `/api/version` body already in hand.
+///
+/// A global drain holds one: [`GlobalGuard`] fetched it to learn the peer's
+/// instance. Reading that same response rather than issuing a second one is not
+/// only a saved request — two reads are two chances to observe two different
+/// servers, which is exactly what snapshotting the credential exists to prevent
+/// (FR-597).
+async fn capability_from(
+    body: &serde_json::Value,
+    d: &Daemon,
+    namespace: &SyncNamespace,
+) -> String {
     let schema = body
         .get("schema_version")
         .and_then(|v| v.as_i64())

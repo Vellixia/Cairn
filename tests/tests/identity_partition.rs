@@ -75,6 +75,27 @@ fn device(server: &Server, label: &str) -> Device {
     }
 }
 
+/// A second machine authenticated as whoever `token` belongs to, linked to a
+/// project of its own so the daemon has credentials and a project to sync.
+fn second_device_for(server: &Server, token: &str) -> Sandbox {
+    let label = format!("second-{}", Uuid::now_v7().simple());
+    let sandbox = Sandbox::new();
+    let remote = format!("git@localhost:cairnfixture/{label}.git");
+    sandbox.git(&["remote", "add", "origin", &remote]);
+    sandbox.must(&["init"]);
+    let (created, status) = post_json_status_bearer(
+        &server.base,
+        "/api/projects",
+        &json!({ "name": label, "repository_remote": remote }),
+        token,
+    );
+    assert_eq!(status, 200, "create project: {created}");
+    let project = created["id"].as_str().expect("id").to_string();
+    attach_server(&sandbox, server, token);
+    sandbox.must(&["link", "--project", &project]);
+    sandbox
+}
+
 /// Record one personal note through the MCP surface an agent actually uses.
 fn remember_personal(s: &Sandbox, content: &str) {
     let mut mcp = Mcp::start(s);
@@ -598,8 +619,28 @@ fn a_team_proposal_authored_as_a_is_not_submitted_as_b() {
     ]);
     let id = proposed["entry"]["id"].as_str().expect("an id").to_string();
 
-    // B logs in on this machine before A's proposal was ever delivered.
+    // B logs in on this machine while A's proposal is still undelivered.
     attach_server(&a.sandbox, &server, &b.token);
+
+    // That precondition is *constructed* rather than raced for. A's own daemon
+    // legitimately delivers this proposal to the server within a tick of it being
+    // written — correctly, as A — so a test that merely proposed and then switched
+    // was measuring which of the two happened first. Undoing the delivery on both
+    // sides restores exactly the state the defect needs: a queued proposal
+    // authored by A, on a shared lane, with B authenticated.
+    server.execute(&format!("DELETE FROM team_knowledge WHERE id = '{id}'"));
+    a.sandbox.execute_sql(&format!(
+        "UPDATE outbox SET state = 'pending', delivered_at = NULL, claimed_at = NULL \
+          WHERE entity_id = '{id}'"
+    ));
+    assert_eq!(
+        server.count(&format!(
+            "SELECT count(*) FROM team_knowledge WHERE id = '{id}'"
+        )),
+        0,
+        "the proposal was not returned to an undelivered state"
+    );
+
     a.sandbox.must(&["sync", "now"]);
 
     let submitted = server.count(&format!(
@@ -796,5 +837,296 @@ fn a_credential_change_that_cannot_clear_the_stale_identity_fails_and_changes_no
         token_before,
         "the new token was written while the previous account's identity stayed \
          on disk — the exact pairing that fails closed only until a restart"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 4. One credential snapshot per operation (FR-597, FR-598, FR-599)
+// ---------------------------------------------------------------------------
+
+fn delivered_on(s: &Sandbox, namespace: &str) -> i64 {
+    s.query_column(&format!(
+        "SELECT CAST(COUNT(*) AS TEXT) FROM outbox \
+         WHERE namespace = '{namespace}' AND state = 'delivered'"
+    ))
+    .first()
+    .and_then(|n| n.parse().ok())
+    .unwrap_or(0)
+}
+
+/// Global work is never pushed to a server the lane does not name.
+///
+/// `pull_global` checked the peer's instance against the lane's; `drain_global`
+/// did not, so after a relink it went on posting `team:<A>` rows at server B.
+/// Nothing reported it — a push the peer accepts looks like a successful
+/// delivery, and the row was marked delivered against a server that was never
+/// meant to receive it (FR-598).
+///
+/// **The row carries no author, which is what makes this reachable.** A
+/// `personal:*` lane is already held back by its owner (FR-593) and an authored
+/// row by its author (FR-594), so with those two in place the instance check is
+/// only reached by a row neither covers: a `team:*` row — the lane has no
+/// identity in its key by design — whose `authored_by_user_id` is NULL. That is
+/// not a contrived value. Migration 0007 rebuilds the outbox and adds the column,
+/// and its `INSERT … SELECT` carries no author across, so **every row queued
+/// before this feature has one**, and an upgraded store that relinks is exactly
+/// this test.
+///
+/// Falsified by removing the `admits` check from `drain_global`: the row is
+/// delivered, and lands in server B's tables.
+#[test]
+fn global_work_is_never_pushed_to_a_server_the_lane_does_not_name() {
+    let Some(server_a) = Server::start_own_database() else {
+        eprintln!("SKIPPED: set CAIRN_TEST_DATABASE_URL to run the identity suite");
+        return;
+    };
+    let Some(server_b) = Server::start_own_database() else {
+        return;
+    };
+
+    let a = device(&server_a, "relink-a");
+    a.sandbox.must(&["sync", "now"]);
+
+    // A proposal queued against server A's team lane.
+    let topic = format!("relink-{}", Uuid::now_v7().simple());
+    let proposed = a.sandbox.json(&[
+        "team",
+        "propose",
+        "bind a push to the instance its lane names",
+        "--topic-key",
+        &topic,
+        "--value-key",
+        "bindpush",
+    ]);
+    let id = proposed["entry"]["id"].as_str().expect("an id").to_string();
+    let team = team_lane(&a.sandbox);
+
+    // Server A goes away before the row can be delivered to it — otherwise the
+    // worker delivers it within a tick, correctly, and this measures a race.
+    drop(server_a);
+
+    // Aged into the state an upgraded store's rows are in: queued, and with no
+    // recorded author, because the column did not exist when they were written.
+    a.sandbox.execute_sql(&format!(
+        "UPDATE outbox SET state = 'pending', delivered_at = NULL, claimed_at = NULL, \
+                authored_by_user_id = NULL WHERE entity_id = '{id}'"
+    ));
+    let queued = pending_on(&a.sandbox, &team);
+    assert!(queued > 0, "nothing was queued against server A");
+
+    // The machine is relinked to a different deployment. The team lane is still
+    // on the store, still naming server A's instance (FR-496 forbids a second).
+    let b_token = server_b.new_user_token("relink-b");
+    // B needs a project of its own on server B, or the batch is refused for
+    // want of an authorization project (FR-595) and this test would pass
+    // without ever reaching the instance check.
+    let (created, status) = post_json_status_bearer(
+        &server_b.base,
+        "/api/projects",
+        &json!({ "name": "relink-b", "repository_remote": "git@localhost:cairnfixture/relink-b.git" }),
+        &b_token,
+    );
+    assert_eq!(status, 200, "create B's project: {created}");
+
+    let out = a
+        .sandbox
+        .cairn(&["auth", "token", "set", &b_token, "--server", &server_b.base]);
+    assert!(out.ok(), "auth token set failed: {}", out.stderr);
+    assert!(
+        lanes(&a.sandbox).contains(&team),
+        "the team lane vanished; this test needs it present to prove it is not pushed"
+    );
+
+    a.sandbox.must(&["sync", "now"]);
+
+    // Asserted as "never delivered", not as "still exactly pending": retries
+    // against the now-unreachable server A move the row through `in_flight` and
+    // can exhaust its attempts, which is ordinary bookkeeping and not this
+    // test's subject. What must never happen is a delivery.
+    assert_eq!(
+        delivered_on(&a.sandbox, &team),
+        0,
+        "rows were marked delivered against server B"
+    );
+    let _ = queued;
+    assert_eq!(
+        server_b.count(&format!(
+            "SELECT count(*) FROM team_knowledge WHERE id = '{id}'"
+        )),
+        0,
+        "server B received knowledge queued for server A"
+    );
+}
+
+/// A lane holding only another account's work is not drained at all, so it
+/// makes no request.
+///
+/// The claim is author-scoped (FR-594) but the count the worker gated on was
+/// not, so a `team:*` lane whose only queued rows were authored by a logged-out
+/// account looked busy on every tick: the drain ran, refreshed capabilities over
+/// the network, and claimed nothing. At a 500 ms `WORKER_TICK` that is two
+/// `GET /api/version` a second against a queue that cannot move until someone
+/// logs back in (FR-599).
+///
+/// Measured by `last_success_at`, which `process_global_namespace` writes after
+/// every drain that rejects nothing — and a drain that claims nothing rejects
+/// nothing, so the defect stamps it on every tick. A drain that never runs never
+/// touches it. That makes "did the worker attempt this lane" a local, exact
+/// question, with no request counter on the server to add.
+///
+/// Falsified by restoring the unscoped `counts_namespace` gate in
+/// `process_global_namespace`: the timestamp advances repeatedly while nothing
+/// is ever delivered.
+#[test]
+fn a_queue_of_only_foreign_work_is_never_drained() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "idlespin-a");
+    let b = device(&server, "idlespin-b");
+
+    // A proposal authored as A, queued on the shared team lane, never delivered.
+    let topic = format!("idlespin-{}", Uuid::now_v7().simple());
+    let proposed = a.sandbox.json(&[
+        "team",
+        "propose",
+        "count drain eligibility by author, not by namespace",
+        "--topic-key",
+        &topic,
+        "--value-key",
+        "byauthor",
+    ]);
+    let id = proposed["entry"]["id"].as_str().expect("an id").to_string();
+    let team = team_lane(&a.sandbox);
+
+    // B takes over. A's proposal is now foreign work: held, unclaimable, and —
+    // this is the assertion — not worth attempting.
+    attach_server(&a.sandbox, &server, &b.token);
+
+    // The undelivered state is constructed, not raced for: A's own daemon
+    // delivers this proposal within a tick of it being written, correctly, so a
+    // test that proposed and then switched would be measuring which happened
+    // first. Undoing the delivery on both sides restores the state the defect
+    // needs — a queued proposal authored by A, on a lane B also uses.
+    server.execute(&format!("DELETE FROM team_knowledge WHERE id = '{id}'"));
+    a.sandbox.execute_sql(&format!(
+        "UPDATE outbox SET state = 'pending', delivered_at = NULL, claimed_at = NULL \
+          WHERE entity_id = '{id}'"
+    ));
+    assert!(
+        pending_on(&a.sandbox, &team) > 0,
+        "nothing is queued on the team lane, so this test would pass vacuously"
+    );
+
+    let stamp = |s: &Sandbox| {
+        s.query_column(&format!(
+            "SELECT COALESCE(last_success_at, '') FROM sync_cursor WHERE namespace = '{team}'"
+        ))
+        .first()
+        .cloned()
+        .unwrap_or_default()
+    };
+
+    // Let the worker tick many times over: `WORKER_TICK` is 500 ms, so this is
+    // roughly twenty ticks, and the defect drained on every one of them.
+    // Settle past the switch itself before measuring. A tick landing in the
+    // instant `set_token` is updating the identity may attempt this lane once,
+    // which is a boundary, not a spin — and a spin is what this asserts.
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // Roughly twenty `WORKER_TICK`s. The defect drained on every one of them.
+    let before = stamp(&a.sandbox);
+    std::thread::sleep(std::time::Duration::from_secs(10));
+    let after = stamp(&a.sandbox);
+
+    assert_eq!(
+        before, after,
+        "the worker drained a lane whose only queued work belongs to another \
+         account, once per tick, each time claiming nothing"
+    );
+    assert!(
+        pending_on(&a.sandbox, &team) > 0,
+        "A's held proposal left the queue while B was authenticated"
+    );
+}
+
+/// Switching accounts while global sync is running never produces an operation
+/// routed as one account and authenticated as another.
+///
+/// The two facts a global operation must agree on — whose lane this is, and whom
+/// we are authenticating as — came from two separate reads of the same field,
+/// with a network round trip between them. `cairn auth token set` writes that
+/// field, so a switch landing in the window produced exactly the pairing FR-593
+/// and FR-567 forbid, reached through timing rather than through a missing check.
+/// [`GlobalGuard`] closes it by snapshotting the credential once per operation
+/// (FR-597).
+///
+/// Hammering the window rather than contriving one instant: switches are
+/// interleaved with syncs for many rounds, while both accounts hold personal
+/// knowledge with distinguishable markers. The invariant is checked over the
+/// whole run, since any single misroute leaves a permanent, observable trace —
+/// a row filed under the account that did not write it.
+///
+/// Falsified by re-reading the credential inside the operation instead of taking
+/// it from the guard — with the gap between the two reads widened, because the
+/// real one is microseconds wide and a probabilistic test that only sometimes
+/// lands is not evidence either way. Widened, the split happens on nearly every
+/// run and **both** markers come back filed under the wrong account, which is
+/// what this asserts. The guard does not narrow that window; it removes it, so
+/// there is nothing left for the width to matter to.
+#[test]
+fn switching_accounts_during_sync_never_splits_an_operation() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "toctou-a");
+    let b = device(&server, "toctou-b");
+
+    let a_id = server_account_id(&server, &a.email);
+    let b_id = server_account_id(&server, &b.email);
+
+    // Both accounts have personal knowledge on the server, written from their own
+    // devices, so either lane has something a wrongly routed pull could deliver.
+    // Markers deliberately unlike the sandboxes' project names: the content
+    // screen refuses project-identifying text, and a marker echoing the project
+    // label is exactly that (FR-517).
+    let a_marker = format!("zephyr-{}", Uuid::now_v7().simple());
+    let b_marker = format!("marlin-{}", Uuid::now_v7().simple());
+    remember_personal(&a.sandbox, &format!("the estimator {a_marker} rounds down"));
+    a.sandbox.must(&["sync", "now"]);
+    remember_personal(&b.sandbox, &format!("the parser {b_marker} is greedy"));
+    b.sandbox.must(&["sync", "now"]);
+
+    // A third machine that holds both identities in turn. The switch has to land
+    // *inside* a running sync to reach the window at all, so the two run
+    // concurrently against one daemon rather than in sequence — sequential calls
+    // never overlap, and a test that alternates them proves nothing.
+    let machine = second_device_for(&server, &a.token);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while std::time::Instant::now() < deadline {
+                // Not `must`: a sync racing a credential change is allowed to
+                // fail. What it may never do is succeed incoherently.
+                let _ = machine.cairn(&["sync", "now"]);
+            }
+        });
+        scope.spawn(|| {
+            let mut round = 0;
+            while std::time::Instant::now() < deadline {
+                let token = if round % 2 == 0 { &b.token } else { &a.token };
+                let _ = machine.cairn(&["auth", "token", "set", token]);
+                round += 1;
+            }
+        });
+    });
+
+    // Every row this machine holds is filed under the account that wrote it. A
+    // split operation — routed as one, authenticated as the other — files a row
+    // under the wrong owner, and nothing later corrects it.
+    let misfiled = machine.query_column(&format!(
+        "SELECT owner_user_id || ' :: ' || content FROM personal_knowledge \
+         WHERE (content LIKE '%{a_marker}%' AND owner_user_id <> '{a_id}') \
+            OR (content LIKE '%{b_marker}%' AND owner_user_id <> '{b_id}')"
+    ));
+    assert!(
+        misfiled.is_empty(),
+        "an operation routed as one account and authenticated as another: {misfiled:?}"
     );
 }
