@@ -101,15 +101,15 @@ Two budgets (data-model.md §7, FR-829, FR-830), so the two points cannot restat
 | session open | the full briefing budget | 3000 |
 | prompt time | 25% of the briefing budget | 750 |
 
-Dedup table `delivered_context (session_id, memory_id, delivered_at, delivery_point)`,
-`PRIMARY KEY (session_id, memory_id)`. Only memory-domain sections participate —
+Dedup table `delivered_context (session_id, domain, knowledge_id, delivered_at, delivery_point)`,
+`PRIMARY KEY (session_id, domain, knowledge_id)`. Only memory-domain sections participate —
 `task_memory`, `branch_memory`, `project_memory`, `patterns`, `personal_notes`,
-`team_guidance` — since only those carry a stable `memory_id`; `task`, `repository`,
+`team_guidance` — since only those carry a stable `KnowledgeRef`; `task`, `repository`,
 `decisions` and the other non-memory sections are re-derived fresh every delivery.
 
 ```
 relevant(session, prompt)
-  MINUS delivered_context[session]
+  MINUS delivered_context[session]   -- matched on (domain, knowledge_id)
   PLUS  any delivered item whose updated_at > its delivered_at
 ```
 
@@ -141,7 +141,7 @@ retrieval (§7, FR-849): nothing was owed, not something broke.
 (delivered, unchanged); `M4` new; `M1` re-enters on its updated timestamp. Cost
 `60+120=180 <= 750`, both admitted. `delivered_context` is upserted: `M4` inserted, `M1`'s row
 updated to `delivered_at=t2, delivery_point=prompt_time` — the primary key
-`(session_id, memory_id)` makes this an update, not a second row.
+`(session_id, domain, knowledge_id)` makes this an update, not a second row.
 
 ## 5. Degradation — four levels, stated once
 
@@ -188,7 +188,7 @@ on; there is no fifth, prompt-time-only level. Where a briefing is served from c
 `session_open`/`prompt_submit`/`explicit`), `delivery_point` (where it was aimed), the
 `degradation_level` and budget accounting from §4–§5, `latency_ms`, `delivery_state`
 (`generated`|`transmitted`|`acknowledged`|`unavailable`|`failed`), `failure_reason` (set only on
-`failed`), and per-item `(memory_id, domain, status ∈ considered|selected, selection_rule,
+`failed`), and per-item `(domain, knowledge_id, status ∈ considered|selected, selection_rule,
 rank)`.
 
 **The rendered briefing text is never in a trace** (FR-839): text mixes domains and carries
@@ -208,13 +208,13 @@ Readership is the session's project members, filtered per item at read time:
 |---|---|
 | `task_memory`, `branch_memory`, `project_memory`, `patterns` | any project member (unchanged) |
 | `team_guidance` | any project member (project/server-wide domain) |
-| `personal_notes` | **only** the account owning the referenced memory (`memories.account_id`) |
+| `personal_notes` | **only** the account owning the referenced record (`personal_knowledge.owner_user_id`) |
 
 A reader who may not see a `personal_notes` item gets that row **dropped from the list**, never
-returned as a redacted or opaque `memory_id` — an opaque handle still discloses that *some*
+returned as a redacted or opaque reference — an opaque handle still discloses that *some*
 personal record existed and was used, exactly the enumeration FR-846a forbids regardless of
-content visibility. The filter joins `retrieval_trace_items` to `memories` on `memory_id` and
-compares `memories.account_id` to the reader's account for every `personal_notes` row; failing
+content visibility. The filter resolves each `KnowledgeRef` in its own domain table and
+resolves each `KnowledgeRef` in its own domain table and compares ownership there; failing
 rows are excluded entirely. Aggregate `budget_tokens`/`budget_spent`/`degradation_level` return
 unfiltered — they disclose nothing about any individual record's identity. A project member
 therefore cannot enumerate a colleague's personal knowledge via traces, regardless of shared
@@ -255,7 +255,7 @@ outcome, never that the agent consumed it.
    result (FR-834, mirrors FR-894a).
 5. Session-open uses the full briefing budget; prompt-time uses 25% of it, applied to whichever
    items survive dedup (FR-829, FR-830, data-model.md §7).
-6. Prompt-time selection is `relevant MINUS delivered_context[session] PLUS {items updated
+6. Prompt-time selection is `relevant MINUS delivered_context[session]   -- matched on (domain, knowledge_id) PLUS {items updated
    since their delivery}` — never a resend of what the session already has unless it changed.
 7. Retrieval degrades to exactly one of `full`, `reduced`, `minimal`, `none` on a deadline; the
    level is recorded on the briefing and in its trace; wall-clock latency is never itself part
@@ -270,9 +270,18 @@ outcome, never that the agent consumed it.
 
 ---
 
-## 12. Corrections from the falsification pass (binding)
+## 12. Cross-domain references, dedup placement, trace scoping and the outage cache
 
-Where this section differs from an earlier one, this section governs.
+These four rules govern wherever an earlier section is less specific. They are stated here once
+rather than as amendments to §§4-6.
+
+### 12.0 Every knowledge reference is a `KnowledgeRef`
+
+Project, personal and team knowledge live in three different tables. A bare `memory_id` names
+only the first. Traces, `delivered_context`, authorization and web rendering all use
+`KnowledgeRef = (domain, knowledge_id)` (`data-model.md` §6.1). `updated_at` is read from the
+referenced record's own table, and ownership is checked in that domain's own terms — a project
+member is not an owner of a colleague's personal record.
 
 ### 12.1 `delivered_context` is a server table
 

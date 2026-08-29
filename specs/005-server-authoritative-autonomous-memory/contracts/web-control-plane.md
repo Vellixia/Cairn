@@ -50,10 +50,10 @@ requirement touches them.
 |---|---|---|---|
 | `GET /api/projects/{id}/funnel` | `SettledUser` | `require_member` — refusal, not empty (FR-894a) | `{ stages: [{ stage, count: int\|null }] }` — §3 |
 | `GET /api/projects/{id}/activity` | `SettledUser` | `require_member` | `{ items: [...], cursor }`, paginated (§7) |
-| `GET /api/projects/{id}/memories` | `SettledUser` | `require_member` (unchanged) | Existing shape + `importance`, `verification_state`, `verification_authority`, `origin_kind`, `reinforcement_count`, `relation_count` |
+| `GET /api/projects/{id}/memories` | `SettledUser` | `require_member` (unchanged) | Existing shape + `importance`, `verification`, `verification_authority`, `origin_kind`, `reinforcement_count`, `relation_count` |
 | `GET /api/memories/{id}` | `SettledUser` | `require_member` on the row's `project_id` (unchanged) | Existing shape + `relations[]`, `evidence_summary` (counts/ids, never content), `verification{state,authority,last_verified_at,stale}`, `reinforcement_count`, `retrieval_usage[]` (bounded, §7), `origin_kind` |
 | `GET /api/projects/{id}/retrieval-traces` | `SettledUser` | `require_member` | `{ traces: [{trace_id, trigger, delivery_point, degradation_level, delivery_state, created_at}], cursor }` |
-| `GET /api/retrieval-traces/{id}` | `SettledUser` | `require_member` on the trace's `project_id`, **plus** §6 withholding | `{ trigger, items: [{memory_id, domain, status, rank}], budget_tokens, budget_spent, latency_ms, delivery_state, failure_reason }` — no briefing text field exists on this shape at all |
+| `GET /api/retrieval-traces/{id}` | `SettledUser` | `require_member` on the trace's `project_id`, **plus** §6 withholding | `{ trigger, items: [{domain, knowledge_id, status, rank}], budget_tokens, budget_spent, latency_ms, delivery_state, failure_reason }` — no briefing text field exists on this shape at all |
 | `GET /api/projects/{id}/integration-health` | `SettledUser` | `require_member` | `{ rows: [{agent, capability, stage, status, evidence_kind, observed_at, stale}] }` |
 | `GET /api/personal/knowledge` | `SettledUser` | none (owner-scoped by construction — `owner_user_id = caller`, not a project concept) | `{ items: [...], cursor }` |
 | `GET /api/team/knowledge` | `SettledUser` | none (server-global); visibility filtered per `sync-namespaces.md` §1a (`proposed` visible to author + admin only) | `{ items: [...], cursor }` |
@@ -178,7 +178,7 @@ authorization decision the server has not already made.
 | Memory explorer | `limit` ≤ 100, default 25 (existing clamp, `api.rs:1247`) | offset via `LIMIT`/relevance-ranked, unchanged |
 | Activity feed | `limit` ≤ 100, default 50 | keyset on `(received_at, event_id)` — stable under concurrent insertion, unlike an offset that would skip or repeat rows as new events arrive |
 | Retrieval traces list | `limit` ≤ 100, default 25 | keyset on `(created_at, trace_id)` |
-| `retrieval_usage[]` on memory detail | 20 most recent | no further pagination — a "view all" link goes to the traces list filtered by `memory_id` |
+| `retrieval_usage[]` on memory detail | 20 most recent | no further pagination — a "view all" link goes to the traces list filtered by that `KnowledgeRef` |
 | Personal / team knowledge feeds | `limit` ≤ 100, default 25 | keyset, matching `retrieval_trace_items`'s existing 200-per-trace cap (data-model.md §3) in spirit |
 | Admin users list | `limit` ≤ 100, default 50 | offset — bounded by account count, which is small by construction |
 
@@ -203,7 +203,7 @@ path (§2) in front of actions that already exist and already carry this guarant
 
 ---
 
-## 10. Corrections from the falsification pass (binding)
+## 10. Cross-domain references, funnel counting and health attribution
 
 - **Consolidation runs get a read API.** `GET /api/projects/{id}/consolidation-runs`,
   `SettledUser` + `require_member`, paginated, returning run id, timings, events claimed,

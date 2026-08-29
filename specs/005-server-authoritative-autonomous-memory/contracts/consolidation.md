@@ -43,38 +43,124 @@ makes a long-running session produce knowledge before it ends.
 
 ## 4. Claim, reclaim, restart
 
-```sql
--- 1. pick ONE session to work on
-SELECT project_id, session_id
-  FROM consolidation_work
- WHERE state = 'pending' OR (state = 'claimed' AND claim_expires_at < now())
- GROUP BY project_id, session_id
- ORDER BY min(enqueued_at)
- LIMIT 1
- FOR UPDATE SKIP LOCKED;
+A `GROUP BY` cannot be combined with a locking clause. PostgreSQL rejects it outright —
+verified on 18.6:
 
--- 2. claim that session's events only
-UPDATE consolidation_work
-   SET state = 'claimed', claim_owner = $1,
-       claim_expires_at = now() + interval '5 minutes', attempts = attempts + 1
- WHERE session_id = $2 AND project_id = $3
-   AND (state = 'pending' OR (state = 'claimed' AND claim_expires_at < now()))
-   AND event_id IN (
-     SELECT event_id FROM consolidation_work
-      WHERE session_id = $2 AND state IN ('pending','claimed')
-      ORDER BY session_seq LIMIT 200
-      FOR UPDATE SKIP LOCKED)
-RETURNING *;
+```
+ERROR:  0A000: FOR UPDATE is not allowed with GROUP BY clause
 ```
 
-The claim is scoped to **one session of one project**, and ordered by `session_seq`, not by
-`event_id`. An unscoped claim would hand extraction a corpus mixing projects and accounts,
-which FR-805a1 forbids verbatim and SC-749 tests, and would make gate 1's "belongs to this
-batch's project and session" undefined. `session_seq` ordering is what makes the sequence
-rules in `extraction.md` meaningful; `event_id` is a UUIDv5 and orders arbitrarily.
+The documentation states the rule generally: *"The locking clauses cannot be used in contexts
+where returned rows cannot be clearly identified with individual table rows; for example they
+cannot be used with aggregation"*
+([SELECT, PostgreSQL 18](https://www.postgresql.org/docs/18/sql-select.html)). The same
+restriction applies to `DISTINCT`, `HAVING`, window functions and set operations, and it is not
+version-dependent — the sentence appears from 9.4 through 18.
 
-`FOR UPDATE SKIP LOCKED` makes concurrent passes within the process disjoint without an
-advisory lock (FR-793d).
+So the group to claim must itself be a lockable **row**. A lease table gives that.
+
+```sql
+CREATE TABLE consolidation_session (
+  project_id         UUID NOT NULL,
+  session_id         UUID NOT NULL,
+  state              TEXT NOT NULL DEFAULT 'pending',   -- pending | claimed | done
+  claimed_by         TEXT,
+  claim_expires_at   TIMESTAMPTZ,
+  oldest_enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, session_id)
+);
+CREATE INDEX ON consolidation_session (oldest_enqueued_at) WHERE state <> 'done';
+```
+
+A row is upserted here in the same transaction that enqueues an event into
+`consolidation_work`, and the conflict action is stated because both obvious choices are wrong:
+
+```sql
+INSERT INTO consolidation_session (project_id, session_id, state, oldest_enqueued_at)
+VALUES ($p, $s, 'pending', now())
+ON CONFLICT (project_id, session_id) DO UPDATE
+   SET state = CASE WHEN consolidation_session.state = 'done'
+                    THEN 'pending'                       -- re-open a finished session
+                    ELSE consolidation_session.state      -- never disturb a live claim
+               END,
+       oldest_enqueued_at = LEAST(consolidation_session.oldest_enqueued_at,
+                                  EXCLUDED.oldest_enqueued_at);
+```
+
+Leaving `state` alone unconditionally would strand every event arriving after a session was
+marked `done`: the partial index excludes `done`, so the session would never be elected again.
+Setting `state = 'pending'` unconditionally would clobber a live `claimed` lease and let a
+second worker elect a session mid-pass. The `CASE` re-opens only a finished session.
+
+```sql
+BEGIN;
+
+-- 1. elect and claim exactly ONE session
+UPDATE consolidation_session s
+   SET state = 'claimed', claimed_by = $worker,
+       claim_expires_at = now() + interval '5 minutes'
+ WHERE (s.project_id, s.session_id) = (
+         SELECT project_id, session_id
+           FROM consolidation_session
+          WHERE state = 'pending'
+             OR (state = 'claimed' AND claim_expires_at < now())   -- reclaim
+          ORDER BY oldest_enqueued_at
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1)
+RETURNING s.project_id, s.session_id;
+
+-- 2. read that session's work, in order. No lock needed: the group is owned.
+SELECT event_id, session_seq
+  FROM consolidation_work
+ WHERE project_id = $p AND session_id = $s AND state = 'pending'
+ ORDER BY session_seq
+ LIMIT 200;
+
+COMMIT;   -- row lock released; the lease stands as committed state
+```
+
+On success the worker marks the events it consolidated `done`, then closes the session **only
+if nothing remains**:
+
+```sql
+UPDATE consolidation_work SET state = 'done'
+ WHERE project_id = $p AND session_id = $s AND event_id = ANY($consolidated);
+
+UPDATE consolidation_session SET state = 'done', claimed_by = NULL, claim_expires_at = NULL
+ WHERE project_id = $p AND session_id = $s AND claimed_by = $worker
+   AND NOT EXISTS (SELECT 1 FROM consolidation_work
+                    WHERE project_id = $p AND session_id = $s AND state = 'pending');
+```
+
+The `NOT EXISTS` guard is what makes the 200-event batch cap safe. A session with 500 pending
+events would otherwise be closed after the first batch and the remaining 300 stranded behind
+the partial index. With the guard, the session returns to `pending` — the `claimed_by` clause
+having released the lease — and is re-elected until it is genuinely drained.
+
+`consolidation_work.state` moves `pending → done` here, `pending → failed` after five attempts
+(§4). Nothing else writes it, so the `consolidation_pending` partial index drains.
+
+A pass longer than the lease extends `claim_expires_at` as a heartbeat.
+
+Why each guarantee holds:
+
+- **One session per batch** — the lease table has exactly one row per session, so `LIMIT 1`
+  elects exactly one group. No aggregation appears anywhere, so `0A000` cannot arise.
+- **No two workers on the same work** — `FOR UPDATE SKIP LOCKED` excludes concurrent claimers
+  for the duration of the claiming transaction, and the `state` flip commits inside that window,
+  so afterwards the election predicate itself excludes them. `SKIP LOCKED` is documented for
+  exactly this: *"can be used to avoid lock contention with multiple consumers accessing a
+  queue-like table."*
+- **Ordering by `session_seq`** — step 2 is a plain `ORDER BY session_seq`. Ordering by
+  `event_id` would be arbitrary: it is a UUIDv5.
+- **Stale claims reclaimable** — the expiry predicate re-elects a session whose worker died
+  mid-batch.
+- **Restart-safe** — every piece of claim state is a committed row, not a lock. Advisory locks
+  were rejected for this reason: they vanish on backend crash or server restart and cannot
+  express a lease.
+- **`LIMIT` is safe here** — *"If a `LIMIT` is used, locking stops once enough rows have been
+  returned to satisfy the limit."* `OFFSET` is deliberately not used, since rows skipped by
+  `OFFSET` would still be locked.
 
 **Restart semantics, stated exactly (FR-793b):**
 

@@ -240,3 +240,146 @@ repaired (FR-796b).
 
 Changing `normalize_value_key` changes existing behaviour, so `migration-cutover.md`'s
 re-keying phase applies it to existing value keys — and to value keys **only**.
+
+---
+
+## 13. Semantic signal content — closing the decision/instruction gap
+
+### 13.1 The gap
+
+The first pass gave `decision_signal` and `user_instruction_signal` **no content**, reasoning
+that any text derived from a prompt is a transcript fragment. The consequence was not noticed
+at the time: the information is destroyed at the machine boundary and is unrecoverable
+afterwards, so no amount of server-side extraction can learn what was decided. Feature 005
+exists to learn decisions, constraints and procedures — not only that a test went from red to
+green. As written, the design could not do the thing it is for.
+
+### 13.2 Why a length-capped text field is not the answer
+
+The obvious repair — "carry 256 redacted bytes" — fails. Redaction is pattern-based and
+self-described as *"a mechanism, not a guarantee"* (`crates/cairn-core/src/redact.rs:5-6`), and
+a bounded free-text field derived from a prompt is still a prompt fragment. Constitution v1.2.1
+Principle V prefers **structural prevention to procedural rules**: *"a record that has no column
+for a secret cannot carry one."* A capped text column is a procedural rule wearing a number.
+
+Nor is a normalized-charset token sufficient on its own. `the api key is sk-abc123` normalizes
+to `the_api_key_is_sk_abc123`, which is inside the charset and inside the length. Shape alone
+constrains nothing.
+
+### 13.3 The mechanism: vocabulary-justified tokens
+
+A semantic signal carries a **closed enum plus tokens the local layer must justify against
+evidence already in the event stream**. This is the same rule as the key↔evidence gate in
+`consolidation.md` §5 gate 5a, applied one layer earlier.
+
+```
+decision_signal {
+  decision_kind: adopt | reject | defer | constrain | prefer | revert
+  subject_token: <vocabulary-justified>
+  object_token:  <vocabulary-justified | closed enum>
+}
+
+user_instruction_signal {
+  instruction_kind: require | forbid | prefer | scope | correct
+  subject_token: <vocabulary-justified>
+  object_token:  <vocabulary-justified | closed enum>
+}
+```
+
+**The session vocabulary** is derived deterministically, with no prose input, from:
+
+| Source | Contributes |
+|---|---|
+| `repo_file` path segments in this session's events | module and file tokens |
+| `command_line` leading binary and subcommand | command verbs |
+| `test_command` suite identifiers | test tokens |
+| existing `topic_key`s in this project's knowledge | established subject tokens |
+| existing `value_key`s in this project's knowledge | established value tokens |
+
+A token that is **not in the session vocabulary is refused**. Both sides check it: the client
+before constructing the event, and the server independently against the events it already holds
+for that session (`safe-events.md` §7.1). This is deterministic, fail-closed, and evaluable
+without a model.
+
+**Ordering, and why it is not a race.** The server can only justify a token against events it
+has already accepted, and events arrive incrementally — a signal citing a file could otherwise
+arrive before the `file_changed` event that put the token in the vocabulary. Three rules close
+this:
+
+1. Events are delivered in `session_seq` order per session, and the spool claims them in that
+   order, so an event that established a token is delivered before one that cites it.
+2. A semantic signal's tokens must be justified by events with a **lower `session_seq`** in the
+   same session. A token justified only by a later event is refused — the machine that built the
+   signal knew the earlier events too, so it could not legitimately have cited a later one.
+3. If the justifying event was itself dropped — deadline, spool overflow, or a server refusal —
+   the signal is refused with `token_not_in_vocabulary`, and the refusal is counted. This is the
+   correct outcome rather than an unfortunate one: the server declines to record a claim whose
+   grounding it does not hold.
+
+**Redaction runs before vocabulary derivation**, not after. A command line is redacted first,
+so a credential never enters the vocabulary and therefore can never justify a token. This
+matters because `command_line` is one of the vocabulary sources: without the ordering, a secret
+in a command would become a legitimising token for itself.
+
+**Repository content cannot smuggle prose.** A file path contributes its *path segments*, each
+normalized to the key charset and bounded — not file contents, which Cairn never reads. A
+deliberately-named file can only contribute a token that is already visible in the repository to
+anyone who can read it, and which the reader of that project can already see.
+
+### 13.4 Why this satisfies the constitution
+
+- **No transcript.** A prompt sentence cannot survive: its words are not in the vocabulary, so
+  the token is refused. `the_api_key_is_sk_abc123` is refused for the same reason a sentence is
+  — it is not a file, module, command, test or established key.
+- **Secrets.** Free-text vocabulary sources — `command_line`, `test_command` — are redacted on
+  the client and screened again on the server before they contribute anything, so a credential
+  in a command never enters the vocabulary. `repo_file` path segments are also screened, so a
+  file *named* after a credential cannot contribute one either. The honest limit: a token can
+  only ever repeat something already present in an event the server accepted, so a semantic
+  signal discloses nothing the event stream did not already carry. It is not an independent
+  disclosure channel — which is the claim that matters, and is weaker than "a credential can
+  never appear".
+- **Deterministic and fail-closed.** Vocabulary membership is set containment. Unjustifiable
+  token ⇒ refusal, never a best guess.
+- **A model is not required.** Deterministic rules map a signal to `decision_kind` and choose
+  the nearest vocabulary token. A local model MAY propose tokens instead, but the vocabulary
+  check governs either way, so the model is an optimization and never the gate.
+- **Smallest sufficient change.** Two enums and two constrained tokens per signal. No new
+  service, store, broker or field type.
+
+### 13.5 What it makes learnable
+
+Tokens are key-shaped by construction, so a semantic signal feeds the existing identity
+machinery directly: `topic_key = subject_token`, `value_key = object_token`. A decision becomes
+a first-class DECISION memory with provenance, reinforcement, conflict detection and
+supersession — all mechanisms Feature 003 already built.
+
+This adds two extractor rules, which are **session rules** (`extraction.md` §4.0):
+
+**R7 — Recorded decision.** `decision_signal{kind, subject, object}` ⇒ **DECISION**:
+"This project `<kind>` `<object>` for `<subject>`."
+`topic_key = decision.<subject_token>` · `value_key = <object_token>`
+
+The `decision.` prefix is load-bearing. R1–R6 derive keys from structural evidence; R7 and R8
+take theirs from a token the client supplied, so an unprefixed key would let one crafted signal
+name an existing high-value topic and register a `conflicts_with` against it — a poisoning
+primitive, and one that gate 5a cannot catch because the cited event *is* the key. Namespacing
+confines client-originated claims to their own key space, where they still reinforce, conflict
+and supersede among themselves, but cannot collide with structurally-derived knowledge.
+
+**R8 — Standing instruction.** `user_instruction_signal{require|forbid, subject, object}`,
+observed in ≥2 sessions ⇒ **CONVENTION** (project rule — aggregator):
+"`<object>` is `<required|forbidden>` for `<subject>` here."
+`topic_key = instruction.<subject_token>` · `value_key = <object_token>`, namespaced for the
+same reason as R7.
+
+R8 is an aggregator rule because a standing convention should rest on repetition, not on one
+instruction in one session.
+
+### 13.6 Honest limits
+
+This learns *that* a decision was taken, about *what*, and in *which direction*. It does not
+learn the reasoning behind it — the "because" lives only in the conversation and stays there.
+A DECISION produced by R7 is a durable, checkable, provenance-bearing claim about a subject in
+this project's own vocabulary. It is not a summary of the discussion, and the spec should not
+imply that it is.

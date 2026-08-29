@@ -430,6 +430,21 @@ server or explicitly reported as unmigrated, with authority switching only if th
 - **FR-727**: Where a vendor exposes a signal that a user gave an instruction, or that a
   decision was reached, the adapter MUST be able to represent it as a canonical event, subject
   to the privacy boundary.
+- **FR-727a**: A semantic signal MUST carry enough structure for the decision or instruction to
+  be learnable. A signal that records only that something happened destroys the information at
+  the machine boundary, where no later stage can recover it, and would leave Feature 005 unable
+  to learn the decisions and constraints it exists to learn.
+- **FR-727b**: That structure MUST NOT be free text derived from user or assistant messages. It
+  MUST be a closed classification plus tokens drawn from a vocabulary the machine can justify
+  from non-prose evidence already present in the session's own events — file and module tokens,
+  command verbs, test identifiers, and keys already established in that project's knowledge.
+- **FR-727c**: A token that cannot be justified against that vocabulary MUST be refused, by the
+  producing machine and independently by the server. This is structural rather than procedural:
+  a sentence's words and a credential are both absent from a derived vocabulary, so neither can
+  be encoded in a token even deliberately.
+- **FR-727d**: Semantic signal structure MUST be derivable without a model. A model MAY propose
+  the classification or the tokens, but the vocabulary check governs the outcome either way, so
+  a model is never the gate and is never required.
 - **FR-728**: Cairn MUST declare, per agent and per canonical event kind, which of the
   following holds: supported, unsupported by the vendor, declined by Cairn, adapter not
   implemented, or failing at runtime.

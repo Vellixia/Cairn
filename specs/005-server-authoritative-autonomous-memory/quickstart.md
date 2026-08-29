@@ -82,7 +82,7 @@ Two traces: one `session_open`, one `prompt_submit`. Check the property that mat
 **the second does not restate the first**:
 
 ```bash
-curl -s $SERVER/api/retrieval-traces/$TRACE2 | jq '.items[].memory_id'
+curl -s $SERVER/api/retrieval-traces/$TRACE2 | jq '.items[] | "\(.domain):\(.knowledge_id)"'
 ```
 
 No id appears in both traces unless its `updated_at` moved between them
@@ -175,6 +175,8 @@ cairn status --durability
 - the bounded briefing cache (refills on next retrieval)
 - machine-local capture disposition counters (the server's own counters are unaffected)
 - local-only knowledge (**gone permanently** — the local-only choice said so at the time)
+- retained-local records the server could not accept (**gone permanently**; listed individually
+  by `cairn migrate --status`, and outside FR-703's guarantee by construction)
 - observations, evidence facts, verification runs, continuity checkpoints (local by design)
 
 Note what is **not** lost: per-session delivered-context tracking lives on the server, so a

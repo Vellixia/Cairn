@@ -190,22 +190,55 @@ Each event, independently, in one transaction:
    from the session, never asserted. A caller who is not a member of the derived project gets
    `403` for the request, not a per-item rejection — a per-item answer would confirm the
    session's existence to a non-member (FR-769a, FR-894a).
-7. **Content screening** — the server applies the **same secret-pattern check** to
+7. **Vocabulary justification** — for `decision_signal` and `user_instruction_signal`, each
+   `subject_token` and `object_token` must appear in the session vocabulary, recomputed
+   server-side. The vocabulary is defined identically on both sides
+   (`contracts/extraction.md` §13.3): tokens derived from this session's **already-accepted
+   events with a lower `session_seq`**, **plus** the `topic_key`s and `value_key`s already
+   established in this project's knowledge. Both sources must be included — a server that
+   checked only session events would refuse tokens the client legitimately justified from
+   established project keys, and the refusal is permanent, destroying the decision.
+   The signal carries `justified_by_seq`, the `session_seq` of the event it relies on, so a
+   refusal names what was missing instead of being a bare mismatch. A token the server cannot
+   justify is refused (`token_not_in_vocabulary`).
+   Events within a batch are validated in `session_seq` order, and a batch MUST be ordered by
+   `session_seq`, so an event that establishes a token is validated before one citing it.
+8. **Content screening** — the server applies the **same secret-pattern check** to
    `command_line`, `test_command` and `failure_note` that the client applied, and refuses a
-   match (`content_screening_failed`). Client-side redaction is where secrets are removed; this
-   is where the boundary is *enforced*. FR-777 requires the server to enforce the privacy
+   match (`content_screening_failed`), and applies the same check to `repo_file` path segments,
+   which are a vocabulary source (`contracts/extraction.md` §13.3). Client-side redaction is
+   where secrets are removed; this is where the boundary is *enforced*. FR-777 requires the server to enforce the privacy
    restrictions independently of the client, and a credential inside an approved text field is
    exactly the case SC-741 names.
-8. **Insert** — `INSERT … ON CONFLICT (event_id) DO NOTHING`. Zero rows affected ⇒ `duplicate`.
-9. **Enqueue** — `INSERT INTO consolidation_work (event_id, state) VALUES (?, 'pending')`, in
-   the same transaction, so an accepted event is always eventually consolidated and a rolled
-   back event never is.
+9. **Insert** — `INSERT … ON CONFLICT (event_id) DO NOTHING`. Zero rows affected ⇒ `duplicate`.
+10. **Enqueue** — in the same transaction, so an accepted event is always eventually
+    consolidated and a rolled-back one never is:
+
+    ```sql
+    -- lease row first: consolidation_work has a FK to it
+    INSERT INTO consolidation_session (project_id, session_id, state, oldest_enqueued_at)
+    VALUES ($p, $s, 'pending', now())
+    ON CONFLICT (project_id, session_id) DO UPDATE
+       SET state = CASE WHEN consolidation_session.state = 'done' THEN 'pending'
+                        ELSE consolidation_session.state END,
+           oldest_enqueued_at = LEAST(consolidation_session.oldest_enqueued_at,
+                                      EXCLUDED.oldest_enqueued_at);
+
+    INSERT INTO consolidation_work
+      (event_id, project_id, session_id, session_seq, state)
+    VALUES ($event_id, $p, $s, $seq, 'pending');
+    ```
+
+    `project_id`, `session_id` and `session_seq` are all `NOT NULL` and the work row carries a
+    foreign key to the lease row, so the lease upsert must precede it
+    (`contracts/consolidation.md` §4).
 
 ### 7.2 Rejection vocabulary
 
 `unknown_field`, `forbidden_field_name`, `bound_exceeded`, `repo_file_absolute`,
 `repo_file_traversal`, `repo_file_malformed`, `event_id_mismatch`, `session_not_found`,
-`content_screening_failed`, `unsupported_kind`, `contract_version_unsupported`.
+`content_screening_failed`, `token_not_in_vocabulary`, `unsupported_kind`,
+`contract_version_unsupported`.
 
 Project non-membership is a request-level `403`, not an item rejection (step 6).
 

@@ -281,9 +281,26 @@ earlier, contingent condition) — a device that never returns simply refuses if
 
 ---
 
-## 12. Corrections from the falsification pass (binding)
+## 11.9 Reads are never refused — the refusal is write-shaped
 
-Where this section differs from an earlier one, this section governs.
+`upgrade_required` applies to **knowledge-bearing writes**. It does not apply to reads.
+
+`GET /api/sync/changes`, `/changes/personal` and `/changes/team` stay available after cutover,
+to every client. This is not an oversight to be tightened later: after cutover the local
+personal and team replicas are demoted to cache, and a cache with no read path can never
+refill. Refusing the read would mean a migrated store loses personal and team knowledge on
+local-store loss, contradicting FR-704 and FR-710a — the opposite of what the authority change
+promises.
+
+What the reads return is unchanged. What changes is that a client may no longer write back
+through the sync path; it uses the commands in `knowledge-commands.md` §3.
+
+A pre-005 client is therefore refused its writes and keeps its reads, which is exactly the
+state that lets it keep working while the user upgrades (FR-877).
+
+## 12. Drain exemption, partial migration, possession and re-keying
+
+These rules govern wherever an earlier section is less specific.
 
 ### 12.1 The drain path must survive its own refusal
 
@@ -307,18 +324,52 @@ Correction: drain uses a **distinct, migration-scoped ingest route**,
 
 `POST /api/sync/batch` remains refused after cutover, unconditionally.
 
-### 12.2 Retained records are excluded from the authority switch, per record
+### 12.2 Partial migration: the authority unit is the record, and retained records are named
 
-FR-871 requires records the server cannot accept to be excluded from the authority switch.
-A store-wide switch does not do that: after it, the read path treats the server as
-authoritative for a domain including records the server provably does not hold, so they become
-unreachable — the loss arriving through the read path instead of the delete path.
+A single store-wide flag cannot express FR-871. "Excluded from the authority switch" behind a
+global `server_authoritative` flag is not a state — the read path would treat the server as
+authoritative for a domain that includes records the server provably does not hold, and those
+records become unreachable. That is the loss FR-871 and SC-723 exist to prevent, arriving
+through the read path instead of the delete path.
 
-Correction: the authority switch records a **retained set** — the record ids that could not be
-transferred. Those remain locally authoritative and locally readable indefinitely. The store's
-mode becomes `server_authoritative_with_retained` while the set is non-empty, and the retained
-set is reportable by `cairn migrate --status`. A retained record is never demoted (FR-872) and
-never silently dropped (SC-723).
+**Chosen semantics: per-record retained-local state, with defined read and write behaviour.**
+Not all-or-nothing, because one un-transferable record must not block a whole store — which is
+also what User Story 7 describes: migration completes, and what could not move is *reported*,
+not fatal.
+
+A new local table names the exceptions explicitly:
+
+```sql
+CREATE TABLE retained_local (
+  domain       TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  knowledge_id TEXT NOT NULL,
+  reason       TEXT NOT NULL,   -- local_only | server_refused | possession_indeterminate
+  detected_at  TEXT NOT NULL,
+  PRIMARY KEY (domain, knowledge_id)
+);
+```
+
+`authority_mode` becomes `server_authoritative` for the store. A record in `retained_local` is
+the stated exception to it, and its behaviour is defined rather than implied:
+
+| Aspect | Retained record |
+|---|---|
+| **Read** | served from the local store, and labelled *retained-local* wherever it is read or displayed, so it is never mistaken for canonical knowledge |
+| **Recall** | included in briefings from the local corpus, since it is real knowledge this machine holds |
+| **Write** | permitted **only** for `local_only` and `server_refused`. A record retained as `possession_indeterminate` — the server may hold it but would not confirm to this caller — is **read-only locally**, because writing a record the server may own would create a second truth (FR-712). |
+| **Demotion** | never (FR-872) |
+| **Deletion** | only by the user, explicitly |
+| **Sync** | never re-attempted automatically; `cairn migrate --retry-retained` re-attempts on demand |
+| **Reporting** | listed individually with its reason by `cairn migrate --status` and `cairn status --durability` (SC-723) |
+| **Durability** | explicitly **outside** FR-703's guarantee — it is named in the durability-loss list, because deleting the local store destroys it |
+
+The set is expected to be small and mostly one reason: `local_only` records, which the user
+chose to keep local and which were never eligible to move. A `server_refused` entry is a defect
+signal and is surfaced as one.
+
+When the set empties — every retained record either transferred on retry or deleted by the
+user — the store is fully server-authoritative with no exceptions, and `cairn migrate --status`
+says so.
 
 ### 12.3 Possession is re-checked at demotion
 
@@ -327,18 +378,28 @@ Demotion re-runs the possession check for the records it is about to demote, in 
 and demotes only what comes back held. FR-872 is then satisfied at the moment that matters
 rather than only at the moment of the earlier check.
 
-### 12.4 Key re-keying applies to value keys only
+### 12.4 Re-keying: both key kinds, with the shipped topic normalizer unchanged
 
-The re-keying phase must **not** re-run topic-key normalization with a folded `.`: `.` is a
-segment separator in shipped `normalize_topic_key`, and folding it would rewrite `test.command`
-to `test_command` across every existing record. Topic keys are already normalized by the
-shipped function and are left as they are. The phase applies the **new value-key folding**
-(`contracts/extraction.md` §7) to existing value keys, and nothing else.
+FR-867a and SC-750 require existing records' **topic and value** keys to be normalized, so the
+phase re-runs both:
+
+- **Topic keys** are re-normalized with the **shipped** `normalize_topic_key` unchanged. It is
+  idempotent, so an already-normalized key is untouched and a legacy un-normalized one is
+  corrected. What the phase must **not** do is apply a variant that folds `.`: `.` is a segment
+  separator (`crates/cairn-core/src/knowledge.rs`, split before `normalize_segment`), and
+  folding it would rewrite `test.command` to `test_command` across every record.
+- **Value keys** are re-normalized with the **new** folding from `contracts/extraction.md` §7,
+  which is the behaviour change this feature introduces.
+
+Where two records collide on a normalized key, the collision is surfaced through the ordinary
+conflict machinery; neither record is discarded.
 
 ### 12.5 Possession is not an existence oracle
 
 The possession check answers only for records the caller could already see: project records in
 projects the caller is a member of, personal records the caller owns, and team records visible
 to the caller under the existing team visibility rules. A `proposed` team record the caller may
-not see is answered as not-held rather than confirmed, so possession cannot be used to probe
-for the existence of other people's proposals.
+not see is answered **indeterminate** — never "not held", which would be a lie the client would
+act on by retaining a writable copy. An indeterminate record is retained read-only (§12.2) and
+is re-checked on the next `--retry-retained`, so possession cannot be used to probe for other
+people's proposals and cannot silently fork a record the server owns.

@@ -71,14 +71,23 @@ generation, checkpointing and context delivery keep working (FR-744).
 | `test_executed` | `test_command` ≤512 (redacted) |
 | `test_result` | `test_outcome` ∈ {`passed`,`failed`,`unknown`}, `exit_status` i32?, `tests_total` u32?, `tests_failed` u32? |
 | `research_activity` | `resource_kind` ∈ {`docs`,`web`,`repository`,`other`} |
-| `user_instruction_signal` | *(none)* — the signal only. Carrying prompt text would be a transcript. |
-| `decision_signal` | *(none)* — same reason. The claim is extracted from surrounding events. |
+| `user_instruction_signal` | `instruction_kind` ∈ {`require`,`forbid`,`prefer`,`scope`,`correct`}, `subject_token`, `object_token` |
+| `decision_signal` | `decision_kind` ∈ {`adopt`,`reject`,`defer`,`constrain`,`prefer`,`revert`}, `subject_token`, `object_token` |
 | `capture_declined`, `capture_failed` | `disposition` enum (§4), `stage` enum |
 | `agent_quiesced` | *(none)* |
 
 **No free text derived from user or assistant messages appears anywhere in this table.**
 `failure_note`, `command_line` and `test_command` are tool-level strings that pass redaction
 first, and are the only free-text fields in the model.
+
+`subject_token` and `object_token` are **not** free text. They are vocabulary-justified tokens:
+key-shaped (`[a-z0-9_]`, dot-segmented, ≤128 / ≤64 chars) **and** required to appear in the
+session's derived vocabulary — the file and module tokens, command verbs, test identifiers and
+established project keys visible in that session's own events. A token outside that set is
+refused, by the client when constructing and by the server independently
+(`contracts/extraction.md` §13). This is what lets a decision survive the boundary without a
+prompt fragment surviving with it: a sentence's words are not in the vocabulary, and neither is
+a credential.
 
 ### 1.4 Identity — stable across hook invocations and retries
 
@@ -166,7 +175,8 @@ The repository root is machine configuration and is never transmitted (FR-753).
 ## 4. Capture dispositions
 
 `captured`, `declined_by_policy`, `capture_deadline_exceeded`, `redaction_failed`,
-`privacy_refused`, `spooled`, `spool_overflow_dropped`, `transmitted`, `accepted`,
+`privacy_refused`, `spooled`, `spool_overflow_dropped`, `spool_saturated_dropped`,
+`transmitted`, `accepted`,
 `rejected_by_server`, `persisted`.
 
 `capture_deadline_exceeded` is the FR-749c disposition: the agent sees success, Cairn counts a
@@ -208,7 +218,26 @@ CREATE TABLE capture_disposition_counts (
 
 CREATE TABLE session_event_seq (           -- durable ordinal; survives spool drain
   session_id TEXT PRIMARY KEY REFERENCES sessions(id),
-  next_seq   INTEGER NOT NULL DEFAULT 1
+  next_seq   INTEGER NOT NULL DEFAULT 1,
+  next_cmd_seq INTEGER NOT NULL DEFAULT 1   -- same guarantee for commands
+);
+
+CREATE TABLE command_spool (               -- knowledge commands awaiting the server
+  command_id  TEXT PRIMARY KEY,            -- UUIDv5(session_id ‖ command_seq)
+  session_id  TEXT NOT NULL REFERENCES sessions(id),
+  project_id  TEXT REFERENCES projects(id),
+  account_id  TEXT NOT NULL,               -- exact match on claim; never NULL-open
+  command_seq INTEGER NOT NULL,
+  kind        TEXT NOT NULL,               -- remember | supersede | reinforce | relate |
+                                           -- pin | forget | personal_create | personal_forget |
+                                           -- team_propose | verification_report
+  payload     TEXT NOT NULL,               -- intent only; no derived state (§3.1 of the contract)
+  state       TEXT NOT NULL CHECK (state IN
+                ('pending','in_flight','delivered','failed','refused')),
+  attempts    INTEGER NOT NULL DEFAULT 0,
+  claimed_at TEXT, next_attempt_at TEXT, last_error_kind TEXT,
+  created_at  TEXT NOT NULL,
+  UNIQUE (session_id, command_seq)
 );
 
 CREATE TABLE authority_mode (
@@ -217,15 +246,39 @@ CREATE TABLE authority_mode (
   changed_at TEXT NOT NULL
 );
 
+CREATE TABLE retained_local (              -- records the server could not accept (FR-871)
+  domain       TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  knowledge_id TEXT NOT NULL,
+  reason       TEXT NOT NULL CHECK (reason IN
+                 ('local_only','server_refused','possession_unconfirmed')),
+  detected_at  TEXT NOT NULL,
+  PRIMARY KEY (domain, knowledge_id)
+);
+
 CREATE TABLE migration_state (
   phase TEXT PRIMARY KEY, state TEXT NOT NULL, detail_count INTEGER,
   started_at TEXT, finished_at TEXT
 );
 ```
 
-Spool overflow (FR-785): drop the **oldest capture-class** rows first; never drop a row with
-`boundary_class = 1` (session open/close, compaction), because those route everything else.
-Each drop increments `spool_overflow_dropped`.
+Spool overflow (FR-785), in order:
+
+1. Drop the **oldest capture-class** rows (`boundary_class = 0`) first, incrementing
+   `spool_overflow_dropped`.
+2. **If the bound is reached and no capture-class row remains** — the spool is entirely
+   boundary-class — Cairn stops accepting new events for that store and enters a
+   `spool_saturated` state. It does **not** drop a boundary row: session open, close and
+   compaction rows are what every other event is routed by, and shedding them would corrupt the
+   session structure of everything already queued.
+
+   In `spool_saturated`: capture continues to be attempted and each new event is recorded as
+   `spool_saturated_dropped` with its kind and session, so the loss is counted rather than
+   silent; the agent is still never blocked (FR-781); and the condition is surfaced by
+   `cairn status` and in capture health as a distinct, actionable state. It clears as soon as
+   delivery drains rows.
+
+This is the one place the capacity policy can lose a boundary event, and it is resolved by
+refusing new work rather than by corrupting queued work.
 
 ---
 
@@ -249,15 +302,33 @@ CREATE TABLE safe_events (
 );
 CREATE INDEX safe_events_project_time ON safe_events (project_id, received_at DESC);
 
+-- The group that gets claimed must be a lockable ROW: PostgreSQL forbids a locking clause
+-- with GROUP BY (SQLSTATE 0A000). Hence a lease table, one row per session.
+CREATE TABLE consolidation_session (
+  project_id         UUID NOT NULL,
+  session_id         UUID NOT NULL,
+  state              TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (state IN ('pending','claimed','done')),
+  claimed_by         TEXT,
+  claim_expires_at   TIMESTAMPTZ,
+  oldest_enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (project_id, session_id)
+);
+CREATE INDEX consolidation_session_elect
+  ON consolidation_session (oldest_enqueued_at) WHERE state <> 'done';
+
 CREATE TABLE consolidation_work (
   event_id     UUID PRIMARY KEY REFERENCES safe_events(event_id),
   project_id   UUID NOT NULL,
   session_id   UUID NOT NULL,
-  state        TEXT NOT NULL CHECK (state IN ('pending','claimed','done','failed')),
-  claim_owner  UUID, claim_expires_at TIMESTAMPTZ,
-  attempts     INT NOT NULL DEFAULT 0, last_error TEXT
+  session_seq  BIGINT NOT NULL,           -- batch order; event_id is a UUID and orders arbitrarily
+  enqueued_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  state        TEXT NOT NULL CHECK (state IN ('pending','done','failed')),
+  attempts     INT NOT NULL DEFAULT 0, last_error TEXT,
+  FOREIGN KEY (project_id, session_id) REFERENCES consolidation_session (project_id, session_id)
 );
-CREATE INDEX consolidation_pending ON consolidation_work (state, claim_expires_at);
+CREATE INDEX consolidation_pending
+  ON consolidation_work (project_id, session_id, session_seq) WHERE state = 'pending';
 
 CREATE TABLE consolidation_runs (
   run_id UUID PRIMARY KEY, project_id UUID NOT NULL, session_id UUID,
@@ -305,26 +376,39 @@ CREATE TABLE retrieval_traces (
 -- is therefore bounded by traffic x 90 days, not unbounded.
 
 CREATE TABLE retrieval_trace_items (
-  trace_id UUID NOT NULL REFERENCES retrieval_traces(trace_id),
-  memory_id UUID NOT NULL, domain TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('considered','selected')),
+  trace_id      UUID NOT NULL REFERENCES retrieval_traces(trace_id),
+  -- KnowledgeRef: (domain, id). Project, personal and team knowledge live in
+  -- DIFFERENT tables, so a bare memory_id cannot name a personal or team record.
+  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  knowledge_id  UUID NOT NULL,
+  status        TEXT NOT NULL CHECK (status IN ('considered','selected')),
   selection_rule TEXT, rank INT,
-  PRIMARY KEY (trace_id, memory_id)
+  PRIMARY KEY (trace_id, domain, knowledge_id)
 );
 
 CREATE TABLE verification_reports (        -- runs reported, never states asserted
-  report_id UUID PRIMARY KEY,
-  memory_id UUID NOT NULL, project_id UUID NOT NULL, account_id UUID NOT NULL,
-  verdict TEXT NOT NULL CHECK (verdict IN ('passed','failed','inconclusive')),
-  verifier_kind TEXT NOT NULL, authority TEXT NOT NULL,
-  run_at TIMESTAMPTZ NOT NULL, received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  report_id     UUID PRIMARY KEY,            -- SERVER-assigned
+  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  knowledge_id  UUID NOT NULL,               -- KnowledgeRef, §6.1
+  project_id    UUID,                        -- NULLABLE: personal/team are project-independent
+  owner_user_id UUID,                        -- set for the personal domain
+  account_id    UUID NOT NULL,               -- the reporting account, from the credential
+  verdict       TEXT NOT NULL CHECK (verdict IN ('passed','failed','inconclusive')),
+  verifier_kind TEXT NOT NULL,
+  authority     TEXT NOT NULL,               -- SERVER-assigned; never from the payload
+  run_at        TIMESTAMPTZ NOT NULL,
+  received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (domain, knowledge_id, verifier_kind, run_at)   -- duplicate-run identity
 );
 
+-- Verification columns ALREADY EXIST on the server `memories` table and are NOT re-added:
+--   verification, verification_authority, last_verified_at, verification_basis,
+--   evidence_fact_count   (0002_project_intelligence.sql:31-35).
+-- `verification` is the canonical state column; there is no `verification_state`.
+-- Feature 005 changes who computes them, not what they are called
+-- (contracts/verification-summary.md §1).
 ALTER TABLE memories
-  ADD COLUMN verification_state     TEXT,   -- DERIVED from verification_reports
-  ADD COLUMN verification_authority TEXT,
-  ADD COLUMN last_verified_at       TIMESTAMPTZ,
-  ADD COLUMN origin_kind            TEXT;   -- explicit | consolidated  (FR-816)
+  ADD COLUMN origin_kind TEXT;   -- explicit | consolidated  (FR-816)
 
 CREATE TABLE integration_health (
   project_id UUID NOT NULL, account_id UUID NOT NULL,
@@ -340,11 +424,13 @@ CREATE TABLE integration_health (
 );
 
 CREATE TABLE delivered_context (           -- per-session dedup; server-side, §7
-  session_id UUID NOT NULL REFERENCES sessions(id),
-  memory_id  UUID NOT NULL,
+  session_id     UUID NOT NULL REFERENCES sessions(id),
+  domain         TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  knowledge_id   UUID NOT NULL,
   delivered_at   TIMESTAMPTZ NOT NULL,
+  source_updated_at TIMESTAMPTZ NOT NULL,   -- the record's updated_at when delivered
   delivery_point TEXT NOT NULL,
-  PRIMARY KEY (session_id, memory_id)
+  PRIMARY KEY (session_id, domain, knowledge_id)
 );
 
 CREATE TABLE capture_dispositions (        -- funnel source; client-reported + server-observed
@@ -366,6 +452,31 @@ configuration read-back from reading as runtime capture (FR-852). `no_evidence` 
 value, which is what lets receipt be reported honestly (FR-838e).
 
 ---
+
+## 6.1 `KnowledgeRef` — naming knowledge across domains
+
+Project knowledge lives in `memories`, personal knowledge in `personal_knowledge`, team
+knowledge in `team_knowledge`. They are separate tables with separate ownership rules, so a
+bare `memory_id` cannot name a personal or team record, and `memories.account_id` does not
+exist as a way to check who owns one.
+
+Every cross-domain reference is therefore a **`KnowledgeRef = (domain, knowledge_id)`**, used
+identically in retrieval traces, delivered-context dedup, authorization and web rendering.
+
+| Domain | Table | Owner check for a reader |
+|---|---|---|
+| `project` | `memories` | reader is a member of `memories.project_id` |
+| `personal` | `personal_knowledge` | reader **is** `personal_knowledge.owner_user_id` |
+| `team` | `team_knowledge` | reader is a member of the server's team; `proposed` rows additionally require author-or-admin |
+
+Two rules follow, both binding:
+
+- **`updated_at` comparisons resolve per domain**, against the referenced table's own column.
+  There is no single table to read it from.
+- **Authorization resolves per domain before a reference is rendered.** A `personal` ref whose
+  owner is not the reader is withheld entirely — not rendered as an opaque id, which would
+  still disclose that the record exists. A project member must never be able to infer a
+  colleague's personal knowledge from a trace identifier, a rank gap, or a count.
 
 ## 7. Per-session context de-duplication
 

@@ -98,8 +98,9 @@ required a design change to keep passing, recorded here rather than in a footnot
 - **Principle XI** would have failed if consolidation had attributed personal knowledge from
   event body content. Resolved by binding owner from the account recorded at ingest.
 - **Principle VI** would have failed if a reclaimed consolidation batch re-derived a second
-  corroboration record. Resolved by deriving candidate identity from the event set and the
-  normalized keys, making re-execution an upsert.
+  corroboration record. Resolved by deriving candidate identity from the project, the
+  session and the normalized keys — deliberately **not** from the event set, which is not
+  stable across a reclaim — making re-execution an upsert.
 
 A falsification pass after the contracts were written found three further gate assessments
 unearned, and each was repaired rather than argued away:
@@ -112,7 +113,7 @@ unearned, and each was repaired rather than argued away:
   evidence. Both derivations were replaced (`data-model.md` §1.4, `contracts/consolidation.md` §7).
 - **Principle X** claimed PASS while any project member could assert `authority = cairn` on a
   verification report. Authority is now server-assigned from the path evidence arrived by
-  (`contracts/verification-summary.md` §10.1).
+  (`contracts/verification-summary.md` §4).
 
 **Complexity Tracking**: no principle is violated, so the table is empty.
 
@@ -130,6 +131,7 @@ specs/005-server-authoritative-autonomous-memory/
 ├── checklists/requirements.md
 └── contracts/
     ├── safe-events.md       # event model, field names, bounds, ingest API, identity
+    ├── knowledge-commands.md# post-cutover mutation model: commands, offline queue, drain
     ├── consolidation.md     # worker, claims, candidate governance, idempotency
     ├── extraction.md        # extractor trait, deterministic baseline, hosted gate
     ├── retrieval-delivery.md# per-agent delivery points, dedup, traces
@@ -156,7 +158,9 @@ crates/cairn-integrate/src/agents/
 └── mod.rs          # REPLACE two-field allowlist with per-vendor field maps
 
 crates/cairn-store/
-├── migrations/0008_safe_events.sql   # NEW event_spool, dispositions, migration_state
+├── migrations/0008_safe_events.sql   # NEW event_spool, session_event_seq, command_spool,
+│                                     #     capture dispositions, authority_mode,
+│                                     #     retained_local, migration_state
 └── src/spool.rs                      # NEW claim protocol reusing outbox semantics
 
 crates/cairn-server/
@@ -166,6 +170,7 @@ crates/cairn-server/
 ├── src/extract.rs        # NEW extractor trait + deterministic baseline
 ├── src/retrieve.rs       # NEW server-side retrieval + trace persistence
 ├── src/verifysummary.rs  # NEW run report ingest, state derivation
+├── src/commands.rs       # NEW knowledge command API (create/supersede/relate/…)
 └── src/api.rs            # EXTEND control-plane read APIs
 
 crates/cairnd/src/
