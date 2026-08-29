@@ -9,6 +9,29 @@ use std::str::FromStr;
 use uuid::Uuid;
 
 /// Generate a time-ordered identifier. UUIDv7 everywhere (data-model.md).
+/// The owner recorded for global knowledge written before any account is known
+/// (FR-603).
+///
+/// **Not an identity, and deliberately not one.** A personal note may be written
+/// before this machine has ever authenticated — that is the local-first property
+/// personal memory is built on — and it needs *some* owner in a column that is
+/// otherwise an account id. It used to get this machine's local `user_id`, which
+/// is the wrong shape of answer: a machine id is identity-shaped, is a component
+/// of a `personal:*` lane key, and compares equal to nothing on the server, so a
+/// row carrying one is indistinguishable at a glance from a row belonging to an
+/// account nobody here can see.
+///
+/// The nil UUID says "no account" in a way no account can ever match. No lane is
+/// keyed by it, so nothing owned by it is enqueued, pushed, or pulled; it simply
+/// stays local until the user records notes under an account of their own.
+///
+/// Rows already carrying it are **not** adopted when the machine later
+/// authenticates. That is the same decision `Daemon::owner_identity` has always
+/// documented for the local id it replaces: reassigning them would attribute work
+/// to an identity that did not do it, and would push it to a server the user had
+/// not chosen to send it to when they wrote it.
+pub const UNATTRIBUTED_OWNER: Uuid = Uuid::nil();
+
 pub fn new_id() -> Uuid {
     Uuid::now_v7()
 }

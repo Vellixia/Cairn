@@ -443,7 +443,22 @@ CREATE TABLE outbox_new (
     -- project than the records do.
     CHECK ((entity_type IN ('personal_knowledge', 'personal_knowledge_relation',
                             'team_knowledge', 'team_knowledge_relation'))
-           = (project_id IS NULL))
+           = (project_id IS NULL)),
+    -- A global row always names its author; a project row never does (FR-602).
+    --
+    -- Enforced here rather than trusted at the call site, because the claim's
+    -- author filter was written to treat a NULL author as claimable by anyone —
+    -- reasonable-looking backward compatibility that quietly meant "this row may
+    -- be delivered under whichever account happens to be logged in", the exact
+    -- misattribution FR-594 forbids. There is no legacy to be compatible with:
+    -- the four global entity types are introduced by *this* migration, so the
+    -- rebuild above can only carry project rows across, and every global row that
+    -- has ever existed was written by code that records an author. The constraint
+    -- states that, so the claim can require a real match and a row that somehow
+    -- lacks one is refused at write time rather than misdelivered later.
+    CHECK ((entity_type IN ('personal_knowledge', 'personal_knowledge_relation',
+                            'team_knowledge', 'team_knowledge_relation'))
+           = (authored_by_user_id IS NOT NULL))
 );
 
 INSERT INTO outbox_new

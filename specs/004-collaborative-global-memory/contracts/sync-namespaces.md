@@ -78,6 +78,45 @@ cursor behaves exactly as it did before, and no lane resets on every pull.
 `personal:*` needs none of this: the server filters that feed by the owning account, and the
 lane key already names it, so a different identity is a different lane by construction.
 
+## 1b. An endpoint is not an identity (FR-601)
+
+§11a and §10 pull in opposite directions, and the seam between them is where a lane keyed by
+a *provisional* id sits.
+
+A server below schema 3 reports no instance id, so a lane opened against one is keyed by an id
+derived from the configured endpoint. §11a then promises liveness: when "that peer is replaced
+by a supporting server **at the same configured endpoint**", the content held for it is
+released. §10 promises isolation: a store binds to exactly one server's team corpus, and
+blending two deployments' guidance is what FR-496 forbids. Read together, the provisional id
+is asked to mean both "whichever server answers here" and "this particular server".
+
+The reconciliation is a division of labour, not a compromise:
+
+| | decides identity | requires identity |
+|---|---|---|
+| `establish_global_namespaces` | re-keys a provisional lane to the id the peer reports, once | — |
+| `drain_global`, `pull_global` | — | the lane's instance must equal the peer's, exactly |
+
+**Establishment decides; operations require.** A provisional lane is a lane whose identity is
+not yet known, and resolving it is establishment's job. Once resolved, the lane names a real
+server and every later operation compares against that and nothing else.
+
+This was briefly the other way round: operations accepted a lane whose instance matched the
+provisional id derived from the endpoint, because the background worker only ran establishment
+when a store had *no* global lanes at all — so a provisional lane never got re-keyed on that
+path, and refusing it would have stranded the very content §11a exists to release. Buying
+liveness there cost isolation: a deployment replaced or restored at the same URL matched the
+same provisional id, and inherited its predecessor's lane. The worker now runs establishment on
+its own cadence whether or not global lanes exist, which makes the re-key reliable and lets the
+operations be strict.
+
+**What this does and does not prevent.** A lane naming a *real* instance is refused against any
+other server, at the same URL or elsewhere — that is the case with a corpus to protect. A lane
+still keyed provisionally is adopted by whatever schema-3 server next answers at that endpoint,
+which is exactly §11a's scenario and is not a leak: its predecessor was below schema 3 and had
+no global corpus at all, so there is nothing of another server's to inherit. The content such a
+lane holds is the store's own, queued and never delivered.
+
 ## 2. `sync_cursor` replaces `sync_meta`'s single cursor
 
 Today, `sync_meta` (`crates/cairn-store/migrations/0001_init.sql:180-184`) is keyed

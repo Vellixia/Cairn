@@ -784,6 +784,22 @@ the subject section it amends.
   account may actually claim, so that a queue holding only another account's held rows
   causes no network request. (amends Synchronization, namespaces and multi-device
   concurrency)
+- **FR-600**: An account identity learned from an authenticated lookup MUST be committed only
+  if the credential that produced it is still the stored credential; otherwise it MUST be
+  discarded. (amends Identity, roles and account lifecycle)
+- **FR-601**: A global synchronization operation MUST require the lane's server instance to
+  equal the peer's exactly; resolving a lane keyed by a provisional endpoint-derived id to the
+  peer's reported id is namespace establishment's responsibility, which MUST run on its own
+  cadence whether or not global lanes already exist. (amends Synchronization, namespaces and
+  multi-device concurrency)
+- **FR-602**: Every queued global row MUST name its author; an absent author MUST NOT be
+  treated as deliverable under any account. (amends Synchronization, namespaces and
+  multi-device concurrency)
+- **FR-603**: Global knowledge MUST NOT be routed, authored, enqueued, pushed or pulled under
+  a local machine identity. Where an account is required the operation MUST fail closed;
+  where knowledge may legitimately precede any account it MUST be recorded as belonging to no
+  account, and MUST NOT be reassigned when one is later learned. (amends Identity, roles and
+  account lifecycle)
 
 ### Key Entities
 

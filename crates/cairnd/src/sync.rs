@@ -259,15 +259,27 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
             }
         }
 
-        // A store that is linked and authenticated but has never established
-        // its global lanes gets them here, on the pull cadence rather than every
-        // tick: the probe is one `GET /api/version`, and doing it twice a second
-        // forever would be the unbounded poll §5 warns about.
-        if targets
-            .iter()
-            .all(|t| matches!(t, NamespaceTarget::Project { .. }))
-            && establish_clock.pull_due(Instant::now())
-        {
+        // Establishment runs on its own cadence, whether or not global lanes
+        // already exist (FR-601). It used to be gated on there being *no* global
+        // target — "this store has never established its lanes" — and that gate
+        // held back the one thing establishment does for a store that already has
+        // lanes: **re-key a provisional one**.
+        //
+        // A lane opened against a server below schema 3 is keyed by an id derived
+        // from the endpoint, because such a server reports none. When that peer is
+        // upgraded in place it starts reporting a real id, and the lane must be
+        // re-keyed to it — but a store with such a lane has a global target, so
+        // this never ran, and the lane stayed provisional forever on the
+        // background path. That is why the drain and the pull had to accept a
+        // provisional id as if it were the peer's, which is precisely what let a
+        // *replacement* deployment at the same URL be treated as the same server
+        // (§1b). Making the re-key happen is what allows those operations to
+        // demand exact identity instead.
+        //
+        // Still on the pull cadence, not every tick: the probe is one
+        // `GET /api/version`, and doing it twice a second forever would be the
+        // unbounded poll §5 warns about.
+        if establish_clock.pull_due(Instant::now()) {
             establish_clock.mark_pulled(Instant::now());
             let _ = establish_global_namespaces(&daemon).await;
         }
@@ -409,7 +421,9 @@ async fn process_global_namespace(
     // decides only whether to *attempt* an operation, and the operation takes its
     // own credential snapshot. A switch between the two costs at most one drain
     // that declines to claim anything — never a misrouted one.
-    let author = d.owner_identity().await;
+    let Some(author) = d.account_identity().await else {
+        return NamespaceOutcome::Ok;
+    };
     let (pending, blocked) = outbox::claimable_counts_for_author(&d.store, &key, author)
         .await
         .unwrap_or((0, 0));
@@ -539,7 +553,20 @@ async fn forget_account_identity(d: &Daemon) -> Result<(), WireError> {
     Ok(())
 }
 
-async fn learn_account_identity(d: &Daemon) -> bool {
+pub(crate) async fn learn_account_identity(d: &Daemon) -> bool {
+    // The credential the question is asked with, remembered so the answer can be
+    // checked against it (FR-600). `GET /api/auth/me` means "who is *this token*",
+    // so the reply is only about the token that was sent — and `cairn auth token
+    // set` can complete while it is in flight. Writing the reply blindly recorded
+    // account A as this machine's identity at a moment when the machine already
+    // held B's token, which is the stale-identity pairing FR-591 exists to
+    // prevent, arrived at from the other direction: not a value that outlived its
+    // credential, but one that never matched the credential it was stored beside.
+    let asked_with = {
+        let creds = d.server.read().await;
+        (creds.token.clone(), creds.url.clone())
+    };
+
     let Ok(client) = client(d).await else {
         return d.server.read().await.account_id.is_some();
     };
@@ -554,7 +581,20 @@ async fn learn_account_identity(d: &Daemon) -> bool {
         return d.server.read().await.account_id.is_some();
     };
 
-    d.server.write().await.account_id = Some(id);
+    // Commit only under the credential that asked. Taking the write lock and
+    // re-checking under it makes this a compare-and-set rather than a second
+    // read: nothing can change between the comparison and the assignment.
+    let mut creds = d.server.write().await;
+    if (creds.token.clone(), creds.url.clone()) != asked_with {
+        tracing::debug!(
+            "discarding a learned account identity: the credential changed while \
+             the server was answering"
+        );
+        return creds.account_id.is_some();
+    }
+    creds.account_id = Some(id);
+    drop(creds);
+
     let mut config = d.config.write().await;
     if config.server_account_id != Some(id) {
         config.server_account_id = Some(id);
@@ -794,12 +834,21 @@ impl GlobalGuard {
         // by three reads happening to agree.
         let (account, url, token) = {
             let creds = d.server.read().await;
-            (
-                creds.account_id.unwrap_or(d.user_id),
-                creds.url.clone(),
-                creds.token.clone(),
-            )
+            (creds.account_id, creds.url.clone(), creds.token.clone())
         };
+        // **No fallback identity** (FR-603). This substituted the machine's local
+        // id when the account was unknown, which meant every global operation had
+        // an account to route by even when nobody had authenticated — and the one
+        // it had named something no server has ever issued. Refusing is the whole
+        // behaviour: without a proven account there is no lane to act on, nothing
+        // to attribute, and no question this operation is entitled to answer.
+        let account = account.ok_or_else(|| {
+            WireError::new(
+                codes::UNAUTHORIZED,
+                "the authenticated account is not known yet; global synchronization \
+                 is held until it is",
+            )
+        })?;
         let base = url.ok_or_else(|| {
             WireError::new(
                 codes::NOT_LINKED,
@@ -860,23 +909,27 @@ impl GlobalGuard {
         }
     }
 
-    /// Whether `instance` names the peer this guard is talking to.
+    /// Whether `instance` names the peer this guard is talking to — **exactly**
+    /// (FR-601, `sync-namespaces.md` §1b).
     ///
-    /// The provisional id counts, and must: a lane opened against a server below
-    /// schema 3 is keyed by an id derived from the endpoint, because such a server
-    /// reports none (§11a). When that peer is later "replaced by a supporting
-    /// server **at the same configured endpoint**", it starts reporting a real
-    /// id — and the lane holding the content that was waiting for exactly this is
-    /// still keyed by the provisional one until
-    /// [`establish_global_namespaces`] re-keys it. Refusing in that gap would
-    /// strand the held content this scenario exists to release, so the two ids
-    /// are one identity here for the same reason they are one identity there.
+    /// This briefly also accepted the provisional id derived from the endpoint, so
+    /// that a lane opened against a server below schema 3 could keep working once
+    /// that peer was upgraded in place and began reporting a real id (§11a). It
+    /// bought upgrade liveness with the isolation FR-495 and FR-496 are for: an
+    /// endpoint is not an identity, so a deployment *replaced* or restored from
+    /// backup at the same URL — a different server, with a different corpus —
+    /// matched the same provisional id and inherited the previous server's team
+    /// lane. "Same URL" and "same server" are not the same claim, and only the
+    /// second one licenses merging two deployments' guidance.
     ///
-    /// It does not weaken the relink refusal: a different endpoint yields a
-    /// different provisional id as well as a different real one, so neither
-    /// matches.
+    /// The liveness that needed the loophole is now provided where it belongs:
+    /// [`establish_global_namespaces`] re-keys a provisional lane to the reported
+    /// id, and the worker runs it on its own cadence rather than only when a store
+    /// has no global lanes at all — which is what used to make the re-key
+    /// unreachable in the background and forced the acceptance here. Establishment
+    /// decides identity; operations require it.
     fn is_this_peer(&self, instance: Uuid) -> bool {
-        instance == self.peer_instance || instance == provisional_instance(&self.base)
+        instance == self.peer_instance
     }
 
     fn refuse(&self, namespace: &SyncNamespace, verb: &str) {
@@ -920,8 +973,12 @@ impl GlobalGuard {
 /// worker from opening an operation, and therefore a request, for a lane it
 /// already knows is not ours.
 async fn may_sync_lane(d: &Daemon, namespace: &SyncNamespace) -> bool {
+    let Some(account) = d.account_identity().await else {
+        // Nothing global is ours to touch until an account is proven (FR-603).
+        return false;
+    };
     match namespace {
-        SyncNamespace::Personal(_, owner) => *owner == d.owner_identity().await,
+        SyncNamespace::Personal(_, owner) => *owner == account,
         SyncNamespace::Team(_) | SyncNamespace::Project(_) => true,
     }
 }
