@@ -518,9 +518,18 @@ pub async fn total(store: &Store, project_id: Uuid) -> Result<i64> {
 /// waiting one. A row that is never claimed simply stays `pending`, reports as
 /// pending, and goes out unchanged the moment its author is authenticated again.
 ///
-/// Rows with no recorded author — every project-namespace row, and any global row
-/// written before this column existed — are claimable by anyone, which preserves
-/// exactly the behaviour they had.
+/// **A missing author is not a wildcard** (FR-602). This read
+/// `authored_by_user_id IS NULL OR = ?`, on the reasonable-looking ground that a
+/// row predating the column should keep working — but "no recorded author" then
+/// meant "deliverable under whichever account is logged in", which is the
+/// misattribution the filter exists to prevent, spelled as backward
+/// compatibility. There is nothing to be compatible with: the global entity types
+/// arrive with the migration that adds the column, and a CHECK now requires it.
+///
+/// `?5 IS NULL` is a different question — it is the *unfiltered* claim, which
+/// project rows use — and stays. Project rows carry no author because their
+/// authorization is project membership, and they claim through
+/// [`claim_namespace`] rather than through this.
 pub async fn claim_namespace_for_author(
     store: &Store,
     namespace: &str,
@@ -560,9 +569,7 @@ async fn claim_in(
                  AND (state = 'pending'
                       OR (state = 'in_flight'
                           AND (claimed_at IS NULL OR claimed_at < ?3)))
-                 AND (?5 IS NULL
-                      OR authored_by_user_id IS NULL
-                      OR authored_by_user_id = ?5)
+                 AND (?5 IS NULL OR authored_by_user_id = ?5)
                ORDER BY created_at, id
                LIMIT ?4
           )
@@ -676,7 +683,7 @@ pub async fn claimable_counts_for_author(
         "SELECT COUNT(*) FROM outbox
           WHERE namespace = ?1
             AND state IN ('pending', 'in_flight')
-            AND (authored_by_user_id IS NULL OR authored_by_user_id = ?2)",
+            AND authored_by_user_id = ?2",
     )
     .bind(namespace)
     .bind(&author)
@@ -686,7 +693,7 @@ pub async fn claimable_counts_for_author(
         "SELECT COUNT(*) FROM outbox
           WHERE namespace = ?1
             AND state = 'blocked'
-            AND (authored_by_user_id IS NULL OR authored_by_user_id = ?2)",
+            AND authored_by_user_id = ?2",
     )
     .bind(namespace)
     .bind(&author)
@@ -1504,6 +1511,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(as_a.len(), 2, "A's own rows were not released back to A");
+    }
+
+    /// A global row with no author is claimed by nobody, and counted for nobody.
+    ///
+    /// Exercised through the **claim and count paths**, not only the schema
+    /// CHECK: the constraint stops such a row being written by the daemon, and
+    /// this states what these queries do if one exists anyway — a row restored
+    /// from an older backup, a hand-edited store, a future migration that forgets.
+    /// "No recorded author" must never widen to "whichever account is logged in",
+    /// which is what `authored_by_user_id IS NULL OR …` quietly meant.
+    ///
+    /// The row is inserted directly, bypassing the constraint, because the point
+    /// is to describe the behaviour of these two queries in isolation from it.
+    ///
+    /// Falsified by restoring the `IS NULL OR` disjunction to either predicate:
+    /// the row is claimed by an unrelated account, or counted as its work.
+    #[tokio::test]
+    async fn a_global_row_without_an_author_is_claimed_and_counted_by_nobody() {
+        let store = Store::open_memory().await.unwrap();
+        let namespace = SyncNamespace::Team(new_id());
+        let account = new_id();
+        let id = new_id();
+
+        // The CHECK refuses this row, which is the point of the CHECK. Suspending
+        // it is how the two queries below get to be tested for what *they* do,
+        // rather than for what the schema already prevents.
+        sqlx::query("PRAGMA ignore_check_constraints = ON")
+            .execute(store.pool())
+            .await
+            .expect("constraints can be suspended");
+
+        sqlx::query(
+            "INSERT INTO outbox
+                 (id, project_id, server_project_id, entity_type, entity_id, operation,
+                  idempotency_key, payload, state, attempts, created_at, namespace,
+                  authored_by_user_id)
+             VALUES (?1, NULL, NULL, 'team_knowledge', ?2, 'upsert', ?3, '{}', 'pending',
+                     0, ?4, ?5, NULL)",
+        )
+        .bind(id.to_string())
+        .bind(id.to_string())
+        .bind(format!("key-{id}"))
+        .bind(rows::now_text())
+        .bind(namespace.key())
+        .execute(store.pool())
+        .await
+        .expect("a store with the constraint suspended holds such a row");
+
+        sqlx::query("PRAGMA ignore_check_constraints = OFF")
+            .execute(store.pool())
+            .await
+            .expect("constraints come back");
+
+        let claimed = claim_namespace_for_author(&store, &namespace.key(), account, 100)
+            .await
+            .unwrap();
+        assert!(
+            claimed.is_empty(),
+            "an authorless global row was claimed for delivery under an account \
+             that has no claim to it"
+        );
+
+        let (pending, blocked) = claimable_counts_for_author(&store, &namespace.key(), account)
+            .await
+            .unwrap();
+        assert_eq!(
+            (pending, blocked),
+            (0, 0),
+            "an authorless global row counted as this account's work, so the \
+             worker would open an operation to send nothing"
+        );
+
+        // Still there, held rather than consumed or failed.
+        let (all_pending, _) = counts_namespace(&store, &namespace.key()).await.unwrap();
+        assert_eq!(all_pending, 1, "the row was consumed instead of held");
     }
 
     /// An unfiltered claim still takes everything, so project lanes and any row

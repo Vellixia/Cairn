@@ -507,39 +507,6 @@ fn provisional_instance(url: &str) -> Uuid {
 /// Best-effort: an unreachable server leaves whatever was already known, which
 /// is the honest answer — the identity did not change because the network did.
 /// Returns whether an identity is now known at all.
-/// Drop the account identity this store believes it holds, in memory and on
-/// disk, so the next authenticated call has to learn it again.
-///
-/// **A credential that changed cannot be trusted to name the same account.**
-/// `account_id` is persisted precisely so a daemon that restarts offline still
-/// knows whose personal partition it is holding (FR-567) — but that durability
-/// cuts the other way when the credential itself changes. `learn_account_identity`
-/// is best-effort by design: on an unreachable server it reports success if an id
-/// is *already* recorded. Set a second account's token while offline and that
-/// contract returns "identity known" while the id still names the first account —
-/// and `establish_global_namespaces` then skips relearning for exactly the same
-/// reason, because the field is `Some`. Account B would read and write under
-/// account A's personal partition, with no failure anywhere to notice.
-///
-/// So a credential change invalidates the identity and the daemon fails closed:
-/// `owner_identity` falls back to this machine's local id, which is nobody's
-/// account partition, and no `personal:*` lane can be keyed at all until a live
-/// `GET /api/auth/me` says who is authenticated (FR-591). Losing A's rows from view is the
-/// point — they belong to A, and this process is no longer A.
-async fn forget_account_identity(d: &Daemon) -> Result<(), WireError> {
-    d.mutate_credentials(|c| c.account_id = None)
-        .await
-        .map_err(|e| {
-            WireError::new(
-                codes::STORAGE_UNAVAILABLE,
-                format!(
-                    "could not clear the recorded server account identity, so the \
-                     credential was left unchanged: {e}"
-                ),
-            )
-        })
-}
-
 pub(crate) async fn learn_account_identity(d: &Daemon) -> bool {
     // The *generation* the question is asked under, not the credential's
     // contents (FR-604). `GET /api/auth/me` means "who is this token", so the
@@ -1607,44 +1574,39 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
     cairn_core::paths::ensure_home()
         .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
 
-    // A different token, or the same token against a different server, may name
-    // a different account, so the recorded identity stops being evidence of
-    // anything. It is dropped **before** any of this is written down, which is
-    // what makes a failure here harmless: nothing has changed yet, so the store
-    // keeps the old token beside the old account id and the two still agree. The
-    // reverse order — write the credential, then try to clear the identity —
-    // leaves a new token paired with a stale account id on disk if the second
-    // step fails, which is FR-591 again, one restart away (FR-596).
+    // **One transition** (FR-610). The token file, the endpoint, the account
+    // identity, the generation, the config and the in-memory credential all move
+    // together or none of them do.
+    //
+    // This was three steps — clear the identity, write the token file, then
+    // change the credential — and the gaps between them were reachable. A
+    // concurrent `GET /api/auth/me` answered under the *old* token could commit
+    // between the first and the third, restoring the account that had just been
+    // cleared; the third step then wrote the new token beside it, and neither
+    // step had done anything wrong on its own. Doing it in one mutation removes
+    // the window rather than narrowing it: the clear and the change are the same
+    // write, and a lookup that snapshotted the old generation can no longer
+    // commit at all.
     //
     // Re-setting the *same* credential is not a change and keeps the identity.
     // That case is common and offline-friendly (`cairn auth token set` re-run
     // from a script), and invalidating there would strand a user's own personal
     // rows every time they re-applied a token they already held.
-    let credential_changed = {
-        let creds = d.server.read().await;
-        creds.token.as_deref() != Some(token.trim())
-            || server_url
-                .as_ref()
-                .is_some_and(|u| creds.url.as_ref() != Some(u))
-    };
-    if credential_changed {
-        forget_account_identity(d).await?;
-    }
-
-    let path = cairn_core::paths::token_path();
-    std::fs::write(&path, token.trim())
-        .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-    }
-
     let trimmed = token.trim().to_string();
-    d.mutate_credentials(|c| {
+    let requested_url = server_url.clone();
+    d.mutate_credentials(move |c| {
+        let changed = c.token.as_deref() != Some(trimmed.as_str())
+            || requested_url
+                .as_ref()
+                .is_some_and(|u| c.url.as_ref() != Some(u));
         c.token = Some(trimmed.clone());
-        if let Some(url) = server_url.clone() {
+        if let Some(url) = requested_url.clone() {
             c.url = Some(url);
+        }
+        if changed {
+            // A different credential may name a different account, so the
+            // recorded identity stops being evidence of anything (FR-591).
+            c.account_id = None;
         }
     })
     .await
@@ -1784,20 +1746,10 @@ pub async fn auth_me(d: &Daemon) -> Reply {
 }
 
 pub async fn logout(d: &Daemon) -> Reply {
-    // Logging out ends this process's claim to that account, so the identity goes
-    // with the credential — and goes *first*, for the reason [`set_token`] gives.
-    // Left behind, it would keep steering local personal writes into the
-    // logged-out account's partition, and would still be sitting there looking
-    // authoritative when a different person logs in on this machine.
-    //
-    // If it cannot be cleared durably the token stays too, and the caller is told
-    // the logout did not complete. A logout that removed the credential but left
-    // the identity would be the worse outcome of the two: no token to correct the
-    // record with, and a machine still attributing knowledge to whoever last used
-    // it (FR-596).
-    // Identity and token drop together, through the one gateway, so there is no
-    // moment at which a stored credential and a stored identity disagree
-    // (FR-605).
+    // One transition, token file included (FR-610). Removing the file separately
+    // meant a failed config write left the credential gone from disk and the
+    // account identity still recorded beside it — a machine with no token that
+    // still believes it is somebody.
     d.mutate_credentials(|c| {
         c.account_id = None;
         c.token = None;
@@ -1806,13 +1758,9 @@ pub async fn logout(d: &Daemon) -> Reply {
     .map_err(|e| {
         WireError::new(
             codes::STORAGE_UNAVAILABLE,
-            format!(
-                "could not clear the recorded server account identity, so the \
-                 credential was left unchanged: {e}"
-            ),
+            format!("could not clear the stored credential, so it was left unchanged: {e}"),
         )
     })?;
-    let _ = std::fs::remove_file(cairn_core::paths::token_path());
     Ok(json!({ "token_stored": false }))
 }
 
@@ -4255,6 +4203,139 @@ mod tests {
         }
     }
 
+    /// An identity lookup answered under the old credential cannot restore the
+    /// old account across a switch.
+    ///
+    /// The transition used to be three steps — clear the identity, write the
+    /// token file, change the credential — and a `GET /api/auth/me` sent before
+    /// the switch could commit in the gap between the first and the third,
+    /// putting the account back. The third step then wrote the new token beside
+    /// it, and no step had done anything wrong on its own (FR-610).
+    ///
+    /// Deterministic because it does not race: the lookup's commit is replayed
+    /// **after** the switch has completed, which is precisely the interleaving
+    /// the gap allowed. It is refused because the generation it was taken under
+    /// is gone.
+    #[tokio::test]
+    async fn a_lookup_from_the_old_credential_cannot_restore_the_old_account() {
+        let d = fx::daemon().await;
+        let account_a = Uuid::now_v7();
+        d.mutate_credentials(|c| {
+            c.url = Some("https://one.example".into());
+            c.token = Some("token-a".into());
+            c.account_id = Some(account_a);
+        })
+        .await
+        .expect("sign in as A");
+
+        // A lookup begins here, under A.
+        let asked_under = d.server.read().await.generation;
+
+        // The whole switch to B happens while it is in flight.
+        d.mutate_credentials(|c| {
+            c.token = Some("token-b".into());
+            c.account_id = None;
+        })
+        .await
+        .expect("switch to B");
+
+        // A's answer arrives. This is `learn_account_identity`'s commit,
+        // conditional on the generation it asked under.
+        d.mutate_credentials(|c| {
+            if c.generation == asked_under {
+                c.account_id = Some(account_a);
+            }
+        })
+        .await
+        .expect("commit attempt");
+
+        assert_eq!(
+            d.server.read().await.account_id,
+            None,
+            "an answer about the previous credential restored the previous account"
+        );
+        assert_eq!(
+            d.server.read().await.token.as_deref(),
+            Some("token-b"),
+            "the switch itself did not stick"
+        );
+    }
+
+    /// Everything a restart reads back moves together: token file, endpoint,
+    /// account.
+    ///
+    /// The token file used to be written by `set_token` on its own, before the
+    /// config and the memory it has to agree with — so a failure after it left
+    /// the new token on disk beside the old account identity, reachable with no
+    /// concurrency at all (FR-610).
+    #[tokio::test]
+    async fn a_token_switch_leaves_the_token_file_and_the_account_agreeing() {
+        let d = fx::daemon().await;
+        let account_a = Uuid::now_v7();
+        d.mutate_credentials(|c| {
+            c.url = Some("https://one.example".into());
+            c.token = Some("token-a".into());
+            c.account_id = Some(account_a);
+        })
+        .await
+        .expect("sign in as A");
+        assert_eq!(
+            std::fs::read_to_string(cairn_core::paths::token_path()).expect("a token file"),
+            "token-a",
+            "the token file was not written as part of the transition"
+        );
+
+        // The switch clears the account in the same write that changes the token.
+        d.mutate_credentials(|c| {
+            c.token = Some("token-b".into());
+            c.account_id = None;
+        })
+        .await
+        .expect("switch to B");
+
+        // What a restart would read.
+        assert_eq!(
+            std::fs::read_to_string(cairn_core::paths::token_path()).expect("a token file"),
+            "token-b"
+        );
+        assert_eq!(
+            cairn_core::config::CairnConfig::load().server_account_id,
+            None,
+            "a restart would pair the new token with the previous account"
+        );
+    }
+
+    /// Logging out removes the credential and the identity together, so a restart
+    /// finds neither.
+    #[tokio::test]
+    async fn a_logout_leaves_no_token_and_no_account_for_a_restart_to_find() {
+        let d = fx::daemon().await;
+        d.mutate_credentials(|c| {
+            c.url = Some("https://one.example".into());
+            c.token = Some("token-a".into());
+            c.account_id = Some(Uuid::now_v7());
+        })
+        .await
+        .expect("sign in");
+
+        d.mutate_credentials(|c| {
+            c.token = None;
+            c.account_id = None;
+        })
+        .await
+        .expect("log out");
+
+        assert!(
+            !cairn_core::paths::token_path().exists(),
+            "the credential is gone from memory but still on disk"
+        );
+        assert_eq!(
+            cairn_core::config::CairnConfig::load().server_account_id,
+            None,
+            "a restart would find an account with no credential to justify it"
+        );
+    }
+
     /// A credential switched away and back is a *different* credential.
     ///
     /// This is the ABA property stated directly, because the end-to-end test for
@@ -4395,6 +4476,16 @@ mod tests {
 
         assert!(outcome.is_err(), "an unpersistable change reported success");
         let after = d.server.read().await.clone();
+        assert_eq!(
+            std::fs::read_to_string(cairn_core::paths::token_path()).ok(),
+            before.token.clone(),
+            "the token file moved even though the change could not be persisted"
+        );
+        assert_eq!(
+            cairn_core::config::CairnConfig::load().server_account_id,
+            before.account_id,
+            "the config kept a value from a change that failed"
+        );
         assert_eq!(after.token, before.token, "memory moved without disk");
         assert_eq!(
             after.account_id, before.account_id,
