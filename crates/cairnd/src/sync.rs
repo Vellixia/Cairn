@@ -527,20 +527,9 @@ fn provisional_instance(url: &str) -> Uuid {
 /// `GET /api/auth/me` says who is authenticated (FR-591). Losing A's rows from view is the
 /// point — they belong to A, and this process is no longer A.
 async fn forget_account_identity(d: &Daemon) -> Result<(), WireError> {
-    d.server.write().await.account_id = None;
-    let mut config = d.config.write().await;
-    if config.server_account_id.is_some() {
-        config.server_account_id = None;
-        // **Failing closed has to reach the disk** (FR-596). Clearing only the
-        // in-memory copy is fail-closed for the life of this process and no
-        // longer: the config still names the previous account, so the next daemon
-        // start reads it back and pairs it with the *new* token — which is
-        // exactly the state FR-591 exists to prevent, reconstituted by a restart.
-        // A caller that cannot be told this happened would report a successful
-        // credential change over a store that is one restart away from writing
-        // into someone else's partition, so the error is propagated rather than
-        // logged.
-        config.save().map_err(|e| {
+    d.mutate_credentials(|c| c.account_id = None)
+        .await
+        .map_err(|e| {
             WireError::new(
                 codes::STORAGE_UNAVAILABLE,
                 format!(
@@ -548,29 +537,22 @@ async fn forget_account_identity(d: &Daemon) -> Result<(), WireError> {
                      credential was left unchanged: {e}"
                 ),
             )
-        })?;
-    }
-    Ok(())
+        })
 }
 
 pub(crate) async fn learn_account_identity(d: &Daemon) -> bool {
-    // The credential the question is asked with, remembered so the answer can be
-    // checked against it (FR-600). `GET /api/auth/me` means "who is *this token*",
-    // so the reply is only about the token that was sent — and `cairn auth token
-    // set` can complete while it is in flight. Writing the reply blindly recorded
-    // account A as this machine's identity at a moment when the machine already
-    // held B's token, which is the stale-identity pairing FR-591 exists to
-    // prevent, arrived at from the other direction: not a value that outlived its
-    // credential, but one that never matched the credential it was stored beside.
-    let asked_with = {
-        let creds = d.server.read().await;
-        (creds.token.clone(), creds.url.clone())
-    };
-
-    let Ok(client) = client(d).await else {
+    // The *generation* the question is asked under, not the credential's
+    // contents (FR-604). `GET /api/auth/me` means "who is this token", so the
+    // answer belongs to the credential that asked — and comparing contents
+    // afterwards cannot tell a credential that never changed from one switched
+    // A → B → A while the server was answering. Both leave `token` and `url`
+    // exactly as they were; only one of them has an answer that is still about
+    // the current credential.
+    let Ok(snapshot) = CredentialSnapshot::take(d).await else {
         return d.server.read().await.account_id.is_some();
     };
-    let Ok(body) = client.get("/api/auth/me").await else {
+    let asked_under = snapshot.generation;
+    let Ok(body) = snapshot.client.get("/api/auth/me").await else {
         return d.server.read().await.account_id.is_some();
     };
     let Some(id) = body
@@ -581,28 +563,32 @@ pub(crate) async fn learn_account_identity(d: &Daemon) -> bool {
         return d.server.read().await.account_id.is_some();
     };
 
-    // Commit only under the credential that asked. Taking the write lock and
-    // re-checking under it makes this a compare-and-set rather than a second
-    // read: nothing can change between the comparison and the assignment.
-    let mut creds = d.server.write().await;
-    if (creds.token.clone(), creds.url.clone()) != asked_with {
+    // Commit through the one gateway, conditional on nothing having changed
+    // since. The check runs inside the same write lock the assignment does, so
+    // there is no window between deciding and committing (FR-605).
+    let committed = d
+        .mutate_credentials(|c| {
+            if c.generation == asked_under {
+                c.account_id = Some(id);
+            }
+        })
+        .await;
+    match committed {
+        Ok(()) => {}
+        Err(e) => {
+            tracing::debug!(error = %e, "could not persist the server account id");
+            return false;
+        }
+    }
+
+    let creds = d.server.read().await;
+    if creds.account_id != Some(id) {
         tracing::debug!(
             "discarding a learned account identity: the credential changed while \
              the server was answering"
         );
-        return creds.account_id.is_some();
     }
-    creds.account_id = Some(id);
-    drop(creds);
-
-    let mut config = d.config.write().await;
-    if config.server_account_id != Some(id) {
-        config.server_account_id = Some(id);
-        if let Err(e) = config.save() {
-            tracing::debug!(error = %e, "could not persist the server account id");
-        }
-    }
-    true
+    creds.account_id.is_some()
 }
 
 /// Make sure this store has a `personal:*` and a `team:*` lane, so the worker
@@ -645,19 +631,19 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
     // switch landing in the middle opened a lane named for one account against a
     // server learned under another's token. That lane is durable: it is written
     // to `sync_cursor` and every later push and pull routes by it.
-    let guard = GlobalGuard::acquire(d).await.ok()?;
-    let reported: Option<Uuid> = guard
+    let context = AuthenticatedContext::acquire(d).await.ok()?;
+    let reported: Option<Uuid> = context
         .version
         .get("server_instance_id")
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    let owner = guard.account;
-    let provisional = provisional_instance(&guard.base);
-    // Identical to `reported.unwrap_or(provisional)` — the guard already made
-    // that substitution — and taken from the guard so the lane this establishes
+    let owner = context.account;
+    let provisional = provisional_instance(&context.base);
+    // Identical to `reported.unwrap_or(provisional)` — the context already
+    // made that substitution — and taken from it so the lane this establishes
     // and the lane every later operation admits are decided by one rule.
-    let instance = guard.peer_instance;
+    let instance = context.peer_instance;
 
     // A server below schema 3 has no `server_instance` table and so reports no
     // id, and until now that meant no lane could be formed — which meant a
@@ -700,6 +686,16 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
                 );
             }
         }
+    }
+
+    // A lane key is durable routing state: it names an account and a server, and
+    // every later push and pull is decided by it. Writing one derived from a
+    // credential this machine no longer holds would outlive the mistake by as
+    // long as the store does, so the context is checked before anything is
+    // written rather than after (FR-604).
+    if !context.still_current(d).await {
+        tracing::debug!("not establishing lanes: the credential changed while probing");
+        return None;
     }
 
     let personal = SyncNamespace::Personal(instance, owner);
@@ -756,6 +752,20 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
 
     // Both backfills are idempotent by the outbox's own key, so running them on
     // every establish costs one query per row and enqueues nothing twice.
+    // Adoption before backfill: notes written before this machine knew who it was
+    // become this account's, and the backfill then queues them like any other row
+    // it owns (FR-608). Without this they stay owned by nobody — recallable here
+    // and invisible everywhere else, which is local-first without the second half
+    // of the promise.
+    match cairn_store::global::adopt_unattributed_personal(&d.store, owner).await {
+        Ok(n) if n > 0 => tracing::info!(
+            adopted = n,
+            "personal knowledge written before this machine signed in now belongs \
+             to the signed-in account"
+        ),
+        Ok(_) => {}
+        Err(e) => tracing::debug!(error = %e, "unattributed personal knowledge not adopted"),
+    }
     match cairn_store::global::enqueue_personal_backlog(&d.store, owner).await {
         Ok(n) if n > 0 => tracing::info!(
             queued = n,
@@ -783,65 +793,131 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
 /// idempotent by id, so a row that becomes mergeable later arrives again on the
 /// next full pull rather than being lost. A *transport* failure returns `Err`
 /// and does not advance the cursor, which is the case that must retry.
-/// Everything one global synchronization operation is allowed to act on, read
-/// **once** (FR-597).
+/// One read of the credential, yielding both the generation it was taken under
+/// and a client that speaks with it (FR-604).
 ///
-/// **The routing invariant lives here, not at the call sites.** A global
-/// operation makes two decisions that must agree: *whose lane is this* and *whom
-/// am I authenticating as*. Those came from two separate reads of
-/// `Daemon::server` — `owner_identity` for the first, `client` for the second —
-/// with the network in between. `cairn auth token set` writes that same field, so
-/// an account switch landing between the reads produced an operation routed as A
-/// and authenticated as B: exactly the pairing FR-593 and FR-567 exist to
-/// forbid, reached through a window rather than through a missing check. Adding a
-/// third check would have added a third read.
+/// [`AuthenticatedContext`] needs an account and so cannot serve the one
+/// operation whose job is to learn one. This is the part of it that does not:
+/// enough to ask a question and to know afterwards whether the credential that
+/// asked is still the credential this machine holds.
 ///
-/// So the credential is snapshotted under one lock and every later decision reads
-/// the snapshot. A switch during the operation cannot split it: the operation
-/// finishes coherently as whoever it started as, and the next one picks up the
-/// new identity.
+/// **The generation and the client come from the same read.** Taking them
+/// separately is the ABA hole in a different place: a snapshot of the old
+/// credential, a request sent with the new one, and a comparison afterwards that
+/// finds the old value back in place and concludes nothing happened — committing
+/// an answer about one account while another's token is stored.
+struct CredentialSnapshot {
+    generation: u64,
+    client: Client,
+}
+
+impl CredentialSnapshot {
+    async fn take(d: &Daemon) -> Result<CredentialSnapshot, WireError> {
+        let (generation, url, token) = {
+            let creds = d.server.read().await;
+            (creds.generation, creds.url.clone(), creds.token.clone())
+        };
+        let base = url.ok_or_else(|| {
+            WireError::new(
+                codes::NOT_LINKED,
+                "no server configured; run `cairn auth token set`",
+            )
+        })?;
+        let token = token.ok_or_else(|| {
+            WireError::new(
+                codes::UNAUTHORIZED,
+                "no API token; run `cairn auth token set`",
+            )
+        })?;
+        let http = reqwest::Client::builder()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|e| WireError::new(codes::SERVER_UNAVAILABLE, e.to_string()))?;
+        Ok(CredentialSnapshot {
+            generation,
+            client: Client {
+                base: base.trim_end_matches('/').to_string(),
+                token,
+                http,
+            },
+        })
+    }
+}
+
+/// The one proven answer to "who is acting, against which server, with what
+/// standing" — resolved once, and used from the start of a server-global
+/// operation to its end (FR-604 through FR-607).
 ///
-/// The peer's instance id is part of the snapshot for the same reason. Only
-/// `pull_global` checked it, so after a relink `drain_global` happily pushed
-/// `team:A` and `personal:A:*` rows at server B — the mirror image of the pull
-/// this repair originally added, and invisible because a push reports success
-/// (FR-598). [`admits`](Self::admits) answers both questions at once, so a lane
-/// cannot be admitted for pushing on terms that would refuse it for pulling.
-struct GlobalGuard {
-    /// The account this operation is authenticated as, from the same read that
-    /// produced [`client`](Self::client).
+/// **This exists because the same five facts kept being resolved separately.**
+/// The endpoint, the credential, the account, the server instance and the
+/// caller's project membership were each fetched by whichever path needed them,
+/// at whatever moment it needed them — and every review round found another pair
+/// that could disagree: an account read before a token, a token read again after
+/// a network call, an actor looked up after the mutation it was meant to
+/// authorize, a membership answered from a local `linked` flag rather than from
+/// the server. Each was fixed where it was found, and the next round found
+/// another. They were not seven defects; they were one missing abstraction,
+/// seven times.
+///
+/// So the facts are gathered together, under one lock acquisition and one
+/// `GET /api/version`, and every decision an operation makes reads *this* rather
+/// than asking again. An operation either runs entirely inside one context or
+/// refuses. There is no fallback identity, no second credential read, and no
+/// local proxy for a server's answer.
+///
+/// The `generation` is what makes "still the same credential" answerable at all.
+/// Comparing token and endpoint cannot distinguish a credential that never
+/// changed from one switched away and back while a request was in flight; a
+/// counter that only increases can. Anything that commits a result derived from
+/// this context checks it first — see [`still_current`](Self::still_current).
+struct AuthenticatedContext {
+    /// The credential generation this context was taken under.
+    generation: u64,
+    /// The account this operation is authenticated as. Never a fallback: a
+    /// context cannot be acquired without one (FR-603).
     account: Uuid,
     client: Client,
     /// The instance the peer reports, or the provisional id derived from the
     /// endpoint when it reports none (a server below schema 3) — the same
-    /// substitution `establish_global_namespaces` makes, so the two agree without
-    /// a special case.
+    /// substitution `establish_global_namespaces` makes, so the two agree
+    /// without a special case.
     peer_instance: Uuid,
     /// `GET /api/version`'s body, kept so a drain's capability refresh reads the
-    /// response this guard already paid for rather than fetching it again under a
-    /// credential that may since have changed.
+    /// response this context already paid for rather than fetching it again
+    /// under a credential that may since have changed.
     version: serde_json::Value,
-    /// The endpoint this guard authenticated against, from the same read — so a
-    /// caller deriving a provisional instance id from it derives it from the
-    /// server it actually talked to.
+    /// The endpoint this context authenticated against.
     base: String,
+    /// The projects the server says this account belongs to, fetched at most
+    /// once and only if something asks (FR-607).
+    ///
+    /// Membership is the server's fact, and every local stand-in for it has been
+    /// wrong in a way that mattered: `project.linked` says this machine once
+    /// linked a project, which is a fact about this machine's past and not about
+    /// whether the account now holding the token may act in that project.
+    memberships: tokio::sync::OnceCell<Vec<Uuid>>,
 }
 
-impl GlobalGuard {
-    async fn acquire(d: &Daemon) -> Result<GlobalGuard, WireError> {
-        // One read. `account`, `token` and `url` come out of the same lock
-        // acquisition, so they describe one identity by construction rather than
-        // by three reads happening to agree.
-        let (account, url, token) = {
+impl AuthenticatedContext {
+    async fn acquire(d: &Daemon) -> Result<AuthenticatedContext, WireError> {
+        // One read. The generation, the account, the token and the endpoint come
+        // out of the same lock acquisition, so they describe one credential by
+        // construction rather than by four reads happening to agree.
+        let (generation, account, url, token) = {
             let creds = d.server.read().await;
-            (creds.account_id, creds.url.clone(), creds.token.clone())
+            (
+                creds.generation,
+                creds.account_id,
+                creds.url.clone(),
+                creds.token.clone(),
+            )
         };
-        // **No fallback identity** (FR-603). This substituted the machine's local
-        // id when the account was unknown, which meant every global operation had
-        // an account to route by even when nobody had authenticated — and the one
-        // it had named something no server has ever issued. Refusing is the whole
-        // behaviour: without a proven account there is no lane to act on, nothing
-        // to attribute, and no question this operation is entitled to answer.
+        // **No fallback identity** (FR-603). Substituting the machine's local id
+        // when the account was unknown meant every global operation had an
+        // account to route by even when nobody had authenticated — and the one it
+        // had named something no server has ever issued. Without a proven account
+        // there is no lane to act on, nothing to attribute, and no question this
+        // operation is entitled to answer.
         let account = account.ok_or_else(|| {
             WireError::new(
                 codes::UNAUTHORIZED,
@@ -879,13 +955,57 @@ impl GlobalGuard {
             .and_then(|s| Uuid::parse_str(s).ok())
             .unwrap_or_else(|| provisional_instance(&base));
 
-        Ok(GlobalGuard {
+        Ok(AuthenticatedContext {
+            generation,
             account,
             client,
             peer_instance,
             version,
             base,
+            memberships: tokio::sync::OnceCell::new(),
         })
+    }
+
+    /// Whether the credential this context was taken under is still the stored
+    /// one (FR-604).
+    ///
+    /// Checked before committing anything derived from this context. A context
+    /// that has gone stale has not necessarily produced a wrong answer — it has
+    /// produced an answer about a credential this machine no longer holds, which
+    /// is not an answer anyone asked for.
+    async fn still_current(&self, d: &Daemon) -> bool {
+        d.server.read().await.generation == self.generation
+    }
+
+    /// The projects this account belongs to, as the server reports them.
+    ///
+    /// Fetched once per context and cached, so an operation that asks twice gets
+    /// one answer rather than two that might differ.
+    async fn memberships(&self) -> &[Uuid] {
+        self.memberships
+            .get_or_init(|| async {
+                let Ok(body) = self.client.get("/api/projects").await else {
+                    return Vec::new();
+                };
+                body.get("projects")
+                    .and_then(|v| v.as_array())
+                    .map(|rows| {
+                        let mut ids: Vec<Uuid> = rows
+                            .iter()
+                            .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
+                            .filter_map(|s| Uuid::parse_str(s).ok())
+                            .collect();
+                        ids.sort();
+                        ids
+                    })
+                    .unwrap_or_default()
+            })
+            .await
+    }
+
+    /// Whether this account is a member of `server_project_id`, per the server.
+    async fn is_member_of(&self, server_project_id: Uuid) -> bool {
+        self.memberships().await.contains(&server_project_id)
     }
 
     /// Whether this operation may act on `namespace` at all — for pushing and for
@@ -909,7 +1029,7 @@ impl GlobalGuard {
         }
     }
 
-    /// Whether `instance` names the peer this guard is talking to — **exactly**
+    /// Whether `instance` names the peer this context is talking to — **exactly**
     /// (FR-601, `sync-namespaces.md` §1b).
     ///
     /// This briefly also accepted the provisional id derived from the endpoint, so
@@ -925,9 +1045,8 @@ impl GlobalGuard {
     /// The liveness that needed the loophole is now provided where it belongs:
     /// [`establish_global_namespaces`] re-keys a provisional lane to the reported
     /// id, and the worker runs it on its own cadence rather than only when a store
-    /// has no global lanes at all — which is what used to make the re-key
-    /// unreachable in the background and forced the acceptance here. Establishment
-    /// decides identity; operations require it.
+    /// has no global lanes at all. Establishment decides identity; operations
+    /// require it.
     fn is_this_peer(&self, instance: Uuid) -> bool {
         instance == self.peer_instance
     }
@@ -968,7 +1087,7 @@ impl GlobalGuard {
 /// **This is a pre-filter, and no longer the guarantee.** It reads the account
 /// on its own, so between building a target list and acting on one the answer can
 /// go stale — which is the window FR-597 describes. The refusal that counts is
-/// [`GlobalGuard::admits`], inside the operation, against a credential that
+/// [`AuthenticatedContext::admits`], inside the operation, against a credential that
 /// cannot change underneath it. Keeping this one is still worth it: it stops the
 /// worker from opening an operation, and therefore a request, for a lane it
 /// already knows is not ours.
@@ -1005,14 +1124,14 @@ async fn syncable_global_lanes(d: &Daemon) -> Vec<SyncNamespace> {
 async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, WireError> {
     // **A lane only ever pulls as the account it names, from the instance it
     // names** (FR-495, FR-496, FR-597). Both halves come from one credential
-    // read — see [`GlobalGuard`], which is where this check used to be written
+    // read — see [`AuthenticatedContext`], which is where this check used to be written
     // out inline against a separately-read client.
-    let guard = GlobalGuard::acquire(d).await?;
-    if !guard.admits(namespace) {
-        guard.refuse(namespace, "pulling");
+    let context = AuthenticatedContext::acquire(d).await?;
+    if !context.admits(namespace) {
+        context.refuse(namespace, "pulling");
         return Ok(0);
     }
-    let c = &guard.client;
+    let c = &context.client;
 
     let since = cursor::pull_cursor(&d.store, namespace)
         .await
@@ -1521,18 +1640,16 @@ pub async fn set_token(d: &Daemon, token: &str, server_url: Option<String>) -> R
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
 
-    let mut creds = d.server.write().await;
-    creds.token = Some(token.trim().to_string());
-    if let Some(url) = server_url {
-        creds.url = Some(url.clone());
-        let mut config = d.config.write().await;
-        config.server_url = Some(url);
-        config
-            .save()
-            .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
-    }
-    let url = creds.url.clone();
-    drop(creds);
+    let trimmed = token.trim().to_string();
+    d.mutate_credentials(|c| {
+        c.token = Some(trimmed.clone());
+        if let Some(url) = server_url.clone() {
+            c.url = Some(url);
+        }
+    })
+    .await
+    .map_err(|e| WireError::new(codes::STORAGE_UNAVAILABLE, e.to_string()))?;
+    let url = d.server.read().await.url.clone();
 
     // Learn which account this token belongs to, and persist it. Personal
     // knowledge is partitioned by the owning account (FR-567, FR-568), so this
@@ -1678,9 +1795,24 @@ pub async fn logout(d: &Daemon) -> Reply {
     // the identity would be the worse outcome of the two: no token to correct the
     // record with, and a machine still attributing knowledge to whoever last used
     // it (FR-596).
-    forget_account_identity(d).await?;
+    // Identity and token drop together, through the one gateway, so there is no
+    // moment at which a stored credential and a stored identity disagree
+    // (FR-605).
+    d.mutate_credentials(|c| {
+        c.account_id = None;
+        c.token = None;
+    })
+    .await
+    .map_err(|e| {
+        WireError::new(
+            codes::STORAGE_UNAVAILABLE,
+            format!(
+                "could not clear the recorded server account identity, so the \
+                 credential was left unchanged: {e}"
+            ),
+        )
+    })?;
     let _ = std::fs::remove_file(cairn_core::paths::token_path());
-    d.server.write().await.token = None;
     Ok(json!({ "token_stored": false }))
 }
 
@@ -1805,20 +1937,115 @@ pub async fn admin_reset_password(d: &Daemon, email: &str) -> Reply {
 /// entry's expected state, refusing by naming its actual one — the same
 /// discipline the local store's own `ratify_team` (T119) keeps, mirrored
 /// here because the server is where this transition is actually authorized.
-pub async fn team_ratify_remote(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
-    let c = client(d).await?;
+/// Ratify on the server **and** report the actor that did it (FR-606).
+///
+/// The caller needs both, and they must be the same account: the server decides
+/// whether this actor may ratify, and the local row then records who did. Those
+/// were two resolutions — a client built from one read of the credential for the
+/// request, and `owner_identity` consulted afterwards for the local write — so a
+/// token switch between them recorded one account as having made a decision the
+/// server had authorized for another. Determining the actor *after* the remote
+/// mutation is the ordering error; returning it from the call that used it is the
+/// fix.
+pub async fn team_ratify_remote(
+    d: &Daemon,
+    id: Uuid,
+    supersedes: Option<Uuid>,
+) -> Result<(serde_json::Value, Uuid), WireError> {
+    let context = AuthenticatedContext::acquire(d).await?;
     let mut body = json!({});
     if let Some(sup) = supersedes {
         body["supersedes"] = json!(sup);
     }
-    c.post(&format!("/api/team/{id}/ratify"), &body).await
+    let reply = context
+        .client
+        .post(&format!("/api/team/{id}/ratify"), &body)
+        .await?;
+    stale_if_changed(&context, d, "ratification").await?;
+    Ok((reply, context.account))
+}
+
+/// Whether the authenticated account is a member of this project, per the server
+/// (FR-607), together with that account.
+///
+/// The one caller is promotion, which needs both: who is promoting, and whether
+/// they have standing in the project the memory came from. Both come from one
+/// context, so the answer cannot be about a different account than the record it
+/// authorizes.
+///
+/// Replaces `r.project.linked` — "this machine once linked this project" — which
+/// is a fact about the machine's past standing in for a fact about the caller's
+/// present authorization. A store linked long ago by one account, now
+/// authenticated as another, reported the second account as a member of a project
+/// it may never have belonged to, and team promotion's non-member check (check 5)
+/// passed on that.
+pub async fn promoter_standing(d: &Daemon, server_project_id: Option<Uuid>) -> (Uuid, bool) {
+    // **Who is acting is a local fact; what they may do is the peer's.** These
+    // are separated deliberately, and getting them the same way was a defect of
+    // its own: taking both from an [`AuthenticatedContext`] meant an unreachable
+    // server produced "no account", so an offline *personal* promotion — which
+    // needs no server at all — filed its record under the unattributed owner even
+    // though this machine knew perfectly well who it was.
+    //
+    // The account comes from the credential this machine holds, which is knowable
+    // without a network. Membership does not, and an unreachable server is not a
+    // yes: a team promotion refuses rather than guessing, which is the same
+    // fail-closed answer as being genuinely unauthorized (FR-607).
+    let Some(account) = d.account_identity().await else {
+        return (cairn_core::domain::UNATTRIBUTED_OWNER, false);
+    };
+    let member = match server_project_id {
+        Some(id) => match AuthenticatedContext::acquire(d).await {
+            Ok(context) => context.is_member_of(id).await,
+            Err(_) => false,
+        },
+        // A project that has never been shared with a server has no membership to
+        // check, and nothing can be promoted out of it to a team that cannot see
+        // it either.
+        None => false,
+    };
+    (account, member)
+}
+
+/// Refuse to record a decision whose authorization was granted to a credential
+/// this machine no longer holds (FR-604).
+///
+/// The server authorized *an account*, and the local row is about to say that
+/// account decided this. If the credential changed while the request was in
+/// flight, the two halves would describe different people — so the local half
+/// does not happen, and the caller is told rather than left with a divergence it
+/// cannot see. The server-side effect stands; it was authorized when it was made.
+async fn stale_if_changed(
+    context: &AuthenticatedContext,
+    d: &Daemon,
+    what: &str,
+) -> Result<(), WireError> {
+    if context.still_current(d).await {
+        return Ok(());
+    }
+    Err(WireError::new(
+        codes::UNAUTHORIZED,
+        format!(
+            "the signed-in account changed while this {what} was in flight; it was \
+             applied on the server but not recorded locally — run `cairn sync now`"
+        ),
+    ))
 }
 
 /// `POST /api/team/{id}/retire` (T121, T133). Same admin gate and
 /// compare-and-swap shape as [`team_ratify_remote`].
-pub async fn team_retire_remote(d: &Daemon, id: Uuid) -> Reply {
-    let c = client(d).await?;
-    c.post(&format!("/api/team/{id}/retire"), &json!({})).await
+/// As [`team_ratify_remote`], for retirement, and for the same reason (FR-606).
+pub async fn team_retire_remote(
+    d: &Daemon,
+    id: Uuid,
+) -> Result<(serde_json::Value, Uuid), WireError> {
+    let context = AuthenticatedContext::acquire(d).await?;
+    let reply = context
+        .client
+        .post(&format!("/api/team/{id}/retire"), &json!({}))
+        .await?;
+    stale_if_changed(&context, d, "retirement").await?;
+    Ok((reply, context.account))
 }
 
 // ---------------------------------------------------------------------------
@@ -2499,35 +2726,19 @@ async fn drain(
 /// logged in. Nothing in the local store can distinguish the two cases, because
 /// membership is not local state.
 ///
-/// So the server is asked. `GET /api/projects` returns exactly the caller's
-/// memberships, from the authenticated identity rather than from anything sent,
-/// and the answer is intersected with what this machine has linked so an
-/// established local project is preferred over an unrelated one the account
-/// happens to belong to. Ordering is by id so the choice is stable across calls
-/// and across devices — a batch's authorization project is not otherwise
-/// meaningful, and a stable one keeps this testable.
+/// So it comes from the context's memberships, which are the server's answer for
+/// this account, intersected with what this machine has linked so an established
+/// local project is preferred over an unrelated one the account happens to belong
+/// to. Ordering is by id so the choice is stable across calls and across devices.
 ///
 /// `None` means this account is a member of no project the route would accept,
 /// and the drain holds its work rather than sending a batch that cannot be
-/// authorized. That is the same outcome as the old "no linked project" branch,
-/// reached for a reason that is now true.
-async fn authorization_project(guard: &GlobalGuard, d: &Daemon) -> Option<Uuid> {
-    let body = guard.client.get("/api/projects").await.ok()?;
-    let mut mine: Vec<Uuid> = body
-        .get("projects")
-        .and_then(|v| v.as_array())
-        .map(|rows| {
-            rows.iter()
-                .filter_map(|p| p.get("id").and_then(|v| v.as_str()))
-                .filter_map(|s| Uuid::parse_str(s).ok())
-                .collect()
-        })
-        .unwrap_or_default();
+/// authorized.
+async fn authorization_project(context: &AuthenticatedContext, d: &Daemon) -> Option<Uuid> {
+    let mine = context.memberships().await;
     if mine.is_empty() {
         return None;
     }
-    mine.sort();
-
     let linked: std::collections::HashSet<Uuid> = repo::list_projects(&d.store)
         .await
         .unwrap_or_default()
@@ -2572,19 +2783,19 @@ async fn drain_global(
     // push that the peer accepts looks like a successful delivery, and the rows
     // were marked delivered against a server that was never supposed to receive
     // them. The pull-side repair that added the check for reading did not add it
-    // for writing, which is the asymmetry [`GlobalGuard::admits`] now removes by
+    // for writing, which is the asymmetry [`AuthenticatedContext::admits`] now removes by
     // answering for both.
     //
-    // Acquiring the guard is also the credential snapshot (FR-597): the account
+    // Acquiring the context is also the credential snapshot (FR-597): the account
     // this drain filters rows by and the token it sends them with come from one
     // read, so a switch mid-drain cannot route as A while authenticating as B.
-    let guard = GlobalGuard::acquire(d).await?;
-    if !guard.admits(namespace) {
-        guard.refuse(namespace, "pushing");
+    let context = AuthenticatedContext::acquire(d).await?;
+    if !context.admits(namespace) {
+        context.refuse(namespace, "pushing");
         return Ok((0, 0, 0));
     }
 
-    let capability = capability_from(&guard.version, d, namespace).await;
+    let capability = capability_from(&context.version, d, namespace).await;
     let key = namespace.key();
 
     // Only rows this account authored (FR-594). A `team:*` lane is shared by
@@ -2592,8 +2803,8 @@ async fn drain_global(
     // otherwise be pushed once B logs in — and the server, right to distrust
     // payload identity, would record B as its proposer. See
     // [`outbox::claim_namespace_for_author`] for why the filter belongs in the
-    // claim. Taken from the guard, not re-read, for the reason above.
-    let author = guard.account;
+    // claim. Taken from the context, not re-read, for the reason above.
+    let author = context.account;
 
     // Resolved on the first non-empty batch, not up front. The namespace's
     // pending count includes rows held for another account's author, so a lane
@@ -2613,13 +2824,13 @@ async fn drain_global(
             break;
         }
 
-        // The guard's client, not a fresh one: the account this batch was
+        // The context's client, not a fresh one: the account this batch was
         // claimed for and the token it is sent with must be the same read
         // (FR-597).
-        let c = &guard.client;
+        let c = &context.client;
 
         if auth_project.is_none() {
-            auth_project = authorization_project(&guard, d).await;
+            auth_project = authorization_project(&context, d).await;
         }
         let Some(project_id) = auth_project else {
             // Nothing this batch could be authorized against. The rows go back to
@@ -2759,7 +2970,7 @@ async fn last_known_capability(d: &Daemon, namespace: &SyncNamespace) -> String 
 
 /// As [`refresh_capability`], over a `/api/version` body already in hand.
 ///
-/// A global drain holds one: [`GlobalGuard`] fetched it to learn the peer's
+/// A global drain holds one: [`AuthenticatedContext`] fetched it to learn the peer's
 /// instance. Reading that same response rather than issuing a second one is not
 /// only a saved request — two reads are two chances to observe two different
 /// servers, which is exactly what snapshotting the credential exists to prevent
@@ -4023,6 +4234,178 @@ mod tests {
         );
     }
 
+    /// Clear the read-only bit, cross-platform.
+    ///
+    /// `set_readonly(false)` is what this means and clippy objects to it on Unix
+    /// because it grants write to everyone; the file is a test fixture inside a
+    /// temporary home, and restoring it is the point.
+    fn restore_writable(path: &std::path::Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("permissions");
+        }
+        #[cfg(not(unix))]
+        {
+            let mut perms = std::fs::metadata(path).expect("a config").permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            perms.set_readonly(false);
+            std::fs::set_permissions(path, perms).expect("permissions");
+        }
+    }
+
+    /// A credential switched away and back is a *different* credential.
+    ///
+    /// This is the ABA property stated directly, because the end-to-end test for
+    /// it can only observe the final state — and the final state of an A → B → A
+    /// sequence is, by construction, indistinguishable from never having
+    /// switched. What distinguishes them is that something happened in between,
+    /// and the generation is what records that (FR-604).
+    ///
+    /// Falsified by deriving "has the credential changed" from its contents:
+    /// `before` and `after` compare equal, and an answer learned under the middle
+    /// credential commits as though it were still current.
+    #[tokio::test]
+    async fn a_credential_switched_away_and_back_is_not_the_same_credential() {
+        let d = fx::daemon().await;
+        d.mutate_credentials(|c| {
+            c.url = Some("https://one.example".into());
+            c.token = Some("token-a".into());
+        })
+        .await
+        .expect("set A");
+        let before = d.server.read().await.generation;
+        let contents_before = {
+            let c = d.server.read().await;
+            (c.token.clone(), c.url.clone())
+        };
+
+        d.mutate_credentials(|c| c.token = Some("token-b".into()))
+            .await
+            .expect("set B");
+        d.mutate_credentials(|c| c.token = Some("token-a".into()))
+            .await
+            .expect("back to A");
+
+        let after = d.server.read().await.generation;
+        let contents_after = {
+            let c = d.server.read().await;
+            (c.token.clone(), c.url.clone())
+        };
+        assert_eq!(
+            contents_before, contents_after,
+            "this test is only meaningful while the contents come back identical"
+        );
+        assert_ne!(
+            before, after,
+            "an A to B to A switch was indistinguishable from no switch at all"
+        );
+    }
+
+    /// Learning which account a token belongs to is not a change of credential.
+    ///
+    /// The generation marks that the credential *became different*. `account_id`
+    /// is derived from it — the answer to "whose token is this" — so recording
+    /// that answer is the question being answered, not asked again. Treating it
+    /// as a change made every routine identity learn invalidate every concurrent
+    /// operation holding the same unchanged credential, which is the very class
+    /// of failure this mechanism exists to prevent.
+    #[tokio::test]
+    async fn learning_an_account_does_not_advance_the_credential_generation() {
+        let d = fx::daemon().await;
+        d.mutate_credentials(|c| {
+            c.url = Some("https://one.example".into());
+            c.token = Some("token-a".into());
+        })
+        .await
+        .expect("set A");
+        let before = d.server.read().await.generation;
+
+        d.mutate_credentials(|c| c.account_id = Some(Uuid::now_v7()))
+            .await
+            .expect("learn an account");
+
+        assert_eq!(
+            before,
+            d.server.read().await.generation,
+            "learning an account counted as changing the credential"
+        );
+        assert!(
+            d.server.read().await.account_id.is_some(),
+            "the account was not recorded"
+        );
+    }
+
+    /// Re-applying an unchanged credential does not advance the generation.
+    #[tokio::test]
+    async fn rewriting_the_same_credential_does_not_advance_the_generation() {
+        let d = fx::daemon().await;
+        d.mutate_credentials(|c| {
+            c.url = Some("https://one.example".into());
+            c.token = Some("token-a".into());
+        })
+        .await
+        .expect("set A");
+        let before = d.server.read().await.generation;
+
+        d.mutate_credentials(|c| c.token = Some("token-a".into()))
+            .await
+            .expect("set A again");
+
+        assert_eq!(
+            before,
+            d.server.read().await.generation,
+            "re-applying an unchanged credential counted as a change"
+        );
+    }
+
+    /// The persisted copy and the in-memory copy are committed together.
+    ///
+    /// They were written by different paths in different orders, so a failed save
+    /// left them disagreeing — and which one a later reader trusted depended on
+    /// whether the daemon had restarted since (FR-605).
+    #[tokio::test]
+    async fn a_credential_change_that_cannot_be_persisted_changes_nothing() {
+        let d = fx::daemon().await;
+        d.mutate_credentials(|c| {
+            c.url = Some("https://one.example".into());
+            c.token = Some("token-a".into());
+            c.account_id = Some(Uuid::now_v7());
+        })
+        .await
+        .expect("set A");
+        let before = d.server.read().await.clone();
+
+        // The config path is made unwritable, so the save fails for a reason that
+        // has nothing to do with the value being written.
+        let path = cairn_core::paths::config_path();
+        let mut perms = std::fs::metadata(&path).expect("a config").permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).expect("permissions");
+
+        let outcome = d
+            .mutate_credentials(|c| {
+                c.token = Some("token-b".into());
+                c.account_id = Some(Uuid::now_v7());
+            })
+            .await;
+
+        restore_writable(&path);
+
+        assert!(outcome.is_err(), "an unpersistable change reported success");
+        let after = d.server.read().await.clone();
+        assert_eq!(after.token, before.token, "memory moved without disk");
+        assert_eq!(
+            after.account_id, before.account_id,
+            "memory moved without disk"
+        );
+        assert_eq!(
+            after.generation, before.generation,
+            "a failed change advanced the generation"
+        );
+    }
+
     #[tokio::test]
     async fn link_status_reports_an_existing_link() {
         let d = fx::daemon().await;
@@ -4083,6 +4466,7 @@ mod tests {
                 // No account identity: this daemon has never reached a server,
                 // which is the situation under test.
                 account_id: None,
+                generation: 0,
             },
         )
         .await;

@@ -455,3 +455,92 @@ Gate after round 6: **1449 passed, 0 failed**; `cargo fmt --all -- --check`,
 clean.
 
 T104 and T194 are unchanged by this round.
+
+## Post-integration review, round 7 — the abstraction the previous six rounds were missing
+
+Six rounds each found a pair of facts that could disagree, fixed that pair, and were followed
+by a round that found another. They were not eighteen defects. They were one missing
+abstraction, found eighteen times: **the endpoint, the credential, the account, the server
+instance and the caller's membership were resolved separately, by whichever path needed them,
+at whatever moment it needed them.**
+
+`AuthenticatedContext` gathers them. One lock acquisition and one `GET /api/version` produce
+the credential generation, the account, the client, the peer's instance and (on demand, once)
+the memberships the server reports. A server-global operation runs entirely inside one context
+or refuses. There is no fallback identity, no second credential read, no post-request actor
+lookup, no local proxy for a server's answer, and no NULL-author compatibility.
+
+Two supporting pieces make it hold:
+
+- **`CredentialSnapshot`** is the part of the context that does not need an account, for the
+  one operation whose job is to learn one. Its generation and its client come from the same
+  read — taking them separately is the same hole in a different place.
+- **`Daemon::mutate_credentials`** is the single door through which a credential or an account
+  identity changes. It writes the persisted copy first and memory only if that succeeded, so a
+  failure leaves both as they were; disk is the copy that survives a restart, and a state that
+  exists only in memory is one that silently changes meaning the next time the daemon starts.
+
+**The generation is what makes "still the same credential" answerable.** Comparing contents
+cannot distinguish a credential that never changed from one switched away and back while a
+request was in flight — both leave the token and endpoint identical. That is ABA, and it is why
+round 6's content-comparing check was not sound. A counter that only increases turns the
+question into one about time.
+
+It counts changes to the **credential** and not to the account derived from it. An earlier draft
+bumped on any difference, and the consequence was a failure of exactly the class this mechanism
+exists to prevent: a routine identity learn invalidated every concurrent operation holding the
+same unchanged credential, so namespace establishment bailed and lanes were never opened. That
+was found by the fresh architecture review this round required, and the response was to move
+the boundary rather than add a condition.
+
+The review found one other, also mine. `promoter_standing` took both the acting account and its
+membership from a peer-dependent context, so an unreachable server reported "no account" — and
+an offline *personal* promotion, which needs no server at all, filed its record under the
+unattributed owner while the credential sat right there. Who is acting is a local fact; what
+they may do is the peer's. Separating them is the correction; both defects were the same
+mistake of putting a boundary in the wrong place, which is the mistake this whole round is
+about.
+
+### The seven blockers
+
+| # | Blocker | Fix | Proof |
+|---|---|---|---|
+| 1 | ABA/CAS race in `learn_account_identity` | generation from the same read as the client; commit only if unchanged | `a_credential_switched_away_and_back_is_not_the_same_credential`, `an_aba_credential_switch_does_not_look_like_no_change` |
+| 2 | identity persistence not atomic with credential change | one `mutate_credentials`, config first, rollback on failure | `a_credential_change_that_cannot_be_persisted_changes_nothing`, `every_credential_boundary_survives_a_restart_coherently` |
+| 3 | team promotion without a real account | promoter is the authenticated account or the unattributed owner, which the gate refuses | `team_promotion_refuses_a_non_member_of_the_linked_project` |
+| 4 | membership from `project.linked` | `AuthenticatedContext::is_member_of`, the server's answer for this account | same |
+| 5 | NULL author claimable by anyone | schema CHECK plus exact-match claim and count | `a_global_outbox_row_cannot_exist_without_an_author` |
+| 6 | ratify/retire actor resolved after the remote call | the remote call returns the actor it used; a changed credential refuses the local write | `stale_if_changed`, exercised by the credential-switch tests |
+| 7 | pre-auth personal knowledge stranded | adopted by the first account this machine signs in as, then backfilled | `pre_authentication_personal_knowledge_reaches_a_second_device` |
+
+Blocker 7 changes intended semantics, so the spec changed with it (FR-608). Round 6 recorded
+such rows as belonging to no account and never reassigned them, on the argument that adoption
+attributes work to an identity that did not do it. That argument was about a *machine* id, which
+may be several people; the marker means "written here before anyone signed in", and the first
+person to sign in is the only answer available. Left unadopted the notes are permanently
+invisible to every other device and to every account-scoped read — local-first without the half
+of the promise that makes it worth having.
+
+### One defect found outside the identity class
+
+A pulled page fetched before a ratification and merged after it walked a row's state backwards,
+turning a locally ratified entry back into a proposal and dropping the supersession with it.
+Team state only advances, and the server already refuses to let a pushed payload advance it;
+this is the same principle facing the other way. It made
+`a_superseded_team_entry_stops_competing_in_every_canonical_read` flaky — 10/16 on the previous
+head, 16/16 after.
+
+### Gate
+
+**1458 passed, 0 failed**; `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and `git diff --check`
+clean.
+
+One environmental note, recorded because it cost real time to diagnose and will cost it again:
+`a_retirement_carries_who_acted_to_a_second_device` fails against a shared test database that
+has accumulated many hundreds of team rows, because a pull delivers one page per cycle and the
+newest row is then many cycles away. It is not a product regression — it reproduces identically
+on the previous head, and CI, which starts from an empty database, has never seen it. Resetting
+the local test database restores it.
+
+T104 and T194 are unchanged by this round.

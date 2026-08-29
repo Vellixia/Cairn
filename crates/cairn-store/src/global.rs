@@ -898,6 +898,39 @@ async fn enqueue_team_tx(
 /// here would let a caller pass a `Project`or `Team` variant that this function
 /// would then have to refuse at runtime. There is nothing to refuse if there is
 /// nothing to pass.
+/// Attribute personal knowledge written before any account was known to the
+/// account this machine has just proven (FR-608).
+///
+/// **Local-first is only half a promise without this.** A user records personal
+/// notes before ever linking a server — the documented reason
+/// [`enqueue_personal_backlog`] exists at all — and those notes are owned by
+/// [`UNATTRIBUTED_OWNER`](cairn_core::domain::UNATTRIBUTED_OWNER), which is not
+/// an account and therefore not a partition anything syncs. Left there they are
+/// permanently invisible to every other device and to every later read scoped by
+/// account: recorded, recallable on this machine alone, and quietly excluded from
+/// the feature they were written for.
+///
+/// So the first account this machine authenticates as adopts them, and the
+/// backlog then queues them like any other row it owns. First, because after one
+/// adoption there are none left — the operation is naturally once, without a flag
+/// to keep.
+///
+/// **Why the first account and not a choice.** These notes were written by
+/// whoever was using this machine, at a time when the machine could not ask who
+/// that was; the first person to sign in is the only answer available, and it is
+/// the same answer a user would give. A machine genuinely shared by two people
+/// before either signs in is outside what personal memory models — it has no
+/// concept of a second local user — and the honest place to state that is here.
+pub async fn adopt_unattributed_personal(store: &Store, account: Uuid) -> Result<usize> {
+    let adopted =
+        sqlx::query("UPDATE personal_knowledge SET owner_user_id = ?1 WHERE owner_user_id = ?2")
+            .bind(account.to_string())
+            .bind(cairn_core::domain::UNATTRIBUTED_OWNER.to_string())
+            .execute(store.pool())
+            .await?;
+    Ok(adopted.rows_affected() as usize)
+}
+
 pub async fn enqueue_personal_backlog(store: &Store, owner_user_id: Uuid) -> Result<usize> {
     let ids: Vec<String> =
         sqlx::query_scalar("SELECT id FROM personal_knowledge WHERE owner_user_id = ?1")
@@ -2436,11 +2469,35 @@ pub async fn merge_synced_team(
             .await?;
         }
     } else {
+        // **A merge never walks a row's state backwards** (FR-609).
+        //
+        // Team state only advances: proposed, then authoritative, then retired.
+        // A page fetched from the server before a ratification and merged after
+        // it carries the row as it was *then*, and this update applied it
+        // wholesale — turning a locally ratified entry back into a proposal, and
+        // with it dropping the supersession that ratification had recorded. The
+        // window is small and the loss is silent: the entry simply stops being
+        // guidance, and the one it replaced goes on competing.
+        //
+        // The server already refuses to let a pushed payload advance state
+        // (`global-memory.md` §5b); this is the same principle facing the other
+        // way. Delivery order is not something either side can promise, so
+        // "later" has to mean further along, not more recently arrived.
         sqlx::query(
             "UPDATE team_knowledge
                 SET state = ?1, ratified_by_user_id = ?2, ratified_at = ?3,
                     retired_at = ?4, superseded_by_id = ?5, retired_by_user_id = ?7
-              WHERE id = ?6",
+              WHERE id = ?6
+                AND (CASE state
+                        WHEN 'proposed' THEN 0
+                        WHEN 'authoritative' THEN 1
+                        WHEN 'retired' THEN 2
+                        ELSE 0 END)
+                    <= (CASE ?1
+                        WHEN 'proposed' THEN 0
+                        WHEN 'authoritative' THEN 1
+                        WHEN 'retired' THEN 2
+                        ELSE 0 END)",
         )
         .bind(incoming.state.as_str())
         .bind(incoming.ratified_by_user_id.map(|u| u.to_string()))

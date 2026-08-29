@@ -774,19 +774,18 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                     // the name alone made this the weaker of two entry points
                     // for the same content.
                     let identities = current_project_identities(&r.project);
-                    // Real project-membership data lives on the server and
-                    // this daemon does not cache it locally yet — the same
-                    // gap `promote::promote`'s own doc names for the `Team`
-                    // arm, which refuses unconditionally regardless of this
-                    // value today. `linked` is the closest local proxy: a
-                    // project shared with a server at all, versus one that
-                    // is not.
-                    let promoter_is_project_member = r.project.linked;
+                    // Membership is the server's fact, asked of the server, for
+                    // the account that is actually promoting (FR-607). It used to
+                    // be `r.project.linked` — this machine once linked this
+                    // project — which is a fact about the machine's past standing
+                    // in for the caller's present authorization.
+                    let (promoter, promoter_is_project_member) =
+                        crate::sync::promoter_standing(d, r.project.server_project_id).await;
                     let new_id = crate::promote::promote(
                         &d.store,
                         memory_id,
                         target,
-                        d.owner_identity().await,
+                        promoter,
                         r.project.id,
                         &identities,
                         promoter_is_project_member,
@@ -2886,7 +2885,7 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
     // made on this machine and not yet delivered is the one case where that is
     // surprising, so the refusal says which of the two it is rather than leaving
     // an administrator to guess whether the id was wrong.
-    let remote = crate::sync::team_ratify_remote(d, id, supersedes)
+    let (remote, actor) = crate::sync::team_ratify_remote(d, id, supersedes)
         .await
         .map_err(|e| {
             if e.code == codes::NOT_FOUND {
@@ -2902,8 +2901,7 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
                 e
             }
         })?;
-    let account = require_account(d).await?;
-    match cairn_store::global::ratify_team(&d.store, id, account, supersedes).await {
+    match cairn_store::global::ratify_team(&d.store, id, actor, supersedes).await {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
@@ -2951,9 +2949,8 @@ async fn require_account(d: &Daemon) -> Result<Uuid, WireError> {
 /// Same server-authorizes, local-applies-after shape as [`team_ratify`], and
 /// the same `state_conflict`-after-server-success treatment.
 async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
-    let remote = crate::sync::team_retire_remote(d, id).await?;
-    let account = require_account(d).await?;
-    match cairn_store::global::retire_team(&d.store, id, account).await {
+    let (remote, actor) = crate::sync::team_retire_remote(d, id).await?;
+    match cairn_store::global::retire_team(&d.store, id, actor).await {
         Ok(record) => Ok(json!({ "entry": record })),
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>

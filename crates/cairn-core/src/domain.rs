@@ -25,11 +25,14 @@ use uuid::Uuid;
 /// keyed by it, so nothing owned by it is enqueued, pushed, or pulled; it simply
 /// stays local until the user records notes under an account of their own.
 ///
-/// Rows already carrying it are **not** adopted when the machine later
-/// authenticates. That is the same decision `Daemon::owner_identity` has always
-/// documented for the local id it replaces: reassigning them would attribute work
-/// to an identity that did not do it, and would push it to a server the user had
-/// not chosen to send it to when they wrote it.
+/// Rows carrying it **are** adopted by the first account this machine
+/// authenticates as (FR-608). The alternative was tried and is worse: left
+/// unattributed they are permanently invisible to every other device and to every
+/// read scoped by account, which is local-first without the half of the promise
+/// that makes it worth having. The earlier objection — that reassigning
+/// attributes work to an identity that did not do it — was about a *machine* id,
+/// which may be several people; this marker means "written here before anyone
+/// signed in", and the first person to sign in is the only answer available.
 pub const UNATTRIBUTED_OWNER: Uuid = Uuid::nil();
 
 pub fn new_id() -> Uuid {
