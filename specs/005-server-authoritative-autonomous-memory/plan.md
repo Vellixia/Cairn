@@ -3,7 +3,7 @@
 **Feature Directory**: `specs/005-server-authoritative-autonomous-memory`
 **Git Branch**: `feature-005-spec`
 **Baseline**: `origin/main` @ `f76a9fec8a786a76dc7ffa1b0b0daf96aae08b15`
-**Spec**: [spec.md](./spec.md) — 254 functional requirements, 53 success criteria
+**Spec**: [spec.md](./spec.md) — 259 functional requirements, 55 success criteria
 **Constitution**: v1.2.1
 **Created**: 2026-08-30
 **Status**: Draft — plan only. No tasks, no implementation.
@@ -123,7 +123,7 @@ unearned, and each was repaired rather than argued away:
 
 ```text
 specs/005-server-authoritative-autonomous-memory/
-├── spec.md                  # approved contract (254 FR, 53 SC)
+├── spec.md                  # approved contract (259 FR, 55 SC)
 ├── research.md              # current-main audit + vendor evidence (preserved, extended)
 ├── plan.md                  # this file
 ├── data-model.md            # entities, local schema v8, server schema v4

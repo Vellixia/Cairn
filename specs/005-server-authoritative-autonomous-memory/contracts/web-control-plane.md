@@ -57,6 +57,7 @@ requirement touches them.
 | `GET /api/projects/{id}/integration-health` | `SettledUser` | `require_member` | `{ rows: [{agent, capability, stage, status, evidence_kind, observed_at, stale}] }` |
 | `GET /api/personal/knowledge` | `SettledUser` | none (owner-scoped by construction — `owner_user_id = caller`, not a project concept) | `{ items: [...], cursor }` |
 | `GET /api/team/knowledge` | `SettledUser` | none (server-global); visibility filtered per `sync-namespaces.md` §1a (`proposed` visible to author + admin only) | `{ items: [...], cursor }` |
+| `GET /api/projects/{id}/consolidation-runs` | `SettledUser` | `require_member` | `{ runs: [{ run_id, started_at, finished_at, events_claimed, candidates_proposed, candidates_accepted, candidates_refused, refusal_reasons, extractor_kind }] }`, paginated (FR-894a) |
 | `GET /api/system/health` | `AdminUser` | none — admin, not membership | `{ ingest: {...}, consolidation: {...}, retrieval: {...} }` — §5 |
 
 Every row above is new **except** `ratify_team`/`retire_team` and the three admin-user
@@ -85,10 +86,10 @@ Twelve stages, in the order FR-879 lists them, each a `{ stage, count }` pair:
 | `active_agents` | distinct `agent` values with a `safe_events` row in the window |
 | `sessions` | `sessions` rows for the project in the window |
 | `safe_events_received` | `safe_events` rows |
-| `capture_failures` | `capture_disposition_counts` where `disposition = 'capture_deadline_exceeded'` |
+| `capture_failures` | `capture_dispositions (server)` where `disposition = 'capture_deadline_exceeded'` |
 | `consolidation_runs` | `consolidation_runs` rows |
 | `candidates_produced` | `knowledge_candidates` rows |
-| `knowledge_accepted` | `knowledge_candidates` where `decision IN ('accepted','reinforced')` |
+| `knowledge_accepted` | `knowledge_candidates` where `decision = 'accepted'` only — a corroboration is not a distinct claim (FR-798a) |
 | `candidates_rejected_or_duplicate` | `decision IN ('refused','duplicate')` |
 | `reinforcements` | `decision = 'reinforced'` |
 | `conflicts` | `decision = 'conflicted'` |

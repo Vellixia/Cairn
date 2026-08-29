@@ -67,6 +67,8 @@ the server store it.
 | Propose team knowledge | `POST /api/team/knowledge` | `team_knowledge` upsert |
 | Ratify / retire | `POST /api/team/{id}/ratify` · `/retire` *(exist)* | — |
 | Report a verification run | `POST /api/verification/reports` | client-set verification fields |
+| Promote a reusable pattern | `POST /api/patterns` | *(no prior path — patterns never synced)* |
+| Forget a pattern | `POST /api/patterns/{id}/forget` | — |
 
 ### 3.1 What a command may not carry
 
@@ -96,6 +98,46 @@ Cross-member overwrite disappears with the upsert: there is no command that repl
 member's memory content. Correcting someone else's knowledge is `supersede`, which creates a
 new record and links it — visible, attributed and reversible, rather than a silent overwrite.
 
+## 3.3 Reusable patterns
+
+Patterns are the one domain with no prior server path at all: `reusable_pattern` is a refused
+entity type and its local row carries three refused field names, so it has never travelled.
+FR-708b requires the refusal to be lifted **only** for a redefined representation, and that is
+what `shared_patterns` is (`data-model.md` §6). The local table is not relaxed and is not sent.
+
+**Promotion.** `POST /api/patterns` carries the safe shape only: title, problem, root cause,
+approach, constraints, applicability. The client derives it from the local row and **drops**
+`signals`, `signal_digest`, `origin_ref`, `sanitization_report`, `source_memory_id` and
+`origin_deleted`. Promotion passes the existing global-content validator, so a pattern that
+names its source project is refused exactly as personal or team knowledge would be. `trust`
+may be `sanitized`, `validated` or `contested` — never `candidate`, which is a local-only
+state meaning "not yet fit to leave".
+
+**Authorship.** `account_id` is bound from the credential (Principle XI). The originating
+project is never transmitted; the local salted origin digest stays local (FR-708a).
+
+**Retrieval and cache.** Patterns keep exactly the budget treatment they have today: the
+`patterns` section, in its existing `SECTION_ORDER` position, admitted from the general pool by
+`take_while_fits` (`crates/cairn-core/src/context.rs:270-274`). They are **not** under
+`GLOBAL_SHARE_MAX`, which applies only to `personal_notes` and `team_guidance`
+(`admit_global`, `context.rs:439-445`). Making patterns server-durable changes where they are
+stored, not how they are budgeted; moving them under the global cap would be a behaviour change
+no requirement asks for. Locally they are cache, refilled from the server like any other
+non-authoritative copy, and labelled as such.
+
+**Deletion.** `POST /api/patterns/{id}/forget` sets `forgotten_at` and clears the content
+columns, the same tombstone shape personal knowledge uses. Only the author may forget their own
+pattern. A forgotten pattern stops being retrieved and stops being served in the changes feed.
+
+**Pattern applications stay local** (FR-707). They record what happened on one machine when a
+pattern was applied, are evidence rather than knowledge, and have no server table.
+
+**Migration.** Existing local patterns are promoted during migration phase 2 like any other
+knowledge, through the drain route, and are subject to the same possession verification before
+any local demotion. A pattern that fails validation — most likely because it names its source
+project — is **retained local** with reason `server_refused` and reported individually, never
+silently dropped (FR-871).
+
 ## 4. Offline behaviour — commands queue, they do not fail
 
 FR-781 and FR-815a still bind: an agent operation must not block on the server, and an explicit
@@ -104,9 +146,37 @@ creation made offline must become a queued write rather than a local durable rec
 A command issued while the server is unreachable is written to a **`command_spool`** in SQLite,
 alongside `event_spool` and using the same claim protocol:
 
-- `command_id` is deterministic — `UUIDv5(CAIRN_COMMAND_NS, session_id ‖ command_seq)` from a
-  durable per-session counter, exactly as event identity works (`safe-events.md` §4). Replay is
-  therefore idempotent: the server answers `duplicate` and applies nothing twice.
+- `command_id` is deterministic — `UUIDv5(CAIRN_COMMAND_NS, scope_kind ‖ scope_key ‖
+  command_seq)` from a durable counter, exactly as event identity works (`safe-events.md` §4).
+  Replay is therefore idempotent: the server answers `duplicate` and applies nothing twice.
+
+### 4.1 Sessionless commands
+
+Not every command has a session. The CLI permits memory and task operations outside one, and
+shipped code represents that honestly: `authoring_session` returns the nil UUID meaning "no
+session", which `cairn task history` renders as an unattributed change
+(`crates/cairnd/src/handlers.rs:2522-2545`). Its own comment states the reasoning — *"a CLI
+invocation outside any session genuinely has no author to name, and naming a throwaway one
+would be worse than naming none."*
+
+The command spool must be able to represent that, so:
+
+- `session_id` is **nullable**. A sessionless command carries no session and no fake one is
+  invented.
+- Identity is scoped rather than session-keyed. `scope_kind` is `session` or `store`;
+  `scope_key` is the session id or the store's `writer_id`. Each scope has its own durable
+  counter, so both kinds get a stable, gapless, restart-safe ordinal.
+- Ordering guarantees are per scope. Session-bound commands are delivered in session order; a
+  sessionless command is ordered against other sessionless commands from the same store. No
+  cross-scope ordering is claimed, and none is needed — a sessionless command by definition
+  does not participate in a session's causal chain.
+- The server records provenance as **unattributed to a session** rather than attributing it to
+  one. `origin_session_id` is left null for such a record, which is what the local store already
+  does.
+
+This keeps `command_id` stable across retries in both cases and requires no synthetic session
+row, which would leave exactly the second active session in the worktree that the shipped
+comment warns makes the next agent's context ambiguous.
 - Rows are claimed with an **exact** `account_id` match; a row with no recorded author is never
   deliverable under whichever account is signed in.
 - The caller is told the command was **accepted for delivery**, not that it is durable

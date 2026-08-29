@@ -59,6 +59,32 @@ cairn memory list --origin consolidated
 A **FAILURE** record naming the tests that were failing and the files whose change fixed them,
 with `origin_kind = consolidated` and provenance resolving to the session's events.
 
+**Decision learning — the part SC-701 alone would not prove.** During the session, express a
+decision the way anyone would: *"use postgres for the storage authority, not sqlite"*. Both
+words must already be in the session's vocabulary — `postgres` from a command or file, and
+`storage_authority` from a file, module or an established key — or Cairn declines, which is the
+designed behaviour rather than a failure.
+
+```bash
+cairn memory list --type decision --origin consolidated
+```
+
+Expect a DECISION whose `topic_key` is `decision.storage_authority` and whose `value_key` is
+`postgresql`. Then confirm what it does **not** contain:
+
+```bash
+cairn memory show <id> | grep -i "because\|wanted\|think"    # expect: no match
+```
+
+The reasoning is not learned, by design (`contracts/extraction.md` §13.9). The record states
+that the project adopted something, for what subject — never why.
+
+Check the declines are visible rather than silent:
+
+```bash
+cairn status --capture | grep no_safe_semantic_mapping
+```
+
 **Verify provenance is real, not decorative:**
 
 ```bash
@@ -214,6 +240,9 @@ cairn memory list                # → unchanged, still readable
 The run has passed when all of these hold:
 
 - [ ] Durable knowledge exists from a session that invoked no Cairn tool
+- [ ] A decision expressed in the session became a DECISION record with the expected tokens
+- [ ] That record contains no word from the prompt that was not already in the vocabulary
+- [ ] Signals with no safe mapping were declined and counted, not guessed at
 - [ ] Its provenance resolves to real, retrievable events
 - [ ] A second session received relevant knowledge with no tool call
 - [ ] The prompt-time briefing did not restate the session-open briefing

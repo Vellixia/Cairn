@@ -150,6 +150,7 @@ report endpoint is not reachable from the extractor, and `verdict` is not a fiel
 | `project` | the memory's `project_id` | caller is a member of that project |
 | `personal` | the record's `owner_user_id` | caller **is** that owner |
 | `team` | the server's single team | caller is a member; `proposed` rows also require author-or-admin |
+| `pattern` | the pattern's `account_id` | caller **is** the pattern's author |
 
 The referenced record is resolved as a `KnowledgeRef` (`data-model.md` §6.1) — project,
 personal and team knowledge are separate tables and a bare id names only the first.
@@ -157,6 +158,37 @@ personal and team knowledge are separate tables and a bare id names only the fir
 FR-826 is unchanged and separate: a deterministic check performed against one project does not
 transfer its authority to a project-independent assertion. That constrains the **authority
 assigned** to a personal or team record, not whether a report may exist for one.
+
+## 7.4 Where a personal, team or pattern summary lives
+
+`memories` carries the five verification columns. `personal_knowledge`, `team_knowledge` and
+`shared_patterns` do **not**, and Feature 005 does not add them — five columns on four tables is
+four places for a derivation to drift.
+
+Summaries for non-project domains live in one derived table, keyed by `KnowledgeRef`:
+
+```sql
+CREATE TABLE knowledge_verification (
+  domain        TEXT NOT NULL CHECK (domain IN ('personal','team','pattern')),
+  knowledge_id  UUID NOT NULL,
+  verification  TEXT NOT NULL DEFAULT 'unverified',
+  verification_authority TEXT,
+  verification_basis     JSONB NOT NULL DEFAULT '[]',
+  evidence_fact_count    INTEGER NOT NULL DEFAULT 0,
+  last_verified_at       TIMESTAMPTZ,
+  PRIMARY KEY (domain, knowledge_id)
+);
+```
+
+The project domain keeps using `memories`' own columns, because they exist, are already
+populated, and moving them would be a migration with no benefit. Readers resolve a summary by
+domain: `project` reads `memories`; everything else reads `knowledge_verification`. Both are
+derived by the same code path from the same `verification_reports` table, so there is one
+derivation and two storage locations, not two derivations.
+
+FR-826 still binds here: a deterministic check performed against one project does not transfer
+its authority to a project-independent record. A personal, team or pattern summary may therefore
+reach `remote_attested` or `remote_cairn`, but never `cairn`.
 
 ## 7.5 The changes feed stops carrying verification at cutover
 
@@ -187,11 +219,27 @@ both, the web control plane labels which is which.
 Existing server rows carry verification values written under §2's bypass, with no evidence
 behind them.
 
-At migration, every project memory's `verification` is **re-derived from zero reports**, which
+**When:** at **cutover**, not at any client's migration. Cutover is the single server-wide
+admin action (`migration-cutover.md` §2), and this is a server-wide re-derivation, so it belongs
+in the same transaction — together with §7.5's change to the changes feed, so no client can pull
+a demoted state before the feed stops carrying verification at all. Client migration phases are
+unaffected and gain no step.
+
+At cutover, every project memory's `verification` is **re-derived from zero reports**, which
 means: any row whose state cannot be substantiated by an accepted report becomes `unverified`,
 with `verification_authority` cleared, `verification_basis` reset to `[]` and
-`evidence_fact_count` to `0`. `last_verified_at` is retained as a historical timestamp but no
-longer supports a `verified` claim on its own.
+`evidence_fact_count` to `0`.
+
+`last_verified_at` is **cleared** on the record, not retained in place. A timestamp sitting in
+`last_verified_at` beside `verification = 'unverified'` reads as "verified then, unverified
+now", which is a claim the server cannot substantiate either — the original value was
+assertable by any project member, so it never established that a run occurred at that time.
+
+The old value is not destroyed silently: it moves to
+`legacy_verification_audit (domain, knowledge_id, legacy_state, legacy_authority,
+legacy_last_verified_at, demoted_at)`, explicitly labelled untrusted pre-cutover audit
+metadata. It is visible in the memory detail view under that label, is never read by any
+derivation, and can never be promoted back into a state.
 
 This is deliberately lossy in one direction only, and only on the server. The alternative —
 grandfathering states that were assertable by any project member — would carry the bypass

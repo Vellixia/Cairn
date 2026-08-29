@@ -116,6 +116,10 @@ SELECT event_id, session_seq
  ORDER BY session_seq
  LIMIT 200;
 
+-- 3. count the attempt for every event this pass will process, BEFORE it runs
+UPDATE consolidation_work SET attempts = attempts + 1
+ WHERE project_id = $p AND session_id = $s AND event_id = ANY($batch);
+
 COMMIT;   -- row lock released; the lease stands as committed state
 ```
 
@@ -123,24 +127,60 @@ On success the worker marks the events it consolidated `done`, then closes the s
 if nothing remains**:
 
 ```sql
+-- 1. retire the events this pass actually consolidated
 UPDATE consolidation_work SET state = 'done'
  WHERE project_id = $p AND session_id = $s AND event_id = ANY($consolidated);
 
-UPDATE consolidation_session SET state = 'done', claimed_by = NULL, claim_expires_at = NULL
- WHERE project_id = $p AND session_id = $s AND claimed_by = $worker
-   AND NOT EXISTS (SELECT 1 FROM consolidation_work
-                    WHERE project_id = $p AND session_id = $s AND state = 'pending');
+-- 2. close the session, or re-open it — ONE statement, so it cannot fall between the two
+UPDATE consolidation_session
+   SET state = CASE WHEN EXISTS (SELECT 1 FROM consolidation_work
+                                  WHERE project_id = $p AND session_id = $s
+                                    AND state = 'pending')
+                    THEN 'pending'      -- more work: re-elect immediately
+                    ELSE 'done'         -- drained
+               END,
+       claimed_by = NULL, claim_expires_at = NULL
+ WHERE project_id = $p AND session_id = $s AND claimed_by = $worker;
 ```
 
-The `NOT EXISTS` guard is what makes the 200-event batch cap safe. A session with 500 pending
-events would otherwise be closed after the first batch and the remaining 300 stranded behind
-the partial index. With the guard, the session returns to `pending` — the `claimed_by` clause
-having released the lease — and is re-elected until it is genuinely drained.
+Step 2 must be a `CASE`, not a guard. An earlier form used
+`… SET state='done' … AND NOT EXISTS (pending)`: when work remained the `UPDATE` matched no
+row, so the session stayed `claimed` with its lease intact and was not re-elected **until the
+lease expired** — a five-minute stall after every full batch. A session with 500 pending events
+would drain at 200 events per five minutes for no reason. The `CASE` releases the lease and
+sets the correct next state in the same statement.
 
-`consolidation_work.state` moves `pending → done` here, `pending → failed` after five attempts
-(§4). Nothing else writes it, so the `consolidation_pending` partial index drains.
+`consolidation_work.state` moves `pending → done` in step 1 and `pending → failed` in §4.1.
+Nothing else writes it, so the `consolidation_pending` partial index drains.
 
 A pass longer than the lease extends `claim_expires_at` as a heartbeat.
+
+### 4.1 `attempts` and the five-attempt rule
+
+`attempts` lives on `consolidation_work`, per event, not on the lease — a session may be
+elected many times legitimately, and counting elections would fail healthy sessions.
+
+- It increments **once per event, at the start of the pass that will process it**, in the same
+  transaction as the claim: `UPDATE consolidation_work SET attempts = attempts + 1 WHERE …
+  event_id = ANY($batch)`. Incrementing at the start rather than on failure is what makes a
+  worker that dies mid-pass still count its attempt; otherwise a crash loop would retry forever.
+- An event reaching `attempts >= 5` moves to `failed` with `last_error`. The transition is an
+  explicit statement, run in the claim transaction right after the increment, so an event never
+  enters a sixth pass:
+
+  ```sql
+  UPDATE consolidation_work SET state = 'failed', last_error = $why
+   WHERE project_id = $p AND session_id = $s AND state = 'pending' AND attempts >= 5;
+  ```
+
+  A failed event leaves the `pending` predicate and becomes visible in system health. It is
+  never retried automatically.
+- Events that reach 5 attempts do **not** block their session: step 2's `EXISTS` looks only for
+  `pending`, so a session whose remainder has all failed is correctly marked `done`.
+- A failed batch persists nothing — extraction, governance and persistence run in one
+  transaction — so a partial candidate cannot exist (FR-808). The `attempts` increment is in the
+  claim transaction and therefore survives the rollback of the processing transaction, which is
+  what makes the counter monotonic.
 
 Why each guarantee holds:
 
@@ -167,13 +207,12 @@ Why each guarantee holds:
 - No **completed** work is lost — `state='done'` is durable.
 - An abandoned claim **is** reclaimed and **re-executed**. This is expected, not a defect.
 - Re-execution produces **no duplicate durable effect**, because candidate identity (§7) is
-  derived from the event set and the normalized keys, so persistence is an upsert.
+  derived from the project, the session and the normalized keys — deliberately **not** the event
+  set — so persistence is an upsert.
 
 The phrase "a restart repeats none of it" is wrong and is not used: the reclaim mechanism
 requires repetition. What must not repeat is the *effect*.
 
-- After `attempts >= 5`, an event moves to `failed` with `last_error`, becomes visible in
-  system health, and stops being retried (FR-808 leaves input reprocessable up to that point).
 - A failed batch persists **nothing** — extraction, governance and persistence run in one
   transaction, so a partial candidate cannot exist (FR-808).
 
@@ -191,6 +230,8 @@ and persists nothing for it.
 | 5 | Ownership | Personal knowledge takes its owner from the `account_id` the server bound at ingest — never from event content, never from extractor output (FR-810a, Principle XI). |
 | 5a | Key ↔ evidence correspondence | Cairn MUST be able to re-derive the proposed key pair from the cited source events using its own rules. A proposal whose keys Cairn cannot re-derive is refused (`key_not_derivable`). Without this the extractor chooses which existing record gets reinforced — a well-formed proposal whose keys happen to match a high-value record would produce a durable reinforcement that a null extractor would not, which is precisely the difference SC-742 measures. |
 | 6 | Duplicate / reinforcement | §6 of `extraction.md`; identity match on normalized keys. |
+| 6a | Relation attribution | A relation a **session rule** produces records that session. A relation a **project rule** produces has no single session, and `memory_relations.decided_by_session` is `NOT NULL`: it records the **nil UUID**, which the codebase already uses for an unattributed act (`crates/cairnd/src/handlers.rs:2522-2545`). Inventing a session would misattribute the relation to work that did not decide it. |
+| 6b | Relation basis | Every relation consolidation records carries a basis from the closed set `deterministic_rule`, `consolidation_reinforcement` (automatic reinforcement under FR-801a), `evidence`, `explicit_agent`, `explicit_user`. The first two are producible only by consolidation, so an inferred relation is always distinguishable from a requested one (FR-802). |
 | 7 | Conflict | Same `topic_key`, overlapping scope, different `value_key` ⇒ `conflicts_with`, basis `deterministic_rule`. Never auto-resolved (FR-799). |
 | 8 | Supersession | **Never automatic.** Consolidation may not supersede anything (FR-800). |
 | 9 | Verification | Never asserted by consolidation. State is derived from run reports only (FR-811, `verification-summary.md`). |
@@ -239,6 +280,13 @@ candidate_id = UUIDv5(CAIRN_CANDIDATE_NS,
 Keys are the **normalized** ones, so a syntactic variant cannot produce a second candidate.
 Persistence is `INSERT … ON CONFLICT (candidate_id) DO NOTHING`.
 
+A candidate refused at gate 2 has no normalized keys, so this derivation is unavailable to it.
+A **refusal** is identified instead by
+`UUIDv5(CAIRN_REFUSAL_NS, project_id ‖ session_id ‖ refusal_reason ‖ digest(proposal))`, so
+several distinct malformed proposals in one session record several distinct refusals. Deriving
+them from the key pair would collapse every `key_normalization_failed` in a session onto one
+row and undercount refusals, which FR-807 and SC-705 depend on being accurate.
+
 **The source event set is deliberately not part of the identity.** It is not stable across a
 re-execution: a reclaim after the lease expires sweeps in events that arrived meanwhile, and an
 event that exhausts its attempts leaves the batch. Including the evidence set would give the
@@ -250,6 +298,23 @@ Evidence is recorded separately and additively: `candidate_source_events` is a u
 re-execution that saw more events adds rows there without changing which candidate they belong
 to. `knowledge_candidates.run_id` records which run first created it; a later run that
 re-derives the same candidate updates evidence, never identity.
+
+## 7.1 The corroboration endpoint
+
+FR-798a requires a reinforcement to have a persisted endpoint to reinforce *from*. It is a row
+in the **same table as the knowledge it corroborates**, because both endpoints of a
+reinforcement relation must be knowledge records.
+
+It is marked `origin_kind = 'corroboration'`, extending the vocabulary
+`explicit | consolidated` (`data-model.md` §6). That one marker carries every rule FR-798a needs:
+
+- **Recall excludes it** — every retrieval query filters `origin_kind <> 'corroboration'`, so it
+  is never returned as independent knowledge.
+- **Counts exclude it** — including the funnel's `knowledge_accepted`.
+- **Identity is stable** — it carries the deterministic `candidate_id` from §7, so a re-executed
+  batch upserts the same row instead of adding a second.
+- **It is visible where it belongs** — the memory detail view shows corroborations as the
+  evidence behind a reinforcement count, which is what they are.
 
 ## 8. Observability
 

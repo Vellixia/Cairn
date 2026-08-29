@@ -92,7 +92,7 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK035 Is every requirement singular — one obligation per identifier — so a test can fail
       it precisely?
 - [x] CHK036 Are requirement identifiers unique and non-colliding with Features 001–004?
-      (Verified mechanically after each pass; currently 238 FR and 51 SC identifiers, all within
+      (Verified mechanically after each pass; currently 259 FR and 55 SC identifiers, all within
       the FR-7xx/FR-9xx and SC-7xx bands this feature reserved, with zero intersection with the
       identifiers used by the four prior features.)
 - [x] CHK037 Is the reason for departing from the leading-digit numbering habit recorded, so a
@@ -349,9 +349,10 @@ survive a hostile read is decoration.
       (FR-838a–FR-838f and research.md §9. Claude Code, Codex CLI and OpenCode for capture;
       Claude Code and Codex CLI for automatic delivery. Vendor documentation checked
       2026-08-30.)
-- [x] CHK098 Is OpenCode's exclusion from delivery stated as a vendor limitation rather than
-      silently dropped? (FR-838b, and SC-708 says so in the criterion itself — an OpenCode
-      *capture* failure still fails SC-701 and SC-706.)
+- [x] CHK098 Is OpenCode's exclusion from delivery stated as **Cairn's decision** rather than
+      silently dropped or blamed on the vendor? (FR-838b and SC-708 both say `declined_by_cairn`
+      and both say why: OpenCode 2 does expose the hooks, and Cairn declines to depend on a beta
+      surface. An OpenCode *capture* failure still fails SC-701 and SC-706.)
 - [x] CHK099 Are the delivery points per agent unambiguous? (FR-838, FR-838c, FR-838d. Both
       committed agents expose a prompt-time hook and a session-start `compact` source, so
       post-compaction delivery is established for both — reached through a compaction-opened
@@ -374,9 +375,67 @@ survive a hostile read is decoration.
       Both are now recorded, with the reason they differ — this repository's feature script
       creates no branch.)
 
+## Final Consistency Repair (Session 2026-08-30, third pass)
+
+- [x] CHK104 Do reusable patterns have a complete server lifecycle? (`shared_patterns` is the
+      redefined safe shape — the local representation stays refused and is not sent. Promotion,
+      authorship binding, retrieval keeping its existing general-pool budget treatment, cache, deletion and
+      migration are all defined; pattern *applications* stay local. FR-708/708a/708b, SC-738,
+      `contracts/knowledge-commands.md` §3.3.)
+- [x] CHK105 Is the semantic mapping a stated deterministic algorithm rather than an intention?
+      (`contracts/extraction.md` §13.7 — redact, classify from a closed versioned lexicon,
+      candidate tokens, intersect with the vocabulary, assign roles by fixed rank with two
+      tiebreaks, decline unless complete. No model, no free text.)
+- [x] CHK106 Is declining defined, and is it counted? (§13.8 — six named conditions, each
+      recording `no_safe_semantic_mapping`. Declining is the correct outcome: a claim Cairn
+      cannot ground in its own event stream is one it could not explain later.)
+- [x] CHK107 Can SC-701 pass on a structural memory alone? (No — SC-701a requires 14 of 20
+      pre-registered decision/instruction scenarios to produce a matching `decision` or
+      `convention` record, and explicitly fails a run whose records are all structural.
+      SC-701b tests that no prompt word crosses unless independently in the vocabulary.)
+- [x] CHK108 Is the "reasoning is not learned" limitation stated rather than discovered later?
+      (§13.9, and it is a consequence of the privacy contract: reasoning is prose, and prose
+      does not cross this boundary.)
+- [x] CHK109 Does a partial consolidation batch re-elect its session immediately? (Yes —
+      `contracts/consolidation.md` §4 uses a single `CASE` statement. The earlier `NOT EXISTS`
+      guard left the session `claimed` until lease expiry, stalling a large session for five
+      minutes per batch.)
+- [x] CHK110 Are `attempts` and the five-attempt rule located and defined? (§4.1 — per event on
+      `consolidation_work`, incremented in the claim transaction so a worker that dies still
+      counts its attempt, and a failed event does not block its session from closing.)
+- [x] CHK111 Is the claim that project memory was already server-authoritative removed?
+      (Yes. `contracts/migration-cutover.md` §3.1 now refuses `memory` and `memory_relation`
+      alongside personal and team, and records the audit that disproved the claim: the upsert's
+      conflict predicate is scoped to the project, not the author.)
+- [x] CHK112 Do the two refusal lists agree? (`migration-cutover.md` §3.1 and
+      `knowledge-commands.md` §2 are the same list, and each says so.)
+- [x] CHK113 Are reads preserved after cutover? (§11.9 — the refusal is write-shaped. A demoted
+      cache with no read path could never refill, which would contradict FR-704.)
+- [x] CHK114 Is `KnowledgeRef` applied beyond traces and dedup? (`knowledge_candidates` result
+      references, verification reports, the entity-relationship diagram, and the `pattern`
+      domain are all keyed by it.)
+- [x] CHK115 Can a sessionless command be represented without inventing a session? (Yes —
+      `command_spool.session_id` is nullable and identity is scoped: `scope_kind` ∈
+      {session, store} with its own durable counter. Shipped code already represents a
+      sessionless CLI act as the nil UUID; a synthetic session would leave the second active
+      session in the worktree that its own comment warns against.)
+- [x] CHK116 Is legacy `last_verified_at` handled honestly? (Cleared on the record — a timestamp
+      beside `unverified` asserts a run the server cannot substantiate — and moved to
+      `legacy_verification_audit`, labelled untrusted, never read by a derivation.)
+- [x] CHK117 Do personal, team and pattern records have somewhere to hold a summary? (Yes —
+      `knowledge_verification`, keyed by `KnowledgeRef`. Those tables do not have and do not
+      gain the project columns; one derivation, two storage locations.)
+- [x] CHK118 Is the FR-798b contradiction resolved? (FR-798c withdraws the source-event clause
+      and explains why it was self-defeating: the event set is not stable across a reclaim, so
+      an identity including it produces the duplicate the requirement existed to prevent.
+      Source events remain recorded as evidence.)
+- [x] CHK119 Is OpenCode's exclusion stated as Cairn's decision in the criterion itself?
+      (SC-708 — `declined_by_cairn`, never a vendor limitation; OpenCode 2 does expose the
+      hooks.)
+
 ## Notes
 
-- No item is incomplete. All 100 checks pass against the specification as it now stands.
+- No item is incomplete. All 119 checks pass against the specification as it now stands.
 - CHK045 and CHK046 tracked two of the three `[NEEDS CLARIFICATION]` markers and were closed on
   2026-08-30 along with the third. The specification now carries no clarification markers, and no
   open product question remains.
@@ -384,8 +443,9 @@ survive a hostile read is decoration.
   were closed in the same pass; they are recorded here because the checklist is a record of what
   was actually checked, not only of what remained wrong.
 - The specification grew from 193 requirements at first draft, to 206 after falsification, to
-  238 after the architectural decisions of 2026-08-30 and the consistency pass that followed.
+  259 after the architectural decisions of 2026-08-30 and the consistency passes that followed.
   Essentially none of the growth is product scope: it is authorization, testability, and the
   consequences of the six decisions. No open product question remains.
 - `/speckit-analyze` is not applicable at this stage: it performs cross-artifact analysis
-  across spec.md, plan.md and tasks.md, and the latter two do not exist yet by design.
+  across spec.md, plan.md and tasks.md. plan.md now exists; tasks.md does not, by design, so the
+  cross-artifact analysis in this repair pass stood in for it.

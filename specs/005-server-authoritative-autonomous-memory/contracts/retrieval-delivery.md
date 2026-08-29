@@ -214,9 +214,11 @@ A reader who may not see a `personal_notes` item gets that row **dropped from th
 returned as a redacted or opaque reference — an opaque handle still discloses that *some*
 personal record existed and was used, exactly the enumeration FR-846a forbids regardless of
 content visibility. The filter resolves each `KnowledgeRef` in its own domain table and
-resolves each `KnowledgeRef` in its own domain table and compares ownership there; failing
-rows are excluded entirely. Aggregate `budget_tokens`/`budget_spent`/`degradation_level` return
-unfiltered — they disclose nothing about any individual record's identity. A project member
+compares ownership there; failing rows are excluded entirely, and surviving rows are re-ranked
+densely so a gap cannot betray a withheld one (§12.2). `degradation_level` returns to every
+reader; `budget_tokens` and `budget_spent` return **only to the trace's own account**, because
+the spent total minus the visible items' cost would otherwise yield the withheld items' count
+and size. A project member
 therefore cannot enumerate a colleague's personal knowledge via traces, regardless of shared
 project membership.
 

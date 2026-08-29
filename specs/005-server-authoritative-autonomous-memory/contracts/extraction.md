@@ -383,3 +383,109 @@ learn the reasoning behind it — the "because" lives only in the conversation a
 A DECISION produced by R7 is a durable, checkable, provenance-bearing claim about a subject in
 this project's own vocabulary. It is not a summary of the discussion, and the spec should not
 imply that it is.
+
+### 13.7 The mapping algorithm
+
+The design says signals carry a classification and two justified tokens. This is how the local
+machine gets there from transient vendor material, deterministically, without a model and
+without retaining a fragment of what it read.
+
+The material is read **in memory only**, during the same hook invocation that already parses,
+redacts and gates it. Nothing derived from it is retained except the four output values.
+
+```
+INPUT   transient vendor text T (a user prompt, or an assistant turn)
+        the session vocabulary V (§13.3), already built from accepted lower-seq events
+OUTPUT  (kind, subject_token, object_token, justified_by_seq)   or   DECLINE
+```
+
+**Step 1 — redact.** `redact(T)`. Every later step reads only the redacted form, so a secret
+cannot influence classification or token selection.
+
+**Step 2 — classify, from a fixed lexicon.** Cairn ships a closed, versioned map from marker
+phrases to a `decision_kind` or `instruction_kind`. It is a literal table, not a heuristic:
+
+| Marker (case-folded, whole-word) | Kind |
+|---|---|
+| `use`, `switch to`, `go with`, `adopt` | `adopt` |
+| `don't use`, `drop`, `stop using`, `reject` | `reject` |
+| `later`, `defer`, `not now`, `postpone` | `defer` |
+| `must`, `always`, `require`, `enforce` | `constrain` / `require` |
+| `never`, `forbid`, `don't` | `revert` / `forbid` |
+| `prefer`, `rather than`, `instead of` | `prefer` |
+| `revert`, `undo`, `roll back` | `revert` |
+| `only in`, `scope to`, `limit to` | `scope` |
+| `actually`, `no —`, `correction` | `correct` |
+
+Matching is **longest-phrase-wins**, and a longer match consumes its span. `don't use X` matches
+`don't use` (⇒ `reject`) and the shorter `don't` never competes for the same span — without
+this rule the commonest phrasing in the table would decline itself, and SC-701a needs 14 of 20
+scenarios to produce a record.
+
+Zero markers ⇒ **DECLINE**. Two or more markers of different kinds **on non-overlapping spans**
+⇒ **DECLINE**: an ambiguous instruction is not a fact about the project, and guessing between
+them would fabricate one.
+
+**Step 3 — candidate tokens.** Case-fold `redact(T)`, split on non-token characters, and form
+unigrams plus adjacent bigrams joined by `_`. Normalize each through the value-key normalizer
+(§7). This yields candidates in exactly the shape a key must have.
+
+**Step 4 — intersect with the vocabulary.** Keep only candidates present in `V`. **This is the
+step that makes the whole design safe**: every surviving token is something the event stream
+already established, so no word that is merely *in the prose* can survive. A sentence
+contributes nothing unless it names a file, module, command, test or established key that
+Cairn already knows.
+
+**Step 4a — choose the event kind.** The kind follows from the marker's column, not from a
+judgement: `adopt`, `reject`, `defer`, `constrain`, `prefer`, `revert` emit a
+`decision_signal`; `require`, `forbid`, `prefer`, `scope`, `correct` emit a
+`user_instruction_signal`. `prefer` appears in both, and is resolved by grammatical person: a
+second-person imperative ("use X instead of Y") is an instruction; anything else is a decision.
+If that test does not resolve, **DECLINE**.
+
+**Step 5 — assign roles, deterministically.**
+
+- `subject_token` — the surviving candidate with the **highest vocabulary rank**, where rank is
+  fixed and total: established project `topic_key` > established project `value_key` > module
+  token > file token > test token > command verb. Ties break on lowest `session_seq` of the
+  justifying event — a token justified by an established project key rather than an event sorts
+  last for this purpose, since it has no seq — then lexicographically. Both tiebreaks exist so
+  the result cannot depend on iteration order.
+- `object_token` — the highest-ranked *remaining* candidate. If none remains, the closed
+  enumeration for the kind may supply it (for `adopt`/`reject`, the object may be the subject's
+  established `value_key`); otherwise **DECLINE**.
+- `justified_by_seq` — the highest `session_seq` among the events justifying the two tokens,
+  recorded so a server refusal can name what was missing (`safe-events.md` §7.1 step 7).
+
+**Step 6 — decline unless complete.** A signal is emitted only with all four values. Otherwise
+nothing is emitted and a `capture_declined` disposition is recorded with reason
+`no_safe_semantic_mapping`.
+
+### 13.8 When Cairn declines — and why that is the right default
+
+DECLINE, with the disposition counted so the rate is visible:
+
+| Condition | Reason |
+|---|---|
+| no marker matched | nothing indicates a decision or instruction was expressed |
+| markers of two different kinds | ambiguous; guessing would fabricate a claim |
+| fewer than two tokens survive step 4 | the claim would name something the event stream never established |
+| subject and object normalize to the same token | a claim about nothing |
+| the justifying event was dropped or refused | the grounding does not exist server-side |
+| the lexicon version is unknown to the server | classification could not be reproduced |
+
+Declining is the correct outcome, not a shortfall. A recorded decision Cairn cannot ground in
+its own event stream is a claim it cannot explain later, and an unexplainable claim in durable
+memory is worse than an absent one.
+
+### 13.9 What baseline 005 does not learn
+
+**The reasoning is not learned.** R7 records *that* a decision was taken, of what kind, about
+which subject, naming which object. The "because" lives in the conversation and stays there —
+it is prose, it is not in any vocabulary, and no step above can carry it.
+
+So a decision reads as *"this project adopted `postgresql` for `storage_authority`"*, never
+*"because the team wanted stronger transactional guarantees"*. That is a real limitation and it
+is stated here rather than discovered later. It is also the direct consequence of the privacy
+contract: reasoning is expressed only in prose, and prose does not cross this boundary. A later
+extractor with a different privacy posture could learn more; baseline 005 deliberately does not.

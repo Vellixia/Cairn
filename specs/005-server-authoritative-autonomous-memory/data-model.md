@@ -71,9 +71,9 @@ generation, checkpointing and context delivery keep working (FR-744).
 | `test_executed` | `test_command` ≤512 (redacted) |
 | `test_result` | `test_outcome` ∈ {`passed`,`failed`,`unknown`}, `exit_status` i32?, `tests_total` u32?, `tests_failed` u32? |
 | `research_activity` | `resource_kind` ∈ {`docs`,`web`,`repository`,`other`} |
-| `user_instruction_signal` | `instruction_kind` ∈ {`require`,`forbid`,`prefer`,`scope`,`correct`}, `subject_token`, `object_token` |
-| `decision_signal` | `decision_kind` ∈ {`adopt`,`reject`,`defer`,`constrain`,`prefer`,`revert`}, `subject_token`, `object_token` |
-| `capture_declined`, `capture_failed` | `disposition` enum (§4), `stage` enum |
+| `user_instruction_signal` | `instruction_kind` ∈ {`require`,`forbid`,`prefer`,`scope`,`correct`}, `subject_token`, `object_token`, `justified_by_seq` u64?, `lexicon_version` u16 |
+| `decision_signal` | `decision_kind` ∈ {`adopt`,`reject`,`defer`,`constrain`,`prefer`,`revert`}, `subject_token`, `object_token`, `justified_by_seq` u64?, `lexicon_version` u16 |
+| `capture_declined`, `capture_failed` | `disposition` enum (§4), `stage` enum, `decline_reason` enum ∈ {`no_safe_semantic_mapping`,`ambiguous_classification`,`insufficient_vocabulary`,`vendor_unavailable`,`policy_excluded`} |
 | `agent_quiesced` | *(none)* |
 
 **No free text derived from user or assistant messages appears anywhere in this table.**
@@ -175,7 +175,8 @@ The repository root is machine configuration and is never transmitted (FR-753).
 ## 4. Capture dispositions
 
 `captured`, `declined_by_policy`, `capture_deadline_exceeded`, `redaction_failed`,
-`privacy_refused`, `spooled`, `spool_overflow_dropped`, `spool_saturated_dropped`,
+`privacy_refused`, `no_safe_semantic_mapping`, `spooled`, `spool_overflow_dropped`,
+`spool_saturated_dropped`,
 `transmitted`, `accepted`,
 `rejected_by_server`, `persisted`.
 
@@ -218,26 +219,35 @@ CREATE TABLE capture_disposition_counts (
 
 CREATE TABLE session_event_seq (           -- durable ordinal; survives spool drain
   session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+  next_seq   INTEGER NOT NULL DEFAULT 1
+);   -- commands use `command_seq` (below), which also covers sessionless scopes
+
+CREATE TABLE command_seq (                 -- durable counters; one row per scope
+  scope_kind TEXT NOT NULL CHECK (scope_kind IN ('session','store')),
+  scope_key  TEXT NOT NULL,                -- session id, or the store's writer_id
   next_seq   INTEGER NOT NULL DEFAULT 1,
-  next_cmd_seq INTEGER NOT NULL DEFAULT 1   -- same guarantee for commands
+  PRIMARY KEY (scope_kind, scope_key)
 );
 
 CREATE TABLE command_spool (               -- knowledge commands awaiting the server
-  command_id  TEXT PRIMARY KEY,            -- UUIDv5(session_id ‖ command_seq)
-  session_id  TEXT NOT NULL REFERENCES sessions(id),
+  command_id  TEXT PRIMARY KEY,            -- UUIDv5(scope_kind ‖ scope_key ‖ command_seq)
+  scope_kind  TEXT NOT NULL CHECK (scope_kind IN ('session','store')),
+  scope_key   TEXT NOT NULL,
+  session_id  TEXT REFERENCES sessions(id),   -- NULL for a sessionless command
   project_id  TEXT REFERENCES projects(id),
   account_id  TEXT NOT NULL,               -- exact match on claim; never NULL-open
   command_seq INTEGER NOT NULL,
   kind        TEXT NOT NULL,               -- remember | supersede | reinforce | relate |
                                            -- pin | forget | personal_create | personal_forget |
-                                           -- team_propose | verification_report
+                                           -- team_propose | verification_report |
+                                           -- pattern_promote | pattern_forget
   payload     TEXT NOT NULL,               -- intent only; no derived state (§3.1 of the contract)
   state       TEXT NOT NULL CHECK (state IN
                 ('pending','in_flight','delivered','failed','refused')),
   attempts    INTEGER NOT NULL DEFAULT 0,
   claimed_at TEXT, next_attempt_at TEXT, last_error_kind TEXT,
   created_at  TEXT NOT NULL,
-  UNIQUE (session_id, command_seq)
+  UNIQUE (scope_kind, scope_key, command_seq)
 );
 
 CREATE TABLE authority_mode (
@@ -250,7 +260,7 @@ CREATE TABLE retained_local (              -- records the server could not accep
   domain       TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
   knowledge_id TEXT NOT NULL,
   reason       TEXT NOT NULL CHECK (reason IN
-                 ('local_only','server_refused','possession_unconfirmed')),
+                 ('local_only','server_refused','possession_indeterminate')),
   detected_at  TEXT NOT NULL,
   PRIMARY KEY (domain, knowledge_id)
 );
@@ -348,7 +358,9 @@ CREATE TABLE knowledge_candidates (
   decision TEXT NOT NULL CHECK (decision IN
     ('accepted','reinforced','duplicate','conflicted','refused')),
   refusal_reason TEXT,               -- fixed vocabulary, FR-804a
-  memory_id UUID,                    -- set when accepted or reinforced
+  -- KnowledgeRef of the record this candidate became or reinforced (§6.1)
+  result_domain       TEXT CHECK (result_domain IN ('project','personal','team','pattern')),
+  result_knowledge_id UUID,
   UNIQUE (run_id, topic_key, value_key)
 );
 
@@ -376,10 +388,10 @@ CREATE TABLE retrieval_traces (
 -- is therefore bounded by traffic x 90 days, not unbounded.
 
 CREATE TABLE retrieval_trace_items (
-  trace_id      UUID NOT NULL REFERENCES retrieval_traces(trace_id),
+  trace_id      UUID NOT NULL REFERENCES retrieval_traces(trace_id) ON DELETE CASCADE,
   -- KnowledgeRef: (domain, id). Project, personal and team knowledge live in
   -- DIFFERENT tables, so a bare memory_id cannot name a personal or team record.
-  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team','pattern')),
   knowledge_id  UUID NOT NULL,
   status        TEXT NOT NULL CHECK (status IN ('considered','selected')),
   selection_rule TEXT, rank INT,
@@ -388,7 +400,7 @@ CREATE TABLE retrieval_trace_items (
 
 CREATE TABLE verification_reports (        -- runs reported, never states asserted
   report_id     UUID PRIMARY KEY,            -- SERVER-assigned
-  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team','pattern')),
   knowledge_id  UUID NOT NULL,               -- KnowledgeRef, §6.1
   project_id    UUID,                        -- NULLABLE: personal/team are project-independent
   owner_user_id UUID,                        -- set for the personal domain
@@ -410,6 +422,67 @@ CREATE TABLE verification_reports (        -- runs reported, never states assert
 ALTER TABLE memories
   ADD COLUMN origin_kind TEXT;   -- explicit | consolidated  (FR-816)
 
+-- Reusable patterns (FR-708/708a/708b, SC-738). The LOCAL representation is refused by the
+-- synchronization boundary and stays refused: `reusable_pattern` is a FORBIDDEN_ENTITY_TYPE,
+-- and its rows carry `signal_digest`, `origin_ref` and `sanitization_report`, all refused
+-- field names. This is the REPLACEMENT safe shape, and it is a different record — the local
+-- one is not relaxed, it is not sent.
+CREATE TABLE shared_patterns (
+  pattern_id    UUID PRIMARY KEY,
+  account_id    UUID NOT NULL REFERENCES users(id),   -- author, bound from the credential
+  title         TEXT NOT NULL,
+  problem       TEXT NOT NULL,
+  root_cause    TEXT NOT NULL,
+  approach      TEXT NOT NULL,
+  constraints   JSONB NOT NULL DEFAULT '[]',
+  applicability JSONB NOT NULL DEFAULT '[]',          -- language/tool vocabulary only
+  trust         TEXT NOT NULL CHECK (trust IN ('sanitized','validated','contested')),
+  topic_key     TEXT, value_key TEXT,                 -- normalized, for reconciliation
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+  forgotten_at  TIMESTAMPTZ
+);
+CREATE INDEX shared_patterns_search
+  ON shared_patterns USING GIN (to_tsvector('english', problem || ' ' || approach));
+
+-- Deliberately absent, and why:
+--   signals, signal_digest   -- the digest is a refused name; raw signals are local evidence
+--   origin_ref               -- refused name; the source project must not be nameable
+--   sanitization_report      -- refused name; the report is local diagnostic output
+--   source_memory_id         -- names a project memory, which a project-independent record
+--                            -- must not do
+--   origin_deleted           -- a fact about a local record that no longer travels
+-- A pattern is project-independent knowledge and inherits that domain's rules: it MUST NOT
+-- name the project it came from, and its origin stays a machine-local salted digest that is
+-- never transmitted (FR-708a).
+
+-- Verification summaries for the non-project domains. `memories` has its own five columns;
+-- personal_knowledge, team_knowledge and shared_patterns do not, and gain none.
+CREATE TABLE knowledge_verification (
+  domain        TEXT NOT NULL CHECK (domain IN ('personal','team','pattern')),
+  knowledge_id  UUID NOT NULL,
+  verification  TEXT NOT NULL DEFAULT 'unverified',
+  verification_authority TEXT,
+  verification_basis     JSONB NOT NULL DEFAULT '[]',
+  evidence_fact_count    INTEGER NOT NULL DEFAULT 0,
+  last_verified_at       TIMESTAMPTZ,
+  PRIMARY KEY (domain, knowledge_id)
+);
+
+CREATE TABLE legacy_verification_audit (   -- pre-cutover values, untrusted, never derived from
+  domain       TEXT NOT NULL,
+  knowledge_id UUID NOT NULL,
+  legacy_state TEXT, legacy_authority TEXT, legacy_last_verified_at TIMESTAMPTZ,
+  demoted_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (domain, knowledge_id)
+);
+
+-- The closed capability vocabulary FR-728/FR-855/SC-726 require. Health is declared per agent
+-- AND per canonical event kind, so a cell is never blank.
+--   capability = 'event:<kind>'      for each of the 21 kinds (capture)
+--              | 'deliver:session_open' | 'deliver:prompt_time'
+--              | 'deliver:post_compaction' | 'receipt'
+-- status uses the six-value vocabulary below; 'no_evidence' is a first-class answer.
 CREATE TABLE integration_health (
   project_id UUID NOT NULL, account_id UUID NOT NULL,
   writer_id  TEXT NOT NULL,                  -- the machine it was observed on (FR-857)
@@ -425,7 +498,7 @@ CREATE TABLE integration_health (
 
 CREATE TABLE delivered_context (           -- per-session dedup; server-side, §7
   session_id     UUID NOT NULL REFERENCES sessions(id),
-  domain         TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
+  domain         TEXT NOT NULL CHECK (domain IN ('project','personal','team','pattern')),
   knowledge_id   UUID NOT NULL,
   delivered_at   TIMESTAMPTZ NOT NULL,
   source_updated_at TIMESTAMPTZ NOT NULL,   -- the record's updated_at when delivered
@@ -468,6 +541,7 @@ identically in retrieval traces, delivered-context dedup, authorization and web 
 | `project` | `memories` | reader is a member of `memories.project_id` |
 | `personal` | `personal_knowledge` | reader **is** `personal_knowledge.owner_user_id` |
 | `team` | `team_knowledge` | reader is a member of the server's team; `proposed` rows additionally require author-or-admin |
+| `pattern` | `shared_patterns` | any authenticated account; patterns are project-independent and carry no project identity |
 
 Two rules follow, both binding:
 
@@ -509,13 +583,23 @@ knowledge to be re-delivered, and does not appear in the durability-loss list.
 SafeCanonicalEvent ──▶ consolidation_work ──▶ ConsolidationRun
                                                     │
                                                     ▼
-                                          KnowledgeCandidate ──▶ Memory
-                                                    │              │
-                                        candidate_source_events    │
-                                                    │              ▼
-                                          SafeCanonicalEvent   memory_relations
-                                                                   │
-Memory ◀── retrieval_trace_items ──▶ RetrievalTrace                │
-   ▲                                                               │
-   └── verification_reports (derive state) ────────────────────────┘
+                                          KnowledgeCandidate
+                                                    │
+                              result = KnowledgeRef(domain, knowledge_id)
+                                                    │
+              ┌──────────────┬──────────────┬───────┴────────┐
+              ▼              ▼              ▼                ▼
+          memories   personal_knowledge  team_knowledge  shared_patterns
+              │              │              │                │
+              └──────────────┴──────┬───────┴────────────────┘
+                                    │  every reference below is a KnowledgeRef
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+    retrieval_trace_items   delivered_context     verification_reports
+              │                                           │
+              ▼                                     (derive state)
+       RetrievalTrace
+
+candidate_source_events ──▶ SafeCanonicalEvent   (evidence, additive)
+memory_relations                                 (project domain only)
 ```

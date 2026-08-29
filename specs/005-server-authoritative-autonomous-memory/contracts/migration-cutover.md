@@ -72,13 +72,25 @@ Once `server_authority.mode = 'server_authoritative'`:
 
 | Route | Refused when |
 |---|---|
-| `POST /api/sync/batch` | any item with `entity_type ∈ {personal_knowledge, team_knowledge}` |
-| `GET /api/sync/changes/personal` | always |
-| `GET /api/sync/changes/team` | always |
+| `POST /api/sync/batch` | any item whose `entity_type` is knowledge-bearing: `memory`, `memory_relation`, `personal_knowledge`, `team_knowledge`, or a `delete` naming one of them |
+| `GET /api/sync/changes*` | **never** — see §11.9 |
 
-Every other `entity_type` (`memory`, `task`, `session`, `handoff`, relations, criteria,
-blockers) is **not** refused (FR-877) — project memory authority was already server-side
-before 005; only the personal/team dual-authority path retires.
+**Project memory is refused too.** An earlier draft exempted it on the grounds that "project
+memory authority was already server-side before 005". That was false, and an audit of `main`
+disproves it: the `memory` upsert (`crates/cairn-server/src/sync.rs:669-693`) lets a client
+payload set `content`, `state`, `superseded_by_id`, `pinned`, `reinforcement_count`,
+`distinct_origin_count` and all five verification columns, and its conflict predicate is
+`WHERE memories.project_id = $2` — scoped to the project, not the author, so any member can
+overwrite any other member's memory. That is local authority writing through a sync path, and
+FR-701 and FR-712 cover project knowledge exactly as they cover personal and team.
+
+This table is therefore the same list as `knowledge-commands.md` §2, and the two must not
+diverge: every refused shape there is refused here.
+
+Everything **not** knowledge-bearing continues (FR-877): `project`, `task`, `session`,
+`handoff`, `task_criterion`, `task_blocker`, and deletes naming those. They are work tracking
+and continuity, not durable knowledge, and their sync path is untouched — which is also what
+keeps the blast radius of cutover small.
 
 This is a **shape-based** refusal, not a client-version check — the server cannot reliably
 learn a caller's binary version. A caller emitting one of these three requests is, by
@@ -168,27 +180,37 @@ and one of: `no_recorded_author` | `author_mismatch` | `server_rejected: <reason
 POST /api/migration/possession
 Authorization: Bearer <token>
 
-{ "records": [ { "kind": "personal_knowledge", "id": "1a2b..." },
-               { "kind": "team_knowledge",     "id": "3c4d..." },
-               { "kind": "memory",             "id": "5e6f..." } ] }
+{ "records": [ { "domain": "personal", "knowledge_id": "1a2b..." },
+               { "domain": "team",     "knowledge_id": "3c4d..." },
+               { "domain": "project",  "knowledge_id": "5e6f..." },
+               { "domain": "pattern",  "knowledge_id": "7a8b..." } ] }
 ```
 
 Bounded to 500 records per call (matching `safe-events.md` §7's batch-bounding discipline); a
 larger local set is checked over multiple calls.
 
 ```json
-{ "held": ["1a2b...", "3c4d..."], "missing": ["5e6f..."] }
+{ "held":          [ { "domain": "personal", "knowledge_id": "1a2b..." } ],
+  "missing":       [ { "domain": "project",  "knowledge_id": "5e6f..." } ],
+  "indeterminate": [ { "domain": "team",     "knowledge_id": "3c4d..." } ] }
 ```
 
-| `kind` | Held requires |
-|---|---|
-| `personal_knowledge` | row exists **and** `owner_user_id` = the authenticated caller |
-| `team_knowledge` | row exists (server-global, no owner; any authenticated account may verify a team id — FR-888's domain is visible, not secret) |
-| `memory` | row exists **and** the caller is a member of its `project_id` |
+Records are named by `KnowledgeRef` (`data-model.md` §6.1), and every answer is one of three.
 
-A record failing its ownership check is reported `missing`, not refused with an error — the
-migrating client needs only "the server does not hold this for me." Only ids reported `held`
-proceed to phase 5; `missing` ids are retained (§6) and re-checked on the next run.
+| `domain` | `held` requires | `indeterminate` when |
+|---|---|---|
+| `personal` | row exists **and** `owner_user_id` = the caller | — |
+| `team` | row exists **and** the caller may see it | a `proposed` row the caller may not see (§12.5) |
+| `project` | row exists **and** the caller is a member of its `project_id` | — |
+| `pattern` | row exists in `shared_patterns` | — |
+
+`missing` means the server genuinely does not hold it for this caller. `indeterminate` means
+the server will not say — the caller cannot see the record, and answering `missing` would be a
+lie the client would act on by retaining a writable copy.
+
+Only `held` proceeds to phase 5. `missing` is retained as `server_refused` or `local_only`;
+`indeterminate` is retained **read-only** as `possession_indeterminate` (§12.2) and re-checked
+on the next `--retry-retained`.
 
 ## 6. Retained, not demoted (FR-871)
 
@@ -302,6 +324,24 @@ state that lets it keep working while the user upgrades (FR-877).
 
 These rules govern wherever an earlier section is less specific.
 
+### 12.0 What the drain actually carries
+
+Phase 2 and §4.2 originally named only the personal and team namespaces. The drain carries
+**every knowledge shape the cutover refuses, plus patterns**:
+
+| Shape | Drained | Possession-checkable | Note |
+|---|---|---|---|
+| `memory` | yes | yes | project memory is refused on the write path (§3.1), so it needs a transfer path |
+| `memory_relation` | yes | yes | keyed by its `(from, to, kind)` triple |
+| `personal_knowledge` | yes | yes | |
+| `team_knowledge` | yes | yes | visibility rules apply (§12.5) |
+| `reusable_pattern` → `shared_patterns` | yes | yes | promoted into the redefined safe shape (`knowledge-commands.md` §3.3); the local representation is never sent |
+| `pattern_application` | no | n/a | local-only evidence (FR-707) |
+
+Possession answers for all five drained shapes, keyed by `KnowledgeRef`. Without the `memory`
+and pattern rows a store could never complete phase 3 for knowledge it holds, and SC-738 would
+have no path.
+
 ### 12.1 The drain path must survive its own refusal
 
 As written, §3.1 refused every `personal_knowledge` / `team_knowledge` sync item after cutover
@@ -396,7 +436,8 @@ conflict machinery; neither record is discarded.
 
 ### 12.5 Possession is not an existence oracle
 
-The possession check answers only for records the caller could already see: project records in
+The possession check returns one of **three** answers per id — `held`, `missing`, `indeterminate` — never two. It
+answers only for records the caller could already see: project records in
 projects the caller is a member of, personal records the caller owns, and team records visible
 to the caller under the existing team visibility rules. A `proposed` team record the caller may
 not see is answered **indeterminate** — never "not held", which would be a lie the client would

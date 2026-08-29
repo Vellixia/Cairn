@@ -741,11 +741,18 @@ privacy boundary has already approved, and is specified under Consolidation.
   be identifiable as consolidation-authored corroboration rather than a second copy of the
   claim, MUST NOT be returned by recall as independent knowledge, and MUST NOT be counted as a
   distinct claim anywhere a user reads a count of what Cairn knows.
-- **FR-798b**: A corroboration endpoint MUST carry a deterministic identity derived from the
-  candidate's normalized keys and the source events it was drawn from, so that re-deriving it
-  after an abandoned claim yields the same endpoint rather than a second one. Without this,
-  a mid-pass restart would add a corroboration record and a relation on every retry, which
-  FR-797 and SC-703 forbid.
+- **FR-798b**: A corroboration endpoint MUST carry a deterministic identity that is stable
+  across re-execution, so that re-deriving it after an abandoned claim yields the same endpoint
+  rather than a second one. Without this, a mid-pass restart would add a corroboration record
+  and a relation on every retry, which FR-797 and SC-703 forbid.
+- **FR-798c**: That identity MUST NOT be derived from the set of source events. An earlier
+  formulation of FR-798b required exactly that, and it is withdrawn here because it is
+  self-defeating: the event set is *not* stable across re-execution — a reclaim after a lease
+  expires sweeps in events that arrived meanwhile, and an event that exhausts its attempts
+  leaves the batch — so an identity including it changes on retry and produces the duplicate the
+  requirement existed to prevent. Identity is derived from the project, the session and the
+  normalized keys. Source events remain recorded, additively, as evidence for the endpoint;
+  they are provenance, not identity.
 - **FR-799**: A candidate that asserts a different value for a subject already held under the
   same topic and an overlapping scope MUST record a conflict, using the existing conflict
   machinery.
@@ -1299,6 +1306,17 @@ feature's tests, and a single counterexample fails it.
   Codex CLI and OpenCode. Accuracy is a reviewed judgement recorded as such; the automated
   portion asserts existence, provenance resolution and rubric completion, and fails if any is
   missing.
+- **SC-701a**: Over a pre-registered scenario set of at least twenty sessions in which a
+  decision or a standing instruction is expressed and then acted on, at least **fourteen**
+  produce a durable `decision` or `convention` record whose subject and object tokens match the
+  scenario's declared expectation. This criterion exists because SC-701 can be satisfied by a
+  structural record alone — a test-failure `failure` memory — which would leave the feature's
+  actual purpose untested. A run in which every produced record is structural **fails**
+  SC-701a even if it passes SC-701.
+- **SC-701b**: Across the same scenario set, zero durable records contain any word from the
+  originating prompt or assistant turn that is not independently present in that session's
+  derived vocabulary. This is the falsifiable form of the claim that reasoning does not cross
+  the boundary.
 - **SC-702**: 100% of durable records produced by consolidation resolve to the session and the
   events they were derived from; zero have unresolvable provenance.
 - **SC-703**: Re-running consolidation over an unchanged set of accepted events produces zero
@@ -1316,9 +1334,9 @@ feature's tests, and a single counterexample fails it.
   generic command.
 - **SC-708**: A second session in a related area receives relevant prior knowledge with no tool
   call, for every agent FR-838a commits to automatic delivery — Claude Code and Codex CLI — at
-  each delivery point that agent's matrix records as available. OpenCode is excluded from this
-  criterion by FR-838b and its exclusion is a recorded vendor limitation, not a reclassification
-  of a failure; an OpenCode delivery failure is reported as unavailable-from-vendor and an
+  each delivery point that agent's matrix records as available. OpenCode is excluded because
+  Cairn **declines** to depend on its beta delivery surface (FR-838b), reported as
+  `declined_by_cairn` and never as a vendor limitation: OpenCode 2 does expose the hooks. An
   OpenCode *capture* failure still fails SC-701 and SC-706.
 - **SC-709**: 100% of delivered briefings are within their stated budget; zero exceed it.
 - **SC-710**: In 100% of briefings where project knowledge alone would fill the reserve,
