@@ -337,6 +337,24 @@ impl Daemon {
             return Err(e);
         }
 
+        // The token file is part of the same transition (FR-610). It is a third
+        // copy of the credential — the one a restart reads before anything else —
+        // and it used to be written by `set_token` on its own, before the config
+        // and the memory it has to agree with. A failure anywhere after that left
+        // the new token on disk beside the old account identity, which is the
+        // pairing FR-591 forbids, reachable without any concurrency at all.
+        //
+        // Rolled back with the config, so a failure leaves all three copies
+        // holding exactly what they held before.
+        if next.token != creds.token {
+            if let Err(e) = write_token_file(next.token.as_deref()) {
+                config.server_url = restore_url;
+                config.server_account_id = restore_account;
+                let _ = config.save();
+                return Err(e);
+            }
+        }
+
         next.generation = if credential_changed {
             creds.generation + 1
         } else {
@@ -352,6 +370,31 @@ impl Daemon {
     /// refuse, not substitute. See [`owner_identity`](Self::owner_identity).
     pub async fn account_identity(&self) -> Option<Uuid> {
         self.server.read().await.account_id
+    }
+}
+
+/// Write or remove the stored token, 0600 on Unix.
+///
+/// `None` removes it: a credential that no longer exists must not be left on disk
+/// for the next start to read.
+fn write_token_file(token: Option<&str>) -> std::io::Result<()> {
+    let path = cairn_core::paths::token_path();
+    match token {
+        Some(token) => {
+            cairn_core::paths::ensure_home()?;
+            std::fs::write(&path, token)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+            }
+            Ok(())
+        }
+        None => match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e),
+        },
     }
 }
 

@@ -544,3 +544,43 @@ on the previous head, and CI, which starts from an empty database, has never see
 the local test database restores it.
 
 T104 and T194 are unchanged by this round.
+
+## Release-closing pass
+
+Two known issues, fixed and nothing else touched.
+
+**The credential transition is one operation (FR-610).** `set_token` was three steps — clear the
+identity, write the token file, change the credential — and the gaps between them were
+reachable. A `GET /api/auth/me` answered under the *old* token could commit between the first
+and the third, restoring the account that had just been cleared; the third step then wrote the
+new token beside it. No step was wrong on its own.
+
+The token file is now part of `mutate_credentials`, which already owned the config and the
+in-memory copy, and `set_token` performs the clear and the change as a single write. So the
+token file, the endpoint, the account identity, the generation, the config and the in-memory
+credential move together or not at all, and a failure anywhere rolls the others back. A lookup
+that snapshotted the old generation can no longer commit: not because the window is smaller,
+but because there is no longer a moment at which the account is cleared and the credential is
+not yet changed. `logout` is the same single write, so a failed config save can no longer leave
+the credential gone from disk while the identity it belonged to is still recorded.
+
+`forget_account_identity` had no callers left and is gone rather than kept as a second way to do
+half of this.
+
+**A missing author is never a wildcard (FR-602).** The claim and both count predicates still
+read `authored_by_user_id IS NULL OR = ?` — the round-6 repair had been reverted by a restore
+during a falsification run, which is exactly the kind of thing a schema constraint does not
+catch, since the CHECK stops such a row being *written* and says nothing about what these
+queries do if one exists. Both now require an exact match. `?5 IS NULL` stays: that is the
+unfiltered claim, which project rows use, and project rows carry no author because their
+authorization is project membership.
+
+The new regression test drives the claim and count paths directly, with the CHECK suspended, so
+it describes what those queries do rather than what the schema prevents. Restoring either
+disjunction fails it.
+
+Gate: **1462 passed, 0 failed**; `cargo fmt --all -- --check`,
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` and `git diff --check`
+clean.
+
+T104 and T194 are unchanged.
