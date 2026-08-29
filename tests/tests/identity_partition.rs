@@ -1322,3 +1322,335 @@ fn a_global_outbox_row_cannot_exist_without_an_author() {
         "project rows should still carry no author"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 6. One authenticated context, adversarially (FR-604–FR-608)
+// ---------------------------------------------------------------------------
+
+/// An A→B→A switch during identity learning is still a change.
+///
+/// Comparing a credential's *contents* cannot tell "never changed" from
+/// "changed away and back while the server was answering": both leave the token
+/// and the endpoint exactly as they were. That is the ABA problem, and it is why
+/// the content-comparing check added in round 6 was not sound. A generation that
+/// only ever increases turns the question into one about time (FR-604).
+///
+/// The switching thread returns to A on purpose and repeatedly, so the window
+/// that closes on an unchanged-looking credential is the one being hammered.
+///
+/// Falsified by comparing token and endpoint instead of the generation: an
+/// answer about B is committed while A is stored, and vice versa.
+#[test]
+fn an_aba_credential_switch_does_not_look_like_no_change() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "aba-a");
+    let b = device(&server, "aba-b");
+
+    let machine = second_device_for(&server, &a.token);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    std::thread::scope(|scope| {
+        let (ta, tb) = (a.token.as_str(), b.token.as_str());
+        for offset in 0..2 {
+            let machine = &machine;
+            scope.spawn(move || {
+                // A, B, A, A, B, A … — every third round returns to where it
+                // started, which is the sequence a content comparison cannot see.
+                let pattern = [ta, tb, ta];
+                let mut round = offset;
+                while std::time::Instant::now() < deadline {
+                    let _ = machine.cairn(&["auth", "token", "set", pattern[round % 3]]);
+                    round += 1;
+                }
+            });
+        }
+    });
+
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let stored =
+        std::fs::read_to_string(machine.cairn_home().join("token")).expect("a stored token");
+    let truth = server.get_json("/api/auth/me", stored.trim());
+    let truth = truth["id"].as_str().expect("the server names the account");
+    assert_eq!(
+        account_id_in_config(&machine).as_deref(),
+        Some(truth),
+        "the recorded account is not the one the stored token belongs to"
+    );
+}
+
+/// What a restart reads back always agrees with the credential beside it.
+///
+/// The in-memory copy and the persisted copy used to be written by different
+/// paths in different orders, so a failed or interleaved save left them
+/// disagreeing — and which one a later reader trusted depended on whether the
+/// daemon had restarted since. Everything now goes through one gateway that
+/// writes the config first and memory only if that succeeded (FR-605).
+///
+/// Restarted after each of several credential boundaries, because the defect is
+/// only visible across the boundary a restart crosses.
+///
+/// Falsified by writing memory before the config, or by letting a save failure
+/// pass: the restarted daemon reads an account that does not belong to the
+/// stored token.
+#[test]
+fn every_credential_boundary_survives_a_restart_coherently() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "restartbound-a");
+    let b = device(&server, "restartbound-b");
+    let machine = second_device_for(&server, &a.token);
+
+    let agrees = |label: &str| {
+        let token = std::fs::read_to_string(machine.cairn_home().join("token")).unwrap_or_default();
+        let recorded = account_id_in_config(&machine);
+        if token.trim().is_empty() {
+            assert_eq!(
+                recorded, None,
+                "{label}: an account is recorded with no credential to justify it"
+            );
+            return;
+        }
+        let truth = server.get_json("/api/auth/me", token.trim());
+        assert_eq!(
+            recorded.as_deref(),
+            truth["id"].as_str(),
+            "{label}: the recorded account does not belong to the stored token"
+        );
+    };
+
+    for (label, args) in [
+        (
+            "after signing in as A",
+            vec!["auth", "token", "set", &a.token],
+        ),
+        (
+            "after switching to B",
+            vec!["auth", "token", "set", &b.token],
+        ),
+        (
+            "after switching back to A",
+            vec!["auth", "token", "set", &a.token],
+        ),
+    ] {
+        machine.must(&args);
+        agrees(label);
+        machine.restart_daemon();
+        agrees(&format!("{label}, across a restart"));
+    }
+
+    machine.must(&["auth", "logout"]);
+    agrees("after logging out");
+    machine.restart_daemon();
+    agrees("after logging out, across a restart");
+}
+
+/// Promotion to team refuses an account that is not a member of the source
+/// project, however long ago this machine linked it.
+///
+/// Membership was answered by `r.project.linked` — "this machine once linked
+/// this project" — which is a fact about the machine's past standing in for the
+/// caller's present authorization. A store linked by one account and then
+/// authenticated as another reported the second as a member of a project it may
+/// never have belonged to, and the promotion gate's non-member check passed on
+/// that (FR-607).
+///
+/// Falsified by restoring the `linked` proxy: the promotion is accepted.
+#[test]
+fn team_promotion_refuses_a_non_member_of_the_linked_project() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "member-a");
+
+    // A memory worth promoting, recorded while A — a genuine member — is signed
+    // in, so the only thing that changes below is who is asking.
+    let marker = format!("kestrel-{}", Uuid::now_v7().simple());
+    let created = a.sandbox.json(&[
+        "memory",
+        "add",
+        "--type",
+        "convention",
+        "--scope",
+        "project",
+        "--topic-key",
+        &format!("budget.{marker}"),
+        "--value-key",
+        "per_lane",
+        &format!("the {marker} budget is measured per lane"),
+    ]);
+    let memory_id = created["memory"]["id"]
+        .as_str()
+        .expect("a memory id")
+        .to_string();
+
+    // Someone else's account, a member of nothing here, on the same machine —
+    // which is still linked to A's project.
+    let outsider = server.new_user_token("member-outsider");
+    attach_server(&a.sandbox, &server, &outsider);
+    assert!(
+        a.sandbox
+            .query_column("SELECT CAST(COUNT(*) AS TEXT) FROM projects WHERE linked = 1")
+            .first()
+            .map(|n| n != "0")
+            .unwrap_or(false),
+        "the project is no longer linked, so the proxy this test is about is gone"
+    );
+
+    let mut mcp = Mcp::start(&a.sandbox);
+    let attempt = mcp.tool_result(
+        "cairn_remember",
+        json!({
+            "action": "promote",
+            "target": "team",
+            "memory_id": memory_id,
+        }),
+        &a.sandbox.repo_path().to_string_lossy(),
+    );
+    assert_eq!(
+        attempt["isError"], true,
+        "a non-member promoted to team on the strength of this machine having \
+         linked the project once: {attempt}"
+    );
+    assert!(
+        attempt.to_string().contains("not_a_member"),
+        "the promotion was refused, but not for want of membership: {attempt}"
+    );
+}
+
+/// Personal knowledge written before this machine ever signed in becomes the
+/// first account's, and reaches that account's other devices.
+///
+/// Owned by nobody it is permanently invisible: not in any account-scoped read,
+/// not in any lane, not on any other device — local-first without the half of
+/// the promise that makes it worth having. The first account to sign in adopts it
+/// and the backfill queues it like any other row it owns (FR-608).
+///
+/// Falsified by removing the adoption: the note never leaves this machine.
+#[test]
+fn pre_authentication_personal_knowledge_reaches_a_second_device() {
+    let Some(server) = server() else { return };
+
+    let first = Sandbox::new();
+    first.git(&[
+        "remote",
+        "add",
+        "origin",
+        "git@localhost:cairnfixture/preauth.git",
+    ]);
+    first.must(&["init"]);
+
+    // Written with no account at all.
+    let marker = format!("kestrel-{}", Uuid::now_v7().simple());
+    remember_personal(&first, &format!("the estimator {marker} rounds down"));
+    assert_eq!(
+        first.query_column("SELECT DISTINCT owner_user_id FROM personal_knowledge"),
+        vec!["00000000-0000-0000-0000-000000000000".to_string()],
+        "the note was attributed to something before any account was known"
+    );
+
+    // Signing in for the first time.
+    let email = format!("preauth-{}@example.test", Uuid::now_v7().simple());
+    server.create_user(&email, "preauth", "correct-horse-battery");
+    let token = server.token_for(&email, "correct-horse-battery");
+    let (created, status) = post_json_status_bearer(
+        &server.base,
+        "/api/projects",
+        &json!({ "name": "preauth", "repository_remote": "git@localhost:cairnfixture/preauth.git" }),
+        &token,
+    );
+    assert_eq!(status, 200, "create project: {created}");
+    attach_server(&first, &server, &token);
+    first.must(&["link", "--project", created["id"].as_str().expect("id")]);
+
+    let account = server_account_id(&server, &email);
+    assert_eq!(
+        first.query_column("SELECT DISTINCT owner_user_id FROM personal_knowledge"),
+        vec![account.clone()],
+        "the note was not adopted by the account that signed in"
+    );
+
+    first.must(&["sync", "now"]);
+    assert_eq!(
+        server.count(&format!(
+            "SELECT count(*) FROM personal_knowledge \
+             WHERE owner_user_id = '{account}' AND content LIKE '%{marker}%'"
+        )),
+        1,
+        "the adopted note never reached the server"
+    );
+
+    // And a second device of the same account receives it.
+    let second = second_device_for(&server, &token);
+    second.settle_within(
+        "the second device to receive knowledge written before the first signed in",
+        std::time::Duration::from_secs(90),
+        |s| {
+            s.query_column(&format!(
+                "SELECT CAST(COUNT(*) AS TEXT) FROM personal_knowledge \
+                 WHERE content LIKE '%{marker}%'"
+            ))
+            .first()
+            .map(String::as_str)
+                == Some("1")
+        },
+    );
+}
+
+/// Promoting to personal while the server is unreachable still files the record
+/// under the account this machine holds.
+///
+/// Who is acting is a local fact and what they may do is the peer's; taking both
+/// from one peer-dependent context made an unreachable server say "no account",
+/// so an offline personal promotion — which needs no server at all — was filed
+/// under the unattributed owner even though the credential was right there
+/// (FR-607).
+///
+/// Falsified by resolving the promoter through `AuthenticatedContext::acquire`:
+/// the record is owned by nobody.
+#[test]
+fn an_offline_personal_promotion_still_knows_which_account_is_acting() {
+    let Some(server) = server() else { return };
+    let a = device(&server, "offpromo-a");
+    a.sandbox.must(&["sync", "now"]);
+    let account = server_account_id(&server, &a.email);
+
+    let marker = format!("kestrel-{}", Uuid::now_v7().simple());
+    let created = a.sandbox.json(&[
+        "memory",
+        "add",
+        "--type",
+        "convention",
+        "--scope",
+        "project",
+        "--topic-key",
+        &format!("budget.{marker}"),
+        "--value-key",
+        "per_lane",
+        &format!("the {marker} budget is measured per lane"),
+    ]);
+    let memory_id = created["memory"]["id"].as_str().expect("an id").to_string();
+
+    // The server goes away. The credential and the learned account stay.
+    drop(server);
+
+    let mut mcp = Mcp::start(&a.sandbox);
+    let promoted = mcp.tool_result(
+        "cairn_remember",
+        json!({
+            "action": "promote",
+            "target": "personal",
+            "memory_id": memory_id,
+        }),
+        &a.sandbox.repo_path().to_string_lossy(),
+    );
+    assert_eq!(
+        promoted["isError"], false,
+        "offline promotion failed: {promoted}"
+    );
+
+    let owners = a.sandbox.query_column(&format!(
+        "SELECT owner_user_id FROM personal_knowledge WHERE content LIKE '%{marker}%'"
+    ));
+    assert_eq!(
+        owners,
+        vec![account],
+        "an offline promotion filed the record under nobody, though the account \
+         was known locally"
+    );
+}

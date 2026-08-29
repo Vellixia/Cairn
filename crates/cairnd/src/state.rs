@@ -142,6 +142,28 @@ pub struct ServerCredentials {
     /// See [`cairn_core::config::CairnConfig::server_account_id`] for why this
     /// is not the local user id.
     pub account_id: Option<uuid::Uuid>,
+    /// How many times this credential has changed, ever, in this process
+    /// (FR-604).
+    ///
+    /// **Comparing the values themselves cannot detect a change that returns.**
+    /// A token switched A → B → A leaves `token` and `url` exactly as they were,
+    /// so a check that re-reads them and finds them equal concludes nothing
+    /// happened — while an identity lookup that spanned the whole sequence
+    /// answered for a credential that was, in between, somebody else's. That is
+    /// the ABA problem, and the reason the compare-and-set added in round 6 was
+    /// still not sound: it compared contents.
+    ///
+    /// A counter that only ever increases turns "is this the same credential"
+    /// into a question about *time* rather than about equality, which is the
+    /// question every one of these paths was actually asking.
+    ///
+    /// It counts changes to the **credential** — the endpoint and the token — and
+    /// not to `account_id`, which is derived from it. Learning who a token belongs
+    /// to is that answer arriving, not the question changing, and treating it as a
+    /// change made every routine identity learn invalidate every concurrent
+    /// operation holding the same unchanged credential. See
+    /// [`Daemon::mutate_credentials`].
+    pub generation: u64,
 }
 
 impl ServerCredentials {
@@ -155,6 +177,7 @@ impl ServerCredentials {
             url: config.server_url.clone(),
             token,
             account_id: config.server_account_id,
+            generation: 0,
         }
     }
 }
@@ -233,11 +256,9 @@ impl Daemon {
     /// pending proposals would stop showing it.
     ///
     /// Notes written before any link are owned by
-    /// [`UNATTRIBUTED_OWNER`](cairn_core::domain::UNATTRIBUTED_OWNER), and stay
-    /// owned by it. Linking later does not reassign them to whichever account the
-    /// machine now authenticates as: that would attribute work to an identity
-    /// that did not do it, and would push it to a server the user had not chosen
-    /// to send it to when they wrote it.
+    /// [`UNATTRIBUTED_OWNER`](cairn_core::domain::UNATTRIBUTED_OWNER) until this
+    /// machine first signs in, at which point they are adopted by that account
+    /// (FR-608).
     ///
     /// **The fallback is not this machine's id** (FR-603). It was, and that made
     /// a local machine identity look like an account: it is identity-shaped, it
@@ -256,7 +277,76 @@ impl Daemon {
             .unwrap_or(cairn_core::domain::UNATTRIBUTED_OWNER)
     }
 
-    /// The account this machine is authenticated as, or `None`.
+    /// Change the stored credential, bumping its generation, with the persisted
+    /// copy and the in-memory copy committed together (FR-604, FR-605).
+    ///
+    /// **The single door.** Every path that alters a credential or an account
+    /// identity goes through here, so there is exactly one place where the
+    /// generation advances and exactly one ordering between disk and memory. The
+    /// paths used to differ: `set_token` wrote a file then updated memory,
+    /// `learn_account_identity` updated memory then saved a config, and
+    /// `forget_account_identity` did the reverse — which meant a failed save left
+    /// the two disagreeing, and which of them a later reader trusted depended on
+    /// whether the daemon had restarted since.
+    ///
+    /// The config is written **first** and memory only if that succeeded, so a
+    /// failure leaves both holding what they held before. Disk is the copy that
+    /// survives a restart, so a state that exists only in memory is a state that
+    /// silently changes meaning the next time the daemon starts; committing in
+    /// this order means there is no such state.
+    pub async fn mutate_credentials<F>(&self, change: F) -> std::io::Result<()>
+    where
+        F: FnOnce(&mut ServerCredentials),
+    {
+        let mut creds = self.server.write().await;
+        let mut next = ServerCredentials {
+            url: creds.url.clone(),
+            token: creds.token.clone(),
+            account_id: creds.account_id,
+            generation: creds.generation,
+        };
+        change(&mut next);
+
+        // **The generation belongs to the credential, not to everything stored
+        // beside it.** `account_id` is *derived* from the credential — it is the
+        // answer to "whose token is this" — so learning it is that answer
+        // arriving, not the question changing. An earlier draft bumped on any
+        // difference, including this one, and the consequence was a class of
+        // failure identical to the ones this whole mechanism exists to prevent:
+        // a routine identity learn invalidated every concurrent operation that
+        // had legitimately snapshotted the same unchanged credential, so
+        // namespace establishment bailed and lanes were never opened.
+        //
+        // A no-op does not advance it either, for the neighbouring reason: two
+        // concurrent learns would each observe the other's bump, each discard its
+        // own answer, and the account would never be learned at all.
+        let credential_changed = next.url != creds.url || next.token != creds.token;
+        let anything_changed = credential_changed || next.account_id != creds.account_id;
+        if !anything_changed {
+            return Ok(());
+        }
+
+        let mut config = self.config.write().await;
+        let restore_url = config.server_url.clone();
+        let restore_account = config.server_account_id;
+        config.server_url = next.url.clone();
+        config.server_account_id = next.account_id;
+        if let Err(e) = config.save() {
+            config.server_url = restore_url;
+            config.server_account_id = restore_account;
+            return Err(e);
+        }
+
+        next.generation = if credential_changed {
+            creds.generation + 1
+        } else {
+            creds.generation
+        };
+        *creds = next;
+        Ok(())
+    }
+
+    /// The account this machine is authenticated as, or `None`.    /// The account this machine is authenticated as, or `None`.
     ///
     /// No fallback, by design: a caller that needs an account and has none must
     /// refuse, not substitute. See [`owner_identity`](Self::owner_identity).

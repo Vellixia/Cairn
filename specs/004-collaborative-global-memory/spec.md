@@ -798,8 +798,25 @@ the subject section it amends.
 - **FR-603**: Global knowledge MUST NOT be routed, authored, enqueued, pushed or pulled under
   a local machine identity. Where an account is required the operation MUST fail closed;
   where knowledge may legitimately precede any account it MUST be recorded as belonging to no
-  account, and MUST NOT be reassigned when one is later learned. (amends Identity, roles and
-  account lifecycle)
+  account. (amends Identity, roles and account lifecycle)
+- **FR-604**: Whether a credential has changed MUST be decided by a monotonic generation, not
+  by comparing its contents, and the generation and any client speaking with that credential
+  MUST come from one read. Any result derived from a credential MUST NOT be committed once
+  that generation has advanced. (amends Identity, roles and account lifecycle)
+- **FR-605**: A credential and the account identity stored beside it MUST be committed
+  together, persisted copy first, through a single mutation path; a change that cannot be
+  persisted MUST leave both unchanged and report failure. (amends Identity, roles and account
+  lifecycle)
+- **FR-606**: An operation that authorizes remotely and then records locally MUST use one
+  authenticated actor for both, determined before the remote call; if the credential changes
+  in between the local record MUST NOT be written. (amends Identity, roles and account
+  lifecycle)
+- **FR-607**: Project membership used to authorize a global operation MUST be the server's
+  answer for the authenticated account, never a local proxy such as whether this machine has
+  linked the project. (amends Identity, roles and account lifecycle)
+- **FR-608**: Personal knowledge recorded before this machine authenticated MUST be adopted by
+  the first account it authenticates as, and thereafter synchronize as that account's own.
+  (amends Personal knowledge)
 
 ### Key Entities
 
