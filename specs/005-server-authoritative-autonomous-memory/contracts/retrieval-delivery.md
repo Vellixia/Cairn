@@ -108,10 +108,15 @@ Every durable item is named as either `KnowledgeRef(domain, id)` or
 
 ```sql
 delivered_context(session_id, ref_kind, domain, knowledge_id,
+                  reference_key TEXT GENERATED ALWAYS AS (
+                    CASE WHEN ref_kind = 'knowledge'
+                         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+                         ELSE 'pattern:' || knowledge_id::text END
+                  ) STORED NOT NULL,
                   delivered_at, source_updated_at, delivery_point)
 CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
     OR (ref_kind = 'pattern'   AND domain IS NULL))
-PRIMARY KEY (session_id, ref_kind, knowledge_id)
+PRIMARY KEY (session_id, reference_key)
 ```
 
 Only stable-reference sections participate — `task_memory`, `branch_memory`,
@@ -141,8 +146,8 @@ general pool `3000−300=2700`, remaining `2420`. Pattern `R1`(80), identified b
 `KnowledgeRef(personal,p1)`: `min(2340,450)=450` room, fits. `team_guidance` `G1`(40),
 identified by `KnowledgeRef(team,g1)`: remaining global allowance `450−50=400`, fits. `M1`–`M3`
 are `KnowledgeRef(project,…)`. Total spend 750. `delivered_context` gets six rows:
-`{M1,M2,M3,R1,P1,G1}`, each encoded by `ref_kind/domain?/knowledge_id`, with
-`delivery_point=session_open, delivered_at=t0`.
+`{M1,M2,M3,R1,P1,G1}`, each carrying `ref_kind/domain?/knowledge_id` plus its generated complete
+`reference_key`, with `delivery_point=session_open, delivered_at=t0`.
 
 **t1 — prompt 1**, `incremental_budget=750`. Relevant set recomputes to the same
 `{M1,M2,M3,R1,P1,G1}` — nothing new, nothing changed:
@@ -156,7 +161,9 @@ retrieval (§7, FR-849): nothing was owed, not something broke.
 (delivered, unchanged); `M4` new; `M1` re-enters on its updated timestamp. Cost
 `60+120=180 <= 750`, both admitted. `delivered_context` is upserted: `M4` inserted, `M1`'s row
 updated to `delivered_at=t2, delivery_point=prompt_time` — the primary key
-`(session_id, ref_kind, knowledge_id)` makes this an update, not a second row.
+`(session_id, reference_key)` makes this an update, not a second row. Because `reference_key`
+includes domain for knowledge, delivery of `KnowledgeRef(personal,id-X)` cannot suppress
+`KnowledgeRef(team,id-X)`.
 
 **Other-account falsification.** Account B, even if it belongs to the same project as account A,
 cannot retrieve A's `PatternRef(r1)`: resolution finds a personal-domain pattern whose
@@ -208,9 +215,11 @@ on; there is no fifth, prompt-time-only level. Where a briefing is served from c
 `session_open`/`prompt_submit`/`explicit`), `delivery_point` (where it was aimed), the
 `degradation_level` and budget accounting from §4–§5, `latency_ms`, `delivery_state`
 (`generated`|`transmitted`|`acknowledged`|`unavailable`|`failed`), `failure_reason` (set only on
-`failed`), and per-item `(ref_kind, domain?, knowledge_id,
+`failed`), and per-item `(ref_kind, domain?, knowledge_id, reference_key,
 status ∈ considered|selected, selection_rule, rank)`. The row has the same database `CHECK` as
 `delivered_context`: knowledge requires a domain; pattern requires a null reference-domain slot.
+Its primary key is `(trace_id, reference_key)`, so same-UUID project, personal, team and pattern
+items coexist in one trace.
 
 **The rendered briefing text is never in a trace** (FR-839): text mixes domains and carries
 handoff-derived material, so persisting it centrally would place one account's personal
@@ -307,7 +316,8 @@ Project, personal and team knowledge live in different tables. A bare `memory_id
 first. Traces, `delivered_context`, authorization and web rendering use
 `KnowledgeRef(domain, knowledge_id)` for ordinary knowledge and `PatternRef(pattern_id)` for a
 pattern (`data-model.md` §6.1), represented by the canonical discriminator plus nullable-domain
-slot. `updated_at` is read from the referenced record's own table. Ownership is checked in that
+slot and generated non-null `reference_key`. `updated_at` is read from the referenced record's
+own table. Ownership is checked in that
 domain's own terms: a project member is not an owner of a colleague's personal record, and a
 `PatternRef` resolves only for its personal-domain pattern's owner.
 

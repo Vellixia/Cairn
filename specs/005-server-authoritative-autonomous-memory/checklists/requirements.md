@@ -92,7 +92,7 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK035 Is every requirement singular — one obligation per identifier — so a test can fail
       it precisely?
 - [x] CHK036 Are requirement identifiers unique and non-colliding with Features 001–004?
-      (Verified mechanically after each pass; currently 270 FR and 62 SC identifiers, all within
+      (Verified mechanically after each pass; currently 272 FR and 63 SC identifiers, all within
       the FR-7xx/FR-9xx and SC-7xx bands this feature reserved, with zero intersection with the
       identifiers used by the four prior features.)
 - [x] CHK037 Is the reason for departing from the leading-digit numbering habit recorded, so a
@@ -498,12 +498,13 @@ survive a hostile read is decoration.
       retrieval trace items, delivered context, verification reports and verification summaries
       each carry a CHECK: knowledge iff domain non-null; pattern iff domain null. SC-766.)
 - [x] CHK136 Are duplicated verification-summary keys identical? (`data-model.md` and
-      `verification-summary.md` both use `PRIMARY KEY (ref_kind, knowledge_id)`, both exclude
-      nullable domain, and both carry the same CHECK. A PatternRef summary insertion is valid.)
+      `verification-summary.md` both generate the same complete `reference_key`, use it as the
+      primary key, and carry the same structural CHECK. Same-UUID personal, team and pattern
+      summaries coexist.)
 - [x] CHK137 Are retrieval examples and invariants ref-kind-aware? (Dedup storage, worked
       session example, trace item shape, authorization, web rendering and invariant text all use
-      `KnowledgeRef(domain,id)` or `PatternRef(pattern_id)`; no `(domain, knowledge_id)`-only
-      identity remains.)
+      `KnowledgeRef(domain,id)` or `PatternRef(pattern_id)`; storage identity uses their generated
+      complete `reference_key` rather than `ref_kind` plus UUID.)
 - [x] CHK138 Does verification authority report only what authentication proves? (Both client
       routes produce `remote_attested`; generic bearer auth proves account only; `cairn` is
       server-executed, and `remote_cairn` awaits a separately specified stronger evidence path.
@@ -512,10 +513,18 @@ survive a hostile read is decoration.
       plugin APIs beta, expose `event.prompt.text`, and expose `system`, `messages`, `tools`
       immediately before model dispatch. Baseline remains `declined_by_cairn` because no stable
       dedicated settled-assistant-message completion boundary was established.)
+- [x] CHK140 Does every database identity preserve the full logical reference?
+      (`retrieval_trace_items`, `delivered_context`, `knowledge_verification` and
+      `verification_reports` use generated `reference_key`; knowledge includes domain, pattern
+      has its own prefix. SC-767's identical-UUID matrix is independently exercised.)
+- [x] CHK141 Does verification report idempotency include reporting identity? (Natural key is
+      `(reference_key, account_id, verifier_kind, run_at)`: same-account retry deduplicates;
+      distinct authenticated accounts do not collapse. Authority remains server-assigned.
+      FR-811i.)
 
 ## Notes
 
-- No item is incomplete. All 139 checks pass against the specification as it now stands.
+- No item is incomplete. All 141 checks pass against the specification as it now stands.
 - CHK045 and CHK046 tracked two of the three `[NEEDS CLARIFICATION]` markers and were closed on
   2026-08-30 along with the third. The specification now carries no clarification markers, and no
   open product question remains.

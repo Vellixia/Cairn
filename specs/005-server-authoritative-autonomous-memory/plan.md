@@ -3,7 +3,7 @@
 **Feature Directory**: `specs/005-server-authoritative-autonomous-memory`
 **Git Branch**: `feature-005-spec`
 **Baseline**: `origin/main` @ `f76a9fec8a786a76dc7ffa1b0b0daf96aae08b15`
-**Spec**: [spec.md](./spec.md) — 270 functional requirements, 62 success criteria
+**Spec**: [spec.md](./spec.md) — 272 functional requirements, 63 success criteria
 **Constitution**: v1.2.1
 **Created**: 2026-08-30
 **Status**: Draft — plan only. No tasks, no implementation.
@@ -78,7 +78,7 @@ contract intact rather than trading it for extraction quality.
 | I. Usable MVP First | **PASS** — the feature is sliced agent → daemon → server → web and ends in a runnable end-to-end scenario on a real repository. |
 | II. Simple Architecture | **PASS** — no new process, service, broker, datastore or worker platform. Consolidation is deferred work inside the existing server, bounded and restartable, which II explicitly permits. The deterministic extractor adds no dependency at all. |
 | III. Fail-Soft, Server-Authoritative | **PASS** — PostgreSQL canonical, SQLite demoted to spool/cache/machine state; the agent never blocks on Cairn; deleting the local store loses nothing the server accepted. |
-| IV. Explicitly Domained Memory | **PASS** — canonical patterns are personal-domain records of type `pattern`; `PatternRef` changes reference shape, not domain. |
+| IV. Explicitly Domained Memory | **PASS** — canonical patterns are personal-domain records of type `pattern`; `PatternRef` changes reference shape, not domain; generated reference identity includes the full domain for every `KnowledgeRef`. |
 | V. Privacy by Default | **PASS** — raw material never leaves the machine; only gate-approved structure crosses; the baseline extractor introduces no second recipient. |
 | VI. Deterministic Data Boundaries | **PASS** — event identity, ingest and consolidation are all idempotent and clock-independent. |
 | VII. Testable Behavior | **PASS** — every success criterion names an observation point; adversarial corpora are required rather than described. |
@@ -142,7 +142,7 @@ IV, and needs no constitutional amendment.
 
 ```text
 specs/005-server-authoritative-autonomous-memory/
-├── spec.md                  # approved contract (270 FR, 62 SC)
+├── spec.md                  # approved contract (272 FR, 63 SC)
 ├── research.md              # current-main audit + vendor evidence (preserved, extended)
 ├── plan.md                  # this file
 ├── data-model.md            # entities, local schema v8, server schema v4

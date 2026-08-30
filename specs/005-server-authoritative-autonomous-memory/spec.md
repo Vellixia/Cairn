@@ -912,6 +912,11 @@ privacy boundary has already approved, and is specified under Consolidation.
   `remote_cairn` MUST NOT be produced until a separately specified trusted evidence path proves
   that a Cairn verifier executed the reported client run; generic bearer authentication, a
   route name and a caller-supplied discriminator prove no such thing.
+- **FR-811i**: Verification-report duplicate identity MUST include the complete referenced
+  record, the authenticated reporting `account_id`, `verifier_kind` and `run_at`. Retrying that
+  same logical report under the same account MUST be idempotent; reports from different
+  authenticated accounts MUST remain distinct. This identity rule MUST NOT let either account
+  assert verification authority.
 - **FR-812**: A candidate derived from activity Cairn could not attribute to a project MUST
   NOT be attributed to one by guesswork.
 - **FR-813**: Consolidation MUST be observable while running: its throughput and its failures
@@ -942,6 +947,11 @@ privacy boundary has already approved, and is specified under Consolidation.
   domain-less. In particular, a canonical reusable pattern MUST carry `domain = personal` even
   though polymorphic references encode it as `PatternRef(pattern_id)` with a distinct
   discriminator shape.
+- **FR-819a**: Whenever a polymorphic knowledge-or-pattern reference participates in database
+  identity, the complete logical reference MUST participate: `KnowledgeRef(domain,id)` includes
+  its project/personal/team domain, while `PatternRef(id)` uses its distinct encoded identity.
+  `ref_kind=knowledge` plus a UUID is insufficient because separate domain tables may contain
+  the same UUID.
 - **FR-820**: Domains MUST remain visibly separate in every result. Cairn MUST NOT merge
   domains into a single ranked list.
 - **FR-821**: Project knowledge MUST NOT be displaceable by personal or team guidance. Broader
@@ -1502,6 +1512,13 @@ feature's tests, and a single counterexample fails it.
   verification summaries — the database accepts knowledge references only with a non-null
   project/personal/team domain and pattern references only with a null reference-domain slot.
   Every inverse combination is rejected by a database `CHECK`, not merely by application code.
+- **SC-767**: With the same UUID `id-X` deliberately present as project, personal and team
+  knowledge and as a pattern, all four valid references coexist in one retrieval trace;
+  personal delivery does not suppress team delivery; personal, team and pattern verification
+  summaries remain distinct from the project summary; reports across all four references remain
+  distinct; and two authenticated accounts reporting the same project or team reference do not
+  collide. Repeating the same account's same logical report remains idempotent, and every invalid
+  `ref_kind`/domain combination is rejected structurally.
 - **SC-739**: Restarting the server at each of at least twenty pre-registered points during
   consolidation, including mid-pass, yields the same durable knowledge, the same relations and
   the same reinforcement counts as an uninterrupted run over the same events, and leaves zero

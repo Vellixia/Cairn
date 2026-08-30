@@ -425,11 +425,16 @@ CREATE TABLE retrieval_trace_items (
   ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
   domain        TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
   knowledge_id  UUID NOT NULL,                       -- knowledge id, or pattern_id
+  reference_key TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
   status        TEXT NOT NULL CHECK (status IN ('considered','selected')),
   selection_rule TEXT, rank INT,
   CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
       OR (ref_kind = 'pattern'   AND domain IS NULL)),
-  PRIMARY KEY (trace_id, ref_kind, knowledge_id)
+  PRIMARY KEY (trace_id, reference_key)
 );
 
 CREATE TABLE verification_reports (        -- runs reported, never states asserted
@@ -437,6 +442,11 @@ CREATE TABLE verification_reports (        -- runs reported, never states assert
   ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
   domain        TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
   knowledge_id  UUID NOT NULL,               -- KnowledgeRef id, or pattern_id
+  reference_key TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
   project_id    UUID,                        -- NULLABLE: personal/team are project-independent
   owner_user_id UUID,                        -- set for personal knowledge and PatternRef
   account_id    UUID NOT NULL,               -- the reporting account, from the credential
@@ -447,7 +457,9 @@ CREATE TABLE verification_reports (        -- runs reported, never states assert
   received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
   CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
       OR (ref_kind = 'pattern'   AND domain IS NULL)),
-  UNIQUE (ref_kind, knowledge_id, verifier_kind, run_at)  -- duplicate-run identity
+  -- Same authenticated account retrying the same logical run is a duplicate. Different
+  -- accounts reporting the same record are distinct reports.
+  UNIQUE (reference_key, account_id, verifier_kind, run_at)
 );
 
 -- Verification columns ALREADY EXIST on the server `memories` table and are NOT re-added:
@@ -505,6 +517,11 @@ CREATE TABLE knowledge_verification (
   ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
   domain        TEXT CHECK (domain IN ('personal','team')),  -- NULL iff ref_kind='pattern'
   knowledge_id  UUID NOT NULL,   -- knowledge id, or pattern_id
+  reference_key TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
   verification  TEXT NOT NULL DEFAULT 'unverified',
   verification_authority TEXT,
   verification_basis     JSONB NOT NULL DEFAULT '[]',
@@ -512,9 +529,7 @@ CREATE TABLE knowledge_verification (
   last_verified_at       TIMESTAMPTZ,
   CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
       OR (ref_kind = 'pattern'   AND domain IS NULL)),
-  -- PK excludes `domain`: it is nullable for a pattern, and PostgreSQL forces NOT NULL on
-  -- every primary-key column. (ref_kind, knowledge_id) is unique on its own.
-  PRIMARY KEY (ref_kind, knowledge_id)
+  PRIMARY KEY (reference_key)
 );
 
 CREATE TABLE legacy_verification_audit (   -- pre-cutover values, untrusted, never derived from
@@ -549,12 +564,17 @@ CREATE TABLE delivered_context (           -- per-session dedup; server-side, §
   ref_kind       TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
   domain         TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
   knowledge_id   UUID NOT NULL,                      -- knowledge id, or pattern_id
+  reference_key  TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
   delivered_at   TIMESTAMPTZ NOT NULL,
   source_updated_at TIMESTAMPTZ NOT NULL,   -- the record's updated_at when delivered
   delivery_point TEXT NOT NULL,
   CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
       OR (ref_kind = 'pattern'   AND domain IS NULL)),
-  PRIMARY KEY (session_id, ref_kind, knowledge_id)
+  PRIMARY KEY (session_id, reference_key)
 );
 
 CREATE TABLE capture_dispositions (        -- funnel source; client-reported + server-observed
@@ -601,6 +621,11 @@ Where a table must reference either, it carries a discriminator rather than a wi
 ref_kind  TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern'))
 domain    TEXT     CHECK (domain IN ('project','personal','team'))  -- NULL iff ref_kind='pattern'
 record_id UUID NOT NULL
+reference_key TEXT GENERATED ALWAYS AS (
+  CASE WHEN ref_kind = 'knowledge'
+       THEN 'knowledge:' || domain || ':' || record_id::text
+       ELSE 'pattern:' || record_id::text END
+) STORED NOT NULL
 CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
     OR (ref_kind = 'pattern'   AND domain IS NULL))
 ```
@@ -608,7 +633,10 @@ CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
 Here `domain IS NULL` means only that the polymorphic row contains a `PatternRef` rather than a
 `KnowledgeRef`. Resolving that `PatternRef` MUST find a `shared_patterns` row whose own domain is
 explicitly `personal`. Every concrete table using this shape repeats the `CHECK`; application
-validation alone is insufficient (SC-766).
+validation alone is insufficient (SC-766). Wherever the reference participates in row identity,
+the generated non-null `reference_key` participates in the primary or unique key. Thus equal
+UUIDs in different knowledge domains remain different identities, while `PatternRef(id)` has
+its own `pattern:<id>` identity (FR-819a, SC-767).
 
 **A memory relation is not a `KnowledgeRef` either.** A relation is identified by its own natural
 key, `RelationRef = (from_memory_id, to_memory_id, kind)`, which is the primary key
@@ -730,6 +758,7 @@ SafeCanonicalEvent ──▶ consolidation_work ──▶ ConsolidationRun
               │              │              │                │
               └──────────────┴──────┬───────┴────────────────┘
                                     │  referenced by (ref_kind, domain?, id)
+                                    │  identity = generated reference_key
               ┌─────────────────────┼─────────────────────┐
               ▼                     ▼                     ▼
     retrieval_trace_items   delivered_context     verification_reports

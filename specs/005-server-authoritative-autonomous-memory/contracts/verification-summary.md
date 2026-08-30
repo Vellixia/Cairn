@@ -119,8 +119,11 @@ server-maintained. `evidence_fact_count` counts accepted reports, never a client
 ## 5. Report identity and duplicate runs
 
 `report_id` is **server-assigned**. The natural key is
-`UNIQUE (ref_kind, knowledge_id, verifier_kind, run_at)`. The discriminator distinguishes a
-`KnowledgeRef` from a `PatternRef`; nullable `domain` is not part of the key.
+`UNIQUE (reference_key, account_id, verifier_kind, run_at)`, where `reference_key` is generated
+from the complete logical reference. Domain is therefore identity for knowledge, and the
+authenticated reporting account is identity for a report. Same UUIDs across project, personal,
+team and pattern do not collide; two accounts reporting the same project/team record do not
+collapse. A retry by the same account with the same reference, verifier kind and `run_at` does.
 
 Without it, the §6 rule requiring a *second, subsequent* passed run to leave `conflicted` is
 satisfied by submitting one run twice, and the guarantee is decorative. A repeat of the same
@@ -193,6 +196,11 @@ CREATE TABLE knowledge_verification (
   ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
   domain        TEXT CHECK (domain IN ('personal','team')),  -- NULL iff ref_kind='pattern'
   knowledge_id  UUID NOT NULL,   -- knowledge id, or pattern_id
+  reference_key TEXT GENERATED ALWAYS AS (
+    CASE WHEN ref_kind = 'knowledge'
+         THEN 'knowledge:' || domain || ':' || knowledge_id::text
+         ELSE 'pattern:' || knowledge_id::text END
+  ) STORED NOT NULL,
   verification  TEXT NOT NULL DEFAULT 'unverified',
   verification_authority TEXT,
   verification_basis     JSONB NOT NULL DEFAULT '[]',
@@ -200,14 +208,15 @@ CREATE TABLE knowledge_verification (
   last_verified_at       TIMESTAMPTZ,
   CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
       OR (ref_kind = 'pattern'   AND domain IS NULL)),
-  PRIMARY KEY (ref_kind, knowledge_id)
+  PRIMARY KEY (reference_key)
 );
 ```
 
-`domain` is deliberately absent from the primary key because PostgreSQL makes every primary-key
-column `NOT NULL`, which would make a `PatternRef` row impossible. The `CHECK` makes the nullable
-slot safe: knowledge requires a domain; pattern requires it null. The resolved pattern row
-itself still has `domain = personal`.
+`reference_key` is `knowledge:<domain>:<uuid>` or `pattern:<uuid>` and is generated from the
+constrained columns, never supplied independently. It is non-null and contains the complete
+logical reference, so personal and team summaries with an identical UUID coexist. The `CHECK`
+still makes the nullable slot safe: knowledge requires a domain; pattern requires it null. The
+resolved pattern row itself still has `domain = personal`.
 
 The project domain keeps using `memories`' own columns, because they exist, are already
 populated, and moving them would be a migration with no benefit. Readers resolve a summary by
