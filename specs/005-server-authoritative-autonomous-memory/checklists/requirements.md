@@ -92,7 +92,7 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK035 Is every requirement singular — one obligation per identifier — so a test can fail
       it precisely?
 - [x] CHK036 Are requirement identifiers unique and non-colliding with Features 001–004?
-      (Verified mechanically after each pass; currently 259 FR and 55 SC identifiers, all within
+      (Verified mechanically after each pass; currently 268 FR and 59 SC identifiers, all within
       the FR-7xx/FR-9xx and SC-7xx bands this feature reserved, with zero intersection with the
       identifiers used by the four prior features.)
 - [x] CHK037 Is the reason for departing from the leading-digit numbering habit recorded, so a
@@ -433,9 +433,54 @@ survive a hostile read is decoration.
       (SC-708 — `declined_by_cairn`, never a vendor limitation; OpenCode 2 does expose the
       hooks.)
 
+## Pre-Task Repair (Session 2026-08-30, fourth pass)
+
+- [x] CHK120 Are patterns kept out of the domain vocabulary? (FR-708c. `KnowledgeRef.domain`
+      remains project/personal/team; a pattern is `PatternRef(pattern_id)`, and tables that may
+      reference either carry a `ref_kind` discriminator. Constitution IV is not amended and
+      plan.md's "domains unchanged" is now true.)
+- [x] CHK121 Is a relation given its correct reference shape? (`RelationRef(from, to, kind)` —
+      `memory_relations` has no surrogate key and is not given one. Used by drain and possession.)
+- [x] CHK122 Are server-backed patterns least-privilege? (FR-708d/FR-708e — owner-scoped by
+      default; widening goes through team propose-and-ratify, never through pattern visibility.
+      Storing centrally is durability, not publication. SC-761.)
+- [x] CHK123 Is pattern promotion idempotent with a privacy-safe identity? (FR-708f —
+      `pattern_id` from owner plus a digest of normalized problem/root cause/approach, all
+      fields that already cross. The local `signal_digest + root_cause_digest` identity uses two
+      refused names and could not travel. SC-760.)
+- [x] CHK124 Is pattern trust prevented from being asserted? (FR-708g — the server stores only
+      `sanitized`, the one level it can establish. `validated`/`contested` derive from
+      local-only applications and stay local, labelled machine-local. SC-762.)
+- [x] CHK125 Does five attempts mean five that ran? (Yes — the claim predicate excludes
+      `attempts >= 5` and the retirement sweep runs after a pass, never before. The earlier form
+      retired an event at the start of its fifth pass, so only four ever executed.)
+- [x] CHK126 Is there one authoritative migration flow? (Phase 2 in §4 now names every drained
+      record type with its reference shape; §12.0 points at it rather than restating it.)
+- [x] CHK127 Can retained-local name every retained record type? (`ref_kind ∈
+      knowledge|pattern|relation`, with a CHECK that the right columns are populated for each.)
+- [x] CHK128 Is verification provenance non-assertable? (Two distinct routes —
+      `/api/verification/runs` → `remote_cairn`, `/api/verification/attestations` →
+      `remote_attested` — so authority comes from the arrival path, not a field. `cairn` has no
+      HTTP route at all. A payload naming an authority is refused, not ignored.)
+- [x] CHK129 Is `prefer` classification deterministic? (Step 4a keys the event kind on the
+      **source role** — which vendor field the material came from — replacing an undefined
+      "grammatical person" test. A marker with no counterpart for the chosen kind declines.)
+- [x] CHK130 Are the vendor source fields recorded exactly? (§13.10 — `UserPromptSubmit.prompt`
+      and `Stop`/`SubagentStop.last_assistant_message` for Claude Code and Codex CLI, verified
+      against vendor documentation on 2026-08-30. `StopFailure.last_assistant_message` and
+      `MessageDisplay.delta` are explicitly excluded: the first carries an API error string, the
+      second a partial stream.)
+- [x] CHK131 Is OpenCode's semantic-signal decline recorded rather than silent? (FR-727e and the
+      capture matrix — OpenCode has no stable prompt field and no assistant-text hook at all in
+      v2. Structural capture is unaffected, and SC-701a's population is stated.)
+- [x] CHK132 Is the legacy verification demotion product-authorized? (FR-811e–FR-811g and
+      SC-763, so it is no longer plan-only mechanism: unsubstantiated server state demotes,
+      client-earned state is untouched, old values survive only as untrusted audit metadata, and
+      the demoted count is reported.)
+
 ## Notes
 
-- No item is incomplete. All 119 checks pass against the specification as it now stands.
+- No item is incomplete. All 132 checks pass against the specification as it now stands.
 - CHK045 and CHK046 tracked two of the three `[NEEDS CLARIFICATION]` markers and were closed on
   2026-08-30 along with the third. The specification now carries no clarification markers, and no
   open product question remains.

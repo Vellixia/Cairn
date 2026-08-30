@@ -187,9 +187,11 @@ cairn init
 cairn link --server https://<host>
 cairn memory list > /tmp/after.txt
 diff /tmp/before.txt /tmp/after.txt      # durable knowledge: identical
+cairn pattern list                       # reusable patterns survive too (SC-738)
 ```
 
-Project, personal and team knowledge survive. What does **not** survive, and what Cairn names
+Project, personal and team knowledge survive, and so do reusable patterns — server-backed as of
+this feature, and visible only to the account that owns them. What does **not** survive, and what Cairn names
 rather than hiding:
 
 ```bash
@@ -252,6 +254,7 @@ The run has passed when all of these hold:
 - [ ] Replay produced only `duplicate`
 - [ ] A mid-flight restart changed no durable outcome
 - [ ] Destroying the local store lost nothing the server had accepted
+- [ ] Reusable patterns survived, and only their owner can see them
 - [ ] Cairn named exactly what the deletion did lose
 - [ ] Health reported configuration and runtime capture as different things
 - [ ] Receipt reported `unavailable / no evidence`, not a green check

@@ -66,8 +66,10 @@ the server store it.
 | Forget personal knowledge | `POST /api/personal/knowledge/{id}/forget` | tombstone |
 | Propose team knowledge | `POST /api/team/knowledge` | `team_knowledge` upsert |
 | Ratify / retire | `POST /api/team/{id}/ratify` · `/retire` *(exist)* | — |
-| Report a verification run | `POST /api/verification/reports` | client-set verification fields |
+
 | Promote a reusable pattern | `POST /api/patterns` | *(no prior path — patterns never synced)* |
+| Report a Cairn-run check | `POST /api/verification/runs` | client-set verification fields |
+| Relay an agent attestation | `POST /api/verification/attestations` | client-set authority |
 | Forget a pattern | `POST /api/patterns/{id}/forget` | — |
 
 ### 3.1 What a command may not carry
@@ -100,7 +102,8 @@ new record and links it — visible, attributed and reversible, rather than a si
 
 ## 3.3 Reusable patterns
 
-Patterns are the one domain with no prior server path at all: `reusable_pattern` is a refused
+Patterns are the one record type with no prior server path at all (they are a record type, not
+a fourth domain — FR-708c): `reusable_pattern` is a refused
 entity type and its local row carries three refused field names, so it has never travelled.
 FR-708b requires the refusal to be lifted **only** for a redefined representation, and that is
 what `shared_patterns` is (`data-model.md` §6). The local table is not relaxed and is not sent.
@@ -109,12 +112,29 @@ what `shared_patterns` is (`data-model.md` §6). The local table is not relaxed 
 approach, constraints, applicability. The client derives it from the local row and **drops**
 `signals`, `signal_digest`, `origin_ref`, `sanitization_report`, `source_memory_id` and
 `origin_deleted`. Promotion passes the existing global-content validator, so a pattern that
-names its source project is refused exactly as personal or team knowledge would be. `trust`
-may be `sanitized`, `validated` or `contested` — never `candidate`, which is a local-only
-state meaning "not yet fit to leave".
+names its source project is refused exactly as personal or team knowledge would be. `trust` is
+**not accepted from the client at all** — the server assigns `sanitized`, the one level it can
+establish (see **Trust** below). A local `candidate` is not promotable: it means "not yet fit to
+leave".
 
-**Authorship.** `account_id` is bound from the credential (Principle XI). The originating
-project is never transmitted; the local salted origin digest stays local (FR-708a).
+**Ownership and visibility.** `owner_user_id` is bound from the credential (Principle XI), and a
+server-backed pattern is visible **only to its owner** (FR-708d, `data-model.md` §6.2). Storing
+a pattern centrally is durability, not publication. Widening one beyond its owner is a separate
+explicit act through team governance — propose, then a human administrator ratifies — never a
+consequence of having promoted it (FR-708e). The originating project is never transmitted; the
+local salted origin digest stays local (FR-708a).
+
+**Identity.** `pattern_id = UUIDv5(CAIRN_PATTERN_NS, owner_user_id ‖ content_key)` where
+`content_key` digests the normalized problem, root cause and approach — all fields that already
+cross. Local duplicate identity used `signal_digest + root_cause_digest`, and both are refused
+names, so the safe shape derives its identity from safe content instead. Promotion is therefore
+an upsert: a retry and a re-run migration converge on one record (FR-708f).
+
+**Trust.** The server stores only `sanitized` — the one level it can establish, meaning the
+record passed the privacy gate. `validated` and `contested` derive from `pattern_applications`,
+which stay local (FR-707), so the server has no evidence for them and a client asserting one
+would be asserting a state it earned privately on a record the server cannot check. Those levels
+remain local and are displayed as machine-local rather than canonical (FR-708g).
 
 **Retrieval and cache.** Patterns keep exactly the budget treatment they have today: the
 `patterns` section, in its existing `SECTION_ORDER` position, admitted from the general pool by
@@ -194,7 +214,8 @@ authoritative because a command is waiting (FR-709, FR-787).
 Phase 2 of migration delivers legacy-shaped knowledge rows, which §2 refuses. The exemption is
 narrow and self-closing (`migration-cutover.md` §12.1):
 
-- `POST /api/migration/drain` accepts the four knowledge entity shapes **only** for a store that
+- `POST /api/migration/drain` accepts the five drained record shapes (`migration-cutover.md`
+  §4.2) **only** for a store that
   has registered a migration and presents its migration token.
 - It is refused for any store without a registered migration, so it is not a general bypass.
 - It closes when the migration completes, so a migrated store cannot keep using it.

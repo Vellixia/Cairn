@@ -377,6 +377,22 @@ server or explicitly reported as unmigrated, with authority switching only if th
   refused fields, and lifting it MUST be recorded as a deliberate narrowing with the replacement
   representation stated. Removing the entity from the refusal list without redefining what it
   carries is forbidden.
+- **FR-708c**: A reusable pattern MUST NOT become a fourth knowledge domain. The durable domains
+  remain project, personal and team. A pattern is a distinct record type with its own reference
+  shape, and Feature 005 introduces no new domain.
+- **FR-708d**: A server-backed pattern MUST be visible only to the account that owns it. Server
+  durability is not publication: promoting a pattern for safekeeping MUST NOT make one
+  developer's cross-project knowledge readable by every account on the server.
+- **FR-708e**: Widening a pattern beyond its owner MUST use the existing team governance — an
+  explicit proposal that a human administrator ratifies. There MUST NOT be a pattern-specific
+  sharing path, and pattern visibility MUST NOT be the mechanism by which anything becomes
+  team-wide.
+- **FR-708f**: Promotion of a pattern MUST be idempotent. A pattern MUST carry a stable identity
+  derived only from content the privacy boundary already permits to cross, so that a retried
+  promotion and a re-run migration converge on one record rather than creating duplicates.
+- **FR-708g**: Server-held pattern trust MUST NOT be assertable by a client. A trust level the
+  server has no evidence for MUST NOT be storable; trust derived from local pattern applications
+  remains local, and is reported as machine-local rather than canonical.
 - **FR-709**: Cairn MUST NOT create durable knowledge locally that the server has not
   accepted and that has no path to acceptance. A local record awaiting delivery is a queued
   write, not an alternative truth, and MUST be represented as such.
@@ -445,6 +461,10 @@ server or explicitly reported as unmigrated, with authority switching only if th
 - **FR-727d**: Semantic signal structure MUST be derivable without a model. A model MAY propose
   the classification or the tokens, but the vocabulary check governs the outcome either way, so
   a model is never the gate and is never required.
+- **FR-727e**: The vendor field supplying each role's transient material MUST be named per agent
+  in the capture matrix, and an agent whose vendor exposes no stable field for a role MUST have
+  semantic signal capture reported as declined by Cairn, with the reason — never as a silent
+  absence. Structural capture is unaffected by such a decline.
 - **FR-728**: Cairn MUST declare, per agent and per canonical event kind, which of the
   following holds: supported, unsupported by the vendor, declined by Cairn, adapter not
   implemented, or failing at runtime.
@@ -856,10 +876,21 @@ privacy boundary has already approved, and is specified under Consolidation.
 - **FR-811c**: A verification summary MUST NOT carry raw evidence: no observed values, no source
   locators, no digests of file content, no command output, no local paths. It carries state,
   authority, a timestamp and counts.
-- **FR-811d**: Where a summary cannot be established — because the run was local-only, or its
+- **FR-811d**: Where a summary cannot be established — because the run was local-only, or the
   report was refused — the server MUST hold the knowledge as unverified rather than inheriting a
   state it cannot justify. Unverified is a truthful answer; an unsubstantiated `verified` is the
   overclaim Principle X forbids.
+- **FR-811e**: At cutover, server-held verification state that no accepted run report
+  substantiates MUST be demoted to unverified, and its authority, basis, fact count and
+  last-verified timestamp MUST stop supporting a verification claim. Those values were writable
+  by any project member before cutover, so they never established that a run occurred.
+- **FR-811f**: The demotion MUST NOT reach a client. Verification state a machine derived from
+  runs it actually performed MUST survive untouched, and the server MUST NOT propagate its
+  demoted state to any client.
+- **FR-811g**: Demoted values MAY be retained only as explicitly untrusted audit metadata,
+  labelled as pre-cutover and never read by any derivation, never displayed as a current state,
+  and never promotable back into one. Cairn MUST report how many records were demoted, so the
+  change is visible rather than silent.
 - **FR-812**: A candidate derived from activity Cairn could not attribute to a project MUST
   NOT be attributed to one by guesswork.
 - **FR-813**: Consolidation MUST be observable while running: its throughput and its failures
@@ -911,6 +942,7 @@ official documentation, checked on 2026-08-30, and from the adapters on `main`.
 | Capability | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
 | Capture events | documented, stable | documented, stable | documented (v1 bus events + plugin hooks) |
+| Semantic signals | supported | supported | declined by Cairn — no stable prompt or assistant-text field |
 | Session-open delivery | documented, stable | documented, stable | no stable documented injection point |
 | Prompt-time retrieval | documented, stable | documented, stable | exists in v2 beta; Cairn declines to depend on it |
 | Post-compaction opportunity | via session-open `compact` trigger | via session-open `compact` trigger | pre-compaction only |
@@ -1309,7 +1341,9 @@ feature's tests, and a single counterexample fails it.
 - **SC-701a**: Over a pre-registered scenario set of at least twenty sessions in which a
   decision or a standing instruction is expressed and then acted on, at least **fourteen**
   produce a durable `decision` or `convention` record whose subject and object tokens match the
-  scenario's declared expectation. This criterion exists because SC-701 can be satisfied by a
+  scenario's declared expectation. The population is the agents that emit semantic signals —
+  Claude Code and Codex CLI (FR-727e); OpenCode is excluded here and remains in SC-701 and
+  SC-706, which test capture. This criterion exists because SC-701 can be satisfied by a
   structural record alone — a test-failure `failure` memory — which would leave the feature's
   actual purpose untested. A run in which every produced record is structural **fails**
   SC-701a even if it passes SC-701.
@@ -1407,6 +1441,17 @@ feature's tests, and a single counterexample fails it.
   FR-805a and FR-805a1 rather than counted here — it stores nothing and coordinates nothing.
 - **SC-738**: Reusable patterns survive deletion of the local store in 100% of trials, closing
   the gap Feature 004 deferred.
+- **SC-760**: Promoting the same pattern twice, and re-running migration over a store whose
+  patterns already promoted, each yield exactly one server record; zero duplicates across at
+  least ten trials.
+- **SC-761**: Zero server-held patterns are readable by an account that does not own them,
+  asserted across retrieval, traces, the read APIs and every web view.
+- **SC-762**: Zero server-held patterns carry a trust level other than the one the server can
+  establish; a client attempting to assert a stronger level is refused in 100% of trials.
+- **SC-763**: At cutover, 100% of server-held verification states unsupported by an accepted
+  run report are demoted to unverified, and the demoted count is reported. Zero client-held
+  verification states change as a result, asserted by comparing every client's local state
+  before and after.
 - **SC-739**: Restarting the server at each of at least twenty pre-registered points during
   consolidation, including mid-pass, yields the same durable knowledge, the same relations and
   the same reinforcement counts as an uninterrupted run over the same events, and leaves zero

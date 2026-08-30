@@ -436,12 +436,28 @@ already established, so no word that is merely *in the prose* can survive. A sen
 contributes nothing unless it names a file, module, command, test or established key that
 Cairn already knows.
 
-**Step 4a — choose the event kind.** The kind follows from the marker's column, not from a
-judgement: `adopt`, `reject`, `defer`, `constrain`, `prefer`, `revert` emit a
-`decision_signal`; `require`, `forbid`, `prefer`, `scope`, `correct` emit a
-`user_instruction_signal`. `prefer` appears in both, and is resolved by grammatical person: a
-second-person imperative ("use X instead of Y") is an instruction; anything else is a decision.
-If that test does not resolve, **DECLINE**.
+**Step 4a — choose the event kind, from the source role.** The kind follows from **which vendor
+field the material came from**, not from any reading of the text:
+
+| Source field | Emits |
+|---|---|
+| the user-prompt field (§13.10) | `user_instruction_signal` |
+| the assistant-message field (§13.10) | `decision_signal` |
+
+This is deterministic because the adapter knows which field it read, and it needs no grammatical
+analysis. It is also the right semantics: an instruction is something the *user* said, and a
+decision is something the *session* concluded.
+
+An earlier form resolved the overlap by "grammatical person — a second-person imperative is an
+instruction", which is not a deterministic rule at all. Person detection over free text is
+exactly the language analysis this design refuses to do, and it was undefined for every input
+that is not a clean imperative.
+
+The marker table's two columns now constrain rather than choose: a marker that has no counterpart
+for the chosen kind ⇒ **DECLINE**. So `adopt`/`reject`/`defer`/`revert` from a user prompt
+decline (they are decision-only markers), and `scope`/`correct` from an assistant message
+decline (instruction-only). `prefer` and `constrain`/`require` exist in both columns and map by
+source role with no ambiguity left to resolve.
 
 **Step 5 — assign roles, deterministically.**
 
@@ -458,8 +474,21 @@ If that test does not resolve, **DECLINE**.
   recorded so a server refusal can name what was missing (`safe-events.md` §7.1 step 7).
 
 **Step 6 — decline unless complete.** A signal is emitted only with all four values. Otherwise
-nothing is emitted and a `capture_declined` disposition is recorded with reason
-`no_safe_semantic_mapping`.
+nothing is emitted and a `capture_declined` disposition is recorded with the reason that
+actually applies, from the `decline_reason` vocabulary (`data-model.md` §1.3):
+
+| Condition | `decline_reason` |
+|---|---|
+| no marker matched | `no_safe_semantic_mapping` |
+| markers of two different kinds on non-overlapping spans | `ambiguous_classification` |
+| marker has no counterpart for the source role (§4a) | `ambiguous_classification` |
+| fewer than two tokens survive step 4 | `insufficient_vocabulary` |
+| subject and object normalize to the same token | `insufficient_vocabulary` |
+| the justifying event was dropped or refused | `insufficient_vocabulary` |
+| the agent emits no semantic signals (§13.10) | `policy_excluded` |
+
+Recording one reason for every case would make the decline rate uninterpretable — an
+implementer could not tell a lexicon that never matches from a vocabulary that is too thin.
 
 ### 13.8 When Cairn declines — and why that is the right default
 
@@ -472,7 +501,11 @@ DECLINE, with the disposition counted so the rate is visible:
 | fewer than two tokens survive step 4 | the claim would name something the event stream never established |
 | subject and object normalize to the same token | a claim about nothing |
 | the justifying event was dropped or refused | the grounding does not exist server-side |
-| the lexicon version is unknown to the server | classification could not be reproduced |
+
+
+The last condition is **not** a client decline — it is a server refusal, because only the server
+knows which lexicon versions it can reproduce. An event whose `lexicon_version` the server does
+not recognise is rejected at ingest, not declined at capture.
 
 Declining is the correct outcome, not a shortfall. A recorded decision Cairn cannot ground in
 its own event stream is a claim it cannot explain later, and an unexplainable claim in durable
@@ -489,3 +522,45 @@ So a decision reads as *"this project adopted `postgresql` for `storage_authorit
 is stated here rather than discovered later. It is also the direct consequence of the privacy
 contract: reasoning is expressed only in prose, and prose does not cross this boundary. A later
 extractor with a different privacy posture could learn more; baseline 005 deliberately does not.
+
+### 13.10 Where the transient material comes from, per vendor
+
+Step 4a keys the event kind on the **source role**, so the exact vendor field each role reads
+must be named rather than assumed. Checked against official documentation on 2026-08-30.
+
+| Agent | User-prompt source | Assistant-text source | Subagent |
+|---|---|---|---|
+| Claude Code | `UserPromptSubmit.prompt` | `Stop.last_assistant_message`, `SubagentStop.last_assistant_message` | `SubagentStop.agent_id`, `.agent_type` |
+| Codex CLI | `UserPromptSubmit.prompt` | `Stop.last_assistant_message`, `SubagentStop.last_assistant_message` | `SubagentStop.agent_id`, `.agent_type` |
+| OpenCode | **not used** — see below | **none exists** | not established |
+
+Rules that follow from the evidence:
+
+- **`last_assistant_message` is nullable** on Codex (`string | null`, per the vendor's field
+  table). A null is not an empty decision: it is DECLINE, not a signal with empty tokens.
+- **`StopFailure.last_assistant_message` MUST NOT be read.** On Claude Code that field carries
+  the API error string itself — *"API Error: Rate limit reached"* — not model prose. Feeding an
+  error string to classification would manufacture decisions out of infrastructure failures.
+- **`MessageDisplay.delta` MUST NOT be read.** It streams partial assistant text; classification
+  over a fragment would fire on half a sentence. Only the settled turn text is read.
+- **OpenCode emits no semantic signals in baseline 005.** Its v1 prompt text is not in a named
+  field at all — it must be walked out of `chat.message`'s `output.parts[]` entries of
+  `type: "text"` — and that hook is absent from the vendor's documentation, appearing only in
+  published type definitions. Its assistant-text hook, `experimental.text.complete`, is
+  undocumented and carries an `experimental.` prefix. OpenCode 2 exposes `event.prompt.text` but
+  is beta, and exposes **no assistant-text hook of any kind**.
+
+  So Cairn declines semantic signal capture for OpenCode, reported as `declined_by_cairn` with
+  the reason — the same posture, for the same reason, as declining its delivery surface
+  (FR-838b). This is a Cairn decision about an unstable surface, not a claim that OpenCode
+  cannot do it. OpenCode's structural capture is unaffected: R1–R6 need no prompt or assistant
+  text, so its `failure`, `convention` and `procedure` learning works exactly as the other two
+  agents'.
+
+**Consequence for SC-701a.** Its scenario set is drawn from the agents that emit semantic
+signals — Claude Code and Codex CLI. OpenCode remains in SC-701 and SC-706, which test capture,
+and its exclusion here is recorded in the capture matrix rather than left implicit.
+
+The material from these fields is read in memory during the hook invocation that already parses
+and redacts it, and is discarded when §13.7 completes. No vendor field named here is ever
+persisted, locally or centrally.

@@ -113,6 +113,7 @@ RETURNING s.project_id, s.session_id;
 SELECT event_id, session_seq
   FROM consolidation_work
  WHERE project_id = $p AND session_id = $s AND state = 'pending'
+   AND attempts < 5                     -- five means five that actually ran (§4.1)
  ORDER BY session_seq
  LIMIT 200;
 
@@ -127,9 +128,14 @@ On success the worker marks the events it consolidated `done`, then closes the s
 if nothing remains**:
 
 ```sql
+-- 0. retire anything that has now had five real attempts (§4.1)
+UPDATE consolidation_work SET state = 'failed', last_error = $last_error
+ WHERE project_id = $p AND session_id = $s AND state = 'pending' AND attempts >= 5;
+
 -- 1. retire the events this pass actually consolidated
 UPDATE consolidation_work SET state = 'done'
- WHERE project_id = $p AND session_id = $s AND event_id = ANY($consolidated);
+ WHERE project_id = $p AND session_id = $s AND state = 'pending'
+   AND event_id = ANY($consolidated);
 
 -- 2. close the session, or re-open it — ONE statement, so it cannot fall between the two
 UPDATE consolidation_session
@@ -164,17 +170,22 @@ elected many times legitimately, and counting elections would fail healthy sessi
   transaction as the claim: `UPDATE consolidation_work SET attempts = attempts + 1 WHERE …
   event_id = ANY($batch)`. Incrementing at the start rather than on failure is what makes a
   worker that dies mid-pass still count its attempt; otherwise a crash loop would retry forever.
-- An event reaching `attempts >= 5` moves to `failed` with `last_error`. The transition is an
-  explicit statement, run in the claim transaction right after the increment, so an event never
-  enters a sixth pass:
+- An event reaching `attempts >= 5` moves to `failed` with `last_error`, so it never enters a
+  sixth pass. The sweep runs in the **close** transaction, after the pass has actually run —
+  never in the claim transaction. Placement is the whole point: in the claim transaction the
+  sweep would sit after the increment, so an event entering its fifth pass at `attempts = 4`
+  would be incremented to 5 and retired *before being processed*, and only four attempts would
+  ever execute.
 
   ```sql
-  UPDATE consolidation_work SET state = 'failed', last_error = $why
+  -- CLOSE transaction, after the pass
+  UPDATE consolidation_work SET state = 'failed', last_error = $last_error
    WHERE project_id = $p AND session_id = $s AND state = 'pending' AND attempts >= 5;
   ```
 
-  A failed event leaves the `pending` predicate and becomes visible in system health. It is
-  never retried automatically.
+  `$last_error` is the error from the pass that just ran; it exists at close time and does not
+  exist at claim time. A failed event leaves the `pending` predicate and becomes visible in
+  system health. It is never retried automatically.
 - Events that reach 5 attempts do **not** block their session: step 2's `EXISTS` looks only for
   `pending`, so a session whose remainder has all failed is correctly marked `done`.
 - A failed batch persists nothing — extraction, governance and persistence run in one

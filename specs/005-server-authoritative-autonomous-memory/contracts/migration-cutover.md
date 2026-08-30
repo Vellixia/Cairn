@@ -143,22 +143,34 @@ previous postcondition; re-running after any interruption re-enters at the first
 | # | Phase | Precondition | Action | Postcondition | On failure |
 |---|---|---|---|---|---|
 | 1 | Inspect | `authority_mode='feature_004'` | Read-only scan of local knowledge + outbox; emit the report of §5 | Report emitted; mode → `migrating` | Cannot fail — read-only |
-| 2 | Drain | phase 1 done | Push queued `personal_knowledge`/`team_knowledge` outbox rows via the existing per-author claim (§6) | Every eligible row `delivered`; every ineligible row `blocked`, reported (§6.2) | Rows remain blocked ⇒ phase `blocked`; migration proceeds for what did drain |
-| 3 | Verify possession | phase 2 done or blocked | Call §5's possession endpoint for every delivered id plus every pre-existing id this store believed canonical | Every checked id confirmed `held`, or `missing` and excluded | Any `missing` ⇒ phase `blocked`; that id retained (§7), excluded from 4–5 |
-| 4 | Switch authority | phase 3 done for the records concerned | `UPDATE authority_mode SET mode='server_authoritative', changed_at=now() WHERE id=1` | Local reads/writes for personal+team knowledge now treat the server as authoritative | Transaction commits or not — no partial state |
+| 2 | Drain | phase 1 done | Push **every knowledge-bearing record type** the cutover refuses — `memory`, `memory_relation`, `personal_knowledge`, `team_knowledge` — plus reusable patterns promoted into their safe shape, all via the existing per-author claim (§4.2) | Every eligible record `delivered`; every ineligible one `blocked`, reported (§4.3) | Records remain blocked ⇒ phase `blocked`; migration proceeds for what did drain |
+| 3 | Verify possession | phase 2 done or blocked | Call §5's possession endpoint for every delivered record plus every pre-existing one this store believed canonical, using each record type's own reference shape (§5) | Every record confirmed `held`, or `missing`/`indeterminate` and excluded | `missing` or `indeterminate` ⇒ that record retained (§6), excluded from 4–5; the phase is `blocked` only if nothing could be checked |
+| 4 | Switch authority | phase 3 done for the records concerned | `UPDATE authority_mode SET mode='server_authoritative', changed_at=now() WHERE id=1`, and write the retained set (§12.2) in the same transaction | Local reads/writes treat the server as authoritative for **all** durable knowledge, except the named retained records | Transaction commits or not — no partial state |
 | 5 | Demote | phase 4 done | For every id confirmed `held`, mark its local replica non-authoritative (cache only) | Confirmed replicas demoted; unconfirmed/refused untouched | A record skipped at phase 3 is simply not demoted |
 
 ### 4.1 Inspect (FR-863)
 
-Before anything changes, the client counts and reports: `personal_knowledge`/`team_knowledge`
-row counts by state; outbox rows for those entity types by state; outbox rows with no
-recorded `authored_by_user_id`; local-only project memories with no canonical counterpart
-(§6 candidates). Phase 1 writes nothing but this report and its own `migration_state` row.
+Before anything changes, the client counts and reports, for **every** drained record type
+(§4.2): row counts by state; outbox rows by state; outbox rows with no recorded
+`authored_by_user_id`; local-only project memories with no canonical counterpart (§6
+candidates); and reusable patterns eligible for promotion. Phase 1 writes nothing but this report and its own `migration_state` row.
 
 ### 4.2 Drain (FR-864, FR-864a)
 
+**What drains.** Every record type the cutover refuses, plus patterns:
+
+| Record type | Reference shape used by phase 3 | Note |
+|---|---|---|
+| `memory` | `KnowledgeRef(project, id)` | project memory is refused on the write path (§3.1), so it needs a transfer path |
+| `memory_relation` | `RelationRef(from_memory_id, to_memory_id, kind)` | a relation has no id of its own; it is **not** a `KnowledgeRef` |
+| `personal_knowledge` | `KnowledgeRef(personal, id)` | |
+| `team_knowledge` | `KnowledgeRef(team, id)` | visibility rules apply (§12.5) |
+| reusable pattern | `PatternRef(pattern_id)` | promoted into the safe shape, owner-scoped (`knowledge-commands.md` §3.3) |
+| `pattern_application` | — | local-only evidence (FR-707); never drains |
+
 Reuses `outbox::claim_namespace_for_author` (`outbox.rs:533-540`) unchanged, over the
-`personal:<instance>:<user>` and `team:<instance>` namespaces this store holds — the existing
+`project:<id>`, `personal:<instance>:<user>` and `team:<instance>` namespaces this store holds
+— the existing
 per-author claim, called from a migration phase rather than the sync loop, never a
 namespace-wide sweep with the author filter removed. A bulk sweep bypassing that filter would
 deliver a row under whichever account happens to be signed in during migration — the exact
@@ -180,29 +192,36 @@ and one of: `no_recorded_author` | `author_mismatch` | `server_rejected: <reason
 POST /api/migration/possession
 Authorization: Bearer <token>
 
-{ "records": [ { "domain": "personal", "knowledge_id": "1a2b..." },
-               { "domain": "team",     "knowledge_id": "3c4d..." },
-               { "domain": "project",  "knowledge_id": "5e6f..." },
-               { "domain": "pattern",  "knowledge_id": "7a8b..." } ] }
+{ "records": [
+    { "ref_kind": "knowledge", "domain": "personal", "id": "1a2b..." },
+    { "ref_kind": "knowledge", "domain": "team",     "id": "3c4d..." },
+    { "ref_kind": "knowledge", "domain": "project",  "id": "5e6f..." },
+    { "ref_kind": "pattern",                          "id": "7a8b..." },
+    { "ref_kind": "relation",  "from": "5e6f...", "to": "9c0d...", "kind": "supersedes" } ] }
 ```
 
 Bounded to 500 records per call (matching `safe-events.md` §7's batch-bounding discipline); a
 larger local set is checked over multiple calls.
 
 ```json
-{ "held":          [ { "domain": "personal", "knowledge_id": "1a2b..." } ],
-  "missing":       [ { "domain": "project",  "knowledge_id": "5e6f..." } ],
-  "indeterminate": [ { "domain": "team",     "knowledge_id": "3c4d..." } ] }
+{ "held":          [ { "ref_kind": "knowledge", "domain": "personal", "id": "1a2b..." } ],
+  "missing":       [ { "ref_kind": "relation", "from": "5e6f...", "to": "9c0d...",
+                       "kind": "supersedes" } ],
+  "indeterminate": [ { "ref_kind": "knowledge", "domain": "team", "id": "3c4d..." } ] }
 ```
 
-Records are named by `KnowledgeRef` (`data-model.md` §6.1), and every answer is one of three.
+Records are named by their own reference shape — `KnowledgeRef(domain, id)` for knowledge, `PatternRef(pattern_id)` for a pattern, `RelationRef(from, to, kind)` for a relation — and every answer is one of three.
 
-| `domain` | `held` requires | `indeterminate` when |
+| Record | `held` requires | `indeterminate` when |
 |---|---|---|
-| `personal` | row exists **and** `owner_user_id` = the caller | — |
-| `team` | row exists **and** the caller may see it | a `proposed` row the caller may not see (§12.5) |
-| `project` | row exists **and** the caller is a member of its `project_id` | — |
-| `pattern` | row exists in `shared_patterns` | — |
+| `knowledge`/`personal` | row exists **and** `owner_user_id` = the caller | — |
+| `knowledge`/`team` | row exists **and** the caller may see it | a `proposed` row the caller may not see (§12.5) |
+| `knowledge`/`project` | row exists **and** the caller is a member of its `project_id` | — |
+| `pattern` | row exists **and** `owner_user_id` = the caller — patterns are owner-scoped (`data-model.md` §6.2) | — |
+| `relation` | a row with that `(from, to, kind)` exists, both endpoints in a project the caller is a member of | — |
+
+A relation is named by its natural key, not by an id: `memory_relations` has no surrogate key
+and must not be given one.
 
 `missing` means the server genuinely does not hold it for this caller. `indeterminate` means
 the server will not say — the caller cannot see the record, and answering `missing` would be a
@@ -324,10 +343,10 @@ state that lets it keep working while the user upgrades (FR-877).
 
 These rules govern wherever an earlier section is less specific.
 
-### 12.0 What the drain actually carries
+### 12.0 What the drain carries — see §4.2
 
-Phase 2 and §4.2 originally named only the personal and team namespaces. The drain carries
-**every knowledge shape the cutover refuses, plus patterns**:
+The authoritative list is the table in §4.2, which phase 2 now references directly. It is
+repeated here only because an earlier draft named the personal and team namespaces alone:
 
 | Shape | Drained | Possession-checkable | Note |
 |---|---|---|---|
@@ -338,7 +357,7 @@ Phase 2 and §4.2 originally named only the personal and team namespaces. The dr
 | `reusable_pattern` → `shared_patterns` | yes | yes | promoted into the redefined safe shape (`knowledge-commands.md` §3.3); the local representation is never sent |
 | `pattern_application` | no | n/a | local-only evidence (FR-707) |
 
-Possession answers for all five drained shapes, keyed by `KnowledgeRef`. Without the `memory`
+Possession answers for all five drained shapes, each by its own reference shape (§5). Without the `memory`
 and pattern rows a store could never complete phase 3 for knowledge it holds, and SC-738 would
 have no path.
 
@@ -379,15 +398,11 @@ not fatal.
 
 A new local table names the exceptions explicitly:
 
-```sql
-CREATE TABLE retained_local (
-  domain       TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
-  knowledge_id TEXT NOT NULL,
-  reason       TEXT NOT NULL,   -- local_only | server_refused | possession_indeterminate
-  detected_at  TEXT NOT NULL,
-  PRIMARY KEY (domain, knowledge_id)
-);
-```
+The canonical definition is `data-model.md` §5. It is keyed by `ref_kind ∈
+{knowledge, pattern, relation}` with a single non-null `dedupe_key`, because it must be able to
+name a pattern (no domain) and a relation (no id of its own), and because SQLite treats NULLs as
+distinct in a UNIQUE index — a naive multi-column UNIQUE would let `--retry-retained` insert the
+same record twice.
 
 `authority_mode` becomes `server_authoritative` for the store. A record in `retained_local` is
 the stated exception to it, and its behaviour is defined rather than implied:

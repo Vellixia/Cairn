@@ -20,6 +20,8 @@ against each vendor's official documentation on 2026-08-30. No implementation ma
 | Prompt-time delivery | documented, stable | documented, stable | exists in v2 beta; **declined** |
 | Post-compaction opportunity | via session-open, trigger `compact` | via session-open, trigger `compact` | pre-compaction only |
 | Receipt acknowledgement | `unavailable / no evidence` | `unavailable / no evidence` | `unavailable / no evidence` |
+| Semantic signals | supported | supported | declined by Cairn — no stable prompt or assistant-text field (`extraction.md` §13.10) |
+| MCP | yes | yes | yes |
 
 **Committed automatic delivery: Claude Code and Codex CLI only** (FR-838a). Both document a
 prompt-submit hook that fires before the model processes the user's prompt and accepts
@@ -163,7 +165,7 @@ produce an identical briefing** (FR-835).
 | Level | Contains | When reached |
 |---|---|---|
 | `full` | Tier 0a + Tier 0b of Level 0, all of Level 1 within budget | assembled inside the deadline |
-| `reduced` | Level 0 in full. Level 1 **project-domain only** — `task_memory`, `branch_memory`, `project_memory`, `patterns`; `personal_notes`/`team_guidance` never fetched | Level 0 fit; global fetch/admission skipped |
+| `reduced` | Level 0 in full. Level 1 narrowed to the caller's own reach — `task_memory`, `branch_memory`, `project_memory`, and `patterns` the caller owns; `personal_notes`/`team_guidance` never fetched | Level 0 fit; global fetch/admission skipped |
 | `minimal` | Level 0 **Tier 0a only** — goal/status, progress counts, `completion_readiness`, single most actionable blocker, `next_action`, critical warning kinds, `repository` | even Tier 0b's bounded reads risked the deadline |
 | `none` | Nothing; the briefing is empty and says so | Tier 0a itself missed the deadline, or retrieval produced nothing |
 
@@ -206,8 +208,9 @@ Readership is the session's project members, filtered per item at read time:
 
 | Item's domain | Visible to |
 |---|---|
-| `task_memory`, `branch_memory`, `project_memory`, `patterns` | any project member (unchanged) |
+| `task_memory`, `branch_memory`, `project_memory` | any project member (unchanged) |
 | `team_guidance` | any project member (project/server-wide domain) |
+| `patterns` | **only** the account owning the pattern (`shared_patterns.owner_user_id`) — server-backed patterns are owner-scoped (FR-708d) |
 | `personal_notes` | **only** the account owning the referenced record (`personal_knowledge.owner_user_id`) |
 
 A reader who may not see a `personal_notes` item gets that row **dropped from the list**, never

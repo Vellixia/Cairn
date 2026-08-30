@@ -87,16 +87,31 @@ refused: `authority` is server-assigned (§4), `report_id` is server-assigned (�
 
 ## 4. Authority is assigned by the server, from the path evidence arrived by
 
-| How the server learned of the run | Assigned `verification_authority` |
-|---|---|
-| a deterministic check the **server itself** ran | `cairn` |
-| a run reported by an authenticated client | `remote_cairn` |
-| an agent attestation reported by a client | `remote_attested` |
-| a client-asserted authority field | *refused* |
+Authority comes from **which route the report arrived on**, and the routes are distinct. It is
+never read from a field, and no field can carry it — an earlier form distinguished a Cairn run
+from an agent attestation by a caller-supplied value, which is the same thing as letting the
+caller choose its own authority.
 
-`cairn` is unreachable from the report endpoint by construction. A client-reported run can reach
-`remote_cairn` at most, which is exactly what it is: a run this server did not witness. This is
-the rule that makes §2's bypass unrepeatable rather than merely relocated.
+| Origin | Route | Assigned `verification_authority` |
+|---|---|---|
+| a deterministic check the **server itself** ran | internal only — no HTTP route exists | `cairn` |
+| a deterministic check **Cairn ran on a client** | `POST /api/verification/runs` | `remote_cairn` |
+| an **agent attestation** relayed by a client | `POST /api/verification/attestations` | `remote_attested` |
+| anything carrying an `authority` field | either route | *refused* — `authority_not_assertable` |
+
+Why two routes rather than one with a discriminator: a discriminator is a field, and a field is
+caller-controlled. Separate paths make the distinction structural. `/runs` accepts only a
+`verifier_kind` from the deterministic set — the checks Cairn itself performs — and refuses
+anything else; `/attestations` accepts only `agent_attested` and records which agent attested.
+A client that wants the stronger authority has to have run a deterministic check, because the
+route that grants it will not accept an attestation's shape.
+
+`cairn` is unreachable over HTTP at all. It is assigned only by the server's own verifier, in
+process, and no request can produce it.
+
+A client-reported run therefore reaches `remote_cairn` at most, which is exactly what it is: a
+run this server did not witness. This is the rule that makes §2's bypass unrepeatable rather
+than merely relocated.
 
 `verification_basis` accumulates the `verifier_kind` of accepted reports, deduplicated, and is
 server-maintained. `evidence_fact_count` counts accepted reports, never a client-supplied number.
@@ -150,7 +165,7 @@ report endpoint is not reachable from the extractor, and `verdict` is not a fiel
 | `project` | the memory's `project_id` | caller is a member of that project |
 | `personal` | the record's `owner_user_id` | caller **is** that owner |
 | `team` | the server's single team | caller is a member; `proposed` rows also require author-or-admin |
-| `pattern` | the pattern's `account_id` | caller **is** the pattern's author |
+| pattern *(`PatternRef`, not a domain)* | the pattern's `owner_user_id` | caller **is** the owner |
 
 The referenced record is resolved as a `KnowledgeRef` (`data-model.md` §6.1) — project,
 personal and team knowledge are separate tables and a bare id names only the first.
@@ -169,14 +184,15 @@ Summaries for non-project domains live in one derived table, keyed by `Knowledge
 
 ```sql
 CREATE TABLE knowledge_verification (
-  domain        TEXT NOT NULL CHECK (domain IN ('personal','team','pattern')),
-  knowledge_id  UUID NOT NULL,
+  ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain        TEXT CHECK (domain IN ('personal','team')),  -- NULL iff ref_kind='pattern'
+  knowledge_id  UUID NOT NULL,   -- knowledge id, or pattern_id
   verification  TEXT NOT NULL DEFAULT 'unverified',
   verification_authority TEXT,
   verification_basis     JSONB NOT NULL DEFAULT '[]',
   evidence_fact_count    INTEGER NOT NULL DEFAULT 0,
   last_verified_at       TIMESTAMPTZ,
-  PRIMARY KEY (domain, knowledge_id)
+  PRIMARY KEY (ref_kind, domain, knowledge_id)
 );
 ```
 
@@ -260,7 +276,10 @@ Migration reports the count of demoted server rows so the change is visible rath
 2. Resolve `memory_ref` to a record; refuse if absent.
 3. Resolve the domain binding per §7; refuse if the caller fails that domain's check.
 4. Validate `verdict` and `verifier_kind` against their closed vocabularies.
-5. Refuse any payload carrying `authority`, `report_id`, or a refused field name.
+5. Refuse any payload carrying `authority`, `report_id`, or a refused field name
+   (`authority_not_assertable`). Authority comes from the route (§4), so a payload that names
+   one is refused rather than ignored — silently ignoring it would let a caller believe it had
+   been honoured.
 6. Assign `report_id` and authority (§4, §5).
 7. Insert; on natural-key conflict answer `duplicate` and stop.
 8. Re-derive `verification`, `verification_basis`, `evidence_fact_count` and `last_verified_at`

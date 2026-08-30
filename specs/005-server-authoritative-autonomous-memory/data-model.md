@@ -239,8 +239,10 @@ CREATE TABLE command_spool (               -- knowledge commands awaiting the se
   command_seq INTEGER NOT NULL,
   kind        TEXT NOT NULL,               -- remember | supersede | reinforce | relate |
                                            -- pin | forget | personal_create | personal_forget |
-                                           -- team_propose | verification_report |
-                                           -- pattern_promote | pattern_forget
+                                           -- team_propose | pattern_promote | pattern_forget |
+                                           -- verification_run | verification_attestation
+                                           --   (two kinds, not one: the route determines
+                                           --    authority, so the queue must remember which)
   payload     TEXT NOT NULL,               -- intent only; no derived state (§3.1 of the contract)
   state       TEXT NOT NULL CHECK (state IN
                 ('pending','in_flight','delivered','failed','refused')),
@@ -257,12 +259,25 @@ CREATE TABLE authority_mode (
 );
 
 CREATE TABLE retained_local (              -- records the server could not accept (FR-871)
-  domain       TEXT NOT NULL CHECK (domain IN ('project','personal','team')),
-  knowledge_id TEXT NOT NULL,
+  -- must be able to name EVERY retained record type, including a relation, which has no id
+  ref_kind     TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern','relation')),
+  domain       TEXT CHECK (domain IN ('project','personal','team')), -- knowledge only
+  knowledge_id TEXT,                       -- knowledge id or pattern_id; NULL for a relation
+  relation_key TEXT,                       -- 'from|to|kind' for a relation; NULL otherwise
   reason       TEXT NOT NULL CHECK (reason IN
                  ('local_only','server_refused','possession_indeterminate')),
   detected_at  TEXT NOT NULL,
-  PRIMARY KEY (domain, knowledge_id)
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL AND knowledge_id IS NOT NULL
+                                  AND relation_key IS NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL     AND knowledge_id IS NOT NULL
+                                  AND relation_key IS NULL)
+      OR (ref_kind = 'relation'  AND domain IS NULL     AND knowledge_id IS NULL
+                                  AND relation_key IS NOT NULL)),
+  -- SQLite treats NULLs as distinct in a UNIQUE index, and every row has a NULL by the CHECK
+  -- above, so a naive UNIQUE would not deduplicate and `--retry-retained` would insert twice.
+  -- A single non-null discriminator key is used instead.
+  dedupe_key   TEXT NOT NULL,   -- 'knowledge:<domain>:<id>' | 'pattern:<id>' | 'relation:<key>'
+  UNIQUE (dedupe_key)
 );
 
 CREATE TABLE migration_state (
@@ -359,8 +374,9 @@ CREATE TABLE knowledge_candidates (
     ('accepted','reinforced','duplicate','conflicted','refused')),
   refusal_reason TEXT,               -- fixed vocabulary, FR-804a
   -- KnowledgeRef of the record this candidate became or reinforced (§6.1)
-  result_domain       TEXT CHECK (result_domain IN ('project','personal','team','pattern')),
-  result_knowledge_id UUID,
+  result_ref_kind     TEXT CHECK (result_ref_kind IN ('knowledge','pattern')),
+  result_domain       TEXT CHECK (result_domain IN ('project','personal','team')),
+  result_knowledge_id UUID,   -- KnowledgeRef id, or the pattern_id when ref_kind='pattern'
   UNIQUE (run_id, topic_key, value_key)
 );
 
@@ -391,17 +407,19 @@ CREATE TABLE retrieval_trace_items (
   trace_id      UUID NOT NULL REFERENCES retrieval_traces(trace_id) ON DELETE CASCADE,
   -- KnowledgeRef: (domain, id). Project, personal and team knowledge live in
   -- DIFFERENT tables, so a bare memory_id cannot name a personal or team record.
-  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team','pattern')),
-  knowledge_id  UUID NOT NULL,
+  ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain        TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
+  knowledge_id  UUID NOT NULL,                       -- knowledge id, or pattern_id
   status        TEXT NOT NULL CHECK (status IN ('considered','selected')),
   selection_rule TEXT, rank INT,
-  PRIMARY KEY (trace_id, domain, knowledge_id)
+  PRIMARY KEY (trace_id, ref_kind, knowledge_id)
 );
 
 CREATE TABLE verification_reports (        -- runs reported, never states asserted
   report_id     UUID PRIMARY KEY,            -- SERVER-assigned
-  domain        TEXT NOT NULL CHECK (domain IN ('project','personal','team','pattern')),
-  knowledge_id  UUID NOT NULL,               -- KnowledgeRef, §6.1
+  ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain        TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
+  knowledge_id  UUID NOT NULL,               -- KnowledgeRef id, or pattern_id
   project_id    UUID,                        -- NULLABLE: personal/team are project-independent
   owner_user_id UUID,                        -- set for the personal domain
   account_id    UUID NOT NULL,               -- the reporting account, from the credential
@@ -410,7 +428,7 @@ CREATE TABLE verification_reports (        -- runs reported, never states assert
   authority     TEXT NOT NULL,               -- SERVER-assigned; never from the payload
   run_at        TIMESTAMPTZ NOT NULL,
   received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (domain, knowledge_id, verifier_kind, run_at)   -- duplicate-run identity
+  UNIQUE (ref_kind, knowledge_id, verifier_kind, run_at)  -- duplicate-run identity
 );
 
 -- Verification columns ALREADY EXIST on the server `memories` table and are NOT re-added:
@@ -428,20 +446,25 @@ ALTER TABLE memories
 -- field names. This is the REPLACEMENT safe shape, and it is a different record — the local
 -- one is not relaxed, it is not sent.
 CREATE TABLE shared_patterns (
+  -- Deterministic, privacy-safe identity: see §6.2. NOT a random UUID, because promotion must
+  -- be idempotent across retries and migration re-runs.
   pattern_id    UUID PRIMARY KEY,
-  account_id    UUID NOT NULL REFERENCES users(id),   -- author, bound from the credential
+  owner_user_id UUID NOT NULL REFERENCES users(id),   -- owner; visibility is owner-only (§6.2)
   title         TEXT NOT NULL,
   problem       TEXT NOT NULL,
   root_cause    TEXT NOT NULL,
   approach      TEXT NOT NULL,
   constraints   JSONB NOT NULL DEFAULT '[]',
   applicability JSONB NOT NULL DEFAULT '[]',          -- language/tool vocabulary only
-  trust         TEXT NOT NULL CHECK (trust IN ('sanitized','validated','contested')),
+  trust         TEXT NOT NULL DEFAULT 'sanitized' CHECK (trust IN ('sanitized')),
+                -- Server-side trust is deliberately single-valued: see §6.2.
   topic_key     TEXT, value_key TEXT,                 -- normalized, for reconciliation
+  content_key   TEXT NOT NULL,                       -- privacy-safe duplicate identity, §6.2
   created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
   forgotten_at  TIMESTAMPTZ
 );
+CREATE UNIQUE INDEX shared_patterns_identity ON shared_patterns (owner_user_id, content_key);
 CREATE INDEX shared_patterns_search
   ON shared_patterns USING GIN (to_tsvector('english', problem || ' ' || approach));
 
@@ -459,14 +482,17 @@ CREATE INDEX shared_patterns_search
 -- Verification summaries for the non-project domains. `memories` has its own five columns;
 -- personal_knowledge, team_knowledge and shared_patterns do not, and gain none.
 CREATE TABLE knowledge_verification (
-  domain        TEXT NOT NULL CHECK (domain IN ('personal','team','pattern')),
-  knowledge_id  UUID NOT NULL,
+  ref_kind      TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain        TEXT CHECK (domain IN ('personal','team')),  -- NULL iff ref_kind='pattern'
+  knowledge_id  UUID NOT NULL,   -- knowledge id, or pattern_id
   verification  TEXT NOT NULL DEFAULT 'unverified',
   verification_authority TEXT,
   verification_basis     JSONB NOT NULL DEFAULT '[]',
   evidence_fact_count    INTEGER NOT NULL DEFAULT 0,
   last_verified_at       TIMESTAMPTZ,
-  PRIMARY KEY (domain, knowledge_id)
+  -- PK excludes `domain`: it is nullable for a pattern, and PostgreSQL forces NOT NULL on
+  -- every primary-key column. (ref_kind, knowledge_id) is unique on its own.
+  PRIMARY KEY (ref_kind, knowledge_id)
 );
 
 CREATE TABLE legacy_verification_audit (   -- pre-cutover values, untrusted, never derived from
@@ -498,12 +524,13 @@ CREATE TABLE integration_health (
 
 CREATE TABLE delivered_context (           -- per-session dedup; server-side, §7
   session_id     UUID NOT NULL REFERENCES sessions(id),
-  domain         TEXT NOT NULL CHECK (domain IN ('project','personal','team','pattern')),
-  knowledge_id   UUID NOT NULL,
+  ref_kind       TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern')),
+  domain         TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
+  knowledge_id   UUID NOT NULL,                      -- knowledge id, or pattern_id
   delivered_at   TIMESTAMPTZ NOT NULL,
   source_updated_at TIMESTAMPTZ NOT NULL,   -- the record's updated_at when delivered
   delivery_point TEXT NOT NULL,
-  PRIMARY KEY (session_id, domain, knowledge_id)
+  PRIMARY KEY (session_id, ref_kind, knowledge_id)
 );
 
 CREATE TABLE capture_dispositions (        -- funnel source; client-reported + server-observed
@@ -533,15 +560,38 @@ knowledge in `team_knowledge`. They are separate tables with separate ownership 
 bare `memory_id` cannot name a personal or team record, and `memories.account_id` does not
 exist as a way to check who owns one.
 
-Every cross-domain reference is therefore a **`KnowledgeRef = (domain, knowledge_id)`**, used
-identically in retrieval traces, delivered-context dedup, authorization and web rendering.
+Every cross-domain reference is therefore a **`KnowledgeRef = (domain, knowledge_id)`** with
+`domain ∈ {project, personal, team}` — the three domains Constitution IV fixes, and no others.
+It is used identically in retrieval traces, delivered-context dedup, authorization and web
+rendering.
+
+**A reusable pattern is not a fourth domain.** Constitution IV states that all durable knowledge
+carries an explicit domain of project, personal or team; adding a fourth would amend a principle
+this feature does not amend, and `plan.md` correctly says the domains are unchanged. A pattern
+is a distinct **record type** that already existed alongside memory, with its own table and its
+own rules. It is referenced as **`PatternRef = pattern_id`**.
+
+Where a table must reference either, it carries a discriminator rather than a widened domain:
+
+```
+ref_kind  TEXT NOT NULL CHECK (ref_kind IN ('knowledge','pattern'))
+domain    TEXT     CHECK (domain IN ('project','personal','team'))  -- NULL iff ref_kind='pattern'
+record_id UUID NOT NULL
+CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+    OR (ref_kind = 'pattern'   AND domain IS NULL))
+```
+
+**A memory relation is not a `KnowledgeRef` either.** A relation is identified by its own natural
+key, `RelationRef = (from_memory_id, to_memory_id, kind)`, which is the primary key
+`memory_relations` already has. It has no `knowledge_id` of its own and must not be given one.
 
 | Domain | Table | Owner check for a reader |
 |---|---|---|
 | `project` | `memories` | reader is a member of `memories.project_id` |
 | `personal` | `personal_knowledge` | reader **is** `personal_knowledge.owner_user_id` |
 | `team` | `team_knowledge` | reader is a member of the server's team; `proposed` rows additionally require author-or-admin |
-| `pattern` | `shared_patterns` | any authenticated account; patterns are project-independent and carry no project identity |
+
+A `PatternRef` resolves against `shared_patterns`, whose visibility rule is in §6.2.
 
 Two rules follow, both binding:
 
@@ -551,6 +601,61 @@ Two rules follow, both binding:
   owner is not the reader is withheld entirely — not rendered as an opaque id, which would
   still disclose that the record exists. A project member must never be able to infer a
   colleague's personal knowledge from a trace identifier, a rank gap, or a count.
+
+## 6.2 Reusable patterns — visibility, identity and trust
+
+### Visibility is owner-only by default
+
+A local reusable pattern is **one developer's** cross-project knowledge. FR-708 asks for
+durability, not for an audience. Making a promoted pattern readable by every authenticated
+account would take a private record and publish it to the whole server as a side effect of
+backing it up — a widening no requirement asks for, and one Constitution V forbids as a side
+effect (*"moving knowledge from one domain to a wider one is always an explicit act, never a
+side effect"*).
+
+So `shared_patterns` is scoped to `owner_user_id`, and reads, retrieval, traces and web views
+all filter on it. The table name describes where it is stored, not who can see it.
+
+Widening to a team is a **separate, explicit act with its own governance**: the owner proposes
+the content as team knowledge, and a human administrator ratifies it, exactly as any other team
+guidance (Product Constraints: *"an agent may propose; only a human administrator may make
+team-wide guidance authoritative"*). There is no pattern-specific sharing path, and pattern
+visibility is never the mechanism by which something becomes team-wide.
+
+### Identity is derived from safe content
+
+Local duplicate identity is `signal_digest + root_cause_digest`, and the safe shape carries
+neither — both are refused field names. A random UUID cannot replace them: promotion must be
+idempotent across a retry and a migration re-run, or the same pattern lands twice.
+
+```
+content_key = digest( normalize(problem) ‖ normalize(root_cause) ‖ normalize(approach) )
+pattern_id  = UUIDv5(CAIRN_PATTERN_NS, owner_user_id ‖ content_key)
+```
+
+Every input is a field that legitimately crosses the boundary, so the identity discloses
+nothing the record does not already carry. `UNIQUE (owner_user_id, content_key)` makes a repeat
+promotion an upsert rather than a duplicate, and makes migration re-runnable.
+
+Two patterns that differ only in `title` collapse to one, which is correct: the title is a
+label, and the problem, cause and approach are the pattern.
+
+### Server trust is narrowed to one value
+
+Local `trust` is `candidate | sanitized | validated | contested`, and `validated` and
+`contested` are derived from `pattern_applications` — which stay local-only (FR-707). The server
+therefore has **no evidence** from which to derive them, and a client asserting `validated`
+would be asserting a state it earned privately, on a record the server cannot check. That is the
+same class of overclaim as client-asserted verification.
+
+So the server stores exactly one trust value, `sanitized`, meaning what it can actually
+establish: this record passed the privacy gate. `validated` and `contested` remain **local**
+states, derived locally from local applications, displayed locally, and labelled as
+machine-local rather than canonical.
+
+This is a deliberate narrowing rather than an omission. If server-side trust is wanted later it
+needs an evidence path — application outcomes reported as runs, the way verification works — and
+that is a separate feature, not an implicit consequence of storing patterns centrally.
 
 ## 7. Per-session context de-duplication
 
@@ -585,14 +690,14 @@ SafeCanonicalEvent ──▶ consolidation_work ──▶ ConsolidationRun
                                                     ▼
                                           KnowledgeCandidate
                                                     │
-                              result = KnowledgeRef(domain, knowledge_id)
+                       result = KnowledgeRef(domain, id)  |  PatternRef(pattern_id)
                                                     │
               ┌──────────────┬──────────────┬───────┴────────┐
               ▼              ▼              ▼                ▼
           memories   personal_knowledge  team_knowledge  shared_patterns
               │              │              │                │
               └──────────────┴──────┬───────┴────────────────┘
-                                    │  every reference below is a KnowledgeRef
+                                    │  referenced by (ref_kind, domain?, id)
               ┌─────────────────────┼─────────────────────┐
               ▼                     ▼                     ▼
     retrieval_trace_items   delivered_context     verification_reports

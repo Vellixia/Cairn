@@ -3,7 +3,7 @@
 **Feature Directory**: `specs/005-server-authoritative-autonomous-memory`
 **Git Branch**: `feature-005-spec`
 **Baseline**: `origin/main` @ `f76a9fec8a786a76dc7ffa1b0b0daf96aae08b15`
-**Spec**: [spec.md](./spec.md) — 259 functional requirements, 55 success criteria
+**Spec**: [spec.md](./spec.md) — 268 functional requirements, 59 success criteria
 **Constitution**: v1.2.1
 **Created**: 2026-08-30
 **Status**: Draft — plan only. No tasks, no implementation.
@@ -78,7 +78,7 @@ contract intact rather than trading it for extraction quality.
 | I. Usable MVP First | **PASS** — the feature is sliced agent → daemon → server → web and ends in a runnable end-to-end scenario on a real repository. |
 | II. Simple Architecture | **PASS** — no new process, service, broker, datastore or worker platform. Consolidation is deferred work inside the existing server, bounded and restartable, which II explicitly permits. The deterministic extractor adds no dependency at all. |
 | III. Fail-Soft, Server-Authoritative | **PASS** — PostgreSQL canonical, SQLite demoted to spool/cache/machine state; the agent never blocks on Cairn; deleting the local store loses nothing the server accepted. |
-| IV. Explicitly Domained Memory | **PASS** — domains and scopes unchanged; provenance now grounds in safe events as IV permits. |
+| IV. Explicitly Domained Memory | **PASS**, on precedent the 1.1.0 amendment set — see below. |
 | V. Privacy by Default | **PASS** — raw material never leaves the machine; only gate-approved structure crosses; the baseline extractor introduces no second recipient. |
 | VI. Deterministic Data Boundaries | **PASS** — event identity, ingest and consolidation are all idempotent and clock-independent. |
 | VII. Testable Behavior | **PASS** — every success criterion names an observation point; adversarial corpora are required rather than described. |
@@ -115,6 +115,25 @@ unearned, and each was repaired rather than argued away:
   verification report. Authority is now server-assigned from the path evidence arrived by
   (`contracts/verification-summary.md` §4).
 
+### Principle IV and reusable patterns
+
+Worth stating rather than asserting, because it is the one assessment that needs an argument.
+IV ¶1 requires that all durable knowledge carry an explicit domain and that nothing recalled be
+unable to name the domain it belongs to. A promoted pattern is durable (FR-708), is recalled —
+`patterns` is a live briefing section — and carries no domain. Read naively, that is a conflict.
+
+It is not a new one, and Feature 005 does not create it. `reusable_patterns` already exists on
+`main`, already carries no project identifier, and is already recalled. The 1.1.0 amendment
+addressed exactly this and settled it: *"Feature 003's own `reusable_patterns` — a table
+deliberately carrying no project identifier — was already the precedent for project-independent
+knowledge under v1.0.0."* IV ¶2 is the clause that governs such a record: knowledge applying
+beyond one project is *"a distinct knowledge type with its own storage, never a wider scope on
+project memory"*. A pattern is that distinct type.
+
+What Feature 005 changes is where such a record is stored, not what it is. FR-708c keeps it out
+of the domain vocabulary, and FR-708d keeps it owner-scoped so it never becomes ambient — which
+is the prohibition IV ¶1 actually exists to enforce. No amendment is required.
+
 **Complexity Tracking**: no principle is violated, so the table is empty.
 
 ## Project Structure
@@ -123,7 +142,7 @@ unearned, and each was repaired rather than argued away:
 
 ```text
 specs/005-server-authoritative-autonomous-memory/
-├── spec.md                  # approved contract (259 FR, 55 SC)
+├── spec.md                  # approved contract (268 FR, 59 SC)
 ├── research.md              # current-main audit + vendor evidence (preserved, extended)
 ├── plan.md                  # this file
 ├── data-model.md            # entities, local schema v8, server schema v4
