@@ -241,8 +241,8 @@ CREATE TABLE command_spool (               -- knowledge commands awaiting the se
                                            -- pin | forget | personal_create | personal_forget |
                                            -- team_propose | pattern_promote | pattern_forget |
                                            -- verification_run | verification_attestation
-                                           --   (two kinds, not one: the route determines
-                                           --    authority, so the queue must remember which)
+                                           --   (two report shapes; both are remote_attested.
+                                           --    A route name does not establish a verifier.)
   payload     TEXT NOT NULL,               -- intent only; no derived state (§3.1 of the contract)
   state       TEXT NOT NULL CHECK (state IN
                 ('pending','in_flight','delivered','failed','refused')),
@@ -265,7 +265,8 @@ CREATE TABLE retained_local (              -- records the server could not accep
   knowledge_id TEXT,                       -- knowledge id or pattern_id; NULL for a relation
   relation_key TEXT,                       -- 'from|to|kind' for a relation; NULL otherwise
   reason       TEXT NOT NULL CHECK (reason IN
-                 ('local_only','server_refused','possession_indeterminate')),
+                 ('local_only','server_refused','possession_indeterminate',
+                  'owner_unclaimed')),
   detected_at  TEXT NOT NULL,
   CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL AND knowledge_id IS NOT NULL
                                   AND relation_key IS NULL)
@@ -283,6 +284,15 @@ CREATE TABLE retained_local (              -- records the server could not accep
 CREATE TABLE migration_state (
   phase TEXT PRIMARY KEY, state TEXT NOT NULL, detail_count INTEGER,
   started_at TEXT, finished_at TEXT
+);
+
+CREATE TABLE legacy_pattern_claims (       -- one-time owner establishment, FR-867b
+  local_pattern_id TEXT PRIMARY KEY REFERENCES reusable_patterns(id),
+  owner_user_id    TEXT NOT NULL,          -- authenticated claimant, persisted before delivery
+  content_key      TEXT NOT NULL,          -- safe normalized-content digest, §6.2
+  pattern_id       TEXT NOT NULL UNIQUE,   -- UUIDv5(owner_user_id || content_key)
+  claimed_at       TEXT NOT NULL,
+  UNIQUE (owner_user_id, content_key)
 );
 ```
 
@@ -377,6 +387,11 @@ CREATE TABLE knowledge_candidates (
   result_ref_kind     TEXT CHECK (result_ref_kind IN ('knowledge','pattern')),
   result_domain       TEXT CHECK (result_domain IN ('project','personal','team')),
   result_knowledge_id UUID,   -- KnowledgeRef id, or the pattern_id when ref_kind='pattern'
+  CHECK ((result_ref_kind IS NULL AND result_domain IS NULL AND result_knowledge_id IS NULL)
+      OR (result_ref_kind = 'knowledge' AND result_domain IS NOT NULL
+                                         AND result_knowledge_id IS NOT NULL)
+      OR (result_ref_kind = 'pattern'   AND result_domain IS NULL
+                                         AND result_knowledge_id IS NOT NULL)),
   UNIQUE (run_id, topic_key, value_key)
 );
 
@@ -412,6 +427,8 @@ CREATE TABLE retrieval_trace_items (
   knowledge_id  UUID NOT NULL,                       -- knowledge id, or pattern_id
   status        TEXT NOT NULL CHECK (status IN ('considered','selected')),
   selection_rule TEXT, rank INT,
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
   PRIMARY KEY (trace_id, ref_kind, knowledge_id)
 );
 
@@ -421,13 +438,15 @@ CREATE TABLE verification_reports (        -- runs reported, never states assert
   domain        TEXT CHECK (domain IN ('project','personal','team')),  -- NULL iff pattern
   knowledge_id  UUID NOT NULL,               -- KnowledgeRef id, or pattern_id
   project_id    UUID,                        -- NULLABLE: personal/team are project-independent
-  owner_user_id UUID,                        -- set for the personal domain
+  owner_user_id UUID,                        -- set for personal knowledge and PatternRef
   account_id    UUID NOT NULL,               -- the reporting account, from the credential
   verdict       TEXT NOT NULL CHECK (verdict IN ('passed','failed','inconclusive')),
   verifier_kind TEXT NOT NULL,
   authority     TEXT NOT NULL,               -- SERVER-assigned; never from the payload
   run_at        TIMESTAMPTZ NOT NULL,
   received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
   UNIQUE (ref_kind, knowledge_id, verifier_kind, run_at)  -- duplicate-run identity
 );
 
@@ -449,6 +468,7 @@ CREATE TABLE shared_patterns (
   -- Deterministic, privacy-safe identity: see §6.2. NOT a random UUID, because promotion must
   -- be idempotent across retries and migration re-runs.
   pattern_id    UUID PRIMARY KEY,
+  domain        TEXT NOT NULL DEFAULT 'personal' CHECK (domain = 'personal'),
   owner_user_id UUID NOT NULL REFERENCES users(id),   -- owner; visibility is owner-only (§6.2)
   title         TEXT NOT NULL,
   problem       TEXT NOT NULL,
@@ -475,9 +495,9 @@ CREATE INDEX shared_patterns_search
 --   source_memory_id         -- names a project memory, which a project-independent record
 --                            -- must not do
 --   origin_deleted           -- a fact about a local record that no longer travels
--- A pattern is project-independent knowledge and inherits that domain's rules: it MUST NOT
--- name the project it came from, and its origin stays a machine-local salted digest that is
--- never transmitted (FR-708a).
+-- A pattern is a project-independent PERSONAL-domain record of type pattern. It inherits that
+-- domain's rules: it MUST NOT name the project it came from, and its origin stays a
+-- machine-local salted digest that is never transmitted (FR-708a/FR-708c/FR-819).
 
 -- Verification summaries for the non-project domains. `memories` has its own five columns;
 -- personal_knowledge, team_knowledge and shared_patterns do not, and gain none.
@@ -490,6 +510,8 @@ CREATE TABLE knowledge_verification (
   verification_basis     JSONB NOT NULL DEFAULT '[]',
   evidence_fact_count    INTEGER NOT NULL DEFAULT 0,
   last_verified_at       TIMESTAMPTZ,
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
   -- PK excludes `domain`: it is nullable for a pattern, and PostgreSQL forces NOT NULL on
   -- every primary-key column. (ref_kind, knowledge_id) is unique on its own.
   PRIMARY KEY (ref_kind, knowledge_id)
@@ -530,6 +552,8 @@ CREATE TABLE delivered_context (           -- per-session dedup; server-side, §
   delivered_at   TIMESTAMPTZ NOT NULL,
   source_updated_at TIMESTAMPTZ NOT NULL,   -- the record's updated_at when delivered
   delivery_point TEXT NOT NULL,
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
   PRIMARY KEY (session_id, ref_kind, knowledge_id)
 );
 
@@ -565,11 +589,11 @@ Every cross-domain reference is therefore a **`KnowledgeRef = (domain, knowledge
 It is used identically in retrieval traces, delivered-context dedup, authorization and web
 rendering.
 
-**A reusable pattern is not a fourth domain.** Constitution IV states that all durable knowledge
-carries an explicit domain of project, personal or team; adding a fourth would amend a principle
-this feature does not amend, and `plan.md` correctly says the domains are unchanged. A pattern
-is a distinct **record type** that already existed alongside memory, with its own table and its
-own rules. It is referenced as **`PatternRef = pattern_id`**.
+**A reusable pattern is not a fourth domain and is not domain-less.** Its canonical
+`shared_patterns` row carries `domain = personal`; `pattern` is the record type. It remains a
+distinct record type with its own table and lifecycle, and is referenced as
+**`PatternRef = pattern_id`**. Thus `PatternRef` omits a domain component without erasing the
+canonical record's personal domain.
 
 Where a table must reference either, it carries a discriminator rather than a widened domain:
 
@@ -581,6 +605,11 @@ CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
     OR (ref_kind = 'pattern'   AND domain IS NULL))
 ```
 
+Here `domain IS NULL` means only that the polymorphic row contains a `PatternRef` rather than a
+`KnowledgeRef`. Resolving that `PatternRef` MUST find a `shared_patterns` row whose own domain is
+explicitly `personal`. Every concrete table using this shape repeats the `CHECK`; application
+validation alone is insufficient (SC-766).
+
 **A memory relation is not a `KnowledgeRef` either.** A relation is identified by its own natural
 key, `RelationRef = (from_memory_id, to_memory_id, kind)`, which is the primary key
 `memory_relations` already has. It has no `knowledge_id` of its own and must not be given one.
@@ -588,7 +617,7 @@ key, `RelationRef = (from_memory_id, to_memory_id, kind)`, which is the primary 
 | Domain | Table | Owner check for a reader |
 |---|---|---|
 | `project` | `memories` | reader is a member of `memories.project_id` |
-| `personal` | `personal_knowledge` | reader **is** `personal_knowledge.owner_user_id` |
+| `personal` | `personal_knowledge`; `shared_patterns` (type `pattern`) | reader **is** the row's `owner_user_id` |
 | `team` | `team_knowledge` | reader is a member of the server's team; `proposed` rows additionally require author-or-admin |
 
 A `PatternRef` resolves against `shared_patterns`, whose visibility rule is in §6.2.
@@ -613,14 +642,16 @@ backing it up — a widening no requirement asks for, and one Constitution V for
 effect (*"moving knowledge from one domain to a wider one is always an explicit act, never a
 side effect"*).
 
-So `shared_patterns` is scoped to `owner_user_id`, and reads, retrieval, traces and web views
-all filter on it. The table name describes where it is stored, not who can see it.
+So `shared_patterns` carries `domain = personal`, is scoped to `owner_user_id`, and reads,
+retrieval, traces and web views all filter on it. The table name describes where it is stored,
+not who can see it.
 
 Widening to a team is a **separate, explicit act with its own governance**: the owner proposes
-the content as team knowledge, and a human administrator ratifies it, exactly as any other team
-guidance (Product Constraints: *"an agent may propose; only a human administrator may make
-team-wide guidance authoritative"*). There is no pattern-specific sharing path, and pattern
-visibility is never the mechanism by which something becomes team-wide.
+the content as a new team-domain record, and a human administrator ratifies it, exactly as any
+other team guidance (Product Constraints: *"an agent may propose; only a human administrator
+may make team-wide guidance authoritative"*). The personal pattern remains owner-only. There
+is no pattern-specific sharing path, and pattern visibility is never the mechanism by which
+something becomes team-wide.
 
 ### Identity is derived from safe content
 
@@ -695,6 +726,7 @@ SafeCanonicalEvent ──▶ consolidation_work ──▶ ConsolidationRun
               ┌──────────────┬──────────────┬───────┴────────┐
               ▼              ▼              ▼                ▼
           memories   personal_knowledge  team_knowledge  shared_patterns
+             project       personal          team        personal/type=pattern
               │              │              │                │
               └──────────────┴──────┬───────┴────────────────┘
                                     │  referenced by (ref_kind, domain?, id)

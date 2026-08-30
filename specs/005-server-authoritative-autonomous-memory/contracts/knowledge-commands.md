@@ -68,8 +68,8 @@ the server store it.
 | Ratify / retire | `POST /api/team/{id}/ratify` · `/retire` *(exist)* | — |
 
 | Promote a reusable pattern | `POST /api/patterns` | *(no prior path — patterns never synced)* |
-| Report a Cairn-run check | `POST /api/verification/runs` | client-set verification fields |
-| Relay an agent attestation | `POST /api/verification/attestations` | client-set authority |
+| Report a client-side deterministic check | `POST /api/verification/runs` | client-set verification fields; result is `remote_attested` |
+| Relay an agent attestation | `POST /api/verification/attestations` | client-set authority; result is `remote_attested` |
 | Forget a pattern | `POST /api/patterns/{id}/forget` | — |
 
 ### 3.1 What a command may not carry
@@ -102,8 +102,9 @@ new record and links it — visible, attributed and reversible, rather than a si
 
 ## 3.3 Reusable patterns
 
-Patterns are the one record type with no prior server path at all (they are a record type, not
-a fourth domain — FR-708c): `reusable_pattern` is a refused
+Patterns are the one record type with no prior server path at all. The canonical server record
+is in the personal domain with type `pattern` — never a fourth domain (FR-708c):
+`reusable_pattern` is a refused
 entity type and its local row carries three refused field names, so it has never travelled.
 FR-708b requires the refusal to be lifted **only** for a redefined representation, and that is
 what `shared_patterns` is (`data-model.md` §6). The local table is not relaxed and is not sent.
@@ -117,12 +118,13 @@ names its source project is refused exactly as personal or team knowledge would 
 establish (see **Trust** below). A local `candidate` is not promotable: it means "not yet fit to
 leave".
 
-**Ownership and visibility.** `owner_user_id` is bound from the credential (Principle XI), and a
-server-backed pattern is visible **only to its owner** (FR-708d, `data-model.md` §6.2). Storing
-a pattern centrally is durability, not publication. Widening one beyond its owner is a separate
-explicit act through team governance — propose, then a human administrator ratifies — never a
-consequence of having promoted it (FR-708e). The originating project is never transmitted; the
-local salted origin digest stays local (FR-708a).
+**Domain, ownership and visibility.** The server sets `domain = personal` and binds
+`owner_user_id` from the credential (Principle XI). A server-backed pattern is visible **only to
+its owner** (FR-708d, `data-model.md` §6.2). Storing a pattern centrally is durability, not
+publication. Widening its content creates a separate team-domain proposal which a human
+administrator may ratify; the personal pattern remains owner-only and does not change domain
+(FR-708e). The originating project is never transmitted; the local salted origin digest stays
+local (FR-708a).
 
 **Identity.** `pattern_id = UUIDv5(CAIRN_PATTERN_NS, owner_user_id ‖ content_key)` where
 `content_key` digests the normalized problem, root cause and approach — all fields that already
@@ -152,11 +154,13 @@ pattern. A forgotten pattern stops being retrieved and stops being served in the
 **Pattern applications stay local** (FR-707). They record what happened on one machine when a
 pattern was applied, are evidence rather than knowledge, and have no server table.
 
-**Migration.** Existing local patterns are promoted during migration phase 2 like any other
-knowledge, through the drain route, and are subject to the same possession verification before
-any local demotion. A pattern that fails validation — most likely because it names its source
-project — is **retained local** with reason `server_refused` and reported individually, never
-silently dropped (FR-871).
+**Migration.** Existing local patterns have no owner field. Phase 1a therefore requires an
+authenticated account to claim selected patterns explicitly and persists `owner_user_id`,
+`content_key` and `pattern_id` before phase 2 can deliver them. Retries always reuse that row;
+credential changes cannot reassign it. Unclaimed patterns remain **retained local** with reason
+`owner_unclaimed`. A claimed pattern that fails validation — most likely because it names its
+source project — is retained with reason `server_refused`. Both are reported individually and
+never silently dropped (FR-867b, FR-871).
 
 ## 4. Offline behaviour — commands queue, they do not fail
 

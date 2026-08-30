@@ -92,7 +92,7 @@ parentheses, what a reader should go check before treating it as settled.
 - [x] CHK035 Is every requirement singular — one obligation per identifier — so a test can fail
       it precisely?
 - [x] CHK036 Are requirement identifiers unique and non-colliding with Features 001–004?
-      (Verified mechanically after each pass; currently 268 FR and 59 SC identifiers, all within
+      (Verified mechanically after each pass; currently 270 FR and 62 SC identifiers, all within
       the FR-7xx/FR-9xx and SC-7xx bands this feature reserved, with zero intersection with the
       identifiers used by the four prior features.)
 - [x] CHK037 Is the reason for departing from the leading-digit numbering habit recorded, so a
@@ -423,8 +423,9 @@ survive a hostile read is decoration.
       beside `unverified` asserts a run the server cannot substantiate — and moved to
       `legacy_verification_audit`, labelled untrusted, never read by a derivation.)
 - [x] CHK117 Do personal, team and pattern records have somewhere to hold a summary? (Yes —
-      `knowledge_verification`, keyed by `KnowledgeRef`. Those tables do not have and do not
-      gain the project columns; one derivation, two storage locations.)
+      `knowledge_verification`, keyed by the `ref_kind`/id discriminator for either
+      `KnowledgeRef` or `PatternRef`; nullable `domain` is excluded from the PK and constrained
+      by CHECK. Those tables do not gain the project columns; one derivation, two locations.)
 - [x] CHK118 Is the FR-798b contradiction resolved? (FR-798c withdraws the source-event clause
       and explains why it was self-defeating: the event set is not stable across a reclaim, so
       an identity including it produces the duplicate the requirement existed to prevent.
@@ -435,10 +436,10 @@ survive a hostile read is decoration.
 
 ## Pre-Task Repair (Session 2026-08-30, fourth pass)
 
-- [x] CHK120 Are patterns kept out of the domain vocabulary? (FR-708c. `KnowledgeRef.domain`
-      remains project/personal/team; a pattern is `PatternRef(pattern_id)`, and tables that may
-      reference either carry a `ref_kind` discriminator. Constitution IV is not amended and
-      plan.md's "domains unchanged" is now true.)
+- [x] CHK120 Are patterns kept out of the domain vocabulary without becoming domain-less?
+      (FR-708c/FR-819. `KnowledgeRef.domain` remains project/personal/team; the canonical
+      `shared_patterns` row has `domain = personal`, while `PatternRef(pattern_id)` remains a
+      distinct reference shape. Constitution IV is not amended.)
 - [x] CHK121 Is a relation given its correct reference shape? (`RelationRef(from, to, kind)` —
       `memory_relations` has no surrogate key and is not given one. Used by drain and possession.)
 - [x] CHK122 Are server-backed patterns least-privilege? (FR-708d/FR-708e — owner-scoped by
@@ -451,17 +452,20 @@ survive a hostile read is decoration.
 - [x] CHK124 Is pattern trust prevented from being asserted? (FR-708g — the server stores only
       `sanitized`, the one level it can establish. `validated`/`contested` derive from
       local-only applications and stay local, labelled machine-local. SC-762.)
-- [x] CHK125 Does five attempts mean five that ran? (Yes — the claim predicate excludes
-      `attempts >= 5` and the retirement sweep runs after a pass, never before. The earlier form
-      retired an event at the start of its fifth pass, so only four ever executed.)
+- [x] CHK125 Does five attempts mean five that ran, with success winning on the last one? (The
+      close transaction first marks `$consolidated` ids `done`, then marks only still-pending
+      rows with `attempts >= 5` failed, then releases/reopens/closes the lease. The truth table
+      explicitly verifies: failures 1–4 retry; attempt-5 success is done; attempt-5 failure is
+      failed; attempt 6 cannot be selected; a crash after start consumes an attempt; failed rows
+      cannot strand the session.)
 - [x] CHK126 Is there one authoritative migration flow? (Phase 2 in §4 now names every drained
       record type with its reference shape; §12.0 points at it rather than restating it.)
 - [x] CHK127 Can retained-local name every retained record type? (`ref_kind ∈
       knowledge|pattern|relation`, with a CHECK that the right columns are populated for each.)
-- [x] CHK128 Is verification provenance non-assertable? (Two distinct routes —
-      `/api/verification/runs` → `remote_cairn`, `/api/verification/attestations` →
-      `remote_attested` — so authority comes from the arrival path, not a field. `cairn` has no
-      HTTP route at all. A payload naming an authority is refused, not ignored.)
+- [x] CHK128 Is verification provenance non-assertable? (Every client HTTP result is
+      `remote_attested`; choosing `/api/verification/runs` cannot produce `remote_cairn`.
+      `cairn` is server-executed only, `remote_cairn` has no baseline producer, and a payload
+      naming authority is refused rather than ignored.)
 - [x] CHK129 Is `prefer` classification deterministic? (Step 4a keys the event kind on the
       **source role** — which vendor field the material came from — replacing an undefined
       "grammatical person" test. A marker with no counterpart for the chosen kind declines.)
@@ -471,16 +475,47 @@ survive a hostile read is decoration.
       `MessageDisplay.delta` are explicitly excluded: the first carries an API error string, the
       second a partial stream.)
 - [x] CHK131 Is OpenCode's semantic-signal decline recorded rather than silent? (FR-727e and the
-      capture matrix — OpenCode has no stable prompt field and no assistant-text hook at all in
-      v2. Structural capture is unaffected, and SC-701a's population is stated.)
+      capture matrix — v2 beta exposes `event.prompt.text` plus pre-dispatch `system`, `messages`
+      and `tools`; Cairn has not established a stable dedicated settled-assistant-message
+      completion boundary. Structural capture is unaffected, and SC-701a's population is
+      stated.)
 - [x] CHK132 Is the legacy verification demotion product-authorized? (FR-811e–FR-811g and
       SC-763, so it is no longer plan-only mechanism: unsubstantiated server state demotes,
       client-earned state is untouched, old values survive only as untrusted audit metadata, and
       the demoted count is reported.)
 
+## Final Pre-Task Semantic Repair (Session 2026-08-30)
+
+- [x] CHK133 Does every canonical pattern name its domain while retaining `PatternRef`?
+      (`shared_patterns.domain = personal`; type is `pattern`; reference-domain NULL means only
+      `PatternRef`, not a domain-less record. Verified independently in spec, plan, data model,
+      retrieval, verification, web, migration and command contracts.)
+- [x] CHK134 Is legacy pattern ownership established before delivery rather than inferred from
+      active credentials? (`legacy_pattern_claims` persists local id, owner, content key and
+      pattern id; same-owner retry is idempotent; other-owner re-claim is refused; credential
+      switch cannot re-key; unclaimed rows are retained and reported. FR-867b, SC-764.)
+- [x] CHK135 Are all polymorphic references structurally constrained? (Candidate results,
+      retrieval trace items, delivered context, verification reports and verification summaries
+      each carry a CHECK: knowledge iff domain non-null; pattern iff domain null. SC-766.)
+- [x] CHK136 Are duplicated verification-summary keys identical? (`data-model.md` and
+      `verification-summary.md` both use `PRIMARY KEY (ref_kind, knowledge_id)`, both exclude
+      nullable domain, and both carry the same CHECK. A PatternRef summary insertion is valid.)
+- [x] CHK137 Are retrieval examples and invariants ref-kind-aware? (Dedup storage, worked
+      session example, trace item shape, authorization, web rendering and invariant text all use
+      `KnowledgeRef(domain,id)` or `PatternRef(pattern_id)`; no `(domain, knowledge_id)`-only
+      identity remains.)
+- [x] CHK138 Does verification authority report only what authentication proves? (Both client
+      routes produce `remote_attested`; generic bearer auth proves account only; `cairn` is
+      server-executed, and `remote_cairn` awaits a separately specified stronger evidence path.
+      FR-811h, SC-765.)
+- [x] CHK139 Does official OpenCode evidence support the exact wording? (Current v2 docs mark
+      plugin APIs beta, expose `event.prompt.text`, and expose `system`, `messages`, `tools`
+      immediately before model dispatch. Baseline remains `declined_by_cairn` because no stable
+      dedicated settled-assistant-message completion boundary was established.)
+
 ## Notes
 
-- No item is incomplete. All 132 checks pass against the specification as it now stands.
+- No item is incomplete. All 139 checks pass against the specification as it now stands.
 - CHK045 and CHK046 tracked two of the three `[NEEDS CLARIFICATION]` markers and were closed on
   2026-08-30 along with the third. The specification now carries no clarification markers, and no
   open product question remains.

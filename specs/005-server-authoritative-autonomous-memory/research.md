@@ -604,7 +604,8 @@ Sources: Claude Code hooks reference and guide at `code.claude.com/docs/en/hooks
 `/hooks-guide` (pages render no publication date); Codex CLI hooks at
 `learn.chatgpt.com/docs/hooks` with changelog entries 0.149.0 (2026-08-20) and 0.150.0
 (2026-08-26); OpenCode plugins at `opencode.ai/docs/plugins/` (last updated 2026-08-28), its
-published plugin SDK type definitions, and the OpenCode 2 beta docs at `opencode.ai/v2/docs/`.
+published plugin SDK type definitions, and the OpenCode 2 beta plugin docs at
+`opencode.ai/v2/docs/build/plugins/` (re-checked 2026-08-30).
 
 | Capability | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
@@ -638,6 +639,14 @@ published plugin SDK type definitions, and the OpenCode 2 beta docs at `opencode
   unstable surface. Recording this as "vendor does not support it" would be false, and the
   capture matrix distinguishes the two (FR-838b). Capture is committed.
 
+- **OpenCode v2 exposes prompt and context/message surfaces.** The beta plugin docs name
+  `event.prompt.text` on the prompt hook and `system`, `messages` and `tools` on the context hook
+  immediately before model dispatch. This disproves the earlier absolute wording that v2 had no
+  assistant-text hook of any kind. It does not establish a stable dedicated settled-assistant-
+  message completion boundary: the API is beta and the documented context surface is a
+  pre-dispatch request view. Baseline semantic signals therefore remain
+  `declined_by_cairn`, for that narrower reason; structural capture is unchanged.
+
 ### 9.2 Not established
 
 Carried into planning rather than assumed:
@@ -650,8 +659,9 @@ Carried into planning rather than assumed:
   session open is therefore settled for both committed agents (FR-838d).
 - Whether OpenCode v1's message-mutation hook reliably injects text the model actually sees;
   only the type signature was verified, never the behaviour.
-- Whether OpenCode 2 has any session-start hook, and whether its `prompt` hook can return
-  context or only intercept it.
+- Whether OpenCode 2 has any stable session-start hook and whether a stable dedicated
+  settled-assistant-message completion boundary will be documented after the plugin API leaves
+  beta. Prompt/context interception itself is established.
 - Receipt acknowledgement on any agent. No mechanism was established from the official
   documentation reviewed; this is an absence of evidence, **not** a vendor statement that none
   exists. FR-838e fixes the reported status at `unavailable / no evidence` and requires a named

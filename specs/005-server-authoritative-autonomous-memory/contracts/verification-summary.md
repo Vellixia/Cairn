@@ -23,7 +23,8 @@ deliberately **not** `verification_basis` or `evidence_fact_count`.
 Vocabularies, from `crates/cairn-core/src/domain.rs`:
 
 - `VerificationState`: `unverified`, `verified`, `needs_recheck`, `drifted`, `conflicted`
-- `VerificationAuthority`: `cairn`, `attested`, `remote_cairn`, `remote_attested`
+- `VerificationAuthority`: `cairn`, `attested`, `remote_cairn`, `remote_attested`. The enum is
+  preserved, but baseline Feature 005 does not produce `remote_cairn` (§4).
 - `VerifierKind`: `file_exists`, `file_digest`, `git_ref`, `git_commit`, `configuration`,
   `schema_version`, `test_outcome`, `command_outcome`, `runtime_state`
 
@@ -85,33 +86,32 @@ file content, no command output, no local path, and — deliberately — **no `a
 refused: `authority` is server-assigned (§4), `report_id` is server-assigned (§5), and
 `observed_value` / `source_locator` are refused field names at any depth.
 
-## 4. Authority is assigned by the server, from the path evidence arrived by
+## 4. Authority reflects the execution boundary, not the HTTP route
 
-Authority comes from **which route the report arrived on**, and the routes are distinct. It is
-never read from a field, and no field can carry it — an earlier form distinguished a Cairn run
-from an agent attestation by a caller-supplied value, which is the same thing as letting the
-caller choose its own authority.
+A route is caller-selected input. Generic bearer authentication establishes the reporting
+account; it does **not** establish that a deterministic Cairn verifier executed on the client.
+Choosing a path is therefore no stronger than choosing a discriminator field. Baseline Feature
+005 uses the safest truthful assignment: every client-reported result is `remote_attested`.
 
 | Origin | Route | Assigned `verification_authority` |
 |---|---|---|
 | a deterministic check the **server itself** ran | internal only — no HTTP route exists | `cairn` |
-| a deterministic check **Cairn ran on a client** | `POST /api/verification/runs` | `remote_cairn` |
+| a client report shaped as a deterministic run | `POST /api/verification/runs` | `remote_attested` |
 | an **agent attestation** relayed by a client | `POST /api/verification/attestations` | `remote_attested` |
 | anything carrying an `authority` field | either route | *refused* — `authority_not_assertable` |
 
-Why two routes rather than one with a discriminator: a discriminator is a field, and a field is
-caller-controlled. Separate paths make the distinction structural. `/runs` accepts only a
-`verifier_kind` from the deterministic set — the checks Cairn itself performs — and refuses
-anything else; `/attestations` accepts only `agent_attested` and records which agent attested.
-A client that wants the stronger authority has to have run a deterministic check, because the
-route that grants it will not accept an attestation's shape.
+The two routes may retain different payload validation: `/runs` accepts the declared
+`VerifierKind` vocabulary, while `/attestations` additionally requires and records the named
+attesting agent. That distinction describes the **reported check shape**, not independently
+established execution provenance, so it changes neither route's authority.
 
 `cairn` is unreachable over HTTP at all. It is assigned only by the server's own verifier, in
 process, and no request can produce it.
 
-A client-reported run therefore reaches `remote_cairn` at most, which is exactly what it is: a
-run this server did not witness. This is the rule that makes §2's bypass unrepeatable rather
-than merely relocated.
+`remote_cairn` remains an existing enum value but has no producer in baseline Feature 005. It
+may be produced only after a future specification names a trusted evidence mechanism that
+establishes Cairn-client execution and states what it proves. No speculative remote-attestation
+infrastructure is introduced here merely to preserve the value.
 
 `verification_basis` accumulates the `verifier_kind` of accepted reports, deduplicated, and is
 server-maintained. `evidence_fact_count` counts accepted reports, never a client-supplied number.
@@ -119,7 +119,8 @@ server-maintained. `evidence_fact_count` counts accepted reports, never a client
 ## 5. Report identity and duplicate runs
 
 `report_id` is **server-assigned**. The natural key is
-`UNIQUE (domain, knowledge_id, verifier_kind, run_at)`.
+`UNIQUE (ref_kind, knowledge_id, verifier_kind, run_at)`. The discriminator distinguishes a
+`KnowledgeRef` from a `PatternRef`; nullable `domain` is not part of the key.
 
 Without it, the §6 rule requiring a *second, subsequent* passed run to leave `conflicted` is
 satisfied by submitting one run twice, and the guarantee is decorative. A repeat of the same
@@ -156,19 +157,23 @@ report endpoint is not reachable from the extractor, and `verdict` is not a fiel
 
 ## 7. Domain bindings
 
-`verification_reports` binds per domain, exactly one of the three set. `project_id` is
-**nullable**, because personal and team knowledge are project-independent by construction
-(FR-822) and a `NOT NULL project_id` would make verification of those domains unrepresentable.
+`verification_reports` binds through the referenced record. A `KnowledgeRef` names one of the
+three domains; a `PatternRef` resolves to a personal-domain pattern. `project_id` is
+**nullable**, because personal, team and pattern records are project-independent by
+construction (FR-822/FR-708c) and a `NOT NULL project_id` would make their verification
+unrepresentable.
 
 | Domain | Bound from | Authorization |
 |---|---|---|
 | `project` | the memory's `project_id` | caller is a member of that project |
 | `personal` | the record's `owner_user_id` | caller **is** that owner |
 | `team` | the server's single team | caller is a member; `proposed` rows also require author-or-admin |
-| pattern *(`PatternRef`, not a domain)* | the pattern's `owner_user_id` | caller **is** the owner |
+| `PatternRef` (canonical record has `domain = personal`, type `pattern`) | the pattern's `owner_user_id` | caller **is** the owner |
 
-The referenced record is resolved as a `KnowledgeRef` (`data-model.md` §6.1) — project,
-personal and team knowledge are separate tables and a bare id names only the first.
+The referenced record is resolved as either `KnowledgeRef(domain, id)` or
+`PatternRef(pattern_id)` (`data-model.md` §6.1). Project, personal and team knowledge are
+separate tables and a bare id names only the first; a `PatternRef` resolves to a personal-domain
+`shared_patterns` row.
 
 FR-826 is unchanged and separate: a deterministic check performed against one project does not
 transfer its authority to a project-independent assertion. That constrains the **authority
@@ -180,7 +185,8 @@ assigned** to a personal or team record, not whether a report may exist for one.
 `shared_patterns` do **not**, and Feature 005 does not add them — five columns on four tables is
 four places for a derivation to drift.
 
-Summaries for non-project domains live in one derived table, keyed by `KnowledgeRef`:
+Summaries for non-project records live in one derived table, keyed by the canonical
+discriminator shape (`KnowledgeRef` or `PatternRef`), not simply by `KnowledgeRef`:
 
 ```sql
 CREATE TABLE knowledge_verification (
@@ -192,9 +198,16 @@ CREATE TABLE knowledge_verification (
   verification_basis     JSONB NOT NULL DEFAULT '[]',
   evidence_fact_count    INTEGER NOT NULL DEFAULT 0,
   last_verified_at       TIMESTAMPTZ,
-  PRIMARY KEY (ref_kind, domain, knowledge_id)
+  CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+      OR (ref_kind = 'pattern'   AND domain IS NULL)),
+  PRIMARY KEY (ref_kind, knowledge_id)
 );
 ```
+
+`domain` is deliberately absent from the primary key because PostgreSQL makes every primary-key
+column `NOT NULL`, which would make a `PatternRef` row impossible. The `CHECK` makes the nullable
+slot safe: knowledge requires a domain; pattern requires it null. The resolved pattern row
+itself still has `domain = personal`.
 
 The project domain keeps using `memories`' own columns, because they exist, are already
 populated, and moving them would be a migration with no benefit. Readers resolve a summary by
@@ -203,8 +216,9 @@ derived by the same code path from the same `verification_reports` table, so the
 derivation and two storage locations, not two derivations.
 
 FR-826 still binds here: a deterministic check performed against one project does not transfer
-its authority to a project-independent record. A personal, team or pattern summary may therefore
-reach `remote_attested` or `remote_cairn`, but never `cairn`.
+its authority to a project-independent record. A personal, team or pattern summary from a
+client report may reach `remote_attested`, but never `remote_cairn` or `cairn`; a server-executed
+check may produce `cairn` only for the record it actually checked.
 
 ## 7.5 The changes feed stops carrying verification at cutover
 
@@ -277,10 +291,9 @@ Migration reports the count of demoted server rows so the change is visible rath
 3. Resolve the domain binding per §7; refuse if the caller fails that domain's check.
 4. Validate `verdict` and `verifier_kind` against their closed vocabularies.
 5. Refuse any payload carrying `authority`, `report_id`, or a refused field name
-   (`authority_not_assertable`). Authority comes from the route (§4), so a payload that names
-   one is refused rather than ignored — silently ignoring it would let a caller believe it had
-   been honoured.
-6. Assign `report_id` and authority (§4, §5).
+   (`authority_not_assertable`). A payload that names authority is refused rather than ignored —
+   silently ignoring it would let a caller believe it had been honoured.
+6. Assign `report_id`; assign `remote_attested` for every HTTP report (§4, §5).
 7. Insert; on natural-key conflict answer `duplicate` and stop.
 8. Re-derive `verification`, `verification_basis`, `evidence_fact_count` and `last_verified_at`
    for the record (§6), in the same transaction.

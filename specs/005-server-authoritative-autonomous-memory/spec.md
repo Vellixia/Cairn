@@ -274,6 +274,14 @@ server or explicitly reported as unmigrated, with authority switching only if th
 5. **Given** a completed and verified migration, **When** obsolete local replicas are
    demoted, **Then** the demotion happens only after canonical possession has been confirmed
    for the records concerned.
+6. **Given** a legacy reusable pattern whose Feature 004 row has no owner field, **When**
+   migration runs, **Then** it is not assigned to the active account automatically; an
+   authenticated account may explicitly claim it, and an unclaimed pattern is retained-local
+   and reported.
+7. **Given** account A claimed a legacy pattern and the process stopped before delivery,
+   **When** credentials switch to account B and migration retries, **Then** the persisted owner
+   and pattern id remain A's, B cannot drain or re-claim it, and no second canonical row is
+   created.
 
 ---
 
@@ -364,9 +372,10 @@ server or explicitly reported as unmigrated, with authority switching only if th
 - **FR-707**: Observations, evidence facts, verification runs, continuity checkpoints,
   pattern applications, task change history and criterion evidence MUST remain local-only.
   Feature 005 does not move raw local records to the server.
-- **FR-708**: Reusable patterns MUST gain a durable server-backed representation, so that
-  project-independent transferable knowledge is covered by FR-703. Pattern *applications*
-  remain local under FR-707.
+- **FR-708**: Reusable patterns MUST gain a durable server-backed representation as
+  owner-scoped personal-domain records of type `pattern`, so that project-independent
+  transferable knowledge is covered by FR-703. Pattern *applications* remain local under
+  FR-707.
 - **FR-708a**: A reusable pattern crossing to the server MUST pass the same content validation
   that governs personal and team knowledge: it MUST NOT name the project it was derived from,
   and its origin MUST remain a machine-local salted digest that is never transmitted.
@@ -377,16 +386,20 @@ server or explicitly reported as unmigrated, with authority switching only if th
   refused fields, and lifting it MUST be recorded as a deliberate narrowing with the replacement
   representation stated. Removing the entity from the refusal list without redefining what it
   carries is forbidden.
-- **FR-708c**: A reusable pattern MUST NOT become a fourth knowledge domain. The durable domains
-  remain project, personal and team. A pattern is a distinct record type with its own reference
-  shape, and Feature 005 introduces no new domain.
-- **FR-708d**: A server-backed pattern MUST be visible only to the account that owns it. Server
-  durability is not publication: promoting a pattern for safekeeping MUST NOT make one
-  developer's cross-project knowledge readable by every account on the server.
-- **FR-708e**: Widening a pattern beyond its owner MUST use the existing team governance — an
-  explicit proposal that a human administrator ratifies. There MUST NOT be a pattern-specific
-  sharing path, and pattern visibility MUST NOT be the mechanism by which anything becomes
-  team-wide.
+- **FR-708c**: A reusable pattern MUST NOT become a fourth knowledge domain. Its canonical
+  server record MUST explicitly name the `personal` domain and the `pattern` record type. A
+  `PatternRef(pattern_id)` remains distinct from `KnowledgeRef(domain, id)` because patterns
+  have their own table and lifecycle; that reference shape MUST NOT be interpreted as a
+  domain-less canonical record. Feature 005 introduces no new domain.
+- **FR-708d**: A server-backed pattern is a personal-domain record and MUST be visible only to
+  the account that owns it. Server durability is not publication: promoting a pattern for
+  safekeeping MUST NOT make one developer's cross-project knowledge readable by every account
+  on the server.
+- **FR-708e**: Widening a pattern's content beyond its owner MUST create a separate team-domain
+  proposal through the existing team governance, followed by human-administrator ratification.
+  The personal-domain pattern remains owner-only throughout; it neither changes domain nor
+  becomes implicitly team-visible. There MUST NOT be a pattern-specific sharing path, and
+  pattern visibility MUST NOT be the mechanism by which anything becomes team-wide.
 - **FR-708f**: Promotion of a pattern MUST be idempotent. A pattern MUST carry a stable identity
   derived only from content the privacy boundary already permits to cross, so that a retried
   promotion and a re-run migration converge on one record rather than creating duplicates.
@@ -462,9 +475,11 @@ server or explicitly reported as unmigrated, with authority switching only if th
   the classification or the tokens, but the vocabulary check governs the outcome either way, so
   a model is never the gate and is never required.
 - **FR-727e**: The vendor field supplying each role's transient material MUST be named per agent
-  in the capture matrix, and an agent whose vendor exposes no stable field for a role MUST have
-  semantic signal capture reported as declined by Cairn, with the reason — never as a silent
-  absence. Structural capture is unaffected by such a decline.
+  in the capture matrix. An agent for which Cairn has not established a stable, dedicated
+  settled-assistant-message completion boundary suitable for baseline semantic-signal capture
+  MUST have semantic signal capture reported as declined by Cairn, with the reason — never as a
+  silent absence and never as the false claim that the vendor exposes no prompt or message
+  surface. Structural capture is unaffected by such a decline.
 - **FR-728**: Cairn MUST declare, per agent and per canonical event kind, which of the
   following holds: supported, unsupported by the vendor, declined by Cairn, adapter not
   implemented, or failing at runtime.
@@ -891,6 +906,12 @@ privacy boundary has already approved, and is specified under Consolidation.
   labelled as pre-cutover and never read by any derivation, never displayed as a current state,
   and never promotable back into one. Cairn MUST report how many records were demoted, so the
   change is visible rather than silent.
+- **FR-811h**: Every verification result submitted through an authenticated client HTTP route
+  MUST be assigned `remote_attested`, regardless of which route or verifier-kind shape the
+  caller chooses. `cairn` is reserved for a deterministic check the server itself executes.
+  `remote_cairn` MUST NOT be produced until a separately specified trusted evidence path proves
+  that a Cairn verifier executed the reported client run; generic bearer authentication, a
+  route name and a caller-supplied discriminator prove no such thing.
 - **FR-812**: A candidate derived from activity Cairn could not attribute to a project MUST
   NOT be attributed to one by guesswork.
 - **FR-813**: Consolidation MUST be observable while running: its throughput and its failures
@@ -918,7 +939,9 @@ privacy boundary has already approved, and is specified under Consolidation.
 - **FR-818**: The project domain's scopes — project, branch, task, session — MUST be preserved
   with their existing precedence.
 - **FR-819**: Every durable record MUST continue to carry an explicit domain. No record may be
-  domain-less.
+  domain-less. In particular, a canonical reusable pattern MUST carry `domain = personal` even
+  though polymorphic references encode it as `PatternRef(pattern_id)` with a distinct
+  discriminator shape.
 - **FR-820**: Domains MUST remain visibly separate in every result. Cairn MUST NOT merge
   domains into a single ranked list.
 - **FR-821**: Project knowledge MUST NOT be displaceable by personal or team guidance. Broader
@@ -942,7 +965,7 @@ official documentation, checked on 2026-08-30, and from the adapters on `main`.
 | Capability | Claude Code | Codex CLI | OpenCode |
 |---|---|---|---|
 | Capture events | documented, stable | documented, stable | documented (v1 bus events + plugin hooks) |
-| Semantic signals | supported | supported | declined by Cairn — no stable prompt or assistant-text field |
+| Semantic signals | supported | supported | declined by Cairn — beta prompt/context surfaces exist, but no stable dedicated settled-assistant-message completion boundary is established |
 | Session-open delivery | documented, stable | documented, stable | no stable documented injection point |
 | Prompt-time retrieval | documented, stable | documented, stable | exists in v2 beta; Cairn declines to depend on it |
 | Post-compaction opportunity | via session-open `compact` trigger | via session-open `compact` trigger | pre-compaction only |
@@ -1024,10 +1047,12 @@ official documentation, checked on 2026-08-30, and from the adapters on `main`.
 
 - **FR-839**: Cairn MUST persist a record of each retrieval, sufficient to answer what triggered
   it, what knowledge was considered, what was selected, why, and what context was produced. A
-  trace MUST record the *identities* of the records selected together with the budget accounting
-  and the degradation level — never the rendered briefing text. Rendered text mixes domains and
-  carries handoff-derived material, so persisting it centrally would place one account's
-  personal knowledge inside a project-scoped record.
+  trace MUST record each selected identity as `KnowledgeRef(domain, id)` or
+  `PatternRef(pattern_id)`, represented by a `ref_kind` discriminator with the canonical nullable
+  reference-domain slot, together with the budget accounting and degradation level — never the
+  rendered briefing text. Rendered text mixes domains and carries handoff-derived material, so
+  persisting it centrally would place one account's personal knowledge inside a project-scoped
+  record.
 - **FR-840**: A retrieval record MUST be linked to the session and agent it served.
 - **FR-841**: A retrieval record MUST record how long retrieval took.
 - **FR-842**: Cairn MUST record whether transmission of context to the agent was attempted,
@@ -1045,9 +1070,10 @@ official documentation, checked on 2026-08-30, and from the adapters on `main`.
 - **FR-846a**: A retrieval trace MUST have a stated readership, and it MUST NOT widen access to
   anything it references. A briefing spans project, personal and team domains, so a trace of it
   names records from all three. A trace MUST NOT allow a reader to enumerate another account's
-  personal knowledge, directly or by inference from identifiers, regardless of shared project
-  membership. Where a trace references a record the reader may not see, the reference MUST be
-  withheld rather than rendered as an opaque handle that still discloses its existence.
+  personal knowledge — including owner-only personal-domain patterns — directly or by inference
+  from identifiers, regardless of shared project membership. Where a trace references a record
+  the reader may not see, the reference MUST be withheld rather than rendered as an opaque
+  handle that still discloses its existence.
 - **FR-847**: Retrieval records MUST be bounded in volume by a stated retention policy.
 - **FR-848**: A failed retrieval MUST be recorded with its failure reason, not omitted.
 - **FR-849**: Delivery telemetry MUST distinguish a briefing that was empty because there was
@@ -1108,6 +1134,14 @@ official documentation, checked on 2026-08-30, and from the adapters on `main`.
   already have. Normalizing a key is not reassigning a record's domain, scope or authorship, and
   where two existing records normalize to one key the collision MUST be surfaced through the
   ordinary conflict machinery rather than resolved by discarding one.
+- **FR-867b**: Legacy `reusable_patterns` rows have no recoverable historical account owner and
+  MUST NOT be assigned to whichever account is authenticated when migration happens to run.
+  Migration MAY let an authenticated account explicitly claim eligible legacy patterns, but it
+  MUST persist the selected local pattern, `owner_user_id`, safe `content_key` and derived
+  `pattern_id` before delivery. A retry or credential change MUST reuse that persisted owner and
+  identity; a different account MUST NOT re-claim or re-key the row. Unclaimed patterns MUST
+  remain retained-local and be reported individually. Repeating the same claim and migration
+  MUST be idempotent.
 - **FR-868**: Migration MUST NOT create duplicate canonical knowledge as a result of retry.
 - **FR-869**: Migration MUST be resumable. An interruption at any point MUST be recoverable by
   running it again.
@@ -1452,6 +1486,22 @@ feature's tests, and a single counterexample fails it.
   run report are demoted to unverified, and the demoted count is reported. Zero client-held
   verification states change as a result, asserted by comparing every client's local state
   before and after.
+- **SC-764**: Across at least ten migrations of a Feature 004 store used by two authenticated
+  accounts, an explicitly claimed legacy pattern is delivered under exactly the persisted
+  claimant and `pattern_id`, including after switching credentials before retry; the other
+  account receives zero ownership and zero read access. Every unclaimed legacy pattern remains
+  retained-local and appears in the migration report, and repeating a claim by the same owner
+  creates zero additional claim or server rows.
+- **SC-765**: In 100% of trials, every verification result submitted over an authenticated HTTP
+  route is stored with `remote_attested`; choosing `/api/verification/runs` rather than
+  `/api/verification/attestations` produces neither `remote_cairn` nor `cairn`. Only a
+  server-executed deterministic check produces `cairn`, and baseline Feature 005 produces zero
+  `remote_cairn` reports.
+- **SC-766**: For every table carrying `ref_kind`, nullable `domain` and a record id — candidate
+  result references, retrieval trace items, delivered context, verification reports and
+  verification summaries — the database accepts knowledge references only with a non-null
+  project/personal/team domain and pattern references only with a null reference-domain slot.
+  Every inverse combination is rejected by a database `CHECK`, not merely by application code.
 - **SC-739**: Restarting the server at each of at least twenty pre-registered points during
   consolidation, including mid-pass, yields the same durable knowledge, the same relations and
   the same reinforcement counts as an uninterrupted run over the same events, and leaves zero

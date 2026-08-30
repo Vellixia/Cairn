@@ -124,20 +124,21 @@ UPDATE consolidation_work SET attempts = attempts + 1
 COMMIT;   -- row lock released; the lease stands as committed state
 ```
 
-On success the worker marks the events it consolidated `done`, then closes the session **only
-if nothing remains**:
+After processing, the worker first marks every successfully processed event `done`, then
+retires only the still-`pending` fifth-attempt failures, then releases the session lease. These
+statements run in one close transaction, in this order:
 
 ```sql
--- 0. retire anything that has now had five real attempts (§4.1)
-UPDATE consolidation_work SET state = 'failed', last_error = $last_error
- WHERE project_id = $p AND session_id = $s AND state = 'pending' AND attempts >= 5;
-
--- 1. retire the events this pass actually consolidated
+-- 1. success wins, including success on attempt 5
 UPDATE consolidation_work SET state = 'done'
  WHERE project_id = $p AND session_id = $s AND state = 'pending'
    AND event_id = ANY($consolidated);
 
--- 2. close the session, or re-open it — ONE statement, so it cannot fall between the two
+-- 2. only unsuccessful fifth attempts remain pending and become failed
+UPDATE consolidation_work SET state = 'failed', last_error = $last_error
+ WHERE project_id = $p AND session_id = $s AND state = 'pending' AND attempts >= 5;
+
+-- 3. close the session, or re-open it — ONE statement, so it cannot fall between the two
 UPDATE consolidation_session
    SET state = CASE WHEN EXISTS (SELECT 1 FROM consolidation_work
                                   WHERE project_id = $p AND session_id = $s
@@ -149,14 +150,14 @@ UPDATE consolidation_session
  WHERE project_id = $p AND session_id = $s AND claimed_by = $worker;
 ```
 
-Step 2 must be a `CASE`, not a guard. An earlier form used
+Step 3 must be a `CASE`, not a guard. An earlier form used
 `… SET state='done' … AND NOT EXISTS (pending)`: when work remained the `UPDATE` matched no
 row, so the session stayed `claimed` with its lease intact and was not re-elected **until the
 lease expired** — a five-minute stall after every full batch. A session with 500 pending events
 would drain at 200 events per five minutes for no reason. The `CASE` releases the lease and
 sets the correct next state in the same statement.
 
-`consolidation_work.state` moves `pending → done` in step 1 and `pending → failed` in §4.1.
+`consolidation_work.state` moves `pending → done` in step 1 and `pending → failed` in step 2.
 Nothing else writes it, so the `consolidation_pending` partial index drains.
 
 A pass longer than the lease extends `claim_expires_at` as a heartbeat.
@@ -170,15 +171,18 @@ elected many times legitimately, and counting elections would fail healthy sessi
   transaction as the claim: `UPDATE consolidation_work SET attempts = attempts + 1 WHERE …
   event_id = ANY($batch)`. Incrementing at the start rather than on failure is what makes a
   worker that dies mid-pass still count its attempt; otherwise a crash loop would retry forever.
-- An event reaching `attempts >= 5` moves to `failed` with `last_error`, so it never enters a
-  sixth pass. The sweep runs in the **close** transaction, after the pass has actually run —
-  never in the claim transaction. Placement is the whole point: in the claim transaction the
-  sweep would sit after the increment, so an event entering its fifth pass at `attempts = 4`
-  would be incremented to 5 and retired *before being processed*, and only four attempts would
-  ever execute.
+- An unsuccessful event reaching `attempts >= 5` moves to `failed` with `last_error`, so it
+  never enters a sixth pass. The sweep runs in the **close** transaction, after the pass has
+  actually run and **after successful event ids have moved to `done`**. Both placements matter:
+  a claim-time sweep would prevent attempt 5 from running, while a close-time failure sweep
+  before the success update would misclassify a successful fifth attempt as failed.
 
   ```sql
   -- CLOSE transaction, after the pass
+  UPDATE consolidation_work SET state = 'done'
+   WHERE project_id = $p AND session_id = $s AND state = 'pending'
+     AND event_id = ANY($consolidated);
+
   UPDATE consolidation_work SET state = 'failed', last_error = $last_error
    WHERE project_id = $p AND session_id = $s AND state = 'pending' AND attempts >= 5;
   ```
@@ -186,12 +190,25 @@ elected many times legitimately, and counting elections would fail healthy sessi
   `$last_error` is the error from the pass that just ran; it exists at close time and does not
   exist at claim time. A failed event leaves the `pending` predicate and becomes visible in
   system health. It is never retried automatically.
-- Events that reach 5 attempts do **not** block their session: step 2's `EXISTS` looks only for
+- Events that reach 5 attempts do **not** block their session: step 3's `EXISTS` looks only for
   `pending`, so a session whose remainder has all failed is correctly marked `done`.
 - A failed batch persists nothing — extraction, governance and persistence run in one
   transaction — so a partial candidate cannot exist (FR-808). The `attempts` increment is in the
   claim transaction and therefore survives the rollback of the processing transaction, which is
   what makes the counter monotonic.
+
+The edge cases are exact:
+
+| History | Close result | Next election |
+|---|---|---|
+| Attempts 1–4 fail | event stays `pending` with attempts 1–4 | retried while `attempts < 5` |
+| Attempt 5 succeeds | step 1 changes it to `done`; step 2 cannot match it | none |
+| Attempt 5 fails | it remains `pending`; step 2 changes it to `failed` | none |
+| Worker crashes after an attempt begins | claim transaction already incremented `attempts`; lease reclaim resumes from that count | never more than five starts |
+
+Attempt 6 never runs because claim selection requires `attempts < 5`. A `failed` event never
+strands its session: it is outside the pending predicate before step 3 chooses `pending` versus
+`done` and clears the lease either way.
 
 Why each guarantee holds:
 

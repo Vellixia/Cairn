@@ -133,8 +133,9 @@ from this handler.
 ## 4. Migration phases — overview
 
 Client-side, driven by `cairnd` (`migrate005.rs` per plan.md), tracked one row per phase in
-`migration_state` (data-model.md §5): `phase ∈ {inspect, drain, verify_possession,
-switch_authority, demote}`, `state ∈ {pending, running, done, blocked}`. `blocked` is FR-870's
+`migration_state` (data-model.md §5): `phase ∈ {inspect, claim_pattern_ownership, drain,
+verify_possession, switch_authority, demote}`, `state ∈ {pending, running, done, blocked}`.
+`blocked` is FR-870's
 "clearly reported failure state" — stopped rather than proceeded; `detail_count` names how
 many records are implicated. Phases run strictly in order, each precondition being the
 previous postcondition; re-running after any interruption re-enters at the first phase not
@@ -143,7 +144,8 @@ previous postcondition; re-running after any interruption re-enters at the first
 | # | Phase | Precondition | Action | Postcondition | On failure |
 |---|---|---|---|---|---|
 | 1 | Inspect | `authority_mode='feature_004'` | Read-only scan of local knowledge + outbox; emit the report of §5 | Report emitted; mode → `migrating` | Cannot fail — read-only |
-| 2 | Drain | phase 1 done | Push **every knowledge-bearing record type** the cutover refuses — `memory`, `memory_relation`, `personal_knowledge`, `team_knowledge` — plus reusable patterns promoted into their safe shape, all via the existing per-author claim (§4.2) | Every eligible record `delivered`; every ineligible one `blocked`, reported (§4.3) | Records remain blocked ⇒ phase `blocked`; migration proceeds for what did drain |
+| 1a | Claim legacy pattern ownership | phase 1 done | Present eligible owner-less legacy patterns; persist only claims the authenticated account explicitly confirms (§4.1a) | Every claimed pattern has an immutable owner, content key and pattern id before delivery; every unclaimed pattern is retained-local and reported | Conflicting re-claim is refused; unclaimed rows do not block other records |
+| 2 | Drain | phase 1a done | Push **every knowledge-bearing record type** the cutover refuses — `memory`, `memory_relation`, `personal_knowledge`, `team_knowledge` — plus only reusable patterns with a persisted ownership claim, promoted into their safe shape, all via the existing per-author claim (§4.2) | Every eligible record `delivered`; every ineligible one `blocked`, reported (§4.3) | Records remain blocked ⇒ phase `blocked`; migration proceeds for what did drain |
 | 3 | Verify possession | phase 2 done or blocked | Call §5's possession endpoint for every delivered record plus every pre-existing one this store believed canonical, using each record type's own reference shape (§5) | Every record confirmed `held`, or `missing`/`indeterminate` and excluded | `missing` or `indeterminate` ⇒ that record retained (§6), excluded from 4–5; the phase is `blocked` only if nothing could be checked |
 | 4 | Switch authority | phase 3 done for the records concerned | `UPDATE authority_mode SET mode='server_authoritative', changed_at=now() WHERE id=1`, and write the retained set (§12.2) in the same transaction | Local reads/writes treat the server as authoritative for **all** durable knowledge, except the named retained records | Transaction commits or not — no partial state |
 | 5 | Demote | phase 4 done | For every id confirmed `held`, mark its local replica non-authoritative (cache only) | Confirmed replicas demoted; unconfirmed/refused untouched | A record skipped at phase 3 is simply not demoted |
@@ -153,7 +155,42 @@ previous postcondition; re-running after any interruption re-enters at the first
 Before anything changes, the client counts and reports, for **every** drained record type
 (§4.2): row counts by state; outbox rows by state; outbox rows with no recorded
 `authored_by_user_id`; local-only project memories with no canonical counterpart (§6
-candidates); and reusable patterns eligible for promotion. Phase 1 writes nothing but this report and its own `migration_state` row.
+candidates); and reusable patterns eligible for ownership claim. Because shipped
+`reusable_patterns` has no owner/account column, this report MUST label their historical owner
+`unknown`, not infer one from current credentials. Phase 1 writes nothing but this report and
+its own `migration_state` row.
+
+### 4.1a Establish legacy pattern ownership once (FR-867b)
+
+Legacy pattern content does not contain a recoverable historical account owner. A Feature 004
+store may have been used with several authenticated accounts, so migration has no truthful
+automatic assignment.
+
+After inspection, `cairn migrate --claim-patterns` shows eligible local pattern ids and requires
+the authenticated user to explicitly select or confirm which ones that account claims. In one
+local transaction, before any promotion command is deliverable, migration inserts:
+
+```
+legacy_pattern_claims(local_pattern_id, owner_user_id, content_key, pattern_id, claimed_at)
+```
+
+`owner_user_id` comes from the authenticated credential. `content_key` is the safe normalized
+content digest from `data-model.md` §6.2, and `pattern_id` is derived immediately as
+`UUIDv5(CAIRN_PATTERN_NS, owner_user_id || content_key)`. Drain reads all three persisted values;
+it never recomputes the owner from the credential active at retry time.
+
+- Repeating the same claim by the same owner is a no-op and returns the persisted identity.
+- A different account attempting to claim that local row receives
+  `legacy_pattern_already_claimed`; no owner or pattern id changes.
+- A credential switch after claim makes the row ineligible for that account's per-author drain.
+  It is reported `author_mismatch` until the claiming account resumes migration; it is never
+  re-keyed to the new account.
+- An unclaimed legacy pattern is inserted into `retained_local` with
+  `reason = owner_unclaimed`, remains readable locally, and is reported individually. It is not
+  queued, delivered, demoted or silently attributed.
+
+Completing this phase means every legacy pattern is either backed by one persisted claim or
+named as retained-local. It does not mean every pattern was claimed.
 
 ### 4.2 Drain (FR-864, FR-864a)
 
@@ -165,7 +202,7 @@ candidates); and reusable patterns eligible for promotion. Phase 1 writes nothin
 | `memory_relation` | `RelationRef(from_memory_id, to_memory_id, kind)` | a relation has no id of its own; it is **not** a `KnowledgeRef` |
 | `personal_knowledge` | `KnowledgeRef(personal, id)` | |
 | `team_knowledge` | `KnowledgeRef(team, id)` | visibility rules apply (§12.5) |
-| reusable pattern | `PatternRef(pattern_id)` | promoted into the safe shape, owner-scoped (`knowledge-commands.md` §3.3) |
+| reusable pattern | `PatternRef(pattern_id)` | only with a persisted `legacy_pattern_claims` row; promoted as a personal-domain record of type `pattern`, owner-scoped (`knowledge-commands.md` §3.3) |
 | `pattern_application` | — | local-only evidence (FR-707); never drains |
 
 Reuses `outbox::claim_namespace_for_author` (`outbox.rs:533-540`) unchanged, over the
@@ -178,11 +215,16 @@ misattribution `outbox.rs:522-531` records as introduced and fixed twice already
 **no recorded author** is drained by no one's migration; it is reported (§4.3) and left
 `pending`.
 
+Patterns use the same rule through `legacy_pattern_claims.owner_user_id`: current credentials
+authorize delivery only when they match the persisted claimant. The active account can never
+substitute for a missing claim.
+
 ### 4.3 Blocked-row reporting (FR-873)
 
 Every row the claim does not deliver is reported individually — `entity_type`, `entity_id`,
-and one of: `no_recorded_author` | `author_mismatch` | `server_rejected: <reason>` |
-`capability_blocked`. `server_rejected` carries the server's own rejection reason verbatim.
+and one of: `no_recorded_author` | `owner_unclaimed` | `author_mismatch` |
+`server_rejected: <reason>` | `capability_blocked`. `server_rejected` carries the server's own
+rejection reason verbatim.
 
 ## 5. Possession verification (FR-865)
 
@@ -217,7 +259,7 @@ Records are named by their own reference shape — `KnowledgeRef(domain, id)` fo
 | `knowledge`/`personal` | row exists **and** `owner_user_id` = the caller | — |
 | `knowledge`/`team` | row exists **and** the caller may see it | a `proposed` row the caller may not see (§12.5) |
 | `knowledge`/`project` | row exists **and** the caller is a member of its `project_id` | — |
-| `pattern` | row exists **and** `owner_user_id` = the caller — patterns are owner-scoped (`data-model.md` §6.2) | — |
+| `pattern` | personal-domain row exists **and** `owner_user_id` = the caller — patterns are owner-scoped (`data-model.md` §6.2) | — |
 | `relation` | a row with that `(from, to, kind)` exists, both endpoints in a project the caller is a member of | — |
 
 A relation is named by its natural key, not by an id: `memory_relations` has no surrogate key
@@ -251,13 +293,15 @@ Interruption at any point — kill, crash, network loss, server 5xx — leaves `
 at whatever phase last committed `done`. Re-running:
 
 1. Finds the first phase not `done`, re-enters from its precondition, not from scratch.
-2. Each phase is independently idempotent: phase 2's claim skips rows already `delivered`;
+2. Each phase is independently idempotent: phase 1a's same-owner claim returns its persisted
+   row and rejects a different owner; phase 2's claim skips rows already `delivered`;
    phase 3's check is a pure read; phase 4's `UPDATE` no-ops if already applied; phase 5's
    demotion no-ops for an already-demoted row.
 3. Produces **no duplicate canonical knowledge** (FR-868): delivery is idempotent by
    construction — `(writer_id, writer_seq)` uniqueness on `personal_knowledge`/`team_knowledge`
    (004's migration §4 step 6) cannot be violated into a second row by a resend, and drain
-   never re-enqueues a row already `delivered`.
+   never re-enqueues a row already `delivered`. Pattern delivery additionally keys identity
+   from the persisted claim, so credential changes cannot produce a second owner or pattern id.
 
 A migration that never reaches phase 4 leaves the store fully functional under Feature 004
 semantics (FR-877) — resumability is the ordinary mode, not a fallback.
@@ -354,7 +398,7 @@ repeated here only because an earlier draft named the personal and team namespac
 | `memory_relation` | yes | yes | keyed by its `(from, to, kind)` triple |
 | `personal_knowledge` | yes | yes | |
 | `team_knowledge` | yes | yes | visibility rules apply (§12.5) |
-| `reusable_pattern` → `shared_patterns` | yes | yes | promoted into the redefined safe shape (`knowledge-commands.md` §3.3); the local representation is never sent |
+| `reusable_pattern` → `shared_patterns` | claimed rows only | yes | explicit owner claim is persisted in phase 1a; promoted as a personal-domain pattern in the redefined safe shape (`knowledge-commands.md` §3.3); unclaimed rows stay retained-local and the local representation is never sent |
 | `pattern_application` | no | n/a | local-only evidence (FR-707) |
 
 Possession answers for all five drained shapes, each by its own reference shape (§5). Without the `memory`
@@ -400,9 +444,10 @@ A new local table names the exceptions explicitly:
 
 The canonical definition is `data-model.md` §5. It is keyed by `ref_kind ∈
 {knowledge, pattern, relation}` with a single non-null `dedupe_key`, because it must be able to
-name a pattern (no domain) and a relation (no id of its own), and because SQLite treats NULLs as
-distinct in a UNIQUE index — a naive multi-column UNIQUE would let `--retry-retained` insert the
-same record twice.
+name a `PatternRef` (whose polymorphic reference-domain slot is null even though the canonical
+record's domain is personal) and a relation (no id of its own), and because SQLite treats NULLs
+as distinct in a UNIQUE index — a naive multi-column UNIQUE would let `--retry-retained` insert
+the same record twice.
 
 `authority_mode` becomes `server_authoritative` for the store. A record in `retained_local` is
 the stated exception to it, and its behaviour is defined rather than implied:

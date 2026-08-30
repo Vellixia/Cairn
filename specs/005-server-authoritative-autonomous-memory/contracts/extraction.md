@@ -532,7 +532,7 @@ must be named rather than assumed. Checked against official documentation on 202
 |---|---|---|---|
 | Claude Code | `UserPromptSubmit.prompt` | `Stop.last_assistant_message`, `SubagentStop.last_assistant_message` | `SubagentStop.agent_id`, `.agent_type` |
 | Codex CLI | `UserPromptSubmit.prompt` | `Stop.last_assistant_message`, `SubagentStop.last_assistant_message` | `SubagentStop.agent_id`, `.agent_type` |
-| OpenCode | **not used** — see below | **none exists** | not established |
+| OpenCode | **not used** — v2 beta exposes `event.prompt.text` | **not used** — no stable dedicated settled-assistant-message completion boundary established | not established |
 
 Rules that follow from the evidence:
 
@@ -547,8 +547,11 @@ Rules that follow from the evidence:
   field at all — it must be walked out of `chat.message`'s `output.parts[]` entries of
   `type: "text"` — and that hook is absent from the vendor's documentation, appearing only in
   published type definitions. Its assistant-text hook, `experimental.text.complete`, is
-  undocumented and carries an `experimental.` prefix. OpenCode 2 exposes `event.prompt.text` but
-  is beta, and exposes **no assistant-text hook of any kind**.
+  undocumented and carries an `experimental.` prefix. Official OpenCode v2 documentation now
+  exposes `event.prompt.text`, and its context hook exposes `system`, `messages` and `tools`
+  immediately before model dispatch. Those are real prompt and message/context surfaces, but
+  the v2 plugin API is beta and Cairn has not established a stable, dedicated
+  settled-assistant-message completion boundary suitable for baseline semantic-signal capture.
 
   So Cairn declines semantic signal capture for OpenCode, reported as `declined_by_cairn` with
   the reason — the same posture, for the same reason, as declining its delivery surface

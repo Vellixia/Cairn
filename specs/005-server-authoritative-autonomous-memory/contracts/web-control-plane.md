@@ -25,7 +25,7 @@ client components, cookie session auth (`web/lib/api.ts`).
 | Retrieval traces | `/projects/[id]/retrievals` | **NEW** | List of past retrievals (FR-886) | `GET /api/projects/{id}/retrieval-traces` |
 | Retrieval trace detail | `/projects/[id]/retrievals/[traceId]` | **NEW** | Trigger, candidates, selection, budget, delivery state — never briefing text (FR-839, FR-846a, FR-886) | `GET /api/retrieval-traces/{id}` |
 | Agents / integration health | `/projects/[id]/agents` | **NEW** | Per-agent, per-capability health (FR-887) | `GET /api/projects/{id}/integration-health` |
-| Domains | `/projects/[id]/domains` | **NEW** | Project, personal, team kept visibly separate (FR-888) | `GET /api/projects/{id}/memories?domain=project`, `GET /api/personal/knowledge`, `GET /api/team/knowledge` |
+| Domains | `/projects/[id]/domains` | **NEW** | Project, personal, team kept visibly separate; personal includes owner-only records of type `pattern` (FR-888, FR-708c) | `GET /api/projects/{id}/memories?domain=project`, `GET /api/personal/knowledge`, `GET /api/patterns`, `GET /api/team/knowledge` |
 | Team curation | `/team` | **NEW** | Review, ratify, retire — admin-restricted actions (FR-889, FR-889a) | `GET /api/team/knowledge`, `POST /api/team/{id}/ratify`, `POST /api/team/{id}/retire` (ratify/retire pre-exist, `global.rs:1068-1160`) |
 | System health | `/system` | **NEW** | Ingest, consolidation, retrieval backlogs and failures (FR-891) | `GET /api/system/health` |
 | Admin users | `/admin/users` | **NEW** | Web equivalent of `cairn user` (FR-890) | `GET/POST /api/admin/users`, `PATCH /api/admin/users/{id}`, `POST /api/admin/users/{id}/reset-password` (all pre-existing, `api.rs:46-51`) |
@@ -53,9 +53,10 @@ requirement touches them.
 | `GET /api/projects/{id}/memories` | `SettledUser` | `require_member` (unchanged) | Existing shape + `importance`, `verification`, `verification_authority`, `origin_kind`, `reinforcement_count`, `relation_count` |
 | `GET /api/memories/{id}` | `SettledUser` | `require_member` on the row's `project_id` (unchanged) | Existing shape + `relations[]`, `evidence_summary` (counts/ids, never content), `verification{state,authority,last_verified_at,stale}`, `reinforcement_count`, `retrieval_usage[]` (bounded, §7), `origin_kind` |
 | `GET /api/projects/{id}/retrieval-traces` | `SettledUser` | `require_member` | `{ traces: [{trace_id, trigger, delivery_point, degradation_level, delivery_state, created_at}], cursor }` |
-| `GET /api/retrieval-traces/{id}` | `SettledUser` | `require_member` on the trace's `project_id`, **plus** §6 withholding | `{ trigger, items: [{ref_kind, domain, knowledge_id, status, rank}], budget_tokens, budget_spent, latency_ms, delivery_state, failure_reason }` — no briefing text field exists on this shape at all |
+| `GET /api/retrieval-traces/{id}` | `SettledUser` | `require_member` on the trace's `project_id`, **plus** §6 withholding | `{ trigger, items: [{ref_kind, domain, knowledge_id, status, rank}], budget_tokens, budget_spent, latency_ms, delivery_state, failure_reason }` — `knowledge` requires a domain; `pattern` requires `domain: null`; no briefing text field exists |
 | `GET /api/projects/{id}/integration-health` | `SettledUser` | `require_member` | `{ rows: [{agent, capability, stage, status, evidence_kind, observed_at, stale}] }` |
 | `GET /api/personal/knowledge` | `SettledUser` | none (owner-scoped by construction — `owner_user_id = caller`, not a project concept) | `{ items: [...], cursor }` |
+| `GET /api/patterns` | `SettledUser` | none (personal-domain patterns; `owner_user_id = caller`) | `{ items: [{pattern_id, domain: "personal", type: "pattern", ...}], cursor }` |
 | `GET /api/team/knowledge` | `SettledUser` | none (server-global); visibility filtered per `sync-namespaces.md` §1a (`proposed` visible to author + admin only) | `{ items: [...], cursor }` |
 | `GET /api/projects/{id}/consolidation-runs` | `SettledUser` | `require_member` | `{ runs: [{ run_id, started_at, finished_at, events_claimed, candidates_proposed, candidates_accepted, candidates_refused, refusal_reasons, extractor_kind }] }`, paginated (FR-894a) |
 | `GET /api/system/health` | `AdminUser` | none — admin, not membership | `{ ingest: {...}, consolidation: {...}, retrieval: {...} }` — §5 |
@@ -161,8 +162,8 @@ Two cross-cutting flags on every row, not folded into `status` (FR-852, FR-853, 
 | View | Rule |
 |---|---|
 | Memory detail | Evidence is local to the capturing machine; the section states "evidence content is local to `<session>` and not held here" rather than rendering empty (FR-893, matching the existing `evidence_content_available: false` field, `api.rs:1310-1329`) |
-| Retrieval trace detail | Never renders briefing text — the response shape (§2) carries no such field, so there is nothing for the view to accidentally render (FR-839, FR-886). A referenced record the reader may not see (another account's personal knowledge, or a pattern the reader does not own, `sync-namespaces.md` §1a's visibility rule) is omitted from `items[]` entirely, never shown as an opaque id that still discloses existence (FR-846a) |
-| Domains — personal panel | Only the caller's own `owner_user_id`; never another account's, even to a project co-member or an admin, short of that admin's own account |
+| Retrieval trace detail | Never renders briefing text — the response shape (§2) carries no such field, so there is nothing for the view to accidentally render (FR-839, FR-886). Each item is `KnowledgeRef(domain,id)` or `PatternRef(pattern_id)` in discriminator form. A referenced record the reader may not see (another account's personal knowledge, including a pattern the reader does not own) is omitted from `items[]` entirely, never shown as an opaque id that still discloses existence (FR-846a) |
+| Domains — personal panel | Shows the caller's ordinary personal knowledge and personal-domain records of type `pattern`, visibly separated by type. Only the caller's own `owner_user_id`; never another account's, even to a project co-member or an admin, short of that admin's own account. A pattern never appears in the team panel unless its content separately became a team proposal and was ratified; the pattern itself remains personal. |
 | Domains — team panel | `proposed` rows visible only to their author and to admins; `authoritative`/`retired` visible to all authenticated accounts (unchanged from `sync-namespaces.md` §1a, now surfaced in a read view for the first time) |
 | Activity feed | No event kind ever carries user/assistant free text (data-model.md §1.3) — this is a property of the data, not the view, but the view renders no field capable of holding it either |
 | System health, Admin users | `AdminUser` only; a non-admin's request is `403`, and the page itself checks `me().role` before rendering the nav entry — belt, not suspenders, per FR-892 |
@@ -180,7 +181,7 @@ authorization decision the server has not already made.
 | Activity feed | `limit` ≤ 100, default 50 | keyset on `(received_at, event_id)` — stable under concurrent insertion, unlike an offset that would skip or repeat rows as new events arrive |
 | Retrieval traces list | `limit` ≤ 100, default 25 | keyset on `(created_at, trace_id)` |
 | `retrieval_usage[]` on memory detail | 20 most recent | no further pagination — a "view all" link goes to the traces list filtered by that `KnowledgeRef` |
-| Personal / team knowledge feeds | `limit` ≤ 100, default 25 | keyset, matching `retrieval_trace_items`'s existing 200-per-trace cap (data-model.md §3) in spirit |
+| Personal / pattern / team knowledge feeds | `limit` ≤ 100, default 25 | keyset, matching `retrieval_trace_items`'s existing 200-per-trace cap (data-model.md §3) in spirit |
 | Admin users list | `limit` ≤ 100, default 50 | offset — bounded by account count, which is small by construction |
 
 No list view in this contract returns an unbounded result, and none accepts a client-supplied

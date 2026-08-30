@@ -3,7 +3,7 @@
 **Feature Directory**: `specs/005-server-authoritative-autonomous-memory`
 **Git Branch**: `feature-005-spec`
 **Baseline**: `origin/main` @ `f76a9fec8a786a76dc7ffa1b0b0daf96aae08b15`
-**Spec**: [spec.md](./spec.md) — 268 functional requirements, 59 success criteria
+**Spec**: [spec.md](./spec.md) — 270 functional requirements, 62 success criteria
 **Constitution**: v1.2.1
 **Created**: 2026-08-30
 **Status**: Draft — plan only. No tasks, no implementation.
@@ -44,7 +44,7 @@ contracts; this table is the index and the rationale.
 | Consolidation | In-process Tokio task, claim/reclaim, bounded | FR-793a–d; the server had no background execution at all |
 | Extractor | Trait; **deterministic rule-based baseline ships as default** | No third-party egress in v1; hosted extraction stays optional and gated |
 | Key normalization | Extend the existing deterministic normalizer | FR-796a–c; the problem is syntactic |
-| Verification | Client reports *runs*; server *derives* state | FR-811b — the server must never accept `verified` as a claim |
+| Verification | Client reports results as `remote_attested`; server derives state | FR-811b/FR-811h — bearer auth and an HTTP route do not prove which verifier executed |
 | Retrieval | Session-open and prompt-time, with per-session dedup | FR-838c; both committed agents document both points |
 | OpenCode | Capture only; delivery declined, reason recorded | FR-838b — the hooks exist but are beta |
 | Migration | Explicit server authority mode + `upgrade_required` | FR-876; retirement must not wait on a dormant device |
@@ -78,7 +78,7 @@ contract intact rather than trading it for extraction quality.
 | I. Usable MVP First | **PASS** — the feature is sliced agent → daemon → server → web and ends in a runnable end-to-end scenario on a real repository. |
 | II. Simple Architecture | **PASS** — no new process, service, broker, datastore or worker platform. Consolidation is deferred work inside the existing server, bounded and restartable, which II explicitly permits. The deterministic extractor adds no dependency at all. |
 | III. Fail-Soft, Server-Authoritative | **PASS** — PostgreSQL canonical, SQLite demoted to spool/cache/machine state; the agent never blocks on Cairn; deleting the local store loses nothing the server accepted. |
-| IV. Explicitly Domained Memory | **PASS**, on precedent the 1.1.0 amendment set — see below. |
+| IV. Explicitly Domained Memory | **PASS** — canonical patterns are personal-domain records of type `pattern`; `PatternRef` changes reference shape, not domain. |
 | V. Privacy by Default | **PASS** — raw material never leaves the machine; only gate-approved structure crosses; the baseline extractor introduces no second recipient. |
 | VI. Deterministic Data Boundaries | **PASS** — event identity, ingest and consolidation are all idempotent and clock-independent. |
 | VII. Testable Behavior | **PASS** — every success criterion names an observation point; adversarial corpora are required rather than described. |
@@ -112,27 +112,27 @@ unearned, and each was repaired rather than argued away:
   spool drained, and on a candidate identity that changed when a reclaimed batch saw different
   evidence. Both derivations were replaced (`data-model.md` §1.4, `contracts/consolidation.md` §7).
 - **Principle X** claimed PASS while any project member could assert `authority = cairn` on a
-  verification report. Authority is now server-assigned from the path evidence arrived by
-  (`contracts/verification-summary.md` §4).
+  verification report. Feature 005 now assigns every client-reported result
+  `remote_attested`; `cairn` is server-executed only, and no route produces `remote_cairn`
+  without a stronger evidence path (`contracts/verification-summary.md` §4).
 
 ### Principle IV and reusable patterns
 
-Worth stating rather than asserting, because it is the one assessment that needs an argument.
-IV ¶1 requires that all durable knowledge carry an explicit domain and that nothing recalled be
-unable to name the domain it belongs to. A promoted pattern is durable (FR-708), is recalled —
-`patterns` is a live briefing section — and carries no domain. Read naively, that is a conflict.
+IV ¶1 requires every durable record to name `project`, `personal` or `team`; the 1.1.0
+amendment history says the same explicitly. Feature 005 satisfies that rule directly:
+`shared_patterns` is a canonical **personal-domain** record of type `pattern`, with
+`domain = personal` and `owner_user_id`. It is project-independent because personal knowledge
+is project-independent, not because the record lacks a domain.
 
-It is not a new one, and Feature 005 does not create it. `reusable_patterns` already exists on
-`main`, already carries no project identifier, and is already recalled. The 1.1.0 amendment
-addressed exactly this and settled it: *"Feature 003's own `reusable_patterns` — a table
-deliberately carrying no project identifier — was already the precedent for project-independent
-knowledge under v1.0.0."* IV ¶2 is the clause that governs such a record: knowledge applying
-beyond one project is *"a distinct knowledge type with its own storage, never a wider scope on
-project memory"*. A pattern is that distinct type.
+`PatternRef(pattern_id)` remains distinct from `KnowledgeRef(domain, id)` because a pattern has
+its own table and lifecycle. In a polymorphic reference row, `ref_kind = pattern` therefore uses
+a null *reference-domain slot*; the referenced `shared_patterns` row still carries
+`domain = personal`. This encoding cannot be used to call the durable record domain-less.
 
-What Feature 005 changes is where such a record is stored, not what it is. FR-708c keeps it out
-of the domain vocabulary, and FR-708d keeps it owner-scoped so it never becomes ambient — which
-is the prohibition IV ¶1 actually exists to enforce. No amendment is required.
+Owner-only retrieval prevents ambient visibility. Widening the content is a separate
+team-domain proposal followed by human-admin ratification; the pattern itself remains personal
+and owner-only. This uses the three existing domains, satisfies both paragraphs of Principle
+IV, and needs no constitutional amendment.
 
 **Complexity Tracking**: no principle is violated, so the table is empty.
 
@@ -142,7 +142,7 @@ is the prohibition IV ¶1 actually exists to enforce. No amendment is required.
 
 ```text
 specs/005-server-authoritative-autonomous-memory/
-├── spec.md                  # approved contract (268 FR, 59 SC)
+├── spec.md                  # approved contract (270 FR, 62 SC)
 ├── research.md              # current-main audit + vendor evidence (preserved, extended)
 ├── plan.md                  # this file
 ├── data-model.md            # entities, local schema v8, server schema v4
@@ -179,7 +179,8 @@ crates/cairn-integrate/src/agents/
 crates/cairn-store/
 ├── migrations/0008_safe_events.sql   # NEW event_spool, session_event_seq, command_spool,
 │                                     #     capture dispositions, authority_mode,
-│                                     #     retained_local, migration_state
+│                                     #     retained_local, legacy_pattern_claims,
+│                                     #     migration_state
 └── src/spool.rs                      # NEW claim protocol reusing outbox semantics
 
 crates/cairn-server/
@@ -214,8 +215,9 @@ Vertical slices, each ending in something runnable, per Principle I.
    with: a second session starts already knowing.
 5. **Verification and health** — run reports, derived summaries, evidence-based health. Ends
    with: status tells the truth.
-6. **Migration and cutover** — authority mode, `upgrade_required`, migration phases. Ends
-   with: an existing installation upgrades safely.
+6. **Migration and cutover** — authority mode, `upgrade_required`, explicit one-time legacy
+   pattern ownership claims persisted before delivery, migration phases. Ends with: an existing
+   installation upgrades safely without attributing owner-less patterns to active credentials.
 7. **Web control plane** — dashboard, detail, traces, health, team and admin. Ends with: the
    whole lifecycle is visible.
 

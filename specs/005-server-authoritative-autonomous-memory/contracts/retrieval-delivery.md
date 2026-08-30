@@ -20,7 +20,7 @@ against each vendor's official documentation on 2026-08-30. No implementation ma
 | Prompt-time delivery | documented, stable | documented, stable | exists in v2 beta; **declined** |
 | Post-compaction opportunity | via session-open, trigger `compact` | via session-open, trigger `compact` | pre-compaction only |
 | Receipt acknowledgement | `unavailable / no evidence` | `unavailable / no evidence` | `unavailable / no evidence` |
-| Semantic signals | supported | supported | declined by Cairn — no stable prompt or assistant-text field (`extraction.md` §13.10) |
+| Semantic signals | supported | supported | declined by Cairn — beta prompt/context surfaces exist, but no stable dedicated settled-assistant-message completion boundary is established (`extraction.md` §13.10) |
 | MCP | yes | yes | yes |
 
 **Committed automatic delivery: Claude Code and Codex CLI only** (FR-838a). Both document a
@@ -103,15 +103,25 @@ Two budgets (data-model.md §7, FR-829, FR-830), so the two points cannot restat
 | session open | the full briefing budget | 3000 |
 | prompt time | 25% of the briefing budget | 750 |
 
-Dedup table `delivered_context (session_id, domain, knowledge_id, delivered_at, delivery_point)`,
-`PRIMARY KEY (session_id, domain, knowledge_id)`. Only memory-domain sections participate —
-`task_memory`, `branch_memory`, `project_memory`, `patterns`, `personal_notes`,
-`team_guidance` — since only those carry a stable `KnowledgeRef`; `task`, `repository`,
-`decisions` and the other non-memory sections are re-derived fresh every delivery.
+Every durable item is named as either `KnowledgeRef(domain, id)` or
+`PatternRef(pattern_id)`. The server stores that union as:
+
+```sql
+delivered_context(session_id, ref_kind, domain, knowledge_id,
+                  delivered_at, source_updated_at, delivery_point)
+CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
+    OR (ref_kind = 'pattern'   AND domain IS NULL))
+PRIMARY KEY (session_id, ref_kind, knowledge_id)
+```
+
+Only stable-reference sections participate — `task_memory`, `branch_memory`,
+`project_memory`, `patterns`, `personal_notes`, `team_guidance`. Every section except
+`patterns` uses `KnowledgeRef`; `patterns` uses `PatternRef`. `task`, `repository`, `decisions` and
+the other non-memory sections are re-derived fresh every delivery.
 
 ```
 relevant(session, prompt)
-  MINUS delivered_context[session]   -- matched on (domain, knowledge_id)
+  MINUS delivered_context[session]   -- matched on KnowledgeRef or PatternRef
   PLUS  any delivered item whose updated_at > its delivered_at
 ```
 
@@ -126,24 +136,32 @@ again without waiting for the next session.
 
 **t0 — session open** (`startup`). Header + Level 0: 300 (reserve 1200 withheld, 300 used, 900
 released). `task_memory`/`branch_memory`/`project_memory` `M1`(120) `M2`(90) `M3`(70) = 280,
-general pool `3000−300=2700`, remaining `2420`. `personal_notes` `P1`(50): `min(2420,450)=450`
-room, fits. `team_guidance` `G1`(40): remaining global allowance `450−50=400`, fits. Total
-spend 670. `delivered_context` gets five rows: `{M1,M2,M3,P1,G1}`, `delivery_point=session_open,
-delivered_at=t0`.
+general pool `3000−300=2700`, remaining `2420`. Pattern `R1`(80), identified by
+`PatternRef(r1)`, fits the general pool. `personal_notes` `P1`(50), identified by
+`KnowledgeRef(personal,p1)`: `min(2340,450)=450` room, fits. `team_guidance` `G1`(40),
+identified by `KnowledgeRef(team,g1)`: remaining global allowance `450−50=400`, fits. `M1`–`M3`
+are `KnowledgeRef(project,…)`. Total spend 750. `delivered_context` gets six rows:
+`{M1,M2,M3,R1,P1,G1}`, each encoded by `ref_kind/domain?/knowledge_id`, with
+`delivery_point=session_open, delivered_at=t0`.
 
 **t1 — prompt 1**, `incremental_budget=750`. Relevant set recomputes to the same
-`{M1,M2,M3,P1,G1}` — nothing new, nothing changed:
-`{M1,M2,M3,P1,G1} MINUS {M1,M2,M3,P1,G1} PLUS {} = {}`. Empty selection. Trace:
+`{M1,M2,M3,R1,P1,G1}` — nothing new, nothing changed:
+`{M1,M2,M3,R1,P1,G1} MINUS {M1,M2,M3,R1,P1,G1} PLUS {} = {}`. Empty selection. Trace:
 `degradation_level: full` (deadline met), `budget.spent: 0` — distinguished from a failed
 retrieval (§7, FR-849): nothing was owed, not something broke.
 
 **t2 — prompt 2.** A new `M4`(60) was created; `M1` was edited, so
-`M1.updated_at > M1.delivered_at(t0)`. `relevant = {M1,M2,M3,M4,P1,G1}`, so:
-`{M1,M2,M3,M4,P1,G1} MINUS {M1,M2,M3,P1,G1} PLUS {M1} = {M4, M1}`. `M2,M3,P1,G1` withheld
+`M1.updated_at > M1.delivered_at(t0)`. `relevant = {M1,M2,M3,M4,R1,P1,G1}`, so:
+`{M1,M2,M3,M4,R1,P1,G1} MINUS {M1,M2,M3,R1,P1,G1} PLUS {M1} = {M4, M1}`. `M2,M3,R1,P1,G1` withheld
 (delivered, unchanged); `M4` new; `M1` re-enters on its updated timestamp. Cost
 `60+120=180 <= 750`, both admitted. `delivered_context` is upserted: `M4` inserted, `M1`'s row
 updated to `delivered_at=t2, delivery_point=prompt_time` — the primary key
-`(session_id, domain, knowledge_id)` makes this an update, not a second row.
+`(session_id, ref_kind, knowledge_id)` makes this an update, not a second row.
+
+**Other-account falsification.** Account B, even if it belongs to the same project as account A,
+cannot retrieve A's `PatternRef(r1)`: resolution finds a personal-domain pattern whose
+`owner_user_id` is A, so selection drops it before ranking. B also cannot obtain it by asking for
+the trace; §6.1 withholds the row entirely. Pattern durability never implies team visibility.
 
 ## 5. Degradation — four levels, stated once
 
@@ -190,8 +208,9 @@ on; there is no fifth, prompt-time-only level. Where a briefing is served from c
 `session_open`/`prompt_submit`/`explicit`), `delivery_point` (where it was aimed), the
 `degradation_level` and budget accounting from §4–§5, `latency_ms`, `delivery_state`
 (`generated`|`transmitted`|`acknowledged`|`unavailable`|`failed`), `failure_reason` (set only on
-`failed`), and per-item `(domain, knowledge_id, status ∈ considered|selected, selection_rule,
-rank)`.
+`failed`), and per-item `(ref_kind, domain?, knowledge_id,
+status ∈ considered|selected, selection_rule, rank)`. The row has the same database `CHECK` as
+`delivered_context`: knowledge requires a domain; pattern requires a null reference-domain slot.
 
 **The rendered briefing text is never in a trace** (FR-839): text mixes domains and carries
 handoff-derived material, so persisting it centrally would place one account's personal
@@ -210,14 +229,15 @@ Readership is the session's project members, filtered per item at read time:
 |---|---|
 | `task_memory`, `branch_memory`, `project_memory` | any project member (unchanged) |
 | `team_guidance` | any project member (project/server-wide domain) |
-| `patterns` | **only** the account owning the pattern (`shared_patterns.owner_user_id`) — server-backed patterns are owner-scoped (FR-708d) |
+| `patterns` (`PatternRef`) | **only** the account owning the personal-domain pattern (`shared_patterns.owner_user_id`) — server-backed patterns are owner-scoped (FR-708d) |
 | `personal_notes` | **only** the account owning the referenced record (`personal_knowledge.owner_user_id`) |
 
 A reader who may not see a `personal_notes` item gets that row **dropped from the list**, never
 returned as a redacted or opaque reference — an opaque handle still discloses that *some*
 personal record existed and was used, exactly the enumeration FR-846a forbids regardless of
-content visibility. The filter resolves each `KnowledgeRef` in its own domain table and
-compares ownership there; failing rows are excluded entirely, and surviving rows are re-ranked
+content visibility. The filter resolves each `KnowledgeRef` in its own domain table or a
+`PatternRef` in `shared_patterns`, then compares ownership there; failing rows are excluded
+entirely, and surviving rows are re-ranked
 densely so a gap cannot betray a withheld one (§12.2). `degradation_level` returns to every
 reader; `budget_tokens` and `budget_spent` return **only to the trace's own account**, because
 the spent total minus the visible items' cost would otherwise yield the withheld items' count
@@ -260,8 +280,9 @@ outcome, never that the agent consumed it.
    result (FR-834, mirrors FR-894a).
 5. Session-open uses the full briefing budget; prompt-time uses 25% of it, applied to whichever
    items survive dedup (FR-829, FR-830, data-model.md §7).
-6. Prompt-time selection is `relevant MINUS delivered_context[session]   -- matched on (domain, knowledge_id) PLUS {items updated
-   since their delivery}` — never a resend of what the session already has unless it changed.
+6. Prompt-time selection is `relevant MINUS delivered_context[session] PLUS {items updated
+   since their delivery}`, matched by `KnowledgeRef(domain,id)` or `PatternRef(pattern_id)` —
+   never a resend of what the session already has unless it changed.
 7. Retrieval degrades to exactly one of `full`, `reduced`, `minimal`, `none` on a deadline; the
    level is recorded on the briefing and in its trace; wall-clock latency is never itself part
    of briefing content (FR-836, FR-835).
@@ -280,13 +301,15 @@ outcome, never that the agent consumed it.
 These four rules govern wherever an earlier section is less specific. They are stated here once
 rather than as amendments to §§4-6.
 
-### 12.0 Every knowledge reference is a `KnowledgeRef`
+### 12.0 Every durable retrieval item uses its canonical reference shape
 
-Project, personal and team knowledge live in three different tables. A bare `memory_id` names
-only the first. Traces, `delivered_context`, authorization and web rendering all use
-`KnowledgeRef = (domain, knowledge_id)` (`data-model.md` §6.1). `updated_at` is read from the
-referenced record's own table, and ownership is checked in that domain's own terms — a project
-member is not an owner of a colleague's personal record.
+Project, personal and team knowledge live in different tables. A bare `memory_id` names only the
+first. Traces, `delivered_context`, authorization and web rendering use
+`KnowledgeRef(domain, knowledge_id)` for ordinary knowledge and `PatternRef(pattern_id)` for a
+pattern (`data-model.md` §6.1), represented by the canonical discriminator plus nullable-domain
+slot. `updated_at` is read from the referenced record's own table. Ownership is checked in that
+domain's own terms: a project member is not an owner of a colleague's personal record, and a
+`PatternRef` resolves only for its personal-domain pattern's owner.
 
 ### 12.1 `delivered_context` is a server table
 
