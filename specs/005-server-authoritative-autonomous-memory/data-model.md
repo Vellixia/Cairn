@@ -406,12 +406,24 @@ CREATE TABLE retrieval_traces (
   project_id UUID NOT NULL, session_id UUID NOT NULL, account_id UUID NOT NULL,
   trigger TEXT NOT NULL,             -- session_open | prompt_submit | explicit
   delivery_point TEXT NOT NULL,
-  degradation_level TEXT NOT NULL,   -- FR-836 declared levels
+  degradation_level TEXT,            -- NULL only while requested or on pre-generation failure
   budget_tokens INT, budget_spent INT,
-  latency_ms INT NOT NULL,
-  delivery_state TEXT NOT NULL,      -- generated|transmitted|acknowledged|unavailable|failed
+  latency_ms INT,                     -- NULL only while requested
+  delivery_state TEXT NOT NULL CHECK (delivery_state IN
+    ('requested','generated','transmitted','failed')),
+  acknowledgement_state TEXT NOT NULL DEFAULT 'unavailable' CHECK
+    (acknowledgement_state IN ('unavailable','acknowledged')),
+                                      -- baseline 005 has no producer for acknowledged
   failure_reason TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  transmission_reported_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK ((delivery_state = 'requested' AND latency_ms IS NULL)
+      OR (delivery_state <> 'requested' AND latency_ms IS NOT NULL)),
+  CHECK ((delivery_state IN ('generated','transmitted') AND degradation_level IS NOT NULL)
+      OR delivery_state IN ('requested','failed')),
+  CHECK ((delivery_state = 'failed' AND failure_reason IS NOT NULL)
+      OR (delivery_state <> 'failed' AND failure_reason IS NULL))
 );
 
 -- Retention (FR-847): retrieval_traces and their items are retained 90 days, then deleted
@@ -432,6 +444,7 @@ CREATE TABLE retrieval_trace_items (
   ) STORED NOT NULL,
   status        TEXT NOT NULL CHECK (status IN ('considered','selected')),
   selection_rule TEXT, rank INT,
+  source_updated_at TIMESTAMPTZ NOT NULL,  -- copied from referenced row for delivery upsert
   CHECK ((ref_kind = 'knowledge' AND domain IS NOT NULL)
       OR (ref_kind = 'pattern'   AND domain IS NULL)),
   PRIMARY KEY (trace_id, reference_key)
@@ -735,6 +748,15 @@ restate each other (FR-829, FR-830). Both write a trace with their `delivery_poi
 A row is written **when transmission is attempted and did not fail**, never at selection time.
 Writing at selection would suppress, for the life of the session, items the agent never
 received — dedup withholding what was only ever generated.
+
+The server inserts `retrieval_traces(delivery_state='requested')` after authenticated
+account/project/session binding and before selection begins. Generation changes it to `generated`
+or `failed`. A later authenticated transmission-outcome report names only the server-issued
+`trace_id` plus the bounded outcome. In one transaction, `generated → transmitted` upserts the
+trace's selected `retrieval_trace_items` into `delivered_context`; `generated → failed` records a
+content-free failure reason and writes no delivery rows. Repeating the same terminal outcome is a
+no-op success; a conflicting terminal outcome is refused. Baseline 005 always leaves
+`acknowledgement_state = 'unavailable'`: returning context establishes transmission, not receipt.
 
 Because `delivered_context` is server-side, deleting the local store does not cause a session's
 knowledge to be re-delivered, and does not appear in the durability-loss list.

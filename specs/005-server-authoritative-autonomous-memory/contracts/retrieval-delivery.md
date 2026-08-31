@@ -85,6 +85,34 @@ POST /api/retrieve                              →  { "trace_id", "delivery_poi
   "open_trigger": "…"  // trigger=session_open }      "sections": {…SECTION_ORDER…} }
 ```
 
+After authenticating and resolving the request's session, account and project, the server inserts
+the trace with `delivery_state = requested` **before** selection or rendering begins. Generation
+success updates it to `generated` and returns the response above. Generation failure updates the
+same trace to `failed` with a bounded `failure_reason` and returns an error carrying `trace_id`, so
+the failed attempt is observable rather than absent.
+
+Automatic hook transmission happens after that response. It is reported through the smallest
+separate authenticated boundary:
+
+```text
+POST /api/retrieval-traces/{trace_id}/transmission
+
+{ "outcome": "transmitted" }
+or
+{ "outcome": "failed",
+  "failure_reason": "hook_transmission_failed" | "hook_transmission_deadline_exceeded" }
+```
+
+The body accepts no account, project, session, delivery authority, acknowledgement, reference, or
+arbitrary diagnostic field. The server resolves the trace, derives its account/project/session,
+requires the authenticated account to own that trace and still be authorized for its session and
+project, and refuses a foreign or unknown trace. `generated → transmitted` and the upsert of all
+selected trace items into `delivered_context` occur in one transaction. `generated → failed`
+records the bounded reason in that transaction and inserts nothing into `delivered_context`.
+Repeating the identical terminal report returns `duplicate` and has no second effect; an opposite
+terminal report returns `outcome_conflict`. No report changes acknowledgement: it remains
+`unavailable / no evidence` until a separately specified vendor mechanism establishes receipt.
+
 `account_id`/`project_id` are absent from the request — bound server-side, the discipline
 `safe-events.md` §3 states for the ingest envelope. `trigger = explicit` is what
 `cairn_context`/`cairn_search` produce: no push into the agent's context stream, always
@@ -214,10 +242,12 @@ on; there is no fifth, prompt-time-only level. Where a briefing is served from c
 `retrieval_traces` / `retrieval_trace_items` (data-model.md §6): `trigger` (why retrieval ran —
 `session_open`/`prompt_submit`/`explicit`), `delivery_point` (where it was aimed), the
 `degradation_level` and budget accounting from §4–§5, `latency_ms`, `delivery_state`
-(`generated`|`transmitted`|`acknowledged`|`unavailable`|`failed`), `failure_reason` (set only on
-`failed`), and per-item `(ref_kind, domain?, knowledge_id, reference_key,
-status ∈ considered|selected, selection_rule, rank)`. The row has the same database `CHECK` as
-`delivered_context`: knowledge requires a domain; pattern requires a null reference-domain slot.
+(`requested`|`generated`|`transmitted`|`failed`), `acknowledgement_state`
+(`unavailable`|`acknowledged`, with no baseline producer for the latter), `failure_reason` (set
+only on `failed`), and per-item `(ref_kind, domain?, knowledge_id, reference_key,
+status ∈ considered|selected, selection_rule, rank, source_updated_at)`. The row has the same
+database `CHECK` as `delivered_context`: knowledge requires a domain; pattern requires a null
+reference-domain slot.
 Its primary key is `(trace_id, reference_key)`, so same-UUID project, personal, team and pattern
 items coexist in one trace.
 
@@ -268,14 +298,22 @@ Writing context to the hook's return channel is `context_transmitted`, never
 `context_acknowledged` (FR-854): Cairn claims only that transmission was attempted and its
 outcome, never that the agent consumed it.
 
+The transition is therefore explicit: authenticated retrieval creates `requested`; generation
+sets `generated` or `failed`; only the daemon's later outcome report can set `transmitted` or a
+transmission-stage `failed`. Generation alone is never evidence of transmission.
+
 ## 7. Refusal and error vocabulary
 
 | Code | Meaning |
 |---|---|
 | `forbidden` (403, "you are not a member of this project") | non-member caller; never an empty briefing (§3) |
 | `session_not_found` | `session_id` does not resolve to a session bound to the caller's credential |
+| `trace_not_found` | `trace_id` does not resolve; no existence detail is exposed to a foreign account |
+| `outcome_conflict` | an opposite terminal transmission outcome was already recorded |
 | `retrieval_deadline_exceeded` | internal signal driving a degradation (§5); never surfaced to the agent as an error |
 | `store_unreachable` | `delivery_state = failed`, `failure_reason = store_unreachable` |
+| `hook_transmission_failed` | the daemon could not return the generated context through the settled hook channel |
+| `hook_transmission_deadline_exceeded` | hook transmission exceeded its fail-soft deadline |
 
 ## Invariants
 
@@ -302,6 +340,10 @@ outcome, never that the agent consumed it.
 10. A failed retrieval is recorded with its failure reason, and is distinguishable from a
     degraded-to-`none` retrieval and from a briefing that was legitimately empty (FR-848,
     FR-849).
+11. `delivered_context` changes only in the same transaction that accepts a non-failed
+    transmission outcome; generation failure and transmission failure write no delivery rows.
+12. A transmission report is account/session/trace authorized, bounded, idempotent, and cannot
+    assert acknowledgement or any stronger delivery authority.
 
 ---
 
@@ -334,6 +376,8 @@ session-open briefing (FR-830).
   durability-loss list.
 - A row is written **when transmission is attempted and did not fail** — never at selection.
   Writing at selection suppresses, for the life of the session, items the agent never received.
+- The successful outcome transaction derives rows from the trace's selected items and their
+  server-stored `source_updated_at`; the daemon does not resubmit references or timestamps.
 
 ### 12.2 Ranks are assigned after filtering, and budget figures are scoped
 

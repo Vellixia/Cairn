@@ -84,7 +84,7 @@ contract intact rather than trading it for extraction quality.
 | VII. Testable Behavior | **PASS** — every success criterion names an observation point; adversarial corpora are required rather than described. |
 | VIII. Project Truth Not Displaceable | **PASS** — budget reserve and domain separation untouched. |
 | IX. Autonomy Under Governance | **PASS** — the extractor proposes; Cairn decides durability, domain, scope, verification and supersession deterministically. |
-| X. Report What Is Established | **PASS** — capture dispositions, delivery stages and health all distinguish established from assumed; receipt is `unavailable / no evidence`. |
+| X. Report What Is Established | **PASS** — every authenticated retrieval creates a `requested` trace before generation; generation and later hook transmission are separate state transitions; only an authenticated idempotent outcome report can record `transmitted` and write `delivered_context`; receipt remains `unavailable / no evidence`. |
 | XI. Identity Established, Never Asserted | **PASS** — account and project come from the authenticated credential; the session an event names is verified server-side. |
 
 ### Post-design gate (v1.2.1)
@@ -188,14 +188,15 @@ crates/cairn-server/
 ├── src/events.rs         # NEW ingest endpoint + server-side validation
 ├── src/consolidate.rs    # NEW in-process worker
 ├── src/extract.rs        # NEW extractor trait + deterministic baseline
-├── src/retrieve.rs       # NEW server-side retrieval + trace persistence
+├── src/retrieve.rs       # NEW retrieval + requested/generated/terminal trace transitions
 ├── src/verifysummary.rs  # NEW run report ingest, state derivation
 ├── src/commands.rs       # NEW knowledge command API (create/supersede/relate/…)
-└── src/api.rs            # EXTEND control-plane read APIs
+└── src/api.rs            # EXTEND command/read APIs + authenticated transmission outcome
 
 crates/cairnd/src/
 ├── capture.rs      # EXTEND build events, assign identity, spool
-├── deliver.rs      # NEW session-open and prompt-time delivery, per-session dedup
+├── deliver.rs      # NEW session-open/prompt delivery + later outcome reporting
+├── sync.rs         # EXTEND shared event/command drain primitive
 └── migrate005.rs   # NEW migration phases
 
 web/app/(app)/      # dashboard, activity, memory detail, retrievals, agents, team, system
@@ -211,8 +212,9 @@ Vertical slices, each ending in something runnable, per Principle I.
    capture, dispositions. Ends with: the capture matrix is true.
 3. **Consolidation** — worker, claims, deterministic extractor, candidate governance. Ends
    with: knowledge appears without anyone asking.
-4. **Retrieval** — server-side selection, session-open and prompt-time delivery, traces. Ends
-   with: a second session starts already knowing.
+4. **Retrieval** — server-side selection, session-open and prompt-time delivery, traces, and the
+   authenticated post-response transmission outcome. Ends with: a second session starts already
+   knowing, failed retrievals remain visible, and only transmitted items enter delivery dedup.
 5. **Verification and health** — run reports, derived summaries, evidence-based health. Ends
    with: status tells the truth.
 6. **Migration and cutover** — authority mode, `upgrade_required`, explicit one-time legacy

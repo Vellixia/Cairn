@@ -521,10 +521,20 @@ survive a hostile read is decoration.
       `(reference_key, account_id, verifier_kind, run_at)`: same-account retry deduplicates;
       distinct authenticated accounts do not collapse. Authority remains server-assigned.
       FR-811i.)
+- [x] CHK142 Are retrieval generation and hook transmission separate durable transitions?
+      (`POST /api/retrieve` creates `requested` before generation and can set only `generated` or
+      generation-stage `failed`; the later authenticated trace-id outcome boundary alone can set
+      `transmitted` or transmission-stage `failed`. Only its successful transaction writes
+      `delivered_context`; acknowledgement remains `unavailable / no evidence`.)
+- [x] CHK143 Do task ownership and dependencies preserve independent stories? (T007 alone owns
+      final FTS schema; T025 owns generic pattern command shape while T085 owns lifecycle; T039
+      supplies the shared drain; T035 supplies the shared health API; T141/T142 precede T143's
+      migration orchestration; US2, US4 and US6 have no hidden earlier-story dependency.)
 
 ## Notes
 
-- No item is incomplete. All 141 checks pass against the specification as it now stands.
+- No item is incomplete. All 143 checks pass against the specification, plan, contracts, data
+  model and task graph as they now stand.
 - CHK045 and CHK046 tracked two of the three `[NEEDS CLARIFICATION]` markers and were closed on
   2026-08-30 along with the third. The specification now carries no clarification markers, and no
   open product question remains.
@@ -535,6 +545,5 @@ survive a hostile read is decoration.
   259 after the architectural decisions of 2026-08-30 and the consistency passes that followed.
   Essentially none of the growth is product scope: it is authorization, testability, and the
   consequences of the six decisions. No open product question remains.
-- `/speckit-analyze` is not applicable at this stage: it performs cross-artifact analysis
-  across spec.md, plan.md and tasks.md. plan.md now exists; tasks.md does not, by design, so the
-  cross-artifact analysis in this repair pass stood in for it.
+- `/speckit-analyze` is now applicable because `spec.md`, `plan.md`, and `tasks.md` all exist; the
+  post-repair run is the authority for cross-artifact readiness.

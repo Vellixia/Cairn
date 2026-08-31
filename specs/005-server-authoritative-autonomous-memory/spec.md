@@ -1300,9 +1300,10 @@ official documentation, checked on 2026-08-30, and from the adapters on `main`.
   record, recognised a duplicate, recorded a conflict, or refused — and on what basis.
 - **RetrievalTrace**: One retrieval: its trigger, its session, what was considered, what was
   selected, the explanation for the selection, what context was produced, and how long it took.
-- **DeliveryOutcome**: What became of a generated briefing — generated, transmitted,
-  acknowledged, or acknowledgement unavailable — recorded at the strength the vendor actually
-  supports.
+- **DeliveryOutcome**: What became of a retrieval — requested, generated, transmitted, or failed
+  at its established stage — plus acknowledgement separately recorded as acknowledged or
+  unavailable. Baseline Feature 005 has no producer for acknowledged. Generation is never
+  treated as transmission, and transmission is never treated as consumption.
 - **EdgeSpool**: The local queue of safe events awaiting acceptance, with its depth, its oldest
   entry, its retry state and its bound. It holds unsent work, never an alternative truth.
 - **AuthorityMode**: Whether a server has cut over to server-authoritative mode, and whether a
