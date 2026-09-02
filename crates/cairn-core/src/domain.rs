@@ -48,6 +48,11 @@ pub struct ParseEnumError {
 }
 
 /// Declare a lowercase-text enum with a `CHECK`-friendly string form.
+///
+/// Visible to the rest of the crate (`pub(crate) use` below) because Feature
+/// 005's event model declares two dozen closed vocabularies of exactly this
+/// shape, and a second copy of the macro would be a second place for the
+/// round-trip and `ALL` conventions to drift.
 macro_rules! text_enum {
     ($(#[$meta:meta])* $name:ident, $kind:literal, {
         $($(#[$vmeta:meta])* $variant:ident => $text:literal),+ $(,)?
@@ -89,6 +94,9 @@ macro_rules! text_enum {
         }
     };
 }
+
+#[allow(unused_imports)]
+pub(crate) use text_enum;
 
 text_enum!(
     /// Task lifecycle (FR-037). No revision history exists (FR-039).
@@ -1419,5 +1427,499 @@ mod tests {
         let a = new_id();
         let b = new_id();
         assert!(a < b || a.get_version_num() == 7);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cross-domain references (Feature 005, data-model.md §6.1)
+// ---------------------------------------------------------------------------
+
+// `KnowledgeDomain` and `RelationKind` are Feature 004's, declared above and
+// reused unchanged. Feature 005 needs no fourth domain and no seventh relation
+// kind (FR-817, FR-823); it needs the two questions below answered in one
+// place instead of at every call site.
+impl KnowledgeDomain {
+    /// Whether a record in this domain may name a project.
+    ///
+    /// Personal and team knowledge are project-independent and must not name one
+    /// (FR-822). This is not a storage detail: a personal record that could name
+    /// a project would disclose which project its author was working in, to
+    /// anyone who could read the record.
+    pub fn may_name_a_project(&self) -> bool {
+        matches!(self, KnowledgeDomain::Project)
+    }
+
+    /// Who may read a record in this domain.
+    pub fn readership(&self) -> Readership {
+        match self {
+            KnowledgeDomain::Project => Readership::ProjectMembers,
+            KnowledgeDomain::Personal => Readership::OwnerOnly,
+            KnowledgeDomain::Team => Readership::TeamMembers,
+        }
+    }
+}
+
+/// Who a domain's records are legible to.
+///
+/// Named rather than inferred at each call site, because "personal means owner
+/// only" is a rule that has to hold in retrieval, in traces, in web rendering
+/// and in authorization, and four independent restatements of it is four
+/// chances for one to be forgotten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readership {
+    /// Members of the record's project.
+    ProjectMembers,
+    /// The owning account, and nobody else. Not "the owner plus admins": an
+    /// administrator's standing is over team guidance, not over a colleague's
+    /// private notes.
+    OwnerOnly,
+    /// Members of the server's team. A `proposed` record additionally requires
+    /// author-or-administrator (FR-825).
+    TeamMembers,
+}
+
+text_enum!(
+    /// Which of the two referenceable record shapes a polymorphic row holds.
+    RefKind, "reference kind", {
+        Knowledge => "knowledge",
+        Pattern => "pattern",
+    }
+);
+
+/// A durable knowledge record, named completely.
+///
+/// The domain is part of the name and not an annotation on it. Project,
+/// personal and team knowledge live in three different tables, so the same
+/// UUID can legitimately exist in all three; a bare id is therefore not an
+/// identity, and treating one as an identity is how a personal record comes to
+/// be served where a project record was asked for (FR-819a, SC-766).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct KnowledgeRef {
+    pub domain: KnowledgeDomain,
+    pub id: Uuid,
+}
+
+impl KnowledgeRef {
+    pub fn new(domain: KnowledgeDomain, id: Uuid) -> Self {
+        Self { domain, id }
+    }
+
+    pub fn project(id: Uuid) -> Self {
+        Self::new(KnowledgeDomain::Project, id)
+    }
+
+    pub fn personal(id: Uuid) -> Self {
+        Self::new(KnowledgeDomain::Personal, id)
+    }
+
+    pub fn team(id: Uuid) -> Self {
+        Self::new(KnowledgeDomain::Team, id)
+    }
+}
+
+/// A reusable pattern, named by its own identity.
+///
+/// A pattern is **not** a fourth domain and is **not** domain-less. Its
+/// canonical record carries `domain = personal`; `pattern` is the record type
+/// (FR-708c, FR-819). `PatternRef` omits a domain component because a pattern
+/// has its own table and its own lifecycle, so the domain adds nothing to the
+/// name — not because the record lacks one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct PatternRef(pub Uuid);
+
+impl PatternRef {
+    /// The domain of the record this reference resolves to.
+    ///
+    /// Always personal. A method rather than a comment, so that code which
+    /// needs the domain of a pattern gets the answer instead of inferring
+    /// "absent" from the reference's shape.
+    pub fn canonical_domain(&self) -> KnowledgeDomain {
+        KnowledgeDomain::Personal
+    }
+}
+
+/// Either kind of reference, as a polymorphic row carries it.
+///
+/// Serializes as the three columns a row actually has — `ref_kind`, a nullable
+/// `domain`, and `knowledge_id` — rather than as a Rust-shaped enum. The wire
+/// form and the column layout being the same shape is what stops a reference
+/// meaning one thing in JSON and another in SQL, and it is why the conversion
+/// goes through [`Reference::from_slots`], which applies the same legality rule
+/// every table's CHECK does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Reference {
+    Knowledge(KnowledgeRef),
+    Pattern(PatternRef),
+}
+
+/// The three columns a polymorphic reference occupies.
+#[derive(Serialize, Deserialize)]
+struct ReferenceWire {
+    ref_kind: RefKind,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    domain: Option<KnowledgeDomain>,
+    knowledge_id: Uuid,
+}
+
+impl Serialize for Reference {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        ReferenceWire {
+            ref_kind: self.kind(),
+            domain: self.domain_slot(),
+            knowledge_id: self.record_id(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Reference {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let wire = ReferenceWire::deserialize(deserializer)?;
+        // An illegal `(ref_kind, domain)` pair is refused here, not repaired.
+        // Accepting `ref_kind=knowledge` with no domain would let a bare UUID
+        // through as an identity, which is the whole failure this type exists
+        // to prevent.
+        Reference::from_slots(wire.ref_kind, wire.domain, wire.knowledge_id)
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+impl Reference {
+    pub fn kind(&self) -> RefKind {
+        match self {
+            Reference::Knowledge(_) => RefKind::Knowledge,
+            Reference::Pattern(_) => RefKind::Pattern,
+        }
+    }
+
+    /// The `domain` column's value for this reference.
+    ///
+    /// `None` for a pattern, and that NULL means "this row holds a
+    /// `PatternRef`" — never "this record has no domain". Use
+    /// [`canonical_domain`](Self::canonical_domain) when the question is which
+    /// domain the referenced record actually belongs to.
+    pub fn domain_slot(&self) -> Option<KnowledgeDomain> {
+        match self {
+            Reference::Knowledge(k) => Some(k.domain),
+            Reference::Pattern(_) => None,
+        }
+    }
+
+    /// The domain of the record this reference resolves to, always present.
+    pub fn canonical_domain(&self) -> KnowledgeDomain {
+        match self {
+            Reference::Knowledge(k) => k.domain,
+            Reference::Pattern(p) => p.canonical_domain(),
+        }
+    }
+
+    /// The UUID stored in the `knowledge_id` column.
+    pub fn record_id(&self) -> Uuid {
+        match self {
+            Reference::Knowledge(k) => k.id,
+            Reference::Pattern(p) => p.0,
+        }
+    }
+
+    /// The canonical identity string (`data-model.md` §6.1).
+    ///
+    /// `knowledge:<domain>:<uuid>` or `pattern:<uuid>`. This is what
+    /// participates in a primary or unique key wherever a reference takes part
+    /// in row identity, and the SQL side generates the identical string as a
+    /// stored column so the two halves cannot drift.
+    pub fn reference_key(&self) -> String {
+        match self {
+            Reference::Knowledge(k) => format!("knowledge:{}:{}", k.domain.as_str(), k.id),
+            Reference::Pattern(p) => format!("pattern:{}", p.0),
+        }
+    }
+
+    pub fn readership(&self) -> Readership {
+        // A pattern resolves to a personal record, and personal means owner
+        // only. Deriving it rather than restating it is what keeps a pattern
+        // from quietly acquiring a wider audience than the domain it belongs
+        // to.
+        self.canonical_domain().readership()
+    }
+
+    /// Rebuild a reference from its canonical key.
+    ///
+    /// Strict: an unknown discriminator, a missing domain, a domain on a
+    /// pattern, or an unparseable UUID are all refused rather than repaired. A
+    /// key that cannot be parsed exactly is a key that names nothing, and
+    /// guessing at it would resolve a reference the writer never made.
+    pub fn parse_key(key: &str) -> Result<Self, ParseReferenceError> {
+        let bad = || ParseReferenceError {
+            value: key.to_string(),
+        };
+        let (discriminator, rest) = key.split_once(':').ok_or_else(bad)?;
+        match discriminator {
+            "knowledge" => {
+                let (domain, id) = rest.split_once(':').ok_or_else(bad)?;
+                let domain = KnowledgeDomain::from_str(domain).map_err(|_| bad())?;
+                let id = Uuid::parse_str(id).map_err(|_| bad())?;
+                Ok(Reference::Knowledge(KnowledgeRef::new(domain, id)))
+            }
+            "pattern" => {
+                // No second colon: a `pattern:` key carries no domain, and one
+                // that did would be encoding a fourth domain.
+                if rest.contains(':') {
+                    return Err(bad());
+                }
+                Ok(Reference::Pattern(PatternRef(
+                    Uuid::parse_str(rest).map_err(|_| bad())?,
+                )))
+            }
+            _ => Err(bad()),
+        }
+    }
+
+    /// Whether the `(ref_kind, domain)` pair a row carries is legal.
+    ///
+    /// The same rule every polymorphic table repeats as a CHECK. Kept here as
+    /// well because a row is not the only place a reference is assembled, and
+    /// the shape must be refused before it reaches SQL as well as by it.
+    pub fn slots_are_legal(kind: RefKind, domain: Option<KnowledgeDomain>) -> bool {
+        match kind {
+            RefKind::Knowledge => domain.is_some(),
+            RefKind::Pattern => domain.is_none(),
+        }
+    }
+
+    /// Assemble a reference from the three columns a row carries.
+    pub fn from_slots(
+        kind: RefKind,
+        domain: Option<KnowledgeDomain>,
+        record_id: Uuid,
+    ) -> Result<Self, ParseReferenceError> {
+        match (kind, domain) {
+            (RefKind::Knowledge, Some(domain)) => {
+                Ok(Reference::Knowledge(KnowledgeRef::new(domain, record_id)))
+            }
+            (RefKind::Pattern, None) => Ok(Reference::Pattern(PatternRef(record_id))),
+            (kind, domain) => Err(ParseReferenceError {
+                value: format!(
+                    "ref_kind={} with domain={}",
+                    kind.as_str(),
+                    domain.map(|d| d.as_str()).unwrap_or("null")
+                ),
+            }),
+        }
+    }
+}
+
+impl fmt::Display for Reference {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.reference_key())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("not a canonical reference key: {value}")]
+pub struct ParseReferenceError {
+    pub value: String,
+}
+
+/// A relation between two project memories, named by its own natural key.
+///
+/// **Not a `KnowledgeRef`.** A relation has no id of its own — it *is* the
+/// triple — and giving it one would create a second way to name the same edge,
+/// which two writers would then disagree about. This is the primary key
+/// `memory_relations` already has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct RelationRef {
+    pub from_memory_id: Uuid,
+    pub to_memory_id: Uuid,
+    pub kind: RelationKind,
+}
+
+impl RelationRef {
+    /// The `dedupe_key` form the local `retained_local` table stores.
+    pub fn relation_key(&self) -> String {
+        format!(
+            "{}|{}|{}",
+            self.from_memory_id,
+            self.to_memory_id,
+            self.kind.as_str()
+        )
+    }
+}
+
+text_enum!(
+    /// The record types Feature 005 can reference, and the domains each may
+    /// live in (FR-819).
+    ///
+    /// The point of the table is that it is a *function*, not a convention: a
+    /// record type has one legal set of domains, and asking rather than
+    /// remembering is what stops a pattern acquiring a project domain in the
+    /// one code path nobody re-read.
+    RecordType, "record type", {
+        Fact => "fact",
+        Decision => "decision",
+        Convention => "convention",
+        Failure => "failure",
+        Procedure => "procedure",
+        /// A reusable pattern. Personal-domain only, and its own table.
+        Pattern => "pattern",
+    }
+);
+
+impl RecordType {
+    /// Whether a record of this type may carry this domain.
+    pub fn allows(&self, domain: KnowledgeDomain) -> bool {
+        match self {
+            // A pattern is one developer's cross-project knowledge. Widening it
+            // to a team is a separate, explicitly governed act that produces a
+            // *team-domain record*, not a team-domain pattern
+            // (data-model.md §6.2).
+            RecordType::Pattern => domain == KnowledgeDomain::Personal,
+            _ => true,
+        }
+    }
+
+    /// The five knowledge kinds, excluding `pattern`.
+    pub const KNOWLEDGE_KINDS: &'static [RecordType] = &[
+        RecordType::Fact,
+        RecordType::Decision,
+        RecordType::Convention,
+        RecordType::Failure,
+        RecordType::Procedure,
+    ];
+}
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    /// The adversarial case the whole design exists for.
+    #[test]
+    fn one_uuid_in_four_places_is_four_identities() {
+        let id = Uuid::now_v7();
+        let refs = [
+            Reference::Knowledge(KnowledgeRef::project(id)),
+            Reference::Knowledge(KnowledgeRef::personal(id)),
+            Reference::Knowledge(KnowledgeRef::team(id)),
+            Reference::Pattern(PatternRef(id)),
+        ];
+        let keys: std::collections::BTreeSet<String> =
+            refs.iter().map(|r| r.reference_key()).collect();
+        assert_eq!(keys.len(), 4, "two references collapsed onto one identity");
+        assert_eq!(
+            keys.into_iter().collect::<Vec<_>>(),
+            vec![
+                format!("knowledge:personal:{id}"),
+                format!("knowledge:project:{id}"),
+                format!("knowledge:team:{id}"),
+                format!("pattern:{id}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_key_round_trips_through_its_own_parser() {
+        let id = Uuid::now_v7();
+        for original in [
+            Reference::Knowledge(KnowledgeRef::project(id)),
+            Reference::Knowledge(KnowledgeRef::personal(id)),
+            Reference::Knowledge(KnowledgeRef::team(id)),
+            Reference::Pattern(PatternRef(id)),
+        ] {
+            let parsed = Reference::parse_key(&original.reference_key())
+                .expect("a key this crate produced parses");
+            assert_eq!(parsed, original);
+        }
+    }
+
+    #[test]
+    fn a_key_that_names_nothing_exactly_is_refused_rather_than_repaired() {
+        let id = Uuid::now_v7();
+        for bad in [
+            format!("{id}"),                   // a bare UUID is not a name
+            format!("knowledge:{id}"),         // no domain
+            format!("knowledge:pattern:{id}"), // pattern is not a domain
+            format!("knowledge:project:{id}:extra"),
+            format!("pattern:personal:{id}"), // a PatternRef carries no domain
+            format!("pattern:{id}:{id}"),
+            format!("project:{id}"), // the pre-canonical shape
+            format!("memory:project:{id}"),
+            "knowledge:project:not-a-uuid".to_string(),
+            "pattern:".to_string(),
+            String::new(),
+        ] {
+            assert!(
+                Reference::parse_key(&bad).is_err(),
+                "{bad:?} was accepted as a canonical reference key"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pattern_reference_has_no_domain_slot_but_still_has_a_domain() {
+        let p = Reference::Pattern(PatternRef(Uuid::now_v7()));
+        assert_eq!(p.domain_slot(), None, "the column is NULL");
+        assert_eq!(
+            p.canonical_domain(),
+            KnowledgeDomain::Personal,
+            "a NULL column was read as a record without a domain"
+        );
+        assert_eq!(p.readership(), Readership::OwnerOnly);
+    }
+
+    #[test]
+    fn the_column_shape_rule_matches_the_check_every_table_repeats() {
+        assert!(Reference::slots_are_legal(
+            RefKind::Knowledge,
+            Some(KnowledgeDomain::Team)
+        ));
+        assert!(Reference::slots_are_legal(RefKind::Pattern, None));
+        assert!(!Reference::slots_are_legal(RefKind::Knowledge, None));
+        assert!(!Reference::slots_are_legal(
+            RefKind::Pattern,
+            Some(KnowledgeDomain::Personal)
+        ));
+
+        let id = Uuid::now_v7();
+        assert!(Reference::from_slots(RefKind::Knowledge, None, id).is_err());
+        assert!(
+            Reference::from_slots(RefKind::Pattern, Some(KnowledgeDomain::Personal), id).is_err()
+        );
+    }
+
+    #[test]
+    fn personal_and_team_knowledge_may_not_name_a_project() {
+        assert!(KnowledgeDomain::Project.may_name_a_project());
+        assert!(!KnowledgeDomain::Personal.may_name_a_project());
+        assert!(!KnowledgeDomain::Team.may_name_a_project());
+    }
+
+    #[test]
+    fn a_pattern_is_a_personal_record_and_nothing_else() {
+        assert!(RecordType::Pattern.allows(KnowledgeDomain::Personal));
+        assert!(!RecordType::Pattern.allows(KnowledgeDomain::Project));
+        assert!(!RecordType::Pattern.allows(KnowledgeDomain::Team));
+        for kind in RecordType::KNOWLEDGE_KINDS {
+            for domain in KnowledgeDomain::ALL {
+                assert!(kind.allows(*domain));
+            }
+        }
+    }
+
+    #[test]
+    fn a_relation_is_named_by_its_triple_and_has_no_id_of_its_own() {
+        let from = Uuid::now_v7();
+        let to = Uuid::now_v7();
+        let r = RelationRef {
+            from_memory_id: from,
+            to_memory_id: to,
+            kind: RelationKind::Supersedes,
+        };
+        assert_eq!(r.relation_key(), format!("{from}|{to}|supersedes"));
+        // Direction is part of the name: A supersedes B is not B supersedes A.
+        let flipped = RelationRef {
+            from_memory_id: to,
+            to_memory_id: from,
+            kind: RelationKind::Supersedes,
+        };
+        assert_ne!(r.relation_key(), flipped.relation_key());
     }
 }

@@ -11,6 +11,12 @@ pub mod context;
 pub mod continuity;
 pub mod corpus;
 pub mod domain;
+/// Feature 005's canonical event model — the one record that crosses the
+/// machine boundary.
+pub mod event;
+/// Feature 005's deterministic identities: events, commands, candidates,
+/// refusals, corroborations and patterns.
+pub mod eventid;
 pub mod global;
 pub mod handoff;
 pub mod knowledge;
