@@ -5,6 +5,7 @@
 
 mod api;
 mod auth;
+mod commands;
 mod db;
 mod error;
 mod events;

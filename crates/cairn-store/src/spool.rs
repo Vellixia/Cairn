@@ -690,9 +690,17 @@ async fn shed_oldest_capture_row(conn: &mut sqlx::SqliteConnection) -> Result<Op
 
 /// Claim up to `limit` deliverable events for this account, oldest first.
 ///
-/// A single `UPDATE … RETURNING` is the whole mechanism, exactly as in
-/// [`crate::outbox::claim`]: SQLite serializes writers, so two drainers receive
-/// disjoint sets and neither can send a row the other already owns.
+/// **Two statements in one transaction**, not the single `UPDATE … RETURNING`
+/// [`crate::outbox::claim`] uses. A drain first retires every eligible row that
+/// has spent its attempt budget, then claims from what is left. They share one
+/// `BEGIN IMMEDIATE` because a second drainer arriving between them could claim
+/// a row this one had just judged exhausted, and the bound would hold only
+/// until two drainers ran at once.
+///
+/// The bound has to be enforced here and not only where a failure is reported:
+/// a drainer that crashes mid-send never calls [`mark_event_failed`], and every
+/// claim increments `attempts`, so a crash loop would otherwise retry a row
+/// without limit (FR-784).
 ///
 /// Eligible rows are this account's — **exactly** this account's — that are
 /// waiting and whose backoff has elapsed, plus rows whose claim has gone stale
@@ -1347,6 +1355,11 @@ async fn allocate_command_seq(
 /// `refused` one has been surfaced to the user (`contracts/knowledge-commands.md`
 /// §4) — letting a single refusal wedge every later command in its scope
 /// forever would turn one visible failure into a silent dead queue.
+///
+/// Like [`claim_events`], this is **two statements in one transaction**:
+/// retiring rows that have spent their attempt budget, then claiming from what
+/// remains. Retiring here also releases a scope rather than wedging it, since
+/// the barrier above counts only unsettled rows.
 pub async fn claim_commands(
     store: &Store,
     account_id: Uuid,

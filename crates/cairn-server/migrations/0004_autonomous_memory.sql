@@ -528,6 +528,46 @@ CREATE TABLE capture_dispositions (
 );
 
 -- ---------------------------------------------------------------------------
+-- Step 7b — command idempotency
+-- ---------------------------------------------------------------------------
+
+-- What a command already did, so replaying it does it again zero times.
+--
+-- `contracts/knowledge-commands.md` §4 requires that replay be idempotent —
+-- *"the server answers `duplicate` and applies nothing twice"* — and gives the
+-- client a deterministic `command_id` to make that possible. It does not say
+-- where the server remembers having seen one, and `data-model.md` §6 has no
+-- table for it: `command_id` appears only in the **local** `command_spool`
+-- (§5). This is that table, added here rather than invented per handler.
+--
+-- Most commands would not strictly need it. A create derives its record id, so
+-- a replay collides on a primary key; a relation upserts on its natural key; a
+-- pin is the same state written twice. `reinforce` is the one that cannot be
+-- made idempotent by shape alone, because incrementing a counter twice is
+-- visibly different from incrementing it once — and a client retrying after a
+-- lost response is exactly the case FR-770's reasoning covers.
+--
+-- One mechanism for all of them rather than three, because "which commands are
+-- idempotent and by what means" is the sort of question that acquires a wrong
+-- answer as soon as it has three.
+--
+-- `result_id` is what the original command produced, returned verbatim on a
+-- replay: a retry that got a fresh record would be the duplicate the identity
+-- exists to prevent.
+CREATE TABLE applied_commands (
+    command_id UUID PRIMARY KEY,
+    -- The account that issued it. A command id is derived from a scope and an
+    -- ordinal, so two accounts could in principle derive the same one; this
+    -- records whose it was, and a mismatch is a fact worth being able to see
+    -- rather than a silent overwrite.
+    account_id UUID NOT NULL REFERENCES users(id),
+    result_id  UUID NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX applied_commands_account ON applied_commands (account_id, applied_at DESC);
+
+-- ---------------------------------------------------------------------------
 -- Step 8 — the memories origin discriminator
 -- ---------------------------------------------------------------------------
 

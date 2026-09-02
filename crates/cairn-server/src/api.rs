@@ -98,13 +98,54 @@ pub fn routes() -> Router<AppState> {
         // either is refused before the handler runs — an agent has no tool
         // action shaped like ratification and must not gain one through a route
         // (FR-455, FR-515).
+        // The post-cutover command boundary (T026). Every one of these
+        // replaces a shape the `memory` upsert used to allow, and the
+        // difference is that a command states an intent the server acts on
+        // rather than a row the server stores.
+        .route(
+            "/api/projects/{id}/memories",
+            get(project_memories).post(crate::commands::create_memory),
+        )
+        .route(
+            "/api/projects/{id}/memory-relations",
+            post(crate::commands::record_relation),
+        )
+        .route(
+            "/api/memories/{id}/supersede",
+            post(crate::commands::supersede_memory),
+        )
+        .route(
+            "/api/memories/{id}/reinforce",
+            post(crate::commands::reinforce_memory),
+        )
+        .route("/api/memories/{id}/pin", post(crate::commands::pin_memory))
+        .route(
+            "/api/personal/knowledge",
+            post(crate::commands::create_personal),
+        )
+        .route(
+            "/api/personal/knowledge/{id}/forget",
+            post(crate::commands::forget_personal),
+        )
+        .route("/api/team/knowledge", post(crate::commands::propose_team))
+        // Pattern routes are interface-only until US3 supplies their lifecycle
+        // repository (T083+). The shape, the owner binding, the server-assigned
+        // trust and the content screening are the boundary's, and they are
+        // here; what is missing is the store behind them.
+        .route("/api/patterns", post(crate::commands::promote_pattern))
+        .route(
+            "/api/patterns/{id}/forget",
+            post(crate::commands::forget_pattern),
+        )
+        // Ratify and retire already exist and are reused unchanged: each is one
+        // compare-and-swap statement, `AdminUser`-gated, and re-implementing
+        // them would be a second place for the transition rule to live.
         .route("/api/team/{id}/ratify", post(ratify_team))
         .route("/api/team/{id}/retire", post(retire_team))
         // Read API for the web UI
         .route("/api/projects/{id}", get(project_overview))
         .route("/api/projects/{id}/tasks", get(project_tasks))
         .route("/api/projects/{id}/sessions", get(project_sessions))
-        .route("/api/projects/{id}/memories", get(project_memories))
         .route("/api/projects/{id}/sync-status", get(project_sync_status))
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/sessions/{id}/handoff", get(session_handoff))
