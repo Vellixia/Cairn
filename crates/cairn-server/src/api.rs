@@ -149,9 +149,13 @@ async fn health() -> Json<Value> {
 /// Unauthenticated on purpose: the version of a service is not a secret, and
 /// the sign-in page is a reasonable place to show it.
 async fn version(State(state): State<AppState>) -> Json<Value> {
+    // Read fresh rather than from the application state: an administrator can
+    // cut this deployment over while it is running, and a client polls here to
+    // learn that they did.
+    let authority = crate::version::authority_for(&state.pool, state.schema_version).await;
     let payload = state
         .releases
-        .payload(state.schema_version, state.server_instance_id)
+        .payload(state.schema_version, state.server_instance_id, authority)
         .await;
     Json(serde_json::to_value(payload).unwrap_or_else(|_| json!({})))
 }

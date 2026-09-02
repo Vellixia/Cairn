@@ -38,6 +38,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "collaborative_global_memory",
         include_str!("../migrations/0007_collaborative_global_memory.sql"),
     ),
+    (
+        8,
+        "safe_events",
+        include_str!("../migrations/0008_safe_events.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.
@@ -129,6 +134,7 @@ async fn finish(version: i64, tx: &mut sqlx::SqliteConnection) -> Result<(), Mig
     match version {
         5 => criteria_from_acceptance_arrays(tx).await,
         7 => seed_writer_identity(tx).await,
+        8 => seed_authority_mode(tx).await,
         _ => Ok(()),
     }
 }
@@ -199,6 +205,29 @@ async fn criteria_from_acceptance_arrays(
 async fn seed_writer_identity(tx: &mut sqlx::SqliteConnection) -> Result<(), MigrateError> {
     sqlx::query("INSERT INTO writer_identity (id, writer_id, created_at) VALUES (1, ?1, ?2)")
         .bind(uuid::Uuid::now_v7().to_string())
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&mut *tx)
+        .await?;
+    Ok(())
+}
+
+/// Migration 8 — the single `authority_mode` row.
+///
+/// Every store starts at `feature_004`, including a brand-new one. A fresh
+/// install has no legacy knowledge to migrate, so it will pass through the
+/// phases quickly, but it still passes through them: seeding it directly at
+/// `server_authoritative` would be claiming the migration ran, and the
+/// migration is what establishes that the server actually holds what the
+/// device does (migration-cutover.md §6, FR-876).
+///
+/// In Rust rather than SQL because `changed_at` has to be an RFC 3339 string
+/// like every other timestamp in this schema, and SQLite's `datetime('now')`
+/// writes a different format — a difference nothing would notice until a
+/// comparison against a timestamp written by the daemon quietly stopped
+/// ordering correctly.
+async fn seed_authority_mode(tx: &mut sqlx::SqliteConnection) -> Result<(), MigrateError> {
+    sqlx::query("INSERT INTO authority_mode (id, mode, changed_at) VALUES (1, ?1, ?2)")
+        .bind("feature_004")
         .bind(chrono::Utc::now().to_rfc3339())
         .execute(&mut *tx)
         .await?;

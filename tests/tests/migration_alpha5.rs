@@ -57,17 +57,28 @@ fn migrating_to_seven_preserves_every_existing_row() {
         "the fixture is empty, so preservation would be vacuous"
     );
 
+    // Against the latest migration this build carries, not against a pinned
+    // number. The assertion this test exists to make is that a v5-era store's
+    // rows survive being brought up to date; pinning the target at 7 stopped
+    // being that assertion the moment migration 8 shipped, and would have to be
+    // re-pinned by hand for every migration after it. The floor stays, so a
+    // build that somehow lost migration 7 still fails here.
+    let latest = store.migrate_to_latest();
+    assert!(
+        latest >= 7,
+        "the store came up at schema {latest}, below the migration this fixture is about"
+    );
     assert_eq!(
-        store.migrate_to_latest(),
-        7,
-        "migration 7 must be the latest"
+        latest,
+        cairn_store::migrate::latest_version(),
+        "the fixture did not reach the newest schema this build carries"
     );
 
     for (table, count, cols) in &before {
         assert_eq!(
             store.row_count(table),
             *count,
-            "{table} lost or gained rows across migration 7"
+            "{table} lost or gained rows across the migrations after 6"
         );
         let after = columns(&store, table);
         // Columns may be *added* to a table a later feature extends, but none
@@ -76,7 +87,7 @@ fn migrating_to_seven_preserves_every_existing_row() {
         for column in cols {
             assert!(
                 after.contains(column),
-                "{table}.{column} disappeared across migration 7"
+                "{table}.{column} disappeared across the migrations after 6"
             );
         }
     }

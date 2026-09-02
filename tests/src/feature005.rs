@@ -165,19 +165,14 @@ impl Pg {
 
     pub fn session_in(&self, project: Uuid, who: &Account) -> Uuid {
         let id = Uuid::now_v7();
+        // `sessions.user_id` is the account binding, and it is what a
+        // server-side ownership check reads (FR-768). It is nullable in the
+        // schema — a pre-Feature-005 row may not have one — so the fixture
+        // always sets it, because a session whose owner is unknown cannot be
+        // the subject of an authorization assertion either way.
         self.server.execute(&format!(
-            "INSERT INTO sessions (id, project_id, agent, started_at)
-             VALUES ('{id}', '{project}', 'claude-code', now())"
-        ));
-        // Bind the session to the account the same way the server does, if the
-        // column exists yet. Before T007 it does not, and the fixture is still
-        // useful for everything that does not check attribution.
-        self.server.execute(&format!(
-            "UPDATE sessions SET account_user_id = '{}'
-              WHERE id = '{id}'
-                AND EXISTS (SELECT 1 FROM information_schema.columns
-                             WHERE table_name = 'sessions'
-                               AND column_name = 'account_user_id')",
+            "INSERT INTO sessions (id, project_id, user_id, agent, branch, status, started_at)
+             VALUES ('{id}', '{project}', '{}', 'claude-code', 'main', 'active', now())",
             who.id
         ));
         id
@@ -241,12 +236,18 @@ pub struct IdenticalIds {
 }
 
 impl IdenticalIds {
-    /// The four canonical reference keys these records must produce.
+    /// The four canonical reference keys these records must produce
+    /// (`data-model.md` §6.1).
+    ///
+    /// Three `knowledge:<domain>:<id>` keys and one `pattern:<id>`. The
+    /// pattern's key omits a domain component because a `PatternRef` is not a
+    /// `KnowledgeRef`, not because the pattern has no domain — the
+    /// `shared_patterns` row it names carries `domain = 'personal'`.
     pub fn reference_keys(&self) -> [String; 4] {
         [
-            format!("project:{}", self.id),
-            format!("personal:{}", self.id),
-            format!("team:{}", self.id),
+            format!("knowledge:project:{}", self.id),
+            format!("knowledge:personal:{}", self.id),
+            format!("knowledge:team:{}", self.id),
             format!("pattern:{}", self.id),
         ]
     }
@@ -306,13 +307,57 @@ impl Pg {
         if !self.table_exists("shared_patterns") {
             return false;
         }
+        // The primary key is `pattern_id`, and the content is four columns
+        // rather than one: a pattern is a problem, a cause and an approach,
+        // with the title as a label. `content_key` is what makes a repeat
+        // promotion an upsert, so it is derived from the id here to keep two
+        // fixture patterns distinct.
+        let safe = content.replace('\'', "''");
         self.server.execute(&format!(
-            "INSERT INTO shared_patterns (id, owner_user_id, domain, content)
-             VALUES ('{id}', '{}', 'personal', '{}')",
-            owner.id,
-            content.replace('\'', "''")
+            "INSERT INTO shared_patterns
+                 (pattern_id, owner_user_id, domain, title, problem, root_cause,
+                  approach, content_key)
+             VALUES ('{id}', '{}', 'personal', '{safe}', '{safe} problem',
+                     '{safe} root cause', '{safe} approach', 'content-key-{id}')",
+            owner.id
         ));
         true
+    }
+
+    /// Run a statement, returning the database's error instead of panicking.
+    ///
+    /// A schema test's sharpest assertions are about what the database
+    /// *refuses*, and `Server::execute` panics on refusal — which is correct
+    /// for seeding a fixture and useless for testing a constraint.
+    pub fn try_execute(&self, sql: &str) -> Result<(), String> {
+        let url = self.server.database_url.clone();
+        let sql = sql.to_string();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async move {
+            let pool = sqlx::PgPool::connect(&url).await.expect("open server db");
+            let outcome = sqlx::query(&sql).execute(&pool).await.map(|_| ());
+            pool.close().await;
+            outcome.map_err(|e| e.to_string())
+        })
+    }
+
+    /// Assert a statement is refused, and say what was being tested when it is
+    /// not.
+    pub fn refuses(&self, what: &str, sql: &str) {
+        if self.try_execute(sql).is_ok() {
+            panic!("the schema accepted {what}");
+        }
+    }
+
+    /// Whether an index of this name exists.
+    pub fn index_exists(&self, name: &str) -> bool {
+        self.server.count(&format!(
+            "SELECT count(*) FROM pg_indexes
+              WHERE schemaname = 'public' AND indexname = '{name}'"
+        )) > 0
     }
 
     pub fn table_exists(&self, name: &str) -> bool {
