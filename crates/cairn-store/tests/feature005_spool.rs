@@ -181,6 +181,36 @@ async fn disposition_total(f: &Fixture, disposition: &str) -> i64 {
     .expect("disposition total")
 }
 
+/// A row's current state, read from the table rather than inferred.
+async fn state_of(f: &Fixture, event_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM event_spool WHERE event_id = ?1")
+        .bind(event_id.to_string())
+        .fetch_one(f.store.pool())
+        .await
+        .expect("state")
+}
+
+/// Put a row's attempt count where a test needs it, rather than driving it
+/// there through two thousand real delivery attempts.
+async fn set_attempts(f: &Fixture, event_id: Uuid, attempts: i64) {
+    sqlx::query("UPDATE event_spool SET attempts = ?1 WHERE event_id = ?2")
+        .bind(attempts)
+        .bind(event_id.to_string())
+        .execute(f.store.pool())
+        .await
+        .expect("set attempts");
+}
+
+/// Move a row's backoff into the past so the next claim is due now.
+async fn expire_backoff(f: &Fixture, event_id: Uuid) {
+    sqlx::query("UPDATE event_spool SET next_attempt_at = ?1 WHERE event_id = ?2")
+        .bind((Utc::now() - chrono::Duration::hours(1)).to_rfc3339())
+        .bind(event_id.to_string())
+        .execute(f.store.pool())
+        .await
+        .expect("expire backoff");
+}
+
 /// Age a claim so the lease has expired, without waiting a minute for it.
 async fn age_claim(f: &Fixture, event_id: Uuid) {
     let stale = Utc::now() - chrono::Duration::seconds(CLAIM_LEASE_SECONDS + 5);
@@ -805,20 +835,41 @@ async fn saturation_clears_when_delivery_drains_the_spool() {
 // Commands
 // ---------------------------------------------------------------------------
 
+/// A bound no test that is not about the bound will ever reach.
+fn roomy() -> SpoolCapacity {
+    SpoolCapacity {
+        max_events: 10_000,
+        max_bytes: i64::MAX,
+    }
+}
+
+/// Unwrap an admission that is expected to have been queued.
+fn queued(admission: spool::CommandAdmission) -> spool::SpooledCommand {
+    match admission {
+        spool::CommandAdmission::Spooled(c) => c,
+        spool::CommandAdmission::Saturated { queued } => {
+            panic!("the command spool refused at {queued} queued rows")
+        }
+    }
+}
+
 async fn spool_command(f: &Fixture, scope: CommandScope, account: Uuid, kind: CommandKind) -> Uuid {
     let payload = serde_json::json!({ "content": "an intent, and nothing derived" });
-    spool::spool_command(
-        &f.store,
-        NewCommand {
-            scope,
-            project_id: Some(f.project_id),
-            account_id: account,
-            kind,
-            payload: &payload,
-        },
+    queued(
+        spool::spool_command(
+            &f.store,
+            NewCommand {
+                scope,
+                project_id: Some(f.project_id),
+                account_id: account,
+                kind,
+                payload: &payload,
+            },
+            roomy(),
+        )
+        .await
+        .expect("spool_command"),
     )
-    .await
-    .expect("spool_command")
     .command_id
 }
 
@@ -958,18 +1009,21 @@ async fn a_sessionless_command_is_scoped_to_the_store_and_names_no_session() {
     };
 
     let payload = serde_json::json!({ "content": "remembered outside any session" });
-    let command = spool::spool_command(
-        &f.store,
-        NewCommand {
-            scope,
-            project_id: None,
-            account_id: account,
-            kind: CommandKind::PersonalCreate,
-            payload: &payload,
-        },
-    )
-    .await
-    .expect("spool_command");
+    let command = queued(
+        spool::spool_command(
+            &f.store,
+            NewCommand {
+                scope,
+                project_id: None,
+                account_id: account,
+                kind: CommandKind::PersonalCreate,
+                payload: &payload,
+            },
+            roomy(),
+        )
+        .await
+        .expect("spool_command"),
+    );
 
     assert_eq!(command.session_id, None);
     assert_eq!(command.project_id, None);
@@ -989,18 +1043,21 @@ async fn a_sessionless_command_is_scoped_to_the_store_and_names_no_session() {
 
     // The store's own writer identity is stable, so a second sessionless
     // command continues the same run rather than starting a new one.
-    let second = spool::spool_command(
-        &f.store,
-        NewCommand {
-            scope: spool::store_scope(&f.store).await.expect("store scope"),
-            project_id: None,
-            account_id: account,
-            kind: CommandKind::PersonalForget,
-            payload: &payload,
-        },
-    )
-    .await
-    .expect("spool_command");
+    let second = queued(
+        spool::spool_command(
+            &f.store,
+            NewCommand {
+                scope: spool::store_scope(&f.store).await.expect("store scope"),
+                project_id: None,
+                account_id: account,
+                kind: CommandKind::PersonalForget,
+                payload: &payload,
+            },
+            roomy(),
+        )
+        .await
+        .expect("spool_command"),
+    );
     assert_eq!(second.command_seq, 2);
 }
 
@@ -1246,4 +1303,344 @@ async fn a_team_state_that_did_not_advance_is_still_accepted_from_the_server() {
         1,
         "the refresh inserted a second copy instead of refreshing"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The state machine, stated as tests (FR-772, FR-784)
+// ---------------------------------------------------------------------------
+
+/// A transient failure is retryable, and this file says so deliberately.
+///
+/// `failed` means the **opposite** here of what it means in `outbox.rs`, where
+/// it is the terminal state. The outbox has no `refused`, so its `failed` had
+/// to carry the permanent meaning; schema v8 gives the spool a `refused` of its
+/// own, which frees `failed` to mean "attempted, transient, waiting out its
+/// backoff". Reading across from the outbox on the strength of the shared name
+/// is the mistake this test exists to catch.
+#[tokio::test]
+async fn a_transient_failure_is_retryable_and_a_refusal_is_not() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+
+    let transient = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+    let permanent = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_failed(&f.store, transient, "connection_refused")
+        .await
+        .expect("mark failed");
+    spool::mark_event_refused(&f.store, permanent, "repo_file_absolute")
+        .await
+        .expect("mark refused");
+
+    // The transient row is claimable again once its backoff elapses.
+    expire_backoff(&f, transient).await;
+    let again = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    let ids: Vec<Uuid> = again.iter().map(|e| e.event_id).collect();
+    assert!(
+        ids.contains(&transient),
+        "a transient failure was not retried"
+    );
+    assert!(
+        !ids.contains(&permanent),
+        "a permanent refusal was retried; no claim predicate may admit `refused`"
+    );
+}
+
+/// Retry is bounded, not merely backed off (FR-784).
+///
+/// FR-784 joins two clauses with "and": retry "MUST be bounded" **and** "MUST
+/// back off", and a permanently undeliverable event "MUST become visible rather
+/// than being retried forever". A row retrying every five minutes indefinitely
+/// has bounded delay and unbounded retry, and satisfies only one of them.
+#[tokio::test]
+async fn retry_stops_at_the_bound_and_the_row_becomes_visible() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    // One attempt short of the bound: still retrying.
+    set_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS - 1).await;
+    spool::mark_event_failed(&f.store, id, "connection_refused")
+        .await
+        .expect("mark failed");
+    assert_eq!(state_of(&f, id).await, "failed");
+
+    // At the bound: terminal, and visible rather than deleted.
+    set_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS).await;
+    spool::mark_event_failed(&f.store, id, "connection_refused")
+        .await
+        .expect("mark failed");
+    assert_eq!(
+        state_of(&f, id).await,
+        "refused",
+        "a row went on being retried past its retry window"
+    );
+    assert_eq!(
+        scalar(
+            &f,
+            &format!("SELECT COUNT(*) FROM event_spool WHERE event_id = '{id}'")
+        )
+        .await,
+        1,
+        "an undeliverable row was deleted instead of surfaced"
+    );
+
+    // And it never becomes claimable again.
+    expire_backoff(&f, id).await;
+    let claimed = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert!(claimed.is_empty(), "an exhausted row was claimed again");
+}
+
+/// The cause survives, even though the state does not distinguish it.
+///
+/// Exhaustion and refusal are both `refused` because schema v8 has five states
+/// and the *consequence* is identical. The cause is not, and a person looking
+/// at a stuck spool needs to know whether the server said no or was never
+/// reachable.
+#[tokio::test]
+async fn an_exhausted_row_is_distinguishable_from_a_server_refusal() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let exhausted = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+    let refused = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    set_attempts(&f, exhausted, spool::MAX_DELIVERY_ATTEMPTS).await;
+    spool::mark_event_failed(&f.store, exhausted, "connection_refused")
+        .await
+        .expect("mark failed");
+    spool::mark_event_refused(&f.store, refused, "repo_file_absolute")
+        .await
+        .expect("mark refused");
+
+    let breakdown = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_eq!(breakdown.terminal, 2);
+    assert_eq!(
+        breakdown.terminal_retry_exhausted, 1,
+        "the two terminal causes were reported as one"
+    );
+}
+
+/// A `duplicate` answer is a success, because it is what the retry was for.
+#[tokio::test]
+async fn a_duplicate_answer_settles_the_row_as_delivered() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    // The drainer maps `accepted` and `duplicate` alike: at most one canonical
+    // event exists either way (FR-770, FR-786).
+    spool::mark_event_delivered(&f.store, id)
+        .await
+        .expect("delivered");
+    assert_eq!(state_of(&f, id).await, "delivered");
+
+    let breakdown = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_eq!(
+        breakdown.waiting + breakdown.retrying + breakdown.in_flight,
+        0
+    );
+    assert_eq!(breakdown.terminal, 0, "a success was reported as terminal");
+}
+
+/// Health tells waiting, retrying, in flight and terminal apart.
+///
+/// One "undelivered" number reports four different situations as one problem. A
+/// spool of waiting rows on a laptop that just came online is healthy; the same
+/// count of exhausted rows is not.
+#[tokio::test]
+async fn health_distinguishes_waiting_retrying_in_flight_and_terminal() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    // Four rows, driven into the four conditions.
+    for _ in 0..4 {
+        spooled(spool(&f, account, capture_event(f.session_id)).await);
+    }
+    let claimed = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 4);
+
+    spool::mark_event_failed(&f.store, claimed[0].event_id, "connection_refused")
+        .await
+        .expect("failed");
+    spool::mark_event_refused(&f.store, claimed[1].event_id, "repo_file_absolute")
+        .await
+        .expect("refused");
+    // The remaining two are still claimed. Releasing every claim and taking one
+    // back leaves exactly one waiting and one in flight.
+    spool::release_event_claims(&f.store)
+        .await
+        .expect("release");
+    let reclaimed = spool::claim_events(&f.store, account, 1)
+        .await
+        .expect("reclaim");
+    assert_eq!(reclaimed.len(), 1);
+
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_eq!(b.waiting, 1, "{b:?}");
+    assert_eq!(b.in_flight, 1, "{b:?}");
+    assert_eq!(b.retrying, 1, "{b:?}");
+    assert_eq!(b.terminal, 1, "{b:?}");
+    assert!(!b.saturated);
+}
+
+// ---------------------------------------------------------------------------
+// Command-spool capacity (FR-785 ∧ knowledge-commands.md §4)
+// ---------------------------------------------------------------------------
+
+/// A full command spool refuses new commands and drops none.
+///
+/// The event spool sheds its oldest capture-class rows. That is inexpressible
+/// for commands — `command_spool` has no `boundary_class`, because no command
+/// is droppable — so the shedding half of FR-785 has nothing to operate on and
+/// the saturation half is the whole policy.
+#[tokio::test]
+async fn a_full_command_spool_refuses_rather_than_discarding_earlier_intent() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let tiny = SpoolCapacity {
+        max_events: 2,
+        max_bytes: i64::MAX,
+    };
+    let payload = serde_json::json!({ "content": "an explicit instruction" });
+    let queue = |kind| {
+        spool::spool_command(
+            &f.store,
+            NewCommand {
+                scope: CommandScope::Session(f.session_id),
+                project_id: Some(f.project_id),
+                account_id: account,
+                kind,
+                payload: &payload,
+            },
+            tiny,
+        )
+    };
+
+    let first = queued(queue(CommandKind::Remember).await.expect("first"));
+    let second = queued(queue(CommandKind::Supersede).await.expect("second"));
+
+    match queue(CommandKind::Forget).await.expect("third") {
+        spool::CommandAdmission::Saturated { queued } => assert_eq!(queued, 2),
+        spool::CommandAdmission::Spooled(_) => {
+            panic!("the command spool accepted work past its bound")
+        }
+    }
+
+    // Nothing earlier was discarded to make room. That is the whole difference
+    // from the event policy: a command is something a person asked for.
+    assert_eq!(
+        scalar(&f, "SELECT COUNT(*) FROM command_spool").await,
+        2,
+        "an explicit command was dropped to admit a newer one"
+    );
+    for id in [first.command_id, second.command_id] {
+        assert_eq!(
+            scalar(
+                &f,
+                &format!("SELECT COUNT(*) FROM command_spool WHERE command_id = '{id}'")
+            )
+            .await,
+            1
+        );
+    }
+}
+
+/// A refused command consumes no ordinal, so the scope's sequence has no gap.
+#[tokio::test]
+async fn a_refused_command_leaves_the_scope_sequence_intact() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let tiny = SpoolCapacity {
+        max_events: 1,
+        max_bytes: i64::MAX,
+    };
+    let payload = serde_json::json!({ "content": "an explicit instruction" });
+    let queue = |kind, capacity| {
+        spool::spool_command(
+            &f.store,
+            NewCommand {
+                scope: CommandScope::Session(f.session_id),
+                project_id: Some(f.project_id),
+                account_id: account,
+                kind,
+                payload: &payload,
+            },
+            capacity,
+        )
+    };
+
+    let first = queued(queue(CommandKind::Remember, tiny).await.expect("first"));
+    assert_eq!(first.command_seq, 1);
+
+    // Refused: the ordinal is checked before it is allocated, so nothing is
+    // consumed and no later reader has to wonder about a missing number.
+    assert!(matches!(
+        queue(CommandKind::Supersede, tiny).await.expect("second"),
+        spool::CommandAdmission::Saturated { .. }
+    ));
+
+    // Room again, and the next command is 2 rather than 3.
+    let next = queued(queue(CommandKind::Supersede, roomy()).await.expect("third"));
+    assert_eq!(
+        next.command_seq, 2,
+        "a refused command burned an ordinal and left a gap in the scope"
+    );
+}
+
+/// Saturation is visible in health, not merely returned to one caller.
+#[tokio::test]
+async fn a_saturated_command_spool_is_reported_as_saturated() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let one = SpoolCapacity {
+        max_events: 1,
+        max_bytes: i64::MAX,
+    };
+    let payload = serde_json::json!({ "content": "an explicit instruction" });
+    queued(
+        spool::spool_command(
+            &f.store,
+            NewCommand {
+                scope: CommandScope::Session(f.session_id),
+                project_id: Some(f.project_id),
+                account_id: account,
+                kind: CommandKind::Remember,
+                payload: &payload,
+            },
+            one,
+        )
+        .await
+        .expect("first"),
+    );
+
+    let b = spool::command_spool_breakdown(&f.store, one)
+        .await
+        .expect("breakdown");
+    assert!(
+        b.saturated,
+        "a full command spool did not report saturation"
+    );
+    assert_eq!(b.waiting, 1);
+
+    // And it clears when the queue drains, with no flag to reset.
+    let b_roomy = spool::command_spool_breakdown(&f.store, roomy())
+        .await
+        .expect("breakdown");
+    assert!(!b_roomy.saturated);
 }

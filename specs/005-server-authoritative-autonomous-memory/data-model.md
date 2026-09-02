@@ -163,7 +163,14 @@ The repository root is machine configuration and is never transmitted (FR-753).
 | Serialized whole event | 16 KiB |
 | Events per ingest batch | 256 |
 | Ingest request body | 1 MiB |
-| Spool capacity | 50,000 events **or** 256 MiB, whichever binds first |
+| Spool capacity | 50,000 rows **or** 256 MiB, whichever binds first |
+
+The capacity bound governs **both** spools. Their *terminal behaviour* differs and the difference is not
+optional: `event_spool` sheds its oldest capture-class rows first and only saturates once nothing
+capture-class remains, while `command_spool` has no shedding step at all — it carries no `boundary_class`
+column because no explicit command is droppable, so reaching the bound refuses new commands visibly and
+discards nothing already queued (FR-785, `contracts/knowledge-commands.md` §4: *"not silently dropped"*).
+The byte bound is measured on `event_spool` only; a command payload is intent, not a serialized event.
 | Consolidation batch | 200 events |
 | Extraction input | 200 events / 256 KiB |
 | `topic_key` | 128 chars, 6 segments (unchanged) |
