@@ -1848,6 +1848,40 @@ fn split_body_and_status(raw: &str) -> (serde_json::Value, u16) {
 }
 
 /// POST and return the HTTP status only, carrying a bearer token.
+/// POST a body from a file, returning the HTTP status only.
+///
+/// A file rather than `-d <string>` because a body large enough to test a
+/// megabyte limit is a body large enough to exceed the shell's argument
+/// length, and the failure would look like a curl error rather than a limit
+/// working.
+pub fn post_file_status_bearer(base: &str, path: &str, body: &[u8], token: &str) -> u16 {
+    let file = tempfile::NamedTempFile::new().expect("a file for the request body");
+    std::fs::write(file.path(), body).expect("write the request body");
+    let out = Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            &format!("authorization: Bearer {token}"),
+            "--data-binary",
+            &format!("@{}", file.path().display()),
+            &format!("{base}{path}"),
+        ])
+        .output()
+        .expect("curl runs");
+    String::from_utf8_lossy(&out.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0)
+}
+
 pub fn post_status_bearer(base: &str, path: &str, body: &serde_json::Value, token: &str) -> u16 {
     let out = Command::new("curl")
         .args([

@@ -3,7 +3,7 @@
 use crate::auth::{self, AdminUser, CurrentUser, SettledUser};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post};
@@ -73,8 +73,10 @@ pub fn routes() -> Router<AppState> {
         // Sync
         // Safe-event ingest. A boundary of its own, not `/api/sync/batch`:
         // that one carries whole entities a client already decided to store,
-        // this one carries typed observations the server decides about.
-        .route("/api/events/batch", post(crate::events::ingest_batch))
+        // this one carries typed observations the server decides about. Merged
+        // rather than routed inline so its body limit stays its own — see
+        // `event_ingest_route`.
+        .merge(event_ingest_route())
         .route("/api/sync/batch", post(sync_batch))
         .route("/api/sync/changes", get(sync_changes))
         // Read-back for the two non-project domains (T101, T129).
@@ -110,6 +112,28 @@ pub fn routes() -> Router<AppState> {
             "/api/memories/{id}",
             get(memory_detail).delete(delete_memory),
         )
+}
+
+/// `/api/events/batch`, carrying its own request-body limit.
+///
+/// The bound is `BODY_MAX_BYTES` — 1 MiB, stated as a number in
+/// `contracts/safe-events.md` §5 so SC-743 has something to fail against — and
+/// it is enforced by the body boundary rather than by counting after the fact.
+/// A batch is bounded twice, at two different layers, and both are needed: 256
+/// events is a bound on *how many* an honest client sends, and 1 MiB is a bound
+/// on how many bytes a hostile one can make the server buffer before anything
+/// has been parsed or authenticated. Checking the length inside the handler is
+/// too late — the body is already in memory by then.
+///
+/// A router of its own, merged in, so the limit applies to **this route only**.
+/// Axum's `DefaultBodyLimit` is a layer, and putting it on the main router would
+/// silently retighten every other endpoint from the 2 MB default to 1 MiB —
+/// including `/api/sync/batch`, which is a different boundary with its own
+/// bounds and no requirement asking for this one.
+fn event_ingest_route() -> Router<AppState> {
+    Router::new()
+        .route("/api/events/batch", post(crate::events::ingest_batch))
+        .layer(DefaultBodyLimit::max(cairn_core::event::BODY_MAX_BYTES))
 }
 
 /// The two routes the security prerequisite removed answer here (FR-587).

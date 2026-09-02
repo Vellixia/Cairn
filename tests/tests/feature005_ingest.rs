@@ -17,7 +17,9 @@
 //!   what it was for.
 
 use cairn_e2e::feature005::{Account, Pg};
-use cairn_e2e::{post_json_bearer, post_json_status_bearer, post_status_bearer};
+use cairn_e2e::{
+    post_file_status_bearer, post_json_bearer, post_json_status_bearer, post_status_bearer,
+};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -729,4 +731,143 @@ fn an_empty_batch_is_accepted_and_changes_nothing() {
     assert_eq!(status, 200, "{body}");
     assert_eq!(statuses(&body), Vec::<String>::new());
     let _ = post_json_bearer;
+}
+
+// ---------------------------------------------------------------------------
+// The request body limit (T030, FR-773, SC-743)
+// ---------------------------------------------------------------------------
+
+/// One legal event in a request body padded past `target` bytes.
+///
+/// Padded with **whitespace between JSON tokens**, which is where the first
+/// attempt at this test went wrong and is worth recording. Padding by adding
+/// events instead needs roughly eleven hundred of them to reach a megabyte,
+/// which trips the 256-event batch cap first — so the request was refused, and
+/// zero events were created, and every assertion passed with the body limit
+/// removed entirely. The test measured the wrong bound and would have shipped
+/// green.
+///
+/// Whitespace is the discriminator because nothing else objects to it: the
+/// batch holds one event, serde ignores the padding, and the *only* property
+/// that can refuse this request is its size in bytes.
+fn padded_body(session: Uuid, target: usize) -> Vec<u8> {
+    let inner = serde_json::to_string(&file_event(session, 1, "a.rs")).expect("serializes");
+    let mut body = String::from("{\"contract_version\": 1, \"events\": [");
+    body.push_str(&inner);
+    body.push(']');
+    // Pad inside the object, after the last member, where JSON allows
+    // insignificant whitespace.
+    while body.len() < target {
+        body.push(' ');
+    }
+    body.push('}');
+    body.into_bytes()
+}
+
+#[test]
+fn a_request_inside_the_body_limit_reaches_ingest() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+    // Comfortably under 1 MiB, and a real event: the point is that the limit
+    // does not refuse ordinary traffic.
+    // Padded to just under the limit, so this is the same shape of request as
+    // the oversized one and differs only in being inside the bound.
+    let body = padded_body(session, 1024 * 1024 - 4096);
+    assert!(body.len() < 1024 * 1024);
+
+    let status =
+        post_file_status_bearer(&pg.server.base, "/api/events/batch", &body, &pg.owner.token);
+    assert_eq!(status, 200);
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM safe_events WHERE session_id = '{session}'"
+        )),
+        1,
+        "a request within the limit did not reach ingest"
+    );
+}
+
+#[test]
+fn a_request_over_one_mebibyte_is_refused_by_the_body_boundary() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+    let body = padded_body(session, 1024 * 1024 + 4096);
+    assert!(
+        body.len() > 1024 * 1024,
+        "the fixture must exceed the limit"
+    );
+    // Under Axum's own 2 MB default, so removing the route limit lets this
+    // through rather than being caught by the framework anyway. That is what
+    // makes the assertions below able to fail.
+    assert!(body.len() < 2 * 1024 * 1024);
+
+    let status =
+        post_file_status_bearer(&pg.server.base, "/api/events/batch", &body, &pg.owner.token);
+    // Refused by the boundary, not by the handler. 413 is what the body limit
+    // produces; 400 is what a rejected extraction produces. Either is a refusal
+    // and neither is a success, and the assertions below are what actually
+    // matter: nothing was persisted.
+    assert!(
+        status == 413 || status == 400,
+        "an oversized request was answered {status}, which is not a refusal"
+    );
+
+    // Zero events, and zero work. The second is the one worth checking
+    // separately: ingest enqueues consolidation in the same transaction as the
+    // insert, so a partial acceptance would show up here as work with no event.
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM safe_events WHERE session_id = '{session}'"
+        )),
+        0,
+        "an oversized request created events"
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_work WHERE session_id = '{session}'"
+        )),
+        0,
+        "an oversized request created consolidation work"
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_session WHERE session_id = '{session}'"
+        )),
+        0,
+        "an oversized request created a consolidation lease"
+    );
+}
+
+#[test]
+fn the_body_limit_is_the_one_the_contract_states() {
+    // Stated as a number so SC-743 has something to fail against, and asserted
+    // here so the route and the contract cannot drift apart silently.
+    assert_eq!(cairn_core::event::BODY_MAX_BYTES, 1024 * 1024);
+}
+
+#[test]
+fn the_body_limit_belongs_to_this_route_and_not_to_the_server() {
+    let pg = pg!();
+    // Axum's `DefaultBodyLimit` is a layer, so putting it on the main router
+    // would silently retighten every other endpoint from the 2 MB default to
+    // 1 MiB — including `/api/sync/batch`, a different boundary with its own
+    // bounds and no requirement asking for this one.
+    let big = {
+        let mut body = String::from("{\"items\": []");
+        while body.len() < 1024 * 1024 + 4096 {
+            body.push(' ');
+        }
+        body.push('}');
+        body.into_bytes()
+    };
+    assert!(big.len() > 1024 * 1024 && big.len() < 2 * 1024 * 1024);
+
+    let ingest =
+        post_file_status_bearer(&pg.server.base, "/api/events/batch", &big, &pg.owner.token);
+    let sync = post_file_status_bearer(&pg.server.base, "/api/sync/batch", &big, &pg.owner.token);
+    assert_eq!(ingest, 413, "the ingest route did not apply its own limit");
+    assert_ne!(
+        sync, 413,
+        "the ingest route's body limit leaked onto /api/sync/batch"
+    );
 }

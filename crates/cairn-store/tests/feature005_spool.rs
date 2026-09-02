@@ -181,6 +181,24 @@ async fn disposition_total(f: &Fixture, disposition: &str) -> i64 {
     .expect("disposition total")
 }
 
+/// A row's attempt count, read from the table.
+async fn attempts_of(f: &Fixture, event_id: Uuid) -> i64 {
+    sqlx::query_scalar("SELECT attempts FROM event_spool WHERE event_id = ?1")
+        .bind(event_id.to_string())
+        .fetch_one(f.store.pool())
+        .await
+        .expect("attempts")
+}
+
+/// Why a row stopped, if it stopped.
+async fn error_kind_of(f: &Fixture, event_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT last_error_kind FROM event_spool WHERE event_id = ?1")
+        .bind(event_id.to_string())
+        .fetch_one(f.store.pool())
+        .await
+        .expect("last_error_kind")
+}
+
 /// A row's current state, read from the table rather than inferred.
 async fn state_of(f: &Fixture, event_id: Uuid) -> String {
     sqlx::query_scalar("SELECT state FROM event_spool WHERE event_id = ?1")
@@ -593,12 +611,13 @@ async fn a_rejected_event_is_refused_permanently_and_stays_visible() {
             .is_empty(),
         "a permanently refused row was retried"
     );
-    let status = spool::event_spool_status(&f.store, SpoolCapacity::default())
+    let status = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
         .await
         .expect("status");
-    assert_eq!(status.refused, 1, "the refusal is not reportable");
+    assert_eq!(status.refused(), 1, "the refusal is not reportable");
     assert_eq!(
-        status.undelivered, 0,
+        status.undelivered(),
+        0,
         "a refused row is still counted as queued work"
     );
     assert_eq!(disposition_total(&f, "rejected_by_server").await, 1);
@@ -726,7 +745,7 @@ async fn saturation_refuses_new_events_rather_than_shedding_a_boundary_row() {
         .push(spooled(spool_with(&f, tight, account, boundary_event(f.session_id)).await).event_id);
     spool_with(&f, tight, account, capture_event(f.session_id)).await;
     assert!(
-        !spool::event_spool_status(&f.store, tight)
+        !spool::event_spool_breakdown(&f.store, tight)
             .await
             .expect("status")
             .saturated,
@@ -782,7 +801,7 @@ async fn saturation_refuses_new_events_rather_than_shedding_a_boundary_row() {
         assert_eq!(present, 1, "a boundary row was dropped");
     }
     assert!(
-        spool::event_spool_status(&f.store, tight)
+        spool::event_spool_breakdown(&f.store, tight)
             .await
             .expect("status")
             .saturated
@@ -819,7 +838,7 @@ async fn saturation_clears_when_delivery_drains_the_spool() {
         .await
         .expect("delivered");
     assert!(
-        !spool::event_spool_status(&f.store, tight)
+        !spool::event_spool_breakdown(&f.store, tight)
             .await
             .expect("status")
             .saturated,
@@ -1107,8 +1126,10 @@ async fn a_refused_command_is_never_retried_and_does_not_wedge_its_scope() {
         .await
         .expect("refused");
 
-    let status = spool::command_spool_status(&f.store).await.expect("status");
-    assert_eq!(status.refused, 1);
+    let status = spool::command_spool_breakdown(&f.store, roomy())
+        .await
+        .expect("status");
+    assert_eq!(status.refused(), 1);
     let next = spool::claim_commands(&f.store, account, 10)
         .await
         .expect("claim");
@@ -1378,7 +1399,7 @@ async fn retry_stops_at_the_bound_and_the_row_becomes_visible() {
     assert_eq!(
         state_of(&f, id).await,
         "refused",
-        "a row went on being retried past its retry window"
+        "a row went on being retried past its attempt budget"
     );
     assert_eq!(
         scalar(
@@ -1603,9 +1624,15 @@ async fn a_refused_command_leaves_the_scope_sequence_intact() {
     );
 }
 
-/// Saturation is visible in health, not merely returned to one caller.
+/// Admission and every public status surface give the same saturation answer.
+///
+/// The defect this replaces: `spool_command` enforced a bound while
+/// `command_spool_status` reported `saturated: false`, so one function refused
+/// work the other said there was room for. There is now a single status
+/// primitive, and this asserts the two remaining surfaces — the admission
+/// result and the breakdown — cannot disagree.
 #[tokio::test]
-async fn a_saturated_command_spool_is_reported_as_saturated() {
+async fn admission_and_status_agree_about_a_full_command_spool() {
     let f = fixture().await;
     let account = Uuid::now_v7();
     let one = SpoolCapacity {
@@ -1613,7 +1640,7 @@ async fn a_saturated_command_spool_is_reported_as_saturated() {
         max_bytes: i64::MAX,
     };
     let payload = serde_json::json!({ "content": "an explicit instruction" });
-    queued(
+    let offer = |capacity| {
         spool::spool_command(
             &f.store,
             NewCommand {
@@ -1623,24 +1650,274 @@ async fn a_saturated_command_spool_is_reported_as_saturated() {
                 kind: CommandKind::Remember,
                 payload: &payload,
             },
-            one,
+            capacity,
         )
+    };
+
+    let first = queued(offer(one).await.expect("first"));
+
+    // Full: admission refuses, and status says saturated.
+    assert!(matches!(
+        offer(one).await.expect("second"),
+        spool::CommandAdmission::Saturated { .. }
+    ));
+    let b = spool::command_spool_breakdown(&f.store, one)
         .await
-        .expect("first"),
-    );
+        .expect("breakdown");
+    assert!(b.saturated, "admission refused while status reported room");
+    assert_eq!(b.waiting, 1);
+    assert_eq!(b.undelivered(), 1);
+    assert_eq!(b.bytes, 0, "the byte bound applies to events only");
+
+    // Drained: admission accepts again, and status agrees.
+    spool::claim_commands(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_command_delivered(&f.store, first.command_id)
+        .await
+        .expect("delivered");
 
     let b = spool::command_spool_breakdown(&f.store, one)
         .await
         .expect("breakdown");
     assert!(
-        b.saturated,
-        "a full command spool did not report saturation"
+        !b.saturated,
+        "a delivered row did not clear saturation, so the flag is being remembered rather than derived"
     );
-    assert_eq!(b.waiting, 1);
+    assert_eq!(b.undelivered(), 0);
+    assert!(matches!(
+        offer(one).await.expect("third"),
+        spool::CommandAdmission::Spooled(_)
+    ));
+}
 
-    // And it clears when the queue drains, with no flag to reset.
-    let b_roomy = spool::command_spool_breakdown(&f.store, roomy())
+// ---------------------------------------------------------------------------
+// The crash/reclaim bypass (FR-784)
+// ---------------------------------------------------------------------------
+
+/// Age a command's claim so its lease has expired.
+async fn age_command_claim(f: &Fixture, command_id: Uuid) {
+    let stale = Utc::now() - chrono::Duration::seconds(CLAIM_LEASE_SECONDS + 5);
+    sqlx::query("UPDATE command_spool SET claimed_at = ?1 WHERE command_id = ?2")
+        .bind(stale.to_rfc3339())
+        .bind(command_id.to_string())
+        .execute(f.store.pool())
         .await
-        .expect("breakdown");
-    assert!(!b_roomy.saturated);
+        .expect("age command claim");
+}
+
+async fn command_state(f: &Fixture, command_id: Uuid) -> String {
+    sqlx::query_scalar("SELECT state FROM command_spool WHERE command_id = ?1")
+        .bind(command_id.to_string())
+        .fetch_one(f.store.pool())
+        .await
+        .expect("state")
+}
+
+async fn command_error_kind(f: &Fixture, command_id: Uuid) -> Option<String> {
+    sqlx::query_scalar("SELECT last_error_kind FROM command_spool WHERE command_id = ?1")
+        .bind(command_id.to_string())
+        .fetch_one(f.store.pool())
+        .await
+        .expect("last_error_kind")
+}
+
+async fn set_command_attempts(f: &Fixture, command_id: Uuid, attempts: i64) {
+    sqlx::query("UPDATE command_spool SET attempts = ?1 WHERE command_id = ?2")
+        .bind(attempts)
+        .bind(command_id.to_string())
+        .execute(f.store.pool())
+        .await
+        .expect("set command attempts");
+}
+
+/// A drainer that keeps crashing after claiming cannot retry an event forever.
+///
+/// This is the hole the attempt budget had. Every claim increments `attempts`,
+/// and a process that dies mid-send never reaches `mark_event_failed` — so with
+/// the check only on the failure path, FR-784's bound held solely for drainers
+/// polite enough to report their own failures. A crash loop bypassed it.
+#[tokio::test]
+async fn a_crash_loop_cannot_retry_an_event_past_the_bound() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    // One attempt short of the bound.
+    set_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS - 1).await;
+
+    // The claim that begins the last permitted attempt. Note what does *not*
+    // happen next: no `mark_event_failed`, because the drainer died.
+    let claimed = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 1, "the row should still have been claimable");
+    assert_eq!(attempts_of(&f, id).await, spool::MAX_DELIVERY_ATTEMPTS);
+    assert_eq!(state_of(&f, id).await, "in_flight");
+
+    // The lease expires and another drain comes along.
+    age_claim(&f, id).await;
+    let next = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+
+    assert!(
+        next.is_empty(),
+        "a crashed drainer's row was claimed again, beginning attempt {}",
+        spool::MAX_DELIVERY_ATTEMPTS + 1
+    );
+    assert_eq!(
+        attempts_of(&f, id).await,
+        spool::MAX_DELIVERY_ATTEMPTS,
+        "attempts went past the budget without any failure ever being reported"
+    );
+    assert_eq!(state_of(&f, id).await, "refused");
+    assert_eq!(
+        error_kind_of(&f, id).await.as_deref(),
+        Some(spool::TERMINAL_RETRY_EXHAUSTED)
+    );
+
+    // And it stays refused however many times a drain comes back.
+    for _ in 0..3 {
+        age_claim(&f, id).await;
+        assert!(
+            spool::claim_events(&f.store, account, 10)
+                .await
+                .expect("claim")
+                .is_empty(),
+            "an exhausted row became claimable again on a later drain"
+        );
+    }
+    assert_eq!(state_of(&f, id).await, "refused");
+}
+
+/// The same hole, and the same repair, for commands.
+#[tokio::test]
+async fn a_crash_loop_cannot_retry_a_command_past_the_bound() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spool_command(
+        &f,
+        CommandScope::Session(f.session_id),
+        account,
+        CommandKind::Remember,
+    )
+    .await;
+
+    set_command_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS - 1).await;
+    let claimed = spool::claim_commands(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(command_state(&f, id).await, "in_flight");
+
+    age_command_claim(&f, id).await;
+    let next = spool::claim_commands(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert!(
+        next.is_empty(),
+        "a crashed drainer's command was claimed again"
+    );
+    assert_eq!(command_state(&f, id).await, "refused");
+    assert_eq!(
+        command_error_kind(&f, id).await.as_deref(),
+        Some(spool::TERMINAL_RETRY_EXHAUSTED)
+    );
+}
+
+/// An exhausted command stops blocking the commands queued behind it.
+///
+/// The head-of-scope barrier holds a scope until its earliest unsettled command
+/// settles. A terminal row is settled, so terminalizing an exhausted command
+/// releases its scope — which is what stops one undeliverable instruction
+/// turning the whole scope into a silent dead queue.
+#[tokio::test]
+async fn an_exhausted_command_releases_its_scope_rather_than_wedging_it() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let scope = CommandScope::Session(f.session_id);
+    let first = spool_command(&f, scope, account, CommandKind::Remember).await;
+    let second = spool_command(&f, scope, account, CommandKind::Supersede).await;
+
+    set_command_attempts(&f, first, spool::MAX_DELIVERY_ATTEMPTS - 1).await;
+    // Limit 1, so the drainer takes only the head of the scope and then dies
+    // holding it. Claiming both would leave `second` in flight under a lease
+    // this test never expires, and the assertion below would be about the lease
+    // rather than about the barrier.
+    let taken = spool::claim_commands(&f.store, account, 1)
+        .await
+        .expect("claim");
+    assert_eq!(
+        taken.iter().map(|c| c.command_id).collect::<Vec<_>>(),
+        vec![first]
+    );
+    age_command_claim(&f, first).await;
+
+    let next = spool::claim_commands(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert_eq!(command_state(&f, first).await, "refused");
+    assert_eq!(
+        next.iter().map(|c| c.command_id).collect::<Vec<_>>(),
+        vec![second],
+        "the scope stayed wedged behind a command that will never be delivered"
+    );
+}
+
+/// A live claim at the bound is left alone.
+///
+/// Terminalizing only *eligible* rows matters: a drainer holding a fresh lease
+/// on a row at the bound may be about to succeed, and refusing it out from
+/// under an in-flight delivery would turn a success into a permanent refusal.
+#[tokio::test]
+async fn a_live_claim_at_the_bound_is_not_terminalized_under_its_drainer() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+    set_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS - 1).await;
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+
+    // A second drainer runs while the first still holds a valid lease.
+    assert!(spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim")
+        .is_empty());
+    assert_eq!(
+        state_of(&f, id).await,
+        "in_flight",
+        "a delivery in progress was refused out from under its drainer"
+    );
+
+    // And the first drainer's success still lands.
+    spool::mark_event_delivered(&f.store, id)
+        .await
+        .expect("delivered");
+    assert_eq!(state_of(&f, id).await, "delivered");
+}
+
+/// Terminalization respects the account binding.
+#[tokio::test]
+async fn one_accounts_drain_does_not_terminalize_anothers_rows() {
+    let f = fixture().await;
+    let mine = Uuid::now_v7();
+    let theirs = Uuid::now_v7();
+    let ours = spooled(spool(&f, mine, capture_event(f.session_id)).await).event_id;
+    let other = spooled(spool(&f, theirs, capture_event(f.session_id)).await).event_id;
+    for id in [ours, other] {
+        set_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS).await;
+    }
+
+    spool::claim_events(&f.store, mine, 10)
+        .await
+        .expect("claim");
+
+    assert_eq!(state_of(&f, ours).await, "refused");
+    assert_eq!(
+        state_of(&f, other).await,
+        "pending",
+        "one account's drain refused another account's row"
+    );
 }

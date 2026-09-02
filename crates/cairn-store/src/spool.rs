@@ -72,7 +72,7 @@ use uuid::Uuid;
 // ---------------------------------------------------------------------------
 
 /// The `last_error_kind` a row carries when it stopped being retried because
-/// its retry window ran out, rather than because the server refused it.
+/// its attempt budget ran out, rather than because the server refused it.
 ///
 /// Both land in `refused` — the consequence is identical, and schema v8 has
 /// five states, not six — but the *cause* differs, and a person looking at a
@@ -98,7 +98,7 @@ pub const TERMINAL_RETRY_EXHAUSTED: &str = "retry_exhausted";
 // | `in_flight` | claimed by a drainer; the lease may go stale        | on expiry |
 // | `failed`    | attempted, transport or server-transient, in backoff | when due |
 // | `delivered` | the server accepted it, or answered `duplicate`      | no        |
-// | `refused`   | terminal and visible: the server refused it permanently, or the retry window ran out | never |
+// | `refused`   | terminal and visible: the server refused it permanently, or its attempt budget ran out | never |
 //
 // - **Transient stays retryable, with bounded backoff and a bounded number of
 //   attempts** (FR-784). `failed` is the retrying state, which is the opposite
@@ -150,31 +150,32 @@ pub const BACKOFF_FLOOR_SECONDS: i64 = 1;
 /// …and no retry ever waits more than five minutes.
 pub const BACKOFF_CEILING_SECONDS: i64 = 300;
 
-/// How long a row may go on being undeliverable before it is declared
-/// undeliverable (FR-784).
+/// How many delivery attempts a row gets before it is declared undeliverable
+/// (FR-784).
 ///
 /// FR-784 has two clauses joined by "and": retry "MUST be bounded" **and**
 /// "MUST back off", and a permanently undeliverable event "MUST become visible
 /// rather than being retried forever". Bounded backoff alone satisfies the
-/// second clause and not the first — a row retrying every five minutes until
-/// the heat death of the machine has bounded *delay* and unbounded *retry*, and
-/// nobody is ever told it is not getting through.
+/// second and not the first — a row retrying every five minutes until the heat
+/// death of the machine has bounded *delay* and unbounded *retry*, and nobody
+/// is ever told it is not getting through.
 ///
-/// So the bound is stated as a window rather than an opaque count, because the
-/// number that matters is the one FR-783 constrains from the other side: events
-/// spooled while the server is unreachable must survive being retried later, so
-/// the window has to outlast a realistic outage. A week does; a working day
-/// would lose a long weekend's capture.
-pub const RETRY_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
-
-/// The attempt at which a row stops being retried and becomes visible.
+/// **This is an attempt budget, not a wall-clock deadline, and the difference
+/// is deliberate.** Nothing here reads a timestamp to decide that a row has
+/// expired: a laptop closed for a fortnight comes back with every spooled event
+/// still deliverable, because the device being off is not the server refusing.
+/// FR-783 requires events spooled during an outage to be retried later, and an
+/// elapsed-time expiry would quietly turn "later" into "not if you took a
+/// holiday".
 ///
-/// Derived from the window and the ceiling rather than written as a number, so
-/// the two cannot drift: changing the backoff ceiling changes how many attempts
-/// fit in a week, and a hand-written constant would quietly stop meaning a
-/// week. Early attempts are much faster than the ceiling, so the real elapsed
-/// time before exhaustion is always at least the window.
-pub const MAX_DELIVERY_ATTEMPTS: i64 = RETRY_WINDOW_SECONDS / BACKOFF_CEILING_SECONDS;
+/// The number is chosen by asking how long a budget of this size *approximates*
+/// once backoff has reached its five-minute ceiling and a drainer is actually
+/// running: 2,016 attempts at five minutes apart is on the order of a week of
+/// continuous, actively-retried failure. That is the reasoning behind the size,
+/// not a guarantee about elapsed time — a machine that only runs for an hour a
+/// day spends the same budget over much longer, which is the correct behaviour
+/// and the reason it is counted in attempts.
+pub const MAX_DELIVERY_ATTEMPTS: i64 = 2_016;
 
 /// How long to wait before the `attempts`-th delivery attempt of a row.
 ///
@@ -702,7 +703,44 @@ pub async fn claim_events(
     limit: i64,
 ) -> Result<Vec<SpooledEvent>> {
     let now = chrono::Utc::now();
+    let now_text = rows::ts_text(now);
     let stale_before = rows::ts_text(now - chrono::Duration::seconds(CLAIM_LEASE_SECONDS));
+
+    // Terminalizing and claiming share one `BEGIN IMMEDIATE`, so no second
+    // drainer can claim a row between this drainer deciding it is exhausted and
+    // writing that down. Two statements outside a transaction would leave
+    // exactly that window, and the window is the whole defect.
+    let mut tx = tx::begin(store, "claim_events").await?;
+
+    // The bound has to be enforced *here*, not only where a failure is
+    // recorded. `mark_event_failed` is never reached by a drainer that dies
+    // after claiming, and every claim increments `attempts` — so a process that
+    // crashes mid-send, repeatedly, would drive a row's attempts up without
+    // limit and never terminalize it. FR-784's bound would hold only for
+    // drainers polite enough to report their own failures.
+    //
+    // Only *eligible* rows are terminalized. A live `in_flight` row at the
+    // bound is left alone: its drainer may still be about to succeed, and
+    // refusing it out from under a delivery in progress would turn a success
+    // into a permanent refusal.
+    sqlx::query(
+        "UPDATE event_spool
+            SET state = 'refused', claimed_at = NULL, next_attempt_at = NULL,
+                last_error_kind = ?4
+          WHERE account_id = ?2
+            AND attempts >= ?5
+            AND ( (state IN ('pending','failed')
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
+               OR (state = 'in_flight'
+                   AND (claimed_at IS NULL OR claimed_at < ?3)) )",
+    )
+    .bind(&now_text)
+    .bind(account_id.to_string())
+    .bind(&stale_before)
+    .bind(TERMINAL_RETRY_EXHAUSTED)
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .execute(&mut *tx)
+    .await?;
 
     let rs = sqlx::query(
         "UPDATE event_spool
@@ -714,6 +752,11 @@ pub async fn claim_events(
                   -- another account is not this drainer's to deliver
                   -- (FR-790, FR-864a).
                WHERE account_id = ?2
+                 -- Under the bound, checked on the claim itself. The statement
+                 -- above has already refused every eligible row at or over it,
+                 -- so this is belt and braces — and it is the brace that holds
+                 -- if the two ever disagree.
+                 AND attempts < ?5
                  AND ( (state IN ('pending','failed')
                         AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
                        -- A NULL claim stamp on an `in_flight` row is a claim
@@ -726,14 +769,16 @@ pub async fn claim_events(
                LIMIT ?4)
           RETURNING *",
     )
-    .bind(rows::ts_text(now))
+    .bind(&now_text)
     .bind(account_id.to_string())
-    .bind(stale_before)
+    .bind(&stale_before)
     .bind(limit)
-    .fetch_all(store.pool())
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .fetch_all(&mut *tx)
     .await?;
 
-    // `RETURNING` promises no order; the queue is oldest-first.
+    // Rows are read out before the commit, because `rs` borrows nothing from
+    // the transaction and the claim is only real once it is committed.
     let mut claimed = rs
         .iter()
         .map(|r| {
@@ -741,6 +786,9 @@ pub async fn claim_events(
             Ok((created_at, event_row(r)?))
         })
         .collect::<Result<Vec<_>>>()?;
+    tx::commit(tx, "claim_events").await?;
+
+    // `RETURNING` promises no order; the queue is oldest-first.
     claimed.sort_by(|a, b| {
         (&a.0, a.1.session_id, a.1.session_seq).cmp(&(&b.0, b.1.session_id, b.1.session_seq))
     });
@@ -792,7 +840,7 @@ pub async fn mark_event_failed(store: &Store, event_id: Uuid, error_kind: &str) 
         .ok_or_else(|| StoreError::NotFound(format!("spooled event {event_id}")))?;
 
     if attempts >= MAX_DELIVERY_ATTEMPTS {
-        // A week of transient failure is not transient any more. The row stops
+        // The attempt budget is spent; this is not a transient failure any more. The row stops
         // being retried and becomes visible, which is what FR-784 asks for; it
         // is not deleted, because a row nobody can see is exactly the silence
         // the requirement forbids.
@@ -881,49 +929,70 @@ pub async fn release_event_claims(store: &Store) -> Result<u64> {
     Ok(result.rows_affected())
 }
 
-/// What a spool has outstanding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpoolStatus {
-    /// Rows still to be delivered, claimed or not: FR-058's question is what
-    /// has not reached the server, not what happens to be unclaimed right now.
-    pub undelivered: i64,
-    /// Rows the server permanently refused, which stay visible.
-    pub refused: i64,
-    /// Bytes of payload the undelivered rows hold. Always zero for commands,
-    /// whose spool has no byte bound.
-    pub bytes: i64,
-    /// The bound is reached and nothing capture-class is left to shed.
-    pub saturated: bool,
-}
+// ---------------------------------------------------------------------------
+// Status
+// ---------------------------------------------------------------------------
 
-/// Waiting, retrying, terminal and saturated, told apart.
+/// The one status primitive for either spool.
 ///
-/// `SpoolStatus` answers "how much has not reached the server", which is the
-/// depth question. This answers the different question a health report has to
-/// ask: *why* is it not moving. The four conditions call for four different
-/// actions, and a single "undelivered" count reports them all as the same
-/// problem — a spool of 500 waiting rows on a laptop that just came online is
-/// healthy, and a spool of 500 exhausted ones is not.
+/// **One, deliberately.** There used to be two — a `SpoolStatus` answering "how
+/// much has not reached the server" and this answering "why is it not moving" —
+/// and they could disagree: `spool_command` enforces a capacity bound that
+/// `command_spool_status` did not know about, so it reported `saturated: false`
+/// about a spool that was refusing work. Two public functions capable of giving
+/// different answers to one question is not a documentation problem, so the
+/// second was removed rather than taught to agree.
+///
+/// The depth question is still answerable — [`undelivered`](Self::undelivered)
+/// — it is just derived from these numbers rather than counted separately, so
+/// it cannot drift from them.
+///
+/// The four conditions are four fields because they call for four different
+/// actions: a spool of 500 waiting rows on a laptop that just came online is
+/// healthy, and 500 exhausted ones are not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpoolBreakdown {
-    /// Spooled and due, never attempted or already past its backoff. Waiting
-    /// on a drainer, not on a problem.
+    /// Spooled and due, never attempted or already past its backoff. Waiting on
+    /// a drainer, not on a problem.
     pub waiting: i64,
     /// Claimed by a drainer whose lease has not expired. In flight right now.
     pub in_flight: i64,
-    /// Attempted, failed transiently, and parked until `next_attempt_at`.
+    /// Attempted, failed transiently, parked until `next_attempt_at`.
     /// Something is wrong and Cairn is still trying.
     pub retrying: i64,
-    /// Terminal: the server refused it permanently, or its retry window ran
-    /// out. Cairn has stopped trying and is saying so.
+    /// Terminal: the server refused it permanently, or it ran out of its
+    /// attempt budget. Cairn has stopped trying and is saying so.
     pub terminal: i64,
-    /// Of the terminal rows, those that exhausted their retry window rather
+    /// Of the terminal rows, those that ran out of their attempt budget rather
     /// than being refused. The consequence is the same and the cause is not:
     /// one means the server said no, the other that it was never reachable.
     pub terminal_retry_exhausted: i64,
-    /// The bound is reached and nothing capture-class is left to shed, so new
-    /// events are being refused rather than boundary rows dropped.
+    /// Bytes of payload the undelivered rows hold.
+    ///
+    /// Always zero for commands: the approved data model applies the byte bound
+    /// to `event_spool` only, and a command payload is intent rather than a
+    /// serialized event. Reporting a number nothing bounds would invite someone
+    /// to bound it.
+    pub bytes: i64,
+    /// New work is being refused: for events, the bound is reached and nothing
+    /// capture-class is left to shed; for commands, the bound is reached, full
+    /// stop.
     pub saturated: bool,
+}
+
+impl SpoolBreakdown {
+    /// Rows that have not reached the server, claimed or not.
+    ///
+    /// Derived rather than counted, so it can never disagree with the
+    /// breakdown it is derived from.
+    pub fn undelivered(&self) -> i64 {
+        self.waiting + self.in_flight + self.retrying
+    }
+
+    /// Rows in a terminal state, which stay visible rather than being deleted.
+    pub fn refused(&self) -> i64 {
+        self.terminal
+    }
 }
 
 /// The event spool's health, broken down by why each row is not moving.
@@ -931,7 +1000,7 @@ pub async fn event_spool_breakdown(
     store: &Store,
     capacity: SpoolCapacity,
 ) -> Result<SpoolBreakdown> {
-    breakdown(store, "event_spool", capacity).await
+    breakdown(store, SpoolTable::Events, capacity).await
 }
 
 /// The command spool's health.
@@ -943,26 +1012,42 @@ pub async fn command_spool_breakdown(
     store: &Store,
     capacity: SpoolCapacity,
 ) -> Result<SpoolBreakdown> {
-    breakdown(store, "command_spool", capacity).await
+    breakdown(store, SpoolTable::Commands, capacity).await
 }
 
-async fn breakdown(store: &Store, table: &str, capacity: SpoolCapacity) -> Result<SpoolBreakdown> {
-    // The table name is one of two literals chosen here, never a caller's
-    // string: this is the one place in the module that interpolates an
-    // identifier, and it stays unreachable from outside.
-    let table = match table {
-        "event_spool" => "event_spool",
-        "command_spool" => "command_spool",
-        other => return Err(StoreError::Corrupt(format!("unknown spool table {other}"))),
-    };
+/// Which spool a status query is about.
+///
+/// An enum rather than a string, so the table name interpolated into the
+/// statements below cannot originate anywhere but here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpoolTable {
+    Events,
+    Commands,
+}
+
+impl SpoolTable {
+    fn name(self) -> &'static str {
+        match self {
+            SpoolTable::Events => "event_spool",
+            SpoolTable::Commands => "command_spool",
+        }
+    }
+}
+
+async fn breakdown(
+    store: &Store,
+    which: SpoolTable,
+    capacity: SpoolCapacity,
+) -> Result<SpoolBreakdown> {
+    let table = which.name();
+    // One connection and one clock reading for all of it, so the breakdown is a
+    // consistent picture rather than several snapshots of a moving table taken
+    // a millisecond apart.
     let mut conn = store.pool().acquire().await?;
     let now = rows::ts_text(chrono::Utc::now());
     let stale_before =
         rows::ts_text(chrono::Utc::now() - chrono::Duration::seconds(CLAIM_LEASE_SECONDS));
 
-    // One connection and one clock reading for all five counts, so the
-    // breakdown is a consistent picture rather than five snapshots of a moving
-    // table taken a millisecond apart.
     async fn count(
         conn: &mut sqlx::SqliteConnection,
         sql: &str,
@@ -984,8 +1069,8 @@ async fn breakdown(store: &Store, table: &str, capacity: SpoolCapacity) -> Resul
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-          WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
-             OR (state = 'in_flight' AND (claimed_at IS NULL OR claimed_at < ?2))"
+              WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
+                 OR (state = 'in_flight' AND (claimed_at IS NULL OR claimed_at < ?2))"
         ),
         &now,
         &stale_before,
@@ -995,7 +1080,7 @@ async fn breakdown(store: &Store, table: &str, capacity: SpoolCapacity) -> Resul
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-          WHERE state = 'in_flight' AND claimed_at IS NOT NULL AND claimed_at >= ?2"
+              WHERE state = 'in_flight' AND claimed_at IS NOT NULL AND claimed_at >= ?2"
         ),
         &now,
         &stale_before,
@@ -1005,7 +1090,7 @@ async fn breakdown(store: &Store, table: &str, capacity: SpoolCapacity) -> Resul
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-          WHERE state = 'failed' OR (state = 'pending' AND next_attempt_at > ?1)"
+              WHERE state = 'failed' OR (state = 'pending' AND next_attempt_at > ?1)"
         ),
         &now,
         &stale_before,
@@ -1022,22 +1107,41 @@ async fn breakdown(store: &Store, table: &str, capacity: SpoolCapacity) -> Resul
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-          WHERE state = 'refused' AND last_error_kind = '{TERMINAL_RETRY_EXHAUSTED}'"
+              WHERE state = 'refused' AND last_error_kind = '{TERMINAL_RETRY_EXHAUSTED}'"
         ),
         &now,
         &stale_before,
     )
     .await?;
 
-    // The event spool is saturated only when nothing capture-class is left to
-    // shed; the command spool is saturated the moment it is full, because
-    // shedding was never an option for it.
     let queued_now = waiting + in_flight + retrying;
-    drop(conn);
-    let saturated = if table == "event_spool" {
-        event_spool_status(store, capacity).await?.saturated
-    } else {
-        queued_now >= capacity.max_events
+    let bytes = match which {
+        SpoolTable::Events => {
+            sqlx::query_scalar::<_, i64>(&format!(
+                "SELECT COALESCE(SUM(payload_bytes), 0) FROM {table} WHERE state IN {UNDELIVERED}"
+            ))
+            .fetch_one(&mut *conn)
+            .await?
+        }
+        SpoolTable::Commands => 0,
+    };
+
+    // The event spool is saturated only once nothing capture-class is left to
+    // shed; the command spool is saturated the moment it is full, because
+    // shedding was never an option for it — it carries no `boundary_class`,
+    // since no explicit command is droppable.
+    let at_bound = queued_now >= capacity.max_events || bytes >= capacity.max_bytes;
+    let saturated = match which {
+        SpoolTable::Events => {
+            let capture_left: i64 = sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table}
+                  WHERE boundary_class = 0 AND state IN {UNDELIVERED}"
+            ))
+            .fetch_one(&mut *conn)
+            .await?;
+            at_bound && capture_left == 0
+        }
+        SpoolTable::Commands => at_bound,
     };
 
     Ok(SpoolBreakdown {
@@ -1046,36 +1150,8 @@ async fn breakdown(store: &Store, table: &str, capacity: SpoolCapacity) -> Resul
         retrying,
         terminal,
         terminal_retry_exhausted,
-        saturated,
-    })
-}
-
-/// The event spool's depth, refusals and saturation.
-///
-/// Saturation is asked of the table, not read from a flag: the bound is reached
-/// and no capture-class row remains. It therefore clears by itself the moment
-/// delivery moves rows out of the undelivered set, with nobody having to
-/// remember to clear it.
-pub async fn event_spool_status(store: &Store, capacity: SpoolCapacity) -> Result<SpoolStatus> {
-    let mut conn = store.pool().acquire().await?;
-    let (undelivered, bytes) = undelivered_capacity(&mut conn).await?;
-    let refused: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM event_spool WHERE state = 'refused'")
-            .fetch_one(&mut *conn)
-            .await?;
-    let capture_left: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM event_spool
-          WHERE boundary_class = 0 AND state IN {UNDELIVERED}"
-    ))
-    .fetch_one(&mut *conn)
-    .await?;
-
-    let at_bound = undelivered >= capacity.max_events || bytes >= capacity.max_bytes;
-    Ok(SpoolStatus {
-        undelivered,
-        refused,
         bytes,
-        saturated: at_bound && capture_left == 0,
+        saturated,
     })
 }
 
@@ -1155,7 +1231,7 @@ pub enum CommandAdmission {
 /// The bound is the one `data-model.md` §3 already states, applied to both
 /// spools rather than a second number invented for this one. Commands are
 /// intent-only payloads issued at human or agent pace, so in ordinary use it
-/// will not bind before a week-long outage exhausts the retry window anyway;
+/// will not bind before a prolonged outage exhausts the attempt budget anyway;
 /// what it rules out is a scripted loop against an unreachable server growing
 /// the store without limit.
 ///
@@ -1280,6 +1356,36 @@ pub async fn claim_commands(
     let now_text = rows::ts_text(now);
     let stale_before = rows::ts_text(now - chrono::Duration::seconds(CLAIM_LEASE_SECONDS));
 
+    let mut tx = tx::begin(store, "claim_commands").await?;
+
+    // The same claim-side bound as `claim_events`, for the same reason: a
+    // drainer that crashes after claiming never reaches `mark_command_failed`,
+    // and every claim increments `attempts`.
+    //
+    // Terminalizing here also *unblocks* the scope rather than wedging it. The
+    // head-of-scope barrier below counts only rows that are still unsettled, so
+    // a refused command stops holding back the commands queued behind it —
+    // which is what stops one undeliverable instruction turning its whole scope
+    // into a silent dead queue.
+    sqlx::query(
+        "UPDATE command_spool
+            SET state = 'refused', claimed_at = NULL, next_attempt_at = NULL,
+                last_error_kind = ?4
+          WHERE account_id = ?2
+            AND attempts >= ?5
+            AND ( (state IN ('pending','failed')
+                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
+               OR (state = 'in_flight'
+                   AND (claimed_at IS NULL OR claimed_at < ?3)) )",
+    )
+    .bind(&now_text)
+    .bind(account_id.to_string())
+    .bind(&stale_before)
+    .bind(TERMINAL_RETRY_EXHAUSTED)
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .execute(&mut *tx)
+    .await?;
+
     let rs = sqlx::query(
         "UPDATE command_spool
             SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1
@@ -1288,6 +1394,7 @@ pub async fn claim_commands(
                   -- Exactly equal, as in `claim_events` and for the same
                   -- reason (FR-790, FR-864a).
                WHERE c.account_id = ?2
+                 AND c.attempts < ?5
                  AND ( (c.state IN ('pending','failed')
                         AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= ?1))
                     OR (c.state = 'in_flight'
@@ -1308,12 +1415,14 @@ pub async fn claim_commands(
     )
     .bind(&now_text)
     .bind(account_id.to_string())
-    .bind(stale_before)
+    .bind(&stale_before)
     .bind(limit)
-    .fetch_all(store.pool())
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .fetch_all(&mut *tx)
     .await?;
 
     let mut claimed = rs.iter().map(command_row).collect::<Result<Vec<_>>>()?;
+    tx::commit(tx, "claim_commands").await?;
     // `RETURNING` promises no order, and this one is a delivery guarantee
     // rather than a presentation choice.
     claimed.sort_by(|a, b| {
@@ -1435,29 +1544,6 @@ pub async fn release_command_claims(store: &Store) -> Result<u64> {
     .execute(store.pool())
     .await?;
     Ok(result.rows_affected())
-}
-
-/// The command spool's depth and refusals.
-///
-/// `bytes` and `saturated` are always zero and false: the capacity policy is
-/// the event spool's, and reporting a bound the command spool does not have
-/// would be reporting a policy that is not enforced anywhere.
-pub async fn command_spool_status(store: &Store) -> Result<SpoolStatus> {
-    let undelivered: i64 = sqlx::query_scalar(&format!(
-        "SELECT COUNT(*) FROM command_spool WHERE state IN {UNDELIVERED}"
-    ))
-    .fetch_one(store.pool())
-    .await?;
-    let refused: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM command_spool WHERE state = 'refused'")
-            .fetch_one(store.pool())
-            .await?;
-    Ok(SpoolStatus {
-        undelivered,
-        refused,
-        bytes: 0,
-        saturated: false,
-    })
 }
 
 #[cfg(test)]
