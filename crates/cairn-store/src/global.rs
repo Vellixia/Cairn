@@ -2407,14 +2407,18 @@ pub struct SyncedTeamKnowledge {
 /// implementation of a check that already ran, which is exactly what
 /// FR-579's discipline exists to prevent.
 ///
-/// **Content is set once, at first insert, and never updated again.** An id
-/// already present in this store has only its lifecycle columns (`state`,
-/// `ratified_by_user_id`, `ratified_at`, `retired_at`, `superseded_by_id`)
-/// moved to match the incoming row — the same "no `UPDATE … SET content`
-/// beyond the tombstone/CAS" discipline §3 of the contract states, upheld
-/// here even against an incoming row that (through a bug or a malicious
-/// peer) disagreed with the stored content: this function has no SQL
-/// statement capable of writing to `content` a second time.
+/// **The stored row is a cache, and the server wins** (FR-712a). An id already
+/// present here is refreshed from the incoming row — content, keys,
+/// applicability and lifecycle alike — rather than kept at whatever this store
+/// first saw. This replaces the insert-once rule these merges were written
+/// with, and the monotonic state clamp that went with it; the reasoning for
+/// each reversal is at the statement that used to enforce it.
+///
+/// The safety that rule was providing has not been discarded, it has moved: an
+/// incoming row is refused outright when it comes from a *different server
+/// instance* (above), which is what stops a second deployment's guidance
+/// blending into this corpus. What a peer on the bound instance says about a
+/// team record is, by definition, what the authority says.
 pub async fn merge_synced_team(
     store: &Store,
     server_instance_id: Uuid,
@@ -2469,35 +2473,39 @@ pub async fn merge_synced_team(
             .await?;
         }
     } else {
-        // **A merge never walks a row's state backwards** (FR-609).
+        // **Server-wins cache refresh** (FR-712a), including a state that did
+        // not advance.
         //
-        // Team state only advances: proposed, then authoritative, then retired.
-        // A page fetched from the server before a ratification and merged after
-        // it carries the row as it was *then*, and this update applied it
-        // wholesale — turning a locally ratified entry back into a proposal, and
-        // with it dropping the supersession that ratification had recorded. The
-        // window is small and the loss is silent: the entry simply stops being
-        // guidance, and the one it replaced goes on competing.
+        // What stood here was the FR-609 monotonic clamp: team state only ever
+        // moves proposed → authoritative → retired, so a page fetched from the
+        // server before a ratification and merged after it must not roll the
+        // local row back to `proposed` and drop the supersession the
+        // ratification recorded. That reasoning was sound while the local row
+        // was itself a record of the transition. It is not sound now. Under
+        // server authority this row is a cache of a record the server owns, and
+        // the server is the only side that knows which of two pages is later —
+        // so a clamp here is a client overruling the authority, and it makes a
+        // legitimate correction (a ratification reversed, a retirement undone by
+        // an administrator) permanently unapplicable on this device.
         //
-        // The server already refuses to let a pushed payload advance state
-        // (`global-memory.md` §5b); this is the same principle facing the other
-        // way. Delivery order is not something either side can promise, so
-        // "later" has to mean further along, not more recently arrived.
+        // The staleness the clamp was defending against does not disappear; it
+        // moves to where it can actually be resolved. Ordering pulled pages is
+        // the sync cursor's job, not a per-row comparison of two states neither
+        // of which carries a version.
+        //
+        // Content is refreshed for the same reason it is refreshed for personal
+        // knowledge: a server-side correction the cache cannot accept is a
+        // correction that never reaches the reader.
+        let digest = content_norm_digest(&incoming.content);
         sqlx::query(
             "UPDATE team_knowledge
-                SET state = ?1, ratified_by_user_id = ?2, ratified_at = ?3,
-                    retired_at = ?4, superseded_by_id = ?5, retired_by_user_id = ?7
-              WHERE id = ?6
-                AND (CASE state
-                        WHEN 'proposed' THEN 0
-                        WHEN 'authoritative' THEN 1
-                        WHEN 'retired' THEN 2
-                        ELSE 0 END)
-                    <= (CASE ?1
-                        WHEN 'proposed' THEN 0
-                        WHEN 'authoritative' THEN 1
-                        WHEN 'retired' THEN 2
-                        ELSE 0 END)",
+                SET knowledge_type = ?8, content = ?9, content_norm_digest = ?10,
+                    topic_key = ?11, value_key = ?12,
+                    state = ?1, ratified_by_user_id = ?2, ratified_at = ?3,
+                    retired_at = ?4, superseded_by_id = ?5, retired_by_user_id = ?7,
+                    proposed_by_user_id = ?13, writer_id = ?14, writer_seq = ?15,
+                    created_at = ?16
+              WHERE id = ?6",
         )
         .bind(incoming.state.as_str())
         .bind(incoming.ratified_by_user_id.map(|u| u.to_string()))
@@ -2506,8 +2514,35 @@ pub async fn merge_synced_team(
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
         .bind(incoming.id.to_string())
         .bind(incoming.retired_by_user_id.map(|u| u.to_string()))
+        .bind(incoming.knowledge_type.as_str())
+        .bind(&incoming.content)
+        .bind(&digest)
+        .bind(incoming.topic_key.as_deref())
+        .bind(incoming.value_key.as_deref())
+        .bind(incoming.proposed_by_user_id.to_string())
+        .bind(incoming.writer_id.to_string())
+        .bind(incoming.writer_seq)
+        .bind(rows::ts_text(incoming.created_at))
         .execute(&mut *tx)
         .await?;
+
+        // As for personal knowledge: applicability is replaced, not added to,
+        // so a fact the server removed stops scoping recall here.
+        sqlx::query("DELETE FROM team_knowledge_applicability WHERE team_id = ?1")
+            .bind(incoming.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        for fact in &incoming.applicability {
+            sqlx::query(
+                "INSERT OR IGNORE INTO team_knowledge_applicability (team_id, kind, value)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .bind(incoming.id.to_string())
+            .bind(fact.kind.as_str())
+            .bind(&fact.value)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     tx::commit(tx, "merge_synced_team").await?;
@@ -2567,16 +2602,21 @@ pub struct SyncedPersonalKnowledge {
 /// surfacing only the one currently authenticated (`sync-namespaces.md` §10,
 /// FR-567).
 ///
-/// **Content is set once, at first insert, and never updated again.** As with
-/// team knowledge, an id already present here has only its two lifecycle
-/// columns — `superseded_by_id` and `forgotten_at` — moved to match. There is
-/// no statement in this function capable of writing `content` a second time, so
-/// an incoming row that disagreed with the stored content (through a bug, or a
-/// peer acting in bad faith) cannot rewrite what this store already recorded.
-/// The one exception is the tombstone, and it is not an exception to the rule:
-/// forgetting clears content to the empty string, and a `forgotten_at` that
-/// arrives here does exactly that, because a record forgotten on one device and
-/// still recallable on the next is the failure the tombstone exists to prevent.
+/// **The stored row is a cache, and the server wins** (FR-712a). As with team
+/// knowledge, an id already present here is refreshed from the incoming row —
+/// content, keys, applicability, writer provenance and both lifecycle columns —
+/// rather than kept at whatever this store first saw. A server-side correction
+/// a cache cannot accept is a correction that never reaches the reader.
+///
+/// The tombstone is unchanged and still takes precedence over any content that
+/// arrives with it: forgetting clears content to the empty string, because a
+/// record forgotten on one device and still recallable on the next is the
+/// failure the tombstone exists to prevent.
+///
+/// Refresh is scoped to the `(id, owner_user_id)` pair, so it reaches only rows
+/// that came from the server for that owner. A record this store holds and the
+/// server has never sent is not named by any merge and is left exactly where it
+/// is.
 ///
 /// **No content re-validation.** This is downstream of the fifth validator
 /// entry point, not a sixth one: the content was screened server-side before
@@ -2632,24 +2672,80 @@ pub async fn merge_synced_personal(
             .await?;
         }
     } else {
-        // The tombstone travels as `forgotten_at`, and applying it clears
-        // content here exactly as `forget_personal` does locally. `CASE WHEN`
-        // rather than an unconditional assignment: a row that arrives without a
-        // tombstone must leave content alone, and a statement that could write
-        // content in that case is the one this function promises not to have.
+        // **Server-wins cache refresh** (FR-712a). The row already here is a
+        // cached copy of a record the server owns, so an arriving copy replaces
+        // it — content included.
+        //
+        // This reverses the insert-once rule these merges were written with.
+        // That rule was right while the local store was an authority and a
+        // second delivery could only be a redelivery of what was already known;
+        // under server authority the same statement makes a server-side
+        // correction unapplicable, and the device would go on recalling the
+        // uncorrected text for as long as the id survives. FR-701's declaration
+        // that the server is correct does not execute itself: it needs a merge
+        // rule capable of accepting a correction.
+        //
+        // The tombstone still clears content, exactly as `forget_personal` does
+        // locally, and takes precedence over whatever content arrived with it —
+        // a record forgotten on one device and still recallable on the next is
+        // the failure the tombstone exists to prevent. `content_norm_digest`
+        // follows content and is left alone when the row is forgotten, which is
+        // what the local forget path does with it too.
+        //
+        // `origin_digest` is deliberately absent from this statement. It
+        // identifies *this machine's* promotion of *this* project and never
+        // crosses the wire (D434, FR-551), so it is local-only provenance that a
+        // pulled row has nothing to say about and must not erase.
+        let digest = content_norm_digest(&incoming.content);
         sqlx::query(
             "UPDATE personal_knowledge
-                SET superseded_by_id = ?1,
-                    forgotten_at = ?2,
-                    content = CASE WHEN ?2 IS NULL THEN content ELSE '' END
-              WHERE id = ?3 AND owner_user_id = ?4",
+                SET knowledge_type = ?1,
+                    content = CASE WHEN ?7 IS NULL THEN ?2 ELSE '' END,
+                    content_norm_digest =
+                        CASE WHEN ?7 IS NULL THEN ?3 ELSE content_norm_digest END,
+                    topic_key = ?4,
+                    value_key = ?5,
+                    writer_id = ?8,
+                    writer_seq = ?9,
+                    created_at = ?10,
+                    superseded_by_id = ?6,
+                    forgotten_at = ?7
+              WHERE id = ?11 AND owner_user_id = ?12",
         )
+        .bind(incoming.knowledge_type.as_str())
+        .bind(&incoming.content)
+        .bind(&digest)
+        .bind(incoming.topic_key.as_deref())
+        .bind(incoming.value_key.as_deref())
         .bind(incoming.superseded_by_id.map(|u| u.to_string()))
         .bind(incoming.forgotten_at.map(rows::ts_text))
+        .bind(incoming.writer_id.to_string())
+        .bind(incoming.writer_seq)
+        .bind(rows::ts_text(incoming.created_at))
         .bind(incoming.id.to_string())
         .bind(incoming.owner_user_id.to_string())
         .execute(&mut *tx)
         .await?;
+
+        // Applicability is part of the cached record, so a refresh replaces the
+        // set rather than adding to it: a fact the server removed has to
+        // disappear here, and an `INSERT OR IGNORE` alone would leave it
+        // scoping recall forever.
+        sqlx::query("DELETE FROM personal_knowledge_applicability WHERE personal_id = ?1")
+            .bind(incoming.id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        for fact in &incoming.applicability {
+            sqlx::query(
+                "INSERT OR IGNORE INTO personal_knowledge_applicability (personal_id, kind, value)
+                 VALUES (?1, ?2, ?3)",
+            )
+            .bind(incoming.id.to_string())
+            .bind(fact.kind.as_str())
+            .bind(&fact.value)
+            .execute(&mut *tx)
+            .await?;
+        }
     }
 
     tx::commit(tx, "merge_synced_personal").await?;
@@ -3090,23 +3186,48 @@ mod tests {
         assert_eq!(stored_seq, 4);
     }
 
-    /// A second delivery of the same row cannot rewrite its content, even when
-    /// the incoming copy disagrees.
+    /// A second delivery of the same row **does** rewrite its content, because
+    /// the local copy is a cache and the server is the author of record.
+    ///
+    /// This assertion is the inverse of the one it replaces, and the inversion
+    /// is the requirement rather than a relaxation of it. Feature 004's merge
+    /// was insert-once: a pull could not rewrite content, so a correction made
+    /// on the server never reached a device that already held the old text, and
+    /// the device went on serving it indefinitely. FR-712a names that rule
+    /// explicitly and requires it replaced — "a local copy MUST be able to
+    /// accept a server-side correction, including a content correction and a
+    /// state that did not advance monotonically" — because under server
+    /// authority the local replica is a cache and a cache that refuses refreshes
+    /// is just a stale copy with extra steps.
+    ///
+    /// Its sibling `an_arriving_tombstone_clears_content` is unchanged and still
+    /// passes: a tombstone still wins over incoming content, so a forgotten
+    /// record is not resurrected by a late delivery of the text it used to have.
     #[tokio::test]
-    async fn a_second_delivery_cannot_rewrite_content() {
+    async fn a_second_delivery_carries_a_server_side_correction() {
         let store = store().await;
         let owner_user_id = owner();
         let first = synced(owner_user_id, "the original claim", 1);
         let id = first.id;
         merge_synced_personal(&store, first).await.unwrap();
 
-        let mut second = synced(owner_user_id, "a rewritten claim", 1);
+        let mut second = synced(owner_user_id, "a corrected claim", 1);
         second.id = id;
         let merged = merge_synced_personal(&store, second).await.unwrap();
         assert_eq!(
-            merged.content, "the original claim",
-            "a redelivery rewrote the stored content"
+            merged.content, "a corrected claim",
+            "the cache refused a correction the server had already made"
         );
+
+        // And the correction is durable, not just reflected in the return
+        // value — a caller that re-reads must see it too.
+        let stored: String =
+            sqlx::query_scalar("SELECT content FROM personal_knowledge WHERE id = ?1")
+                .bind(id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(stored, "a corrected claim");
     }
 
     /// A tombstone that arrives clears content, exactly as forgetting does

@@ -1,8 +1,13 @@
-//! Local storage: SQLite, migrations, repositories, lexical search and the
-//! transactional outbox (D2, D3, D9).
+//! Local storage: SQLite, migrations, repositories, lexical search, the
+//! transactional outbox and the Feature 005 edge spools (D2, D3, D9).
 //!
 //! Everything here is local and works offline. No call in this crate touches
 //! the network.
+//!
+//! Under server authority the local copies of personal and team knowledge are
+//! a **cache**, not an authority: [`global::merge_synced_personal`] and
+//! [`global::merge_synced_team`] let a pulled row replace what is stored,
+//! including a content correction and a state that did not advance (FR-712a).
 
 pub mod constraints;
 pub mod continuity;
@@ -19,6 +24,9 @@ pub mod patterns;
 pub mod repo;
 pub mod rows;
 pub mod search;
+/// Feature 005's edge spools: approved events and knowledge commands waiting
+/// for the server, with durable ordinals and an exact per-account claim.
+pub mod spool;
 pub mod traits;
 pub mod tx;
 
