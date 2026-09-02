@@ -1032,9 +1032,21 @@ pub async fn release_event_claims(store: &Store) -> Result<u64> {
 /// — it is just derived from these numbers rather than counted separately, so
 /// it cannot drift from them.
 ///
-/// The four conditions are four fields because they call for four different
+/// The conditions are four fields because they call for four different
 /// actions: a spool of 500 waiting rows on a laptop that just came online is
 /// healthy, and 500 exhausted ones are not.
+///
+/// **They are a partition.** `waiting`, `in_flight`, `retrying`, `deferred` and
+/// `terminal` are mutually exclusive and, together, cover every row still in
+/// the spool; `undelivered()` is the four non-terminal ones. A breakdown whose
+/// buckets overlapped would invite the reader to add them up and get a number
+/// larger than the table — and would put one row under two headings that call
+/// for different actions, which is the whole reason this is not reported as a
+/// single depth.
+///
+/// `terminal_retry_exhausted` is the one exception, and deliberately: it is a
+/// *subset* of `terminal` rather than a sixth peer, so it is excluded from the
+/// sum and bounded by `terminal` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SpoolBreakdown {
     /// Spooled and due, never attempted or already past its backoff. Waiting on
@@ -1073,10 +1085,15 @@ pub struct SpoolBreakdown {
 impl SpoolBreakdown {
     /// Rows that have not reached the server, claimed or not.
     ///
-    /// Derived rather than counted, so it can never disagree with the
-    /// breakdown it is derived from.
+    /// The four non-terminal conditions, `deferred` included: a row waiting for
+    /// a capability has not reached the server either, and leaving it out would
+    /// make a store full of deferred work report an empty queue.
+    ///
+    /// Derived rather than counted, so it can never disagree with the breakdown
+    /// it comes from — and because the conditions are a partition, this is
+    /// exactly "everything that is not terminal".
     pub fn undelivered(&self) -> i64 {
-        self.waiting + self.in_flight + self.retrying
+        self.waiting + self.in_flight + self.retrying + self.deferred
     }
 
     /// Rows in a terminal state, which stay visible rather than being deleted.
@@ -1152,14 +1169,28 @@ async fn breakdown(
             .map_err(StoreError::from)
     }
 
-    // A stale `in_flight` row counts as waiting, not as in flight: its drainer
-    // is gone and the next claim will take it. Counting it as in flight would
-    // report a dead process as healthy work in progress.
+    // **The five conditions are a partition**, and keeping them one takes some
+    // care because the underlying states overlap freely: a deferred row is
+    // `pending` with a future `next_attempt_at`, which is also exactly what a
+    // row waiting out a transient backoff looks like. Counting each condition
+    // independently put every deferred row under `retrying` as well — so the
+    // five sums exceeded the table, and an old server read as a failing one.
+    //
+    // `deferred` is therefore tested first and excluded from the other two,
+    // which makes the order below load-bearing rather than incidental. It is
+    // written as an explicit exclusion rather than left to the reader.
+    const NOT_DEFERRED: &str = "(last_error_kind IS NULL                                 OR last_error_kind <> 'awaiting_capability')";
+
+    // Waiting on a drainer, not on a problem. A stale `in_flight` row counts
+    // here rather than as in flight: its drainer is gone and the next claim
+    // will take it, and calling it in flight would report a dead process as
+    // healthy work in progress.
     let waiting = count(
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-              WHERE (state = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
+              WHERE (state = 'pending' AND {NOT_DEFERRED}
+                     AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
                  OR (state = 'in_flight' AND (claimed_at IS NULL OR claimed_at < ?2))"
         ),
         &now,
@@ -1176,21 +1207,29 @@ async fn breakdown(
         &stale_before,
     )
     .await?;
+    // Something is wrong and Cairn is still trying. A deferral is neither, so
+    // it is excluded from both halves.
     let retrying = count(
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-              WHERE state = 'failed' OR (state = 'pending' AND next_attempt_at > ?1)"
+              WHERE (state = 'failed' AND {NOT_DEFERRED})
+                 OR (state = 'pending' AND {NOT_DEFERRED} AND next_attempt_at > ?1)"
         ),
         &now,
         &stale_before,
     )
     .await?;
+    // Waiting on a capability. Every non-terminal state a deferred row can be
+    // in belongs here, so the condition is the marker rather than the state —
+    // a deferral that is due and a deferral still in its probe interval are
+    // both deferrals.
     let deferred = count(
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-              WHERE state = 'pending' AND last_error_kind = '{DEFERRED_AWAITING_CAPABILITY}'"
+              WHERE state IN ('pending','failed','in_flight')
+                AND last_error_kind = '{DEFERRED_AWAITING_CAPABILITY}'"
         ),
         &now,
         &stale_before,
@@ -1214,7 +1253,13 @@ async fn breakdown(
     )
     .await?;
 
-    let queued_now = waiting + in_flight + retrying;
+    // Every non-terminal condition, `deferred` included: a row waiting for a
+    // capability still occupies the spool, so it counts toward the bound. This
+    // is the same sum `SpoolBreakdown::undelivered` reports, and it has to be —
+    // a capacity check that disagreed with the depth it is checked against
+    // would refuse work while reporting room, which is the class of
+    // contradiction the single status primitive exists to rule out.
+    let queued_now = waiting + in_flight + retrying + deferred;
     let bytes = match which {
         SpoolTable::Events => {
             sqlx::query_scalar::<_, i64>(&format!(

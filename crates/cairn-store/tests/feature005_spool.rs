@@ -2088,3 +2088,174 @@ async fn deferring_a_command_forever_never_exhausts_it() {
         Some(spool::DEFERRED_AWAITING_CAPABILITY)
     );
 }
+
+// ---------------------------------------------------------------------------
+// The classification is a partition (T020, T022)
+// ---------------------------------------------------------------------------
+
+/// The five conditions are **mutually exclusive and exhaustive** over the
+/// spool.
+///
+/// A breakdown whose buckets overlap is worse than one number: it invites the
+/// reader to add them up, and the sum is then larger than the table. It also
+/// puts the same row under two headings that call for different actions —
+/// which is the whole reason the breakdown was split into conditions rather
+/// than reported as one depth.
+fn assert_partition(b: &spool::SpoolBreakdown, total: i64, what: &str) {
+    let sum = b.waiting + b.in_flight + b.retrying + b.deferred + b.terminal;
+    assert_eq!(
+        sum, total,
+        "{what}: the five conditions sum to {sum} over a spool of {total} rows, \
+         so they either overlap or leave a row unclassified ({b:?})"
+    );
+    // `terminal_retry_exhausted` is deliberately a *subset* of `terminal`
+    // rather than a sixth peer, so it is excluded from the sum and bounded by
+    // it instead.
+    assert!(
+        b.terminal_retry_exhausted <= b.terminal,
+        "{what}: more rows exhausted than are terminal ({b:?})"
+    );
+}
+
+#[tokio::test]
+async fn a_deferred_row_is_counted_once_and_not_as_retrying() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("defer");
+
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 1, "one deferred row");
+    assert_eq!(b.deferred, 1, "{b:?}");
+    // Nothing is wrong and Cairn is not "still trying" in the sense `retrying`
+    // means: the row is waiting for somebody to upgrade a server, and it is
+    // spending no attempt budget while it waits.
+    assert_eq!(
+        b.retrying, 0,
+        "a deferred row was also counted as retrying, so an old server reads \
+         as a failing one ({b:?})"
+    );
+    assert_eq!(b.waiting, 0, "{b:?}");
+}
+
+#[tokio::test]
+async fn a_deferred_row_whose_probe_is_due_is_still_only_deferred() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("defer");
+
+    // The probe interval elapses. The row becomes claimable again, which is
+    // the point — but it is still waiting on a capability, not on a drainer.
+    expire_backoff(&f, id).await;
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 1, "one due deferred row");
+    assert_eq!(b.deferred, 1, "{b:?}");
+    assert_eq!(
+        b.waiting, 0,
+        "a due deferred row was also counted as waiting ({b:?})"
+    );
+}
+
+#[tokio::test]
+async fn every_condition_at_once_still_partitions_the_spool() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let mut ids = Vec::new();
+    for _ in 0..5 {
+        ids.push(spooled(spool(&f, account, capture_event(f.session_id)).await).event_id);
+    }
+    let claimed = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 5);
+
+    spool::mark_event_failed(&f.store, ids[0], "connection_refused")
+        .await
+        .expect("retrying");
+    spool::mark_event_deferred(&f.store, ids[1], spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("deferred");
+    spool::mark_event_refused(&f.store, ids[2], "repo_file_absolute")
+        .await
+        .expect("terminal");
+    // ids[3] stays in flight under a live lease; ids[4] is released to waiting.
+    sqlx::query("UPDATE event_spool SET state = 'pending', claimed_at = NULL WHERE event_id = ?1")
+        .bind(ids[4].to_string())
+        .execute(f.store.pool())
+        .await
+        .expect("release one");
+
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 5, "one row in each condition");
+    assert_eq!(b.retrying, 1, "{b:?}");
+    assert_eq!(b.deferred, 1, "{b:?}");
+    assert_eq!(b.terminal, 1, "{b:?}");
+    assert_eq!(b.in_flight, 1, "{b:?}");
+    assert_eq!(b.waiting, 1, "{b:?}");
+    // And the depth is the four non-terminal conditions, which is what makes
+    // `undelivered()` derivable rather than a sixth count that could disagree.
+    assert_eq!(b.undelivered(), 4, "{b:?}");
+}
+
+#[tokio::test]
+async fn a_delivered_row_leaves_every_condition() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_delivered(&f.store, id)
+        .await
+        .expect("delivered");
+
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    // Exhaustive over *queued* rows: a delivered row is no longer queued, which
+    // is what lets saturation clear itself.
+    assert_partition(&b, 0, "one delivered row");
+    assert_eq!(b.undelivered(), 0, "{b:?}");
+}
+
+#[tokio::test]
+async fn the_command_spool_partitions_the_same_way() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let scope = CommandScope::Session(f.session_id);
+    let a = spool_command(&f, scope, account, CommandKind::Remember).await;
+    let b_id = spool_command(&f, scope, account, CommandKind::Supersede).await;
+
+    spool::claim_commands(&f.store, account, 1)
+        .await
+        .expect("claim");
+    spool::mark_command_deferred(&f.store, a, spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("defer");
+
+    let b = spool::command_spool_breakdown(&f.store, roomy())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 2, "a deferred and a waiting command");
+    assert_eq!(b.deferred, 1, "{b:?}");
+    assert_eq!(b.waiting, 1, "{b:?}");
+    let _ = b_id;
+}

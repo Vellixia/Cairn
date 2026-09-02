@@ -191,6 +191,28 @@ off is not the server refusing (FR-783). 2,016 attempts is what a week of contin
 actively-retried failure approximates once backoff reaches its ceiling; that is the reasoning
 behind the size, not a guarantee about wall-clock time.
 
+**Spool status is reported as a partition.** A queued row is in exactly one of five
+conditions, and they cover every row the spool still holds:
+
+| Condition | Predicate |
+|---|---|
+| `waiting` | `pending`, not deferred, and due — or `in_flight` with an expired lease |
+| `in_flight` | `in_flight` under a lease that has not expired |
+| `retrying` | `failed`, or `pending` and not yet due — in both cases **not** deferred |
+| `deferred` | `last_error_kind = 'awaiting_capability'`, in any non-terminal state |
+| `terminal` | `refused`, whether the server refused it or its budget ran out |
+
+Mutually exclusive because the underlying states are not: a deferred row is `pending` with a
+future `next_attempt_at`, which is indistinguishable from a row waiting out a transient backoff
+unless the deferral marker is tested first and excluded from the others. Counting each condition
+independently put every deferred row under `retrying` as well, so the five summed to more than
+the table and an old server read as a failing one.
+
+`undelivered` is the four non-terminal conditions — a row waiting for a capability has not
+reached the server either — and is derived from them rather than counted separately, so it
+cannot disagree with them. `terminal_retry_exhausted` is deliberately a *subset* of `terminal`
+rather than a sixth condition, and is bounded by it rather than summed with it.
+
 **A deferral spends no budget at all** and probes at a flat interval rather than an
 exponential one. A capability appears when somebody upgrades a server, which will not happen
 sooner because Cairn asked twice, so the claim's attempt increment is refunded and the row
