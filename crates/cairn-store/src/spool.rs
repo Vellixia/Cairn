@@ -752,7 +752,25 @@ pub async fn claim_events(
 
     let rs = sqlx::query(
         "UPDATE event_spool
-            SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1
+            SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1,
+                -- The previous attempt's reason is history the moment a new
+                -- send begins. `last_error_kind` describes why the row is in
+                -- the state it is *now*, and now it is in flight.
+                --
+                -- Leaving it attached broke the status partition at exactly
+                -- this transition: a deferred row rests as `pending` carrying
+                -- `awaiting_capability`, and re-claiming it produced a row that
+                -- was `in_flight` and `deferred` at once — and `waiting` and
+                -- `deferred` at once if the claim later went stale. The repair
+                -- belongs here rather than in the status query, because a query
+                -- taught to ignore a live claim's marker would be working
+                -- around a row that says something untrue about itself.
+                --
+                -- Nothing is lost. Whatever happens next establishes its own
+                -- reason: another deferral sets `awaiting_capability` again, a
+                -- transport failure sets its own kind, a refusal sets its
+                -- refusal kind, and success needs none. Identity is untouched.
+                last_error_kind = NULL
           WHERE event_id IN (
               SELECT event_id FROM event_spool
                   -- Exactly equal, and nothing else. Not `IS NULL OR`, not a
@@ -1220,15 +1238,22 @@ async fn breakdown(
         &stale_before,
     )
     .await?;
-    // Waiting on a capability. Every non-terminal state a deferred row can be
-    // in belongs here, so the condition is the marker rather than the state —
-    // a deferral that is due and a deferral still in its probe interval are
-    // both deferrals.
+    // Waiting on a capability, and **resting** while it waits. A deferral that
+    // is due and one still inside its probe interval are both deferrals, so the
+    // condition is the marker rather than the schedule — but a row with a send
+    // in progress is not resting, and `in_flight` is excluded here rather than
+    // left out by luck.
+    //
+    // A claim clears `last_error_kind`, so an `in_flight` row cannot carry the
+    // marker anyway. Excluding the state as well makes the exclusivity
+    // structural: if the claim reset were ever lost, this query would still
+    // refuse to report a live claim as resting, and the transition tests would
+    // fail on the reset rather than on the classification.
     let deferred = count(
         &mut conn,
         &format!(
             "SELECT COUNT(*) FROM {table}
-              WHERE state IN ('pending','failed','in_flight')
+              WHERE state IN ('pending','failed')
                 AND last_error_kind = '{DEFERRED_AWAITING_CAPABILITY}'"
         ),
         &now,
@@ -1539,7 +1564,11 @@ pub async fn claim_commands(
 
     let rs = sqlx::query(
         "UPDATE command_spool
-            SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1
+            SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1,
+                -- The same reset as `claim_events`, for the same reason: a new
+                -- attempt supersedes the previous attempt's reason, and a row
+                -- carrying a stale one is in two status conditions at once.
+                last_error_kind = NULL
           WHERE command_id IN (
               SELECT c.command_id FROM command_spool c
                   -- Exactly equal, as in `claim_events` and for the same

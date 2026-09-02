@@ -2259,3 +2259,219 @@ async fn the_command_spool_partitions_the_same_way() {
     assert_eq!(b.waiting, 1, "{b:?}");
     let _ = b_id;
 }
+
+// ---------------------------------------------------------------------------
+// The partition holds across the claim transition too (T020, T022)
+// ---------------------------------------------------------------------------
+
+/// Re-claiming a deferred row leaves it in one condition, not two.
+///
+/// The partition was made exclusive over *resting* states and stopped there.
+/// A deferred row rests as `pending` carrying `awaiting_capability`; when its
+/// probe comes due the claim moves it to `in_flight` — and the marker stayed,
+/// so the row satisfied `in_flight` **and** `deferred` at once. The earlier
+/// tests stopped one step short of the re-claim, which is exactly where the
+/// overlap reappeared.
+///
+/// The reasoning behind the repair is temporal, not cosmetic.
+/// `last_error_kind` is the reason for the row's *current* state. Once a new
+/// send begins the current state is "in flight", and the previous attempt's
+/// reason is history. Whatever happens next re-establishes a reason of its own:
+/// a deferral sets `awaiting_capability` again, a transport failure sets its
+/// own kind, a refusal sets its refusal kind, and success needs none.
+#[tokio::test]
+async fn re_claiming_a_deferred_event_makes_it_in_flight_and_nothing_else() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("defer");
+    expire_backoff(&f, id).await;
+
+    // The probe. This is the step the earlier tests did not take.
+    let claimed = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("re-claim");
+    assert_eq!(claimed.len(), 1, "a due deferred row was not re-claimable");
+
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 1, "a re-claimed deferred row");
+    assert_eq!(b.in_flight, 1, "{b:?}");
+    assert_eq!(
+        b.deferred, 0,
+        "a row with a send in progress is still reported as waiting for a \
+         capability ({b:?})"
+    );
+    assert_eq!(b.waiting, 0, "{b:?}");
+    assert_eq!(b.retrying, 0, "{b:?}");
+
+    // The marker is cleared rather than merely ignored by the query: status
+    // must not have to know that a stale reason might still be attached.
+    assert_eq!(
+        error_kind_of(&f, id).await,
+        None,
+        "the previous attempt's reason survived into a new attempt"
+    );
+    // And identity is untouched, so the event that eventually lands is the
+    // same event.
+    assert_eq!(claimed[0].event_id, id);
+}
+
+#[tokio::test]
+async fn re_claiming_a_deferred_command_makes_it_in_flight_and_nothing_else() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spool_command(
+        &f,
+        CommandScope::Session(f.session_id),
+        account,
+        CommandKind::PatternPromote,
+    )
+    .await;
+
+    spool::claim_commands(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_command_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("defer");
+    sqlx::query("UPDATE command_spool SET next_attempt_at = ?1 WHERE command_id = ?2")
+        .bind((Utc::now() - chrono::Duration::hours(1)).to_rfc3339())
+        .bind(id.to_string())
+        .execute(f.store.pool())
+        .await
+        .expect("expire the probe");
+
+    let claimed = spool::claim_commands(&f.store, account, 10)
+        .await
+        .expect("re-claim");
+    assert_eq!(claimed.len(), 1);
+
+    let b = spool::command_spool_breakdown(&f.store, roomy())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 1, "a re-claimed deferred command");
+    assert_eq!(b.in_flight, 1, "{b:?}");
+    assert_eq!(b.deferred, 0, "{b:?}");
+    assert_eq!(command_error_kind(&f, id).await, None);
+}
+
+#[tokio::test]
+async fn a_stale_re_claim_of_a_deferred_row_is_classified_only_as_stale() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("defer");
+    expire_backoff(&f, id).await;
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("re-claim");
+
+    // The drainer that took it dies, and the lease expires. Stale-claim
+    // semantics say the row is waiting again — and only that. With the marker
+    // still attached it would be `waiting` and `deferred` at once.
+    age_claim(&f, id).await;
+
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 1, "a stale re-claim of a deferred row");
+    assert_eq!(
+        b.waiting, 1,
+        "a stale claim is waiting again, by stale-claim semantics ({b:?})"
+    );
+    assert_eq!(b.deferred, 0, "{b:?}");
+    assert_eq!(b.in_flight, 0, "{b:?}");
+}
+
+#[tokio::test]
+async fn a_row_deferred_twice_reports_deferred_each_time_it_rests() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    // Clearing the marker on claim must not lose the condition: if the server
+    // still lacks the capability, the next deferral establishes it again. The
+    // marker describes the row's current reason, and a row that is deferred
+    // twice is deferred both times.
+    for round in 0..3 {
+        expire_backoff(&f, id).await;
+        assert_eq!(
+            spool::claim_events(&f.store, account, 10)
+                .await
+                .expect("claim")
+                .len(),
+            1,
+            "round {round}"
+        );
+        let mid = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+            .await
+            .expect("breakdown");
+        assert_eq!(mid.in_flight, 1, "round {round}: {mid:?}");
+        assert_eq!(mid.deferred, 0, "round {round}: {mid:?}");
+
+        spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+            .await
+            .expect("defer");
+        let resting = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+            .await
+            .expect("breakdown");
+        assert_partition(&resting, 1, "a re-deferred row");
+        assert_eq!(
+            resting.deferred, 1,
+            "round {round}: the condition was lost rather than re-established ({resting:?})"
+        );
+    }
+    // And the budget is still untouched after three round trips.
+    assert_eq!(attempts_of(&f, id).await, 0);
+}
+
+#[tokio::test]
+async fn a_claim_clears_a_transient_reason_too() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    // Not a deferral-specific rule. Any previous attempt's reason is history
+    // once a new send begins, and leaving a transient one attached would make
+    // a row in flight look like a row that had just failed.
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_failed(&f.store, id, "connection_refused")
+        .await
+        .expect("fail");
+    assert_eq!(
+        error_kind_of(&f, id).await.as_deref(),
+        Some("connection_refused")
+    );
+
+    expire_backoff(&f, id).await;
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("re-claim");
+    assert_eq!(
+        error_kind_of(&f, id).await,
+        None,
+        "a transient reason survived into the attempt that followed it"
+    );
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    assert_partition(&b, 1, "a re-claimed transiently-failed row");
+    assert_eq!(b.in_flight, 1, "{b:?}");
+    assert_eq!(b.retrying, 0, "{b:?}");
+}

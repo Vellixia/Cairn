@@ -199,14 +199,26 @@ conditions, and they cover every row the spool still holds:
 | `waiting` | `pending`, not deferred, and due — or `in_flight` with an expired lease |
 | `in_flight` | `in_flight` under a lease that has not expired |
 | `retrying` | `failed`, or `pending` and not yet due — in both cases **not** deferred |
-| `deferred` | `last_error_kind = 'awaiting_capability'`, in any non-terminal state |
+| `deferred` | **resting** — `pending` or `failed` — and carrying `last_error_kind = 'awaiting_capability'` |
 | `terminal` | `refused`, whether the server refused it or its budget ran out |
 
-Mutually exclusive because the underlying states are not: a deferred row is `pending` with a
-future `next_attempt_at`, which is indistinguishable from a row waiting out a transient backoff
+Mutually exclusive because the underlying states are not: a deferred row rests as `pending` with
+a future `next_attempt_at`, which is indistinguishable from a row waiting out a transient backoff
 unless the deferral marker is tested first and excluded from the others. Counting each condition
 independently put every deferred row under `retrying` as well, so the five summed to more than
 the table and an old server read as a failing one.
+
+**`deferred` is a resting condition, and `last_error_kind` is why a row is in the state it is
+*now*.** A claim therefore clears the marker: once a new send begins the row is in flight, and
+the previous attempt's reason is history. Without that reset, re-claiming a due deferred row
+produced a row that was `in_flight` and `deferred` at once — and `waiting` and `deferred` at once
+if the claim later went stale. The reset belongs in the claim rather than in the status query,
+because a query taught to ignore a live claim's marker would be working around a row that says
+something untrue about itself.
+
+Nothing is lost by clearing it. Whatever happens next establishes its own reason: another
+deferral sets `awaiting_capability` again, a transport failure sets its own kind, a permanent
+refusal sets its refusal kind, and success needs none. Identity is never touched by a claim.
 
 `undelivered` is the four non-terminal conditions — a row waiting for a capability has not
 reached the server either — and is derived from them rather than counted separately, so it
