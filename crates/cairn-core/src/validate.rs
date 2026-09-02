@@ -1152,3 +1152,211 @@ mod rooted_path_tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Feature 005 — the same classes, applied at the new boundaries
+// ---------------------------------------------------------------------------
+//
+// Four new surfaces carry free text or file identity: safe-event fields,
+// `repo_file`, promoted patterns, and consolidation candidates. All four are
+// screened by the functions above rather than by new ones (FR-760): a second
+// implementation of `absolute_path` is a second place for the two to drift, and
+// the drift would be invisible until something leaked.
+//
+// What is new here is *which* classes apply where, and that is a real question
+// rather than a formality. A `command_line` field is supposed to look like a
+// command; refusing it as `command_shaped` would refuse every event of that
+// kind. The distinction is drawn once, below, and nowhere else.
+
+/// The three fields of a safe event that carry free text.
+///
+/// Named so the screening rule can be stated per field, because it differs:
+/// two of these are *expected* to look like commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SafeEventField {
+    /// `command_executed.command_line` — a shell command, by definition.
+    CommandLine,
+    /// `test_executed.test_command` — a test invocation, by definition.
+    TestCommand,
+    /// `tool_failed.failure_note` — a tool's own description of a failure.
+    FailureNote,
+    /// A `close_reason`, `vendor_event`, `vendor_tool`, `subagent_kind` or
+    /// `subagent_ref` — bounded provenance tokens, screened in full.
+    Provenance,
+}
+
+impl SafeEventField {
+    /// Whether the `command_shaped` class applies to this field.
+    ///
+    /// It does not apply to `command_line` and `test_command`, and that is not
+    /// a hole. The class exists to catch a *narrative* that has silently become
+    /// an invocation — a "fact" that is really a runbook step, which is
+    /// knowledge about how to do something rather than knowledge about what is
+    /// true. These two fields are declared to be invocations; the risk they
+    /// carry is a secret in an argument, and that is what
+    /// `credentialed_url`, `env_assignment` and `encoded_secret_shape` are for.
+    ///
+    /// `failure_note` is different again: a tool wrote it, it is prose, and a
+    /// tool that echoes the command it ran is exactly how a command reaches a
+    /// place nothing expected one. It gets the full class list.
+    fn command_shape_applies(&self) -> bool {
+        !matches!(
+            self,
+            SafeEventField::CommandLine | SafeEventField::TestCommand
+        )
+    }
+}
+
+/// Screen one free-text field of a safe event (FR-749–FR-757, FR-777).
+///
+/// Runs on the client when the event is constructed and on the server when it
+/// is accepted, independently. Independently is the whole point: a client that
+/// constructs the field correctly is not the mechanism by which the rule holds
+/// (FR-777d).
+///
+/// `project_identities` behaves exactly as it does for global content: an empty
+/// slice makes the `project_identifying` check vacuous rather than unevaluable
+/// (FR-580), and a non-empty slice containing a blank token refuses, because
+/// the caller said it had an identity and handed over something unusable
+/// (FR-764).
+pub fn validate_safe_event_text(
+    field: SafeEventField,
+    text: &str,
+    project_identities: &[ProjectIdentity],
+) -> Result<(), GlobalContentRejection> {
+    if project_identities
+        .iter()
+        .any(|identity| identity.0.trim().is_empty())
+    {
+        return Err(GlobalContentRejection::of("evaluation_incomplete"));
+    }
+    match matched_class(text, project_identities) {
+        Some("command_shaped") if !field.command_shape_applies() => Ok(()),
+        Some(class) => Err(GlobalContentRejection::of(class)),
+        None => Ok(()),
+    }
+}
+
+/// The `repo_file` rejection classes, distinct from the content classes.
+///
+/// A path is refused for reasons a sentence never is — a traversal segment, a
+/// UNC prefix — so these are their own vocabulary rather than being folded into
+/// [`CONTENT_CLASSES`], where they would read as content problems.
+pub const REPO_FILE_CLASSES: &[&str] = &[
+    "repo_file_empty",
+    "repo_file_absolute",
+    "repo_file_traversal",
+    "repo_file_drive_letter",
+    "repo_file_unc",
+    "repo_file_empty_segment",
+    "repo_file_too_long",
+    "repo_file_too_many_segments",
+];
+
+/// Validate a `repo_file`, applying `contracts/safe-events.md` §6 in order.
+///
+/// The same eight rules on both sides (FR-777c, FR-777d). Two of them look
+/// redundant next to `absolute_path` in the content classes and are not: this
+/// runs against a field that is *declared* to be a path, so it must say which
+/// property of the path is wrong, and it must refuse a Windows-shaped absolute
+/// path that the content check's slash-oriented shape would miss.
+///
+/// **Refuses; never repairs.** Stripping a leading `/` or resolving a `..`
+/// would turn a path outside the repository into one that looks inside it,
+/// which is precisely the confusion `out_of_repository` exists to record
+/// honestly (FR-777f).
+///
+/// Returns the normalized value on success — separators folded to `/` — so a
+/// caller cannot accidentally store the unnormalized form it passed in.
+pub fn validate_repo_file(value: &str) -> Result<String, GlobalContentRejection> {
+    use crate::event::{REPO_FILE_MAX_BYTES, REPO_FILE_MAX_SEGMENTS};
+
+    if value.is_empty() {
+        return Err(GlobalContentRejection::of("repo_file_empty"));
+    }
+    // A UNC prefix is checked before separator folding, because folding would
+    // turn `\\server\share` into `//server/share` and the shape would then read
+    // as an ordinary absolute path — a different, less accurate refusal.
+    if value.starts_with("\\\\") || value.starts_with("//") {
+        return Err(GlobalContentRejection::of("repo_file_unc"));
+    }
+    let bytes = value.as_bytes();
+    if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+        return Err(GlobalContentRejection::of("repo_file_drive_letter"));
+    }
+
+    let normalized = value.replace('\\', "/");
+    if normalized.starts_with('/') {
+        return Err(GlobalContentRejection::of("repo_file_absolute"));
+    }
+    if normalized.len() > REPO_FILE_MAX_BYTES {
+        return Err(GlobalContentRejection::of("repo_file_too_long"));
+    }
+
+    let segments: Vec<&str> = normalized.split('/').collect();
+    if segments.len() > REPO_FILE_MAX_SEGMENTS {
+        return Err(GlobalContentRejection::of("repo_file_too_many_segments"));
+    }
+    for segment in &segments {
+        if *segment == ".." {
+            return Err(GlobalContentRejection::of("repo_file_traversal"));
+        }
+        if segment.is_empty() {
+            // An empty interior segment, or a trailing slash. Collapsing it
+            // would be repair, and a repaired path names a different file.
+            return Err(GlobalContentRejection::of("repo_file_empty_segment"));
+        }
+    }
+    Ok(normalized)
+}
+
+/// Screen a promoted pattern's transmittable fields (FR-708, FR-762).
+///
+/// Exactly the fields the safe shape carries. `signals`, `signal_digest`,
+/// `origin_ref`, `sanitization_report` and `source_memory_id` are absent from
+/// that shape, so there is nothing here to screen them — which is the stronger
+/// guarantee: a field that does not exist cannot leak.
+///
+/// A pattern is a personal-domain record and is project-independent, so
+/// `project_identities` are the *source* project's tokens. A pattern that names
+/// the project it was learned in is refused, which is the most likely way a
+/// promotion fails (FR-708a, FR-822).
+pub fn validate_pattern_content(
+    title: &str,
+    problem: &str,
+    root_cause: &str,
+    approach: &str,
+    constraints: &[String],
+    applicability: &[ApplicabilityFact],
+    project_identities: &[ProjectIdentity],
+) -> Result<(), GlobalContentRejection> {
+    for field in [title, problem, root_cause, approach] {
+        validate_global_content(field, None, None, &[], project_identities)?;
+    }
+    for constraint in constraints {
+        validate_global_content(constraint, None, None, &[], project_identities)?;
+    }
+    validate_global_content("", None, None, applicability, project_identities)
+}
+
+/// Screen a consolidation candidate before it becomes durable knowledge
+/// (FR-759).
+///
+/// Extraction running on the server does not exempt its output from
+/// validation. The extractor proposes; this is one of the gates that decides
+/// (Principle IX), and it is the *same* gate — the same nine classes, the same
+/// single implementation — that a hand-written memory passes through. A model
+/// must never be the sole or final gate on whether material may be persisted
+/// (FR-758).
+///
+/// The keys are screened as well as the content, because a topic key is free
+/// text on the same row and an extractor is at least as likely to put a path in
+/// one as a person is.
+pub fn validate_candidate_content(
+    content: &str,
+    topic_key: Option<&str>,
+    value_key: Option<&str>,
+    project_identities: &[ProjectIdentity],
+) -> Result<(), GlobalContentRejection> {
+    validate_global_content(content, topic_key, value_key, &[], project_identities)
+}
