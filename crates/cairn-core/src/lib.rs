@@ -31,6 +31,9 @@ pub mod tasks;
 pub mod tools;
 pub mod validate;
 pub mod verify;
+/// The session vocabulary a semantic signal must justify its tokens against —
+/// one implementation, called by the client and the server independently.
+pub mod vocabulary;
 pub mod wire;
 
 pub use config::CairnConfig;

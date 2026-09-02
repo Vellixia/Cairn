@@ -71,6 +71,10 @@ pub fn routes() -> Router<AppState> {
         // Same `410 Gone` treatment, for the same reason (FR-587).
         .route("/api/projects/{id}/join", post(join_removed))
         // Sync
+        // Safe-event ingest. A boundary of its own, not `/api/sync/batch`:
+        // that one carries whole entities a client already decided to store,
+        // this one carries typed observations the server decides about.
+        .route("/api/events/batch", post(crate::events::ingest_batch))
         .route("/api/sync/batch", post(sync_batch))
         .route("/api/sync/changes", get(sync_changes))
         // Read-back for the two non-project domains (T101, T129).

@@ -7,6 +7,7 @@ mod api;
 mod auth;
 mod db;
 mod error;
+mod events;
 mod global;
 mod sync;
 mod version;
