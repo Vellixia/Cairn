@@ -11,6 +11,13 @@ path = "src/main.rs"
 
 [dependencies]
 cairn-core.workspace = true
+# The health matrix vocabulary — `MatrixStatus`, `MatrixCapability` and the
+# coherence rule — is defined once in `cairn-integrate::capability` and used by
+# the reporter and by this server's validation. A second copy here would be a
+# second place for "what counts as a healthy cell" to drift, which is the
+# failure the shared type exists to prevent. Already a workspace member, so the
+# SC-737 dependency baseline is unchanged.
+cairn-integrate.workspace = true
 axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true

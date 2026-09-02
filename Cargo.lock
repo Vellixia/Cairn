@@ -363,6 +363,7 @@ dependencies = [
  "argon2",
  "axum",
  "cairn-core",
+ "cairn-integrate",
  "chrono",
  "clap",
  "hex",

@@ -11,6 +11,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::Row;
+use std::str::FromStr;
 use uuid::Uuid;
 
 pub fn routes() -> Router<AppState> {
@@ -147,12 +148,255 @@ pub fn routes() -> Router<AppState> {
         .route("/api/projects/{id}/tasks", get(project_tasks))
         .route("/api/projects/{id}/sessions", get(project_sessions))
         .route("/api/projects/{id}/sync-status", get(project_sync_status))
+        // Health and the capture funnel. One write path and one read path per
+        // report, shared by US5's dashboard and US6's status (T035).
+        .route(
+            "/api/projects/{id}/health",
+            get(read_health).post(report_health),
+        )
+        .route(
+            "/api/projects/{id}/dispositions",
+            post(report_dispositions),
+        )
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/sessions/{id}/handoff", get(session_handoff))
         .route(
             "/api/memories/{id}",
             get(memory_detail).delete(delete_memory),
         )
+}
+
+// ---------------------------------------------------------------------------
+// Health and disposition reporting (T035, FR-851-FR-860)
+// ---------------------------------------------------------------------------
+
+/// How many rows one health or disposition report may carry.
+///
+/// A report is a *summary* — one row per agent, capability and stage, or per
+/// kind and day. A complete matrix for three agents is seventy-five rows, and a
+/// day's dispositions across three agents and twenty-one kinds is a few
+/// hundred. A thousand is comfortably above any honest report and well below
+/// what an unbounded one could do to a request handler.
+const REPORT_MAX_ROWS: usize = 1000;
+
+/// Validate a reported health matrix and seed the rows a read API returns.
+///
+/// **Shared, because US5 and US6 ask the same two questions of the same rows**
+/// and two implementations would be two places for "what counts as a healthy
+/// cell" to drift. The write side validates; the read side is a plain select
+/// over what the write side accepted.
+///
+/// Three rules the validation enforces, each of which is a way the matrix could
+/// otherwise claim more than Cairn established:
+///
+/// - **Attribution is per machine** (FR-857). `writer_id` comes from the report
+///   because it names the machine that observed the behaviour, but the project
+///   and the account come from the credential — a client that could name those
+///   could file health for somebody else's project.
+/// - **A behavioural status needs an observation** (FR-852). Configuration
+///   read-back is `introspection` and does not establish that anything ran.
+/// - **The vocabulary is closed.** An unrecognized status is refused rather
+///   than stored, because a matrix cell rendering as an unknown string is a
+///   blank cell wearing a value.
+async fn report_health(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id).await?;
+
+    let rows = body
+        .get("cells")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::invalid("`cells` must be an array"))?;
+    if rows.len() > REPORT_MAX_ROWS {
+        return Err(ApiError::invalid(format!(
+            "a health report carries at most {REPORT_MAX_ROWS} cells"
+        )));
+    }
+
+    let writer_id = body
+        .get("writer_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid("`writer_id` is required: a capability is observed on a machine"))?
+        .to_string();
+
+    let mut accepted = 0usize;
+    let mut tx = state.pool.begin().await?;
+    for row in rows {
+        let cell: cairn_integrate::capability::MatrixCell =
+            serde_json::from_value(row.clone())
+                .map_err(|_| ApiError::invalid("a cell is not a health cell"))?;
+        if cairn_integrate::capability::MatrixCapability::parse(&cell.capability).is_none() {
+            return Err(ApiError::invalid(format!(
+                "`{}` is not a capability this matrix has a cell for",
+                cell.capability
+            )));
+        }
+        if !cell.is_coherent() {
+            // Named rather than silently downgraded: a client reporting
+            // `supported` on configuration evidence has a bug worth knowing
+            // about, and storing a weaker status would hide it.
+            return Err(ApiError::invalid(format!(
+                "`{}` reports {} without the evidence that status requires",
+                cell.capability, cell.status
+            )));
+        }
+
+        sqlx::query(
+            "INSERT INTO integration_health
+                 (project_id, account_id, writer_id, agent, capability, stage, status,
+                  evidence_kind, observed_at, degraded)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (project_id, account_id, writer_id, agent, capability, stage)
+             DO UPDATE SET status = EXCLUDED.status,
+                           evidence_kind = EXCLUDED.evidence_kind,
+                           observed_at = EXCLUDED.observed_at,
+                           degraded = EXCLUDED.degraded",
+        )
+        .bind(project_id)
+        .bind(user.id)
+        .bind(&writer_id)
+        .bind(&cell.agent)
+        .bind(&cell.capability)
+        .bind(&cell.stage)
+        .bind(cell.status.as_str())
+        .bind(cell.evidence_kind.map(|k| k.as_str()))
+        .bind(
+            cell.observed_at
+                .as_deref()
+                .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.with_timezone(&chrono::Utc)),
+        )
+        .bind(cell.degraded)
+        .execute(&mut *tx)
+        .await?;
+        accepted += 1;
+    }
+    tx.commit().await?;
+    Ok(Json(json!({ "accepted": accepted })))
+}
+
+/// The matrix as it stands, for one project.
+///
+/// A plain read over what the write side accepted. It does **not** synthesize
+/// missing cells: a matrix with a cell absent is a real state — nothing has
+/// ever reported it — and filling it in here would make "no report arrived"
+/// indistinguishable from "reported as no evidence" (FR-855).
+async fn read_health(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id).await?;
+    let rows = sqlx::query(
+        "SELECT writer_id, agent, capability, stage, status, evidence_kind,
+                observed_at, degraded
+           FROM integration_health
+          WHERE project_id = $1
+          ORDER BY agent, capability, stage",
+    )
+    .bind(project_id)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let cells: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                "writer_id": r.get::<String, _>("writer_id"),
+                "agent": r.get::<String, _>("agent"),
+                "capability": r.get::<String, _>("capability"),
+                "stage": r.get::<String, _>("stage"),
+                "status": r.get::<String, _>("status"),
+                "evidence_kind": r.get::<Option<String>, _>("evidence_kind"),
+                "observed_at": r
+                    .get::<Option<chrono::DateTime<chrono::Utc>>, _>("observed_at")
+                    .map(|t| t.to_rfc3339()),
+                "degraded": r.get::<Option<bool>, _>("degraded"),
+            })
+        })
+        .collect();
+    Ok(Json(json!({ "cells": cells })))
+}
+
+/// Record capture dispositions — the funnel's client-reported half.
+///
+/// Counts, not records. A disposition carries no payload content (FR-749d,
+/// FR-741), so there is nothing to keep beyond how often it happened, and the
+/// vocabulary is closed by the column's own CHECK.
+async fn report_dispositions(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(project_id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    auth::require_member(&state.pool, project_id, user.id).await?;
+    let rows = body
+        .get("counts")
+        .and_then(Value::as_array)
+        .ok_or_else(|| ApiError::invalid("`counts` must be an array"))?;
+    if rows.len() > REPORT_MAX_ROWS {
+        return Err(ApiError::invalid(format!(
+            "a disposition report carries at most {REPORT_MAX_ROWS} rows"
+        )));
+    }
+
+    let mut accepted = 0usize;
+    let mut tx = state.pool.begin().await?;
+    for row in rows {
+        let agent = row
+            .get("agent")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`agent` is required"))?;
+        let kind = row
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`kind` is required"))?;
+        let disposition = row
+            .get("disposition")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`disposition` is required"))?;
+        // Parsed rather than passed through, so an unrecognized disposition is
+        // refused here with a name rather than by a constraint violation.
+        if cairn_core::event::Disposition::from_str(disposition).is_err() {
+            return Err(ApiError::invalid(format!(
+                "`{disposition}` is not a capture disposition"
+            )));
+        }
+        let day = row
+            .get("day")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ApiError::invalid("`day` is required"))?;
+        let n = row.get("n").and_then(Value::as_i64).unwrap_or(0);
+        if n < 0 {
+            return Err(ApiError::invalid("a count cannot be negative"));
+        }
+
+        // Counts accumulate: a client reports what it saw since last time, and
+        // two reports of the same day are two batches of the same funnel rather
+        // than a correction of it.
+        sqlx::query(
+            "INSERT INTO capture_dispositions
+                 (project_id, account_id, agent, kind, disposition, day, n)
+             VALUES ($1, $2, $3, $4, $5, $6::date, $7)
+             ON CONFLICT (project_id, account_id, agent, kind, disposition, day)
+             DO UPDATE SET n = capture_dispositions.n + EXCLUDED.n",
+        )
+        .bind(project_id)
+        .bind(user.id)
+        .bind(agent)
+        .bind(kind)
+        .bind(disposition)
+        .bind(day)
+        .bind(n)
+        .execute(&mut *tx)
+        .await?;
+        accepted += 1;
+    }
+    tx.commit().await?;
+    Ok(Json(json!({ "accepted": accepted })))
 }
 
 /// `/api/events/batch`, carrying its own request-body limit.
