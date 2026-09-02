@@ -6,6 +6,7 @@
 mod api;
 mod auth;
 mod commands;
+mod consolidate;
 mod db;
 mod error;
 mod events;
@@ -251,6 +252,8 @@ async fn main() -> anyhow::Result<()> {
             .filter(|e| !e.is_empty()),
     };
 
+    start_consolidation(&state, args.max_connections);
+
     // A credentialed browser request cannot be paired with wildcard headers or
     // methods, so the web-origin branch names both explicitly.
     let cors = match &args.web_origin {
@@ -274,6 +277,43 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %args.addr, "cairn-server listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Start the one in-process consolidation task, if this deployment may have one
+/// (FR-793a, FR-793a1, `contracts/consolidation.md` §6).
+///
+/// Exactly one task. Consolidation shares a process and a connection pool with
+/// request serving, so FR-814's prohibition on back-pressure is not achievable
+/// by intention — only by limits, and the count of concurrent tasks is the
+/// first of them.
+///
+/// Two conditions withhold it, and both are ordinary configurations rather than
+/// errors:
+///
+/// - **Below the schema that has its tables** there is nothing to query. A deployment held back
+///   for a staged rollout is supported, and a task that queried
+///   `consolidation_session` on a v3 database would fail every 100 ms forever.
+/// - **Below a pool share of one** consolidation would be taking connections a
+///   small deployment needs for serving requests. `min(2, floor(n / 5))` is
+///   zero under five connections, and the end-to-end suite deliberately runs
+///   servers that small.
+fn start_consolidation(state: &AppState, max_connections: u32) {
+    let share = consolidate::pool_share(max_connections);
+    if state.schema_version < consolidate::REQUIRED_SCHEMA {
+        tracing::info!(
+            schema_version = state.schema_version,
+            "consolidation is idle: this database is below the schema that has its tables"
+        );
+        return;
+    }
+    if share == 0 {
+        tracing::warn!(
+            max_connections,
+            "consolidation is idle: a pool this small is needed for serving requests"
+        );
+        return;
+    }
+    tokio::spawn(consolidate::Consolidator::new(state.pool.clone(), share).run());
 }
 
 /// Run one operator command and return.

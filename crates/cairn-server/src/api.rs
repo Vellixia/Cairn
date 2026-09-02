@@ -154,10 +154,7 @@ pub fn routes() -> Router<AppState> {
             "/api/projects/{id}/health",
             get(read_health).post(report_health),
         )
-        .route(
-            "/api/projects/{id}/dispositions",
-            post(report_dispositions),
-        )
+        .route("/api/projects/{id}/dispositions", post(report_dispositions))
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/sessions/{id}/handoff", get(session_handoff))
         .route(
@@ -219,15 +216,16 @@ async fn report_health(
     let writer_id = body
         .get("writer_id")
         .and_then(Value::as_str)
-        .ok_or_else(|| ApiError::invalid("`writer_id` is required: a capability is observed on a machine"))?
+        .ok_or_else(|| {
+            ApiError::invalid("`writer_id` is required: a capability is observed on a machine")
+        })?
         .to_string();
 
     let mut accepted = 0usize;
     let mut tx = state.pool.begin().await?;
     for row in rows {
-        let cell: cairn_integrate::capability::MatrixCell =
-            serde_json::from_value(row.clone())
-                .map_err(|_| ApiError::invalid("a cell is not a health cell"))?;
+        let cell: cairn_integrate::capability::MatrixCell = serde_json::from_value(row.clone())
+            .map_err(|_| ApiError::invalid("a cell is not a health cell"))?;
         if cairn_integrate::capability::MatrixCapability::parse(&cell.capability).is_none() {
             return Err(ApiError::invalid(format!(
                 "`{}` is not a capability this matrix has a cell for",

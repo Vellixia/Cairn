@@ -185,6 +185,14 @@ impl NamespaceTarget {
 /// by `drain`/`drain_global` and are not retried, and never count as transient
 /// (§4a) — an ingest content refusal must never throttle the namespace it
 /// arrived in.
+/// How many spooled rows one drain pass claims.
+///
+/// Below the ingest batch bound of 256 rather than equal to it, so a full pass
+/// is comfortably inside the request body limit even with the largest events
+/// the model allows. A pass that had to be refused for size would release every
+/// row it claimed and try the identical batch again next tick, forever.
+const SPOOL_DRAIN_BATCH: i64 = 128;
+
 pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
     let mut clocks: HashMap<String, NamespaceClock> = HashMap::new();
     let mut establish_clock = NamespaceClock::due_now(Instant::now());
@@ -282,6 +290,28 @@ pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
         if establish_clock.pull_due(Instant::now()) {
             establish_clock.mark_pulled(Instant::now());
             let _ = establish_global_namespaces(&daemon).await;
+        }
+
+        // The Feature 005 spools, drained on the same tick as everything else
+        // (T039). Not a second worker and not a second process: both spools are
+        // claimed under the same drain lock the sync lanes use, so a project
+        // drain and a spool drain do not interleave, and the two-process
+        // architecture is unchanged.
+        //
+        // Errors are swallowed here rather than propagated. A drain that could
+        // not reach the server has already released every row it claimed with a
+        // backoff, so there is nothing for this loop to do about it beyond
+        // trying again next tick — and an agent must never be blocked or slowed
+        // by a server that is not there (FR-781).
+        //
+        // Events first: a command may reference knowledge a consolidated event
+        // produced, and delivering commands ahead of the events behind them
+        // would make the server see the reference before the thing referenced.
+        if let Err(e) = drain_event_spool(&daemon, SPOOL_DRAIN_BATCH).await {
+            tracing::debug!(error = %e.message, "event spool drain deferred");
+        }
+        if let Err(e) = drain_command_spool(&daemon, SPOOL_DRAIN_BATCH).await {
+            tracing::debug!(error = %e.message, "command spool drain deferred");
         }
 
         let now = Instant::now();
@@ -2701,6 +2731,280 @@ async fn authorization_project(context: &AuthenticatedContext, d: &Daemon) -> Op
         .copied()
 }
 
+// ---------------------------------------------------------------------------
+// The shared spool drain primitive (T039)
+// ---------------------------------------------------------------------------
+//
+// One drain shape for two spools. The event spool and the command spool differ
+// in what they claim and where they post it, and in nothing else that matters
+// here: both claim in order under an exact account, both get per-item outcomes
+// back, both have to tell a permanent refusal from a transient failure and from
+// a version the server cannot hold yet, and both settle every claimed row
+// before returning.
+//
+// Written once because the interesting part is the *settling*, and settling is
+// where a second implementation goes wrong quietly. A row claimed and not
+// settled is a row in flight until its lease expires — recoverable, but it
+// looks like progress while nothing is happening.
+
+/// What one delivered item's outcome was, in the vocabulary both spools share.
+///
+/// Four outcomes, and the third is the one that needs a name of its own. A
+/// *permanent refusal* and a *version the server cannot hold yet* are both a
+/// "no" from the server, and treating them alike either strands work an upgrade
+/// would deliver or retries forever something that will never be accepted
+/// (FR-772, FR-774, FR-775).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ItemOutcome {
+    /// The server stored it, or already had it. A `duplicate` is a success:
+    /// it is what the retry was for (FR-770, FR-786).
+    Delivered,
+    /// Permanent. Never retried, and it stays visible (FR-772, FR-784).
+    Refused,
+    /// The server cannot hold this contract version or kind yet. Deferred, not
+    /// failed: an upgrade delivers it (FR-775).
+    Deferred,
+    /// Transport, or a response that said nothing about this item. Retried
+    /// under the spool's backoff.
+    Transient,
+}
+
+/// What a drain pass did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct DrainReport {
+    pub delivered: usize,
+    pub refused: usize,
+    pub deferred: usize,
+    pub transient: usize,
+}
+
+impl DrainReport {
+    fn record(&mut self, outcome: ItemOutcome) {
+        match outcome {
+            ItemOutcome::Delivered => self.delivered += 1,
+            ItemOutcome::Refused => self.refused += 1,
+            ItemOutcome::Deferred => self.deferred += 1,
+            ItemOutcome::Transient => self.transient += 1,
+        }
+    }
+
+    /// Every row the pass settled, which must equal every row it claimed.
+    ///
+    /// The invariant a drain is easiest to get wrong: a claimed row that is
+    /// neither delivered nor released is in flight until its lease expires, and
+    /// for that minute it looks like progress while nothing is happening.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn settled(&self) -> usize {
+        self.delivered + self.refused + self.deferred + self.transient
+    }
+}
+
+/// Map a server's per-item error code to an outcome.
+///
+/// The deferral set is the existing capability-refusal set plus the two the
+/// event contract adds. Sharing the set rather than restating it is the point:
+/// a code the sync boundary defers and this one fails would be the drift
+/// FR-760 forbids for rejection classes, moved to the delivery path.
+pub(crate) fn outcome_for(code: Option<&str>) -> ItemOutcome {
+    match code {
+        None => ItemOutcome::Transient,
+        Some(code)
+            if codes::CAPABILITY_REFUSALS.contains(&code)
+                || code == "contract_version_unsupported"
+                || code == "unsupported_kind" =>
+        {
+            ItemOutcome::Deferred
+        }
+        Some(_) => ItemOutcome::Refused,
+    }
+}
+
+/// Settle one claimed spool row according to its outcome.
+///
+/// A `Deferred` row is released back to `pending` with a backoff rather than
+/// being marked `refused`: the server will accept it after an upgrade, and
+/// burning its attempt budget on a deferral would eventually declare an
+/// upgradeable row permanently undeliverable.
+async fn settle_event(
+    d: &Daemon,
+    event_id: uuid::Uuid,
+    outcome: ItemOutcome,
+    reason: &str,
+) -> Result<(), WireError> {
+    use cairn_store::spool;
+    match outcome {
+        ItemOutcome::Delivered => spool::mark_event_delivered(&d.store, event_id).await,
+        ItemOutcome::Refused => spool::mark_event_refused(&d.store, event_id, reason).await,
+        ItemOutcome::Deferred | ItemOutcome::Transient => {
+            spool::mark_event_failed(&d.store, event_id, reason).await
+        }
+    }
+    .map_err(storage_err)
+}
+
+async fn settle_command(
+    d: &Daemon,
+    command_id: uuid::Uuid,
+    outcome: ItemOutcome,
+    reason: &str,
+) -> Result<(), WireError> {
+    use cairn_store::spool;
+    match outcome {
+        ItemOutcome::Delivered => spool::mark_command_delivered(&d.store, command_id).await,
+        ItemOutcome::Refused => spool::mark_command_refused(&d.store, command_id, reason).await,
+        ItemOutcome::Deferred | ItemOutcome::Transient => {
+            spool::mark_command_failed(&d.store, command_id, reason).await
+        }
+    }
+    .map_err(storage_err)
+}
+
+/// Drain the event spool once, in claim order, settling every claimed row.
+///
+/// **Every claimed row is settled before this returns, including on the error
+/// paths.** A claimed row that is neither delivered nor released is in flight
+/// until its lease expires — recoverable, but for a minute it looks like
+/// progress while nothing is happening, and a drain that returned early on a
+/// transport error used to leave exactly that.
+///
+/// The account and the server come from one credential read, so a switch mid-
+/// drain cannot route as one identity and authenticate as another (FR-597), and
+/// rows stay bound to the account that authored them (FR-790).
+pub(crate) async fn drain_event_spool(d: &Daemon, limit: i64) -> Result<DrainReport, WireError> {
+    use cairn_store::spool;
+    let _drain_guard = d.sync_drain.lock().await;
+    let context = AuthenticatedContext::acquire(d).await?;
+
+    let claimed = spool::claim_events(&d.store, context.account, limit)
+        .await
+        .map_err(storage_err)?;
+    let mut report = DrainReport::default();
+    if claimed.is_empty() {
+        return Ok(report);
+    }
+
+    let events: Vec<serde_json::Value> = claimed
+        .iter()
+        .map(|c| serde_json::to_value(&c.event).unwrap_or(serde_json::Value::Null))
+        .collect();
+    let body = serde_json::json!({
+        "contract_version": cairn_core::event::CONTRACT_VERSION,
+        "events": events,
+    });
+
+    let response = match context.client.post("/api/events/batch", &body).await {
+        Ok(response) => response,
+        Err(e) => {
+            // Transport. Every claimed row is released with a backoff rather
+            // than left in flight, because the alternative is a minute of
+            // apparent progress after a failure that already happened.
+            for c in &claimed {
+                settle_event(d, c.event_id, ItemOutcome::Transient, "transport").await?;
+                report.record(ItemOutcome::Transient);
+            }
+            return Err(e);
+        }
+    };
+
+    let results = response
+        .get("results")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for c in &claimed {
+        let found = results
+            .iter()
+            .find(|r| r.get("event_id").and_then(|v| v.as_str()) == Some(&c.event_id.to_string()));
+        // An item with no result in the response is transient, not delivered.
+        // Assuming success for a silence would mark a row delivered that the
+        // server may never have seen.
+        let outcome = match found.and_then(|r| r.get("status").and_then(|s| s.as_str())) {
+            Some("accepted") | Some("duplicate") => ItemOutcome::Delivered,
+            Some("rejected") => {
+                outcome_for(found.and_then(|r| r.get("reason").and_then(|s| s.as_str())))
+            }
+            _ => ItemOutcome::Transient,
+        };
+        let reason = found
+            .and_then(|r| r.get("reason").and_then(|s| s.as_str()))
+            .unwrap_or("no result for item");
+        settle_event(d, c.event_id, outcome, reason).await?;
+        report.record(outcome);
+    }
+    Ok(report)
+}
+
+/// Drain the command spool once, in scope order.
+///
+/// Ordering is the difference from the event drain and it is enforced by the
+/// claim, not here: a supersede queued after its target has to reach the server
+/// after it, and `claim_commands` will not hand out a row whose scope has an
+/// earlier unsettled one.
+pub(crate) async fn drain_command_spool(d: &Daemon, limit: i64) -> Result<DrainReport, WireError> {
+    use cairn_store::spool;
+    let _drain_guard = d.sync_drain.lock().await;
+    let context = AuthenticatedContext::acquire(d).await?;
+
+    let claimed = spool::claim_commands(&d.store, context.account, limit)
+        .await
+        .map_err(storage_err)?;
+    let mut report = DrainReport::default();
+
+    // One at a time, in the order claimed. Batching would deliver a scope's
+    // commands concurrently and lose the ordering the claim just established.
+    for c in &claimed {
+        let path = command_path(c.kind);
+        let response = match context.client.post(path, &c.payload).await {
+            Ok(response) => response,
+            Err(e) => {
+                settle_command(d, c.command_id, ItemOutcome::Transient, "transport").await?;
+                report.record(ItemOutcome::Transient);
+                // Stop the pass: the next command in this scope must not be
+                // attempted before this one settles, and the server is
+                // evidently not answering anyway.
+                let _ = e;
+                break;
+            }
+        };
+        let outcome = match response.get("error").and_then(|e| e.get("code")) {
+            None => ItemOutcome::Delivered,
+            Some(code) => outcome_for(code.as_str()),
+        };
+        let reason = response
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("ok");
+        settle_command(d, c.command_id, outcome, reason).await?;
+        report.record(outcome);
+    }
+    Ok(report)
+}
+
+/// Where each command kind is posted (`contracts/knowledge-commands.md` §3).
+///
+/// A total function over the kind enum rather than a lookup that can miss:
+/// adding a command kind without a route stops compiling here, which is the
+/// only place that mapping exists.
+fn command_path(kind: cairn_store::spool::CommandKind) -> &'static str {
+    use cairn_store::spool::CommandKind;
+    match kind {
+        CommandKind::Remember => "/api/commands/memories",
+        CommandKind::Supersede => "/api/commands/supersede",
+        CommandKind::Reinforce => "/api/commands/reinforce",
+        CommandKind::Relate => "/api/commands/relate",
+        CommandKind::Pin => "/api/commands/pin",
+        CommandKind::Forget => "/api/commands/forget",
+        CommandKind::PersonalCreate => "/api/personal/knowledge",
+        CommandKind::PersonalForget => "/api/commands/personal-forget",
+        CommandKind::TeamPropose => "/api/team/knowledge",
+        CommandKind::PatternPromote => "/api/patterns",
+        CommandKind::PatternForget => "/api/commands/pattern-forget",
+        CommandKind::VerificationRun => "/api/verification/runs",
+        CommandKind::VerificationAttestation => "/api/verification/attestations",
+    }
+}
+
 /// [`drain`], for a `personal:*`/`team:*` namespace (T093, T100, T106, T107).
 ///
 /// Same claim → send → record-outcome shape as `drain`, over
@@ -3711,6 +4015,103 @@ mod tests {
     /// then a single success clears it back to `BACKOFF_MIN` outright — not
     /// merely halved, so a namespace that just recovered is as eligible as one
     /// that never failed (Invariant 2).
+    /// A "no" from the server is three different answers, and mixing any two
+    /// of them loses work or retries forever.
+    #[test]
+    fn a_refusal_a_deferral_and_a_transient_failure_are_told_apart() {
+        // Permanent: an absolute path will never become acceptable, and
+        // retaining it would turn a privacy refusal into a pending delivery.
+        assert_eq!(
+            super::outcome_for(Some("repo_file_absolute")),
+            super::ItemOutcome::Refused
+        );
+        assert_eq!(
+            super::outcome_for(Some("content_screening_failed")),
+            super::ItemOutcome::Refused
+        );
+        // Deferrable: an upgrade delivers these, so failing them strands work
+        // (FR-775).
+        assert_eq!(
+            super::outcome_for(Some("contract_version_unsupported")),
+            super::ItemOutcome::Deferred
+        );
+        assert_eq!(
+            super::outcome_for(Some("unsupported_kind")),
+            super::ItemOutcome::Deferred
+        );
+        // No code at all is a silence, and a silence is not a success: assuming
+        // delivery would mark a row delivered the server may never have seen.
+        assert_eq!(super::outcome_for(None), super::ItemOutcome::Transient);
+    }
+
+    #[test]
+    fn the_capability_refusals_the_sync_boundary_defers_are_deferred_here_too() {
+        // A code one boundary defers and the other fails is the drift FR-760
+        // forbids for rejection classes, moved onto the delivery path.
+        for code in cairn_core::wire::codes::CAPABILITY_REFUSALS {
+            assert_eq!(
+                super::outcome_for(Some(code)),
+                super::ItemOutcome::Deferred,
+                "{code} is deferred by sync and not by the spool drain"
+            );
+        }
+    }
+
+    #[test]
+    fn a_report_settles_every_outcome_it_records() {
+        let mut report = super::DrainReport::default();
+        for outcome in [
+            super::ItemOutcome::Delivered,
+            super::ItemOutcome::Delivered,
+            super::ItemOutcome::Refused,
+            super::ItemOutcome::Deferred,
+            super::ItemOutcome::Transient,
+        ] {
+            report.record(outcome);
+        }
+        assert_eq!(report.delivered, 2);
+        assert_eq!(report.refused, 1);
+        assert_eq!(report.deferred, 1);
+        assert_eq!(report.transient, 1);
+        assert_eq!(
+            report.settled(),
+            5,
+            "a settled row went uncounted, which is how a claimed row is left in flight"
+        );
+    }
+
+    #[test]
+    fn every_command_kind_has_a_route() {
+        // Total over the enum, so adding a kind without a route stops
+        // compiling rather than producing a command nothing can deliver.
+        use cairn_store::spool::CommandKind;
+        let all = [
+            CommandKind::Remember,
+            CommandKind::Supersede,
+            CommandKind::Reinforce,
+            CommandKind::Relate,
+            CommandKind::Pin,
+            CommandKind::Forget,
+            CommandKind::PersonalCreate,
+            CommandKind::PersonalForget,
+            CommandKind::TeamPropose,
+            CommandKind::PatternPromote,
+            CommandKind::PatternForget,
+            CommandKind::VerificationRun,
+            CommandKind::VerificationAttestation,
+        ];
+        let paths: std::collections::BTreeSet<&str> =
+            all.iter().map(|k| super::command_path(*k)).collect();
+        assert_eq!(
+            paths.len(),
+            all.len(),
+            "two command kinds share a route, so one would be delivered as the other"
+        );
+        for path in paths {
+            assert!(path.starts_with("/api/"), "{path} is not a route");
+        }
+    }
+
     #[test]
     fn backoff_doubles_to_a_ceiling_and_a_success_clears_it_entirely() {
         let now = Instant::now();

@@ -13,7 +13,8 @@
 //! walk the live route set.
 
 use cairn_e2e::{
-    get_json_status_bearer, patch_json_bearer, post_json_status_bearer, Sandbox, Server,
+    get_json_status_bearer, patch_json_bearer, post_json_status_bearer, post_status_bearer,
+    Sandbox, Server,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -67,7 +68,23 @@ fn project_scoped_paths(project: Uuid) -> Vec<String> {
         format!("/api/projects/{project}/memories"),
         format!("/api/projects/{project}/sync-status"),
         format!("/api/projects/{project}/members"),
+        // Feature 005's health matrix. Readable by members only: a project's
+        // capture health says which machines its members work from and which
+        // of their agents are failing.
+        format!("/api/projects/{project}/health"),
         format!("/api/sync/changes?project_id={project}"),
+    ]
+}
+
+/// Project-scoped routes that accept only `POST`, so the GET sweep above
+/// cannot reach them.
+///
+/// Swept separately rather than excluded, for the reason `body_scoped_paths`
+/// gives: a write route is the most consequential kind to leave unguarded.
+fn post_only_project_paths(project: Uuid) -> Vec<String> {
+    vec![
+        format!("/api/projects/{project}/dispositions"),
+        format!("/api/projects/{project}/memory-relations"),
     ]
 }
 
@@ -181,6 +198,13 @@ fn a_non_member_is_refused_by_every_project_scoped_endpoint() {
             "{path} answered {status} to a non-member; expected a refusal"
         );
     }
+    for path in post_only_project_paths(alice.project) {
+        let status = post_status_bearer(&server.base, &path, &json!({}), &bob);
+        assert!(
+            status == 403 || status == 404,
+            "{path} answered {status} to a non-member; expected a refusal"
+        );
+    }
     // The body-scoped routes, which a GET sweep cannot reach.
     for path in body_scoped_paths() {
         let (body, status) = post_json_status_bearer(
@@ -237,7 +261,10 @@ fn every_project_scoped_path_is_covered_by_the_sweep_list() {
         "the router scan found nothing; this test would pass vacuously"
     );
 
-    let covered = project_scoped_paths(Uuid::nil());
+    // Both sweeps, because a route reachable only by POST is covered by the
+    // POST sweep and would otherwise read here as uncovered.
+    let mut covered = project_scoped_paths(Uuid::nil());
+    covered.extend(post_only_project_paths(Uuid::nil()));
     let removed = removed_paths(Uuid::nil());
     for path in &declared {
         if body_scoped_paths().contains(&path.as_str()) {
