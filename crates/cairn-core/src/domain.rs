@@ -447,6 +447,18 @@ text_enum!(
     /// On what a reconciliation decision was decided (FR-304).
     RelationBasis, "relation basis", {
         DeterministicRule => "deterministic_rule",
+        /// Automatic reinforcement on a deterministic identity match, which
+        /// only consolidation can produce (FR-801a, `contracts/consolidation.md`
+        /// §5 gate 6b).
+        ///
+        /// A separate basis rather than a reuse of `deterministic_rule`,
+        /// because FR-802 requires that a relation consolidation inferred be
+        /// distinguishable from one a human or an agent asked for — and
+        /// reinforcement is the one relation Feature 005 newly permits an
+        /// automatic process to record at all. Sharing a basis with duplicate
+        /// and conflict detection would make "who decided this" unanswerable
+        /// for exactly the relation where it is newly in question.
+        ConsolidationReinforcement => "consolidation_reinforcement",
         Evidence => "evidence",
         ExplicitAgent => "explicit_agent",
         ExplicitUser => "explicit_user",

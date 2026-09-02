@@ -36,15 +36,56 @@
 
 use crate::event::{EventContent, EventKind, VocabToken};
 use crate::knowledge::normalize_topic_key;
-use std::collections::BTreeSet;
+use std::collections::BTreeMap;
+
+/// Where a token came from, ordered so that the strongest source is greatest.
+///
+/// The order is the fixed, total rank `contracts/extraction.md` §13.5 assigns
+/// roles by, strongest first: an established project `topic_key`, then an
+/// established project `value_key`, then a module token, a file token, a test
+/// token, and last a command verb. It is total so the choice of subject cannot
+/// depend on iteration order, and it is a rank rather than a score because
+/// there is no arithmetic to do — one source is simply more established than
+/// another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum VocabRank {
+    /// The leading word of a shell command, or a vendor tool's name.
+    CommandVerb,
+    /// A word from a test invocation.
+    Test,
+    /// The final component of a repository path, without its extension.
+    File,
+    /// A directory component of a repository path.
+    Module,
+    /// A `value_key` this project's knowledge already establishes.
+    EstablishedValueKey,
+    /// A `topic_key` this project's knowledge already establishes.
+    EstablishedTopicKey,
+}
+
+/// What the vocabulary knows about one token.
+///
+/// `seq` is the `session_seq` of the **earliest** event that justified it, and
+/// is absent for a token an established project key supplied — a key was not
+/// established by any event in this session, so it has no ordinal here. That
+/// absence is load-bearing twice: it sorts such a token last in the §13.5
+/// tiebreak, and it keeps it out of the `justified_by_seq` a refusal would
+/// name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VocabEntry {
+    pub rank: VocabRank,
+    pub seq: Option<u64>,
+}
 
 /// One session's derived vocabulary.
 ///
-/// A set, deliberately: membership is the only question anyone asks of it, and
-/// exposing an order would invite something to depend on one.
+/// A map from token to the strongest source that justified it. Membership is
+/// what the server asks; the rank is what the client's role assignment needs
+/// (`contracts/extraction.md` §13.5). Both read the same structure, so the two
+/// sides cannot disagree about which tokens exist.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SessionVocabulary {
-    tokens: BTreeSet<String>,
+    tokens: BTreeMap<String, VocabEntry>,
 }
 
 impl SessionVocabulary {
@@ -52,15 +93,31 @@ impl SessionVocabulary {
         Self::default()
     }
 
-    /// Seed with the topic and value keys this project's knowledge already
-    /// establishes.
+    /// Seed with the topic keys this project's knowledge already establishes.
     ///
-    /// Both sources are required. A server that justified tokens only from
+    /// Both key sources are required. A server that justified tokens only from
     /// session events would refuse tokens the client legitimately justified
     /// from established project keys — and the refusal is permanent, so the
     /// decision is destroyed rather than deferred
     /// (`contracts/safe-events.md` §7.1 step 7).
-    pub fn with_established_keys<'a>(mut self, keys: impl IntoIterator<Item = &'a str>) -> Self {
+    pub fn with_established_keys<'a>(self, keys: impl IntoIterator<Item = &'a str>) -> Self {
+        self.with_established(keys, VocabRank::EstablishedTopicKey)
+    }
+
+    /// Seed with the value keys this project's knowledge already establishes.
+    ///
+    /// Separate from [`Self::with_established_keys`] only because the two rank
+    /// differently when a role is assigned; for membership they are the same
+    /// kind of evidence.
+    pub fn with_established_value_keys<'a>(self, keys: impl IntoIterator<Item = &'a str>) -> Self {
+        self.with_established(keys, VocabRank::EstablishedValueKey)
+    }
+
+    fn with_established<'a>(
+        mut self,
+        keys: impl IntoIterator<Item = &'a str>,
+        rank: VocabRank,
+    ) -> Self {
         for key in keys {
             // An established key may be dot-segmented. Both the whole key and
             // each segment count: a decision citing `deploy` is justified by an
@@ -68,15 +125,15 @@ impl SessionVocabulary {
             // of this project's vocabulary either way.
             if let Some(normalized) = normalize_topic_key(key) {
                 for segment in normalized.split('.') {
-                    self.insert(segment);
+                    self.insert(segment, rank, None);
                 }
-                self.insert(&normalized);
+                self.insert(&normalized, rank, None);
             }
         }
         self
     }
 
-    /// Add everything one event contributes.
+    /// Add everything one event contributes, without an ordinal.
     ///
     /// Only events with a **lower `session_seq`** than the signal being checked
     /// should be fed in. A token justified only by a later event is refused:
@@ -84,6 +141,20 @@ impl SessionVocabulary {
     /// could not legitimately have cited a later one, and accepting it would
     /// make justification depend on delivery order.
     pub fn observe(&mut self, kind: EventKind, content: Option<&EventContent>) {
+        self.observe_at(None, kind, content);
+    }
+
+    /// Add everything one event contributes, recording which event it was.
+    ///
+    /// The ordinal is what lets a client name `justified_by_seq` on the signal
+    /// it emits, so a server refusal can say what was missing instead of being
+    /// a bare mismatch.
+    pub fn observe_at(
+        &mut self,
+        seq: Option<u64>,
+        kind: EventKind,
+        content: Option<&EventContent>,
+    ) {
         let Some(content) = content else { return };
         match content {
             // Path segments, not file contents — Cairn never reads those. A
@@ -95,7 +166,7 @@ impl SessionVocabulary {
                 ..
             } => {
                 for path in [repo_file, repo_file_from].into_iter().flatten() {
-                    self.add_path_segments(path);
+                    self.add_path_segments(path, seq);
                 }
             }
             // The leading binary and its subcommand. Not the arguments: an
@@ -106,17 +177,17 @@ impl SessionVocabulary {
             // credential entering the vocabulary and then legitimising a token
             // for itself.
             EventContent::Command { command_line, .. } => {
-                self.add_leading_words(command_line, 2);
+                self.add_leading_words(command_line, 2, VocabRank::CommandVerb, seq);
             }
             EventContent::TestInvocation { test_command } => {
                 // A test command contributes more of itself than a shell
                 // command does, because a suite identifier is often the third
                 // or fourth word (`cargo test -p cairn-core`).
-                self.add_leading_words(test_command, 4);
+                self.add_leading_words(test_command, 4, VocabRank::Test, seq);
             }
             EventContent::Tool { vendor_tool, .. }
             | EventContent::ToolFailure { vendor_tool, .. } => {
-                self.insert_normalized(vendor_tool);
+                self.insert_normalized(vendor_tool, VocabRank::CommandVerb, seq);
             }
             _ => {}
         }
@@ -134,8 +205,32 @@ impl SessionVocabulary {
         // the intended case; a token with an unjustified segment is not.
         token
             .split('.')
-            .all(|segment| self.tokens.contains(segment))
-            || self.tokens.contains(token)
+            .all(|segment| self.tokens.contains_key(segment))
+            || self.tokens.contains_key(token)
+    }
+
+    /// What justified a token, if anything did.
+    ///
+    /// A dot-segmented token takes the **weakest** rank and the **earliest**
+    /// ordinal among its segments: a compound is only as established as its
+    /// least established part, and claiming otherwise would let one strong
+    /// segment promote a whole token above what the evidence supports.
+    pub fn entry(&self, token: &str) -> Option<VocabEntry> {
+        if let Some(found) = self.tokens.get(token) {
+            return Some(*found);
+        }
+        let mut rank: Option<VocabRank> = None;
+        let mut seq: Option<u64> = None;
+        for segment in token.split('.') {
+            let found = self.tokens.get(segment)?;
+            rank = Some(rank.map_or(found.rank, |r: VocabRank| r.min(found.rank)));
+            seq = match (seq, found.seq) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, b) => b,
+            };
+        }
+        rank.map(|rank| VocabEntry { rank, seq })
     }
 
     pub fn len(&self) -> usize {
@@ -148,20 +243,36 @@ impl SessionVocabulary {
 
     /// The tokens, sorted, for a diagnostic that needs to show its working.
     pub fn tokens(&self) -> impl Iterator<Item = &str> {
-        self.tokens.iter().map(String::as_str)
+        self.tokens.keys().map(String::as_str)
     }
 
-    fn add_path_segments(&mut self, path: &str) {
-        for segment in path.split('/') {
+    fn add_path_segments(&mut self, path: &str, seq: Option<u64>) {
+        let segments: Vec<&str> = path.split('/').collect();
+        let last = segments.len().saturating_sub(1);
+        for (i, segment) in segments.iter().enumerate() {
             // A file's extension is not part of its identity here: `sync.rs`
             // and `sync.py` name the same module in two languages, and `rs` is
             // not a subject anyone decides about.
-            let stem = segment.rsplit_once('.').map_or(segment, |(stem, _)| stem);
-            self.insert_normalized(stem);
+            let stem = segment.rsplit_once('.').map_or(*segment, |(stem, _)| stem);
+            // Directory components name a module; the final component names a
+            // file. A module outranks a file because it is the coarser subject,
+            // and a decision is more often about an area than about one file.
+            let rank = if i == last {
+                VocabRank::File
+            } else {
+                VocabRank::Module
+            };
+            self.insert_normalized(stem, rank, seq);
         }
     }
 
-    fn add_leading_words(&mut self, text: &str, how_many: usize) {
+    fn add_leading_words(
+        &mut self,
+        text: &str,
+        how_many: usize,
+        rank: VocabRank,
+        seq: Option<u64>,
+    ) {
         for word in text.split_whitespace().take(how_many) {
             // Flags are not verbs. `-p` and `--release` say how, not what.
             if word.starts_with('-') {
@@ -171,21 +282,43 @@ impl SessionVocabulary {
             // `./scripts/deploy.sh` is `deploy`.
             let last = word.rsplit('/').next().unwrap_or(word);
             let stem = last.rsplit_once('.').map_or(last, |(stem, _)| stem);
-            self.insert_normalized(stem);
+            self.insert_normalized(stem, rank, seq);
         }
     }
 
-    fn insert_normalized(&mut self, raw: &str) {
+    fn insert_normalized(&mut self, raw: &str, rank: VocabRank, seq: Option<u64>) {
         if let Some(normalized) = normalize_topic_key(raw) {
             for segment in normalized.split('.') {
-                self.insert(segment);
+                self.insert(segment, rank, seq);
             }
         }
     }
 
-    fn insert(&mut self, token: &str) {
-        if !token.is_empty() {
-            self.tokens.insert(token.to_string());
+    fn insert(&mut self, token: &str, rank: VocabRank, seq: Option<u64>) {
+        if token.is_empty() {
+            return;
+        }
+        // The strongest source wins, and at equal strength the earliest event
+        // does. Both halves are deterministic on purpose: the rank decides the
+        // role, the ordinal breaks the tie, and neither depends on the order
+        // events happened to be fed in.
+        match self.tokens.get_mut(token) {
+            Some(existing) if rank > existing.rank => {
+                existing.rank = rank;
+                existing.seq = seq;
+            }
+            Some(existing) if rank == existing.rank => {
+                existing.seq = match (existing.seq, seq) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (Some(a), None) => Some(a),
+                    (None, b) => b,
+                };
+            }
+            Some(_) => {}
+            None => {
+                self.tokens
+                    .insert(token.to_string(), VocabEntry { rank, seq });
+            }
         }
     }
 }

@@ -20,6 +20,7 @@ pub mod eventid;
 pub mod global;
 pub mod handoff;
 pub mod knowledge;
+pub mod lexicon;
 pub mod lifecycle;
 pub mod paths;
 pub mod patterns;
