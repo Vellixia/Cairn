@@ -325,6 +325,7 @@ dependencies = [
  "tempfile",
  "tiktoken-rs",
  "tokio",
+ "toml_edit",
  "uuid",
 ]
 

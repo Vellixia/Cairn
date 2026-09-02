@@ -13,10 +13,10 @@
 
 ## Phase 1: Setup
 
-- [ ] T001 Record the pre-Feature-005 workspace dependency manifest used by SC-737 in `tests/feature005/dependency-baseline.toml`
-- [ ] T002 Add shared Feature 005 PostgreSQL/SQLite fixtures, identical-UUID seed helpers, authenticated multi-account helpers, and restart injection controls in `tests/src/feature005.rs`
-- [ ] T003 Export the Feature 005 harness from `tests/src/lib.rs`
-- [ ] T004 Add only the test dependencies required by the approved Rust/PostgreSQL/Next.js stack in `tests/Cargo.toml`
+- [X] T001 Record the pre-Feature-005 workspace dependency manifest used by SC-737 in `tests/feature005/dependency-baseline.toml`
+- [X] T002 Add shared Feature 005 PostgreSQL/SQLite fixtures, identical-UUID seed helpers, authenticated multi-account helpers, and restart injection controls in `tests/src/feature005.rs`
+- [X] T003 Export the Feature 005 harness from `tests/src/lib.rs`
+- [X] T004 Add only the test dependencies required by the approved Rust/PostgreSQL/Next.js stack in `tests/Cargo.toml`
 
 ---
 

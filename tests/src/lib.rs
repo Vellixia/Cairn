@@ -9,6 +9,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use tempfile::TempDir;
 
+/// Feature 005 fixtures: PostgreSQL at server schema v4, SQLite at local
+/// schema v8, identical-UUID seeding, multi-account authentication and restart
+/// injection.
+///
+/// A module of its own rather than more surface on `Sandbox` and `Server`: the
+/// feature's fixtures are about *two* databases and *three* accounts at once,
+/// which is not a shape either existing type has.
+pub mod feature005;
+
 /// An isolated Cairn installation: its own state directory, socket, daemon and
 /// Git repository.
 pub struct Sandbox {
