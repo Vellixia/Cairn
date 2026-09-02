@@ -1514,6 +1514,54 @@ impl Client {
         decode(response).await
     }
 
+    /// POST, distinguishing a **server answer** from a **transport failure**.
+    ///
+    /// `post` collapses the two: a refusal and an unreachable server both come
+    /// back as `Err(WireError)`, and the drain that used them could not tell a
+    /// `409 unsupported_kind` from a dropped connection. It spent an attempt on
+    /// a row an upgrade would have delivered, and retried a permanent refusal
+    /// forever. The difference is not cosmetic, so it is in the type.
+    ///
+    /// Any HTTP response at all — success or refusal — is a server answer. Only
+    /// a failure to get one is transport.
+    async fn post_for_outcome(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> Result<ServerAnswer, WireError> {
+        let response = self
+            .http
+            .post(format!("{}{path}", self.base))
+            .bearer_auth(&self.token)
+            .json(body)
+            .send()
+            .await
+            .map_err(unreachable_err)?;
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+        if status.is_success() {
+            return Ok(ServerAnswer::Ok);
+        }
+        // The structured code, kept: it is what tells a deferral from a
+        // permanent refusal, and losing it is what made every refusal look
+        // alike. A response with no code still yields one, because a status
+        // with no body is still the server having answered.
+        let code = body
+            .get("error")
+            .and_then(|e| e.get("code"))
+            .and_then(|c| c.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| match status.as_u16() {
+                401 => "unauthorized".to_string(),
+                403 => "forbidden".to_string(),
+                // A 5xx is the server failing rather than refusing, so it is
+                // transient by code as well as by status.
+                s if (500..600).contains(&s) => "server_error".to_string(),
+                s => format!("http_{s}"),
+            });
+        Ok(ServerAnswer::Refused { code })
+    }
+
     async fn get(&self, path: &str) -> Result<serde_json::Value, WireError> {
         let response = self
             .http
@@ -2747,6 +2795,13 @@ async fn authorization_project(context: &AuthenticatedContext, d: &Daemon) -> Op
 // settled is a row in flight until its lease expires — recoverable, but it
 // looks like progress while nothing is happening.
 
+/// Whether the server answered at all, and what it said if it refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ServerAnswer {
+    Ok,
+    Refused { code: String },
+}
+
 /// What one delivered item's outcome was, in the vocabulary both spools share.
 ///
 /// Four outcomes, and the third is the one that needs a name of its own. A
@@ -2815,6 +2870,10 @@ pub(crate) fn outcome_for(code: Option<&str>) -> ItemOutcome {
         {
             ItemOutcome::Deferred
         }
+        // The server failed rather than refused. Transient, and it consumes an
+        // attempt like any other transport-class failure — a 500 is not a
+        // statement about the request.
+        Some("server_error") | Some("storage_unavailable") => ItemOutcome::Transient,
         Some(_) => ItemOutcome::Refused,
     }
 }
@@ -2835,9 +2894,15 @@ async fn settle_event(
     match outcome {
         ItemOutcome::Delivered => spool::mark_event_delivered(&d.store, event_id).await,
         ItemOutcome::Refused => spool::mark_event_refused(&d.store, event_id, reason).await,
-        ItemOutcome::Deferred | ItemOutcome::Transient => {
-            spool::mark_event_failed(&d.store, event_id, reason).await
+        // Deferral costs no attempt. Routing it through the failure path was
+        // the defect this replaces: `attempts` increments at claim time, so
+        // every probe of an old server spent one, and a long enough old-server
+        // period drove an upgradeable row to `retry_exhausted`.
+        ItemOutcome::Deferred => {
+            spool::mark_event_deferred(&d.store, event_id, spool::DEFERRED_AWAITING_CAPABILITY)
+                .await
         }
+        ItemOutcome::Transient => spool::mark_event_failed(&d.store, event_id, reason).await,
     }
     .map_err(storage_err)
 }
@@ -2852,9 +2917,11 @@ async fn settle_command(
     match outcome {
         ItemOutcome::Delivered => spool::mark_command_delivered(&d.store, command_id).await,
         ItemOutcome::Refused => spool::mark_command_refused(&d.store, command_id, reason).await,
-        ItemOutcome::Deferred | ItemOutcome::Transient => {
-            spool::mark_command_failed(&d.store, command_id, reason).await
+        ItemOutcome::Deferred => {
+            spool::mark_command_deferred(&d.store, command_id, spool::DEFERRED_AWAITING_CAPABILITY)
+                .await
         }
+        ItemOutcome::Transient => spool::mark_command_failed(&d.store, command_id, reason).await,
     }
     .map_err(storage_err)
 }
@@ -2953,57 +3020,84 @@ pub(crate) async fn drain_command_spool(d: &Daemon, limit: i64) -> Result<DrainR
     // One at a time, in the order claimed. Batching would deliver a scope's
     // commands concurrently and lose the ordering the claim just established.
     for c in &claimed {
-        let path = command_path(c.kind);
-        let response = match context.client.post(path, &c.payload).await {
-            Ok(response) => response,
-            Err(e) => {
-                settle_command(d, c.command_id, ItemOutcome::Transient, "transport").await?;
-                report.record(ItemOutcome::Transient);
-                // Stop the pass: the next command in this scope must not be
-                // attempted before this one settles, and the server is
-                // evidently not answering anyway.
-                let _ = e;
-                break;
-            }
+        let envelope = command_envelope(c);
+        let (outcome, reason) = match context
+            .client
+            .post_for_outcome(COMMAND_ENVELOPE_PATH, &envelope)
+            .await
+        {
+            // A structured refusal from the server is **not** a transport
+            // failure, and conflating them was the defect this replaces: a
+            // `409 unsupported_kind` read as transport spent an attempt on a
+            // row an upgrade would have delivered, and a `400` read as
+            // transport retried a refusal forever.
+            Ok(ServerAnswer::Ok) => (ItemOutcome::Delivered, "accepted".to_string()),
+            Ok(ServerAnswer::Refused { code }) => (outcome_for(Some(&code)), code),
+            Err(_) => (ItemOutcome::Transient, "transport".to_string()),
         };
-        let outcome = match response.get("error").and_then(|e| e.get("code")) {
-            None => ItemOutcome::Delivered,
-            Some(code) => outcome_for(code.as_str()),
-        };
-        let reason = response
-            .get("error")
-            .and_then(|e| e.get("code"))
-            .and_then(|c| c.as_str())
-            .unwrap_or("ok");
-        settle_command(d, c.command_id, outcome, reason).await?;
+        settle_command(d, c.command_id, outcome, &reason).await?;
         report.record(outcome);
+        if outcome == ItemOutcome::Transient {
+            // Stop the pass. The next command in this scope must not be
+            // attempted before this one settles, and a server that is not
+            // answering will not answer the next one either.
+            break;
+        }
     }
     Ok(report)
 }
 
-/// Where each command kind is posted (`contracts/knowledge-commands.md` §3).
+/// What one queued command needs to say on the wire.
 ///
-/// A total function over the kind enum rather than a lookup that can miss:
-/// adding a command kind without a route stops compiling here, which is the
-/// only place that mapping exists.
-fn command_path(kind: cairn_store::spool::CommandKind) -> &'static str {
+/// Everything a command is, in one object: its deterministic identity, its
+/// kind, whatever it targets, and its intent. The first version of this drain
+/// posted `payload` alone to a path derived from the kind, which lost the
+/// `command_id` — so nothing was idempotent — and named several paths the
+/// server does not serve, so nothing arrived either. Both were the same
+/// mistake: the wire form did not carry the command.
+///
+/// The account is **not** here. It comes from the credential the request is
+/// made with, and there is deliberately no field for it: a daemon that could
+/// name an account could attribute one identity's writes to another
+/// (Principle XI).
+fn command_envelope(command: &cairn_store::spool::SpooledCommand) -> serde_json::Value {
     use cairn_store::spool::CommandKind;
-    match kind {
-        CommandKind::Remember => "/api/commands/memories",
-        CommandKind::Supersede => "/api/commands/supersede",
-        CommandKind::Reinforce => "/api/commands/reinforce",
-        CommandKind::Relate => "/api/commands/relate",
-        CommandKind::Pin => "/api/commands/pin",
-        CommandKind::Forget => "/api/commands/forget",
-        CommandKind::PersonalCreate => "/api/personal/knowledge",
-        CommandKind::PersonalForget => "/api/commands/personal-forget",
-        CommandKind::TeamPropose => "/api/team/knowledge",
-        CommandKind::PatternPromote => "/api/patterns",
-        CommandKind::PatternForget => "/api/commands/pattern-forget",
-        CommandKind::VerificationRun => "/api/verification/runs",
-        CommandKind::VerificationAttestation => "/api/verification/attestations",
-    }
+    // What the command applies to. A project for the commands that create
+    // within one, a record for the commands that act on one, neither for the
+    // account-scoped domains — which is why both are optional rather than one
+    // widened field that means different things per kind.
+    let (project_id, target_id) = match command.kind {
+        CommandKind::Remember | CommandKind::Relate => (command.project_id, None),
+        CommandKind::Supersede
+        | CommandKind::Reinforce
+        | CommandKind::Pin
+        | CommandKind::Forget
+        | CommandKind::PersonalForget
+        | CommandKind::PatternForget => (
+            command.project_id,
+            command
+                .payload
+                .get("target_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| uuid::Uuid::parse_str(s).ok()),
+        ),
+        CommandKind::PersonalCreate
+        | CommandKind::TeamPropose
+        | CommandKind::PatternPromote
+        | CommandKind::VerificationRun
+        | CommandKind::VerificationAttestation => (None, None),
+    };
+    serde_json::json!({
+        "command_id": command.command_id,
+        "kind": command.kind.as_str(),
+        "project_id": project_id,
+        "target_id": target_id,
+        "payload": command.payload,
+    })
 }
+
+/// The one route every queued command is delivered to.
+const COMMAND_ENVELOPE_PATH: &str = "/api/commands";
 
 /// [`drain`], for a `personal:*`/`team:*` namespace (T093, T100, T106, T107).
 ///
@@ -4080,11 +4174,17 @@ mod tests {
         );
     }
 
+    /// Every command kind produces an envelope the server can dispatch.
+    ///
+    /// The envelope replaced a per-kind path table, and the reason is worth
+    /// keeping: that table named several routes the server does not serve, and
+    /// posting the payload alone lost the `command_id` — so nothing was
+    /// delivered and nothing was idempotent. A compile-time enum-to-string
+    /// check passed throughout, which is why this asserts the *shape* the
+    /// server reads rather than a mapping.
     #[test]
-    fn every_command_kind_has_a_route() {
-        // Total over the enum, so adding a kind without a route stops
-        // compiling rather than producing a command nothing can deliver.
-        use cairn_store::spool::CommandKind;
+    fn every_command_kind_produces_a_dispatchable_envelope() {
+        use cairn_store::spool::{CommandKind, CommandScope, SpooledCommand};
         let all = [
             CommandKind::Remember,
             CommandKind::Supersede,
@@ -4100,16 +4200,41 @@ mod tests {
             CommandKind::VerificationRun,
             CommandKind::VerificationAttestation,
         ];
-        let paths: std::collections::BTreeSet<&str> =
-            all.iter().map(|k| super::command_path(*k)).collect();
-        assert_eq!(
-            paths.len(),
-            all.len(),
-            "two command kinds share a route, so one would be delivered as the other"
-        );
-        for path in paths {
-            assert!(path.starts_with("/api/"), "{path} is not a route");
+        let payload = serde_json::json!({ "content": "an intent" });
+        let mut kinds = std::collections::BTreeSet::new();
+        for kind in all {
+            let command = SpooledCommand {
+                command_id: uuid::Uuid::now_v7(),
+                scope: CommandScope::Store(uuid::Uuid::now_v7()),
+                session_id: None,
+                project_id: Some(uuid::Uuid::now_v7()),
+                account_id: uuid::Uuid::now_v7(),
+                command_seq: 1,
+                kind,
+                payload: payload.clone(),
+                attempts: 0,
+            };
+            let envelope = super::command_envelope(&command);
+            // The four things the wire form has to carry.
+            assert_eq!(
+                envelope["command_id"],
+                serde_json::json!(command.command_id)
+            );
+            assert_eq!(envelope["kind"], kind.as_str());
+            assert_eq!(envelope["payload"], payload);
+            assert!(envelope.get("target_id").is_some());
+            // And the one thing it must not: nothing that decides who is
+            // acting. The account travels as the credential, not as a field.
+            for forbidden in ["account_id", "owner_user_id", "verification_authority"] {
+                assert!(
+                    envelope.get(forbidden).is_none(),
+                    "the envelope carries `{forbidden}`, which a daemon must not name"
+                );
+            }
+            kinds.insert(kind.as_str());
         }
+        assert_eq!(kinds.len(), all.len(), "two kinds share a wire name");
+        assert_eq!(super::COMMAND_ENVELOPE_PATH, "/api/commands");
     }
 
     #[test]

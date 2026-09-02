@@ -156,9 +156,14 @@ fn no_feature_005_handler_reads_identity_out_of_a_request_body() {
             .map(|i| i + 1)
             .unwrap_or(body.len());
         let body = &body[..end];
+        // Matched on the call, not on a variable name. `command_envelope`
+        // screens `&envelope` rather than `&body` — it checks the whole
+        // envelope, so a field named outside `payload` is refused too — and an
+        // audit keyed to one spelling would have reported that as a missing
+        // guard.
         assert!(
-            body.contains("reject_server_owned(&body)"),
-            "{handler} does not screen its body for server-owned fields, so a \
+            body.contains("reject_server_owned(&"),
+            "{handler} does not screen its input for server-owned fields, so a \
              client could name an identity or assert a derived value"
         );
     }

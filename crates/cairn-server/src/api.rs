@@ -129,6 +129,15 @@ pub fn routes() -> Router<AppState> {
             post(crate::commands::forget_personal),
         )
         .route("/api/team/knowledge", post(crate::commands::propose_team))
+        .route(
+            "/api/memories/{id}/forget",
+            post(crate::commands::forget_memory),
+        )
+        // One authenticated route for every queued command, dispatching
+        // internally to the handlers above. Not a second implementation of
+        // command semantics: a second *way in* to the same ones, carrying the
+        // deterministic `command_id` the per-command paths have nowhere to put.
+        .route("/api/commands", post(crate::commands::command_envelope))
         // Pattern routes are interface-only until US3 supplies their lifecycle
         // repository (T083+). The shape, the owner binding, the server-assigned
         // trust and the content screening are the boundary's, and they are

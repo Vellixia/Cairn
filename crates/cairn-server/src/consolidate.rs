@@ -126,16 +126,58 @@ pub fn pool_share(max_connections: u32) -> u32 {
 /// `state` flip commits inside that window, so afterwards the election
 /// predicate itself excludes them. `OFFSET` is deliberately absent: rows it
 /// skipped would still be locked.
+/// How many pending events make a session eligible on volume alone
+/// (`contracts/consolidation.md` §3).
+///
+/// The same number as the batch, which is not a coincidence: the threshold is
+/// "there is a full batch to do".
+pub const ELIGIBLE_PENDING_COUNT: i64 = BATCH_EVENTS;
+
+/// How old the oldest pending event must be for a still-open session to be
+/// eligible on age (`contracts/consolidation.md` §3).
+///
+/// This is the condition that makes a long-running session produce knowledge
+/// before it ends. Without it a session that stays open all afternoon and never
+/// reaches 200 events would consolidate nothing until it closed.
+pub const ELIGIBLE_AGE: Duration = Duration::from_secs(10 * 60);
+
 const ELECT: &str = "\
 UPDATE consolidation_session s
    SET state = 'claimed', claimed_by = $1,
-       claim_expires_at = now() + make_interval(secs => $2)
+       claim_expires_at = now() + make_interval(secs => $2),
+       -- The latch, set on the first election and left alone afterwards.
+       -- `COALESCE` rather than `now()` so a generation that has already begun
+       -- keeps the moment it became eligible, which is what a report of
+       -- \"how long has this been consolidating\" needs.
+       eligible_since = COALESCE(s.eligible_since, now())
  WHERE (s.project_id, s.session_id) = (
-         SELECT project_id, session_id
-           FROM consolidation_session
-          WHERE state = 'pending'
-             OR (state = 'claimed' AND claim_expires_at < now())
-          ORDER BY oldest_enqueued_at
+         SELECT c.project_id, c.session_id
+           FROM consolidation_session c
+          WHERE (c.state = 'pending'
+                 OR (c.state = 'claimed' AND c.claim_expires_at < now()))
+            AND (
+                 -- Already latched: this generation began consolidating and
+                 -- stays eligible until its work is finished. This is what
+                 -- makes the tail of a partial batch re-electable at once
+                 -- rather than waiting for a threshold it can no longer meet
+                 -- (see section 3 of the consolidation contract).
+                 c.eligible_since IS NOT NULL
+                 -- The session has closed. Read from the server's own
+                 -- `sessions` row, which sync maintains; no new client
+                 -- assertion is introduced for this.
+                 OR EXISTS (SELECT 1 FROM sessions ss
+                             WHERE ss.id = c.session_id
+                               AND (ss.ended_at IS NOT NULL OR ss.status <> 'active'))
+                 -- A full batch has accumulated.
+                 OR (SELECT COUNT(*) FROM consolidation_work w
+                      WHERE w.project_id = c.project_id
+                        AND w.session_id = c.session_id
+                        AND w.state = 'pending'
+                        AND w.attempts < $4) >= $5
+                 -- The oldest pending event has waited long enough.
+                 OR c.oldest_enqueued_at <= now() - make_interval(secs => $6)
+                )
+          ORDER BY c.oldest_enqueued_at
           FOR UPDATE SKIP LOCKED
           LIMIT 1)
 RETURNING s.project_id, s.session_id";
@@ -202,6 +244,18 @@ UPDATE consolidation_session
                     THEN 'pending'
                     ELSE 'done'
                END,
+       -- The latch survives a partial batch and is dropped when the generation
+       -- finishes. That asymmetry is the whole mechanism: 205 events trigger at
+       -- 200, this pass takes 200, and the remaining five stay eligible because
+       -- the latch is still set — they do not have to satisfy a threshold they
+       -- can no longer reach. Once nothing is pending the generation is over,
+       -- and the next one must earn its own eligibility.
+       eligible_since = CASE WHEN EXISTS (SELECT 1 FROM consolidation_work
+                                           WHERE project_id = $1 AND session_id = $2
+                                             AND state = 'pending')
+                             THEN eligible_since
+                             ELSE NULL
+                        END,
        claimed_by = NULL, claim_expires_at = NULL
  WHERE project_id = $1 AND session_id = $2 AND claimed_by = $3";
 
@@ -313,6 +367,14 @@ impl Consolidator {
         let elected: Option<(Uuid, Uuid)> = sqlx::query_as(ELECT)
             .bind(&self.worker)
             .bind(CLAIM_LEASE.as_secs_f64())
+            // `$3` is unused by ELECT and kept only so the parameter numbering
+            // matches the rest of this module's statements, where `$3` is the
+            // attempt ceiling. Binding it here keeps the eligibility bounds at
+            // the same indices they have everywhere else.
+            .bind(MAX_ATTEMPTS)
+            .bind(MAX_ATTEMPTS)
+            .bind(ELIGIBLE_PENDING_COUNT)
+            .bind(ELIGIBLE_AGE.as_secs_f64())
             .fetch_optional(&mut *tx)
             .await?;
         let Some((project_id, session_id)) = elected else {

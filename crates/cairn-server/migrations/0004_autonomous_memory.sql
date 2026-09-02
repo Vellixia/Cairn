@@ -81,7 +81,32 @@ CREATE TABLE consolidation_session (
                        CHECK (state IN ('pending','claimed','done')),
   claimed_by         TEXT,
   claim_expires_at   TIMESTAMPTZ,
+  -- The oldest **pending** enqueue time for the current generation, which is
+  -- both the election order and the input to the age trigger.
+  --
+  -- Reset, not minimised, when a `done` session is re-opened. Keeping the old
+  -- value would carry completed work forward as the age of a new generation's
+  -- first event, so one fresh event in a long-lived session would be instantly
+  -- age-eligible on the strength of work consolidated a day ago. For a
+  -- generation still `pending` or `claimed` the true oldest is preserved,
+  -- because there the old value really is the age of work still waiting.
   oldest_enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- When this generation first became eligible; NULL until it does
+  -- (`contracts/consolidation.md` §3).
+  --
+  -- **A latch, and it has to be durable.** Eligibility is a threshold — 200
+  -- events, or ten minutes, or the session closing — and a threshold
+  -- re-evaluated on every election strands the tail of a batch: 205 events
+  -- trigger at 200, a pass takes 200, and the remaining five satisfy no trigger
+  -- of their own. Latching says "this generation has begun consolidating" and
+  -- keeps saying it until the generation's work is finished, which is what
+  -- makes the partial-batch re-election immediate.
+  --
+  -- Durable rather than in-memory because a restart must not lose it: an
+  -- in-memory latch would strand exactly the same five events across a
+  -- deployment. Cleared when the generation finishes, and cleared again on
+  -- re-open, because a new generation has met no threshold of its own.
+  eligible_since     TIMESTAMPTZ,
   PRIMARY KEY (project_id, session_id)
 );
 
@@ -89,6 +114,12 @@ CREATE TABLE consolidation_session (
 -- server whose history is mostly `done` does not pay for it on every claim.
 CREATE INDEX consolidation_session_elect
   ON consolidation_session (oldest_enqueued_at) WHERE state <> 'done';
+
+-- Election also asks "is this generation latched", and a latched session is the
+-- common case once a busy session is under way.
+CREATE INDEX consolidation_session_latched
+  ON consolidation_session (oldest_enqueued_at)
+  WHERE state <> 'done' AND eligible_since IS NOT NULL;
 
 -- The events themselves, queued for consolidation.
 --
@@ -555,14 +586,27 @@ CREATE TABLE capture_dispositions (
 -- replay: a retry that got a fresh record would be the duplicate the identity
 -- exists to prevent.
 CREATE TABLE applied_commands (
-    command_id UUID PRIMARY KEY,
-    -- The account that issued it. A command id is derived from a scope and an
-    -- ordinal, so two accounts could in principle derive the same one; this
-    -- records whose it was, and a mismatch is a fact worth being able to see
-    -- rather than a silent overwrite.
+    -- **The account is part of the identity, not an annotation on it.**
+    --
+    -- A `command_id` is UUIDv5 over a scope kind, a scope key and an ordinal
+    -- (`contracts/knowledge-commands.md` §4). The scope key of a sessionless
+    -- command is the *store's* `writer_id`, so two accounts on one machine
+    -- derive the same ids for their own first, second and third commands. With
+    -- `command_id` alone as the key, one account's first command would be
+    -- answered `duplicate` because another account had issued its own — the
+    -- second account's write would silently never happen, and it would read as
+    -- success.
+    --
+    -- `account_id` comes from the authenticated credential and never from the
+    -- request body (Principle XI).
     account_id UUID NOT NULL REFERENCES users(id),
+    command_id UUID NOT NULL,
+    -- What the original command produced, returned verbatim on a replay: a
+    -- retry that got a fresh record would be the duplicate the identity exists
+    -- to prevent.
     result_id  UUID NOT NULL,
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (account_id, command_id)
 );
 
 CREATE INDEX applied_commands_account ON applied_commands (account_id, applied_at DESC);

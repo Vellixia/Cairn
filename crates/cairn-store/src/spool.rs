@@ -879,6 +879,83 @@ pub async fn mark_event_failed(store: &Store, event_id: Uuid, error_kind: &str) 
     tx::commit(tx, "mark_event_failed").await
 }
 
+/// How long a deferred row waits before it is probed again.
+///
+/// A flat interval, not the exponential backoff a transient failure gets, and
+/// the difference follows from what is being waited for. A transient failure
+/// may clear in a second, so the wait starts short and grows. A capability
+/// appears when somebody upgrades a server, which will not happen sooner
+/// because Cairn asked twice — so probing fast buys nothing, and probing at the
+/// ceiling forever is the bounded traffic FR-788 wants.
+pub const DEFERRAL_PROBE_SECONDS: i64 = BACKOFF_CEILING_SECONDS;
+
+/// The `last_error_kind` a deferred row carries while it waits.
+pub const DEFERRED_AWAITING_CAPABILITY: &str = "awaiting_capability";
+
+/// The server cannot hold this **yet**. Retryable, and it costs nothing.
+///
+/// ## Why this is not `mark_event_failed`
+///
+/// It was, and that was the defect. `attempts` increments when a row is
+/// claimed, so routing a deferral through the failure path spent an attempt on
+/// every probe — and a store talking to an old server for long enough would
+/// drive an upgradeable row to `retry_exhausted` and declare it permanently
+/// undeliverable. The row would be terminal because the *server* was old, which
+/// is precisely the outcome FR-775's "refuse in a way the client can recognise
+/// and defer" exists to avoid.
+///
+/// So the claim's increment is **refunded**. The same reasoning
+/// [`crate::outbox::mark_retryable`] gives for not counting a released claim:
+/// `attempts` is a count of futile retries, and a deferral was not one — the
+/// server was asked a question it cannot answer yet, and answered honestly.
+///
+/// The identity does not change. `event_id` was fixed when the row was spooled
+/// and is derived from the session and its ordinal, so however long a row waits
+/// for an upgrade, the event that eventually lands is the same event and lands
+/// exactly once (FR-770).
+pub async fn mark_event_deferred(store: &Store, event_id: Uuid, reason: &str) -> Result<()> {
+    let next = chrono::Utc::now() + chrono::Duration::seconds(DEFERRAL_PROBE_SECONDS);
+    let updated = sqlx::query(
+        "UPDATE event_spool
+            SET state = 'pending', claimed_at = NULL, next_attempt_at = ?2,
+                last_error_kind = ?3,
+                attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END
+          WHERE event_id = ?1",
+    )
+    .bind(event_id.to_string())
+    .bind(rows::ts_text(next))
+    .bind(reason)
+    .execute(store.pool())
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(StoreError::NotFound(format!("spooled event {event_id}")));
+    }
+    Ok(())
+}
+
+/// The same, for a command. See [`mark_event_deferred`].
+pub async fn mark_command_deferred(store: &Store, command_id: Uuid, reason: &str) -> Result<()> {
+    let next = chrono::Utc::now() + chrono::Duration::seconds(DEFERRAL_PROBE_SECONDS);
+    let updated = sqlx::query(
+        "UPDATE command_spool
+            SET state = 'pending', claimed_at = NULL, next_attempt_at = ?2,
+                last_error_kind = ?3,
+                attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END
+          WHERE command_id = ?1",
+    )
+    .bind(command_id.to_string())
+    .bind(rows::ts_text(next))
+    .bind(reason)
+    .execute(store.pool())
+    .await?;
+    if updated.rows_affected() == 0 {
+        return Err(StoreError::NotFound(format!(
+            "spooled command {command_id}"
+        )));
+    }
+    Ok(())
+}
+
 /// The server rejected it. Permanent, and visible (FR-772, FR-784).
 ///
 /// `next_attempt_at` is cleared rather than pushed out, because a refused row
@@ -968,6 +1045,11 @@ pub struct SpoolBreakdown {
     /// Attempted, failed transiently, parked until `next_attempt_at`.
     /// Something is wrong and Cairn is still trying.
     pub retrying: i64,
+    /// Waiting for a capability the server does not have yet. Retryable and
+    /// spending no attempt budget, so this number can sit still for a long time
+    /// with nothing wrong — and it is separate from `retrying` because "the
+    /// server is old" and "the server is failing" call for different actions.
+    pub deferred: i64,
     /// Terminal: the server refused it permanently, or it ran out of its
     /// attempt budget. Cairn has stopped trying and is saying so.
     pub terminal: i64,
@@ -1104,6 +1186,16 @@ async fn breakdown(
         &stale_before,
     )
     .await?;
+    let deferred = count(
+        &mut conn,
+        &format!(
+            "SELECT COUNT(*) FROM {table}
+              WHERE state = 'pending' AND last_error_kind = '{DEFERRED_AWAITING_CAPABILITY}'"
+        ),
+        &now,
+        &stale_before,
+    )
+    .await?;
     let terminal = count(
         &mut conn,
         &format!("SELECT COUNT(*) FROM {table} WHERE state = 'refused'"),
@@ -1156,6 +1248,7 @@ async fn breakdown(
         waiting,
         in_flight,
         retrying,
+        deferred,
         terminal,
         terminal_retry_exhausted,
         bytes,

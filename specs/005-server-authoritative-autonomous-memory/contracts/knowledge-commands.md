@@ -174,6 +174,55 @@ alongside `event_spool` and using the same claim protocol:
   command_seq)` from a durable counter, exactly as event identity works (`safe-events.md` §4).
   Replay is therefore idempotent: the server answers `duplicate` and applies nothing twice.
 
+### 4.2 The delivery envelope
+
+A queued command is delivered to **one** route, `POST /api/commands`, which dispatches
+internally to the same handlers §3's paths call. There is one implementation of each command's
+semantics; this is a second way in, not a second copy.
+
+```json
+{ "command_id": "…", "kind": "remember", "project_id": "…", "target_id": null,
+  "payload": { "type": "decision", "scope": "project", "content": "…" } }
+```
+
+One route rather than thirteen because a queued command has to carry four things at once, and
+the per-command paths can express only the last two: its deterministic `command_id`, its kind,
+whatever it targets, and its intent. A drain posting the payload alone to a path derived from
+the kind loses the identity, so nothing is idempotent — and if any of those paths is not served,
+nothing is delivered either.
+
+`project_id` is present for the commands that create within a project, `target_id` for those
+that act on an existing record, and neither for the account-scoped domains. Both are optional
+rather than one widened field that would mean different things per kind.
+
+**Nothing in the envelope decides who is acting.** `account_id`, `owner_user_id`,
+`proposed_by_user_id` and every verification authority are refused in the payload exactly as on
+a direct call, and the account comes from the credential (Principle XI). A daemon cannot invent
+authorization information because there is no field for it.
+
+**Duplicate identity is `(account_id, command_id)`**, with the account taken from
+authentication. A `command_id` is derived from a scope key that, for a sessionless command, is
+the *store's* `writer_id` — so two accounts on one machine derive the same ids for their own
+first commands, and keying on `command_id` alone would answer the second account `duplicate`
+about a write that never happened. The reservation is taken inside the effect's transaction, so
+two concurrent deliveries produce exactly one effect and a rolled-back effect leaves the command
+replayable (`data-model.md` §6, `applied_commands`).
+
+### 4.3 A kind this build cannot carry yet
+
+A command whose owning phase has not shipped answers `409 unsupported_kind` — the same code the
+capability mechanism already uses for an entity type a server cannot hold yet (FR-774, FR-775),
+so the drain needs no second rule. Deliberately not `404`, which the drain reads as permanent
+and would mark the row terminal, losing the user's instruction.
+
+A deferral **does not spend the row's attempt budget**. `attempts` increments when a row is
+claimed, so routing a deferral through the failure path would let an arbitrarily long
+old-server period drive an upgradeable row to `retry_exhausted` — terminal because the *server*
+was old, which is exactly what "refuse in a way the client can recognise and defer" exists to
+prevent. The claim's increment is refunded, the row returns to `pending` with a flat probe
+interval rather than an exponential one, and its identity is unchanged, so the event that
+eventually lands is the same event and lands exactly once.
+
 ### 4.1 Sessionless commands
 
 Not every command has a session. The CLI permits memory and task operations outside one, and

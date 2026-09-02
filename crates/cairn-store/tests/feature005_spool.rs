@@ -1516,6 +1516,7 @@ async fn health_distinguishes_waiting_retrying_in_flight_and_terminal() {
     assert_eq!(b.waiting, 1, "{b:?}");
     assert_eq!(b.in_flight, 1, "{b:?}");
     assert_eq!(b.retrying, 1, "{b:?}");
+    assert_eq!(b.deferred, 0, "{b:?}");
     assert_eq!(b.terminal, 1, "{b:?}");
     assert!(!b.saturated);
 }
@@ -1919,5 +1920,171 @@ async fn one_accounts_drain_does_not_terminalize_anothers_rows() {
         state_of(&f, other).await,
         "pending",
         "one account's drain refused another account's row"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Deferral does not spend the attempt budget (FR-775, FR-784)
+// ---------------------------------------------------------------------------
+
+/// An old server cannot turn an upgradeable row into a permanent refusal.
+///
+/// This is the falsification the defect deserves. Deferral used to route
+/// through `mark_event_failed`, and `attempts` increments at claim time — so
+/// every probe of a server that could not hold the row yet spent one, and a
+/// long enough old-server period drove the row to `retry_exhausted`. The row
+/// would have been terminal because the *server* was old, which is the outcome
+/// FR-775's "refuse in a way the client can recognise and defer" exists to
+/// prevent.
+#[tokio::test]
+async fn deferring_a_row_forever_never_exhausts_it() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    // Far more drain cycles than the budget allows, each one a claim followed
+    // by a deferral — the shape of a daemon talking to an old server for weeks.
+    let cycles = spool::MAX_DELIVERY_ATTEMPTS + 50;
+    for cycle in 0..cycles {
+        expire_backoff(&f, id).await;
+        let claimed = spool::claim_events(&f.store, account, 10)
+            .await
+            .expect("claim");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "the row stopped being claimable on cycle {cycle}; attempts is {}",
+            attempts_of(&f, id).await
+        );
+        spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+            .await
+            .expect("defer");
+    }
+
+    assert_eq!(
+        attempts_of(&f, id).await,
+        0,
+        "deferral spent attempt budget; after {cycles} cycles the row is on its way to \
+         being refused for the server's age"
+    );
+    assert_eq!(state_of(&f, id).await, "pending");
+    assert_eq!(
+        error_kind_of(&f, id).await.as_deref(),
+        Some(spool::DEFERRED_AWAITING_CAPABILITY)
+    );
+
+    // The capability appears. The same row, with the same identity it was
+    // spooled with, is delivered exactly once.
+    expire_backoff(&f, id).await;
+    let claimed = spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert_eq!(claimed.len(), 1);
+    assert_eq!(
+        claimed[0].event_id, id,
+        "the identity changed while the row waited, so the server would see a new event"
+    );
+    spool::mark_event_delivered(&f.store, id)
+        .await
+        .expect("delivered");
+    assert_eq!(state_of(&f, id).await, "delivered");
+
+    expire_backoff(&f, id).await;
+    assert!(
+        spool::claim_events(&f.store, account, 10)
+            .await
+            .expect("claim")
+            .is_empty(),
+        "a delivered row was claimed again, so it would be delivered twice"
+    );
+}
+
+/// A transient failure still spends the budget, so the two paths have not been
+/// collapsed in the other direction.
+#[tokio::test]
+async fn a_transient_failure_still_costs_an_attempt() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    assert_eq!(attempts_of(&f, id).await, 1);
+    spool::mark_event_failed(&f.store, id, "connection_refused")
+        .await
+        .expect("failed");
+    assert_eq!(
+        attempts_of(&f, id).await,
+        1,
+        "a transient failure refunded its attempt, so retry is unbounded again"
+    );
+    assert_eq!(state_of(&f, id).await, "failed");
+}
+
+/// A permanent refusal is still terminal, and a deferral is not.
+#[tokio::test]
+async fn a_deferred_row_and_a_refused_row_are_reported_apart() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let waiting = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+    let refused = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
+
+    spool::claim_events(&f.store, account, 10)
+        .await
+        .expect("claim");
+    spool::mark_event_deferred(&f.store, waiting, spool::DEFERRED_AWAITING_CAPABILITY)
+        .await
+        .expect("defer");
+    spool::mark_event_refused(&f.store, refused, "repo_file_absolute")
+        .await
+        .expect("refuse");
+
+    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
+        .await
+        .expect("breakdown");
+    // "The server is old" and "the server is failing" call for different
+    // actions, so they are different numbers.
+    assert_eq!(b.deferred, 1, "{b:?}");
+    assert_eq!(b.terminal, 1, "{b:?}");
+    assert_eq!(b.undelivered(), 1, "a deferred row is still queued work");
+}
+
+/// A deferred command behaves the same way.
+#[tokio::test]
+async fn deferring_a_command_forever_never_exhausts_it() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let id = spool_command(
+        &f,
+        CommandScope::Session(f.session_id),
+        account,
+        CommandKind::PatternPromote,
+    )
+    .await;
+
+    for _ in 0..(spool::MAX_DELIVERY_ATTEMPTS + 10) {
+        sqlx::query("UPDATE command_spool SET next_attempt_at = ?1 WHERE command_id = ?2")
+            .bind((Utc::now() - chrono::Duration::hours(1)).to_rfc3339())
+            .bind(id.to_string())
+            .execute(f.store.pool())
+            .await
+            .expect("expire backoff");
+        let claimed = spool::claim_commands(&f.store, account, 10)
+            .await
+            .expect("claim");
+        assert_eq!(
+            claimed.len(),
+            1,
+            "a deferred command stopped being claimable"
+        );
+        spool::mark_command_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
+            .await
+            .expect("defer");
+    }
+    assert_eq!(command_state(&f, id).await, "pending");
+    assert_eq!(
+        command_error_kind(&f, id).await.as_deref(),
+        Some(spool::DEFERRED_AWAITING_CAPABILITY)
     );
 }

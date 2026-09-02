@@ -164,18 +164,37 @@ The repository root is machine configuration and is never transmitted (FR-753).
 | Events per ingest batch | 256 |
 | Ingest request body | 1 MiB |
 | Spool capacity | 50,000 rows **or** 256 MiB, whichever binds first |
-
-The capacity bound governs **both** spools. Their *terminal behaviour* differs and the difference is not
-optional: `event_spool` sheds its oldest capture-class rows first and only saturates once nothing
-capture-class remains, while `command_spool` has no shedding step at all — it carries no `boundary_class`
-column because no explicit command is droppable, so reaching the bound refuses new commands visibly and
-discards nothing already queued (FR-785, `contracts/knowledge-commands.md` §4: *"not silently dropped"*).
-The byte bound is measured on `event_spool` only; a command payload is intent, not a serialized event.
+| Spool delivery attempts | 2,016 per row |
+| Spool retry backoff | 1 s doubling to a 5 min ceiling |
+| Spool deferral probe interval | 5 min, flat |
 | Consolidation batch | 200 events |
+| Consolidation eligibility — volume | 200 pending events |
+| Consolidation eligibility — age | oldest pending event 10 min old |
+| Consolidation lease | 5 min |
+| Consolidation attempts | 5 per event |
 | Extraction input | 200 events / 256 KiB |
 | `topic_key` | 128 chars, 6 segments (unchanged) |
 | `value_key` | 64 chars (unchanged) |
 | Retrieval trace items | 200 per trace |
+
+**Spool capacity governs both spools, and their terminal behaviour differs.**
+`event_spool` sheds its oldest capture-class rows first and saturates only once nothing
+capture-class remains; `command_spool` has no shedding step at all — it carries no
+`boundary_class` column because no explicit command is droppable — so reaching the bound
+refuses new commands visibly and discards nothing already queued (FR-785,
+`contracts/knowledge-commands.md` §4: *"not silently dropped"*). The byte bound is measured
+on `event_spool` only: a command payload is intent, not a serialized event.
+
+**The attempt budget is counted in attempts, not elapsed time.** Nothing reads a clock to
+expire a spooled row, so a device that was switched off has spent none of its budget — being
+off is not the server refusing (FR-783). 2,016 attempts is what a week of continuous,
+actively-retried failure approximates once backoff reaches its ceiling; that is the reasoning
+behind the size, not a guarantee about wall-clock time.
+
+**A deferral spends no budget at all** and probes at a flat interval rather than an
+exponential one. A capability appears when somebody upgrades a server, which will not happen
+sooner because Cairn asked twice, so the claim's attempt increment is refunded and the row
+waits (`contracts/knowledge-commands.md` §4.3).
 
 ---
 
@@ -353,7 +372,24 @@ CREATE TABLE consolidation_session (
                        CHECK (state IN ('pending','claimed','done')),
   claimed_by         TEXT,
   claim_expires_at   TIMESTAMPTZ,
+  -- The oldest **pending** enqueue time for the current generation. Reset, not
+  -- minimised, when a `done` session is re-opened: keeping the old value would
+  -- carry completed work forward as the age of a new generation's first event,
+  -- so one fresh event in a long-lived session would be instantly age-eligible
+  -- on the strength of work consolidated a day ago. For a generation still
+  -- `pending` or `claimed` the true oldest is preserved (§3).
   oldest_enqueued_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  -- When this generation first became eligible; NULL until it does.
+  --
+  -- The durable eligibility **latch** (`contracts/consolidation.md` §3).
+  -- Eligibility is a threshold, and a threshold re-evaluated on every election
+  -- strands the tail of a batch: 205 events trigger at 200, a pass takes 200,
+  -- and the remaining five satisfy no trigger of their own. The latch says
+  -- "this generation has begun" and keeps saying it until the generation's work
+  -- is finished. Durable rather than in-memory so a restart does not strand the
+  -- same five. Cleared when the generation finishes, and cleared again on
+  -- re-open, because a new generation has met no threshold of its own.
+  eligible_since     TIMESTAMPTZ,
   PRIMARY KEY (project_id, session_id)
 );
 CREATE INDEX consolidation_session_elect
@@ -602,6 +638,38 @@ CREATE TABLE capture_dispositions (        -- funnel source; client-reported + s
   kind TEXT NOT NULL, disposition TEXT NOT NULL, day DATE NOT NULL,
   n BIGINT NOT NULL DEFAULT 0,
   PRIMARY KEY (project_id, account_id, agent, kind, disposition, day)
+);
+
+-- Server-side command idempotency (`contracts/knowledge-commands.md` §4).
+--
+-- The contract requires replay to be idempotent — "the server answers
+-- `duplicate` and applies nothing twice" — and gives the client a deterministic
+-- `command_id`. This is where the server remembers having seen one. Most
+-- commands would not strictly need it: a create derives its record id, a
+-- relation upserts on its natural key, a pin is the same state written twice.
+-- `reinforce` cannot be made idempotent by shape alone, because incrementing a
+-- counter twice is visibly different from once. One mechanism serves all of
+-- them, because "which commands are idempotent and by what means" acquires a
+-- wrong answer as soon as it has three.
+--
+-- **The account is part of the identity, not an annotation on it.** A
+-- `command_id` is UUIDv5 over a scope kind, a scope key and an ordinal, and a
+-- sessionless command's scope key is the *store's* `writer_id` — so two
+-- accounts on one machine derive the same ids for their own first commands.
+-- Keyed on `command_id` alone, the second account's write would be answered
+-- `duplicate` and silently never happen. `account_id` comes from the
+-- authenticated credential and never from the request body.
+--
+-- The reservation is taken with `INSERT … ON CONFLICT DO NOTHING RETURNING`
+-- **inside the effect's own transaction and before it**, so PostgreSQL's unique
+-- index is the arbiter rather than a read-then-write race, and a rolled-back
+-- effect takes its reservation with it — leaving the command replayable.
+CREATE TABLE applied_commands (
+  account_id UUID NOT NULL REFERENCES users(id),
+  command_id UUID NOT NULL,
+  result_id  UUID NOT NULL,   -- returned verbatim on a replay
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (account_id, command_id)
 );
 
 CREATE TABLE server_authority (

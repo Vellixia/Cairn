@@ -540,14 +540,41 @@ async fn persist(
         return Ok(EventOutcome::duplicate(event.event_id));
     }
 
+    // The conflict action is spelled out because all three obvious choices are
+    // wrong in a different way.
+    //
+    // Leaving `state` alone strands every event arriving after a session was
+    // marked `done`: the partial index excludes `done`, so the session is never
+    // elected again. Setting it to `pending` unconditionally clobbers a live
+    // lease and lets a second worker elect a session mid-pass. The `CASE`
+    // re-opens only a finished one.
+    //
+    // `oldest_enqueued_at` is **reset** on re-open and minimised otherwise.
+    // Minimising unconditionally carries yesterday's completed work forward as
+    // the age of today's first event, so a single fresh event in a long-lived
+    // session is instantly age-eligible on the strength of work that was
+    // consolidated a day ago — a new generation inheriting the old one's clock.
+    // For a generation still `pending` or `claimed` the old value really is the
+    // age of work still waiting, so there it is preserved.
+    //
+    // `eligible_since` is cleared on re-open for the same reason: a new
+    // generation has met no threshold of its own, and inheriting the latch
+    // would make it eligible before it had.
     sqlx::query(
         "INSERT INTO consolidation_session (project_id, session_id, state, oldest_enqueued_at)
          VALUES ($1, $2, 'pending', now())
          ON CONFLICT (project_id, session_id) DO UPDATE
             SET state = CASE WHEN consolidation_session.state = 'done' THEN 'pending'
                              ELSE consolidation_session.state END,
-                oldest_enqueued_at = LEAST(consolidation_session.oldest_enqueued_at,
-                                           EXCLUDED.oldest_enqueued_at)",
+                oldest_enqueued_at =
+                    CASE WHEN consolidation_session.state = 'done'
+                         THEN EXCLUDED.oldest_enqueued_at
+                         ELSE LEAST(consolidation_session.oldest_enqueued_at,
+                                    EXCLUDED.oldest_enqueued_at) END,
+                eligible_since =
+                    CASE WHEN consolidation_session.state = 'done'
+                         THEN NULL
+                         ELSE consolidation_session.eligible_since END",
     )
     .bind(binding.project_id)
     .bind(event.session_id)

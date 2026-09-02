@@ -160,6 +160,14 @@ struct Seed<'a> {
     claimed_by: &'a str,
     expires: &'a str,
     enqueued: &'a str,
+    /// Whether the underlying session has closed.
+    ///
+    /// Defaults to closed, because these tests are about the *claim*
+    /// machinery — leases, attempts, ordering — and a session that is not
+    /// eligible is never claimed at all, so an open one would make every test
+    /// here a test of eligibility instead. Eligibility has its own tests
+    /// below, and they set this deliberately.
+    closed: bool,
 }
 
 impl Default for Seed<'_> {
@@ -172,8 +180,23 @@ impl Default for Seed<'_> {
             claimed_by: "NULL",
             expires: "NULL",
             enqueued: "now()",
+            closed: true,
         }
     }
+}
+
+/// Close a session on the server's own row, which is where the election reads
+/// it from.
+///
+/// A closed session is eligible immediately (`contracts/consolidation.md` §3),
+/// and it is the cheapest of the three triggers to establish — the alternatives
+/// are two hundred events or a ten-minute wait. Tests that are about claim
+/// machinery rather than about eligibility use this so that eligibility is not
+/// silently the thing they are measuring.
+fn close_session(pg: &Pg, session: Uuid) {
+    pg.server.execute(&format!(
+        "UPDATE sessions SET status = 'completed', ended_at = now() WHERE id = '{session}'"
+    ));
 }
 
 fn seed_session(pg: &Pg, who: &Account, session: Uuid, seed: Seed) {
@@ -184,7 +207,11 @@ fn seed_session(pg: &Pg, who: &Account, session: Uuid, seed: Seed) {
         claimed_by,
         expires,
         enqueued,
+        closed,
     } = seed;
+    if closed {
+        close_session(pg, session);
+    }
     pg.server.execute(&format!(
         "INSERT INTO consolidation_session
              (project_id, session_id, state, claimed_by, claim_expires_at, oldest_enqueued_at)
@@ -436,6 +463,7 @@ fn an_expired_lease_is_reclaimed_and_the_crashed_attempt_is_not_refunded() {
 fn an_event_that_has_failed_fewer_than_five_times_is_tried_again() {
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
+    close_session(&pg, session);
     // Four events, one per already-spent attempt count. Failures 1–4 retry, so
     // every one of these is claimable and every one gains exactly one attempt.
     for (i, spent) in [1, 2, 3, 4].into_iter().enumerate() {
@@ -538,6 +566,7 @@ fn a_fifth_attempt_that_never_reported_becomes_failed_and_never_starts_a_sixth()
 fn work_that_has_exhausted_its_attempts_never_strands_its_session() {
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
+    close_session(&pg, session);
     // One event still has attempts left; the other has none. The session must
     // finish `done` rather than staying electable forever on the strength of a
     // row nothing will ever run again.
@@ -697,6 +726,10 @@ fn ingest(pg: &Pg, who: &Account, event: Value) {
 fn an_event_arriving_for_a_finished_session_re_opens_it_and_it_is_consolidated_again() {
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
+    // Closed, so its work is eligible at once. A late event arriving for a
+    // session that has already ended is exactly the case re-opening exists
+    // for.
+    close_session(&pg, session);
     // Through the real boundary: re-opening is what the ingest upsert's `CASE`
     // does, and asserting it against a hand-written `UPDATE` here would prove
     // only that this file can write SQL.
@@ -750,4 +783,360 @@ fn a_server_whose_pool_share_would_be_zero_does_not_consolidate_at_all() {
     settle("a server with a share does consolidate it", || {
         drained(&pg, session)
     });
+}
+
+// ---------------------------------------------------------------------------
+// Eligibility (contracts/consolidation.md §3)
+// ---------------------------------------------------------------------------
+
+/// A session is elected only once one of the three triggers has fired.
+///
+/// The worker used to elect every pending session the instant an event arrived,
+/// which is not what §3 says and is worse than it sounds: a session that fires
+/// a tool call every few seconds would be consolidated a few seconds at a time,
+/// and every one of those passes reads a fragment of a sequence the extraction
+/// rules only mean anything over.
+fn seed_open(pg: &Pg, who: &Account, session: Uuid, events: i64, enqueued: &str) {
+    seed_session(
+        pg,
+        who,
+        session,
+        Seed {
+            events,
+            enqueued,
+            closed: false,
+            ..Seed::default()
+        },
+    );
+}
+
+/// Wait long enough to be confident a worker had its chance and declined.
+///
+/// A negative assertion needs a positive control, or it passes on a worker that
+/// was simply never running. Every test below that asserts "not claimed" also
+/// makes a second session eligible and waits for *that* one to drain, so the
+/// worker is demonstrably alive and choosing.
+fn eligible_control(pg: &Pg, who: &Account) -> Uuid {
+    let control = pg.session_for(who);
+    close_session(pg, control);
+    seed_session(
+        pg,
+        who,
+        control,
+        Seed {
+            closed: true,
+            ..Seed::default()
+        },
+    );
+    control
+}
+
+#[test]
+fn one_recent_event_in_an_open_session_is_not_eligible() {
+    let pg = pg!();
+    let quiet = pg.session_for(&pg.owner);
+    seed_open(&pg, &pg.owner, quiet, 1, "now()");
+    let control = eligible_control(&pg, &pg.owner);
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the control session drains", || drained(&pg, control));
+
+    assert_eq!(
+        pending(&pg, quiet),
+        1,
+        "a single recent event in an open session was consolidated on its own"
+    );
+    assert_eq!(session_state(&pg, quiet), "pending");
+    assert_eq!(runs(&pg, quiet), 0);
+}
+
+#[test]
+fn one_event_short_of_a_full_batch_is_not_eligible() {
+    let pg = pg!();
+    let almost = pg.session_for(&pg.owner);
+    seed_open(&pg, &pg.owner, almost, 199, "now()");
+    let control = eligible_control(&pg, &pg.owner);
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the control session drains", || drained(&pg, control));
+
+    assert_eq!(
+        pending(&pg, almost),
+        199,
+        "199 recent events in an open session were consolidated"
+    );
+}
+
+#[test]
+fn a_full_batch_of_recent_events_is_eligible() {
+    let pg = pg!();
+    let full = pg.session_for(&pg.owner);
+    seed_open(&pg, &pg.owner, full, 200, "now()");
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("a full batch is consolidated", || drained(&pg, full));
+    assert_eq!(runs(&pg, full), 1);
+}
+
+#[test]
+fn one_event_older_than_ten_minutes_is_eligible() {
+    let pg = pg!();
+    let aged = pg.session_for(&pg.owner);
+    // The condition that makes a long-running session produce knowledge before
+    // it ends. Without it an afternoon-long session that never reaches 200
+    // events consolidates nothing until it closes.
+    seed_open(&pg, &pg.owner, aged, 1, "now() - interval '11 minutes'");
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the aged event is consolidated", || drained(&pg, aged));
+    assert_eq!(runs(&pg, aged), 1);
+}
+
+#[test]
+fn one_event_just_inside_ten_minutes_is_not_yet_eligible() {
+    let pg = pg!();
+    let nearly = pg.session_for(&pg.owner);
+    seed_open(&pg, &pg.owner, nearly, 1, "now() - interval '9 minutes'");
+    let control = eligible_control(&pg, &pg.owner);
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the control session drains", || drained(&pg, control));
+    assert_eq!(
+        pending(&pg, nearly),
+        1,
+        "an event nine minutes old was treated as ten"
+    );
+}
+
+#[test]
+fn a_closed_session_is_eligible_immediately_with_one_event() {
+    let pg = pg!();
+    let ended = pg.session_for(&pg.owner);
+    close_session(&pg, ended);
+    seed_session(
+        &pg,
+        &pg.owner,
+        ended,
+        Seed {
+            closed: true,
+            ..Seed::default()
+        },
+    );
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("a closed session drains at once", || drained(&pg, ended));
+    assert_eq!(runs(&pg, ended), 1);
+}
+
+#[test]
+fn the_tail_of_a_partial_batch_is_re_elected_without_waiting_for_a_new_trigger() {
+    let pg = pg!();
+    let busy = pg.session_for(&pg.owner);
+    // 205 events in an **open** session. The volume trigger fires at 200, the
+    // first pass takes 200, and the remaining five satisfy no trigger of their
+    // own — not 200, not ten minutes old, not a closed session. Without the
+    // latch they would wait for a ten-minute clock that had just been reset,
+    // which is a stall the five-minute lease does not even explain.
+    seed_open(&pg, &pg.owner, busy, 205, "now()");
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("both passes complete", || drained(&pg, busy));
+
+    // Two passes, not one, and the second was elected immediately rather than
+    // after any wait — `settle`'s own deadline is what proves that.
+    assert_eq!(
+        runs(&pg, busy),
+        2,
+        "the tail was not processed in a second pass"
+    );
+    assert_eq!(session_state(&pg, busy), "done");
+    // And the latch is released once the generation is finished, so the next
+    // generation has to earn its own eligibility.
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_session
+              WHERE session_id = '{busy}' AND eligible_since IS NULL"
+        )),
+        1,
+        "the latch outlived the generation that set it"
+    );
+}
+
+#[test]
+fn a_latched_generation_is_elected_by_a_worker_that_never_saw_it_latched() {
+    let pg = pg!();
+    let busy = pg.session_for(&pg.owner);
+    // An open session, five recent events: it satisfies **no** live trigger —
+    // not 200, not ten minutes, not closed. The only thing that can make it
+    // electable is the latch.
+    seed_open(&pg, &pg.owner, busy, 5, "now()");
+    // Latched by a previous generation's pass, which then died. This is the
+    // state a restart leaves behind, seeded directly rather than raced for: an
+    // in-memory latch would simply not exist here, and the tail would strand.
+    pg.server.execute(&format!(
+        "UPDATE consolidation_session SET eligible_since = now() - interval '1 minute'
+          WHERE session_id = '{busy}'"
+    ));
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the latched tail drains", || drained(&pg, busy));
+    assert_eq!(runs(&pg, busy), 1);
+    // And the latch is released now the generation is finished, so the next one
+    // must earn its own eligibility.
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_session
+              WHERE session_id = '{busy}' AND eligible_since IS NULL"
+        )),
+        1,
+        "the latch outlived the generation that set it"
+    );
+}
+
+#[test]
+fn an_unlatched_generation_with_the_same_shape_is_left_alone() {
+    let pg = pg!();
+    // The control for the test above, and the reason it is not vacuous: the
+    // identical session without the latch must not be elected.
+    let quiet = pg.session_for(&pg.owner);
+    seed_open(&pg, &pg.owner, quiet, 5, "now()");
+    let control = eligible_control(&pg, &pg.owner);
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the control session drains", || drained(&pg, control));
+    assert_eq!(
+        pending(&pg, quiet),
+        5,
+        "an unlatched session satisfying no trigger was consolidated"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Re-opened generations (defect 5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_re_opened_session_does_not_inherit_the_old_generations_age() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+
+    // A finished generation whose work was enqueued yesterday.
+    seed_session(
+        &pg,
+        &pg.owner,
+        session,
+        Seed {
+            state: "done",
+            enqueued: "now() - interval '1 day'",
+            closed: false,
+            ..Seed::default()
+        },
+    );
+    pg.server.execute(&format!(
+        "UPDATE consolidation_work SET state = 'done' WHERE session_id = '{session}'"
+    ));
+
+    // One fresh event arrives through the real boundary.
+    ingest(
+        &pg,
+        &pg.owner,
+        file_event(session, 9, "crates/cairnd/src/main.rs"),
+    );
+
+    assert_eq!(
+        session_state(&pg, session),
+        "pending",
+        "the session did not re-open"
+    );
+    // The new generation's clock starts now. Carrying yesterday forward would
+    // make this single fresh event instantly age-eligible on the strength of
+    // work that was consolidated a day ago.
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_session
+              WHERE session_id = '{session}'
+                AND oldest_enqueued_at > now() - interval '1 minute'"
+        )),
+        1,
+        "the re-opened generation inherited the old generation's oldest enqueue time"
+    );
+    // And the latch was cleared, so the new generation has met no threshold.
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_session
+              WHERE session_id = '{session}' AND eligible_since IS NULL"
+        )),
+        1
+    );
+
+    let control = eligible_control(&pg, &pg.owner);
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the control session drains", || drained(&pg, control));
+    assert_eq!(
+        pending(&pg, session),
+        1,
+        "the re-opened session was consolidated on yesterday's clock"
+    );
+}
+
+#[test]
+fn a_re_opened_generation_becomes_eligible_once_it_is_itself_old_enough() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+    seed_session(
+        &pg,
+        &pg.owner,
+        session,
+        Seed {
+            state: "done",
+            enqueued: "now() - interval '1 day'",
+            closed: false,
+            ..Seed::default()
+        },
+    );
+    pg.server.execute(&format!(
+        "UPDATE consolidation_work SET state = 'done' WHERE session_id = '{session}'"
+    ));
+    ingest(
+        &pg,
+        &pg.owner,
+        file_event(session, 9, "crates/cairnd/src/main.rs"),
+    );
+
+    // Age the new generation past ten minutes on its own account.
+    pg.server.execute(&format!(
+        "UPDATE consolidation_session
+            SET oldest_enqueued_at = now() - interval '11 minutes'
+          WHERE session_id = '{session}'"
+    ));
+
+    let _worker = Worker::start(&pg.server.database_url);
+    settle("the aged re-opened generation drains", || {
+        pending(&pg, session) == 0
+    });
+}
+
+#[test]
+fn a_pending_generation_keeps_the_true_oldest_enqueue_time() {
+    let pg = pg!();
+    let session = pg.session_for(&pg.owner);
+    // Still `pending`, so the old value really is the age of work that is
+    // still waiting and must be preserved rather than reset.
+    ingest(&pg, &pg.owner, file_event(session, 1, "a.rs"));
+    pg.server.execute(&format!(
+        "UPDATE consolidation_session
+            SET oldest_enqueued_at = now() - interval '11 minutes'
+          WHERE session_id = '{session}'"
+    ));
+    ingest(&pg, &pg.owner, file_event(session, 2, "b.rs"));
+
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_session
+              WHERE session_id = '{session}'
+                AND oldest_enqueued_at < now() - interval '10 minutes'"
+        )),
+        1,
+        "a second event reset the clock of work that was already waiting"
+    );
 }

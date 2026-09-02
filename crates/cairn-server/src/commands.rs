@@ -234,51 +234,96 @@ async fn all_identities_for(
 // Idempotency
 // ---------------------------------------------------------------------------
 
-/// Look up what a previously-applied command produced.
+/// Reserve a command's identity, atomically, inside the effect's transaction.
 ///
-/// A command may carry its own `command_id`, derived on the client from a
-/// durable ordinal, so a retry is recognisably the same command rather than a
-/// second one. The record it produced is returned unchanged: a retry that got a
-/// fresh record would be exactly the duplicate the identity exists to prevent
-/// (FR-786 applied to commands).
+/// ## The race this replaces
 ///
-/// A command with no `command_id` is not idempotent, and that is the caller's
-/// choice: an interactive `cairn remember` typed twice is two claims.
-async fn already_applied(pool: &PgPool, command_id: Option<Uuid>) -> ApiResult<Option<Uuid>> {
-    let Some(command_id) = command_id else {
-        return Ok(None);
-    };
-    let found: Option<(Uuid,)> =
-        sqlx::query_as("SELECT result_id FROM applied_commands WHERE command_id = $1")
-            .bind(command_id)
-            .fetch_optional(pool)
-            .await?;
-    Ok(found.map(|(id,)| id))
+/// The first version read `applied_commands`, performed the effect, then
+/// inserted the receipt with `ON CONFLICT DO NOTHING`. Two concurrent
+/// deliveries of one command both read "not applied", both performed the
+/// effect, and one lost the receipt insert — so the reinforcement counted
+/// twice and one caller was told `duplicate` about a write that had happened
+/// anyway. A check-then-act across a network boundary is not an idempotency
+/// gate; it is a window.
+///
+/// ## The gate
+///
+/// The reservation is an `INSERT … ON CONFLICT DO NOTHING RETURNING`, taken in
+/// the **same transaction** as the effect and **before** it. PostgreSQL's
+/// unique index is the arbiter: exactly one concurrent inserter gets a row
+/// back, and the other gets none and knows it lost. Because the reservation and
+/// the effect share a transaction, a rollback takes both — so a failed command
+/// leaves no reservation behind and a later retry is still executable.
+///
+/// Every command's result id is known before its effect runs — a create mints
+/// its id, and the record-addressed commands are named by theirs — so
+/// reserving first costs nothing.
+///
+/// `Reserved` means "you own this command, do the work". `AlreadyApplied`
+/// carries what the original produced, returned verbatim: a retry that got a
+/// fresh record would be the duplicate the identity exists to prevent.
+enum Reservation {
+    Reserved,
+    AlreadyApplied { result_id: Uuid },
 }
 
-/// Record that a command was applied, so a retry finds it.
+/// Take the reservation, or discover somebody already has.
 ///
-/// `ON CONFLICT DO NOTHING`: two concurrent deliveries of one command race
-/// here, and the loser reads the winner's result rather than overwriting it.
-async fn record_applied(
+/// Keyed `(account_id, command_id)`, and the account half is load-bearing. A
+/// `command_id` is UUIDv5 over a scope kind, a scope key and an ordinal, and a
+/// sessionless command's scope key is the *store's* `writer_id` — so two
+/// accounts on one machine derive identical ids for their own first commands.
+/// Keyed on `command_id` alone, the second account's write would be answered
+/// `duplicate` and silently never happen.
+async fn reserve_command(
     tx: &mut sqlx::PgConnection,
-    command_id: Option<Uuid>,
     account_id: Uuid,
+    command_id: Option<Uuid>,
     result_id: Uuid,
-) -> ApiResult<()> {
+) -> ApiResult<Reservation> {
+    // A command with no id is not idempotent, and that is the caller's choice:
+    // an interactive `cairn remember` typed twice is two claims. Every *queued*
+    // command carries one, because the spool derives it.
     let Some(command_id) = command_id else {
-        return Ok(());
+        return Ok(Reservation::Reserved);
     };
-    sqlx::query(
-        "INSERT INTO applied_commands (command_id, account_id, result_id)
-         VALUES ($1, $2, $3) ON CONFLICT (command_id) DO NOTHING",
+    let reserved: Option<(Uuid,)> = sqlx::query_as(
+        "INSERT INTO applied_commands (account_id, command_id, result_id)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (account_id, command_id) DO NOTHING
+         RETURNING result_id",
     )
-    .bind(command_id)
     .bind(account_id)
+    .bind(command_id)
     .bind(result_id)
-    .execute(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    Ok(())
+    if reserved.is_some() {
+        return Ok(Reservation::Reserved);
+    }
+    // Lost the race, or this is a replay. Either way the answer is what the
+    // winner produced — scoped to this account, so a different account's
+    // identical id is invisible here.
+    let existing: (Uuid,) = sqlx::query_as(
+        "SELECT result_id FROM applied_commands
+          WHERE account_id = $1 AND command_id = $2",
+    )
+    .bind(account_id)
+    .bind(command_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(Reservation::AlreadyApplied {
+        result_id: existing.0,
+    })
+}
+
+/// The reply a duplicate gets.
+///
+/// A success, and it says so. A replayed `forget` answering `404` would tell a
+/// client its instruction had failed when it had already been carried out, and
+/// the client's only correct response to that is to retry forever.
+fn duplicate_reply(result_id: Uuid) -> Json<Value> {
+    Json(json!({ "id": result_id, "applied": "duplicate" }))
 }
 
 /// Resolve the project a record belongs to, for a caller entitled to know.
@@ -332,10 +377,6 @@ pub async fn create_memory(
     let reader = ReaderContext::load(&state.pool, &user).await?;
 
     let command_id = optional_uuid(&body, "command_id")?;
-    if let Some(existing) = already_applied(&state.pool, command_id).await? {
-        return Ok(Json(json!({ "id": existing, "applied": "duplicate" })));
-    }
-
     let kind = knowledge_type(&body)?;
     let scope = memory_scope(&body)?;
     let content = text(&body, "content")?;
@@ -350,6 +391,11 @@ pub async fn create_memory(
 
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { result_id } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
+        return Ok(duplicate_reply(result_id));
+    }
     // `origin_kind = 'explicit'`: this memory exists because somebody asked for
     // it, which is exactly the distinction FR-816 asks the column to carry.
     sqlx::query(
@@ -369,7 +415,6 @@ pub async fn create_memory(
     .bind(value_key)
     .execute(&mut *tx)
     .await?;
-    record_applied(&mut tx, command_id, user.id, id).await?;
     tx.commit().await?;
 
     Ok(Json(json!({ "id": id, "applied": "accepted" })))
@@ -387,10 +432,6 @@ pub async fn supersede_memory(
     let project_id = project_of_record(&state.pool, "memories", id, user.id).await?;
 
     let command_id = optional_uuid(&body, "command_id")?;
-    if let Some(existing) = already_applied(&state.pool, command_id).await? {
-        return Ok(Json(json!({ "id": existing, "applied": "duplicate" })));
-    }
-
     let kind = knowledge_type(&body)?;
     let scope = memory_scope(&body)?;
     let content = text(&body, "content")?;
@@ -401,6 +442,11 @@ pub async fn supersede_memory(
     // them would leave either a superseded record pointing at nothing, or a
     // correction nobody can find from the thing it corrects.
     let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { result_id } =
+        reserve_command(&mut tx, user.id, command_id, replacement).await?
+    {
+        return Ok(duplicate_reply(result_id));
+    }
     sqlx::query(
         "INSERT INTO memories
              (id, project_id, type, scope, scope_key, content, origin_session_id, origin_kind)
@@ -430,7 +476,6 @@ pub async fn supersede_memory(
     if updated.rows_affected() == 0 {
         return Err(ApiError::invalid("that memory is already superseded"));
     }
-    record_applied(&mut tx, command_id, user.id, replacement).await?;
     tx.commit().await?;
 
     Ok(Json(json!({ "id": replacement, "supersedes": id })))
@@ -447,20 +492,22 @@ pub async fn reinforce_memory(
     project_of_record(&state.pool, "memories", id, user.id).await?;
 
     let command_id = optional_uuid(&body, "command_id")?;
-    if already_applied(&state.pool, command_id).await?.is_some() {
-        // The count is the server's, and a replayed command must not inflate
-        // it. Returning the current value keeps the retry indistinguishable
-        // from the original for the caller.
+    let mut tx = state.pool.begin().await?;
+    // The gate is taken before the increment and in the same transaction, so
+    // two concurrent deliveries of one command cannot both increment. The
+    // count is the server's and a replay must not inflate it.
+    if let Reservation::AlreadyApplied { .. } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
         let count: i32 =
             sqlx::query_scalar("SELECT reinforcement_count FROM memories WHERE id = $1")
                 .bind(id)
-                .fetch_one(&state.pool)
+                .fetch_one(&mut *tx)
                 .await?;
+        tx.commit().await?;
         return Ok(Json(json!({ "id": id, "reinforcement_count": count,
                                "applied": "duplicate" })));
     }
-
-    let mut tx = state.pool.begin().await?;
     let count: i32 = sqlx::query_scalar(
         "UPDATE memories SET reinforcement_count = reinforcement_count + 1, updated_at = now()
           WHERE id = $1 RETURNING reinforcement_count",
@@ -468,7 +515,6 @@ pub async fn reinforce_memory(
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
-    record_applied(&mut tx, command_id, user.id, id).await?;
     tx.commit().await?;
 
     Ok(Json(json!({ "id": id, "reinforcement_count": count })))
@@ -483,12 +529,29 @@ pub async fn pin_memory(
     reject_server_owned(&body)?;
     project_of_record(&state.pool, "memories", id, user.id).await?;
 
+    let command_id = optional_uuid(&body, "command_id")?;
     let pinned = body.get("pinned").and_then(Value::as_bool).unwrap_or(true);
+
+    // Gated even though setting `pinned = true` twice is the same state.
+    // Protocol idempotency is not the same property as state idempotency: the
+    // caller needs to be told "already done" rather than "done again", and a
+    // shape-idempotent command that skipped the gate would be the one command
+    // whose replay behaviour differed from every other.
+    let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { .. } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
+        tx.commit().await?;
+        return Ok(Json(
+            json!({ "id": id, "pinned": pinned, "applied": "duplicate" }),
+        ));
+    }
     sqlx::query("UPDATE memories SET pinned = $2, updated_at = now() WHERE id = $1")
         .bind(id)
         .bind(pinned)
-        .execute(&state.pool)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
     Ok(Json(json!({ "id": id, "pinned": pinned })))
 }
 
@@ -500,6 +563,7 @@ pub async fn record_relation(
 ) -> ApiResult<Json<Value>> {
     reject_server_owned(&body)?;
     require_member(&state.pool, project_id, user.id).await?;
+    let reader = ReaderContext::load(&state.pool, &user).await?;
 
     let from = optional_uuid(&body, "from_memory_id")?
         .ok_or_else(|| ApiError::invalid("`from_memory_id` is required"))?;
@@ -525,20 +589,85 @@ pub async fn record_relation(
     // `conflicts_with` has no direction, so its endpoints are ordered before
     // the write and two machines detecting one conflict produce one row.
     let (from, to) = cairn_core::knowledge::normalize_relation_endpoints(kind, from, to);
+    let command_id = optional_uuid(&body, "command_id")?;
+    // `decided_by_session` is NOT NULL: a relation records *who decided*, and
+    // the column has no room for "nobody". A command issued outside any session
+    // carries the nil UUID, which is the honest answer the local store already
+    // gives for a CLI invocation with no author to name — rather than an
+    // invented session, which would leave a second active session in the
+    // worktree and make the next agent's context ambiguous.
+    let session = attributed_session(&state.pool, &reader, project_id, &body).await?;
+
+    let mut tx = state.pool.begin().await?;
+    // A relation has no id of its own — it *is* the triple — so the gate is
+    // keyed on the `from` endpoint as its result. That is enough: the answer a
+    // replay needs is "already done", not a new identifier.
+    //
+    // Gated even though the insert is `ON CONFLICT DO NOTHING` and therefore
+    // idempotent in shape. Protocol idempotency is a different property: the
+    // caller has to be told "already done" rather than "done again", and a
+    // command that skipped the gate would be the one whose replay behaviour a
+    // client had to know about separately.
+    if let Reservation::AlreadyApplied { .. } =
+        reserve_command(&mut tx, user.id, command_id, from).await?
+    {
+        tx.commit().await?;
+        return Ok(Json(json!({
+            "from": from, "to": to, "kind": kind.as_str(), "applied": "duplicate"
+        })));
+    }
     sqlx::query(
-        "INSERT INTO memory_relations (project_id, from_memory_id, to_memory_id, kind, basis)
-         VALUES ($1, $2, $3, $4, 'explicit')
+        "INSERT INTO memory_relations
+             (project_id, from_memory_id, to_memory_id, kind, decided_by_session, basis)
+         VALUES ($1, $2, $3, $4, $5, 'explicit')
          ON CONFLICT DO NOTHING",
     )
     .bind(project_id)
     .bind(from)
     .bind(to)
     .bind(kind.as_str())
-    .execute(&state.pool)
+    .bind(session)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(Json(
         json!({ "from": from, "to": to, "kind": kind.as_str() }),
     ))
+}
+
+/// Forget a project memory.
+///
+/// The tombstone shape project knowledge already had, reached as a command so
+/// that a queued `forget` has somewhere to land. Gated for the same reason
+/// `forget_personal` is: a replay must be told the instruction succeeded.
+pub async fn forget_memory(
+    State(state): State<AppState>,
+    user: CurrentUser,
+    Path(id): Path<Uuid>,
+    Json(body): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    reject_server_owned(&body)?;
+    project_of_record(&state.pool, "memories", id, user.id).await?;
+    let command_id = optional_uuid(&body, "command_id")?;
+
+    let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { .. } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
+        tx.commit().await?;
+        return Ok(Json(
+            json!({ "id": id, "forgotten": true, "applied": "duplicate" }),
+        ));
+    }
+    sqlx::query(
+        "UPDATE memories SET deleted_at = now(), content = '', updated_at = now()
+          WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(Json(json!({ "id": id, "forgotten": true })))
 }
 
 // ---------------------------------------------------------------------------
@@ -554,10 +683,6 @@ pub async fn create_personal(
     let reader = ReaderContext::load(&state.pool, &user).await?;
 
     let command_id = optional_uuid(&body, "command_id")?;
-    if let Some(existing) = already_applied(&state.pool, command_id).await? {
-        return Ok(Json(json!({ "id": existing, "applied": "duplicate" })));
-    }
-
     let kind = knowledge_type(&body)?;
     let content = text(&body, "content")?;
     // Personal knowledge is project-independent and must not name a project
@@ -575,6 +700,11 @@ pub async fn create_personal(
 
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { result_id } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
+        return Ok(duplicate_reply(result_id));
+    }
     sqlx::query(
         "INSERT INTO personal_knowledge
              (id, owner_user_id, knowledge_type, content, topic_key, value_key,
@@ -591,7 +721,6 @@ pub async fn create_personal(
     .bind(id.as_u128() as i64 & 0x7fff_ffff)
     .execute(&mut *tx)
     .await?;
-    record_applied(&mut tx, command_id, user.id, id).await?;
     tx.commit().await?;
 
     Ok(Json(json!({ "id": id, "owner_user_id": user.id })))
@@ -614,6 +743,23 @@ pub async fn forget_personal(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     reject_server_owned(&body)?;
+    let command_id = optional_uuid(&body, "command_id")?;
+
+    // **Forget is the command where a lost response hurts most**, and the
+    // reason it must be gated even though the effect is idempotent in shape.
+    // Without the gate a replay finds `forgotten_at` already set, affects zero
+    // rows, and answers `404` — telling the client its instruction failed when
+    // it had already been carried out. The client's only correct response to
+    // that is to retry forever.
+    let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { .. } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
+        tx.commit().await?;
+        return Ok(Json(
+            json!({ "id": id, "forgotten": true, "applied": "duplicate" }),
+        ));
+    }
     let forgotten = sqlx::query(
         "UPDATE personal_knowledge
             SET forgotten_at = now(), content = ''
@@ -621,11 +767,15 @@ pub async fn forget_personal(
     )
     .bind(id)
     .bind(user.id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
     if forgotten.rows_affected() == 0 {
+        // Rolled back, so the reservation goes with it and a later retry is
+        // still executable. A caller who never owned this record must not have
+        // its command id burned by the attempt.
         return Err(ApiError::not_found("no such personal record"));
     }
+    tx.commit().await?;
     Ok(Json(json!({ "id": id, "forgotten": true })))
 }
 
@@ -648,10 +798,6 @@ pub async fn propose_team(
     let reader = ReaderContext::load(&state.pool, &user).await?;
 
     let command_id = optional_uuid(&body, "command_id")?;
-    if let Some(existing) = already_applied(&state.pool, command_id).await? {
-        return Ok(Json(json!({ "id": existing, "applied": "duplicate" })));
-    }
-
     let kind = knowledge_type(&body)?;
     let content = text(&body, "content")?;
     let identities = all_identities_for(&state.pool, &reader).await?;
@@ -666,6 +812,11 @@ pub async fn propose_team(
 
     let id = Uuid::now_v7();
     let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { result_id } =
+        reserve_command(&mut tx, user.id, command_id, id).await?
+    {
+        return Ok(duplicate_reply(result_id));
+    }
     sqlx::query(
         "INSERT INTO team_knowledge
              (id, knowledge_type, content, topic_key, value_key, state,
@@ -682,7 +833,6 @@ pub async fn propose_team(
     .bind(id.as_u128() as i64 & 0x7fff_ffff)
     .execute(&mut *tx)
     .await?;
-    record_applied(&mut tx, command_id, user.id, id).await?;
     tx.commit().await?;
 
     Ok(Json(json!({ "id": id, "state": "proposed",
@@ -814,6 +964,134 @@ pub async fn forget_pattern(
         return Err(ApiError::not_found("no such pattern"));
     }
     Ok(Json(json!({ "pattern_id": pattern_id, "forgotten": true })))
+}
+
+// ---------------------------------------------------------------------------
+// The command envelope (T026, T039)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/commands` — one authenticated route for every queued command.
+///
+/// ## Why one route and not thirteen
+///
+/// A queued command has to reach the server carrying four things the
+/// per-command routes cannot all express: its deterministic `command_id`, its
+/// kind, whatever target it names, and its intent payload. The first version of
+/// the drain posted `payload` alone to a path derived from the kind, which lost
+/// the `command_id` — so nothing was idempotent — and named several paths the
+/// server does not serve, so nothing was delivered either. Two bugs with one
+/// cause: the wire form did not carry the command.
+///
+/// So the envelope carries all four, and dispatches **internally to the same
+/// handlers** the direct routes call. There is one implementation of each
+/// command's semantics; this is a second way in, not a second copy.
+///
+/// ## What the envelope may not carry
+///
+/// Nothing that decides who is acting. `account_id`, `owner_user_id`,
+/// `proposed_by_user_id` and every verification authority are refused by
+/// `reject_server_owned` on the payload, exactly as on a direct call, and the
+/// account comes from the credential (Principle XI). The daemon cannot invent
+/// authorization information because there is no field in which to put it.
+///
+/// ## Kinds this route does not carry yet
+///
+/// Pattern promotion and forgetting, and the two verification report shapes,
+/// answer a **deferral** rather than a success: their owning phases are US3
+/// (T083+) and US5 (T106+). A deferral is a recognisable, non-terminal refusal
+/// — the drain leaves the row durable and retries after an upgrade — so a
+/// queued pattern promotion waits rather than being silently marked delivered.
+/// That distinction is the whole point of answering deferral instead of `404`.
+pub async fn command_envelope(
+    state: State<AppState>,
+    user: CurrentUser,
+    Json(envelope): Json<Value>,
+) -> ApiResult<Json<Value>> {
+    // Screened here as well as in each handler, and both are needed. The
+    // envelope is checked **whole**, so a field named at envelope level rather
+    // than inside `payload` is refused too — the folding below only carries
+    // `payload` in, so an envelope-level `account_id` would otherwise be
+    // ignored rather than refused. And a deferred kind never reaches a handler
+    // at all, so without this its payload would go unscreened entirely.
+    reject_server_owned(&envelope)?;
+
+    let kind = envelope
+        .get("kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid("`kind` is required"))?
+        .to_string();
+    let command_id = optional_uuid(&envelope, "command_id")?
+        .ok_or_else(|| ApiError::invalid("a queued command must carry its `command_id`"))?;
+
+    // The payload is the intent, and the envelope's own fields are folded into
+    // it so each handler sees exactly the body it would have received directly.
+    // `command_id` is added here rather than trusted from the payload, so an
+    // envelope cannot name one id and carry another.
+    let mut body = envelope
+        .get("payload")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !body.is_object() {
+        return Err(ApiError::invalid("`payload` must be an object"));
+    }
+    body["command_id"] = json!(command_id);
+
+    let project_id = optional_uuid(&envelope, "project_id")?;
+    let target_id = optional_uuid(&envelope, "target_id")?;
+    let needs_project = || {
+        project_id
+            .ok_or_else(|| ApiError::invalid(format!("`{kind}` needs the project it applies to")))
+    };
+    let needs_target = || {
+        target_id
+            .ok_or_else(|| ApiError::invalid(format!("`{kind}` needs the record it applies to")))
+    };
+
+    match kind.as_str() {
+        "remember" => create_memory(state, user, Path(needs_project()?), Json(body)).await,
+        "supersede" => supersede_memory(state, user, Path(needs_target()?), Json(body)).await,
+        "reinforce" => reinforce_memory(state, user, Path(needs_target()?), Json(body)).await,
+        "pin" => pin_memory(state, user, Path(needs_target()?), Json(body)).await,
+        "forget" => forget_memory(state, user, Path(needs_target()?), Json(body)).await,
+        "relate" => record_relation(state, user, Path(needs_project()?), Json(body)).await,
+        "personal_create" => create_personal(state, user, Json(body)).await,
+        "personal_forget" => forget_personal(state, user, Path(needs_target()?), Json(body)).await,
+        "team_propose" => propose_team(state, user, Json(body)).await,
+
+        // Deferred, not refused. The row stays durable and the drain retries it
+        // after the phase that owns it ships, which is what stops a queued
+        // pattern promotion being marked delivered by a server that cannot
+        // store one.
+        "pattern_promote" | "pattern_forget" => Err(deferred(&kind, "US3 (T083 onward)")),
+        "verification_run" | "verification_attestation" => {
+            Err(deferred(&kind, "US5 (T106 onward)"))
+        }
+
+        other => Err(ApiError::invalid(format!(
+            "`{other}` is not a command kind"
+        ))),
+    }
+}
+
+/// A command kind this build understands but cannot yet carry out.
+///
+/// `409` with the code the drain recognises as a deferral. Deliberately not
+/// `404`, which the drain would read as a permanent refusal and mark the row
+/// terminal — losing the user's instruction — and deliberately not `501`, which
+/// says nothing about whether retrying will ever help.
+///
+/// The same shape and the same code the capability mechanism already uses for
+/// an entity type a server cannot hold yet (FR-774, FR-775), so the drain needs
+/// no second rule.
+fn deferred(kind: &str, owner: &str) -> ApiError {
+    ApiError::new(
+        axum::http::StatusCode::CONFLICT,
+        "unsupported_kind",
+        format!(
+            "`{kind}` is not carried by this build yet; it is owned by {owner}. \
+             The command remains queued and will be retried."
+        ),
+    )
 }
 
 #[cfg(test)]

@@ -41,6 +41,35 @@ A session's events are consolidated when either: the session has closed, or 200 
 accumulated, or the oldest pending event is older than 10 minutes. The last condition is what
 makes a long-running session produce knowledge before it ends.
 
+**"Closed" is read from the server's own `sessions` row** — `ended_at IS NOT NULL` or a status
+other than `active` — which synchronization already maintains. No new client assertion is
+introduced for it, and in particular a client cannot declare a session closed in order to have
+it consolidated sooner.
+
+A **generation** is one round of a session's pending work: everything enqueued for that session
+between the moment it was last `done` and the moment it becomes `done` again. A long-lived
+session has many, and they are the unit eligibility and age are measured over — which is what
+makes it wrong for one generation to inherit another's clock or another's latch.
+
+**Eligibility latches for the duration of a generation.** Once a trigger fires,
+`consolidation_session.eligible_since` is set and the session stays eligible until its pending
+work is exhausted. Without the latch the tail of a partial batch strands: 205 events trigger at
+200, the pass takes 200, and the remaining five satisfy no trigger of their own — not 200, not
+ten minutes on a clock that has just been reset, and not a closed session. They would wait for a
+condition they can no longer meet, which is a stall the five-minute lease does not even explain.
+
+The latch is a column rather than worker state because a restart must not lose it; an in-memory
+latch strands exactly the same five events across a deployment. It is cleared when the
+generation finishes, and cleared again when a `done` session re-opens, because a new generation
+has met no threshold of its own.
+
+**A re-opened session's clock starts over.** `oldest_enqueued_at` is *reset* to the new work's
+enqueue time on `done → pending`, not minimised against the old value. Minimising would carry
+completed work forward as the age of the new generation's first event, so a single fresh event
+in a long-lived session would be instantly age-eligible on the strength of work consolidated a
+day ago. For a generation still `pending` or `claimed` the existing value is the true age of
+work still waiting, and is preserved.
+
 ## 4. Claim, reclaim, restart
 
 A `GROUP BY` cannot be combined with a locking clause. PostgreSQL rejects it outright —
