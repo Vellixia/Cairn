@@ -281,6 +281,42 @@ async fn record_applied(
     Ok(())
 }
 
+/// Resolve the project a record belongs to, for a caller entitled to know.
+///
+/// **One answer for "no such record" and "not your project".** A route that
+/// answered `404` for a missing memory and `403` for a colleague's would let
+/// anyone with an account enumerate memory ids across the whole server, one
+/// guess at a time — the same oracle the ingest boundary closes for sessions
+/// (FR-894a).
+///
+/// The asymmetry with the project-addressed routes is deliberate rather than an
+/// inconsistency. There the caller *named* the project, so `403` discloses
+/// nothing they did not already supply; here the caller names a record, and
+/// whether it exists is precisely what must not leak.
+async fn project_of_record(pool: &PgPool, table: &str, id: Uuid, user_id: Uuid) -> ApiResult<Uuid> {
+    let hidden = || ApiError::not_found("no such memory");
+    let sql = match table {
+        "memories" => "SELECT project_id FROM memories WHERE id = $1",
+        other => return Err(ApiError::internal(format!("unknown record table {other}"))),
+    };
+    let project_id: Uuid = sqlx::query_scalar(sql)
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(hidden)?;
+    // Membership decided here rather than by `require_member`, because its
+    // refusal is a `403` and that is the distinguishable answer this function
+    // exists to avoid.
+    let member: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT user_id FROM project_members WHERE project_id = $1 AND user_id = $2",
+    )
+    .bind(project_id)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    member.map(|_| project_id).ok_or_else(hidden)
+}
+
 // ---------------------------------------------------------------------------
 // Project memory
 // ---------------------------------------------------------------------------
@@ -348,12 +384,7 @@ pub async fn supersede_memory(
     reject_server_owned(&body)?;
     let reader = ReaderContext::load(&state.pool, &user).await?;
 
-    let project_id: Uuid = sqlx::query_scalar("SELECT project_id FROM memories WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("no such memory"))?;
-    require_member(&state.pool, project_id, user.id).await?;
+    let project_id = project_of_record(&state.pool, "memories", id, user.id).await?;
 
     let command_id = optional_uuid(&body, "command_id")?;
     if let Some(existing) = already_applied(&state.pool, command_id).await? {
@@ -412,12 +443,8 @@ pub async fn reinforce_memory(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     reject_server_owned(&body)?;
-    let project_id: Uuid = sqlx::query_scalar("SELECT project_id FROM memories WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("no such memory"))?;
-    require_member(&state.pool, project_id, user.id).await?;
+    // The guard is the point; the project id itself is not needed again.
+    project_of_record(&state.pool, "memories", id, user.id).await?;
 
     let command_id = optional_uuid(&body, "command_id")?;
     if already_applied(&state.pool, command_id).await?.is_some() {
@@ -454,12 +481,7 @@ pub async fn pin_memory(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     reject_server_owned(&body)?;
-    let project_id: Uuid = sqlx::query_scalar("SELECT project_id FROM memories WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
-        .ok_or_else(|| ApiError::not_found("no such memory"))?;
-    require_member(&state.pool, project_id, user.id).await?;
+    project_of_record(&state.pool, "memories", id, user.id).await?;
 
     let pinned = body.get("pinned").and_then(Value::as_bool).unwrap_or(true);
     sqlx::query("UPDATE memories SET pinned = $2, updated_at = now() WHERE id = $1")

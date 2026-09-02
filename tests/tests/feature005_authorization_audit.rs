@@ -1,0 +1,335 @@
+//! Every Feature 005 project-scoped route is guarded, enumerated rather than
+//! sampled (T038, FR-769, FR-894a).
+//!
+//! An audit, not a set of examples. A test naming three routes keeps passing
+//! the day a fourth is added without a guard, which is exactly the failure this
+//! file exists to prevent — so the sweeps below walk the route set as it
+//! actually is and fail on anything in it that is not guarded.
+//!
+//! Two properties, and they are different:
+//!
+//! - **Membership decides access.** A project-scoped route answers a non-member
+//!   with a refusal, never an empty result (FR-057), and never with data.
+//! - **Identity is never read from the body** (FR-769). A route that accepted
+//!   `owner_user_id` or `origin_session_id` from a request could attribute one
+//!   account's work to another, which is the same class of defect as a
+//!   falsified session on an event.
+//!
+//! The static half of the audit reads `api.rs` and `commands.rs`. That is
+//! deliberate: a live probe can only test the routes it thinks of, and the
+//! point is to catch the one nobody thought of.
+
+use cairn_e2e::feature005::Pg;
+use cairn_e2e::post_status_bearer;
+use serde_json::{json, Value};
+use uuid::Uuid;
+
+macro_rules! pg {
+    () => {
+        match Pg::start() {
+            Some(pg) => pg,
+            None => {
+                eprintln!("skipped: CAIRN_TEST_DATABASE_URL is not set");
+                return;
+            }
+        }
+    };
+}
+
+fn source(relative: &str) -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root")
+        .join(relative);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// The static inventory
+// ---------------------------------------------------------------------------
+
+/// Every Feature 005 handler that reaches project data, and which of the two
+/// membership guards it must carry.
+///
+/// A handler reaches project data one of two ways, and the two need *different*
+/// guards because they disclose different things:
+///
+/// - **The path names the project.** `require_member`, whose refusal is `403`.
+///   The caller supplied the project id, so refusing by name discloses nothing
+///   they did not already know.
+/// - **The path names a record.** `project_of_record`, whose refusal is `404`
+///   and is identical to the answer a missing record gets. Here whether the
+///   record exists is precisely what must not leak, so a `403` would be an
+///   enumeration oracle (FR-894a).
+///
+/// Getting these the wrong way round is not a style question: this audit caught
+/// exactly that, with `reinforce` answering `403` for a memory that existed and
+/// `404` for one that did not.
+const PROJECT_ADDRESSED: &[&str] = &["create_memory", "record_relation"];
+const RECORD_ADDRESSED: &[&str] = &["supersede_memory", "reinforce_memory", "pin_memory"];
+
+/// One handler's body, up to the next top-level item.
+fn handler_body<'a>(source: &'a str, handler: &str) -> &'a str {
+    let start = source
+        .find(&format!("pub async fn {handler}("))
+        .unwrap_or_else(|| panic!("{handler} is gone; update this audit deliberately"));
+    let body = &source[start..];
+    let end = body[1..]
+        .find("\npub async fn ")
+        .map(|i| i + 1)
+        .unwrap_or(body.len());
+    &body[..end]
+}
+
+#[test]
+fn every_handler_reaching_project_data_carries_the_guard_that_fits_it() {
+    let commands = source("crates/cairn-server/src/commands.rs");
+    for handler in PROJECT_ADDRESSED {
+        assert!(
+            handler_body(&commands, handler).contains("require_member("),
+            "{handler} names its project and does not call require_member"
+        );
+    }
+    for handler in RECORD_ADDRESSED {
+        let body = handler_body(&commands, handler);
+        assert!(
+            body.contains("project_of_record("),
+            "{handler} names a record and does not resolve membership through \
+             project_of_record"
+        );
+        assert!(
+            !body.contains("require_member("),
+            "{handler} names a record but refuses with require_member's 403, \
+             which tells a non-member whether the record exists"
+        );
+    }
+}
+
+#[test]
+fn the_record_addressed_guard_gives_one_answer_to_both_questions() {
+    // The static half of the oracle check: `project_of_record` must not have
+    // two exits a caller could tell apart.
+    let commands = source("crates/cairn-server/src/commands.rs");
+    let body = {
+        let start = commands
+            .find("async fn project_of_record(")
+            .expect("project_of_record is gone");
+        let rest = &commands[start..];
+        let end = rest[1..]
+            .find("\n// ----")
+            .map(|i| i + 1)
+            .unwrap_or(rest.len());
+        &rest[..end]
+    };
+    assert!(
+        body.contains("let hidden = ||"),
+        "project_of_record no longer funnels its refusals through one answer"
+    );
+    assert!(
+        !body.contains("forbidden("),
+        "project_of_record has a distinguishable refusal, which is an \
+         enumeration oracle"
+    );
+}
+
+#[test]
+fn no_feature_005_handler_reads_identity_out_of_a_request_body() {
+    // The guard is `reject_server_owned`, which refuses the credential-bound
+    // names outright. This asserts every command handler runs it — a handler
+    // that skipped it could accept `owner_user_id` and write on somebody
+    // else's behalf.
+    let commands = source("crates/cairn-server/src/commands.rs");
+    let handlers: Vec<&str> = commands
+        .match_indices("pub async fn ")
+        .map(|(i, _)| {
+            let rest = &commands[i + "pub async fn ".len()..];
+            &rest[..rest.find('(').unwrap_or(0)]
+        })
+        .collect();
+    assert!(handlers.len() >= 9, "the audit found no handlers to check");
+
+    for handler in handlers {
+        let start = commands.find(&format!("pub async fn {handler}(")).unwrap();
+        let body = &commands[start..];
+        let end = body[1..]
+            .find("\npub async fn ")
+            .map(|i| i + 1)
+            .unwrap_or(body.len());
+        let body = &body[..end];
+        assert!(
+            body.contains("reject_server_owned(&body)"),
+            "{handler} does not screen its body for server-owned fields, so a \
+             client could name an identity or assert a derived value"
+        );
+    }
+}
+
+#[test]
+fn the_ingest_route_binds_its_project_from_the_session_and_not_the_body() {
+    let events = source("crates/cairn-server/src/events.rs");
+    // The project is derived from the verified session. A route that took it
+    // from the body would let a caller attribute events to a project they have
+    // nothing to do with (FR-769).
+    assert!(
+        events.contains("bind_session("),
+        "ingest no longer derives its project from a verified session"
+    );
+    assert!(
+        !events.contains("body.project_id") && !events.contains("\"project_id\""),
+        "ingest reads a project id out of the request body"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The live sweep
+// ---------------------------------------------------------------------------
+
+/// Every Feature 005 project-scoped endpoint, with a body that would succeed
+/// for a member.
+fn project_scoped_requests(pg: &Pg, memory: Uuid) -> Vec<(String, Value)> {
+    vec![
+        (
+            format!("/api/projects/{}/memories", pg.project),
+            json!({ "type": "fact", "scope": "project", "content": "x" }),
+        ),
+        (
+            format!("/api/projects/{}/memory-relations", pg.project),
+            json!({ "from_memory_id": memory, "to_memory_id": memory, "kind": "reinforces" }),
+        ),
+        (
+            format!("/api/memories/{memory}/supersede"),
+            json!({ "type": "fact", "scope": "project", "content": "x" }),
+        ),
+        (format!("/api/memories/{memory}/reinforce"), json!({})),
+        (
+            format!("/api/memories/{memory}/pin"),
+            json!({ "pinned": true }),
+        ),
+        // A batch with a real event in it. An *empty* batch names no session,
+        // so there is nothing to authorize against and answering it 200 is
+        // correct — which makes it useless as a test of the guard.
+        (
+            "/api/events/batch".to_string(),
+            json!({ "contract_version": 1, "events": [session_event(pg)] }),
+        ),
+    ]
+}
+
+/// One legal event naming a session in the fixture project.
+fn session_event(pg: &Pg) -> Value {
+    let session = pg.session_for(&pg.owner);
+    json!({
+        "event_id": cairn_core::eventid::event_id(session, 1),
+        "contract_version": 1,
+        "kind": "file_read",
+        "agent": "claude_code",
+        "vendor_event": null,
+        "session_id": session,
+        "session_seq": 1,
+        "occurred_at": "2026-09-02T10:00:00Z",
+        "content": { "File": {
+            "repo_file": "a.rs", "repo_file_from": null,
+            "change_kind": null, "file_identity": "present"
+        }},
+    })
+}
+
+fn seed_memory(pg: &Pg) -> Uuid {
+    let id = Uuid::now_v7();
+    pg.server.execute(&format!(
+        "INSERT INTO memories (id, project_id, type, scope, scope_key, content,
+                               origin_session_id)
+         VALUES ('{id}', '{}', 'fact', 'project', '{}', 'a claim',
+                 '00000000-0000-0000-0000-000000000000')",
+        pg.project, pg.project
+    ));
+    id
+}
+
+#[test]
+fn a_non_member_is_refused_by_every_project_scoped_endpoint() {
+    let pg = pg!();
+    let memory = seed_memory(&pg);
+    for (path, body) in project_scoped_requests(&pg, memory) {
+        let code = post_status_bearer(&pg.server.base, &path, &body, &pg.outsider.token);
+        // 403 where the caller named the project — they already knew it, so a
+        // refusal discloses nothing. 404 where the caller named a *record* —
+        // there, whether it exists is precisely what must not leak, so the
+        // answer matches the one a missing record gets (FR-894a).
+        assert!(
+            code == 403 || code == 404,
+            "{path} answered a non-member {code}; a refusal is the only correct \
+             answer, and an empty result is not one (FR-057)"
+        );
+    }
+}
+
+#[test]
+fn an_unauthenticated_caller_is_refused_by_every_project_scoped_endpoint() {
+    let pg = pg!();
+    let memory = seed_memory(&pg);
+    for (path, body) in project_scoped_requests(&pg, memory) {
+        let code = post_status_bearer(&pg.server.base, &path, &body, "not-a-real-token");
+        assert_eq!(
+            code, 401,
+            "{path} answered an unauthenticated caller {code}"
+        );
+    }
+}
+
+#[test]
+fn a_non_member_learns_nothing_from_the_shape_of_the_refusal() {
+    let pg = pg!();
+    let real = seed_memory(&pg);
+    let imaginary = Uuid::now_v7();
+    // A different answer for a record that exists and one that does not would
+    // let anyone with an account enumerate record ids across the whole server,
+    // one guess at a time (FR-894a).
+    for path in ["reinforce", "pin"] {
+        let existing = post_status_bearer(
+            &pg.server.base,
+            &format!("/api/memories/{real}/{path}"),
+            &json!({}),
+            &pg.outsider.token,
+        );
+        let absent = post_status_bearer(
+            &pg.server.base,
+            &format!("/api/memories/{imaginary}/{path}"),
+            &json!({}),
+            &pg.outsider.token,
+        );
+        assert_eq!(
+            existing, absent,
+            "/{path} tells an outsider whether a memory exists: {existing} vs {absent}"
+        );
+    }
+}
+
+#[test]
+fn personal_and_team_routes_are_account_scoped_rather_than_project_scoped() {
+    let pg = pg!();
+    // These are project-independent, so `require_member` is the wrong guard for
+    // them and its absence is correct. What guards them is ownership, which is
+    // asserted in `feature005_commands.rs`; what is asserted here is that they
+    // are not silently reachable without authentication.
+    for (path, body) in [
+        (
+            "/api/personal/knowledge",
+            json!({ "knowledge_type": "fact", "content": "x" }),
+        ),
+        (
+            "/api/team/knowledge",
+            json!({ "knowledge_type": "fact", "content": "x" }),
+        ),
+        (
+            "/api/patterns",
+            json!({ "title": "t", "problem": "p", "root_cause": "r", "approach": "a" }),
+        ),
+    ] {
+        assert_eq!(
+            post_status_bearer(&pg.server.base, path, &body, "not-a-real-token"),
+            401,
+            "{path} is reachable without authentication"
+        );
+    }
+}

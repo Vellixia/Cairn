@@ -285,10 +285,15 @@ fn a_non_member_cannot_issue_any_project_command() {
         ),
     ];
     for (path, body) in cases {
-        assert_eq!(
-            status(&pg, &pg.outsider, &path, &body),
-            403,
-            "{path} was reachable by a non-member"
+        let code = status(&pg, &pg.outsider, &path, &body);
+        // A project-addressed route refuses with 403: the caller named the
+        // project, so saying "not yours" discloses nothing new. A
+        // record-addressed route refuses with 404, identical to the answer a
+        // missing record gets — there, whether the record exists is exactly
+        // what must not leak (FR-894a). Both are refusals; neither is data.
+        assert!(
+            code == 403 || code == 404,
+            "{path} answered a non-member {code}"
         );
     }
 }
