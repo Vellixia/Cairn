@@ -9,6 +9,7 @@
 //! [`global::merge_synced_team`] let a pulled row replace what is stored,
 //! including a content correction and a state that did not advance (FR-712a).
 
+pub mod authority;
 pub mod constraints;
 pub mod continuity;
 pub mod criteria;

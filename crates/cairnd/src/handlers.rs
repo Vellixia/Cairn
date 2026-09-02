@@ -2439,6 +2439,98 @@ async fn personal_create(
     Ok(body)
 }
 
+// ---------------------------------------------------------------------------
+// Post-cutover routing (T027, FR-701, FR-712, FR-815a)
+// ---------------------------------------------------------------------------
+
+/// Turn an explicit knowledge mutation into a command once the server owns
+/// durable knowledge.
+///
+/// Before cutover this does nothing and the local write stands. After it, a
+/// local write would be exactly what FR-712 forbids — "a local write the server
+/// later discovers" — so the mutation becomes a **request** instead.
+///
+/// It is always spooled rather than sent inline, and that is deliberate.
+/// FR-781 says an agent operation must not block on the server, and FR-815a
+/// says an explicit creation made offline becomes a queued write rather than a
+/// local durable record. Sending inline would satisfy neither when the server
+/// is slow: the caller would wait, and a failure would leave the daemon
+/// choosing between blocking and inventing a local record. Spooling gives one
+/// path for both cases, and the drain (T039) delivers it — promptly when the
+/// server is there, later when it is not.
+///
+/// The caller is told the command was **accepted for delivery**, never that it
+/// is durable. Nothing local becomes authoritative because a command is
+/// waiting (FR-709, FR-787).
+async fn queue_knowledge_command(
+    d: &Daemon,
+    project_id: Option<Uuid>,
+    session_id: Option<Uuid>,
+    kind: cairn_store::spool::CommandKind,
+    payload: &serde_json::Value,
+) -> Reply {
+    // Account-bound, and it fails closed. A command spooled with no account
+    // could not be claimed by anyone — the claim predicate matches an account
+    // exactly — so queueing one would be a silent black hole rather than a
+    // queued write (FR-790, FR-864a).
+    let Some(account_id) = d.account_identity().await else {
+        return Err(WireError::new(
+            codes::NOT_LINKED,
+            "sign in before recording knowledge: the server owns durable \
+             knowledge now, and a command with no account could never be \
+             delivered",
+        ));
+    };
+
+    // Sessionless is a real case, not a degenerate one. The CLI permits memory
+    // operations outside any session, and the honest representation is a
+    // store-scoped command rather than a throwaway session row — which would
+    // leave a second active session in the worktree and make the next agent's
+    // context ambiguous (`contracts/knowledge-commands.md` §4.1).
+    let scope = match session_id {
+        Some(session) => cairn_store::spool::CommandScope::Session(session),
+        None => cairn_store::spool::store_scope(&d.store)
+            .await
+            .map_err(storage_err)?,
+    };
+
+    let admission = cairn_store::spool::spool_command(
+        &d.store,
+        cairn_store::spool::NewCommand {
+            scope,
+            project_id,
+            account_id,
+            kind,
+            payload,
+        },
+        cairn_store::spool::SpoolCapacity::default(),
+    )
+    .await
+    .map_err(storage_err)?;
+
+    match admission {
+        cairn_store::spool::CommandAdmission::Spooled(command) => Ok(json!({
+            // Not "stored". The distinction is the contract's: a queued command
+            // is not a local durable record, and saying so would be the claim
+            // FR-709 and FR-787 exist to prevent.
+            "accepted_for_delivery": true,
+            "command_id": command.command_id,
+            "scope": command.scope.kind(),
+            "command_seq": command.command_seq,
+        })),
+        // Refused visibly, and nothing queued was discarded to make room: no
+        // explicit command is droppable (FR-785 as applied in `spool.rs`).
+        cairn_store::spool::CommandAdmission::Saturated { queued } => Err(WireError::new(
+            codes::STORAGE_UNAVAILABLE,
+            format!(
+                "the command queue is full at {queued} undelivered \
+                     commands; nothing was dropped, and this command was not \
+                     accepted"
+            ),
+        )),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn memory_create(
     d: &Daemon,
@@ -2462,6 +2554,36 @@ async fn memory_create(
 
     let (scope, key) = resolve_scope(&r, &session, &git.branch, scope, scope_key)?;
     let content = cairn_core::redact::redact(&content);
+
+    // Once the server owns durable knowledge, this stops being a local write.
+    // `local_only` is the one exception and stays local by definition: it is
+    // knowledge the user asked never to leave the machine (FR-051), so routing
+    // it through the server would be the opposite of what it means.
+    if !local_only
+        && cairn_store::authority::mode(&d.store)
+            .await
+            .map_err(storage_err)?
+            .commands_are_authoritative()
+    {
+        // Intent only. Nothing derived travels — no state, no counts, no
+        // verification — because the server computes those and a client that
+        // could send them could assert them (`knowledge-commands.md` §3.1).
+        let payload = json!({
+            "type": kind.as_str(),
+            "scope": scope.as_str(),
+            "scope_key": key,
+            "content": content,
+            "topic_key": subject.topic_key,
+            "value_key": subject.value_key,
+            "supersedes": supersedes,
+        });
+        let command = match supersedes {
+            Some(_) => cairn_store::spool::CommandKind::Supersede,
+            None => cairn_store::spool::CommandKind::Remember,
+        };
+        return queue_knowledge_command(d, Some(r.project.id), Some(session.id), command, &payload)
+            .await;
+    }
 
     let new = repo::NewMemory {
         project_id: r.project.id,
