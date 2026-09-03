@@ -241,16 +241,16 @@ fn every_foundation_command_kind_is_delivered_and_has_an_observable_effect() {
 #[test]
 fn a_deferred_kind_answers_a_recognisable_deferral_and_not_a_refusal() {
     let pg = pg!();
-    // Pattern lifecycle is US3's and verification is US5's. What matters is
-    // that the answer is a **deferral**: the drain leaves the row durable and
-    // retries after an upgrade. A `404` would be read as permanent, and the
-    // user's queued instruction would be marked terminal and lost.
-    for kind in [
-        "pattern_promote",
-        "pattern_forget",
-        "verification_run",
-        "verification_attestation",
-    ] {
+    // Verification is US5's. What matters is that the answer is a **deferral**:
+    // the drain leaves the row durable and retries after an upgrade. A `404`
+    // would be read as permanent, and the user's queued instruction would be
+    // marked terminal and lost.
+    //
+    // The pattern kinds were here too until US3 shipped their repository
+    // (T085). They are asserted below instead — a deferral that outlives the
+    // phase it was waiting for is a queued instruction that never lands, so the
+    // list shrinking is the mechanism working rather than coverage being lost.
+    for kind in ["verification_run", "verification_attestation"] {
         let (body, code) = deliver(
             &pg,
             &pg.owner,
@@ -265,10 +265,52 @@ fn a_deferred_kind_answers_a_recognisable_deferral_and_not_a_refusal() {
 }
 
 #[test]
-fn a_pattern_promotion_is_not_mistaken_for_durable_storage() {
+fn a_deferral_ends_when_the_phase_that_owned_it_ships() {
     let pg = pg!();
-    // The direct route reports its own disposition explicitly: the shape and
-    // the guards are the boundary's, the store behind them is US3's.
+    // The other half of the deferral contract, and the half that is easy to
+    // leave untested: a kind that stays deferred after its repository exists is
+    // a spool row that waits forever. `pattern_promote` and `pattern_forget`
+    // answered `409 unsupported_kind` until T085; they must not any more.
+    for (kind, payload) in [
+        (
+            "pattern_promote",
+            json!({
+                "title": "sign images before release",
+                "problem": "the pipeline refuses unsigned images",
+                "root_cause": "no signer is configured in the release job",
+                "approach": "configure a signer and re-run the release job",
+            }),
+        ),
+        ("pattern_forget", json!({})),
+    ] {
+        let (body, code) = deliver(
+            &pg,
+            &pg.owner,
+            &envelope(kind, Uuid::now_v7(), None, Some(Uuid::now_v7()), payload),
+        );
+        assert_ne!(
+            code, 409,
+            "`{kind}` is still deferred after US3 shipped its repository, so a \
+             queued row would wait for an upgrade that already happened: {body}"
+        );
+        assert_ne!(
+            body["error"]["code"], "unsupported_kind",
+            "`{kind}` still answers the drain's deferral code: {body}"
+        );
+    }
+}
+
+#[test]
+fn a_pattern_promotion_reports_the_durability_it_actually_has() {
+    let pg = pg!();
+    // **This test used to assert the opposite, and the reversal is the point.**
+    // Until T085 the route validated the shape, derived the identity and stored
+    // nothing, so it answered `"stored": false` — reporting a durability it did
+    // not have would have been the defect. US3 supplied the repository, so the
+    // honest answer changed with it.
+    //
+    // What is unchanged is the rule: the flag reports what happened, and the row
+    // count is what decides whether it is telling the truth.
     let (body, code) = post_json_status_bearer(
         &pg.server.base,
         "/api/patterns",
@@ -281,13 +323,17 @@ fn a_pattern_promotion_is_not_mistaken_for_durable_storage() {
     );
     assert_eq!(code, 200, "{body}");
     assert_eq!(
-        body["stored"], false,
-        "the pattern route claimed durability it does not have"
+        body["stored"], true,
+        "the pattern route disclaimed durability it now has, which would tell a \
+         caller to retry a promotion that already landed"
     );
     assert_eq!(
-        pg.server.count("SELECT count(*) FROM shared_patterns"),
-        0,
-        "a pattern was stored by a route whose repository does not exist yet"
+        pg.server.count(&format!(
+            "SELECT count(*) FROM shared_patterns WHERE owner_user_id = '{}'",
+            pg.owner.id
+        )),
+        1,
+        "the route claimed to store a pattern and stored nothing"
     );
 }
 
