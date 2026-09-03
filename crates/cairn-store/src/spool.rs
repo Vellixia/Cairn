@@ -1121,6 +1121,37 @@ impl SpoolBreakdown {
 }
 
 /// The event spool's health, broken down by why each row is not moving.
+/// One session's spooled events, oldest first.
+///
+/// Every state, `delivered` included: a token a semantic signal cites stays
+/// justified after the event that established it reached the server, because
+/// the server still holds it. What does remove a token is the capacity policy
+/// shedding the row — and a signal that then cites it is refused, which is
+/// exactly the outcome `contracts/extraction.md` §13.3 rule 3 states rather
+/// than an accident of the spool draining.
+///
+/// Ordered by the durable ordinal and never by insertion time, because the
+/// ordinal is what "an earlier event" means here (FR-780).
+pub async fn session_events(store: &Store, session_id: Uuid) -> Result<Vec<SafeCanonicalEvent>> {
+    let rows: Vec<(i64, String)> = sqlx::query_as(
+        "SELECT session_seq, payload FROM event_spool
+          WHERE session_id = ?1
+          ORDER BY session_seq",
+    )
+    .bind(session_id.to_string())
+    .fetch_all(store.pool())
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        // A row whose payload no longer parses is skipped rather than failing
+        // the read. It cannot justify a token — nothing can read what it says —
+        // and refusing to answer at all would take a whole session's vocabulary
+        // down with one unreadable row.
+        .filter_map(|(_, payload)| serde_json::from_str::<SafeCanonicalEvent>(&payload).ok())
+        .collect())
+}
+
 pub async fn event_spool_breakdown(
     store: &Store,
     capacity: SpoolCapacity,

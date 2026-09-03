@@ -10,11 +10,17 @@
 
 use cairn_core::bound::{bound_json, bound_text, payload_bytes};
 use cairn_core::domain::Observation;
+use cairn_core::event::{
+    CaptureOutput, Disposition, EventAgent, SafeCanonicalEvent, SafeEventDraft,
+};
 use cairn_core::redact;
+use cairn_core::vocabulary::SessionVocabulary;
 use cairn_core::wire::ObservationInput;
 use cairn_core::CairnConfig;
 use cairn_store::repo::{self, NewObservation};
+use cairn_store::spool::{self, SpoolCapacity};
 use cairn_store::Store;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 pub struct CaptureContext<'a> {
@@ -410,4 +416,208 @@ mod tests {
         assert_eq!(o.exit_code, Some(101));
         assert!(o.summary.contains("cargo test"));
     }
+}
+
+// ---------------------------------------------------------------------------
+// Feature 005 safe-event capture (T050, T051)
+// ---------------------------------------------------------------------------
+
+/// What one vendor event's capture did.
+///
+/// Counted rather than described. A summary that carried what it spooled would
+/// be a second copy of the payload in a place nothing needs one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpoolSummary {
+    pub spooled: u64,
+    /// Capture-class rows the overflow policy shed to make room.
+    pub overflow_dropped: u64,
+    /// Events refused because the spool is saturated and nothing shedable
+    /// remains.
+    pub saturated: u64,
+    /// Captures the local pipeline declined, each already counted under its own
+    /// disposition.
+    pub declined: u64,
+}
+
+/// The vocabulary and established keys a hook needs to build a semantic signal.
+///
+/// Derived here rather than in the hook because the hook is a short-lived
+/// process with no store, and derived from *this session's* events plus *this
+/// project's* established keys because those are the two sources
+/// `contracts/extraction.md` §13.3 names. Both are required: a client that
+/// justified tokens only from session events would refuse tokens it could
+/// legitimately have justified from an established key, and that refusal is
+/// permanent — the decision is destroyed rather than deferred.
+///
+/// Sending this to the hook rather than sending the hook's text here is the
+/// whole point. A prompt fragment must not cross the capture-process boundary
+/// (FR-730); a set of tokens already visible to anyone who can read the
+/// repository may.
+pub async fn session_vocabulary(
+    store: &Store,
+    project_id: Uuid,
+    session_id: Uuid,
+) -> Result<(SessionVocabulary, BTreeMap<String, String>), cairn_store::StoreError> {
+    let keys: Vec<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT topic_key, value_key FROM memories
+          WHERE project_id = ?1 AND topic_key IS NOT NULL
+            AND state = 'active' AND deleted_at IS NULL",
+    )
+    .bind(project_id.to_string())
+    .fetch_all(store.pool())
+    .await?;
+
+    let topics: Vec<String> = keys.iter().filter_map(|(t, _)| t.clone()).collect();
+    let values: Vec<String> = keys.iter().filter_map(|(_, v)| v.clone()).collect();
+
+    // The subject's established value, for the one step that may supply an
+    // object the text did not name (`contracts/extraction.md` §13.5). A subject
+    // with two established values is left out: naming one of them would be a
+    // choice the evidence does not make.
+    let mut established: BTreeMap<String, String> = BTreeMap::new();
+    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
+    for (topic, value) in &keys {
+        let (Some(topic), Some(value)) = (topic, value) else {
+            continue;
+        };
+        let (Some(topic), Some(value)) = (
+            cairn_core::knowledge::normalize_topic_key(topic),
+            cairn_core::knowledge::normalize_value_key(value),
+        ) else {
+            continue;
+        };
+        match established.get(&topic) {
+            Some(held) if held != &value => {
+                ambiguous.insert(topic);
+            }
+            _ => {
+                established.insert(topic, value);
+            }
+        }
+    }
+    for topic in ambiguous {
+        established.remove(&topic);
+    }
+
+    let mut vocabulary = SessionVocabulary::new()
+        .with_established_keys(topics.iter().map(String::as_str))
+        .with_established_value_keys(values.iter().map(String::as_str));
+    for event in cairn_store::spool::session_events(store, session_id).await? {
+        vocabulary.observe_at(Some(event.session_seq), event.kind, event.content.as_ref());
+    }
+    Ok((vocabulary, established))
+}
+
+/// Spool one vendor event's approved canonical events, in order.
+///
+/// Identity is assigned by the store, inside the transaction that inserts each
+/// row — never here and never by the hook. A hook is a separate short-lived
+/// process and cannot hold a counter, and two concurrent invocations choosing
+/// their own ordinals would derive colliding `event_id`s, which the server
+/// answers `duplicate`, silently discarding a real event (`data-model.md` §1.4).
+///
+/// Order matters and is the order the drafts arrive in: a semantic signal may
+/// only cite a token an earlier ordinal established, so spooling the signal
+/// before the `file_changed` that justified it would make the server refuse a
+/// claim the client legitimately built.
+///
+/// Every decline becomes both a counted disposition and a `capture_declined`
+/// event. The counter makes the rate visible locally; the event makes it
+/// visible centrally. Neither carries any part of what was declined (FR-741,
+/// FR-749d).
+pub async fn spool_safe_events(
+    store: &Store,
+    project_id: Uuid,
+    account_id: Uuid,
+    session_id: Uuid,
+    output: &CaptureOutput,
+) -> Result<SpoolSummary, cairn_store::StoreError> {
+    let capacity = SpoolCapacity::default();
+    let mut summary = SpoolSummary::default();
+
+    let declined_events: Vec<SafeEventDraft> = output
+        .declines
+        .iter()
+        .map(|decline| {
+            let agent = output
+                .events
+                .first()
+                .map(|e| e.agent)
+                .unwrap_or(EventAgent::ClaudeCode);
+            decline.as_event(agent, None)
+        })
+        .collect();
+
+    for decline in &output.declines {
+        let agent = declined_events
+            .first()
+            .map(|e| e.agent.as_str())
+            .unwrap_or(EventAgent::ClaudeCode.as_str());
+        spool::record_disposition(
+            store,
+            project_id,
+            agent,
+            decline.kind.as_str(),
+            decline.disposition(),
+        )
+        .await?;
+        summary.declined += 1;
+    }
+
+    for draft in output.events.iter().chain(declined_events.iter()) {
+        let event = SafeCanonicalEvent {
+            // Overwritten by the store, and passed as nil rather than as a
+            // guess so nothing here can be mistaken for an identity.
+            event_id: Uuid::nil(),
+            contract_version: cairn_core::event::CONTRACT_VERSION,
+            kind: draft.kind,
+            agent: draft.agent,
+            vendor_event: draft.vendor_event.clone(),
+            session_id,
+            session_seq: 0,
+            occurred_at: chrono::Utc::now(),
+            content: draft.content.clone(),
+        };
+
+        // The client's own validation, before the row exists. It is a courtesy
+        // and not the mechanism — the server checks independently — but an
+        // event that cannot pass it would occupy a spool row for the length of
+        // its attempt budget only to be refused.
+        if event.validate().is_err() {
+            spool::record_disposition(
+                store,
+                project_id,
+                draft.agent.as_str(),
+                draft.kind.as_str(),
+                Disposition::PrivacyRefused,
+            )
+            .await?;
+            summary.declined += 1;
+            continue;
+        }
+
+        match spool::spool_event(
+            store,
+            capacity,
+            spool::NewEvent {
+                project_id,
+                account_id,
+                event,
+            },
+        )
+        .await?
+        {
+            spool::EventAdmission::Spooled {
+                overflow_dropped, ..
+            } => {
+                summary.spooled += 1;
+                summary.overflow_dropped += overflow_dropped;
+            }
+            // Refused visibly. The count is the only trace a saturated store
+            // leaves of the event it could not take, and losing it silently is
+            // the one thing FR-785 does not allow.
+            spool::EventAdmission::Saturated { .. } => summary.saturated += 1,
+        }
+    }
+    Ok(summary)
 }

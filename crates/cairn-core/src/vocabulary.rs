@@ -36,6 +36,7 @@
 
 use crate::event::{EventContent, EventKind, VocabToken};
 use crate::knowledge::normalize_topic_key;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// Where a token came from, ordered so that the strongest source is greatest.
@@ -47,7 +48,8 @@ use std::collections::BTreeMap;
 /// depend on iteration order, and it is a rank rather than a score because
 /// there is no arithmetic to do — one source is simply more established than
 /// another.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum VocabRank {
     /// The leading word of a shell command, or a vendor tool's name.
     CommandVerb,
@@ -71,7 +73,7 @@ pub enum VocabRank {
 /// absence is load-bearing twice: it sorts such a token last in the §13.5
 /// tiebreak, and it keeps it out of the `justified_by_seq` a refusal would
 /// name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VocabEntry {
     pub rank: VocabRank,
     pub seq: Option<u64>,
@@ -83,7 +85,7 @@ pub struct VocabEntry {
 /// what the server asks; the rank is what the client's role assignment needs
 /// (`contracts/extraction.md` §13.5). Both read the same structure, so the two
 /// sides cannot disagree about which tokens exist.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionVocabulary {
     tokens: BTreeMap<String, VocabEntry>,
 }

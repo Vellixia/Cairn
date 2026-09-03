@@ -30,6 +30,18 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
         })),
         Request::DaemonShutdown => Ok(json!({ "stopping": true })),
 
+        Request::CaptureVocabulary {
+            cwd,
+            agent,
+            agent_session_key,
+        } => capture_vocabulary(d, &cwd, &agent, &agent_session_key).await,
+        Request::CaptureEvents {
+            cwd,
+            agent,
+            agent_session_key,
+            output,
+        } => capture_events(d, &cwd, &agent, &agent_session_key, &output).await,
+
         Request::Init { cwd } => init(d, &cwd).await,
         Request::Status { cwd } => status(d, &cwd).await,
 
@@ -1120,6 +1132,7 @@ async fn status(d: &Daemon, cwd: &str) -> Reply {
         local_schema_version: cairn_store::migrate::latest_version(),
         sessions_awaiting_handoff: debt.0,
         knowledge: knowledge_health(d, r.project.id).await,
+        capture: capture_health(d, r.project.id).await,
         handoff_synthesis_failures: debt
             .1
             .into_iter()
@@ -1163,6 +1176,60 @@ async fn rebuild_derived(d: &Daemon, cwd: &str) -> Reply {
         // whose derived values disagree with the records behind them.
         "consistent": differed == 0,
     }))
+}
+
+/// What capture did on this machine, and where its events are (T059).
+///
+/// Reported from the two primitives that already hold the answer rather than
+/// from a third count kept alongside them: `SpoolBreakdown` is the single spool
+/// status primitive, and the disposition counts are the single record of what
+/// capture decided. A status field that counted either independently could
+/// disagree with it, and a health report that disagrees with itself is worse
+/// than one that says nothing.
+///
+/// Returns `None` rather than zeros when the store cannot answer. Zeros would
+/// read as "capture is healthy and idle", which is a claim, and an unavailable
+/// store has not established it.
+async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
+    let capacity = cairn_store::spool::SpoolCapacity::default();
+    let counts = cairn_store::spool::disposition_counts(&d.store, project_id)
+        .await
+        .ok()?;
+    let events = cairn_store::spool::event_spool_breakdown(&d.store, capacity)
+        .await
+        .ok()?;
+    let commands = cairn_store::spool::command_spool_breakdown(&d.store, capacity)
+        .await
+        .ok()?;
+
+    let mut dispositions: std::collections::BTreeMap<String, i64> =
+        std::collections::BTreeMap::new();
+    for row in counts {
+        *dispositions
+            .entry(row.disposition.as_str().to_string())
+            .or_insert(0) += row.n;
+    }
+
+    Some(CaptureHealth {
+        dispositions,
+        events: spool_health(&events),
+        commands: spool_health(&commands),
+    })
+}
+
+fn spool_health(b: &cairn_store::spool::SpoolBreakdown) -> SpoolHealth {
+    SpoolHealth {
+        waiting: b.waiting,
+        in_flight: b.in_flight,
+        retrying: b.retrying,
+        deferred: b.deferred,
+        terminal: b.terminal,
+        terminal_retry_exhausted: b.terminal_retry_exhausted,
+        // Derived from the breakdown rather than recomputed here, so the two
+        // cannot drift apart.
+        undelivered: b.undelivered(),
+        saturated: b.saturated,
+    }
 }
 
 /// Mark memory whose scope key no longer resolves as `stale` (FR-018).
@@ -1215,6 +1282,92 @@ async fn integration_mode(d: &Daemon) -> String {
 ///
 /// A worktree may hold several active sessions, so ambiguity is reported
 /// rather than guessed (FR-010).
+/// The vocabulary a hook needs before it can build a semantic signal.
+///
+/// The hook holds the transient vendor text and the daemon holds the event
+/// stream, and neither can do the §13.7 mapping alone. Sending the text here
+/// would put a prompt fragment across the capture-process boundary, which
+/// FR-730 forbids, so the derived token set travels the other way instead. It
+/// discloses nothing new: every token in it is a path segment, a command verb,
+/// a test identifier or an established project key that anyone who can read the
+/// project can already see.
+///
+/// A session that does not exist yet answers with an empty vocabulary rather
+/// than an error. The first event of a session legitimately arrives before any
+/// event has established anything, and an error there would make the hook treat
+/// an ordinary case as a failure.
+async fn capture_vocabulary(d: &Daemon, cwd: &str, agent: &str, key: &str) -> Reply {
+    let _ = agent;
+    let r = d.resolve(cwd).await?;
+    let session = repo::session_by_key(&d.store, r.project.id, key)
+        .await
+        .map_err(storage_err)?;
+    let Some(session) = session else {
+        return Ok(
+            json!({ "vocabulary": cairn_core::vocabulary::SessionVocabulary::new(),
+                          "established_values": {} }),
+        );
+    };
+    let (vocabulary, established) =
+        crate::capture::session_vocabulary(&d.store, r.project.id, session.id)
+            .await
+            .map_err(storage_err)?;
+    Ok(json!({ "vocabulary": vocabulary, "established_values": established }))
+}
+
+/// Spool one vendor event's approved canonical events.
+///
+/// Account-bound and it fails closed. The claim predicate matches an account
+/// exactly, so a row spooled with no account could never be claimed by anyone —
+/// queueing one would be a silent black hole rather than a queued event
+/// (FR-790, FR-864a). Capture is fail-soft toward the *agent*, never toward the
+/// truth: the decline is counted rather than hidden.
+async fn capture_events(
+    d: &Daemon,
+    cwd: &str,
+    agent: &str,
+    key: &str,
+    output: &cairn_core::event::CaptureOutput,
+) -> Reply {
+    let r = d.resolve(cwd).await?;
+    let session = resolve_session_for_event(d, &r, Some(key)).await?;
+
+    let Some(account_id) = d.account_identity().await else {
+        // Counted, not silent. An unsigned-in machine still produces capture,
+        // and a health report that could not tell "nothing happened" from
+        // "nobody was signed in" would be reporting the wrong problem.
+        for draft in &output.events {
+            cairn_store::spool::record_disposition(
+                &d.store,
+                r.project.id,
+                draft.agent.as_str(),
+                draft.kind.as_str(),
+                cairn_core::event::Disposition::DeclinedByPolicy,
+            )
+            .await
+            .map_err(storage_err)?;
+        }
+        return Ok(json!({
+            "spooled": 0,
+            "declined": output.events.len(),
+            "reason": "no account is signed in, so a spooled event could never be delivered",
+        }));
+    };
+
+    let summary =
+        crate::capture::spool_safe_events(&d.store, r.project.id, account_id, session.id, output)
+            .await
+            .map_err(storage_err)?;
+    let _ = agent;
+
+    Ok(json!({
+        "spooled": summary.spooled,
+        "declined": summary.declined,
+        "overflow_dropped": summary.overflow_dropped,
+        "saturated": summary.saturated,
+    }))
+}
+
 pub(crate) async fn resolve_session(
     d: &Daemon,
     r: &Resolved,

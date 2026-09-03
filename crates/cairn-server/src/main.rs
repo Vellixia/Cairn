@@ -10,6 +10,7 @@ mod consolidate;
 mod db;
 mod error;
 mod events;
+mod extract;
 mod global;
 mod sync;
 mod version;

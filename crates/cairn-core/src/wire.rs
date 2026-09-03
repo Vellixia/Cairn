@@ -562,6 +562,37 @@ pub enum Request {
         token_budget: Option<usize>,
     },
 
+    /// The session vocabulary a semantic signal must justify its tokens
+    /// against (`contracts/extraction.md` §13.3).
+    ///
+    /// The hook asks for this because it holds the transient vendor text and
+    /// the daemon holds the event stream, and neither can do the mapping
+    /// alone. Sending the text to the daemon instead would put a prompt
+    /// fragment across the capture-process boundary, which FR-730 forbids; so
+    /// the derived set travels the other way. It discloses nothing new — every
+    /// token in it is a file segment, a command verb, a test identifier or an
+    /// established key already visible to anyone who can read the project.
+    CaptureVocabulary {
+        cwd: String,
+        agent: String,
+        agent_session_key: String,
+    },
+
+    /// Approved Feature 005 events from one vendor event, ready to spool.
+    ///
+    /// Additive to [`Request::CanonicalEvent`], which still drives sessions,
+    /// handoffs and context delivery. This carries the richer safe-event
+    /// stream, and carries no raw vendor payload: what arrives here has already
+    /// been parsed, relativized, redacted and screened on the far side of the
+    /// process boundary (FR-730, SC-741).
+    CaptureEvents {
+        cwd: String,
+        agent: String,
+        agent_session_key: String,
+        #[serde(default)]
+        output: crate::event::CaptureOutput,
+    },
+
     /// Read the local integration record for this machine (FR-182).
     ///
     /// Local only: nothing here has an outbox entity type and none of it ever
@@ -1365,6 +1396,60 @@ pub struct StatusPayload {
     /// stay retryable and actionable; this is not a terminal outcome.
     #[serde(default)]
     pub handoff_synthesis_failures: Vec<HandoffFailure>,
+    /// What capture did, and where its events currently are (FR-740, FR-749c).
+    ///
+    /// Defaulted so a client reading an older payload still parses.
+    #[serde(default)]
+    pub capture: Option<CaptureHealth>,
+}
+
+/// Capture's own state, reported truthfully rather than reassuringly.
+///
+/// Fail-soft describes what the agent experiences: a capture-class event that
+/// misses its deadline is dropped and the hook still exits successfully. It
+/// does not describe what Cairn is allowed to know about itself, and this is
+/// where the difference is visible (FR-749c, SC-706).
+///
+/// Every number here is a count. No field carries a path, a command, a token or
+/// any part of an event — a disposition record has nothing of the payload it
+/// was processing (FR-749d, FR-741), and neither does its summary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CaptureHealth {
+    /// How often each disposition was recorded, keyed by its fixed name.
+    ///
+    /// A map rather than named fields, because the vocabulary is closed and
+    /// declared once in `data-model.md` §4; thirteen fields here would be a
+    /// second declaration of it that could fall behind the first.
+    #[serde(default)]
+    pub dispositions: std::collections::BTreeMap<String, i64>,
+    /// Where this machine's undelivered events are.
+    #[serde(default)]
+    pub events: SpoolHealth,
+    /// Where this machine's undelivered commands are.
+    #[serde(default)]
+    pub commands: SpoolHealth,
+}
+
+/// One spool, as a partition (`data-model.md` §3).
+///
+/// A queued row is in exactly one of these conditions and they cover every row
+/// the spool still holds, so the five sum to the table. `undelivered` is
+/// derived from the four non-terminal ones rather than counted separately, so
+/// it cannot disagree with them, and `terminal_retry_exhausted` is a subset of
+/// `terminal` rather than a sixth condition.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SpoolHealth {
+    pub waiting: i64,
+    pub in_flight: i64,
+    pub retrying: i64,
+    /// Waiting for a server that cannot yet hold this contract version or kind.
+    /// Not a failure, and it spends no attempt budget.
+    pub deferred: i64,
+    pub terminal: i64,
+    pub terminal_retry_exhausted: i64,
+    pub undelivered: i64,
+    /// Whether the spool is at its bound and refusing new work.
+    pub saturated: bool,
 }
 
 /// One boundary still owing a handoff, and why (FR-240 clause 3).

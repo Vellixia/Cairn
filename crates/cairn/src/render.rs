@@ -1283,6 +1283,7 @@ mod tests {
             sessions_awaiting_handoff: 0,
             knowledge: None,
             handoff_synthesis_failures: vec![],
+            capture: None,
         };
         let text = status(&s);
         assert!(text.contains("Sharing      local only"));

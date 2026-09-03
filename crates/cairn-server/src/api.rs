@@ -164,6 +164,10 @@ pub fn routes() -> Router<AppState> {
             get(read_health).post(report_health),
         )
         .route("/api/projects/{id}/dispositions", post(report_dispositions))
+        // Consolidation's own backlog, readable while a pass is running and
+        // immediately after a restart, because every field behind it is a
+        // committed row rather than worker state (SC-748, FR-793c).
+        .route("/api/consolidation/health", get(consolidation_health))
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/sessions/{id}/handoff", get(session_handoff))
         .route(
@@ -579,6 +583,23 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         .map_err(|_| ApiError::internal("bad cookie"))?,
     );
     Ok((out, Json(json!({ "ok": true }))))
+}
+
+/// How far behind consolidation is, for any authenticated caller.
+///
+/// Not project-scoped, and deliberately: the backlog is a property of the
+/// deployment's single consolidation task, not of any one project, and every
+/// field it reports is a count or a timestamp — no content, no keys, nothing
+/// that names what any project knows. Scoping it per project would suggest a
+/// per-project worker that does not exist.
+async fn consolidation_health(
+    State(state): State<AppState>,
+    _user: SettledUser,
+) -> ApiResult<Json<Value>> {
+    let health = crate::consolidate::health(&state.pool).await?;
+    Ok(Json(
+        serde_json::to_value(health).unwrap_or_else(|_| json!({})),
+    ))
 }
 
 async fn me(State(state): State<AppState>, user: SettledUser) -> ApiResult<Json<Value>> {

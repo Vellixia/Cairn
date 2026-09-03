@@ -788,3 +788,131 @@ impl EventRefusal {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The capture-process boundary (T046, T050)
+// ---------------------------------------------------------------------------
+
+/// One canonical event, minus the identity only the daemon can assign.
+///
+/// This is what crosses from a hook process to the daemon. `event_id` and
+/// `session_seq` are deliberately absent: each hook run is a separate
+/// short-lived process and cannot share a counter, so a hook that chose either
+/// would produce colliding identities across concurrent invocations, and a
+/// colliding id is answered `duplicate` and silently discards a real event
+/// (`data-model.md` §1.4). The daemon assigns both inside the transaction that
+/// spools the event.
+///
+/// `session_id` is absent for the same reason in reverse: the hook knows only
+/// the *vendor's* session key, and the synced Cairn session UUID is what
+/// travels. The daemon holds the mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SafeEventDraft {
+    pub kind: EventKind,
+    pub agent: EventAgent,
+    /// The vendor's own event name, sanitized. Provenance only (FR-724).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor_event: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<EventContent>,
+}
+
+/// A capture that did not happen, and why.
+///
+/// Recorded rather than dropped. Fail-soft describes what the agent
+/// experiences, not what Cairn is permitted to know about itself (FR-749c), and
+/// a decline rate is uninterpretable unless each reason is distinguishable
+/// (`contracts/extraction.md` §13.7 step 6). Carries no payload content
+/// (FR-749d, FR-741) — there is nothing in the type to carry any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureDecline {
+    /// The kind that was not emitted.
+    pub kind: EventKind,
+    pub stage: PipelineStage,
+    pub reason: DeclineReason,
+}
+
+/// Everything one vendor event produced.
+///
+/// A single vendor event routinely produces several canonical events — one
+/// `PostToolUse` for an editing tool is both a `tool_succeeded` and a
+/// `file_changed` — and the order of `events` is the order they must be spooled
+/// in, because `session_seq` is assigned in it and a semantic signal may only
+/// cite a token an earlier ordinal established.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaptureOutput {
+    #[serde(default)]
+    pub events: Vec<SafeEventDraft>,
+    #[serde(default)]
+    pub declines: Vec<CaptureDecline>,
+}
+
+impl CaptureOutput {
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.declines.is_empty()
+    }
+
+    /// Append an event, returning self so a router reads as one expression.
+    pub fn event(mut self, draft: SafeEventDraft) -> Self {
+        self.events.push(draft);
+        self
+    }
+
+    /// Record a decline at the parse stage, which is where capture declines.
+    pub fn declined(mut self, kind: EventKind, reason: DeclineReason) -> Self {
+        self.declines.push(CaptureDecline {
+            kind,
+            stage: PipelineStage::EventParsed,
+            reason,
+        });
+        self
+    }
+
+    /// Fold another output's events and declines into this one, in order.
+    pub fn chain(mut self, other: CaptureOutput) -> Self {
+        self.events.extend(other.events);
+        self.declines.extend(other.declines);
+        self
+    }
+}
+
+impl CaptureDecline {
+    /// The disposition this decline is counted under (`data-model.md` §4).
+    ///
+    /// A decline Cairn chose is `declined_by_policy`; a mapping that found
+    /// nothing safe to say is its own disposition, because the two call for
+    /// different actions — one is a rule working, the other is a lexicon or a
+    /// vocabulary that is too thin to be useful.
+    pub fn disposition(&self) -> Disposition {
+        match self.reason {
+            DeclineReason::NoSafeSemanticMapping => Disposition::NoSafeSemanticMapping,
+            DeclineReason::PolicyExcluded => Disposition::DeclinedByPolicy,
+            DeclineReason::AmbiguousClassification
+            | DeclineReason::InsufficientVocabulary
+            | DeclineReason::VendorUnavailable => Disposition::DeclinedByPolicy,
+        }
+    }
+
+    /// The event a decline itself becomes, so the refusal is visible centrally
+    /// rather than only in a local counter.
+    ///
+    /// `capture_declined` carries the disposition, the stage and the reason and
+    /// nothing else — a decline record that quoted what it declined would carry
+    /// across the boundary exactly the material the decline exists to keep on
+    /// this side.
+    pub fn as_event(&self, agent: EventAgent, vendor_event: Option<String>) -> SafeEventDraft {
+        SafeEventDraft {
+            kind: EventKind::CaptureDeclined,
+            agent,
+            vendor_event,
+            content: Some(EventContent::CaptureOutcome {
+                disposition: self.disposition(),
+                stage: self.stage,
+                decline_reason: self.reason,
+            }),
+        }
+    }
+}

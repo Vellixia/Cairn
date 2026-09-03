@@ -19,7 +19,7 @@ use crate::plan::RecordedInstall;
 use crate::{render, revision};
 use cairn_core::event::{
     ChangeKind, DeclineReason, EventAgent, EventContent, EventKind, FailureKind, FileIdentity,
-    PipelineStage, ResourceKind as ResearchResource, TestOutcome, ToolClass,
+    ResourceKind as ResearchResource, TestOutcome, ToolClass,
 };
 use cairn_core::lexicon::{map_semantic_signal, SourceRole};
 use cairn_core::lifecycle::CanonicalLifecycleEvent;
@@ -424,66 +424,13 @@ impl Default for CaptureEnv<'_> {
     }
 }
 
-/// One canonical event, minus the identity only the daemon can assign.
-///
-/// `event_id` and `session_seq` are deliberately absent: a hook is a separate
-/// short-lived process and cannot hold a counter, and deriving one here would
-/// produce colliding identities across concurrent invocations
-/// (`data-model.md` §1.4). The daemon assigns both inside the transaction that
-/// spools the event.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SafeEventDraft {
-    pub kind: EventKind,
-    pub agent: EventAgent,
-    pub vendor_event: Option<String>,
-    pub content: Option<EventContent>,
-}
-
-/// A capture that did not happen, and why.
-///
-/// Recorded rather than dropped. Fail-soft describes what the agent
-/// experiences, not what Cairn is permitted to know about itself (FR-749c), and
-/// a decline rate is uninterpretable unless each reason is distinguishable
-/// (`contracts/extraction.md` §13.7 step 6).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CaptureDecline {
-    /// The kind that was not emitted.
-    pub kind: EventKind,
-    pub stage: PipelineStage,
-    pub reason: DeclineReason,
-}
-
-/// Everything one vendor event produced.
-///
-/// A single vendor event routinely produces several canonical events — one
-/// `PostToolUse` for an editing tool is both a `tool_succeeded` and a
-/// `file_changed` — and the order here is the order they must be spooled in,
-/// because `session_seq` is assigned in it.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CaptureOutput {
-    pub events: Vec<SafeEventDraft>,
-    pub declines: Vec<CaptureDecline>,
-}
-
-impl CaptureOutput {
-    pub fn is_empty(&self) -> bool {
-        self.events.is_empty() && self.declines.is_empty()
-    }
-
-    pub(crate) fn event(mut self, draft: SafeEventDraft) -> Self {
-        self.events.push(draft);
-        self
-    }
-
-    pub(crate) fn declined(mut self, kind: EventKind, reason: DeclineReason) -> Self {
-        self.declines.push(CaptureDecline {
-            kind,
-            stage: PipelineStage::EventParsed,
-            reason,
-        });
-        self
-    }
-}
+// The three types below are `cairn-core`'s, re-exported rather than redefined.
+//
+// They are the shape that crosses the capture-process boundary, so the wire
+// request that carries them and the adapter that builds them must be talking
+// about the same type — two structurally identical definitions would compile
+// and would let one side gain a field the other silently dropped.
+pub use cairn_core::event::{CaptureDecline, CaptureOutput, SafeEventDraft};
 
 /// Build a draft with the fields every kind shares.
 pub(crate) fn draft(
@@ -681,7 +628,8 @@ pub fn tool_capture(
             ));
         }
         ToolClass::Test => {
-            if let Some(command) = raw_command.and_then(|c| safe_text(SafeEventField::TestCommand, c))
+            if let Some(command) =
+                raw_command.and_then(|c| safe_text(SafeEventField::TestCommand, c))
             {
                 out = out.event(draft(
                     map,
@@ -814,8 +762,7 @@ pub fn semantic_capture(
     // An agent Cairn declines to read semantic material from names no field
     // here, and that is the decline — not an omission to be discovered later.
     if keys.is_empty() {
-        return CaptureOutput::default()
-            .declined(role.event_kind(), DeclineReason::PolicyExcluded);
+        return CaptureOutput::default().declined(role.event_kind(), DeclineReason::PolicyExcluded);
     }
     // A null settled assistant message is not an empty decision. It is the
     // vendor saying there was no settled turn text, which declines.
