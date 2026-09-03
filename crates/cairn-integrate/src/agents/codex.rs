@@ -833,4 +833,58 @@ followUpQueueMode = \"queue\"
             "Stop"
         ));
     }
+
+    /// Codex is a committed automatic-delivery agent (T074, `contracts/
+    /// retrieval-delivery.md` §1, FR-838a): both delivery points are
+    /// documented and stable for it, exactly as for Claude Code, and neither
+    /// is declined the way OpenCode's are.
+    ///
+    /// This pins the two structural preconditions `cairn::hook`'s delivery
+    /// gate depends on, from this crate's side of that boundary:
+    ///
+    /// - `UserPromptSubmit` is registered (so the hook actually fires and is
+    ///   not silently declined by the adapter, `event_class` note in
+    ///   `cairn::hook::run_blocking`); and
+    /// - it maps to no canonical lifecycle event (so it is reached only
+    ///   through the capture path that carries delivery, never mistaken for
+    ///   a boundary event that would take the other one).
+    ///
+    /// `SessionStart` is unaffected by any of this: session-open delivery
+    /// rides the existing `session_opened` canonical event, unchanged since
+    /// before Feature 005.
+    #[test]
+    fn codex_registers_prompt_submit_as_capture_only() {
+        let a = Codex;
+        assert!(
+            a.registered_events().contains(&"UserPromptSubmit"),
+            "prompt-time delivery has no event to fire on otherwise"
+        );
+        assert!(
+            a.normalize("UserPromptSubmit", &payload(json!({"session_id": "s"})))
+                .is_none(),
+            "UserPromptSubmit must stay capture-only, never a boundary event"
+        );
+    }
+
+    /// The declared matrix agrees: neither delivery point is
+    /// `declined_by_cairn` for Codex, in contrast with OpenCode's three
+    /// (`opencode.rs::opencode_declines_automatic_delivery_for_every_
+    /// registered_event`).
+    #[test]
+    fn codexs_declared_matrix_does_not_decline_delivery() {
+        use crate::capability::{declared_matrix, MatrixStatus};
+        let matrix = declared_matrix("codex");
+        for key in ["deliver:session_open", "deliver:prompt_time"] {
+            let status = matrix
+                .iter()
+                .find(|c| c.capability == key)
+                .map(|c| c.status)
+                .unwrap_or_else(|| panic!("{key} is not in Codex's matrix"));
+            assert_ne!(
+                status,
+                MatrixStatus::DeclinedByCairn,
+                "{key} must not be declined for a committed agent"
+            );
+        }
+    }
 }

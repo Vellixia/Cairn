@@ -267,6 +267,8 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             token_budget,
             explain,
             depth,
+            trigger,
+            open_trigger,
         } => {
             context(
                 d,
@@ -277,8 +279,25 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                 token_budget,
                 explain,
                 depth,
+                trigger,
+                open_trigger,
             )
             .await
+        }
+
+        // The daemon's own report of what happened to a generated briefing,
+        // forwarded to the server (T072, `contracts/retrieval-delivery.md`
+        // §3, §6.2). No project or session to resolve here: the trace already
+        // carries both, and the server is what checks this account still owns
+        // it.
+        Request::RetrievalOutcome {
+            trace_id,
+            transmitted,
+            failure_reason,
+        } => {
+            crate::deliver::report_outcome(d, trace_id, transmitted, failure_reason.as_deref())
+                .await;
+            Ok(json!({ "reported": true }))
         }
 
         Request::SessionCheckpoint {
@@ -1664,13 +1683,16 @@ async fn observe(
 // Context
 // ---------------------------------------------------------------------------
 
-/// Eight arguments, one past the lint's limit, and each one is read.
+/// Ten arguments, three past the lint's limit, and each one is read.
 ///
 /// `reason` decides the post-compaction path; `depth` decides whether the global
-/// sections are assembled at all (FR-477); the rest were already load-bearing.
-/// Bundling them into a request struct would only move the same eight values
-/// behind one name — this function's caller destructures them straight out of
-/// `Request::Context`, so a struct would be that variant with a second name.
+/// sections are assembled at all (FR-477); `trigger`/`open_trigger` decide
+/// whether this retrieval goes through the server and as what
+/// (`contracts/retrieval-delivery.md` §1–§3); the rest were already
+/// load-bearing. Bundling them into a request struct would only move the same
+/// values behind one name — this function's caller destructures them straight
+/// out of `Request::Context`, so a struct would be that variant with a second
+/// name.
 #[allow(clippy::too_many_arguments)]
 async fn context(
     d: &Daemon,
@@ -1681,6 +1703,8 @@ async fn context(
     token_budget: Option<usize>,
     explain: bool,
     depth: Option<cairn_core::wire::ContextDepth>,
+    trigger: Option<String>,
+    open_trigger: Option<String>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
     let budget = token_budget.unwrap_or(d.config.read().await.context_budget_tokens);
@@ -1693,8 +1717,64 @@ async fn context(
     // Absent means `standard` — today's full assembly — so a caller that has
     // never named `depth` sees no change (FR-481, T156).
     let depth = depth.unwrap_or(cairn_core::wire::ContextDepth::Standard);
-    let payload = briefing::build(d, &r, session.as_ref(), budget, false, explain, depth).await?;
-    let mut out = serde_json::to_value(payload).unwrap_or(json!({}));
+
+    let mut out = match (explain, session.as_ref()) {
+        // `--explain` diagnoses the daemon's own local assembly and its
+        // reasons; the server's `sections` carry a `selection_rule` of their
+        // own but no per-reader diagnostic to merge with it, so this stays a
+        // purely local read exactly as it was before Feature 005 US2
+        // (`contracts/retrieval-delivery.md` §8 keeps a *reason* out of the
+        // trace for the parallel cause).
+        (true, _) => {
+            let payload =
+                briefing::build(d, &r, session.as_ref(), budget, false, true, depth).await?;
+            serde_json::to_value(payload).unwrap_or(json!({}))
+        }
+        // No session bound in this worktree: `/api/retrieve` requires one to
+        // bind to, and there is none, so this is the daemon's own local
+        // assembly exactly as it always was (FR-031).
+        (false, None) => {
+            let payload = briefing::build(d, &r, None, budget, false, false, depth).await?;
+            serde_json::to_value(payload).unwrap_or(json!({}))
+        }
+        (false, Some(s)) => {
+            let trigger = trigger
+                .as_deref()
+                .map(crate::deliver::Trigger::parse)
+                .unwrap_or(crate::deliver::Trigger::Explicit);
+            let deadline =
+                std::time::Duration::from_millis(d.config.read().await.context_deadline_ms);
+            let delivered =
+                crate::deliver::deliver(d, &r, s.id, trigger, open_trigger.as_deref(), deadline)
+                    .await;
+            // These three already travel inside `delivered.payload` too
+            // (a caller that only sees the wire reply, such as the hook
+            // process, has no other way to read them) — logged here as well
+            // because this is the one place a server outage or a degraded
+            // level is otherwise silent on the daemon's own side.
+            tracing::debug!(
+                trace_id = ?delivered.trace_id,
+                degradation_level = %delivered.degradation_level,
+                served_from_cache = delivered.served_from_cache,
+                "server-side retrieval delivered"
+            );
+            let mut payload = delivered.payload;
+            // FR-477: `minimum` excludes both global sections entirely,
+            // unconditionally. `deliver` has no `depth` parameter of its own
+            // — the merge is identical at every depth — so the gate is
+            // enforced here, on the merged result, instead of before the
+            // fetch. The server has no notion of `depth` either, so this is
+            // the only place the guarantee can live regardless.
+            if depth.is_minimum() {
+                if let Some(briefing) = payload.get_mut("briefing").and_then(|b| b.as_object_mut())
+                {
+                    briefing.remove("personal_notes");
+                    briefing.remove("team_guidance");
+                }
+            }
+            payload
+        }
+    };
 
     // The mode Cairn can honestly promise this agent — derived from Feature
     // 002's capability profile, never from a capability of its own (FR-426).

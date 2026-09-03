@@ -7,6 +7,7 @@
 mod briefing;
 mod capture;
 mod continuity;
+mod deliver;
 mod drift;
 mod handlers;
 mod handoffs;
@@ -109,6 +110,7 @@ async fn setup() -> anyhow::Result<Arc<Daemon>> {
         )),
         in_flight_captures: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         sync_drain: Arc::new(tokio::sync::Mutex::new(())),
+        outage_cache: Arc::new(tokio::sync::Mutex::new(deliver::OutageCache::default())),
     });
 
     let reconciled = recover::reconcile_previous_runs(&daemon).await;

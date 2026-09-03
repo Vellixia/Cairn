@@ -712,4 +712,60 @@ mod tests {
         assert!(!establishes_failure(Some(&json!({}))).0);
         assert!(!establishes_failure(None).0);
     }
+
+    /// T075. OpenCode's automatic delivery stays absent — `declined_by_cairn`,
+    /// never `unsupported_by_vendor` (FR-838a, FR-838b) — for every event this
+    /// adapter registers, pinned here so an edit elsewhere (a new registered
+    /// event, a matrix rename, a rewrite of `declared_absence`) cannot lose
+    /// the decline silently.
+    ///
+    /// Two independent checks, because either one regressing alone would be
+    /// exactly the kind of loss this test exists to catch:
+    ///
+    /// - the **declared** matrix: all three `deliver:*` cells are
+    ///   `declined_by_cairn`, matching `capability.rs`'s own
+    ///   `opencodes_semantic_decline_is_cairns_and_not_the_vendors` — restated
+    ///   here, local to the adapter that decline is actually about; and
+    /// - the **structural** precondition `cairn::hook`'s delivery gate relies
+    ///   on from this crate's side of that boundary: OpenCode never registers
+    ///   `UserPromptSubmit` at all (its vocabulary is `session.*`/`tool.*`),
+    ///   so there is no event name automatic prompt-time delivery could ever
+    ///   attach to here, even if that gate were ever weakened or removed.
+    #[test]
+    fn opencode_declines_automatic_delivery_for_every_registered_event() {
+        use crate::capability::{declared_matrix, MatrixStatus};
+
+        let matrix = declared_matrix("opencode");
+        for key in [
+            "deliver:session_open",
+            "deliver:prompt_time",
+            "deliver:post_compaction",
+        ] {
+            let status = matrix
+                .iter()
+                .find(|c| c.capability == key)
+                .map(|c| c.status)
+                .unwrap_or_else(|| panic!("{key} is not in OpenCode's matrix"));
+            assert_eq!(status, MatrixStatus::DeclinedByCairn, "{key}");
+        }
+
+        let a = OpenCode;
+        assert!(
+            !a.registered_events().contains(&"UserPromptSubmit"),
+            "OpenCode must never register the event automatic prompt-time \
+             delivery rides on for every other agent"
+        );
+        // Defense in depth, event by event: nothing this adapter actually
+        // registers is the boundary event delivery rides on either — session
+        // open is reached through `session_opened`, and `session.created` is
+        // OpenCode's only source of that, so this loop is really asserting
+        // there is no *second*, unexpected source of it hiding among the
+        // vendor names below.
+        for event in EVENTS {
+            assert_ne!(
+                *event, "UserPromptSubmit",
+                "OpenCode's own event list must never gain this name"
+            );
+        }
+    }
 }

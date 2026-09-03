@@ -297,6 +297,25 @@ fn close_session(pg: &Pg, session: Uuid) {
 // Observation
 // ---------------------------------------------------------------------------
 
+/// These tests share one database and each starts its own consolidation
+/// worker, and a worker elects **any** eligible session in the database it is
+/// pointed at — not only the one the test that started it created. Run
+/// concurrently they therefore consolidate each other's sessions, and a test
+/// that is about a crash window watches one that another test's worker already
+/// drained.
+///
+/// So the suite serialises itself. A mutex rather than per-test databases
+/// because the interference is the point being avoided, not a fixture detail
+/// worth generalising: every other Feature 005 suite is read-mostly or
+/// project-scoped and shares the database happily.
+///
+/// The lock is taken with the poison deliberately ignored: one test panicking
+/// must not turn every later test into a second, misleading failure.
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    static SUITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    SUITE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 fn settle<F: Fn() -> bool>(what: &str, predicate: F) {
     let deadline = Instant::now() + SETTLE;
     while Instant::now() < deadline {
@@ -448,6 +467,7 @@ fn pair<'a>(pairs: &'a [ParaphrasePair], id: &str) -> &'a ParaphrasePair {
 
 #[test]
 fn the_paraphrase_corpus_is_pre_registered_at_the_size_and_spread_sc_736_requires() {
+    let _serial = serial();
     let pairs = load_corpus();
     assert!(
         pairs.len() >= 50,
@@ -477,6 +497,7 @@ fn the_paraphrase_corpus_is_pre_registered_at_the_size_and_spread_sc_736_require
 /// which extractor rule would eventually see any particular pair.
 #[test]
 fn every_paraphrase_pair_normalizes_its_two_wordings_to_one_topic_key_and_one_value_key() {
+    let _serial = serial();
     let pairs = load_corpus();
     assert!(pairs.len() >= 50);
     for p in &pairs {
@@ -527,6 +548,7 @@ fn every_paraphrase_pair_normalizes_its_two_wordings_to_one_topic_key_and_one_va
 #[test]
 fn a_representative_subset_of_paraphrased_failure_claims_reinforces_through_the_real_consolidation_pipeline(
 ) {
+    let _serial = serial();
     let pg = pg!();
     let pairs = load_corpus();
 
@@ -598,7 +620,14 @@ fn reopen_for_reclaim(pg: &Pg, session: Uuid, lease_expired: bool) {
     let expires = if lease_expired {
         "now() - interval '1 minute'"
     } else {
-        "now() + interval '2 seconds'"
+        // Long, deliberately. The property under test is "a live lease is not
+        // reclaimed", and the test proves it by watching for 400 ms — so the
+        // lease only has to outlast the observation, not race the worker's
+        // startup. Two seconds made the assertion depend on how fast a debug
+        // binary boots under load, which is a fact about the machine and not
+        // about the lease. The test expires it explicitly when it wants the
+        // reclaim, so nothing else rests on this number being tight.
+        "now() + interval '60 seconds'"
     };
     pg.server.execute(&format!(
         "UPDATE consolidation_session
@@ -624,6 +653,7 @@ fn reopen_for_reclaim(pg: &Pg, session: Uuid, lease_expired: bool) {
 #[test]
 fn rerunning_consolidation_over_an_unchanged_set_of_accepted_events_produces_nothing_new_across_five_rounds(
 ) {
+    let _serial = serial();
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
     let (topic, value) = post_r1_sequence(&pg, &pg.owner, session, "sc703suite", "sc703file");
@@ -671,6 +701,7 @@ fn rerunning_consolidation_over_an_unchanged_set_of_accepted_events_produces_not
 #[test]
 fn a_reexecution_that_saw_more_events_adds_source_evidence_without_changing_candidate_identity_or_first_run(
 ) {
+    let _serial = serial();
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
     let (topic, value) = post_r1_sequence(&pg, &pg.owner, session, "evidsuite", "evidfile");
@@ -754,6 +785,7 @@ fn a_reexecution_that_saw_more_events_adds_source_evidence_without_changing_cand
 #[test]
 fn rederiving_a_reinforcement_after_an_abandoned_claim_yields_the_same_corroboration_row_not_a_second_one(
 ) {
+    let _serial = serial();
     let pg = pg!();
     let session_a = pg.session_for(&pg.owner);
     let session_b = pg.session_for(&pg.owner);
@@ -899,7 +931,14 @@ fn seed_claim(pg: &Pg, session: Uuid, lease_expired: bool) {
     let expires = if lease_expired {
         "now() - interval '1 minute'"
     } else {
-        "now() + interval '2 seconds'"
+        // Long, deliberately. The property under test is "a live lease is not
+        // reclaimed", and the test proves it by watching for 400 ms — so the
+        // lease only has to outlast the observation, not race the worker's
+        // startup. Two seconds made the assertion depend on how fast a debug
+        // binary boots under load, which is a fact about the machine and not
+        // about the lease. The test expires it explicitly when it wants the
+        // reclaim, so nothing else rests on this number being tight.
+        "now() + interval '60 seconds'"
     };
     pg.server.execute(&format!(
         "UPDATE consolidation_session
@@ -1055,6 +1094,7 @@ fn run_crash_point(pg: &Pg, idx: usize, cp: &CrashPoint) {
 #[test]
 fn restarting_at_each_pre_registered_crash_point_converges_to_the_same_durable_outcome_with_zero_events_stranded(
 ) {
+    let _serial = serial();
     let pg = pg!();
     let points = crash_points();
     assert!(points.len() >= 18, "the crash-point table lost entries");
@@ -1067,6 +1107,7 @@ fn restarting_at_each_pre_registered_crash_point_converges_to_the_same_durable_o
 /// two batches (`BATCH_EVENTS = 200`) crashes between them.
 #[test]
 fn a_session_crossing_a_batch_boundary_recovers_from_a_crash_after_its_first_batch() {
+    let _serial = serial();
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
     // Plain `file_changed` events: this crash point is about the claim
@@ -1087,10 +1128,29 @@ fn a_session_crossing_a_batch_boundary_recovers_from_a_crash_after_its_first_bat
             )) >= 200
         });
     });
-    // Crashed here: the first 200 are done, the remaining 5 are still
-    // pending, and the close transaction's `CASE` has already re-opened the
-    // session for its second batch (§4).
-    assert_eq!(session_state_of(&pg, session), "pending");
+    // Crashed here: the first 200 are done, the remaining 5 are still pending,
+    // and the close transaction's `CASE` has already re-opened the session for
+    // its second batch (§4).
+    //
+    // Asserted as "not finished while work remains" rather than as exactly
+    // `pending`. The worker is still alive when the settle succeeds, so between
+    // seeing the two-hundredth `done` row and being killed it may legitimately
+    // have re-elected the session — and `claimed` is that, not a defect. What
+    // §4 actually forbids is the state this replaced: `done` with work
+    // outstanding, which is the stall the `CASE` exists to prevent.
+    let state = session_state_of(&pg, session);
+    assert_ne!(
+        state, "done",
+        "the session was finished with work still pending, which is the stall \
+         the close transaction's CASE exists to prevent"
+    );
+    assert!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM consolidation_work
+              WHERE session_id = '{session}' AND state = 'pending'"
+        )) > 0,
+        "the tail of the batch was not left for a second pass"
+    );
 
     with_worker(&pg, || {
         settle("the whole session drains after the restart", || {
@@ -1109,6 +1169,7 @@ fn a_session_crossing_a_batch_boundary_recovers_from_a_crash_after_its_first_bat
 /// in the same outage and neither one blocks the other's recovery.
 #[test]
 fn two_independently_crashed_sessions_recover_without_blocking_each_other() {
+    let _serial = serial();
     let pg = pg!();
     let session_a = pg.session_for(&pg.owner);
     let session_b = pg.session_for(&pg.owner);

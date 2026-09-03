@@ -185,6 +185,14 @@ async fn dispatch(
 
             // Context delivery is the one canonical event whose handling
             // produces something the agent consumes (D19a).
+            //
+            // `trigger: session_open` and the vendor's own `source` are what
+            // let this retrieval go through the server as the push it is
+            // (`contracts/retrieval-delivery.md` §1–§3); `open_trigger` is
+            // forwarded exactly as the vendor sent it (`startup`/`resume`/
+            // `clear`/`compact`/`fork`), never derived from `after_compaction`
+            // above, which is Cairn's own recorded-state detection and can
+            // legitimately disagree with what the vendor happened to send.
             let delivered = crate::handlers::handle(
                 d,
                 cairn_core::wire::Request::Context {
@@ -198,6 +206,8 @@ async fn dispatch(
                     // assembly; this event carries no depth of its own to
                     // forward (T156).
                     depth: None,
+                    trigger: Some("session_open".to_string()),
+                    open_trigger: event.source.clone(),
                 },
             )
             .await;

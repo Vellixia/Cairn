@@ -1207,6 +1207,10 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
                 token_budget: *budget,
                 explain: *explain,
                 depth,
+                // The CLI always retrieves as an explicit pull (`contracts/
+                // retrieval-delivery.md` §3), same as `cairn_context`.
+                trigger: None,
+                open_trigger: None,
             })
             .await?;
             let payload: ContextPayload =

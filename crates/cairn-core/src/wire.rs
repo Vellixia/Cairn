@@ -734,6 +734,33 @@ pub enum Request {
         /// assembly (`contracts/recall-composition.md` §5).
         #[serde(default)]
         depth: Option<ContextDepth>,
+        /// Which delivery point this retrieval is for, server-side
+        /// (`contracts/retrieval-delivery.md` §1–§3): `"session_open"` |
+        /// `"prompt_submit"`. Absent is an **explicit** pull —
+        /// `cairn_context`/`cairn_search`'s companion call, and the CLI — which
+        /// is also the safe default for any caller written before this field
+        /// existed: nothing is pushed and nothing is ever reported
+        /// `transmitted` on an absent trigger's behalf.
+        #[serde(default)]
+        trigger: Option<String>,
+        /// `session_open` only: the vendor's own reason the session opened —
+        /// `startup`/`resume`/`clear`/`compact`/`fork` — forwarded to
+        /// `/api/retrieve` verbatim so the server can recognize a
+        /// post-compaction restoration (`contracts/retrieval-delivery.md` §2).
+        #[serde(default)]
+        open_trigger: Option<String>,
+    },
+
+    /// Report what actually happened to a briefing `/api/retrieve` generated
+    /// (`contracts/retrieval-delivery.md` §3, §6.2). Never sent for a
+    /// `trigger` of `explicit` (absent on the [`Request::Context`] that
+    /// produced it): an explicit call is answered, not pushed, and there is no
+    /// transport to have succeeded or failed (FR-843, FR-854).
+    RetrievalOutcome {
+        trace_id: Uuid,
+        transmitted: bool,
+        #[serde(default)]
+        failure_reason: Option<String>,
     },
 
     SessionCheckpoint {

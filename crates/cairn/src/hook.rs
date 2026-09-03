@@ -12,7 +12,7 @@ use crate::client;
 use crate::render;
 use cairn_core::wire::{ContextPayload, Request};
 use cairn_core::CairnConfig;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Which adapter this invocation serves.
 ///
@@ -217,6 +217,18 @@ pub fn run_blocking(event: &str) -> bool {
     let config = CairnConfig::load();
     let captured = capture_pass(agent, event, &raw, &cwd, &config);
 
+    // Prompt-time delivery (T073, `contracts/retrieval-delivery.md` §1–§2):
+    // committed for Claude Code and Codex only, and additive to capture,
+    // never a replacement for it — capture above always runs first and
+    // exactly as it did before this existed. `UserPromptSubmit` maps to no
+    // canonical lifecycle event for any agent (`the_lifecycle_still_declines_
+    // what_it_never_mapped`), so this is the one place this delivery point
+    // can be reached: the async boundary path below never sees this event at
+    // all.
+    if event == "UserPromptSubmit" && delivers_at_prompt_time(agent) {
+        deliver_prompt_time(agent, &cwd, &captured.key, &config);
+    }
+
     // One request carrying both halves where there is a lifecycle event, and a
     // capture-only request where there is not. Two writes per tool call is the
     // largest cost Cairn adds to a session, and this path runs on every one
@@ -315,39 +327,123 @@ pub async fn run(event: &str) {
         return;
     }
 
+    let started = Instant::now();
     match client::send_with_deadline(&request, deadline).await {
         Ok(value) => {
             if delivers_context {
-                let degraded = deliver_context(agent, &value);
+                let (content_degraded, transport_ok) =
+                    deliver_context(agent, "SessionStart", &value);
                 // The adapter reports the delivery outcome back, which is what
                 // establishes `context_at_session_open`. A session start that
                 // emitted nothing leaves the capability expected — the session
                 // started, and Cairn's context did not reach it (D19a).
-                report_context_delivery(agent, &cwd, &key, degraded, deadline).await;
+                report_context_delivery(agent, &cwd, &key, content_degraded, deadline).await;
+                // Feature 005's own report: what happened to the trace the
+                // server generated, if it generated one at all (§3, §6.2).
+                report_retrieval_outcome(&value, transport_ok, started, deadline).await;
             }
         }
         Err(e) => {
             if delivers_context {
                 // Feature 001's bounded fallback: the session starts with
                 // reduced context rather than waiting (FR-046, FR-195). No
-                // evidence is recorded, because nothing was delivered.
-                emit_context(agent, &reduced_context_notice(&e.message));
+                // evidence is recorded, because nothing was delivered, and no
+                // retrieval trace is known to report against either.
+                emit_context(agent, "SessionStart", &reduced_context_notice(&e.message));
             }
             log_drop(event, &e.message);
         }
     }
 }
 
+/// Whether this agent's `UserPromptSubmit` is a committed automatic delivery
+/// point (`contracts/retrieval-delivery.md` §1, FR-838a).
+///
+/// OpenCode's automatic delivery stays absent — capture-only, a Cairn
+/// decision about an unstable vendor surface rather than a claim the vendor
+/// cannot do it (FR-838b; see `cairn_integrate::agents::opencode`). It is also
+/// structurally excluded upstream of this check: OpenCode never registers an
+/// event named `UserPromptSubmit` at all (its vocabulary is `session.*` /
+/// `tool.*`), so this gate is defense in depth, not the only thing standing
+/// between OpenCode and a push.
+fn delivers_at_prompt_time(agent: cairn_integrate::AgentId) -> bool {
+    matches!(
+        agent,
+        cairn_integrate::AgentId::ClaudeCode | cairn_integrate::AgentId::Codex
+    )
+}
+
+/// Ask the daemon for a prompt-time briefing and hand it to the agent's
+/// context surface — the same rendering and reporting `run`'s boundary path
+/// uses, but blocking, with no async runtime (SC-007): a prompt fires once
+/// per turn, which is exactly the affordability argument `send_blocking`
+/// already rests on for the session-vocabulary fetch above `run_blocking`
+/// makes today.
+fn deliver_prompt_time(
+    agent: cairn_integrate::AgentId,
+    cwd: &str,
+    key: &str,
+    config: &CairnConfig,
+) {
+    let deadline = context_deadline(config);
+    let started = Instant::now();
+    let request = Request::Context {
+        cwd: cwd.to_string(),
+        agent_session_key: (!key.is_empty()).then(|| key.to_string()),
+        session_id: None,
+        reason: None,
+        token_budget: None,
+        explain: false,
+        depth: None,
+        trigger: Some("prompt_submit".to_string()),
+        open_trigger: None,
+    };
+    match client::send_blocking(&request, deadline) {
+        Ok(value) => {
+            let (_content_degraded, transport_ok) =
+                deliver_context(agent, "UserPromptSubmit", &value);
+            report_retrieval_outcome_blocking(&value, transport_ok, started, deadline);
+        }
+        Err(e) => {
+            // Same fail-soft rule as session open: the turn proceeds either
+            // way (FR-781), and there is no trace to report against, because
+            // the daemon never got far enough to hand one back.
+            emit_context(
+                agent,
+                "UserPromptSubmit",
+                &reduced_context_notice(&e.message),
+            );
+            log_drop("UserPromptSubmit", &e.message);
+        }
+    }
+}
+
 /// Emit the briefing on the agent's own context surface.
 ///
-/// Returns whether what was delivered was degraded. The distinction that
-/// matters for evidence is between *reduced* and *absent*: an empty or
+/// `hook_event` is the vendor event name the emitted `hookEventName` should
+/// carry — `"SessionStart"` for session-open delivery, `"UserPromptSubmit"`
+/// for prompt-time delivery (T073): the two delivery points share this
+/// rendering and reporting, and only their vendor event name differs.
+///
+/// Returns `(content_degraded, transport_ok)`.
+///
+/// `content_degraded` distinguishes *reduced* from *absent*: an empty or
 /// unassemblable briefing still demonstrates that the agent's context surface
 /// carries what Cairn puts on it, and is recorded with `degraded: true`. A
 /// start where nothing was emitted at all demonstrates nothing, and that case
 /// never reaches this function — it is the caller's error branch, which
 /// records no evidence (D19a).
-fn deliver_context(agent: cairn_integrate::AgentId, value: &serde_json::Value) -> bool {
+///
+/// `transport_ok` is whether the write to that surface actually succeeded —
+/// the one piece of real transport evidence this process has, and the only
+/// honest basis for ever reporting `transmitted` (FR-843, FR-854): generating
+/// a briefing is not evidence an agent received one, and neither is this
+/// function *returning*, only its write actually landing.
+fn deliver_context(
+    agent: cairn_integrate::AgentId,
+    hook_event: &str,
+    value: &serde_json::Value,
+) -> (bool, bool) {
     match serde_json::from_value::<ContextPayload>(value.clone()) {
         Ok(payload) => {
             // A restored checkpoint is rendered from the raw reply, not from
@@ -366,13 +462,29 @@ fn deliver_context(agent: cairn_integrate::AgentId, value: &serde_json::Value) -
             // next action acted on is worse than no next action at all.
             let mut text = render::continuity(value);
             text.push_str(&render::briefing(&payload));
-            let degraded = text.trim().is_empty();
-            emit_context(agent, &text);
-            degraded
+            let content_degraded = text.trim().is_empty();
+
+            // §12.3: a briefing served from cache is labelled cached and
+            // possibly stale, never presented as though it were fresh. An
+            // outage with no cache entry at all says so instead of quietly
+            // carrying on with only Level 0.
+            if value.get("served_from_cache").and_then(|v| v.as_bool()) == Some(true) {
+                text = format!("{}{text}", cached_context_notice());
+            } else if value
+                .get("fresh_knowledge_unavailable")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+            {
+                text = format!("{}{text}", unavailable_context_notice());
+            }
+
+            let transport_ok = emit_context(agent, hook_event, &text);
+            (content_degraded, transport_ok)
         }
         Err(e) => {
-            emit_context(agent, &reduced_context_notice(&e.to_string()));
-            true
+            let transport_ok =
+                emit_context(agent, hook_event, &reduced_context_notice(&e.to_string()));
+            (true, transport_ok)
         }
     }
 }
@@ -400,6 +512,81 @@ async fn report_context_delivery(
     let _ = client::send_oneway(&request, deadline).await;
 }
 
+/// What actually happened to the transmission, in the vocabulary
+/// `RetrievalOutcome` accepts (`contracts/retrieval-delivery.md` §7).
+///
+/// `hook_transmission_deadline_exceeded` is reached when the write itself did
+/// not fail but only completed after this delivery's own budget was already
+/// spent getting an answer — the one place this process can honestly tell
+/// "ran out of time" apart from "the write itself failed" (§5, §7).
+fn transmission_outcome(
+    transport_ok: bool,
+    started: Instant,
+    deadline: Duration,
+) -> (bool, Option<&'static str>) {
+    if transport_ok {
+        (true, None)
+    } else if started.elapsed() >= deadline {
+        (false, Some("hook_transmission_deadline_exceeded"))
+    } else {
+        (false, Some("hook_transmission_failed"))
+    }
+}
+
+/// Report a delivery's transmission outcome to the daemon (which forwards it
+/// to the server), for the async boundary path.
+///
+/// **Never sent when the daemon's answer carried no `trace_id`** — an
+/// explicit retrieval, a cache hit, or an outage with nothing cached all
+/// legitimately carry none, and there is nothing to report an outcome
+/// against (§3: only a `generated` trace can become `transmitted`).
+async fn report_retrieval_outcome(
+    value: &serde_json::Value,
+    transport_ok: bool,
+    started: Instant,
+    deadline: Duration,
+) {
+    let Some(trace_id) = value
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    else {
+        return;
+    };
+    let (transmitted, failure_reason) = transmission_outcome(transport_ok, started, deadline);
+    let request = Request::RetrievalOutcome {
+        trace_id,
+        transmitted,
+        failure_reason: failure_reason.map(str::to_string),
+    };
+    let _ = client::send_oneway(&request, deadline).await;
+}
+
+/// The same report, blocking, for `run_blocking`'s prompt-time path (SC-007).
+fn report_retrieval_outcome_blocking(
+    value: &serde_json::Value,
+    transport_ok: bool,
+    started: Instant,
+    deadline: Duration,
+) {
+    let Some(trace_id) = value
+        .get("trace_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok())
+    else {
+        return;
+    };
+    let (transmitted, failure_reason) = transmission_outcome(transport_ok, started, deadline);
+    let request = Request::RetrievalOutcome {
+        trace_id,
+        transmitted,
+        failure_reason: failure_reason.map(str::to_string),
+    };
+    if let Err(e) = client::send_oneway_blocking(&request, deadline) {
+        log_drop("UserPromptSubmit", &e.message);
+    }
+}
+
 fn capture_deadline(config: &CairnConfig) -> Duration {
     Duration::from_millis(config.capture_deadline_ms)
 }
@@ -415,25 +602,55 @@ fn reduced_context_notice(reason: &str) -> String {
     )
 }
 
+/// §12.3: served only when the server is unreachable, and always labelled
+/// cached and possibly stale — never presented as though it were fresh.
+fn cached_context_notice() -> String {
+    "_Cairn could not reach the server this turn; the durable memory below is served from \
+     a local cache and may be stale._\n\n"
+        .to_string()
+}
+
+/// §12.3's closing bullet: no cache entry exists for this session and
+/// account, so fresh knowledge is reported unavailable rather than silently
+/// served as though there were nothing to say. Local project state (Level 0)
+/// is unaffected and is not what this notice is about.
+fn unavailable_context_notice() -> String {
+    "_Cairn could not reach the server this turn and has no cached briefing for this \
+     session; durable memory (task/branch/project memory, patterns, personal notes, team \
+     guidance) is unavailable this turn. Local project state below is current._\n\n"
+        .to_string()
+}
+
 /// Emit context on the agent's own supported context surface.
 ///
-/// Claude Code and Codex both read `hookSpecificOutput.additionalContext`.
+/// Claude Code and Codex both read `hookSpecificOutput.additionalContext`,
+/// tagged with the vendor event name that produced it (`hook_event`).
 ///
 /// OpenCode is emitted to as plain stdout, but note that its installed plugin
 /// spawns `cairn hook` with stdout ignored, so nothing written here reaches an
 /// OpenCode session today. OpenCode has no post-compaction session open either,
 /// which is why it derives `agent_initiated` and asks instead.
-fn emit_context(agent: cairn_integrate::AgentId, text: &str) {
+///
+/// Returns whether the write itself succeeded — real transport evidence,
+/// never inferred from this function merely returning without panicking.
+fn emit_context(agent: cairn_integrate::AgentId, hook_event: &str, text: &str) -> bool {
+    use std::io::Write;
     match agent {
-        cairn_integrate::AgentId::Opencode => println!("{text}"),
+        cairn_integrate::AgentId::Opencode => {
+            let mut out = std::io::stdout();
+            writeln!(out, "{text}").and_then(|()| out.flush()).is_ok()
+        }
         _ => {
             let out = serde_json::json!({
                 "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
+                    "hookEventName": hook_event,
                     "additionalContext": text,
                 }
             });
-            println!("{out}");
+            let mut stdout = std::io::stdout();
+            writeln!(stdout, "{out}")
+                .and_then(|()| stdout.flush())
+                .is_ok()
         }
     }
 }

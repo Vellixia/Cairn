@@ -68,6 +68,13 @@ pub struct Daemon {
     /// holds the rest of the queue, and then reports a depth that is accurate
     /// and useless. One in-process mutex — no lease, no lock service (FR-059).
     pub sync_drain: Arc<tokio::sync::Mutex<()>>,
+    /// The bounded, account-bound outage cache for server-side retrieval
+    /// (T072, `contracts/retrieval-delivery.md` §12.3). A cache, not durable
+    /// state: in-memory, lost on restart, rebuilt by the next successful
+    /// retrieval. Invalidated from [`Daemon::mutate_credentials`], the single
+    /// door for sign-out, credential change and account change alike
+    /// (FR-790a).
+    pub outage_cache: Arc<tokio::sync::Mutex<crate::deliver::OutageCache>>,
 }
 
 /// Increments the in-flight capture count and decrements it on drop, whatever
@@ -361,6 +368,17 @@ impl Daemon {
             creds.generation
         };
         *creds = next;
+        drop(creds);
+        drop(config);
+
+        // Sign-out, a credential change, and any account change are exactly
+        // the three cases that reach here (the early return above is the
+        // fourth: nothing changed, nothing to invalidate) — the outage
+        // cache's own bound, account-keyed by construction, is not enough on
+        // its own: a *new* account signing in on this machine must never find
+        // a stale entry still keyed to a session id it happens to share with
+        // the old one (FR-790a, `contracts/retrieval-delivery.md` §12.3).
+        self.outage_cache.lock().await.clear();
         Ok(())
     }
 
