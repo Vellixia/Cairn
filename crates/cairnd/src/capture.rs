@@ -530,6 +530,12 @@ pub async fn spool_safe_events(
     project_id: Uuid,
     account_id: Uuid,
     session_id: Uuid,
+    // The agent comes from the caller, which knows which adapter ran, and never
+    // from the first event in the output. A capture that produced only declines
+    // has no first event, and inferring one would file a Codex decline under
+    // Claude Code — a health report that named the wrong agent would send
+    // somebody to look at an adapter that is working.
+    agent: EventAgent,
     output: &CaptureOutput,
 ) -> Result<SpoolSummary, cairn_store::StoreError> {
     let capacity = SpoolCapacity::default();
@@ -538,25 +544,14 @@ pub async fn spool_safe_events(
     let declined_events: Vec<SafeEventDraft> = output
         .declines
         .iter()
-        .map(|decline| {
-            let agent = output
-                .events
-                .first()
-                .map(|e| e.agent)
-                .unwrap_or(EventAgent::ClaudeCode);
-            decline.as_event(agent, None)
-        })
+        .map(|decline| decline.as_event(agent, None))
         .collect();
 
     for decline in &output.declines {
-        let agent = declined_events
-            .first()
-            .map(|e| e.agent.as_str())
-            .unwrap_or(EventAgent::ClaudeCode.as_str());
         spool::record_disposition(
             store,
             project_id,
-            agent,
+            agent.as_str(),
             decline.kind.as_str(),
             decline.disposition(),
         )

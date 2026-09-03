@@ -1282,6 +1282,25 @@ async fn integration_mode(d: &Daemon) -> String {
 ///
 /// A worktree may hold several active sessions, so ambiguity is reported
 /// rather than guessed (FR-010).
+/// The capture agent one adapter name denotes.
+///
+/// The two vocabularies spell the same agent differently — `AgentId` uses
+/// hyphens because that is what a command line reads well, `EventAgent` uses
+/// underscores because that is what a key-shaped wire value reads well — and
+/// this is the one place the two meet. Both spellings are accepted so a caller
+/// need not know which side of the boundary it is on.
+fn event_agent(name: &str) -> Option<cairn_core::event::EventAgent> {
+    use cairn_core::event::EventAgent;
+    match name {
+        "claude-code" | "claude_code" => Some(EventAgent::ClaudeCode),
+        "codex" => Some(EventAgent::Codex),
+        "opencode" => Some(EventAgent::OpenCode),
+        // `generic-mcp` is not part of the automatic capture population
+        // (FR-838f) and its adapter produces nothing, so it never reaches here.
+        _ => None,
+    }
+}
+
 /// The vocabulary a hook needs before it can build a semantic signal.
 ///
 /// The hook holds the transient vendor text and the daemon holds the event
@@ -1332,6 +1351,15 @@ async fn capture_events(
     let r = d.resolve(cwd).await?;
     let session = resolve_session_for_event(d, &r, Some(key)).await?;
 
+    // The adapter that ran, named by the caller. An agent Feature 005 does not
+    // capture from reaches here only if a caller invented the name, and it is
+    // refused rather than filed under a neighbour.
+    let Some(agent) = event_agent(agent) else {
+        return Err(WireError::invalid(format!(
+            "{agent} is not an agent Feature 005 captures from"
+        )));
+    };
+
     let Some(account_id) = d.account_identity().await else {
         // Counted, not silent. An unsigned-in machine still produces capture,
         // and a health report that could not tell "nothing happened" from
@@ -1340,7 +1368,7 @@ async fn capture_events(
             cairn_store::spool::record_disposition(
                 &d.store,
                 r.project.id,
-                draft.agent.as_str(),
+                agent.as_str(),
                 draft.kind.as_str(),
                 cairn_core::event::Disposition::DeclinedByPolicy,
             )
@@ -1354,10 +1382,16 @@ async fn capture_events(
         }));
     };
 
-    let summary =
-        crate::capture::spool_safe_events(&d.store, r.project.id, account_id, session.id, output)
-            .await
-            .map_err(storage_err)?;
+    let summary = crate::capture::spool_safe_events(
+        &d.store,
+        r.project.id,
+        account_id,
+        session.id,
+        agent,
+        output,
+    )
+    .await
+    .map_err(storage_err)?;
     let _ = agent;
 
     Ok(json!({

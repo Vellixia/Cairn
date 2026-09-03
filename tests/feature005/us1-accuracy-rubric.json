@@ -1,0 +1,43 @@
+{
+  "criterion_of": "SC-701",
+  "fixed_before": "T064",
+  "why": "SC-701 makes accuracy a reviewed judgement recorded as such. A rubric written after the run would be one written to fit its answer, so the criteria are fixed here and the automated portion asserts existence, provenance resolution and rubric completion — never accuracy itself.",
+  "agents": ["claude_code", "codex", "opencode"],
+  "criteria": [
+    {
+      "id": "kind_is_one_of_five",
+      "statement": "The record's kind is one of fact, decision, convention, failure or procedure. Feature 005 introduces no sixth kind (FR-795).",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "claim_is_non_empty",
+      "statement": "The record states something. An empty claim is not knowledge.",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "keys_are_canonical",
+      "statement": "The stored topic and value keys are already in their own canonical form, so a syntactic variant of the same subject collides with this record rather than creating a second (FR-796a).",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "provenance_resolves",
+      "statement": "Every cited source event exists and belongs to the session the record was derived from; zero citations are unresolvable (SC-702).",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "nothing_asked_for_it",
+      "statement": "No explicit record and no supersession appears in a session that invoked no Cairn tool.",
+      "evaluated": "mechanically"
+    },
+    {
+      "id": "claim_is_supported_by_its_evidence",
+      "statement": "A reader given only the cited safe events would judge the claim true of this project. This is the accuracy judgement itself, and it is a human's: an automated check would be the test agreeing with itself.",
+      "evaluated": "by_review"
+    },
+    {
+      "id": "claim_says_no_more_than_the_events_establish",
+      "statement": "The claim does not assert reasoning, intent or a cause that the event stream does not carry. Baseline 005 learns that a decision was taken and about what, never why (contracts/extraction.md §13.9).",
+      "evaluated": "by_review"
+    }
+  ]
+}
