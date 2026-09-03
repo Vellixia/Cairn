@@ -608,14 +608,31 @@ SELECT session_id, event_id, agent, kind, vendor_event, session_seq, contract_ve
  ORDER BY session_id, session_seq
  LIMIT $3";
 
-/// Which of the cited events actually exist in this project and session.
+/// Which of the cited events exist in this project and this session.
 ///
-/// Gate 1. The predicate carries the project and the session, so an extractor
-/// citing an event from anywhere else gets an empty row back and its candidate
-/// is refused rather than persisted with a citation nobody can follow.
-const VERIFY_SOURCES: &str = "\
+/// Gate 1 for a **session rule**, which is what an extractor produces. The
+/// predicate carries both, so a proposal citing an event from anywhere else
+/// gets an empty row back and is refused rather than persisted with a citation
+/// nobody can follow.
+const VERIFY_SESSION_SOURCES: &str = "\
 SELECT event_id FROM safe_events
  WHERE project_id = $1 AND session_id = $2 AND event_id = ANY($3)";
+
+/// Which of the cited events exist in this project at all.
+///
+/// Gate 1 for a **project rule**. R3, R5, R6 and R8 exist precisely because
+/// their evidence spans sessions (`contracts/extraction.md` §4.0), so verifying
+/// them against one session would refuse every candidate they can produce — and
+/// silently, since a refusal is a normal outcome. The scope that matters is
+/// still the one FR-805a1 names: one project, and the aggregator was handed
+/// exactly this project's sessions.
+///
+/// No extractor reaches this predicate. A project rule is Cairn's own
+/// deterministic function, which is the reason the rules that most resemble
+/// policy claims about a project are the ones no extractor influences at all.
+const VERIFY_PROJECT_SOURCES: &str = "\
+SELECT event_id FROM safe_events
+ WHERE project_id = $1 AND event_id = ANY($2)";
 
 /// Existing project knowledge under one subject.
 ///
@@ -931,7 +948,7 @@ async fn govern(
     claim: &Claim,
     account_id: Uuid,
     attributed: &Attributed,
-    verified: &BTreeSet<Uuid>,
+    verified: &Verified,
     derivable: &BTreeSet<(String, String)>,
     settled: &mut BTreeSet<(String, String)>,
 ) -> Result<Verdict, sqlx::Error> {
@@ -950,7 +967,7 @@ async fn govern(
         || !proposal
             .source_event_ids
             .iter()
-            .all(|id| verified.contains(id))
+            .all(|id| verified.accepts(attributed, id))
     {
         return Ok(Verdict::Refused {
             reason: refusal::UNVERIFIABLE_SOURCE,
@@ -1304,7 +1321,7 @@ async fn record_candidate(
     claim: &Claim,
     attributed: &Attributed,
     verdict: &Verdict,
-    verified: &BTreeSet<Uuid>,
+    verified: &Verified,
 ) -> Result<(), sqlx::Error> {
     let proposal = &attributed.proposal;
 
@@ -1360,7 +1377,7 @@ async fn record_candidate(
     for event_id in proposal
         .source_event_ids
         .iter()
-        .filter(|e| verified.contains(e))
+        .filter(|e| verified.accepts(attributed, e))
     {
         sqlx::query(INSERT_SOURCE_EVENT)
             .bind(id)
@@ -1427,23 +1444,67 @@ async fn verify_sources(
     pool: &PgPool,
     claim: &Claim,
     proposed: &[Attributed],
-) -> Result<BTreeSet<Uuid>, sqlx::Error> {
-    let cited: Vec<Uuid> = proposed
-        .iter()
-        .flat_map(|a| a.proposal.source_event_ids.iter().copied())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    if cited.is_empty() {
-        return Ok(BTreeSet::new());
+) -> Result<Verified, sqlx::Error> {
+    let cited = |session_scoped: bool| -> Vec<Uuid> {
+        proposed
+            .iter()
+            .filter(|a| (a.decided_by_session != Uuid::nil()) == session_scoped)
+            .flat_map(|a| a.proposal.source_event_ids.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+
+    let in_session = cited(true);
+    let session = if in_session.is_empty() {
+        BTreeSet::new()
+    } else {
+        sqlx::query_scalar(VERIFY_SESSION_SOURCES)
+            .bind(claim.project_id)
+            .bind(claim.session_id)
+            .bind(&in_session)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect()
+    };
+
+    let in_project = cited(false);
+    let project = if in_project.is_empty() {
+        BTreeSet::new()
+    } else {
+        sqlx::query_scalar(VERIFY_PROJECT_SOURCES)
+            .bind(claim.project_id)
+            .bind(&in_project)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect()
+    };
+
+    Ok(Verified { session, project })
+}
+
+/// The citations gate 1 accepted, by the scope each rule tier is verified in.
+///
+/// Two sets rather than one, because the two tiers are answerable for different
+/// things: a session rule may cite only what it was handed, and a project rule
+/// may cite anything in the project it aggregated over. Merging them would let
+/// a session-rule proposal borrow a project-rule citation's verification, which
+/// is the widening gate 1 exists to prevent.
+struct Verified {
+    session: BTreeSet<Uuid>,
+    project: BTreeSet<Uuid>,
+}
+
+impl Verified {
+    fn accepts(&self, attributed: &Attributed, event_id: &Uuid) -> bool {
+        if attributed.decided_by_session == Uuid::nil() {
+            self.project.contains(event_id)
+        } else {
+            self.session.contains(event_id)
+        }
     }
-    let rows: Vec<Uuid> = sqlx::query_scalar(VERIFY_SOURCES)
-        .bind(claim.project_id)
-        .bind(claim.session_id)
-        .bind(&cited)
-        .fetch_all(pool)
-        .await?;
-    Ok(rows.into_iter().collect())
 }
 
 /// One `safe_events` row as the database hands it back.
