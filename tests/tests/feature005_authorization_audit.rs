@@ -148,6 +148,7 @@ fn no_feature_005_handler_reads_identity_out_of_a_request_body() {
         .collect();
     assert!(handlers.len() >= 9, "the audit found no handlers to check");
 
+    let mut screened = 0;
     for handler in handlers {
         let start = commands.find(&format!("pub async fn {handler}(")).unwrap();
         let body = &commands[start..];
@@ -156,6 +157,21 @@ fn no_feature_005_handler_reads_identity_out_of_a_request_body() {
             .map(|i| i + 1)
             .unwrap_or(body.len());
         let body = &body[..end];
+        let signature = &body[..body.find(" -> ApiResult").unwrap_or(body.len())];
+        // **A handler with no request body has nothing to screen**, and US3's
+        // pattern list is the first of those: a `GET` route whose whole input is
+        // the credential cannot be made to name an identity, because there is no
+        // field in which to name one. Requiring the call anyway would mean
+        // writing a screen over an argument that does not exist, which is how an
+        // audit teaches people to add a line to satisfy it.
+        //
+        // The exemption is decided from the signature rather than from a list of
+        // handler names, so a new route is covered or exempt by what it actually
+        // accepts — a list would have to be remembered.
+        if !signature.contains("Json(") {
+            continue;
+        }
+        screened += 1;
         // Matched on the call, not on a variable name. `command_envelope`
         // screens `&envelope` rather than `&body` — it checks the whole
         // envelope, so a field named outside `payload` is refused too — and an
@@ -167,6 +183,69 @@ fn no_feature_005_handler_reads_identity_out_of_a_request_body() {
              client could name an identity or assert a derived value"
         );
     }
+    assert!(
+        screened >= 9,
+        "the audit exempted almost everything; {screened} handlers were actually \
+         checked, which means the signature rule above is matching nothing"
+    );
+}
+
+/// A pattern is owner-only, and every route that can reach one says so in the
+/// query (T090, FR-708d, SC-761).
+///
+/// The static half. A live probe is in `feature005_patterns.rs`; this exists
+/// because a probe can only test the routes it thinks of, and the failure being
+/// guarded against is a *new* route that forgets the filter.
+#[test]
+fn every_pattern_query_is_bound_to_the_owning_account() {
+    // **Every server source file, not just `commands.rs`.** The rule is about
+    // where a pattern can be read from, and a pattern can be read from anywhere
+    // that writes SQL — retrieval builds candidates from it, the reference
+    // authorization check resolves one, and the changes feed pages over it. An
+    // audit scoped to the module where the routes happen to live today would
+    // pass on the day one of them moves.
+    let sources: Vec<String> = std::fs::read_dir(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("workspace root")
+            .join("crates/cairn-server/src"),
+    )
+    .expect("the server crate's sources")
+    .filter_map(|e| e.ok())
+    .map(|e| e.path())
+    .filter(|p| p.extension().is_some_and(|x| x == "rs"))
+    .map(|p| std::fs::read_to_string(&p).expect("read"))
+    .collect();
+    let commands = sources.join("\n");
+    let mut found = 0;
+    for (i, _) in commands.match_indices("shared_patterns") {
+        // The statement this occurrence belongs to: back to the opening quote of
+        // the SQL literal, forward to its close.
+        let start = commands[..i].rfind('"').unwrap_or(0);
+        let end = commands[i..]
+            .find("\",")
+            .map(|j| i + j)
+            .unwrap_or(commands.len());
+        let statement = &commands[start..end];
+        // A `CREATE`/comment mention is not a query. Only statements that read
+        // or write rows have an owner to bind.
+        let upper = statement.to_uppercase();
+        if !upper.contains("SELECT") && !upper.contains("UPDATE") && !upper.contains("INSERT") {
+            continue;
+        }
+        found += 1;
+        assert!(
+            statement.contains("owner_user_id"),
+            "a `shared_patterns` statement does not name owner_user_id, so it \
+             can reach another account's pattern:\n{statement}"
+        );
+    }
+    assert!(
+        found >= 5,
+        "the audit found {found} pattern statements; promotion, the list, the \
+         changes feed, retrieval's candidate query and the reference \
+         authorization check are at least five, so the scan is matching nothing"
+    );
 }
 
 #[test]
