@@ -22,15 +22,78 @@ const GLOBAL_PER_BRIEFING: i64 = 12;
 ///
 /// `degraded` is set by the caller when assembly had to proceed without part of
 /// its inputs — the agent session still starts (FR-046).
+/// Who is supplying the durable sections this briefing needs.
+///
+/// One budget is shared by two assemblers once retrieval is server-side, and
+/// the only way the total stays inside it is for each half to spend on what it
+/// alone provides. A local build that assembled its own memory and then had it
+/// replaced by the server's would have *paid* for one set and *shipped*
+/// another — the arithmetic holds for neither, and the briefing quietly
+/// exceeds the budget it states (FR-029, SC-709).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Durable {
+    /// This build reads task, branch and project memory, personal notes and
+    /// team guidance from the local store, as it always has.
+    Local,
+    /// The server already selected them and already spent for them. This build
+    /// assembles Level 0 and the sections that are re-derived every delivery,
+    /// and nothing else.
+    FromServer,
+}
+
+/// How this briefing is to be assembled.
+///
+/// Grouped because they are one decision, not five: the budget, the depth and
+/// who supplies the durable sections are all answers to "what may this
+/// briefing contain", and threading them separately through every call site
+/// made it easy to add one and forget a caller.
+#[derive(Debug, Clone, Copy)]
+pub struct Assembly {
+    pub budget: usize,
+    /// Assembly ran out of time or storage was unavailable (FR-046).
+    pub degraded: bool,
+    /// Emit the selection diagnostics (FR-463).
+    pub explain: bool,
+    pub depth: ContextDepth,
+    pub durable: Durable,
+}
+
+impl Assembly {
+    /// The ordinary local assembly: everything from this machine's store.
+    pub fn local(budget: usize, depth: ContextDepth) -> Self {
+        Self {
+            budget,
+            degraded: false,
+            explain: false,
+            depth,
+            durable: Durable::Local,
+        }
+    }
+
+    pub fn explaining(mut self, explain: bool) -> Self {
+        self.explain = explain;
+        self
+    }
+
+    pub fn with_durable(mut self, durable: Durable) -> Self {
+        self.durable = durable;
+        self
+    }
+}
+
 pub async fn build(
     daemon: &Daemon,
     resolved: &Resolved,
     session: Option<&Session>,
-    budget: usize,
-    degraded: bool,
-    explain: bool,
-    depth: ContextDepth,
+    assembly: Assembly,
 ) -> Result<ContextPayload, WireError> {
+    let Assembly {
+        budget,
+        degraded,
+        explain,
+        depth,
+        durable,
+    } = assembly;
     let store = &daemon.store;
     let project = &resolved.project;
 
@@ -60,20 +123,39 @@ pub async fn build(
         .map(|h| h.failures.clone())
         .unwrap_or_default();
 
-    let task_memory = match task.as_ref() {
-        Some(t) => scope_memory(daemon, project.id, MemoryScope::Task, &t.id.to_string()).await?,
-        None => Vec::new(),
+    // Not read at all when the server supplies them — not read and then
+    // discarded. A budget spent on content that is about to be replaced is
+    // spent, and the replacement costs its own amount on top.
+    let local_durable = durable == Durable::Local;
+    let task_memory = match (local_durable, task.as_ref()) {
+        (true, Some(t)) => {
+            scope_memory(daemon, project.id, MemoryScope::Task, &t.id.to_string()).await?
+        }
+        _ => Vec::new(),
     };
-    let branch_memory = scope_memory(daemon, project.id, MemoryScope::Branch, &git.branch).await?;
-    let project_memory = scope_memory(
-        daemon,
-        project.id,
-        MemoryScope::Project,
-        &project.id.to_string(),
-    )
-    .await?;
+    let branch_memory = if local_durable {
+        scope_memory(daemon, project.id, MemoryScope::Branch, &git.branch).await?
+    } else {
+        Vec::new()
+    };
+    let project_memory = if local_durable {
+        scope_memory(
+            daemon,
+            project.id,
+            MemoryScope::Project,
+            &project.id.to_string(),
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
 
+    // A project whose durable memory lives on the server has history; it is
+    // simply not in these three vectors. Reading their emptiness as "no prior
+    // history" would greet a long-running project as a new one every time
+    // (FR-031).
     let has_history = previous_handoff.is_some()
+        || !local_durable
         || !task_memory.is_empty()
         || !branch_memory.is_empty()
         || !project_memory.is_empty();
@@ -111,7 +193,7 @@ pub async fn build(
     // (below) is never called, not merely filtered afterward — the same
     // "the function cannot see the thing that would violate it" argument
     // `contracts/recall-composition.md` §2 makes for the reserve.
-    let (personal_notes, team_guidance) = if depth.is_minimum() {
+    let (personal_notes, team_guidance) = if depth.is_minimum() || !local_durable {
         (Vec::new(), Vec::new())
     } else {
         global_candidates(daemon, resolved).await

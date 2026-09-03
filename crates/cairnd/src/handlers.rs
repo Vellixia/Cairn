@@ -1726,15 +1726,21 @@ async fn context(
         // (`contracts/retrieval-delivery.md` §8 keeps a *reason* out of the
         // trace for the parallel cause).
         (true, _) => {
-            let payload =
-                briefing::build(d, &r, session.as_ref(), budget, false, true, depth).await?;
+            let payload = briefing::build(
+                d,
+                &r,
+                session.as_ref(),
+                briefing::Assembly::local(budget, depth).explaining(true),
+            )
+            .await?;
             serde_json::to_value(payload).unwrap_or(json!({}))
         }
         // No session bound in this worktree: `/api/retrieve` requires one to
         // bind to, and there is none, so this is the daemon's own local
         // assembly exactly as it always was (FR-031).
         (false, None) => {
-            let payload = briefing::build(d, &r, None, budget, false, false, depth).await?;
+            let payload =
+                briefing::build(d, &r, None, briefing::Assembly::local(budget, depth)).await?;
             serde_json::to_value(payload).unwrap_or(json!({}))
         }
         (false, Some(s)) => {
@@ -1744,9 +1750,16 @@ async fn context(
                 .unwrap_or(crate::deliver::Trigger::Explicit);
             let deadline =
                 std::time::Duration::from_millis(d.config.read().await.context_deadline_ms);
-            let delivered =
-                crate::deliver::deliver(d, &r, s.id, trigger, open_trigger.as_deref(), deadline)
-                    .await;
+            let delivered = crate::deliver::deliver(
+                d,
+                &r,
+                s.id,
+                trigger,
+                open_trigger.as_deref(),
+                budget,
+                deadline,
+            )
+            .await;
             // These three already travel inside `delivered.payload` too
             // (a caller that only sees the wire reply, such as the hook
             // process, has no other way to read them) — logged here as well

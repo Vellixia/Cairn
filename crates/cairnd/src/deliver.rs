@@ -200,13 +200,30 @@ pub async fn deliver(
     session_id: Uuid,
     trigger: Trigger,
     open_trigger: Option<&str>,
+    // What this machine may spend. Sent to the server rather than applied
+    // afterwards, because the two assemblers share one budget and only the side
+    // that selects first can keep the total inside it — trimming the answer
+    // here would already have exceeded it.
+    budget_tokens: usize,
     deadline: Duration,
 ) -> Delivered {
     let account_id = d.account_identity().await;
 
+    // The server binds a retrieval's project from a session **it holds**, and a
+    // session created moments ago is still in this machine's outbox. Pushing
+    // first is what makes automatic delivery at session open possible at all:
+    // without it the first thing a new session does is ask about a session the
+    // server has never seen, and the honest answer to that is "no briefing",
+    // every time.
+    //
+    // Bounded by a slice of the same deadline and its failure ignored. If the
+    // push does not land, retrieval degrades exactly as it would for any other
+    // unreachable server — which is a worse briefing, never a wrong one.
+    let _ = tokio::time::timeout(deadline / 2, crate::sync::push_pending(d, resolved)).await;
+
     let remote = tokio::time::timeout(
         deadline,
-        retrieve_remote(d, session_id, trigger, open_trigger),
+        retrieve_remote(d, session_id, trigger, open_trigger, budget_tokens),
     )
     .await
     .ok()
@@ -235,18 +252,31 @@ pub async fn deliver(
     };
 
     let meta = ResponseMeta::extract(response.as_ref(), served_from_cache);
-    let full_budget = d.config.read().await.context_budget_tokens;
-    let local_budget = meta.local_budget(full_budget);
+    // The caller's figure, not the machine's default. `cairn context --budget`
+    // and a per-machine `context_budget_tokens` are both real, and the caller
+    // already resolved which applies; re-reading config here ignored a stated
+    // budget entirely and produced a briefing larger than the one asked for
+    // (FR-029, SC-709).
+    let local_budget = meta.local_budget(budget_tokens);
 
     let session = cairn_store::repo::session(&d.store, session_id).await.ok();
+    // When the server answered, it already selected and already paid for the
+    // durable sections — so this build must not read them. Assembling them here
+    // and letting the merge overwrite them would spend budget on content that
+    // is thrown away, and the replacement costs its own amount on top: the
+    // briefing then exceeds the budget it states, which is what FR-029 forbids
+    // and what a merged answer of 357 tokens against a stated 300 looked like.
+    let durable = if response.is_some() {
+        crate::briefing::Durable::FromServer
+    } else {
+        crate::briefing::Durable::Local
+    };
     let local = crate::briefing::build(
         d,
         resolved,
         session.as_ref(),
-        local_budget,
-        false,
-        false,
-        ContextDepth::Standard,
+        crate::briefing::Assembly::local(local_budget, ContextDepth::Standard)
+            .with_durable(durable),
     )
     .await;
     let mut payload = match local {
@@ -324,6 +354,7 @@ async fn retrieve_remote(
     session_id: Uuid,
     trigger: Trigger,
     open_trigger: Option<&str>,
+    budget_tokens: usize,
 ) -> Option<Value> {
     let creds = d.server.read().await.clone();
     let base = creds.url?;
@@ -333,6 +364,9 @@ async fn retrieve_remote(
     let mut body = json!({
         "session_id": session_id,
         "trigger": trigger.as_str(),
+        // The server clamps this to its own figure, so asking is always safe
+        // and never widens anything.
+        "budget_tokens": budget_tokens,
     });
     // `open_trigger` belongs to a `session_open` retrieval and to no other
     // (the server refuses it otherwise) — never sent for the other two.

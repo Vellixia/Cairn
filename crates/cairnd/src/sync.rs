@@ -2590,6 +2590,31 @@ pub async fn sync_now(d: &Daemon, cwd: &str) -> Reply {
 /// at the same time as this one works on a disjoint set rather than re-sending
 /// the same rows. A transient failure releases the claim; a permanent rejection
 /// records the row `failed` (FR-056, FR-058).
+/// Push whatever this project has queued, once, so the server knows about it.
+///
+/// Retrieval binds its project from a **session the server holds**, and a
+/// session that has only just been created has not reached the server yet — the
+/// background worker moves it on its own cadence, which is measured against
+/// nothing in particular and certainly not against a hook's deadline. Without
+/// this, automatic delivery at session open could never work: the first thing a
+/// new session does is ask for context about a session the server has never
+/// seen, and the honest answer to that is "no briefing", every time.
+///
+/// One drain pass, and its failure is not an error. If the session still is not
+/// there, retrieval degrades exactly as it does for any other unreachable
+/// server, and the next delivery point will have it.
+pub(crate) async fn push_pending(d: &Daemon, resolved: &Resolved) -> Result<(), WireError> {
+    if !resolved.project.linked {
+        return Ok(());
+    }
+    let Some(server_project_id) = resolved.project.server_project_id else {
+        return Ok(());
+    };
+    drain(d, resolved.project.id, server_project_id)
+        .await
+        .map(|_| ())
+}
+
 async fn drain(
     d: &Daemon,
     project_id: Uuid,

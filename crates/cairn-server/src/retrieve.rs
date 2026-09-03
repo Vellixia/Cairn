@@ -175,6 +175,17 @@ impl Trigger {
 pub struct RetrieveRequest {
     pub session_id: Uuid,
     pub trigger: Trigger,
+    /// A **smaller** budget than the deployment's, where the caller wants one.
+    ///
+    /// Not authority: a caller may ask for less and never for more, and the
+    /// server clamps it, so the worst a hostile value can do is starve the
+    /// caller's own briefing. It exists because the budget is a property of the
+    /// machine asking — `cairn context --budget` and a per-machine
+    /// `context_budget_tokens` are both real — and a server that ignored it
+    /// would hand back more than the caller can spend, which is how a briefing
+    /// stops being within its stated budget (FR-029, SC-709).
+    #[serde(default)]
+    pub budget_tokens: Option<usize>,
     /// `session_open` only. `compact` is how post-compaction restoration is
     /// reached — there is no post-compaction delivery point of its own,
     /// because at least one committed vendor's post-compaction event cannot
@@ -328,9 +339,15 @@ pub async fn retrieve(
         (_, None) => None,
     };
 
+    // Clamped, not trusted. `min` is the whole guard: a caller asking for more
+    // than the deployment allows gets the deployment's figure.
+    let full = request
+        .budget_tokens
+        .unwrap_or(budget_tokens)
+        .min(budget_tokens);
     let tokens = match request.trigger {
-        Trigger::PromptSubmit => (budget_tokens as f64 * INCREMENTAL_FRACTION).floor() as usize,
-        _ => budget_tokens,
+        Trigger::PromptSubmit => (full as f64 * INCREMENTAL_FRACTION).floor() as usize,
+        _ => full,
     };
 
     let trace_id = Uuid::now_v7();
