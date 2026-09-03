@@ -224,8 +224,12 @@ pub struct RetrieveResponse {
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct BudgetReport {
+    /// The whole briefing budget for this delivery point.
     pub tokens: usize,
+    /// What the durable sections took of it.
     pub spent: usize,
+    /// What is guaranteed to the Level 0 the daemon assembles.
+    pub reserved_for_level0: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -422,13 +426,20 @@ async fn generate(
         BTreeMap::new()
     };
 
+    // **The reserve stays withheld here, and that is the whole reason it
+    // exists.** One budget is shared by two assemblers: this module selects the
+    // durable sections, and the daemon adds the Level 0 it alone can see — the
+    // task, the repository's working state, the previous handoff, the warnings
+    // and the pins. Level 0 is the part a briefing may not lose.
+    //
+    // Releasing the reserve here would hand the whole budget to durable memory
+    // and leave the assembler that owes the guaranteed minimum with whatever
+    // happened to be left, which is exactly the displacement the reserve was
+    // introduced to prevent. Nothing in this module is Level 0, so it never
+    // spends *from* the reserve; it withholds it *for* the assembler that does,
+    // and the two together therefore cannot exceed the budget.
     let mut budget =
         Budget::with_reserve(tokens, (tokens as f64 * RESERVE_FRACTION).floor() as usize);
-    // Nothing in this module is Level 0, so the reserve is released before any
-    // admission: it exists to stop Level 1 displacing project truth the *daemon*
-    // assembles, and withholding it here would shrink the project sections it
-    // was withheld for.
-    budget.release_reserve();
     let global_cap = (tokens as f64 * cairn_core::context::GLOBAL_SHARE_MAX).floor() as usize;
     let mut global_spent = 0usize;
 
@@ -528,6 +539,10 @@ async fn generate(
         budget: BudgetReport {
             tokens,
             spent: budget.spent(),
+            // What this module withheld for the assembler that owes Level 0.
+            // Reported rather than left to be re-derived, because a caller
+            // recomputing the fraction is a second place for it to drift.
+            reserved_for_level0: budget.reserve(),
         },
         served_from_cache: false,
         sections,
