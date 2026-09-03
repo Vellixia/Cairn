@@ -758,6 +758,17 @@ impl Verdict {
 /// single session and records the nil UUID, which the codebase already uses for
 /// an unattributed act. Inventing a session would misattribute a relation to
 /// work that did not decide it (§5 gate 6a).
+///
+/// **The same value names the candidate.** §7 derives identity from the
+/// project, the session and the normalized keys, and a project rule has no
+/// session to put there. Using the pass's session instead would give one
+/// project-wide claim a different identity in every session that triggered a
+/// pass: the record itself would not duplicate, because gate 6 finds it and
+/// reinforces — but it would gain a *fresh* corroboration endpoint and another
+/// increment on every pass, forever. The count would stop meaning "independent
+/// confirmations" and start meaning "passes since this rule began firing",
+/// which is a number nobody asked for and everybody would read as the other
+/// one.
 struct Attributed {
     proposal: CandidateProposal,
     decided_by_session: Uuid,
@@ -1102,7 +1113,7 @@ async fn create(
 ) -> Result<Uuid, sqlx::Error> {
     let id = candidate_id(
         claim.project_id,
-        claim.session_id,
+        attributed.decided_by_session,
         Some(topic_key),
         Some(value_key),
     );
@@ -1146,7 +1157,7 @@ async fn reinforce(
 ) -> Result<Uuid, sqlx::Error> {
     let endpoint = corroboration_id(
         claim.project_id,
-        claim.session_id,
+        attributed.decided_by_session,
         Some(topic_key),
         Some(value_key),
     );
@@ -1322,7 +1333,7 @@ async fn record_candidate(
 
     let id = candidate_id(
         claim.project_id,
-        claim.session_id,
+        attributed.decided_by_session,
         topic_key.as_deref(),
         value_key.as_deref(),
     );
@@ -1498,6 +1509,14 @@ async fn read_project_events(
         .fetch_all(pool)
         .await?;
 
+    // A read that hit its cap may have stopped in the middle of a session, and
+    // a half-read session is worse than an unread one: R5 matches an *identical
+    // ordered sequence*, so a truncated one is a procedure that never happened.
+    // The last session is therefore dropped whenever the cap was reached, which
+    // is the same judgement the rule already makes about a sequence too long to
+    // render — half a procedure is a wrong procedure.
+    let truncated = rows.len() as i64 == extract::AGGREGATE_MAX_EVENTS;
+
     let mut sessions: Vec<extract::SessionEvents> = Vec::new();
     for (session_id, event_id, agent, kind, vendor_event, seq, version, content, at) in rows {
         let Some(event) = rebuild(
@@ -1520,6 +1539,9 @@ async fn read_project_events(
                 events: vec![event],
             }),
         }
+    }
+    if truncated {
+        sessions.pop();
     }
     Ok(sessions)
 }
