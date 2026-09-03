@@ -168,6 +168,17 @@ pub fn routes() -> Router<AppState> {
         // immediately after a restart, because every field behind it is a
         // committed row rather than worker state (SC-748, FR-793c).
         .route("/api/consolidation/health", get(consolidation_health))
+        // Retrieval, its trace, and the outcome of actually transmitting it.
+        // Three routes and not one: generating a briefing, reading back what
+        // was selected, and reporting what reached the agent are three
+        // different claims, and collapsing them would let the first stand in
+        // for the third (FR-843, FR-854).
+        .route("/api/retrieve", post(retrieve_context))
+        .route("/api/retrieval-traces/{trace_id}", get(retrieval_trace))
+        .route(
+            "/api/retrieval-traces/{trace_id}/transmission",
+            post(retrieval_transmission),
+        )
         .route("/api/sessions/{id}", get(session_detail))
         .route("/api/sessions/{id}/handoff", get(session_handoff))
         .route(
@@ -583,6 +594,54 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> ApiResult<
         .map_err(|_| ApiError::internal("bad cookie"))?,
     );
     Ok((out, Json(json!({ "ok": true }))))
+}
+
+/// Generate a briefing for one session, and trace it.
+///
+/// The account comes from the credential and the project from the session; the
+/// body names neither, and a caller that could name them could retrieve against
+/// a project it has nothing to do with (FR-769, Principle XI).
+async fn retrieve_context(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<crate::retrieve::RetrieveRequest>,
+) -> ApiResult<Json<Value>> {
+    let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+    let budget = cairn_core::CairnConfig::default().context_budget_tokens;
+    let answer = crate::retrieve::retrieve(&state.pool, &reader, &body, budget).await?;
+    Ok(Json(
+        serde_json::to_value(answer).unwrap_or_else(|_| json!({})),
+    ))
+}
+
+/// What a retrieval considered and selected, filtered to this reader.
+async fn retrieval_trace(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(trace_id): Path<Uuid>,
+) -> ApiResult<Json<Value>> {
+    let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+    Ok(Json(
+        crate::retrieve::trace_detail(&state.pool, &reader, trace_id).await?,
+    ))
+}
+
+/// What actually happened to a generated briefing.
+///
+/// The smallest boundary that can carry the fact: a server-issued `trace_id` in
+/// the path and a bounded outcome in the body. Nothing else is accepted,
+/// because everything else the server already holds and everything beyond that
+/// is authority a caller must not assert.
+async fn retrieval_transmission(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Path(trace_id): Path<Uuid>,
+    Json(body): Json<crate::retrieve::TransmissionReport>,
+) -> ApiResult<Json<Value>> {
+    let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
+    Ok(Json(
+        crate::retrieve::report_transmission(&state.pool, &reader, trace_id, &body).await?,
+    ))
 }
 
 /// How far behind consolidation is, for any authenticated caller.

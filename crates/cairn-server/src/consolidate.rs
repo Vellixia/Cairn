@@ -345,6 +345,16 @@ impl Consolidator {
             if let Err(e) = self.pass().await {
                 tracing::warn!(worker = %self.worker, error = %e, "a consolidation pass failed");
             }
+            // Retention rides the same task rather than a second one (FR-847).
+            // It is bounded per sweep, so it never becomes a long lock on a
+            // table the request path writes to, and a task that already yields
+            // between passes is the natural place for work that must not
+            // compete with request serving.
+            match crate::retrieve::sweep_traces(&self.pool).await {
+                Ok(n) if n > 0 => tracing::debug!(deleted = n, "retrieval traces swept"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "a retention sweep failed"),
+            }
             tokio::time::sleep(BATCH_YIELD).await;
         }
     }
