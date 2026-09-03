@@ -16,7 +16,6 @@
   "version": 1,
   "recorded_at_commit": "b54a457bb90ff2eda68d2834c582895ce53255cd",
   "recorded_on": "2026-09-02",
-
   "corpora": {
     "key_variants": {
       "criterion": "SC-745",
@@ -39,7 +38,6 @@
         "dot separates topic segments and a hyphen does not."
       ]
     },
-
     "privacy_classes": {
       "criterion": "SC-704, SC-705",
       "requires": "every rejection class exercised; zero secrets persisted; refusals structurally text-free",
@@ -64,7 +62,6 @@
         "untested while every assertion still passed."
       ]
     },
-
     "path_attacks": {
       "criterion": "SC-743, FR-777c",
       "requires": "every listed form refused on both POSIX and Windows shapes; bounds stated as numbers",
@@ -83,11 +80,10 @@
       "status": "present",
       "notes": [
         "Each attack is paired with the path its 'obvious fix' would produce,",
-        "and that repaired form is asserted legal — which is exactly why",
+        "and that repaired form is asserted legal \u2014 which is exactly why",
         "repairing silently would be undetectable downstream."
       ]
     },
-
     "legacy_keys": {
       "criterion": "SC-746 (un-normalized legacy keys produce no second record)",
       "requires": "seeded from a real v7-era store, not a v8 store containing an old-looking string",
@@ -106,7 +102,6 @@
         "old-looking string would pass without proving anything."
       ]
     },
-
     "reference_identity": {
       "criterion": "SC-766, SC-767",
       "requires": "one UUID shared across project, personal, team and pattern, on every surface carrying a reference",
@@ -120,7 +115,6 @@
       "location": "tests/tests/feature005_reference_identity.rs",
       "status": "present"
     },
-
     "capture_matrix": {
       "criterion": "SC-701, SC-706, SC-708, SC-712",
       "requires": "every supported agent against every canonical event kind, with a disposition for each cell",
@@ -132,12 +126,16 @@
         "opencode"
       ],
       "location": "tests/tests/feature005_capture_matrix.rs",
-      "status": "owed",
-      "owed_by": "T040-T064 (US1)"
+      "status": "present",
+      "notes": [
+        "Delivered by T040. The declared matrix answers all twenty-five cells for",
+        "each agent before anything runs; the test drives real evidence through",
+        "every cell the adapters implement and asserts the rest are coherent",
+        "absences rather than blanks."
+      ]
     },
-
     "decision_signals": {
-      "criterion": "FR-736, contracts/extraction.md §13",
+      "criterion": "FR-736, contracts/extraction.md \u00a713",
       "requires": "vocabulary-justified tokens accepted, sentence fragments and credentials refused",
       "must_cover": [
         "token justified by a file segment",
@@ -147,31 +145,37 @@
         "a sentence rendered in the key charset",
         "a credential rendered in the key charset"
       ],
-      "location": "tests/tests/feature005_ingest.rs",
-      "status": "partial",
-      "owed_by": "T040-T064 (US1) extends this to the extraction side",
+      "location": "tests/tests/feature005_semantic_signals.rs::SCENARIOS",
+      "status": "present",
       "notes": [
         "The ingest half is present. What is owed is the extraction half: that",
-        "an accepted signal actually produces the decision it names."
+        "an accepted signal actually produces the decision it names.",
+        "Completed by T041. The twenty pre-registered sessions live in SCENARIOS,",
+        "drawn only from the agents that emit semantic signals (FR-727e), with",
+        "the ingest-side cases in feature005_ingest.rs unchanged beside them."
       ]
     },
-
     "paraphrase_pairs": {
       "criterion": "SC-736",
       "requires": "at least fifty claim pairs spanning all five knowledge kinds; a restatement reinforces rather than creating a record",
       "minimum_pairs": 50,
-      "must_cover": ["fact", "decision", "convention", "failure", "procedure"],
+      "must_cover": [
+        "fact",
+        "decision",
+        "convention",
+        "failure",
+        "procedure"
+      ],
       "location": "tests/feature005/corpora/paraphrase_pairs.json",
-      "status": "owed",
-      "owed_by": "T040-T064 (US1)",
+      "status": "present",
       "notes": [
         "SC-736 says the corpus is fixed before implementation. This entry is",
         "that fixing: the shape and the size are committed now, and the pairs",
-        "are written before the consolidation code that has to satisfy them —",
-        "not chosen afterwards from the cases it happens to handle."
+        "are written before the consolidation code that has to satisfy them \u2014",
+        "not chosen afterwards from the cases it happens to handle.",
+        "Delivered by T044: fifty pairs, ten per kind."
       ]
     },
-
     "restart_injection": {
       "criterion": "SC-703, FR-793a-d",
       "requires": "a crash at each stage of a consolidation pass leaves no duplicate and strands no session",
@@ -182,11 +186,14 @@
         "lease expiry and reclaim",
         "attempt exhaustion"
       ],
-      "location": "tests/tests/feature005_consolidation_claims.rs",
-      "status": "owed",
-      "owed_by": "T031-T033"
+      "location": "tests/tests/feature005_consolidation_restart.rs::crash_points",
+      "status": "present",
+      "notes": [
+        "Moved by T044. T031-T033 established the claim machinery's own crash",
+        "cases; the twenty pre-registered points SC-739 asks for belong with the",
+        "pass they interrupt, which is where they now are."
+      ]
     },
-
     "migration_stores": {
       "criterion": "SC-746, FR-861-FR-878",
       "requires": "populated v7 stores covering every retained-local reason and every blocked-row report",

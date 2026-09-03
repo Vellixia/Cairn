@@ -1044,10 +1044,30 @@ async fn govern(
     }
 
     // Gate 6 — duplicate and reinforcement, on normalized-key identity.
+    //
+    // **A candidate never reinforces itself.** A record this candidate already
+    // created carries this candidate's own deterministic id, and a re-executed
+    // batch derives the same proposal again — so without this exclusion a
+    // session that crashed after its governance transaction committed would be
+    // reclaimed, find its own creation, and corroborate it: a second record, a
+    // second relation and an increment that no second occurrence produced.
+    // Re-execution after an abandoned claim is expected; a second durable
+    // effect from it is the thing SC-703 and SC-739 forbid.
+    //
+    // The asymmetry is worth naming, because it is why the defect was invisible
+    // on half the paths: a *reinforcing* session's reclaim was already safe,
+    // since its corroboration endpoint is excluded from this lookup by
+    // `origin_kind`. Only a creating session's reclaim was exposed.
+    let own = candidate_id(
+        claim.project_id,
+        attributed.decided_by_session,
+        Some(&topic_key),
+        Some(&value_key),
+    );
     let existing = project_by_topic(tx, claim.project_id, &topic_key).await?;
     let exact = existing
         .iter()
-        .find(|row| matches_value_key(row.value_key.as_deref(), &value_key));
+        .find(|row| row.id != own && matches_value_key(row.value_key.as_deref(), &value_key));
 
     if let Some(row) = exact {
         let knowledge_id = reinforce(tx, claim, attributed, &topic_key, &value_key, row).await?;
@@ -1148,6 +1168,8 @@ async fn create(
         Some(topic_key),
         Some(value_key),
     );
+    // `ON CONFLICT DO NOTHING`, so a re-executed batch that already created
+    // this record writes nothing rather than a second copy of it.
     sqlx::query(INSERT_MEMORY)
         .bind(id)
         .bind(claim.project_id)
