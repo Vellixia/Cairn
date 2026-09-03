@@ -170,6 +170,68 @@ fn no_feature_005_handler_reads_identity_out_of_a_request_body() {
 }
 
 #[test]
+fn the_retrieval_routes_bind_every_identity_from_the_session_or_the_trace() {
+    // The audit exists so a *new* endpoint cannot slip past the rule, and US2
+    // added three. Retrieval is where the rule matters most: the answer spans
+    // project, personal and team knowledge, so a caller that could name an
+    // account or a project in the body could read across all three.
+    let retrieve = source("crates/cairn-server/src/retrieve.rs");
+
+    // Retrieval derives its project from a verified session, exactly as ingest
+    // does.
+    assert!(
+        retrieve.contains("bind_session("),
+        "retrieval no longer derives its project from a verified session"
+    );
+
+    // The request types are closed. `deny_unknown_fields` is what turns "the
+    // server ignores an extra field" into "the server refuses it" — an ignored
+    // `account_id` reads to the caller exactly like an accepted one.
+    let closed = retrieve.matches("#[serde(deny_unknown_fields)]").count();
+    assert!(
+        closed >= 2,
+        "a retrieval request type is open, so a caller can send fields the          server silently ignores"
+    );
+
+    // None of the identity-bearing names may be read from a body at all.
+    for forbidden in [
+        "body.account_id",
+        "body.project_id",
+        "body.owner_user_id",
+        "body.session_owner",
+        "report.account_id",
+        "report.project_id",
+        "report.session_id",
+    ] {
+        assert!(
+            !retrieve.contains(forbidden),
+            "retrieval reads {forbidden} out of a request body"
+        );
+    }
+
+    // The transmission report's whole surface is an outcome and a bounded
+    // reason. Anything else is authority a caller must not assert — including
+    // acknowledgement, which no vendor mechanism establishes for any agent.
+    let start = retrieve
+        .find("pub struct TransmissionReport {")
+        .expect("the transmission report type exists");
+    let report = &retrieve[start..start + retrieve[start..].find('}').unwrap_or(0)];
+    for forbidden in [
+        "account",
+        "project",
+        "session",
+        "acknowledg",
+        "reference",
+        "domain",
+    ] {
+        assert!(
+            !report.contains(forbidden),
+            "the transmission report carries a {forbidden} field, which is              authority the caller must not be able to assert"
+        );
+    }
+}
+
+#[test]
 fn the_ingest_route_binds_its_project_from_the_session_and_not_the_body() {
     let events = source("crates/cairn-server/src/events.rs");
     // The project is derived from the verified session. A route that took it
