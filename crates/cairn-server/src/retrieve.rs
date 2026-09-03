@@ -280,6 +280,10 @@ pub async fn retrieve(
     reader: &ReaderContext,
     request: &RetrieveRequest,
     budget_tokens: usize,
+    // The hook's own context deadline. Passed in rather than defined here,
+    // because a second deadline constant would drift against the one the hook
+    // actually enforces.
+    deadline_ms: u128,
 ) -> ApiResult<RetrieveResponse> {
     let started = std::time::Instant::now();
 
@@ -349,6 +353,7 @@ pub async fn retrieve(
         &binding,
         trace_id,
         tokens,
+        deadline_ms,
         open_trigger,
         started,
     )
@@ -394,6 +399,7 @@ async fn generate(
     binding: &auth::SessionBinding,
     trace_id: Uuid,
     tokens: usize,
+    deadline_ms: u128,
     open_trigger: Option<cairn_core::event::OpenTrigger>,
     started: std::time::Instant,
 ) -> ApiResult<RetrieveResponse> {
@@ -493,7 +499,7 @@ async fn generate(
     persist_items(pool, trace_id, &items).await?;
 
     let elapsed = started.elapsed().as_millis();
-    let level = degradation(elapsed, request.trigger, rank);
+    let level = degradation(elapsed, request.trigger, deadline_ms);
     let latency = elapsed.min(i32::MAX as u128) as i32;
 
     sqlx::query(
@@ -530,20 +536,34 @@ async fn generate(
 
 /// Which of the four levels this retrieval reached.
 ///
-/// `none` is a **degraded result and not a failure**: a briefing that is empty
-/// because there was nothing to say and one that is empty because something
-/// broke are told apart by `delivery_state`, never conflated (FR-849).
-fn degradation(elapsed_ms: u128, trigger: Trigger, selected: i32) -> &'static str {
-    if selected == 0 {
-        return LEVEL_NONE;
-    }
+/// **The level says how much of the pipeline ran, never how many items came
+/// out.** §5's table and §4.1's worked example read differently on this — the
+/// table lists "retrieval produced nothing" under `none`, and the example says
+/// an empty prompt-time delivery is `full` with a spend of zero, "distinguished
+/// from a failed retrieval: nothing was owed, not something broke". The example
+/// is the more specific statement and it is the one that is reasoned, so it
+/// governs: a delivery emptied by dedup is a complete delivery of nothing owed,
+/// and reporting it as degraded would say the briefing was cut short when the
+/// briefing was exactly right.
+///
+/// What emptiness means is already answered elsewhere and by better fields:
+/// `delivery_state` separates a failure from a success (FR-849), and
+/// `budget.spent = 0` says nothing was owed. A third field repeating either
+/// would only be a third thing that can disagree.
+///
+/// `none` is therefore reached only by the deadline the hook itself enforces,
+/// which is the one case where the guaranteed minimum genuinely did not
+/// assemble.
+fn degradation(elapsed_ms: u128, trigger: Trigger, deadline_ms: u128) -> &'static str {
     let soft = trigger.soft_target_ms();
     if elapsed_ms <= soft {
         LEVEL_FULL
     } else if elapsed_ms <= soft * 4 {
         LEVEL_REDUCED
-    } else {
+    } else if elapsed_ms <= deadline_ms {
         LEVEL_MINIMAL
+    } else {
+        LEVEL_NONE
     }
 }
 

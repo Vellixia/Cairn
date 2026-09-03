@@ -607,8 +607,15 @@ async fn retrieve_context(
     Json(body): Json<crate::retrieve::RetrieveRequest>,
 ) -> ApiResult<Json<Value>> {
     let reader = auth::ReaderContext::load(&state.pool, &user.0).await?;
-    let budget = cairn_core::CairnConfig::default().context_budget_tokens;
-    let answer = crate::retrieve::retrieve(&state.pool, &reader, &body, budget).await?;
+    let config = cairn_core::CairnConfig::default();
+    let answer = crate::retrieve::retrieve(
+        &state.pool,
+        &reader,
+        &body,
+        config.context_budget_tokens,
+        config.context_deadline_ms as u128,
+    )
+    .await?;
     Ok(Json(
         serde_json::to_value(answer).unwrap_or_else(|_| json!({})),
     ))
