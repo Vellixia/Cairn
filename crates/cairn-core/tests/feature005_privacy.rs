@@ -462,3 +462,52 @@ fn there_is_one_implementation_and_the_new_surfaces_all_reach_it() {
         expected
     );
 }
+
+/// The screen refuses what redaction would have destroyed (FR-777, SC-741).
+///
+/// The two mechanisms recognised disjoint shapes and each one's gap was the
+/// other's coverage: redaction knows vendor-prefixed API keys and not a bare
+/// hex digest, the screen knew the digest and not the keys. On the ordinary
+/// path that is invisible, because redaction runs on the client first. FR-777
+/// requires the server to enforce independently of the client, and a client is
+/// exactly what a server may not assume, so the gap was real and only a hostile
+/// or broken client could find it — which is the client the requirement is
+/// about.
+#[test]
+fn a_vendor_prefixed_key_inside_an_approved_field_is_refused_by_the_screen_itself() {
+    use cairn_core::validate::{validate_safe_event_text, SafeEventField};
+
+    for (field, text) in [
+        (
+            SafeEventField::TestCommand,
+            "cargo test --token sk-abcdefghij1234567890",
+        ),
+        (
+            SafeEventField::CommandLine,
+            "deploy --token ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ),
+        (
+            SafeEventField::FailureNote,
+            "authentication failed for sk-abcdefghij1234567890",
+        ),
+    ] {
+        let refusal = validate_safe_event_text(field, text, &[])
+            .expect_err("a key redaction recognises must not pass the screen");
+        assert_eq!(
+            refusal.to_string(),
+            "encoded_secret_shape",
+            "refused for the wrong reason: {text:?}"
+        );
+        // The refusal names a class and never the value that produced it.
+        assert!(!refusal.to_string().contains("sk-"));
+        assert!(!refusal.to_string().contains("ghp_"));
+    }
+
+    // The ordinary invocation still passes. A screen that refused every command
+    // would be a boundary nothing could cross, which is not the same as a safe
+    // one.
+    assert!(
+        validate_safe_event_text(SafeEventField::TestCommand, "cargo test -p cairn-core", &[])
+            .is_ok()
+    );
+}

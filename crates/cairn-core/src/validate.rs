@@ -1231,10 +1231,38 @@ pub fn validate_safe_event_text(
         return Err(GlobalContentRejection::of("evaluation_incomplete"));
     }
     match matched_class(text, project_identities) {
-        Some("command_shaped") if !field.command_shape_applies() => Ok(()),
+        Some("command_shaped") if !field.command_shape_applies() => secret_shape(text),
         Some(class) => Err(GlobalContentRejection::of(class)),
-        None => Ok(()),
+        None => secret_shape(text),
     }
+}
+
+/// Refuse anything redaction would have destroyed (FR-777, SC-741).
+///
+/// The two mechanisms recognised **disjoint** shapes, and each one's gap was
+/// exactly the other's coverage: `redact` knows vendor-prefixed API keys —
+/// `sk-…`, `ghp_…` — and does not know a bare 32-character hex digest;
+/// `encoded_secret_shape` knows the digest and not the prefixed keys. On the
+/// ordinary path that is invisible, because redaction runs on the client before
+/// anything is screened. It is not invisible to FR-777, which requires the
+/// server to enforce the privacy restrictions **independently of the client**,
+/// and SC-741 names this exact case: material well-formed for the safe-event
+/// schema carrying a secret inside an approved text field.
+///
+/// So the screen now refuses what redaction recognises. Nothing legitimate is
+/// lost by it: a value redaction would have replaced was never going to reach
+/// storage intact from a well-behaved client, and this is the boundary where a
+/// badly-behaved one is stopped.
+///
+/// Deliberately scoped to the safe-event fields and applied only where no
+/// other class matched. A redaction hit that `credentialed_url` already names
+/// keeps that name, because a refusal reason is what somebody reads to find out
+/// what went wrong, and the more specific one says more.
+fn secret_shape(text: &str) -> Result<(), GlobalContentRejection> {
+    if crate::redact::contains_secret(text) {
+        return Err(GlobalContentRejection::of("encoded_secret_shape"));
+    }
+    Ok(())
 }
 
 /// The `repo_file` rejection classes, distinct from the content classes.

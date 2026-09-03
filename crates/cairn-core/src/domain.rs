@@ -62,9 +62,22 @@ macro_rules! text_enum {
         // these sorts stably for output. No semantics rest on it: nothing in
         // Cairn decides which of two records is *correct* by comparing enums.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-        #[serde(rename_all = "snake_case")]
         pub enum $name {
-            $($(#[$vmeta])* $variant),+
+            // **`rename` per variant, never `rename_all`.** They agree for
+            // almost every enum here and silently disagree wherever a declared
+            // text is not the snake case of its variant name — `OpenCode` is
+            // `opencode` and not `open_code`, `Level2Only` is `level_2_only`
+            // and not `level2_only`. One value then has two names depending on
+            // whether something read it through serde or through `as_str`, and
+            // the two paths are exactly the wire and the database.
+            //
+            // That is not a hypothetical: reading a stored `agent` back through
+            // serde failed for OpenCode and only OpenCode, which made
+            // consolidation silently produce nothing for one of the three
+            // committed agents while producing knowledge for the other two.
+            // Binding the two representations together here is what makes that
+            // class of bug unexpressible rather than fixed once.
+            $($(#[$vmeta])* #[serde(rename = $text)] $variant),+
         }
 
         impl $name {
@@ -1432,6 +1445,50 @@ mod tests {
         assert!(Importance::High.rank() < Importance::Normal.rank());
         assert!(Importance::Normal.rank() < Importance::Low.rank());
         assert_eq!(Importance::default(), Importance::Normal);
+    }
+
+    #[test]
+    fn every_text_enum_serializes_as_the_text_it_declares() {
+        // The two representations must be one. Where they differed, a value
+        // written by `as_str` and read by serde came back as an error — and the
+        // caller that hit it was reading stored rows, so the failure looked
+        // like "this agent produces no knowledge" rather than like a name
+        // mismatch. Only two of the codebase's enums ever disagreed, which is
+        // exactly what made it hard to see.
+        macro_rules! agree {
+            ($t:ty) => {
+                for value in <$t>::ALL {
+                    let encoded = serde_json::to_string(value).expect("serializable");
+                    assert_eq!(
+                        encoded,
+                        format!("{:?}", value.as_str()),
+                        "{} serializes as something other than its declared text",
+                        stringify!($t)
+                    );
+                    let decoded: $t =
+                        serde_json::from_str(&encoded).expect("round-trips through serde");
+                    assert_eq!(decoded, *value);
+                    assert_eq!(
+                        <$t>::from_str(value.as_str()).expect("round-trips through FromStr"),
+                        *value
+                    );
+                }
+            };
+        }
+
+        agree!(MemoryType);
+        agree!(MemoryScope);
+        agree!(MemoryState);
+        agree!(ObservationType);
+        agree!(RelationKind);
+        agree!(RelationBasis);
+        agree!(KnowledgeDomain);
+        agree!(OmissionReason);
+        agree!(crate::event::EventAgent);
+        agree!(crate::event::EventKind);
+        agree!(crate::event::Disposition);
+        agree!(crate::event::DeclineReason);
+        agree!(crate::event::PipelineStage);
     }
 
     #[test]

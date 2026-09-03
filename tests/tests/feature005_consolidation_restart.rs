@@ -989,9 +989,51 @@ fn run_crash_point(pg: &Pg, idx: usize, cp: &CrashPoint) {
     });
 
     let after = snapshot(pg, &topic, &value);
+
+    // SC-739 compares the interrupted run against **an uninterrupted run over
+    // the same events**, not against the state the outage happened to leave
+    // behind. Those differ for a session whose pass had not committed anything
+    // yet: a cold session legitimately produces its first record after the
+    // restart, and asserting nothing changed would be asserting that a
+    // reclaimed session is never consolidated — the opposite of what reclaim is
+    // for.
+    //
+    // The converged outcome is the same whatever stage the crash happened at,
+    // which is the property worth pinning: one record for the key, and a
+    // reinforcement exactly where a second session's evidence earned one.
+    let expected_extra = i64::from(cp.reinforce);
     assert_eq!(
-        after, before,
-        "{}: the restart changed durable state a restart must not change",
+        after.consolidated, 1,
+        "{}: expected exactly one durable record for the key, not {}",
+        cp.name, after.consolidated
+    );
+    assert_eq!(
+        (after.corroboration, after.relations, after.reinforcement),
+        (expected_extra, expected_extra, expected_extra),
+        "{}: the reinforcement effect did not converge on the uninterrupted one",
+        cp.name
+    );
+    // Where the pass had already committed, the restart must add nothing at
+    // all — the stronger statement, available only for the stages where there
+    // was something to preserve.
+    if matches!(cp.stage, Stage::GovernCommitted | Stage::FullyClosed) {
+        assert_eq!(
+            after, before,
+            "{}: the restart changed durable state a restart must not change",
+            cp.name
+        );
+    }
+
+    // And running again changes nothing, whatever the crash stage was. This is
+    // the half that catches a second durable effect from a re-derivation, which
+    // is the failure SC-739 names.
+    with_worker(pg, || {
+        std::thread::sleep(Duration::from_millis(400));
+    });
+    assert_eq!(
+        snapshot(pg, &topic, &value),
+        after,
+        "{}: a further pass produced a second durable effect",
         cp.name
     );
     assert!(

@@ -1393,6 +1393,7 @@ async fn record_candidate(
     sqlx::query(INSERT_CANDIDATE)
         .bind(id)
         .bind(claim.run_id)
+        .bind(claim.project_id)
         .bind(proposal.kind.as_str())
         // Advisory, and recorded as proposed so the difference between what the
         // extractor wanted and what Cairn resolved stays visible.
@@ -1451,6 +1452,7 @@ async fn record_refusal(
     sqlx::query(INSERT_CANDIDATE)
         .bind(id)
         .bind(claim.run_id)
+        .bind(claim.project_id)
         .bind(proposal.map_or(MemoryType::Fact.as_str(), |p| p.kind.as_str()))
         .bind(proposal.map_or(KnowledgeDomain::Project.as_str(), |p| {
             p.proposed_domain.as_str()

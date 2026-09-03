@@ -729,12 +729,18 @@ fn re_consolidating_the_same_session_yields_the_same_candidate_id_and_no_second_
         memory_count(&pg, "decision.core", "parser", "consolidated"),
         1
     );
-    // ...and exactly one corroboration, not two (SC-703's shape: re-running
-    // consolidation over unchanged events produces zero *additional* records
-    // and zero additional reinforcement changes).
+    // ...and **no** corroboration at all. A re-executed batch re-derives the
+    // same proposal and finds the record its own first attempt created; a
+    // candidate never reinforces itself, so nothing is added. Expecting one
+    // here would be encoding the defect: a session that crashed after its
+    // governance transaction committed would corroborate its own creation, and
+    // SC-703 says re-running over unchanged events produces zero *additional*
+    // records, zero additional relations and zero reinforcement changes — not
+    // one of each and then no more.
     assert_eq!(
         memory_count(&pg, "decision.core", "parser", "corroboration"),
-        1
+        0,
+        "a re-execution corroborated the record its own first attempt created"
     );
     let reinforcements = pg.server.count(
         "SELECT count(*) FROM memory_relations mr
@@ -742,8 +748,8 @@ fn re_consolidating_the_same_session_yields_the_same_candidate_id_and_no_second_
           WHERE mr.kind = 'reinforces' AND m.topic_key = 'decision.core' AND m.value_key = 'parser'",
     );
     assert_eq!(
-        reinforcements, 1,
-        "a second run recorded a second reinforcement relation"
+        reinforcements, 0,
+        "a re-execution recorded a reinforcement against its own creation"
     );
     let reinforcement_count: i64 = pg
         .server
@@ -756,7 +762,7 @@ fn re_consolidating_the_same_session_yields_the_same_candidate_id_and_no_second_
         .parse()
         .expect("an integer reinforcement count");
     assert_eq!(
-        reinforcement_count, 1,
-        "the reinforcement counter was bumped more than once"
+        reinforcement_count, 0,
+        "a re-execution bumped the counter of the record it had just created"
     );
 }

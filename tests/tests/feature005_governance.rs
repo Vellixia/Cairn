@@ -297,11 +297,15 @@ fn an_adversarial_attempt_to_claim_durability_domain_scope_ownership_verificatio
     let adversarial = pg!();
     let session = adversarial.session_for(&adversarial.owner);
     let claims = [
-        ("team", "ledger", "authoritative"), // a foreign domain, in words
-        ("personal", "vault", "vault"),      // another account's ownership, in words
+        // A foreign domain, in words. The *object* has to be a token the
+        // session established, because the server justifies both
+        // independently — an unjustified one is refused at ingest and never
+        // reaches governance, which would test the wrong boundary.
+        ("team", "ledger", "ledger"),
+        ("personal", "vault", "vault"), // another account's ownership, in words
         ("supersedes", "baseline", "baseline"), // supersession, in words
-        ("verified", "status", "status"),    // verified/durable status, in words
-        ("scope", "everyone", "everyone"),   // a wider scope, in words
+        ("verified", "status", "status"), // verified/durable status, in words
+        ("scope", "everyone", "everyone"), // a wider scope, in words
     ];
     let mut seq = 1u64;
     let mut events = Vec::new();
@@ -334,12 +338,28 @@ fn an_adversarial_attempt_to_claim_durability_domain_scope_ownership_verificatio
     // It did produce ordinary knowledge — this is not a test that nothing
     // happened, only that nothing *forbidden* did.
     let produced = adversarial.server.count(&format!(
-        "SELECT count(*) FROM memories WHERE project_id = '{}' AND origin_kind = 'consolidated'",
+        "SELECT count(*) FROM memories
+          WHERE project_id = '{}' AND origin_kind = 'consolidated'
+            AND topic_key LIKE 'decision.%'",
         adversarial.project
     ));
     assert_eq!(
         produced, 5,
         "expected one DECISION record per adversarial-worded claim"
+    );
+    // R4 fires too, and should: a decision signal beside file changes makes the
+    // decision *locatable*, which is a different claim from what the signal
+    // said and is deliberately weak. Counting every consolidated record and
+    // expecting five would have failed on a rule doing its job.
+    assert_eq!(
+        adversarial.server.count(&format!(
+            "SELECT count(*) FROM memories
+              WHERE project_id = '{}' AND origin_kind = 'consolidated'
+                AND topic_key LIKE 'area.%'",
+            adversarial.project
+        )),
+        1,
+        "R4 records one locatability claim for the session"
     );
     for (subject, _, object) in claims {
         let state = adversarial.server.text(&format!(
@@ -408,12 +428,27 @@ fn an_oversized_client_supplied_key_is_refused_with_empty_content_and_no_keys_ra
     let pg = pg!();
     let session = pg.session_for(&pg.owner);
 
-    let filler_a = "a".repeat(128);
-    let filler_c = "c".repeat(128);
+    // A repeating *word*, not a run of one letter. A 128-character
+    // single-token path segment reads as an encoded secret to the content
+    // screen, and the event would be refused at ingest for a reason that has
+    // nothing to do with the oversized key this test is about.
+    // Exactly 128 characters: the longest a topic key may be, and the longest
+    // `VocabToken::subject` accepts. One more and the normalizer returns
+    // nothing, the token never enters the vocabulary, and the signal is refused
+    // at ingest — a refusal in the wrong layer for this test. At exactly 128 the
+    // signal is accepted and R7's `decision.` prefix is what pushes the key over
+    // the bound, which is the gate-2 refusal the test is about.
+    let filler_a = format!("{}ab", "ab_".repeat(42));
+    let filler_c = format!("{}cd", "cd_".repeat(42));
     let events = vec![
-        file_changed(session, 1, &format!("{filler_a}.rs")),
+        // The path carries both tokens: the directory establishes the
+        // oversized subject and the file stem establishes the object. A path
+        // with only the subject would have the signal refused at ingest for an
+        // unjustified object, which is a different refusal in a different layer
+        // from the one this test is about.
+        file_changed(session, 1, &format!("{filler_a}/b.rs")),
         decision_signal(session, 2, &filler_a, "b", Some(1)),
-        file_changed(session, 3, &format!("{filler_c}.rs")),
+        file_changed(session, 3, &format!("{filler_c}/d.rs")),
         decision_signal(session, 4, &filler_c, "d", Some(3)),
     ];
     let (body, status) = post(&pg, &pg.owner, events);
@@ -429,7 +464,25 @@ fn an_oversized_client_supplied_key_is_refused_with_empty_content_and_no_keys_ra
           WHERE cr.session_id = '{session}'
             AND kc.decision = 'refused' AND kc.refusal_reason = 'key_normalization_failed'"
     ));
-    assert_eq!(refused, 2, "expected one refusal per oversized attempt");
+    // Three, not two. R7 refuses each of the two signals, and R4 refuses once
+    // more because its own `area.` key is built from the same oversized module
+    // token — so three distinct malformed proposals record three distinct
+    // refusals. That is the property this test is for: §7 keys a refusal on the
+    // reason and a digest of the proposal rather than on the key pair, which a
+    // refused candidate does not have. Keyed on the pair, all three would have
+    // collapsed onto one row and the count FR-807 and SC-705 depend on would be
+    // wrong by two.
+    assert_eq!(refused, 3, "expected one refusal per oversized attempt");
+    let distinct = pg.server.count(&format!(
+        "SELECT count(DISTINCT kc.candidate_id) FROM knowledge_candidates kc
+           JOIN consolidation_runs cr ON cr.run_id = kc.run_id
+          WHERE cr.session_id = '{session}'
+            AND kc.decision = 'refused' AND kc.refusal_reason = 'key_normalization_failed'"
+    ));
+    assert_eq!(
+        distinct, 3,
+        "two malformed proposals collapsed onto one refusal identity"
+    );
 
     // SC-705: no portion of the content is ever carried by a refusal row.
     let with_content = pg.server.count(&format!(
@@ -469,7 +522,11 @@ fn consolidation_never_creates_an_authoritative_team_record_only_a_project_scope
     let session = pg.session_for(&pg.owner);
     let events = vec![
         file_changed(session, 1, "team/ledger.rs"),
-        decision_signal(session, 2, "team", "authoritative", Some(1)),
+        // `team` is the subject, which is what makes this fixture
+        // team-worded. The object is a token the file established, because
+        // the point is what governance does with the subject and not
+        // whether ingest justifies the object.
+        decision_signal(session, 2, "team", "ledger", Some(1)),
     ];
     let (body, status) = post(&pg, &pg.owner, events);
     assert_all_accepted("team-worded fixture", &body, status);
@@ -482,7 +539,7 @@ fn consolidation_never_creates_an_authoritative_team_record_only_a_project_scope
     assert_eq!(
         pg.server.count(&format!(
             "SELECT count(*) FROM memories
-              WHERE project_id = '{}' AND topic_key = 'decision.team' AND value_key = 'authoritative'
+              WHERE project_id = '{}' AND topic_key = 'decision.team' AND value_key = 'ledger'
                 AND type = 'decision' AND scope = 'project' AND origin_kind = 'consolidated'",
             pg.project
         )),
@@ -630,7 +687,11 @@ fn an_adversarial_ingest_corpus_of_absolute_paths_secrets_and_forbidden_fields_n
             "content_screening_failed",
             "content_screening_failed",
             "forbidden_field_name",
-            "unknown_field",
+            // Not `unknown_field`: the refused-name check runs before schema
+            // deserialization, so a name the sync boundary refuses is answered
+            // as one whether or not the schema also lacks it. Both terms are in
+            // the §7.2 vocabulary, and the more specific one says more.
+            "forbidden_field_name",
         ]
     );
     // The refusal must never echo the secret it refused.

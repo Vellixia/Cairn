@@ -33,15 +33,62 @@
 //! exactly the point of R1–R6 needing no prompt text, and is worth proving
 //! rather than assuming.
 
-use cairn_e2e::{attach_server, post_json_status_bearer, Sandbox, Server};
+use cairn_e2e::{attach_server, binary, post_json_status_bearer, Sandbox, Server};
 use serde_json::{json, Value};
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+/// A second `cairn-server` on the same database, started only for its
+/// consolidation task.
+///
+/// The fixture's own server runs a pool too small to earn a share — below five
+/// connections consolidation deliberately does not run at all, so that a small
+/// deployment never starves request serving. That is correct behaviour and not
+/// something to work around by widening the fixture; the way to get a
+/// consolidation task is to run a server that qualifies for one.
+struct Worker {
+    child: Child,
+}
+
+impl Worker {
+    fn start(database_url: &str) -> Self {
+        let child = Command::new(binary("cairn-server"))
+            .args([
+                "--addr",
+                "127.0.0.1:0",
+                "--database-url",
+                database_url,
+                "--max-connections",
+                "5",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("cairn-server runs");
+        Worker { child }
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 const SETTLE: Duration = Duration::from_secs(45);
 
+/// A server on its own database.
+///
+/// Not the shared one. Three stories run in parallel here, each starts a
+/// consolidation worker, and a single worker elects one session at a time
+/// across every project in its database — so on a shared database the three
+/// compete, and a story can wait out its deadline behind sessions that are not
+/// its own. That is a property of the fixture and not of consolidation, and the
+/// honest place to fix it is the fixture.
 fn server() -> Option<Server> {
-    match Server::start() {
+    match Server::start_own_database() {
         Some(s) => Some(s),
         None => {
             eprintln!("skipped: CAIRN_TEST_DATABASE_URL is not set");
@@ -357,6 +404,10 @@ fn story(agent: &'static str, build: fn(&str) -> Session) {
     server.execute(&format!(
         "UPDATE sessions SET ended_at = now(), status = 'completed' WHERE id = '{session}'"
     ));
+
+    // Consolidation is the deployment's task, not the request path's, so it
+    // needs a server that qualifies for a pool share.
+    let _worker = Worker::start(&server.database_url);
 
     settle("consolidation runs", || {
         server.count(&format!(
