@@ -81,10 +81,21 @@ enum Command {
         /// how the wrong project gets rebuilt.
         #[arg(long)]
         rebuild_derived: bool,
+        /// State what deleting this local store would cost, and what it would
+        /// not (FR-705, SC-714).
+        ///
+        /// Three lists: what is lost for good, what the server restores on the
+        /// next pull, and what is queued and not yet accepted. Plus whether
+        /// each cache has actually refilled — an empty cache and an absence of
+        /// knowledge look identical from here, and only one of them is news.
+        #[arg(long)]
+        durability: bool,
     },
     /// Reusable cross-project patterns (`contracts/patterns.md`).
     ///
-    /// A pattern is local to this machine and never synchronizes.
+    /// A pattern's transferable content is durable on the server as an
+    /// owner-only personal-domain record; its signals, origin and applications
+    /// stay on this machine and are not backed up.
     Pattern {
         #[command(subcommand)]
         action: PatternAction,
@@ -1106,9 +1117,12 @@ async fn run(cli: &Cli) -> Result<Output, WireError> {
         Command::Doctor {
             agent,
             rebuild_derived,
+            durability,
         } => {
             if *rebuild_derived {
                 rebuild_derived_command().await
+            } else if *durability {
+                durability_command().await
             } else {
                 integrate::doctor(parse_agent_opt(agent)?).await
             }
@@ -2526,6 +2540,83 @@ async fn rebuild_derived_command() -> Result<Output, WireError> {
             format!("{differed} derived value(s) disagree with their rebuild"),
         ));
     }
+    Ok(Output::with(v, text))
+}
+
+/// `cairn doctor --durability` — the local-loss inventory (T089).
+///
+/// Reports what deleting this store would cost, in three lists, and never
+/// collapses them into one number. "Restorable" is not the same claim as
+/// "durable": the rows go, the knowledge comes back on the next pull, and a
+/// summary that said only "safe" would be answering a question the user did not
+/// ask.
+///
+/// Exits zero either way. Local-only data is a choice, not a fault, and a
+/// non-zero exit would turn every store that holds an observation into a failing
+/// check.
+async fn durability_command() -> Result<Output, WireError> {
+    let v = client::send(&Request::Durability { cwd: cwd() }).await?;
+
+    let rows = |key: &str| -> Vec<(String, i64)> {
+        v[key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|e| {
+                        (
+                            e["category"].as_str().unwrap_or("").to_string(),
+                            e["rows"].as_i64().unwrap_or(0),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let mut text = String::new();
+    let mut section = |title: &str, entries: Vec<(String, i64)>| {
+        text.push_str(title);
+        text.push('\n');
+        if entries.iter().all(|(_, n)| *n == 0) {
+            text.push_str("  (nothing)\n");
+        }
+        for (category, n) in entries.iter().filter(|(_, n)| *n > 0) {
+            text.push_str(&format!("  {category:<32} {n:>8}\n"));
+        }
+        text.push('\n');
+    };
+
+    section(
+        "lost for good if this store is deleted:",
+        rows("lost_on_deletion"),
+    );
+    section(
+        "restored from the server on the next pull:",
+        rows("restorable_from_server"),
+    );
+    section(
+        "queued, accepted for delivery, not yet durable:",
+        rows("in_flight"),
+    );
+
+    text.push_str("caches:\n");
+    let caches = v["caches"].as_array().cloned().unwrap_or_default();
+    if caches.is_empty() {
+        text.push_str("  (no lane has been established yet)\n");
+    }
+    for c in &caches {
+        text.push_str(&format!(
+            "  {:<40} {:<14} {:>6} rows\n",
+            c["namespace"].as_str().unwrap_or(""),
+            c["state"].as_str().unwrap_or(""),
+            c["rows"].as_i64().unwrap_or(0),
+        ));
+    }
+    text.push_str(&format!(
+        "\nauthority: {}\n",
+        v["authority"].as_str().unwrap_or("unknown")
+    ));
+
     Ok(Output::with(v, text))
 }
 

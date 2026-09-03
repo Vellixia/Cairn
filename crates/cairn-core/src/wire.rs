@@ -1016,6 +1016,17 @@ pub enum Request {
         cwd: String,
     },
 
+    /// What this local store would lose if it were deleted, and what it would
+    /// not (FR-705, FR-710a, SC-714).
+    ///
+    /// A question about the store, not about a project, but `cwd` is still
+    /// carried: every request resolves a project, and a durability report that
+    /// silently answered for whichever store the daemon happened to have open
+    /// would be answering a question nobody asked.
+    Durability {
+        cwd: String,
+    },
+
     /// List promoted patterns, with their counters.
     PatternList {
         cwd: String,

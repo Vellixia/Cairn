@@ -758,6 +758,7 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             domain => global_subject(d, domain, topic_key).await,
         },
         Request::RebuildDerived { cwd } => rebuild_derived(d, &cwd).await,
+        Request::Durability { cwd } => durability(d, &cwd).await,
         Request::PatternList { cwd, trust, signal } => {
             crate::patterns::list(d, &cwd, trust, signal).await
         }
@@ -1201,6 +1202,86 @@ async fn rebuild_derived(d: &Daemon, cwd: &str) -> Reply {
         // The caller exits non-zero on this, so a release cannot ship a store
         // whose derived values disagree with the records behind them.
         "consistent": differed == 0,
+    }))
+}
+
+/// What deleting this local store would cost, category by category (T089).
+///
+/// **The inventory is exhaustive by construction, and that is the requirement.**
+/// FR-705 asks Cairn to state which categories would not survive deletion, and
+/// SC-714 asks for zero categories lost silently — a report that omitted one
+/// would be worse than no report, because the reader would take the omission for
+/// an assurance. The list itself lives in `cairn_store::diag::local_inventory`,
+/// beside the tables it counts, so a category added to the schema and not to the
+/// inventory is one file's inconsistency rather than two.
+///
+/// Three answers, not one:
+///
+/// - **what is lost** — the machine-local categories (FR-707). Observations,
+///   evidence, verification runs, checkpoints, pattern applications and the
+///   local-only knowledge the user asked never to leave. These have no server
+///   table, which is what makes "it stays local" a fact about the schema rather
+///   than a promise, and what makes losing them permanent.
+/// - **what is restorable** — the caches. The knowledge in them is the server's
+///   and comes back on the next pull without a manual repair step (FR-703,
+///   FR-704). The *rows* do not survive; the knowledge does, and those are
+///   different claims (`DurabilityClass::survives_local_loss`).
+/// - **what is in flight** — the spools. Events and commands accepted for
+///   delivery and not yet acknowledged. Not durable knowledge (FR-709) and not
+///   restorable either: a queued write nobody has accepted is lost with the
+///   queue.
+///
+/// The cache report is separate and answers a different question: whether each
+/// cache has actually refilled. An empty cache and an absent body of knowledge
+/// look identical from the reader's side, and FR-710a says a store must be able
+/// to tell them apart.
+async fn durability(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let inventory = cairn_store::diag::local_inventory(&d.store)
+        .await
+        .map_err(storage_err)?;
+    let caches = cairn_store::diag::cache_status(&d.store)
+        .await
+        .map_err(storage_err)?;
+
+    let mut lost = Vec::new();
+    let mut restorable = Vec::new();
+    let mut in_flight = Vec::new();
+    for entry in &inventory {
+        let row = json!({
+            "category": entry.category,
+            "class": entry.class.as_str(),
+            "rows": entry.rows,
+        });
+        match entry.class {
+            cairn_store::diag::DurabilityClass::LocalOnly => lost.push(row),
+            cairn_store::diag::DurabilityClass::QueuedForServer => in_flight.push(row),
+            cairn_store::diag::DurabilityClass::Cache
+            | cairn_store::diag::DurabilityClass::ServerDurable => restorable.push(row),
+        }
+    }
+
+    Ok(json!({
+        "lost_on_deletion": lost,
+        "restorable_from_server": restorable,
+        "in_flight": in_flight,
+        "caches": caches
+            .iter()
+            .map(|c| json!({
+                "namespace": c.namespace,
+                "rows": c.rows,
+                "state": c.state.as_str(),
+                "last_refilled_at": c.last_refilled_at,
+            }))
+            .collect::<Vec<_>>(),
+        // Stated rather than left to be inferred from an empty `lost` list,
+        // which would be the wrong inference: a fresh store has nothing local
+        // yet and would report the same emptiness as one that genuinely holds
+        // nothing at risk.
+        "authority": cairn_store::authority::mode(&d.store)
+            .await
+            .map(|m| m.as_str())
+            .unwrap_or("unknown"),
     }))
 }
 
@@ -2749,7 +2830,7 @@ async fn personal_create(
 /// The caller is told the command was **accepted for delivery**, never that it
 /// is durable. Nothing local becomes authoritative because a command is
 /// waiting (FR-709, FR-787).
-async fn queue_knowledge_command(
+pub(crate) async fn queue_knowledge_command(
     d: &Daemon,
     project_id: Option<Uuid>,
     session_id: Option<Uuid>,
@@ -2891,7 +2972,9 @@ async fn memory_create(
             let (old, new) = repo::supersede_memory(&d.store, original, new, r.policy)
                 .await
                 .map_err(storage_err)?;
-            Ok(json!({ "memory": new, "superseded": old.id }))
+            let mut body = json!({ "memory": new, "superseded": old.id });
+            note_local_only_durability(d, local_only, &mut body).await;
+            Ok(body)
         }
         None => {
             let out = repo::create_memory_reconciled(
@@ -2913,9 +2996,48 @@ async fn memory_create(
             if !out.notes.is_empty() {
                 body["notes"] = json!(out.notes);
             }
+            note_local_only_durability(d, local_only, &mut body).await;
             Ok(body)
         }
     }
+}
+
+/// Say what `--local-only` costs, on the reply to the write that chose it.
+///
+/// **FR-706 asks for this at the point of choosing, and this is that point.**
+/// Local-only is the one deliberate exclusion from FR-703's durability
+/// guarantee: the record is excluded because the user asked for it to be, and a
+/// choice whose consequence is stated only in a manual is a choice made without
+/// it. Deleting this store deletes the record, and no pull brings it back —
+/// there is nothing on the server to pull.
+///
+/// Attached to the reply rather than logged, so it reaches the human and the
+/// agent that made the call. Silent when the flag was not set: a note on every
+/// write would be noise, and noise is how a warning stops being read.
+///
+/// Only in the end state. While the local store is still the authority, every
+/// memory is local and `--local-only` withholds nothing a colleague would
+/// otherwise have — the warning would be true of the whole store, which is a
+/// statement about the installation and not about this write.
+async fn note_local_only_durability(d: &Daemon, local_only: bool, body: &mut serde_json::Value) {
+    if !local_only {
+        return;
+    }
+    let authoritative = cairn_store::authority::mode(&d.store)
+        .await
+        .map(|m| m.commands_are_authoritative())
+        .unwrap_or(false);
+    if !authoritative {
+        return;
+    }
+    body["durability"] = json!({
+        "class": cairn_store::diag::DurabilityClass::LocalOnly.as_str(),
+        "survives_local_loss": false,
+        "note": "local-only: this stays on this machine. It is not sent to the \
+                 server, it is excluded from the durability guarantee, and \
+                 deleting this store deletes it — there is nothing to restore \
+                 it from.",
+    });
 }
 
 /// Recording memory should not require the caller to have started a session
@@ -3506,6 +3628,14 @@ async fn namespace_sync_status(
                 // not surfaced: recall shows only the currently linked
                 // identity, and so does this (FR-567).
                 SyncNamespace::Personal(..) => continue,
+                // A pattern is a personal-domain record (FR-708c), so its lane
+                // reports under `personal` rather than inventing a fourth kind
+                // in a status view — the lane is separate because the feed and
+                // the cursor are, not because the domain is.
+                SyncNamespace::Patterns(_, user) if user == owner => {
+                    (KnowledgeDomain::Personal, namespace.key())
+                }
+                SyncNamespace::Patterns(..) => continue,
                 SyncNamespace::Team(_) => (KnowledgeDomain::Team, namespace.key()),
                 SyncNamespace::Project(_) => continue,
             };
