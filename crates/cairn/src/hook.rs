@@ -45,6 +45,124 @@ fn to_canonical(
     )
 }
 
+/// Run Feature 005 capture for one vendor event and spool what it produced.
+///
+/// Beside the canonical-lifecycle path and never instead of it: one drives
+/// sessions, handoffs and context delivery, the other produces the safe events
+/// the server consolidates.
+///
+/// The raw payload does not leave this process. Where the event carries
+/// transient prompt or assistant text, the daemon's session vocabulary is
+/// fetched *here* and the mapping runs *here* — sending the text the other way
+/// would put a prompt fragment across the capture-process boundary, which
+/// FR-730 closes and SC-741 tests. A vocabulary that cannot be fetched in time
+/// is treated as empty, which declines the signal rather than delaying the
+/// agent; the decline is counted, so a daemon that is always too slow is
+/// visible rather than silently lossy.
+fn capture_pass(
+    agent: cairn_integrate::AgentId,
+    event: &str,
+    raw: &serde_json::Value,
+    cwd: &str,
+    config: &CairnConfig,
+) {
+    let payload = cairn_integrate::RawPayload::new(raw.clone(), cwd);
+    let deadline = capture_deadline(config);
+
+    let key = raw
+        .get("session_id")
+        .or_else(|| raw.get("sessionID"))
+        .or_else(|| raw.get("thread_id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if key.is_empty() {
+        // An event that cannot name its session cannot be routed, and it is
+        // declined here exactly as the lifecycle path declines it (FR-737).
+        return;
+    }
+
+    let (vocabulary, established) = if cairn_integrate::carries_semantic_material(agent, event) {
+        fetch_vocabulary(agent, cwd, &key, deadline)
+    } else {
+        Default::default()
+    };
+    let root = repository_root(cwd);
+    let env = cairn_integrate::agents::CaptureEnv {
+        repo_root: root.as_deref(),
+        vocabulary: &vocabulary,
+        established_values: &established,
+    };
+
+    let output = cairn_integrate::capture(agent, event, &payload, &env);
+    if output.is_empty() {
+        return;
+    }
+    let request = Request::CaptureEvents {
+        cwd: cwd.to_string(),
+        agent: agent.as_str().to_string(),
+        agent_session_key: key,
+        output,
+    };
+    if let Err(e) = client::send_oneway_blocking(&request, deadline) {
+        log_drop(event, &e.message);
+    }
+}
+
+/// Ask the daemon for this session's vocabulary and established values.
+///
+/// Failure is not an error here. An empty vocabulary justifies no token, so the
+/// mapping declines with `insufficient_vocabulary` — the honest answer when
+/// Cairn cannot check a claim's grounding, and a better one than recording a
+/// claim it could not ground.
+fn fetch_vocabulary(
+    agent: cairn_integrate::AgentId,
+    cwd: &str,
+    key: &str,
+    deadline: Duration,
+) -> (
+    cairn_core::vocabulary::SessionVocabulary,
+    std::collections::BTreeMap<String, String>,
+) {
+    let request = Request::CaptureVocabulary {
+        cwd: cwd.to_string(),
+        agent: agent.as_str().to_string(),
+        agent_session_key: key.to_string(),
+    };
+    let Ok(value) = client::send_blocking(&request, deadline) else {
+        return Default::default();
+    };
+    let vocabulary = value
+        .get("vocabulary")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    let established = value
+        .get("established_values")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    (vocabulary, established)
+}
+
+/// The repository root an absolute path is relativized against.
+///
+/// Walked from the working directory rather than asked of the daemon, because
+/// the answer is needed before any round trip and a `.git` entry is the same
+/// fact either way. The root is machine configuration and never crosses the
+/// boundary (FR-753); it is used here and discarded.
+fn repository_root(cwd: &str) -> Option<std::path::PathBuf> {
+    let mut here = std::path::Path::new(cwd).to_path_buf();
+    loop {
+        if here.join(".git").exists() {
+            return Some(here);
+        }
+        if !here.pop() {
+            return None;
+        }
+    }
+}
+
 /// Handle a capture-class event without an async runtime (SC-007).
 ///
 /// Returns `true` when the event was handled here. A capture-class event needs
@@ -60,19 +178,28 @@ pub fn run_blocking(event: &str) -> bool {
     // The class is decided from the event name *before* stdin is touched: a
     // boundary event needs a reply and takes the async path, and both paths
     // reading the payload would leave the second one with nothing.
+    // Feature 005 registers three events the canonical lifecycle has no
+    // counterpart for — a prompt-time hook, a pre-tool hook and a subagent
+    // boundary. They have no class because they map to no lifecycle event, and
+    // they are still capture: `event_class` returning `None` no longer means
+    // there is nothing to do.
+    let registered = cairn_integrate::adapter_for(agent)
+        .registered_events()
+        .contains(&event);
     match cairn_integrate::event_class(agent, event) {
-        // Declined by the adapter: the normal way an event Cairn does not map
-        // is handled (FR-115). Nothing to do, and nothing is wrong — but the
-        // agent is writing the payload to this process's stdin right now, and
-        // exiting without reading it gives *the agent* a broken pipe. Cairn's
-        // hook must be invisible even when it does nothing (FR-193, FR-194),
-        // so the payload is drained and discarded.
-        None => {
+        // Declined by the adapter and not registered for capture either: the
+        // normal way an event Cairn does not map is handled (FR-115). Nothing
+        // to do, and nothing is wrong — but the agent is writing the payload to
+        // this process's stdin right now, and exiting without reading it gives
+        // *the agent* a broken pipe. Cairn's hook must be invisible even when
+        // it does nothing (FR-193, FR-194), so the payload is drained and
+        // discarded.
+        None if !registered => {
             drain_stdin();
             return true;
         }
         Some(class) if class.is_boundary_class() => return false,
-        Some(_) => {}
+        _ => {}
     }
 
     let raw = read_raw();
@@ -87,19 +214,23 @@ pub fn run_blocking(event: &str) -> bool {
         })
         .unwrap_or_else(|| ".".to_string());
 
-    let Some(canonical) = to_canonical(agent, event, &raw, &cwd) else {
-        return true;
-    };
-
     let config = CairnConfig::load();
-    let request = Request::CanonicalEvent {
-        event: canonical,
-        wait_for_handoff: false,
-        token_budget: None,
-    };
-    if let Err(e) = client::send_oneway_blocking(&request, capture_deadline(&config)) {
-        log_drop(event, &e.message);
+
+    // The lifecycle path first, where there is one: it is what creates or
+    // resumes the session the safe events are then bound to, and an event
+    // spooled against a session that does not exist yet has nowhere to go.
+    if let Some(canonical) = to_canonical(agent, event, &raw, &cwd) {
+        let request = Request::CanonicalEvent {
+            event: canonical,
+            wait_for_handoff: false,
+            token_budget: None,
+        };
+        if let Err(e) = client::send_oneway_blocking(&request, capture_deadline(&config)) {
+            log_drop(event, &e.message);
+        }
     }
+
+    capture_pass(agent, event, &raw, &cwd, &config);
     true
 }
 
@@ -126,6 +257,11 @@ pub async fn run(event: &str) {
     let config = CairnConfig::load();
 
     let Some(canonical) = to_canonical(agent, event, &raw, &cwd) else {
+        // A boundary-class caller reaching an event the lifecycle declines has
+        // nothing to answer with, but the event may still be capture. This is
+        // the path a registered-but-unmapped event takes when the async entry
+        // point is used.
+        capture_pass(agent, event, &raw, &cwd, &config);
         return;
     };
 
@@ -328,33 +464,78 @@ mod tests {
     }
 
     #[test]
-    fn every_registered_event_reaches_the_canonical_vocabulary() {
-        // The hook's job is translation, and every event Cairn registers must
-        // survive it (FR-112).
+    fn every_registered_event_is_handled_by_one_path_or_the_other() {
+        // The rule used to be "every registered event normalizes", which held
+        // while registration and the canonical lifecycle were the same list.
+        // Feature 005 registers three events the lifecycle has no counterpart
+        // for, so the rule that actually matters is the one SC-706 states: an
+        // event Cairn registers is either translated or captured, and zero are
+        // silently dropped. A hook that fires and does nothing is the failure
+        // this pins.
         for e in cairn_integrate::agents::claude_code::EVENTS {
             let payload = raw(json!({
                 "session_id": "s-1",
                 "tool_name": "Read",
-                "tool_input": { "file_path": "a.rs" }
+                "tool_input": { "file_path": "a.rs" },
+                "prompt": "prefer sync over drift",
+                "last_assistant_message": "prefer sync over drift",
+                "agent_id": "sub-1",
+                "agent_type": "explorer",
             }));
+            let translated = to_canonical(AgentId::ClaudeCode, e, &payload, "/repo").is_some();
+            let captured = !cairn_integrate::capture(
+                AgentId::ClaudeCode,
+                e,
+                &cairn_integrate::RawPayload::new(payload.clone(), "/repo"),
+                &cairn_integrate::agents::CaptureEnv::default(),
+            )
+            .is_empty();
+            assert!(translated || captured, "{e} is registered and does nothing");
+        }
+    }
+
+    #[test]
+    fn the_lifecycle_still_declines_what_it_never_mapped() {
+        // FR-115. `PreToolUse` and `UserPromptSubmit` are now registered for
+        // capture, and they still map to no canonical lifecycle event — the two
+        // paths stayed separate rather than one quietly widening the other.
+        for e in [
+            "PreToolUse",
+            "UserPromptSubmit",
+            "SubagentStop",
+            "Notification",
+        ] {
             assert!(
-                to_canonical(AgentId::ClaudeCode, e, &payload, "/repo").is_some(),
-                "{e} did not normalize"
+                to_canonical(
+                    AgentId::ClaudeCode,
+                    e,
+                    &raw(json!({"session_id": "s-1"})),
+                    "/repo"
+                )
+                .is_none(),
+                "{e} reached the canonical lifecycle"
             );
         }
     }
 
     #[test]
-    fn an_unregistered_event_is_declined_rather_than_mapped() {
-        // FR-115: it simply does not occur for that agent.
-        for e in ["PreToolUse", "UserPromptSubmit", "Notification"] {
-            assert!(to_canonical(
-                AgentId::ClaudeCode,
-                e,
-                &raw(json!({"session_id": "s-1"})),
-                "/repo"
-            )
-            .is_none());
+    fn an_event_no_adapter_registers_captures_nothing() {
+        // The other half: not registered means nothing happens, for both paths.
+        for e in ["Notification", "StopFailure", "MessageDisplay"] {
+            let payload = cairn_integrate::RawPayload::new(
+                json!({"session_id": "s-1", "prompt": "use postgresql"}),
+                "/repo",
+            );
+            assert!(
+                cairn_integrate::capture(
+                    AgentId::ClaudeCode,
+                    e,
+                    &payload,
+                    &cairn_integrate::agents::CaptureEnv::default()
+                )
+                .is_empty(),
+                "{e} produced capture without being registered"
+            );
         }
     }
 

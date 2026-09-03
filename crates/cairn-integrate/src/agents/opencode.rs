@@ -34,6 +34,74 @@ pub const EVENTS: &[&str] = &[
     "session.compacted",
 ];
 
+/// Which vendor field carries which fact.
+///
+/// **`user_prompt` and `assistant_message` are the empty slice, and that is the
+/// decline.** OpenCode v1's prompt text is not in a named field at all — it has
+/// to be walked out of `chat.message`'s `output.parts[]` entries — and that
+/// hook is absent from the vendor's documentation, appearing only in published
+/// type definitions. Its assistant-text hook carries an `experimental.` prefix.
+/// Official v2 documentation does expose `event.prompt.text`, but the v2 plugin
+/// API is beta and Cairn has established no stable, dedicated
+/// settled-assistant-message completion boundary.
+///
+/// So Cairn declines semantic-signal capture for OpenCode, reported as
+/// `declined_by_cairn` — a decision about an unstable surface, not a claim that
+/// the vendor cannot do it (FR-838b). Expressing the decline as an empty field
+/// list rather than as a check somewhere is deliberate: there is no field to
+/// read, so the capability cannot be gained by an oversight in the router.
+///
+/// Structural capture is unaffected. R1–R6 need no prompt or assistant text, so
+/// OpenCode's failure, convention and procedure learning works exactly as the
+/// other two agents\' does.
+pub const FIELDS: FieldMap = FieldMap {
+    agent: EventAgent::OpenCode,
+    session_keys: &["sessionID", "session_id"],
+    tool_name: &["tool", "tool_name"],
+    tool_input: &["args", "tool_input"],
+    tool_response: &["output", "result"],
+    input_file_path: &["filePath", "file_path", "path"],
+    input_command: &["command"],
+    response_exit_status: &["exit_code", "exitCode"],
+    response_error: &["error", "message", "stderr"],
+    open_trigger: &["source"],
+    compaction_trigger: &["trigger"],
+    close_reason: &["reason"],
+    user_prompt: &[],
+    assistant_message: &[],
+    // Not established. A subagent reference sourced from a field that carries a
+    // description would put authored text into an identifier, which
+    // `contracts/safe-events.md` §2 forbids outright.
+    subagent_ref: &[],
+    subagent_kind: &[],
+    classify_failure: establishes_failure_bool,
+};
+
+/// The boolean half of [`establishes_failure`], for the capture path.
+///
+/// Deliberately conservative in the same way: output that does not
+/// *unambiguously* establish failure is not a failure. Inferring one from an
+/// ambiguous payload is the fabrication FR-117 and SC-110 exist to prevent.
+fn establishes_failure_bool(output: Option<&serde_json::Value>) -> bool {
+    establishes_failure(output).0
+}
+
+/// What each registered event produces, in spool order.
+///
+/// No `UserPrompt` and no `AssistantMessage` route: the decline is structural,
+/// and a route that called into the semantic mapper with an empty field list
+/// would only reach the same answer more slowly.
+///
+/// `session.idle` means the agent went quiet. It is never `session_closed`
+/// (FR-116) — OpenCode signals no session end at all — so nothing here maps one.
+pub const ROUTES: RoutingTable = &[
+    ("session.created", &[Route::SessionOpen]),
+    ("tool.execute.after", &[Route::Tool { failed: None }]),
+    ("session.idle", &[Route::Quiesced]),
+    ("experimental.session.compacting", &[Route::Compacting]),
+    ("session.compacted", &[Route::Compacted]),
+];
+
 /// The plugin Cairn installs. Cairn generates the whole file and owns every
 /// byte of it, which is why whole-file replacement is legitimate here.
 pub const PLUGIN_SOURCE: &str = include_str!("../../assets/opencode-plugin.js");
@@ -178,6 +246,14 @@ impl AgentAdapter for OpenCode {
     fn registered_events(&self) -> &'static [&'static str] {
         EVENTS
     }
+
+    fn capture(&self, event: &str, payload: &RawPayload, env: &CaptureEnv<'_>) -> CaptureOutput {
+        route_capture(&FIELDS, ROUTES, event, payload, env)
+    }
+
+    // `carries_semantic_material` keeps the trait default of `false`. OpenCode
+    // reads no prompt and no settled assistant message, so there is never a
+    // vocabulary for a caller to fetch on its behalf.
 
     fn normalize(&self, event: &str, payload: &RawPayload) -> Option<CanonicalLifecycleEvent> {
         let key = session_key(payload, &["sessionID", "session_id"])?;
@@ -324,6 +400,81 @@ fn inspect_plugin(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opencode_never_gains_semantic_capture_by_accident() {
+        // The decline is structural: there is no field to read, so a payload
+        // that would be a decision on another agent produces nothing here. This
+        // is the assertion that stops a well-meaning routing change from
+        // quietly enabling a capability Cairn declined (FR-838b).
+        assert!(FIELDS.user_prompt.is_empty());
+        assert!(FIELDS.assistant_message.is_empty());
+        for event in EVENTS {
+            assert!(
+                !OpenCode.carries_semantic_material(event),
+                "{event} claimed to carry semantic material"
+            );
+            let out = OpenCode.capture(
+                event,
+                &RawPayload::new(
+                    serde_json::json!({
+                        "sessionID": "s",
+                        "prompt": "we should use postgresql for storage",
+                        "text": "we should use postgresql for storage",
+                    }),
+                    "/repo",
+                ),
+                &CaptureEnv::default(),
+            );
+            for produced in &out.events {
+                assert!(
+                    !matches!(
+                        produced.kind,
+                        cairn_core::event::EventKind::DecisionSignal
+                            | cairn_core::event::EventKind::UserInstructionSignal
+                    ),
+                    "{event} produced a semantic signal"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn structural_capture_is_unaffected_by_the_semantic_decline() {
+        // R1–R6 need no prompt or assistant text, so OpenCode's failure,
+        // convention and procedure learning works exactly as the other two
+        // agents' does.
+        let out = OpenCode.capture(
+            "tool.execute.after",
+            &RawPayload::new(
+                serde_json::json!({
+                    "sessionID": "s",
+                    "tool": "bash",
+                    "args": {"command": "cargo test -p cairn-core"},
+                    "output": {"exit_code": 0},
+                }),
+                "/repo",
+            ),
+            &CaptureEnv::default(),
+        );
+        let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
+        assert!(kinds.contains(&cairn_core::event::EventKind::ToolSucceeded));
+        assert!(kinds.contains(&cairn_core::event::EventKind::TestExecuted));
+        assert!(kinds.contains(&cairn_core::event::EventKind::TestResult));
+    }
+
+    #[test]
+    fn going_quiet_is_never_a_session_end() {
+        // FR-116. OpenCode signals no session end at all, and reporting idle as
+        // one would close a session that is still open.
+        let out = OpenCode.capture(
+            "session.idle",
+            &RawPayload::new(serde_json::json!({"sessionID": "s"}), "/repo"),
+            &CaptureEnv::default(),
+        );
+        let kinds: Vec<_> = out.events.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, vec![cairn_core::event::EventKind::AgentQuiesced]);
+    }
     use serde_json::json;
 
     fn skill_env() -> (tempfile::TempDir, crate::scope::Env) {

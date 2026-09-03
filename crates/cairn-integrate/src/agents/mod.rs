@@ -11,15 +11,15 @@ pub mod codex;
 pub mod generic_mcp;
 pub mod opencode;
 
-use crate::adapter::Observed;
+use crate::adapter::{Observed, RawPayload};
 use crate::edit::{json, EditError};
 use crate::markers::{self, CONTRACT_ID};
 use crate::model::{AgentId, HealthCondition, InstallationScope, ResourceKind, ResourceOwner};
 use crate::plan::RecordedInstall;
 use crate::{render, revision};
 use cairn_core::event::{
-    ChangeKind, DeclineReason, EventAgent, EventContent, EventKind, FailureKind, FileIdentity,
-    ResourceKind as ResearchResource, TestOutcome, ToolClass,
+    ChangeKind, CompactionTrigger, DeclineReason, EventAgent, EventContent, EventKind, FailureKind,
+    FileIdentity, OpenTrigger, ResourceKind as ResearchResource, TestOutcome, ToolClass,
 };
 use cairn_core::lexicon::{map_semantic_signal, SourceRole};
 use cairn_core::lifecycle::CanonicalLifecycleEvent;
@@ -392,6 +392,14 @@ pub struct FieldMap {
     pub assistant_message: &'static [&'static str],
     pub subagent_ref: &'static [&'static str],
     pub subagent_kind: &'static [&'static str],
+    /// How this vendor's one tool event says a tool failed.
+    ///
+    /// A function per vendor rather than a shared rule, because the vendors
+    /// disagree: one has a dedicated failure event and never needs this, one
+    /// reports an exit status, and one only sometimes establishes failure at
+    /// all. Guessing on behalf of the third would manufacture failures
+    /// (FR-117, SC-110).
+    pub classify_failure: fn(Option<&Value>) -> bool,
 }
 
 /// What the local machine knows that a pure payload parse cannot.
@@ -780,4 +788,220 @@ pub fn semantic_capture(
         )),
         Err(reason) => CaptureOutput::default().declined(role.event_kind(), reason),
     }
+}
+
+/// What one vendor event means, canonically.
+///
+/// A vendor event maps to a small list of these, and the list is the routing
+/// table. Written as data rather than as a `match` per adapter because the
+/// interesting per-vendor fact is *which* canonical events an event produces —
+/// and a table can be read against the capture matrix, while three hand-written
+/// matches have to be trusted to agree with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Route {
+    /// `session_opened`, or `session_resumed` when the trigger says so.
+    SessionOpen,
+    SessionClose,
+    Compacting,
+    Compacted,
+    /// A tool is about to run. Carries no derived events: nothing has happened
+    /// yet, and recording a file change before the edit would be a claim.
+    ToolStarted,
+    /// A tool has run. `Some(failed)` when the vendor has a dedicated failure
+    /// event; `None` when one event carries both and the payload decides.
+    Tool {
+        failed: Option<bool>,
+    },
+    Quiesced,
+    SubagentCompleted,
+    /// Transient user-prompt text. Emits `user_instruction_signal` or declines.
+    UserPrompt,
+    /// Transient settled assistant text. Emits `decision_signal` or declines.
+    AssistantMessage,
+}
+
+/// One vendor event and everything it produces.
+pub type RoutingTable = &'static [(&'static str, &'static [Route])];
+
+/// Run a vendor's routing table for one event.
+///
+/// The order of `Route`s is the order the canonical events are spooled in, and
+/// that order is load-bearing: `session_seq` is assigned in it, and a semantic
+/// signal may only cite a token an earlier ordinal established. A table that
+/// listed the signal before the tool event that justified it would build claims
+/// the server then permanently refuses.
+pub fn route_capture(
+    map: &FieldMap,
+    table: RoutingTable,
+    event: &str,
+    payload: &RawPayload,
+    env: &CaptureEnv<'_>,
+) -> CaptureOutput {
+    // Routing needs the vendor's session key for nothing except establishing
+    // that the event *has* one: an event that cannot name its session cannot be
+    // routed and is declined, exactly as it is today (FR-118, FR-737).
+    if session_key(payload, map.session_keys).is_none() {
+        return CaptureOutput::default();
+    }
+    let Some((_, routes)) = table.iter().find(|(name, _)| *name == event) else {
+        // Not registered for this agent. Declining is the normal way an event
+        // Cairn does not map is handled, and it is not a failure (FR-115).
+        return CaptureOutput::default();
+    };
+
+    let mut out = CaptureOutput::default();
+    for route in *routes {
+        out = out.chain(one_route(map, *route, event, payload, env));
+    }
+    out
+}
+
+fn one_route(
+    map: &FieldMap,
+    route: Route,
+    event: &str,
+    payload: &RawPayload,
+    env: &CaptureEnv<'_>,
+) -> CaptureOutput {
+    let json = &payload.json;
+    match route {
+        Route::SessionOpen => {
+            let trigger = first_str(Some(json), map.open_trigger).unwrap_or("startup");
+            let open_trigger = trigger
+                .parse::<OpenTrigger>()
+                .unwrap_or(OpenTrigger::Startup);
+            // A resumed session is a distinct kind rather than a flag, because
+            // "this session continued" and "this session began" are different
+            // facts about a session's history and a reader should not have to
+            // recover one from a field on the other.
+            let kind = if open_trigger == OpenTrigger::Resume {
+                EventKind::SessionResumed
+            } else {
+                EventKind::SessionOpened
+            };
+            CaptureOutput::default().event(draft(
+                map,
+                kind,
+                event,
+                Some(EventContent::SessionOpen { open_trigger }),
+            ))
+        }
+        Route::SessionClose => {
+            // Bounded provenance, screened like any other. A vendor's reason
+            // string is short by convention and not by guarantee.
+            let close_reason = first_str(Some(json), map.close_reason)
+                .and_then(normalize_vendor_tool)
+                .unwrap_or_else(|| "unknown".to_string());
+            CaptureOutput::default().event(draft(
+                map,
+                EventKind::SessionClosed,
+                event,
+                Some(EventContent::SessionClose { close_reason }),
+            ))
+        }
+        Route::Compacting | Route::Compacted => {
+            let compaction_trigger =
+                match first_str(Some(json), map.compaction_trigger).unwrap_or("auto") {
+                    "manual" => CompactionTrigger::Manual,
+                    _ => CompactionTrigger::Auto,
+                };
+            let kind = if route == Route::Compacting {
+                EventKind::ContextCompacting
+            } else {
+                EventKind::ContextCompacted
+            };
+            CaptureOutput::default().event(draft(
+                map,
+                kind,
+                event,
+                Some(EventContent::Compaction { compaction_trigger }),
+            ))
+        }
+        Route::ToolStarted => {
+            let Some(tool) = first_str(Some(json), map.tool_name) else {
+                return CaptureOutput::default()
+                    .declined(EventKind::ToolStarted, DeclineReason::VendorUnavailable);
+            };
+            let vendor_tool = normalize_vendor_tool(tool).unwrap_or_else(|| "tool".to_string());
+            let input = first_value(Some(json), map.tool_input);
+            CaptureOutput::default().event(draft(
+                map,
+                EventKind::ToolStarted,
+                event,
+                Some(EventContent::Tool {
+                    tool_class: tool_class_of(
+                        &vendor_tool,
+                        first_str(input, map.input_command),
+                        first_str(input, map.input_file_path),
+                    ),
+                    vendor_tool,
+                }),
+            ))
+        }
+        Route::Tool { failed } => {
+            let failed = failed.unwrap_or_else(|| {
+                (map.classify_failure)(first_value(Some(json), map.tool_response))
+            });
+            tool_capture(map, event, json, failed, env)
+        }
+        Route::Quiesced => {
+            CaptureOutput::default().event(draft(map, EventKind::AgentQuiesced, event, None))
+        }
+        Route::SubagentCompleted => {
+            let Some(subagent_ref) =
+                first_str(Some(json), map.subagent_ref).and_then(normalize_vendor_tool)
+            else {
+                // An attribution with no identity attributes nothing. Declining
+                // is better than inventing a reference, which would make two
+                // unrelated subagents look like one.
+                return CaptureOutput::default().declined(
+                    EventKind::SubagentCompleted,
+                    DeclineReason::VendorUnavailable,
+                );
+            };
+            let subagent_kind = first_str(Some(json), map.subagent_kind)
+                .and_then(normalize_vendor_tool)
+                .unwrap_or_else(|| "unknown".to_string());
+            CaptureOutput::default().event(draft(
+                map,
+                EventKind::SubagentCompleted,
+                event,
+                Some(EventContent::Subagent {
+                    subagent_ref,
+                    subagent_kind,
+                    // The hook cannot know the ordinal: the daemon assigns it,
+                    // and it does so after this event is built. Zero is the
+                    // honest placeholder for "not established here" rather than
+                    // a guess at the parent's position.
+                    parent_session_seq: 0,
+                }),
+            ))
+        }
+        Route::UserPrompt => semantic_capture(map, event, json, SourceRole::UserPrompt, env),
+        Route::AssistantMessage => {
+            semantic_capture(map, event, json, SourceRole::AssistantMessage, env)
+        }
+    }
+}
+
+/// The default failure test for a vendor whose one tool event carries both
+/// outcomes.
+///
+/// Read, never inferred. A response with no exit status and no error has told
+/// Cairn nothing about the outcome, and calling that a failure would invent a
+/// failure the vendor did not report.
+pub fn failure_from_response(response: Option<&Value>) -> bool {
+    let Some(response) = response else {
+        return false;
+    };
+    if let Some(code) = response.get("exit_code").and_then(Value::as_i64) {
+        return code != 0;
+    }
+    if response.get("success").and_then(Value::as_bool) == Some(false) {
+        return true;
+    }
+    if response.get("failed").and_then(Value::as_bool) == Some(true) {
+        return true;
+    }
+    response.get("error").is_some_and(|e| !e.is_null())
 }

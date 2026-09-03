@@ -128,6 +128,25 @@ pub fn normalize(
 /// determined by the event, never by its contents.
 ///
 /// `None` means the adapter declines that event entirely (FR-115).
+/// Feature 005 capture for one vendor event, through that agent's adapter.
+///
+/// Mirrors [`normalize`] and is called beside it, not instead of it: one drives
+/// the lifecycle the daemon already depends on, the other produces the safe
+/// events the server consolidates.
+pub fn capture(
+    agent: AgentId,
+    event: &str,
+    payload: &RawPayload,
+    env: &agents::CaptureEnv<'_>,
+) -> agents::CaptureOutput {
+    adapter_for(agent).capture(event, payload, env)
+}
+
+/// Whether this agent's event carries transient prompt or assistant text.
+pub fn carries_semantic_material(agent: AgentId, event: &str) -> bool {
+    adapter_for(agent).carries_semantic_material(event)
+}
+
 pub fn event_class(agent: AgentId, event: &str) -> Option<cairn_core::lifecycle::CanonicalEvent> {
     let probe = serde_json::json!({
         "session_id": "class-probe",
