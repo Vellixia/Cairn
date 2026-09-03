@@ -852,12 +852,19 @@ pub async fn report_transmission(
         ));
     }
 
+    // Read the trace **inside** the transaction that will act on it, and lock
+    // the row. Reading first and updating afterwards leaves a window in which a
+    // concurrent report moves the state between the two: the guarded `UPDATE`
+    // would then match nothing while the delivery insert still ran, writing
+    // rows for a transition that did not happen. A retry after a lost response
+    // is the ordinary case here, so two reports racing is not exotic.
+    let mut tx = pool.begin().await?;
     let row = sqlx::query(
         "SELECT project_id, session_id, account_id, delivery_state, failure_reason
-           FROM retrieval_traces WHERE trace_id = $1",
+           FROM retrieval_traces WHERE trace_id = $1 FOR UPDATE",
     )
     .bind(trace_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await?;
 
     // One answer for "no such trace" and "not yours". A foreign account that
@@ -919,7 +926,6 @@ pub async fn report_transmission(
         _ => {}
     }
 
-    let mut tx = pool.begin().await?;
     match report.outcome {
         TransmissionOutcome::Transmitted => {
             sqlx::query(
