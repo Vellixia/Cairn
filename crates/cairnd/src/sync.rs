@@ -667,6 +667,10 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
                 SyncNamespace::Personal(instance, owner),
             ),
             (
+                SyncNamespace::Patterns(provisional, owner),
+                SyncNamespace::Patterns(instance, owner),
+            ),
+            (
                 SyncNamespace::Team(provisional),
                 SyncNamespace::Team(instance),
             ),
@@ -697,6 +701,11 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
 
     let personal = SyncNamespace::Personal(instance, owner);
     let team = SyncNamespace::Team(instance);
+    // Opened with the personal lane and on the same terms. A pattern is a
+    // personal-domain record (FR-708c), so the account that may read the one may
+    // read the other, and a store holding two identities' personal knowledge side
+    // by side holds two identities' patterns the same way.
+    let patterns = SyncNamespace::Patterns(instance, owner);
 
     // **A store may hold several `personal:*` lanes and exactly one `team:*`
     // lane** (D438, FR-495, FR-496).
@@ -736,9 +745,9 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
     };
 
     let lanes: Vec<&SyncNamespace> = if team_is_ours {
-        vec![&personal, &team]
+        vec![&personal, &patterns, &team]
     } else {
-        vec![&personal]
+        vec![&personal, &patterns]
     };
     for namespace in lanes {
         if let Err(e) = cursor::establish(&d.store, namespace).await {
@@ -1016,7 +1025,7 @@ impl AuthenticatedContext {
     /// answered by the claim (FR-594), not about the lane.
     fn admits(&self, namespace: &SyncNamespace) -> bool {
         match namespace {
-            SyncNamespace::Personal(instance, owner) => {
+            SyncNamespace::Personal(instance, owner) | SyncNamespace::Patterns(instance, owner) => {
                 *owner == self.account && self.is_this_peer(*instance)
             }
             SyncNamespace::Team(instance) => self.is_this_peer(*instance),
@@ -1094,7 +1103,11 @@ async fn may_sync_lane(d: &Daemon, namespace: &SyncNamespace) -> bool {
         return false;
     };
     match namespace {
-        SyncNamespace::Personal(_, owner) => *owner == account,
+        // Both owner-partitioned lanes answer the same question, because a
+        // server-held pattern is a personal-domain record owned by one account
+        // (FR-708d): a lane naming somebody else's account is never ours to
+        // pull, whatever it carries.
+        SyncNamespace::Personal(_, owner) | SyncNamespace::Patterns(_, owner) => *owner == account,
         SyncNamespace::Team(_) | SyncNamespace::Project(_) => true,
     }
 }
@@ -1137,6 +1150,7 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
     let (path, array) = match namespace {
         SyncNamespace::Personal(..) => ("/api/sync/changes/personal", "personal"),
         SyncNamespace::Team(_) => ("/api/sync/changes/team", "team"),
+        SyncNamespace::Patterns(..) => ("/api/sync/changes/patterns", "patterns"),
         // `project:*` has its own puller with its own entity types.
         SyncNamespace::Project(_) => return Ok(0),
     };
@@ -1158,6 +1172,7 @@ async fn pull_global(d: &Daemon, namespace: &SyncNamespace) -> Result<usize, Wir
         let merged = match namespace {
             SyncNamespace::Personal(_, owner) => merge_pulled_personal(d, *owner, row).await,
             SyncNamespace::Team(instance) => merge_pulled_team(d, *instance, row).await,
+            SyncNamespace::Patterns(_, owner) => merge_pulled_pattern(d, *owner, row).await,
             SyncNamespace::Project(_) => false,
         };
         if merged {
@@ -1368,6 +1383,70 @@ async fn merge_pulled_personal(d: &Daemon, owner: Uuid, row: &serde_json::Value)
     }
 }
 
+/// One pulled pattern row into this store's cache.
+///
+/// **The owner comes from the lane, never from the row** — the same rule
+/// `merge_pulled_personal` states just above, and it binds harder here. A
+/// server-held pattern is visible only to its owner (FR-708d), so a row that
+/// could name its own owner would be a row that could name somebody else's, and
+/// the cache would hold a pattern this account is not entitled to read. The lane
+/// key already carries the account whose feed this is; that is the authority.
+///
+/// The cached row is not authority either way. Losing it loses nothing the
+/// server accepted (FR-703), and the merge that writes it lets the server
+/// correct what is already there (FR-712a).
+async fn merge_pulled_pattern(d: &Daemon, owner: Uuid, row: &serde_json::Value) -> bool {
+    let Some(pattern_id) = pulled_uuid(row, "pattern_id") else {
+        return false;
+    };
+    let Some(created_at) = pulled_time(row, "created_at") else {
+        return false;
+    };
+    let Some(updated_at) = pulled_time(row, "updated_at") else {
+        return false;
+    };
+    let text = |field: &str| {
+        row.get(field)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let strings = |field: &str| {
+        row.get(field)
+            .and_then(serde_json::Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let incoming = cairn_store::global::SyncedPattern {
+        pattern_id,
+        owner_user_id: owner,
+        title: text("title"),
+        problem: text("problem"),
+        root_cause: text("root_cause"),
+        approach: text("approach"),
+        constraints: strings("constraints"),
+        applicability: strings("applicability"),
+        content_key: text("content_key"),
+        created_at,
+        updated_at,
+        forgotten_at: pulled_time(row, "forgotten_at"),
+    };
+
+    match cairn_store::global::merge_synced_pattern(&d.store, incoming).await {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!(pattern = %pattern_id, error = %e, "a pulled pattern row did not merge");
+            false
+        }
+    }
+}
+
 /// One pulled team row into this store.
 ///
 /// `merge_synced_team` refuses a row from a server instance other than the one
@@ -1441,38 +1520,38 @@ async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) 
     }
 }
 
-/// Recover a `personal:*`/`team:*` namespace from the plain string
+/// Recover a non-project namespace from the plain string
 /// `outbox::known_namespaces` returns.
 ///
-/// `SyncNamespace` has no public parser (`key()` is one-way, by design — it is
-/// a cursor key, not a wire format), so this reads the same three shapes
-/// `key()` produces rather than adding one to `cairn_core` (out of this task's
-/// file ownership). `project:*` rows are excluded: `run_worker` already builds
-/// project targets from `repo::list_projects`, which is the authoritative
-/// source for a project's *current* `server_project_id` — parsing it back out
-/// of a namespace string here would risk drifting from that if a project were
-/// ever re-linked to a different server project.
+/// **The parsing itself is `cairn_store::cursor::parse`'s**, and this is a
+/// filter over it rather than a second reader of the same keys. It was written
+/// as its own parser when `SyncNamespace` had no public one; `cursor::parse`
+/// exists now because `sync_cursor` stores only the key and reading the table
+/// back requires exactly one parser. Keeping both meant a lane added to one was
+/// silently invisible to the other — which is what happened when the fourth
+/// lane arrived: the outbox walk simply stopped seeing it, with nothing to
+/// report.
+///
+/// `project:*` rows are excluded here, and that is this function's whole
+/// remaining job. `run_worker` already builds project targets from
+/// `repo::list_projects`, the authoritative source for a project's *current*
+/// `server_project_id`; parsing one back out of a namespace string would risk
+/// drifting from that if a project were ever re-linked to a different server
+/// project.
 fn parse_global_namespace(key: &str) -> Option<SyncNamespace> {
-    if let Some(rest) = key.strip_prefix("personal:") {
-        let (instance, user) = rest.split_once(':')?;
-        return Some(SyncNamespace::Personal(
-            Uuid::parse_str(instance).ok()?,
-            Uuid::parse_str(user).ok()?,
-        ));
+    match cairn_store::cursor::parse(key) {
+        Some(SyncNamespace::Project(_)) | None => None,
+        other => other,
     }
-    if let Some(rest) = key.strip_prefix("team:") {
-        return Some(SyncNamespace::Team(Uuid::parse_str(rest).ok()?));
-    }
-    None
 }
 
-struct Client {
+pub(crate) struct Client {
     base: String,
     token: String,
     http: reqwest::Client,
 }
 
-async fn client(d: &Daemon) -> Result<Client, WireError> {
+pub(crate) async fn client(d: &Daemon) -> Result<Client, WireError> {
     let creds = d.server.read().await.clone();
     let base = creds.url.ok_or_else(|| {
         WireError::new(
@@ -1562,7 +1641,7 @@ impl Client {
         Ok(ServerAnswer::Refused { code })
     }
 
-    async fn get(&self, path: &str) -> Result<serde_json::Value, WireError> {
+    pub(crate) async fn get(&self, path: &str) -> Result<serde_json::Value, WireError> {
         let response = self
             .http
             .get(format!("{}{path}", self.base))

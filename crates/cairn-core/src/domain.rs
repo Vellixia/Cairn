@@ -946,7 +946,7 @@ pub struct ProjectTrait {
     pub value: String,
 }
 
-/// One of the three independent synchronization lanes (D426, FR-486).
+/// One of the independent synchronization lanes (D426, FR-486).
 ///
 /// Each variant carries the identity that makes its cursor key unique.
 /// `Personal` carries **both** the server instance and the owning account
@@ -954,12 +954,24 @@ pub struct ProjectTrait {
 /// server-bound the way team knowledge is, but a user identity *is* per-server,
 /// so the same human on two servers is two different accounts. Keying on both
 /// is what stops those two identities from merging into one namespace.
+///
+/// `Patterns` carries the same pair, and for the same reason. A server-backed
+/// pattern is a personal-domain record owned by one account (FR-708c, FR-708d),
+/// so its lane is partitioned exactly as the personal lane is. It is a fourth
+/// *lane*, not a fourth *domain*: the lane names where a feed is read from and
+/// how far it has been read, and patterns have their own table, their own
+/// cursor and their own tombstones, which is precisely what a separate lane
+/// expresses. Folding them into `Personal` would put two feeds behind one
+/// cursor, so a page that landed for one would advance the other past a page it
+/// never read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SyncNamespace {
     Project(Uuid),
     /// `(server_instance_id, user_id)`.
     Personal(Uuid, Uuid),
     Team(Uuid),
+    /// `(server_instance_id, owner_user_id)` — the owner's server-held patterns.
+    Patterns(Uuid, Uuid),
 }
 
 impl SyncNamespace {
@@ -970,6 +982,7 @@ impl SyncNamespace {
             SyncNamespace::Project(project) => format!("project:{project}"),
             SyncNamespace::Personal(instance, user) => format!("personal:{instance}:{user}"),
             SyncNamespace::Team(instance) => format!("team:{instance}"),
+            SyncNamespace::Patterns(instance, user) => format!("patterns:{instance}:{user}"),
         }
     }
 }

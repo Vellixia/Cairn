@@ -126,6 +126,13 @@ pub fn parse(key: &str) -> Option<SyncNamespace> {
     if let Some(rest) = key.strip_prefix("team:") {
         return Some(SyncNamespace::Team(Uuid::parse_str(rest).ok()?));
     }
+    if let Some(rest) = key.strip_prefix("patterns:") {
+        let (instance, user) = rest.split_once(':')?;
+        return Some(SyncNamespace::Patterns(
+            Uuid::parse_str(instance).ok()?,
+            Uuid::parse_str(user).ok()?,
+        ));
+    }
     None
 }
 
