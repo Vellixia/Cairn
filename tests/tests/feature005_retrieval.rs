@@ -452,7 +452,19 @@ fn an_unchanged_delivered_item_does_not_reappear_on_the_next_prompt_submit() {
     assert_eq!(status, 200, "{prompt}");
     assert!(
         find_item(&prompt, &key).is_none(),
-        "an unchanged, already-delivered item was resent: {prompt}"
+        "an unchanged, already-delivered item was resent.\n\
+         The dedup rule is `source_updated_at <= delivered_at`, so the two \
+         timestamps say whether this is a dedup defect or a genuinely changed \
+         item. memories.updated_at={}, delivered_context.delivered_at={}.\n\
+         response: {prompt}",
+        pg.server.text(&format!(
+            "SELECT COALESCE(max(updated_at)::text, '<none>') FROM memories WHERE id = '{id}'"
+        )),
+        pg.server.text(&format!(
+            "SELECT COALESCE(max(delivered_at)::text, '<no delivery row>')
+               FROM delivered_context
+              WHERE session_id = '{session}' AND reference_key = '{key}'"
+        )),
     );
     // Nothing was owed (contract §4.1's worked example, t1): a dedup-emptied
     // delivery spends zero, distinct from a failed retrieval. (Which

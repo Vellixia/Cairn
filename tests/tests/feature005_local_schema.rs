@@ -15,7 +15,7 @@
 //!   promoting a pattern twice yield one record while two people's identical
 //!   patterns stay two.
 
-use cairn_e2e::feature005::{Local, LocalAt, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8};
+use cairn_e2e::feature005::{Local, LocalAt, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9};
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -61,9 +61,50 @@ fn v7_migrates_to_v8_and_gains_every_table() {
     rt().block_on(async {
         let db = LocalAt::new(LOCAL_SCHEMA_V7).await;
         let db = db.migrate_to_latest().await;
-        assert_eq!(db.schema_version().await, LOCAL_SCHEMA_V8);
+        // Migrating to *latest* now lands past v8, so the assertion is that v8's
+        // tables all arrived and not that the store stopped there. Pinning this
+        // to v8 would mean every future migration failed a test about v8.
+        assert_eq!(db.schema_version().await, LOCAL_SCHEMA_V9);
         for table in V8_TABLES {
             assert!(db.table_exists(table).await, "v8 did not create {table}");
+        }
+    });
+}
+
+/// The pattern cache arrives in v9, and it is a table of its own.
+///
+/// Asserted alongside the absence of the fields that forced it: a
+/// `cached_patterns` that grew a `signals` column would be `reusable_patterns`
+/// again, and the six refused names would be back on a table a pull writes.
+#[test]
+fn v8_migrates_to_v9_and_gains_the_pattern_cache() {
+    rt().block_on(async {
+        let db = LocalAt::new(LOCAL_SCHEMA_V8).await;
+        assert_eq!(
+            db.count(
+                "SELECT count(*) FROM sqlite_master
+                  WHERE type = 'table' AND name = 'cached_patterns'"
+            )
+            .await,
+            0,
+            "v8 already has cached_patterns, so v9 is not what introduces it"
+        );
+        let db = db.migrate_to_latest().await;
+        assert_eq!(db.schema_version().await, LOCAL_SCHEMA_V9);
+        assert!(db.table_exists("cached_patterns").await);
+        for refused in [
+            "signals",
+            "signal_digest",
+            "origin_ref",
+            "sanitization_report",
+            "source_memory_id",
+            "origin_deleted",
+        ] {
+            assert!(
+                !db.column_exists("cached_patterns", refused).await,
+                "the pattern cache has a `{refused}` column; that is a name the \
+                 privacy boundary refuses and a server row could never fill it"
+            );
         }
     });
 }

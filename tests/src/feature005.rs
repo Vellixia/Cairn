@@ -30,6 +30,15 @@ use uuid::Uuid;
 
 /// The local schema version Feature 005 introduces (`data-model.md` §5).
 pub const LOCAL_SCHEMA_V8: i64 = 8;
+/// The version US3 adds on top of it, for the owner's pattern cache.
+///
+/// `data-model.md` §5 describes v8 because that is the schema the feature was
+/// designed against. US3 then needed somewhere to hold a server pattern
+/// locally, and `reusable_patterns` cannot: its `signals`, `signal_digest` and
+/// `origin_ref` are NOT NULL and are three of the six names the privacy
+/// boundary refuses, so a server row has nothing to put in them. Hence
+/// `cached_patterns`, and hence a ninth migration.
+pub const LOCAL_SCHEMA_V9: i64 = 9;
 /// The local schema version Feature 005 upgrades *from*.
 pub const LOCAL_SCHEMA_V7: i64 = 7;
 /// The server schema version Feature 005 introduces (`data-model.md` §6).
