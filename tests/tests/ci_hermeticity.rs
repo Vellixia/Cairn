@@ -387,16 +387,34 @@ fn an_agents_proposal_is_recorded_as_a_proposal() {
     // The vocabulary itself says where a decision came from. There is no
     // `inferred` and no `model`: every basis names either a rule Cairn ran or
     // a party that asserted it.
+    //
+    // Feature 005 adds a fifth, and it is still a rule rather than a judgement.
+    // FR-801a newly lets an automatic process record a reinforcement on a
+    // deterministic identity match and on no other basis, and FR-802 requires
+    // that such a relation stay distinguishable from one a human or an agent
+    // asked for — so it gets its own name rather than sharing
+    // `deterministic_rule` with duplicate and conflict detection, where "who
+    // decided this" would become unanswerable for exactly the relation where it
+    // is newly in question.
     let mut bases: Vec<&str> = RelationBasis::ALL.iter().map(|b| b.as_str()).collect();
     bases.sort();
     assert_eq!(
         bases,
         vec![
+            "consolidation_reinforcement",
             "deterministic_rule",
             "evidence",
             "explicit_agent",
             "explicit_user"
         ],
         "a basis that does not name a rule or a party would make provenance unreadable"
+    );
+    // The new member is producible only by consolidation, which is what makes
+    // an inferred relation distinguishable from a requested one.
+    assert!(
+        !RelationBasis::ConsolidationReinforcement
+            .as_str()
+            .contains("explicit"),
+        "an automatic basis must not read as an asserted one"
     );
 }

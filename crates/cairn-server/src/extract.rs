@@ -332,18 +332,16 @@ fn digest_token(parts: &[&str]) -> String {
 
 /// Render a list of names for a candidate's content, bounded.
 fn name_list(names: &[String]) -> String {
+    // **No backticks.** They read well and are conclusive shell syntax to the
+    // privacy screen every candidate passes through — `validate.rs` treats a
+    // backtick as a command substitution on its own, so a claim written this
+    // way was refused by its own governance before it could become knowledge.
+    // The refusal was silent and looked like a privacy success, which is why
+    // the guard for it is a test rather than a comment.
     if names.len() <= CONTENT_MAX_FILES {
-        return names
-            .iter()
-            .map(|n| format!("`{n}`"))
-            .collect::<Vec<_>>()
-            .join(", ");
+        return names.join(", ");
     }
-    let shown = names[..CONTENT_MAX_FILES]
-        .iter()
-        .map(|n| format!("`{n}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let shown = names[..CONTENT_MAX_FILES].join(", ");
     format!("{shown} and {} more", names.len() - CONTENT_MAX_FILES)
 }
 
@@ -586,7 +584,7 @@ fn rule_2_persistent_failure(events: &[SafeCanonicalEvent]) -> Vec<CandidateProp
             streak.events.truncate(PROPOSAL_MAX_SOURCE_EVENTS);
             CandidateProposal {
                 kind: MemoryType::Failure,
-                content: format!("`{}` fails repeatedly in this project.", kind.as_str()),
+                content: format!("The {} failure recurs in this project.", kind.as_str()),
                 topic_key: format!("failure.{}", kind.as_str()),
                 value_key: "unresolved".to_string(),
                 source_event_ids: streak.events,
@@ -646,7 +644,7 @@ fn rule_4_decision_near_change(
     vec![CandidateProposal {
         kind: MemoryType::Decision,
         content: format!(
-            "Work in {} followed a decision point in session `{}`.",
+            "Work in {} followed a decision point in session {}.",
             name_list(&distinct(&files)),
             session.0
         ),
@@ -684,7 +682,7 @@ fn rule_7_recorded_decision(events: &[SafeCanonicalEvent]) -> Vec<CandidatePropo
             Some(CandidateProposal {
                 kind: MemoryType::Decision,
                 content: format!(
-                    "This project `{}` `{}` for `{}`.",
+                    "This project decided to {} {} for {}.",
                     decision_kind.as_str(),
                     object_token.as_str(),
                     subject_token.as_str()
@@ -761,7 +759,7 @@ fn rule_3_established_command(sessions: &[SessionEvents]) -> Vec<CandidatePropos
             events.truncate(PROPOSAL_MAX_SOURCE_EVENTS);
             Some(CandidateProposal {
                 kind: MemoryType::Convention,
-                content: format!("`{line}` is the established command for this project."),
+                content: format!("The established command for this project has the verb {verb}."),
                 topic_key: format!("command.{verb}"),
                 value_key: digest_token(&[line]),
                 source_event_ids: events,
@@ -793,13 +791,13 @@ fn rule_5_repeated_procedure(sessions: &[SessionEvents]) -> Vec<CandidateProposa
             events.truncate(PROPOSAL_MAX_SOURCE_EVENTS);
             let rendered = sequence
                 .iter()
-                .map(|c| format!("`{c}`"))
+                .filter_map(|c| command_verb(c))
                 .collect::<Vec<_>>()
-                .join(" → ");
+                .join(", then ");
             let parts: Vec<&str> = sequence.iter().map(String::as_str).collect();
             Some(CandidateProposal {
                 kind: MemoryType::Procedure,
-                content: format!("The sequence {rendered} is used to accomplish work here."),
+                content: format!("A repeated procedure here runs {rendered}."),
                 topic_key: format!("procedure.{verb}"),
                 value_key: digest_token(&parts),
                 source_event_ids: events,
@@ -842,9 +840,14 @@ fn rule_6_test_suite_identity(sessions: &[SessionEvents]) -> Vec<CandidatePropos
     let mut events: Vec<Uuid> = invocations.iter().map(|(_, id)| *id).collect();
     events.truncate(PROPOSAL_MAX_SOURCE_EVENTS);
 
+    // A command whose leading word yields no key-shaped verb names no subject,
+    // and the rule says nothing rather than inventing one.
+    let Some(verb) = command_verb(command) else {
+        return Vec::new();
+    };
     vec![CandidateProposal {
         kind: MemoryType::Fact,
-        content: format!("`{command}` is the test command for this project."),
+        content: format!("The test command for this project has the verb {verb}."),
         topic_key: "test.command".to_string(),
         value_key: digest_token(&[command]),
         source_event_ids: events,
@@ -907,7 +910,7 @@ fn rule_8_standing_instruction(sessions: &[SessionEvents]) -> Vec<CandidatePropo
             };
             CandidateProposal {
                 kind: MemoryType::Convention,
-                content: format!("`{object}` is {verb} for `{subject}` here."),
+                content: format!("Here, {object} is {verb} for {subject}."),
                 topic_key: format!("instruction.{subject}"),
                 value_key: object,
                 source_event_ids: events,
@@ -1115,6 +1118,102 @@ mod tests {
         }
     }
 
+    /// Every proposal every rule can produce, from one corpus that fires all
+    /// eight.
+    fn every_rule_fires() -> Vec<CandidateProposal> {
+        let session = SessionRef(Uuid::from_u128(7));
+        let one = vec![
+            invoked(1, "cargo test -p widget"),
+            verdict(2, TestOutcome::Failed),
+            changed(3, "src/widget/parser.rs"),
+            verdict(4, TestOutcome::Passed),
+            ran(5, "cargo build --release", 0),
+            ran(6, "cargo fmt", 0),
+            failed(7, "shell", FailureKind::PermissionDenied),
+            failed(8, "shell", FailureKind::PermissionDenied),
+            failed(9, "shell", FailureKind::PermissionDenied),
+            signal(10, DecisionKind::Adopt, "widget", "parser"),
+            standing(11, InstructionKind::Require, "widget", "parser"),
+        ];
+        let mut out = session_rules(session, &one);
+
+        // The project rules need the same shape in enough sessions to fire.
+        let sessions: Vec<SessionEvents> = (0..3)
+            .map(|n| SessionEvents {
+                session_ref: SessionRef(Uuid::from_u128(100 + n)),
+                events: vec![
+                    ran(1, "cargo build --release", 0),
+                    ran(2, "cargo fmt", 0),
+                    invoked(3, "cargo test -p widget"),
+                    invoked(4, "cargo test -p widget"),
+                    standing(5, InstructionKind::Require, "widget", "parser"),
+                ],
+            })
+            .collect();
+        out.extend(aggregate(ProjectRef(Uuid::from_u128(1)), &sessions));
+        out
+    }
+
+    #[test]
+    fn every_rules_content_survives_the_privacy_screen() {
+        // Gate 3 runs the same single implementation that governs any other
+        // content, and it refuses anything shaped like an invocation — a
+        // backtick is conclusive on its own, and so is a program name in head
+        // position with an operand after it.
+        //
+        // Every rule's claim used to be written with the command or the file in
+        // backticks, which reads well and was refused by every gate 3 it ever
+        // reached. Consolidation would have produced *nothing at all*, silently,
+        // with a refusal count that looked like a privacy success. This test is
+        // the guard that was missing: a rule whose own claim its own governance
+        // refuses is not a rule.
+        let proposals = every_rule_fires();
+        assert!(
+            proposals.len() >= 6,
+            "the corpus fired only {} rules, so this proves less than it looks like",
+            proposals.len()
+        );
+        for proposal in &proposals {
+            let normalized = cairn_core::knowledge::normalize_candidate_keys(
+                Some(&proposal.topic_key),
+                Some(&proposal.value_key),
+            )
+            .unwrap_or_else(|e| panic!("gate 2 refuses {:?}: {e:?}", proposal.topic_key));
+            let verdict = cairn_core::validate::validate_candidate_content(
+                &proposal.content,
+                normalized.0.as_deref(),
+                normalized.1.as_deref(),
+                &[],
+            );
+            assert!(
+                verdict.is_ok(),
+                "gate 3 refuses a rule's own claim as {:?}: {:?}",
+                verdict.unwrap_err().to_string(),
+                proposal.content
+            );
+        }
+    }
+
+    #[test]
+    fn no_rules_claim_embeds_a_command_line() {
+        // The value key is a bounded digest and not the command text, because a
+        // realistic command would refuse its own candidate. The same reasoning
+        // governs the claim: a command line in the content is refused by gate 3
+        // for the same reason, so the rules name the verb instead.
+        for proposal in every_rule_fires() {
+            assert!(
+                !proposal.content.contains("--"),
+                "a flag reached a claim: {:?}",
+                proposal.content
+            );
+            assert!(
+                !proposal.content.contains('`'),
+                "a backtick reached a claim, and it is conclusive shell syntax: {:?}",
+                proposal.content
+            );
+        }
+    }
+
     fn changed(seq: u64, path: &str) -> SafeCanonicalEvent {
         event(
             seq,
@@ -1172,6 +1271,39 @@ mod tests {
                 failure_kind: kind,
                 failure_note: None,
                 exit_status: None,
+            }),
+        )
+    }
+
+    fn signal(seq: u64, kind: DecisionKind, subject: &str, object: &str) -> SafeCanonicalEvent {
+        event(
+            seq,
+            EventKind::DecisionSignal,
+            Some(EventContent::Decision {
+                decision_kind: kind,
+                subject_token: VocabToken::subject(subject).unwrap(),
+                object_token: VocabToken::object(object).unwrap(),
+                justified_by_seq: Some(0),
+                lexicon_version: 1,
+            }),
+        )
+    }
+
+    fn standing(
+        seq: u64,
+        kind: InstructionKind,
+        subject: &str,
+        object: &str,
+    ) -> SafeCanonicalEvent {
+        event(
+            seq,
+            EventKind::UserInstructionSignal,
+            Some(EventContent::Instruction {
+                instruction_kind: kind,
+                subject_token: VocabToken::subject(subject).unwrap(),
+                object_token: VocabToken::object(object).unwrap(),
+                justified_by_seq: Some(0),
+                lexicon_version: 1,
             }),
         )
     }
@@ -1313,7 +1445,7 @@ mod tests {
         assert_eq!(r7.value_key, "postgresql");
         assert_eq!(
             r7.content,
-            "This project `adopt` `postgresql` for `storage_authority`."
+            "This project decided to adopt postgresql for storage_authority."
         );
     }
 
@@ -1374,7 +1506,7 @@ mod tests {
         assert!(r3.value_key.chars().all(|c| c.is_ascii_hexdigit()));
         assert_eq!(
             r3.content,
-            "`cargo build --release` is the established command for this project."
+            "The established command for this project has the verb cargo."
         );
     }
 
@@ -1470,7 +1602,7 @@ mod tests {
         let r8 = out.first().expect("R8 fired");
         assert_eq!(r8.topic_key, "instruction.migrations");
         assert_eq!(r8.value_key, "rewrite");
-        assert_eq!(r8.content, "`rewrite` is forbidden for `migrations` here.");
+        assert_eq!(r8.content, "Here, rewrite is forbidden for migrations.");
     }
 
     #[test]
