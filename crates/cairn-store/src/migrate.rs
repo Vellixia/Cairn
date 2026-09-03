@@ -43,6 +43,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "safe_events",
         include_str!("../migrations/0008_safe_events.sql"),
     ),
+    (
+        9,
+        "pattern_cache",
+        include_str!("../migrations/0009_pattern_cache.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.

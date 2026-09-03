@@ -2767,6 +2767,347 @@ pub async fn merge_synced_personal(
 }
 
 // ---------------------------------------------------------------------------
+// The pattern cache (T086, FR-703, FR-710, FR-710a, FR-712a)
+// ---------------------------------------------------------------------------
+//
+// The third refill path, and the one with no local authority behind it at all.
+// Personal and team knowledge were written locally first and were demoted to a
+// cache by FR-712a; a server-held pattern was never local in this shape. Its
+// rows live in `cached_patterns` rather than in `reusable_patterns` because the
+// six field names that table declares NOT NULL are exactly the ones the privacy
+// boundary refuses, so a row pulled from the server cannot supply them and
+// inventing them would be fabricating content (FR-708b,
+// `migrations/0009_pattern_cache.sql`). `reusable_patterns` keeps its own
+// meaning: the local, pre-promotion rows, which stay local (FR-707).
+
+/// One `shared_patterns` row arriving from the server.
+///
+/// The safe shape and nothing else — the same shape promotion sends, read back
+/// (knowledge-commands.md §3.3). `signals`, `signal_digest`, `origin_ref`,
+/// `sanitization_report`, `source_memory_id` and `origin_deleted` are absent
+/// for the reason [`SyncedPersonalKnowledge`] has no `origin_digest`, only
+/// stronger: those names are refused on the boundary, the server was never told
+/// them, and a field here for one would be a field nothing could ever fill
+/// honestly.
+///
+/// `trust` is absent too, and deliberately. The server stores exactly one
+/// level, `sanitized`, because passing the privacy gate is the only thing it
+/// can witness; `validated` and `contested` are derived from
+/// `pattern_applications`, which never leave the machine (FR-707, FR-708g). A
+/// field here would be somewhere for a level the server cannot establish to
+/// arrive.
+pub struct SyncedPattern {
+    pub pattern_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub title: String,
+    pub problem: String,
+    pub root_cause: String,
+    pub approach: String,
+    pub constraints: Vec<String>,
+    pub applicability: Vec<String>,
+    /// The digest of the normalized problem, root cause and approach that the
+    /// pattern's identity is derived from — `pattern_id` is
+    /// UUIDv5(owner_user_id ‖ content_key) (FR-708f). Stored rather than
+    /// recomputed: recomputing it here would be a second implementation of the
+    /// server's identity rule, free to drift from it.
+    pub content_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub forgotten_at: Option<DateTime<Utc>>,
+}
+
+/// One cached pattern as this store holds it.
+///
+/// Distinct from [`SyncedPattern`] by two columns, and the difference is the
+/// point: `trust` and `cached_at` are what let a reader tell a cached pattern
+/// from a server-accepted one at the point of reading it (FR-710).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedPattern {
+    pub pattern_id: Uuid,
+    pub owner_user_id: Uuid,
+    pub title: String,
+    pub problem: String,
+    pub root_cause: String,
+    pub approach: String,
+    pub constraints: Vec<String>,
+    pub applicability: Vec<String>,
+    /// Read back from the row rather than assumed to be [`PATTERN_TRUST`].
+    ///
+    /// The column is CHECKed to one value, so this can only ever be that value
+    /// — which is the argument for reading it: a store that somehow held
+    /// another one would show it here instead of having it silently reported as
+    /// `sanitized` by a constant this code substituted.
+    pub trust: String,
+    pub content_key: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub forgotten_at: Option<DateTime<Utc>>,
+    /// When *this copy* was last written, which is not `updated_at`. That one
+    /// is the server's statement about the record; this one is the local
+    /// statement about the copy, and reporting the cache stale needs the second
+    /// (FR-710a).
+    pub cached_at: DateTime<Utc>,
+}
+
+/// The only trust level a server-held pattern can carry.
+///
+/// Named here as well as CHECKed in the schema so the merge has something to
+/// bind that is not a bare string literal, and so the reason travels with the
+/// value: `sanitized` means the record passed the privacy gate, and passing the
+/// gate is the only thing the server witnesses (FR-708g).
+pub const PATTERN_TRUST: &str = "sanitized";
+
+/// Merge one pattern synchronized from the server into this store's cache
+/// (T086, FR-703, FR-712a).
+///
+/// **The stored row is a cache, and the server wins — unconditionally.** An id
+/// already present here is replaced from the incoming row, content included,
+/// rather than kept at whatever this store first saw. The reasoning is
+/// [`merge_synced_personal`]'s and does not weaken for patterns: a correction a
+/// cache cannot accept is a correction that never reaches the reader, and it
+/// would go on reading the uncorrected text for as long as the id survives.
+/// There is no clamp and no comparison of timestamps here, because a client
+/// comparing two of the server's own statements is a client overruling the
+/// authority. Ordering pulled pages is the patterns cursor's job
+/// ([`SyncNamespace::Patterns`]), not a per-row decision.
+///
+/// **Scoped to the `(pattern_id, owner_user_id)` pair.** One machine may hold
+/// more than one identity's cache — a user account is per-server, so two
+/// servers are already two owners — and a pattern is visible only to the
+/// account that owns it (FR-708d). Every statement below names both, so a merge
+/// for one identity cannot reach a row belonging to another on the same
+/// machine.
+///
+/// **No content re-validation**, for the reason [`merge_synced_personal`] gives:
+/// this is downstream of the server-side ingest validator, not a sixth entry
+/// point to it. The content was screened before the promotion that created the
+/// record this pull is reading, and re-screening here would be a second
+/// implementation of a check that already ran (FR-579).
+pub async fn merge_synced_pattern(store: &Store, incoming: SyncedPattern) -> Result<()> {
+    let mut tx = tx::begin(store, "merge_synced_pattern").await?;
+
+    // The tombstone takes precedence over whatever content arrived with it, and
+    // it is resolved once, here, rather than in six `CASE` expressions.
+    //
+    // A forgotten pattern that is still legible on this device is precisely the
+    // failure the tombstone exists to prevent, and a server that sends a
+    // `forgotten_at` alongside stale content — a page assembled before the
+    // forget, delivered after it — must not be able to leave that content
+    // behind. `content_key` is *not* cleared: it is the identity input, not
+    // content, and clearing it would break the `(owner_user_id, content_key)`
+    // constraint's ability to keep a later refill converging on this same row.
+    let forgotten = incoming.forgotten_at.is_some();
+    let title = if forgotten { "" } else { &incoming.title };
+    let problem = if forgotten { "" } else { &incoming.problem };
+    let root_cause = if forgotten { "" } else { &incoming.root_cause };
+    let approach = if forgotten { "" } else { &incoming.approach };
+    let constraints = json_list(if forgotten {
+        &[]
+    } else {
+        &incoming.constraints
+    });
+    let applicability = json_list(if forgotten {
+        &[]
+    } else {
+        &incoming.applicability
+    });
+    let now = rows::now_text();
+
+    let existing: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM cached_patterns WHERE pattern_id = ?1 AND owner_user_id = ?2",
+    )
+    .bind(incoming.pattern_id.to_string())
+    .bind(incoming.owner_user_id.to_string())
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if existing.is_none() {
+        // `trust` is bound from [`PATTERN_TRUST`] and never from the incoming
+        // row, which has no field for it to arrive in. The one level the server
+        // can establish is the one level this table may hold (FR-708g).
+        //
+        // A `pattern_id` already present under a *different* owner is left to
+        // collide with the primary key rather than being absorbed. It cannot
+        // happen from an honest feed — the id is UUIDv5(owner ‖ content_key), so
+        // a shared id means a shared owner — and the alternative to a loud
+        // failure is one identity's row being overwritten by another's, which
+        // is the exact outcome the owner scoping above exists to prevent.
+        sqlx::query(
+            "INSERT INTO cached_patterns
+                (pattern_id, owner_user_id, title, problem, root_cause, approach,
+                 constraints, applicability, trust, content_key,
+                 created_at, updated_at, forgotten_at, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+        )
+        .bind(incoming.pattern_id.to_string())
+        .bind(incoming.owner_user_id.to_string())
+        .bind(title)
+        .bind(problem)
+        .bind(root_cause)
+        .bind(approach)
+        .bind(&constraints)
+        .bind(&applicability)
+        .bind(PATTERN_TRUST)
+        .bind(&incoming.content_key)
+        .bind(rows::ts_text(incoming.created_at))
+        .bind(rows::ts_text(incoming.updated_at))
+        .bind(incoming.forgotten_at.map(rows::ts_text))
+        .bind(&now)
+        .execute(&mut *tx)
+        .await?;
+    } else {
+        // **Server-wins cache refresh** (FR-712a). Every column the server owns
+        // is taken from the incoming row — there is no field here this store
+        // has a better claim on than the server does, which is what makes the
+        // rule this simple to state.
+        //
+        // `trust` is refreshed to `sanitized` rather than left alone, for the
+        // same reason it is written that way on insert: the value is a
+        // consequence of the record existing on the server, not something
+        // carried by a particular delivery of it.
+        //
+        // `cached_at` moves and `created_at` does not. The first records that
+        // this device refilled the copy just now; the second is the server's
+        // statement about when the record began, and a cache rewriting it would
+        // be inventing history for a record it does not own.
+        sqlx::query(
+            "UPDATE cached_patterns
+                SET title = ?1, problem = ?2, root_cause = ?3, approach = ?4,
+                    constraints = ?5, applicability = ?6, trust = ?7,
+                    content_key = ?8, created_at = ?9, updated_at = ?10,
+                    forgotten_at = ?11, cached_at = ?12
+              WHERE pattern_id = ?13 AND owner_user_id = ?14",
+        )
+        .bind(title)
+        .bind(problem)
+        .bind(root_cause)
+        .bind(approach)
+        .bind(&constraints)
+        .bind(&applicability)
+        .bind(PATTERN_TRUST)
+        .bind(&incoming.content_key)
+        .bind(rows::ts_text(incoming.created_at))
+        .bind(rows::ts_text(incoming.updated_at))
+        .bind(incoming.forgotten_at.map(rows::ts_text))
+        .bind(&now)
+        .bind(incoming.pattern_id.to_string())
+        .bind(incoming.owner_user_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx::commit(tx, "merge_synced_pattern").await?;
+    // No `store.checkpoint()` here, for the reason spelled out at the end of
+    // [`merge_synced_personal`]: a truncating checkpoint takes an exclusive
+    // lock and belongs to deletions. A tombstone arriving on this path *does*
+    // clear content, and the pull worker checkpoints once per drained page
+    // rather than once per row — which is what stopped foreground commands
+    // failing with "database is locked" while a machine caught up.
+    Ok(())
+}
+
+/// This owner's cached patterns, most recently updated first (T086).
+///
+/// Forgotten rows stay out, exactly as [`list_personal`] excludes them: a
+/// tombstone is not something the owner still holds, and the emptied content
+/// columns behind one would read as a pattern with no problem and no approach.
+///
+/// Scoped to `owner_user_id` in the statement rather than filtered afterwards.
+/// A pattern is visible only to the account that owns it (FR-708d), and a
+/// visibility rule applied after the fetch is a visibility rule a future caller
+/// can skip.
+///
+/// The order is `updated_at DESC, pattern_id`. The second key is not
+/// decoration: two patterns refilled from the same page can carry the same
+/// `updated_at`, and an order that left them to the database's discretion would
+/// give a caller a different sequence on different runs over unchanged rows.
+pub async fn cached_patterns(store: &Store, owner: Uuid) -> Result<Vec<CachedPattern>> {
+    let rs = sqlx::query(
+        "SELECT * FROM cached_patterns
+          WHERE owner_user_id = ?1 AND forgotten_at IS NULL
+          ORDER BY updated_at DESC, pattern_id",
+    )
+    .bind(owner.to_string())
+    .fetch_all(store.pool())
+    .await?;
+    rs.iter().map(cached_pattern_row).collect()
+}
+
+/// Apply a forget to this store's cached copy: content cleared, `forgotten_at`
+/// set, nothing else touched.
+///
+/// **This is not where a pattern is forgotten.** Forgetting is the server's to
+/// decide — `POST /api/patterns/{id}/forget`, reached through a `pattern_forget`
+/// command, because under server authority a local mutation of a server-owned
+/// record is a request the server accepts or refuses and never a local write it
+/// later discovers (FR-712). What this function does is stop the cache serving
+/// a record whose forget has already been accepted, in the window before the
+/// next pull would carry the tombstone back. Calling it on a forget the server
+/// has not accepted would make this store the only place that believes it.
+///
+/// Scoped to `owner_user_id` in the same statement that finds the row, and
+/// returning the same `NotFound` for a wrong owner as for a missing id — the
+/// discipline [`forget_personal`] keeps, for the same reason: a distinguishable
+/// error would let a caller probe another identity's cache by id.
+///
+/// The checkpoint is the one thing this path has that [`merge_synced_pattern`]
+/// does not. It removes content, and removed content has to leave the
+/// write-ahead log rather than stay legible in an old frame (FR-052).
+pub async fn forget_cached_pattern(store: &Store, owner: Uuid, pattern_id: Uuid) -> Result<()> {
+    let mut tx = tx::begin(store, "forget_cached_pattern").await?;
+    let result = sqlx::query(
+        "UPDATE cached_patterns
+            SET forgotten_at = ?1, cached_at = ?1,
+                title = '', problem = '', root_cause = '', approach = '',
+                constraints = '[]', applicability = '[]'
+          WHERE pattern_id = ?2 AND owner_user_id = ?3 AND forgotten_at IS NULL",
+    )
+    .bind(rows::now_text())
+    .bind(pattern_id.to_string())
+    .bind(owner.to_string())
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        // Nothing changed, so `tx` is dropped and rolls back a transaction that
+        // wrote nothing. One error covers three cases alike: no such id, another
+        // owner's id, and an id already forgotten.
+        return Err(StoreError::NotFound(format!("cached pattern {pattern_id}")));
+    }
+    tx::commit(tx, "forget_cached_pattern").await?;
+    store.checkpoint().await?;
+    Ok(())
+}
+
+/// A JSON array of strings, for the two list columns.
+///
+/// Serialization of a `Vec<String>` cannot fail, so the fallback is unreachable
+/// rather than a swallowed error; `[]` is what the column defaults to anyway,
+/// which keeps an impossible branch from being the one that writes something
+/// the schema would reject.
+fn json_list(items: &[String]) -> String {
+    serde_json::to_string(items).unwrap_or_else(|_| "[]".to_string())
+}
+
+fn cached_pattern_row(row: &SqliteRow) -> Result<CachedPattern> {
+    Ok(CachedPattern {
+        pattern_id: rows::uuid(row, "pattern_id")?,
+        owner_user_id: rows::uuid(row, "owner_user_id")?,
+        title: row.try_get("title")?,
+        problem: row.try_get("problem")?,
+        root_cause: row.try_get("root_cause")?,
+        approach: row.try_get("approach")?,
+        constraints: rows::json_field(row, "constraints")?,
+        applicability: rows::json_field(row, "applicability")?,
+        trust: row.try_get("trust")?,
+        content_key: row.try_get("content_key")?,
+        created_at: rows::ts(row, "created_at")?,
+        updated_at: rows::ts(row, "updated_at")?,
+        forgotten_at: rows::opt_ts(row, "forgotten_at")?,
+        cached_at: rows::ts(row, "cached_at")?,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Writer-sequence gap detection (T097, T114, FR-492, FR-582, SC-450)
 // ---------------------------------------------------------------------------
 
@@ -2877,6 +3218,187 @@ mod tests {
             .fetch_one(store.pool())
             .await
             .unwrap()
+    }
+
+    // -- T086: the pattern cache -------------------------------------------
+
+    fn incoming_pattern(pattern_id: Uuid, owner_user_id: Uuid, approach: &str) -> SyncedPattern {
+        let now = Utc::now();
+        SyncedPattern {
+            pattern_id,
+            owner_user_id,
+            title: "retry the flaky integration probe".into(),
+            problem: "the probe fails once and the run is abandoned".into(),
+            root_cause: "the caller treats a transient refusal as terminal".into(),
+            approach: approach.into(),
+            constraints: vec!["only for idempotent probes".into()],
+            applicability: vec!["rust".into()],
+            content_key: format!("ck-{pattern_id}"),
+            created_at: now,
+            updated_at: now,
+            forgotten_at: None,
+        }
+    }
+
+    /// FR-712a for patterns. The server is the pattern's canonical owner, so a
+    /// second delivery replaces what is here rather than being ignored — a
+    /// correction a cache cannot accept is a correction that never reaches the
+    /// reader.
+    #[tokio::test]
+    async fn a_refill_replaces_a_cached_patterns_content() {
+        let store = store().await;
+        let owner_user_id = owner();
+        let pattern_id = Uuid::now_v7();
+
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(pattern_id, owner_user_id, "retry once"),
+        )
+        .await
+        .unwrap();
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(pattern_id, owner_user_id, "retry twice with backoff"),
+        )
+        .await
+        .unwrap();
+
+        let held = cached_patterns(&store, owner_user_id).await.unwrap();
+        assert_eq!(held.len(), 1, "a refill converges on one row: {held:#?}");
+        assert_eq!(held[0].approach, "retry twice with backoff");
+        assert_eq!(
+            held[0].trust, PATTERN_TRUST,
+            "the only level the server can establish"
+        );
+        assert_eq!(
+            held[0].constraints,
+            vec!["only for idempotent probes".to_string()],
+            "the list columns survive the round trip as lists"
+        );
+    }
+
+    /// The tombstone clears content and takes precedence over whatever content
+    /// arrived alongside it — a page assembled before the forget and delivered
+    /// after it must not leave the text behind.
+    #[tokio::test]
+    async fn a_tombstone_clears_the_content_it_arrives_with() {
+        let store = store().await;
+        let owner_user_id = owner();
+        let pattern_id = Uuid::now_v7();
+
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(pattern_id, owner_user_id, "retry once"),
+        )
+        .await
+        .unwrap();
+
+        let mut forgotten = incoming_pattern(pattern_id, owner_user_id, "retry once");
+        forgotten.forgotten_at = Some(Utc::now());
+        merge_synced_pattern(&store, forgotten).await.unwrap();
+
+        assert!(
+            cached_patterns(&store, owner_user_id)
+                .await
+                .unwrap()
+                .is_empty(),
+            "a forgotten pattern is not something the owner still holds"
+        );
+        let row: (String, String, String, String, String, String) = sqlx::query_as(
+            "SELECT title, problem, root_cause, approach, constraints, applicability
+               FROM cached_patterns WHERE pattern_id = ?1",
+        )
+        .bind(pattern_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            row,
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                "[]".to_string(),
+                "[]".to_string()
+            ),
+            "the tombstone must leave nothing legible behind"
+        );
+        let content_key: String =
+            sqlx::query_scalar("SELECT content_key FROM cached_patterns WHERE pattern_id = ?1")
+                .bind(pattern_id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert!(
+            !content_key.is_empty(),
+            "content_key is identity, not content: clearing it would stop a later \
+             refill converging on this row"
+        );
+    }
+
+    /// One machine may hold two identities' caches side by side, and a merge for
+    /// one must not reach the other's row (FR-708d).
+    #[tokio::test]
+    async fn a_merge_for_one_owner_leaves_another_owners_row_alone() {
+        let store = store().await;
+        let mine = owner();
+        let theirs = owner();
+        let my_pattern = Uuid::now_v7();
+        let their_pattern = Uuid::now_v7();
+
+        merge_synced_pattern(&store, incoming_pattern(my_pattern, mine, "mine, v1"))
+            .await
+            .unwrap();
+        merge_synced_pattern(
+            &store,
+            incoming_pattern(their_pattern, theirs, "theirs, v1"),
+        )
+        .await
+        .unwrap();
+
+        merge_synced_pattern(&store, incoming_pattern(my_pattern, mine, "mine, v2"))
+            .await
+            .unwrap();
+
+        let ours = cached_patterns(&store, mine).await.unwrap();
+        assert_eq!(ours.len(), 1);
+        assert_eq!(ours[0].approach, "mine, v2");
+
+        let others = cached_patterns(&store, theirs).await.unwrap();
+        assert_eq!(others.len(), 1, "the other identity keeps exactly its row");
+        assert_eq!(others[0].approach, "theirs, v1");
+        assert_eq!(others[0].pattern_id, their_pattern);
+    }
+
+    /// A read never crosses the owner boundary, and a forget scoped to the
+    /// wrong owner is `NotFound` rather than a distinguishable refusal — the
+    /// discipline `forget_personal` keeps, so an id cannot be probed.
+    #[tokio::test]
+    async fn forgetting_another_owners_cached_pattern_is_not_found() {
+        let store = store().await;
+        let mine = owner();
+        let theirs = owner();
+        let pattern_id = Uuid::now_v7();
+
+        merge_synced_pattern(&store, incoming_pattern(pattern_id, mine, "mine"))
+            .await
+            .unwrap();
+
+        match forget_cached_pattern(&store, theirs, pattern_id).await {
+            Err(StoreError::NotFound(_)) => {}
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+        assert_eq!(
+            cached_patterns(&store, mine).await.unwrap().len(),
+            1,
+            "the owner's row is untouched"
+        );
+
+        forget_cached_pattern(&store, mine, pattern_id)
+            .await
+            .unwrap();
+        assert!(cached_patterns(&store, mine).await.unwrap().is_empty());
     }
 
     // -- T100: outbox routing ----------------------------------------------
