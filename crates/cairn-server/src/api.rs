@@ -95,6 +95,20 @@ pub fn routes() -> Router<AppState> {
         // pull to a project the personal domain does not belong to.
         .route("/api/sync/changes/personal", get(sync_personal_changes))
         .route("/api/sync/changes/team", get(sync_team_changes))
+        // The third of the same shape (T085). A pattern is a personal-domain
+        // record, so this feed is owner-scoped exactly as `changes/personal`
+        // is, and for the same reason a namespace parameter is not used to
+        // reach it: a parameter that selects a namespace is one edit away from
+        // selecting an owner.
+        //
+        // Unlike the two above, this one carries **tombstones**. A cache that
+        // already holds a pattern only learns it was forgotten from the row
+        // itself, so a forgotten pattern travels once more with its
+        // `forgotten_at` and no content.
+        .route(
+            "/api/sync/changes/patterns",
+            get(crate::commands::pattern_changes),
+        )
         // The team lifecycle. `AdminUser` on both handlers, so a member reaching
         // either is refused before the handler runs — an agent has no tool
         // action shaped like ratification and must not gain one through a route
@@ -138,11 +152,20 @@ pub fn routes() -> Router<AppState> {
         // command semantics: a second *way in* to the same ones, carrying the
         // deterministic `command_id` the per-command paths have nowhere to put.
         .route("/api/commands", post(crate::commands::command_envelope))
-        // Pattern routes are interface-only until US3 supplies their lifecycle
-        // repository (T083+). The shape, the owner binding, the server-assigned
-        // trust and the content screening are the boundary's, and they are
-        // here; what is missing is the store behind them.
-        .route("/api/patterns", post(crate::commands::promote_pattern))
+        // The pattern lifecycle (T085). Promotion is an upsert on
+        // `(owner_user_id, content_key)`, so posting the same pattern twice is
+        // one record; the list is the owner's own and takes no parameter
+        // through which another account could be named.
+        //
+        // There is no route here that widens a pattern to a team. Widening is a
+        // separate, explicit act with its own governance — the owner proposes
+        // the content through `POST /api/team/knowledge` and a human
+        // administrator ratifies it — and the personal pattern stays owner-only
+        // and stays in the personal domain (FR-708e, Constitution V).
+        .route(
+            "/api/patterns",
+            get(crate::commands::list_patterns).post(crate::commands::promote_pattern),
+        )
         .route(
             "/api/patterns/{id}/forget",
             post(crate::commands::forget_pattern),

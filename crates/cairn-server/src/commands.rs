@@ -35,10 +35,12 @@
 //! the old one, attributed to whoever made it and reversible — rather than a
 //! silent overwrite.
 
-use crate::auth::{bind_session, require_member, CurrentUser, ReaderContext, SessionBindingError};
+use crate::auth::{
+    bind_session, require_member, CurrentUser, ReaderContext, SessionBindingError, SettledUser,
+};
 use crate::error::{ApiError, ApiResult};
 use crate::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use cairn_core::domain::{KnowledgeDomain, RelationKind, UNATTRIBUTED_OWNER};
 use cairn_core::validate::{validate_global_content, validate_pattern_content, ProjectIdentity};
@@ -840,21 +842,30 @@ pub async fn propose_team(
 }
 
 // ---------------------------------------------------------------------------
-// Patterns — shape and owner guard only
+// Patterns — the owner-only lifecycle (T085)
 // ---------------------------------------------------------------------------
 
-/// The safe promotion shape, and the guards that belong to the boundary.
+/// Promote a reusable pattern into the owner's server-backed store.
 ///
-/// **The lifecycle repository is US3's** (T083 onward). What T025 owns is the
-/// shape: the six fields that may cross, the six that may not, the owner bound
-/// from the credential, the server-assigned `trust`, and the content screening
-/// a pattern shares with personal and team knowledge.
+/// **The safe shape and nothing else.** Six fields cross — title, problem, root
+/// cause, approach, constraints, applicability — and six are refused by name.
+/// The refused six are not dropped silently, because a client whose
+/// `origin_ref` had been quietly discarded would believe the source project
+/// travelled with the pattern when it did not (FR-708a).
+///
+/// **An upsert, not an insert** (FR-708f, SC-760). Identity is
+/// `UUIDv5(owner ‖ content_key)` over content that already crosses the
+/// boundary, so a retry, a replayed spool row and a re-run migration all land
+/// on one record. `UNIQUE (owner_user_id, content_key)` is what makes that a
+/// database fact rather than a hope, and the owner half of it is why two
+/// accounts promoting identical text get two records rather than fighting over
+/// one (`data-model.md` §6.2).
 ///
 /// `trust` is not accepted from the client at all. `validated` and `contested`
 /// are derived locally from `pattern_applications`, which never leave the
 /// machine, so the server has no evidence for them and a client asserting one
 /// would be asserting a state it earned privately on a record the server cannot
-/// check (`data-model.md` §6.2).
+/// check (SC-762, FR-708g).
 pub async fn promote_pattern(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -888,28 +899,27 @@ pub async fn promote_pattern(
     }
 
     let reader = ReaderContext::load(&state.pool, &user).await?;
+    let command_id = optional_uuid(&body, "command_id")?;
     let title = text(&body, "title")?;
     let problem = text(&body, "problem")?;
     let root_cause = text(&body, "root_cause")?;
     let approach = text(&body, "approach")?;
-    let constraints: Vec<String> = body
-        .get("constraints")
-        .and_then(Value::as_array)
-        .map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
+    let constraints = string_list(&body, "constraints");
+    let applicability = string_list(&body, "applicability");
 
     let identities = all_identities_for(&state.pool, &reader).await?;
+    // Constraints and applicability are both free text the caller wrote, and
+    // the screen is identical for each, so they are screened as one list.
+    // Keeping them apart below is about what is stored, not about what is
+    // checked — a project name is equally disclosing in either.
+    let mut free_text = constraints.clone();
+    free_text.extend(applicability.iter().cloned());
     validate_pattern_content(
         &title,
         &problem,
         &root_cause,
         &approach,
-        &constraints,
+        &free_text,
         &[],
         &identities,
     )
@@ -926,17 +936,82 @@ pub async fn promote_pattern(
         "a pattern is a personal-domain record"
     );
 
+    let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { result_id } =
+        reserve_command(&mut tx, user.id, command_id, pattern_id).await?
+    {
+        return Ok(duplicate_reply(result_id));
+    }
+    // `domain` and `trust` are written as literals here and are bound from
+    // nothing the caller sent. There is no expression in this statement that a
+    // request body can reach, which is the form of that guarantee a later edit
+    // cannot weaken by accident; the column `CHECK`s in migration 4 are the
+    // second line of the same rule.
+    //
+    // `topic_key` and `value_key` are left to their NULL default: the safe
+    // promotion shape enumerates six fields and neither is among them
+    // (`contracts/knowledge-commands.md` §3.3).
+    //
+    // `forgotten_at = NULL` on conflict is a deliberate revival, not a leak.
+    // The owner has just re-promoted the *same* content — same problem, same
+    // root cause, same approach, which is what `content_key` digests — so the
+    // record they asked for is the one that is already there, and refusing to
+    // un-forget it would leave the owner unable to reinstate their own pattern
+    // by any route other than editing it into something else.
+    sqlx::query(
+        "INSERT INTO shared_patterns
+             (pattern_id, domain, owner_user_id, title, problem, root_cause,
+              approach, constraints, applicability, trust, content_key)
+         VALUES ($1, 'personal', $2, $3, $4, $5, $6, $7, $8, 'sanitized', $9)
+         ON CONFLICT (owner_user_id, content_key) DO UPDATE
+            SET title         = EXCLUDED.title,
+                problem       = EXCLUDED.problem,
+                root_cause    = EXCLUDED.root_cause,
+                approach      = EXCLUDED.approach,
+                constraints   = EXCLUDED.constraints,
+                applicability = EXCLUDED.applicability,
+                updated_at    = now(),
+                forgotten_at  = NULL",
+    )
+    .bind(pattern_id)
+    .bind(user.id)
+    .bind(&title)
+    .bind(&problem)
+    .bind(&root_cause)
+    .bind(&approach)
+    .bind(Value::from(constraints.clone()))
+    .bind(Value::from(applicability.clone()))
+    .bind(&content_key)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
     Ok(Json(json!({
         "pattern_id": pattern_id,
         "owner_user_id": user.id,
         "domain": KnowledgeDomain::Personal.as_str(),
         "trust": "sanitized",
         "content_key": content_key,
-        // US3 supplies the repository that makes this durable (T083+). The
-        // boundary is what T025 owes, and it is complete: shape validated,
-        // content screened, identity derived, owner bound.
-        "stored": false,
+        "stored": true,
     })))
+}
+
+/// An optional array-of-strings field, with anything that is not a string
+/// dropped rather than coerced.
+///
+/// Absent and empty mean the same thing to this record — a pattern with no
+/// constraints — so there is nothing for a missing field to be distinguished
+/// from and no reason to refuse one.
+fn string_list(body: &Value, field: &str) -> Vec<String> {
+    body.get(field)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Forget a pattern one owns.
@@ -944,6 +1019,21 @@ pub async fn promote_pattern(
 /// The owner guard is delegated to the same rule personal knowledge uses, and
 /// for the same reason: a pattern is a personal-domain record, so "only the
 /// owner" is not a second policy to keep in step, it is the same one.
+///
+/// **One answer for "no such pattern" and "not your pattern".** A route that
+/// answered `404` for a pattern that does not exist and `403` for a colleague's
+/// would let any account with a token enumerate pattern ids across the whole
+/// server, one guess at a time — the same oracle [`project_of_record`] closes
+/// for memories (FR-894a, FR-708d). The owner is in the `WHERE` clause rather
+/// than in a preceding read precisely so there is no branch where the two
+/// answers could drift apart.
+///
+/// **Forgetting twice succeeds.** The state the caller asked for is "this
+/// pattern is forgotten", and after the first call it holds. Answering `404` to
+/// the second would tell a client its instruction had failed when it had
+/// already been carried out, whose only correct response is to retry forever.
+/// That check is scoped to a row this caller owns, so it discloses nothing a
+/// non-owner could not already have guessed at.
 pub async fn forget_pattern(
     State(state): State<AppState>,
     user: CurrentUser,
@@ -951,19 +1041,180 @@ pub async fn forget_pattern(
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
     reject_server_owned(&body)?;
+    let command_id = optional_uuid(&body, "command_id")?;
+
+    let mut tx = state.pool.begin().await?;
+    if let Reservation::AlreadyApplied { .. } =
+        reserve_command(&mut tx, user.id, command_id, pattern_id).await?
+    {
+        tx.commit().await?;
+        return Ok(Json(
+            json!({ "pattern_id": pattern_id, "forgotten": true, "applied": "duplicate" }),
+        ));
+    }
+    // The tombstone keeps the row and empties it. The row has to stay: it is
+    // what the changes feed carries to a cache that still holds the pattern,
+    // and a deleted row reaches nobody. Every content column is cleared, so
+    // what survives is the identity and the fact of the forgetting.
     let forgotten = sqlx::query(
         "UPDATE shared_patterns
-            SET forgotten_at = now(), problem = '', root_cause = '', approach = ''
+            SET forgotten_at  = now(),
+                title         = '',
+                problem       = '',
+                root_cause    = '',
+                approach      = '',
+                constraints   = '[]'::jsonb,
+                applicability = '[]'::jsonb,
+                updated_at    = now()
           WHERE pattern_id = $1 AND owner_user_id = $2 AND forgotten_at IS NULL",
     )
     .bind(pattern_id)
     .bind(user.id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
     if forgotten.rows_affected() == 0 {
-        return Err(ApiError::not_found("no such pattern"));
+        let already_forgotten: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT pattern_id FROM shared_patterns
+              WHERE pattern_id = $1 AND owner_user_id = $2 AND forgotten_at IS NOT NULL",
+        )
+        .bind(pattern_id)
+        .bind(user.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if already_forgotten.is_none() {
+            // Rolled back, so the reservation goes with it and a later retry is
+            // still executable. A caller who never owned this record must not
+            // have its command id burned by the attempt.
+            return Err(ApiError::not_found("no such pattern"));
+        }
     }
+    tx.commit().await?;
     Ok(Json(json!({ "pattern_id": pattern_id, "forgotten": true })))
+}
+
+/// The columns a pattern shows on the wire, enumerated rather than `*`.
+///
+/// Enumerated so that adding a column to `shared_patterns` cannot put it on the
+/// wire by default — the same rule [`crate::global::team_changes`] states for
+/// `origin_digest`. `owner_user_id` is deliberately absent: every row a caller
+/// can see is their own, so transmitting the owner would only restate the
+/// credential back to whoever presented it.
+const PATTERN_WIRE_COLUMNS: &str = "pattern_id, title, problem, root_cause, approach, \
+                                    constraints, applicability, trust, content_key, \
+                                    created_at, updated_at, forgotten_at";
+
+/// One `shared_patterns` row as the two read routes both render it.
+fn pattern_row_json(row: &sqlx::postgres::PgRow, with_tombstone: bool) -> Value {
+    use sqlx::Row as _;
+    let mut out = json!({
+        "pattern_id": row.get::<Uuid, _>("pattern_id"),
+        "title": row.get::<String, _>("title"),
+        "problem": row.get::<String, _>("problem"),
+        "root_cause": row.get::<String, _>("root_cause"),
+        "approach": row.get::<String, _>("approach"),
+        "constraints": row.get::<Value, _>("constraints"),
+        "applicability": row.get::<Value, _>("applicability"),
+        "trust": row.get::<String, _>("trust"),
+        "content_key": row.get::<String, _>("content_key"),
+        "created_at": row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+        "updated_at": row.get::<chrono::DateTime<chrono::Utc>, _>("updated_at"),
+    });
+    if with_tombstone {
+        out["forgotten_at"] = json!(row
+            .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("forgotten_at")
+            .ok()
+            .flatten());
+    }
+    out
+}
+
+/// `GET /api/patterns` — the caller's own patterns, and only ever those.
+///
+/// **There is no parameter naming an owner, and there cannot be one.** The
+/// owner is `user.id()`, taken from the authenticated identity, so this route
+/// has no argument through which one account could ask for another's patterns —
+/// not a filter, not a project, not an administrator override. That is not a
+/// check this handler performs; it is the absence of the thing a check would
+/// have to guard, which is the only form of the guarantee a later edit cannot
+/// quietly weaken (FR-708d, `data-model.md` §6.2).
+///
+/// There is deliberately no administrator exemption either. An administrator's
+/// standing is over team guidance, not over a colleague's private patterns —
+/// the same rule [`forget_personal`] states.
+///
+/// Forgotten rows are absent. This is the owner's living list; the tombstone a
+/// cache needs is carried by [`pattern_changes`], which is a different question
+/// asked by a different caller.
+pub async fn list_patterns(
+    State(state): State<AppState>,
+    user: SettledUser,
+) -> ApiResult<Json<Value>> {
+    let rows = sqlx::query(&format!(
+        "SELECT {PATTERN_WIRE_COLUMNS}
+           FROM shared_patterns
+          WHERE owner_user_id = $1 AND forgotten_at IS NULL
+          ORDER BY updated_at DESC, pattern_id"
+    ))
+    .bind(user.id())
+    .fetch_all(&state.pool)
+    .await?;
+    let patterns: Vec<Value> = rows.iter().map(|r| pattern_row_json(r, false)).collect();
+    Ok(Json(
+        json!({ "total": patterns.len(), "patterns": patterns }),
+    ))
+}
+
+/// `GET /api/sync/changes/patterns` — the feed a local pattern cache refills
+/// from.
+///
+/// Owner-scoped exactly as [`list_patterns`] is, and for the same reason: a
+/// promoted pattern is durability, not publication. The cursor convention is
+/// [`crate::global::PageCursor`] verbatim rather than a second one — the same
+/// `(changed_at, id)` pair, the same `since`, the same opaque encoding — so a
+/// client that already drains the personal and team feeds needs no new rule.
+///
+/// **Tombstones are included, and that is the whole point.** A forget has to
+/// reach a cache that already holds the pattern, and the only thing that can
+/// carry it is the row itself: a deleted row reaches nobody, and a feed
+/// filtered on `forgotten_at IS NULL` would leave every cache serving a pattern
+/// its owner had withdrawn. So a forgotten pattern travels once more, carrying
+/// its `forgotten_at` and no content.
+pub async fn pattern_changes(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Query(q): Query<crate::global::GlobalChangesQuery>,
+) -> ApiResult<Json<Value>> {
+    let since = crate::global::PageCursor::decode(q.since.as_deref());
+    // `GREATEST` over the row's own timestamps, for the reason
+    // `global::personal_changes` gives: ordering on `created_at` alone would
+    // make an in-place mutation unreachable to a cursor that had already passed
+    // the row's creation, so a forget could never arrive anywhere.
+    // `updated_at` moves on both an upsert and a tombstone, and `forgotten_at`
+    // is carried too so the ordering does not depend on the two being written
+    // in the same statement.
+    let rows = sqlx::query(&format!(
+        "WITH changed AS (
+             SELECT {PATTERN_WIRE_COLUMNS},
+                    pattern_id AS id,
+                    GREATEST(created_at, updated_at, forgotten_at) AS changed_at
+               FROM shared_patterns
+              WHERE owner_user_id = $1
+         )
+         SELECT * FROM changed
+          WHERE (changed_at, id) > ($2, $3)
+          ORDER BY changed_at ASC, id ASC LIMIT $4"
+    ))
+    .bind(user.id())
+    .bind(since.at)
+    .bind(since.id)
+    .bind(q.page())
+    .fetch_all(&state.pool)
+    .await?;
+    let patterns: Vec<Value> = rows.iter().map(|r| pattern_row_json(r, true)).collect();
+    Ok(Json(json!({
+        "patterns": patterns,
+        "cursor": crate::global::page_cursor(&rows, since).encode(),
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -996,12 +1247,18 @@ pub async fn forget_pattern(
 ///
 /// ## Kinds this route does not carry yet
 ///
-/// Pattern promotion and forgetting, and the two verification report shapes,
-/// answer a **deferral** rather than a success: their owning phases are US3
-/// (T083+) and US5 (T106+). A deferral is a recognisable, non-terminal refusal
-/// — the drain leaves the row durable and retries after an upgrade — so a
-/// queued pattern promotion waits rather than being silently marked delivered.
-/// That distinction is the whole point of answering deferral instead of `404`.
+/// The two verification report shapes answer a **deferral** rather than a
+/// success: their owning phase is US5 (T106+). A deferral is a recognisable,
+/// non-terminal refusal — the drain leaves the row durable and retries after an
+/// upgrade — so a queued command waits rather than being silently marked
+/// delivered. That distinction is the whole point of answering deferral instead
+/// of `404`.
+///
+/// Pattern promotion and forgetting were deferred here until US3 supplied their
+/// repository (T085). They are not deferred any more: both dispatch to the real
+/// handlers, so a spool row queued against an older server lands the moment the
+/// upgrade it was waiting for arrives, which is exactly what the deferral was
+/// protecting.
 pub async fn command_envelope(
     state: State<AppState>,
     user: CurrentUser,
@@ -1058,11 +1315,17 @@ pub async fn command_envelope(
         "personal_forget" => forget_personal(state, user, Path(needs_target()?), Json(body)).await,
         "team_propose" => propose_team(state, user, Json(body)).await,
 
+        // Patterns dispatch to the same two handlers `/api/patterns` and
+        // `/api/patterns/{id}/forget` call. A promotion carries no target — its
+        // identity is derived from its content — and a forget names the pattern
+        // it withdraws.
+        "pattern_promote" => promote_pattern(state, user, Json(body)).await,
+        "pattern_forget" => forget_pattern(state, user, Path(needs_target()?), Json(body)).await,
+
         // Deferred, not refused. The row stays durable and the drain retries it
         // after the phase that owns it ships, which is what stops a queued
-        // pattern promotion being marked delivered by a server that cannot
-        // store one.
-        "pattern_promote" | "pattern_forget" => Err(deferred(&kind, "US3 (T083 onward)")),
+        // verification report being marked delivered by a server that cannot
+        // record one.
         "verification_run" | "verification_attestation" => {
             Err(deferred(&kind, "US5 (T106 onward)"))
         }

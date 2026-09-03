@@ -509,7 +509,7 @@ pub struct GlobalChangesQuery {
 }
 
 impl GlobalChangesQuery {
-    fn page(&self) -> i64 {
+    pub(crate) fn page(&self) -> i64 {
         self.limit
             .unwrap_or(crate::sync::PAGE)
             .clamp(1, crate::sync::PAGE)
@@ -653,7 +653,7 @@ impl PageCursor {
     }
 
     /// `<rfc3339>|<uuid>`. Opaque to the client, which stores and echoes it.
-    fn encode(&self) -> String {
+    pub(crate) fn encode(&self) -> String {
         format!("{}|{}", self.at.to_rfc3339(), self.id)
     }
 
@@ -664,7 +664,7 @@ impl PageCursor {
     /// exact instant once. Every importer is idempotent by id, so a repeat is
     /// free and a skip would not be; that asymmetry is why this is lenient here
     /// and strict about ordering everywhere else.
-    fn decode(raw: Option<&str>) -> Self {
+    pub(crate) fn decode(raw: Option<&str>) -> Self {
         let Some(raw) = raw else {
             return Self::start();
         };
@@ -876,7 +876,7 @@ pub async fn team_changes(
 /// A single-table page has nothing to be pinned against. It inherits the same
 /// tie exposure — `PAGE` rows sharing one timestamp with a `>` cursor would
 /// step over the rest — which is unchanged from the route this one follows.
-fn page_cursor(rows: &[sqlx::postgres::PgRow], since: PageCursor) -> PageCursor {
+pub(crate) fn page_cursor(rows: &[sqlx::postgres::PgRow], since: PageCursor) -> PageCursor {
     rows.last()
         .and_then(|r| {
             let at = r
