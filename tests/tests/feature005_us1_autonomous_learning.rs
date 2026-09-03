@@ -411,10 +411,18 @@ fn story(agent: &'static str, build: fn(&str) -> Session) {
 
         // SC-702: 100% resolve to the session and the events they came from,
         // and zero have unresolvable provenance.
+        //
+        // Joined through `result_knowledge_id` rather than by assuming a
+        // record's id equals its candidate's. It does for a record this pass
+        // created, and it does not for one this pass reinforced — where the
+        // record is the older one and the candidate is this pass's. A query
+        // that assumed the first would silently pass on the case it was least
+        // able to check.
         let sources = server.count(&format!(
             "SELECT COUNT(*) FROM candidate_source_events cse
+               JOIN knowledge_candidates kc ON kc.candidate_id = cse.candidate_id
                JOIN safe_events e ON e.event_id = cse.event_id
-              WHERE cse.candidate_id = '{id}' AND e.session_id = '{session}'"
+              WHERE kc.result_knowledge_id = '{id}' AND e.session_id = '{session}'"
         ));
         assert!(
             sources > 0,
@@ -422,13 +430,14 @@ fn story(agent: &'static str, build: fn(&str) -> Session) {
         );
         let foreign = server.count(&format!(
             "SELECT COUNT(*) FROM candidate_source_events cse
+               JOIN knowledge_candidates kc ON kc.candidate_id = cse.candidate_id
           LEFT JOIN safe_events e ON e.event_id = cse.event_id
-              WHERE cse.candidate_id = '{id}'
-                AND (e.event_id IS NULL OR e.session_id <> '{session}')"
+              WHERE kc.result_knowledge_id = '{id}'
+                AND (e.event_id IS NULL OR e.project_id <> '{project}')"
         ));
         assert_eq!(
             foreign, 0,
-            "{agent}'s record {id} cites an event outside its own session"
+            "{agent}'s record {id} cites an event outside its own project"
         );
     }
 

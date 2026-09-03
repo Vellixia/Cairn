@@ -811,6 +811,20 @@ async fn consolidate_batch(pool: &PgPool, claim: &Claim) -> PassOutcome {
 async fn run_pass(pool: &PgPool, claim: &Claim) -> Result<(), sqlx::Error> {
     let batch = read_batch_events(pool, claim).await?;
     if batch.is_empty() {
+        // A pass with nothing readable is still a pass, and its run row should
+        // say which extractor did not find anything rather than keeping the
+        // placeholder it was opened with. "Consolidation found nothing" and
+        // "consolidation never happened" are two states a health report must
+        // not conflate (§8).
+        let (extractor, _) = extract::select_extractor(None);
+        sqlx::query(COUNT_RUN)
+            .bind(claim.run_id)
+            .bind(0_i32)
+            .bind(0_i32)
+            .bind(0_i32)
+            .bind(extractor.kind())
+            .execute(pool)
+            .await?;
         return Ok(());
     }
     // The owner comes from the account the server bound when it accepted the
