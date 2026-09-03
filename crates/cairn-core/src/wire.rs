@@ -560,6 +560,16 @@ pub enum Request {
         /// The token budget for the context a `session_opened` delivers.
         #[serde(default)]
         token_budget: Option<usize>,
+        /// The Feature 005 events this same vendor event produced.
+        ///
+        /// Carried here rather than sent as a second request because the hot
+        /// path is one hook invocation per tool call, and two connects and two
+        /// writes where one would do is the largest cost Cairn adds to a
+        /// session (SC-007). It also fixes the order for free: the lifecycle
+        /// half creates or resumes the session the safe events bind to, and one
+        /// request cannot arrive out of order with itself.
+        #[serde(default)]
+        capture: Option<crate::event::CaptureOutput>,
     },
 
     /// The session vocabulary a semantic signal must justify its tokens

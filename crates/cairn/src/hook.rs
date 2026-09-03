@@ -59,13 +59,21 @@ fn to_canonical(
 /// is treated as empty, which declines the signal rather than delaying the
 /// agent; the decline is counted, so a daemon that is always too slow is
 /// visible rather than silently lossy.
+#[derive(Default)]
+struct Captured {
+    /// The vendor's own session key, which routes the events.
+    key: String,
+    /// What this vendor event established, or nothing.
+    output: Option<cairn_core::event::CaptureOutput>,
+}
+
 fn capture_pass(
     agent: cairn_integrate::AgentId,
     event: &str,
     raw: &serde_json::Value,
     cwd: &str,
     config: &CairnConfig,
-) {
+) -> Captured {
     let payload = cairn_integrate::RawPayload::new(raw.clone(), cwd);
     let deadline = capture_deadline(config);
 
@@ -79,7 +87,7 @@ fn capture_pass(
     if key.is_empty() {
         // An event that cannot name its session cannot be routed, and it is
         // declined here exactly as the lifecycle path declines it (FR-737).
-        return;
+        return Captured::default();
     }
 
     let (vocabulary, established) = if cairn_integrate::carries_semantic_material(agent, event) {
@@ -95,17 +103,9 @@ fn capture_pass(
     };
 
     let output = cairn_integrate::capture(agent, event, &payload, &env);
-    if output.is_empty() {
-        return;
-    }
-    let request = Request::CaptureEvents {
-        cwd: cwd.to_string(),
-        agent: agent.as_str().to_string(),
-        agent_session_key: key,
-        output,
-    };
-    if let Err(e) = client::send_oneway_blocking(&request, deadline) {
-        log_drop(event, &e.message);
+    Captured {
+        key,
+        output: (!output.is_empty()).then_some(output),
     }
 }
 
@@ -215,22 +215,33 @@ pub fn run_blocking(event: &str) -> bool {
         .unwrap_or_else(|| ".".to_string());
 
     let config = CairnConfig::load();
+    let captured = capture_pass(agent, event, &raw, &cwd, &config);
 
-    // The lifecycle path first, where there is one: it is what creates or
-    // resumes the session the safe events are then bound to, and an event
-    // spooled against a session that does not exist yet has nowhere to go.
-    if let Some(canonical) = to_canonical(agent, event, &raw, &cwd) {
-        let request = Request::CanonicalEvent {
+    // One request carrying both halves where there is a lifecycle event, and a
+    // capture-only request where there is not. Two writes per tool call is the
+    // largest cost Cairn adds to a session, and this path runs on every one
+    // (SC-007).
+    let request = match to_canonical(agent, event, &raw, &cwd) {
+        Some(canonical) => Request::CanonicalEvent {
             event: canonical,
             wait_for_handoff: false,
             token_budget: None,
-        };
-        if let Err(e) = client::send_oneway_blocking(&request, capture_deadline(&config)) {
-            log_drop(event, &e.message);
-        }
+            capture: captured.output,
+        },
+        None => match captured.output {
+            Some(output) => Request::CaptureEvents {
+                cwd: cwd.clone(),
+                agent: agent.as_str().to_string(),
+                agent_session_key: captured.key,
+                output,
+            },
+            // Registered, and this payload established nothing. Not a failure.
+            None => return true,
+        },
+    };
+    if let Err(e) = client::send_oneway_blocking(&request, capture_deadline(&config)) {
+        log_drop(event, &e.message);
     }
-
-    capture_pass(agent, event, &raw, &cwd, &config);
     true
 }
 
@@ -256,12 +267,23 @@ pub async fn run(event: &str) {
         .unwrap_or_else(|| ".".to_string());
     let config = CairnConfig::load();
 
+    let captured = capture_pass(agent, event, &raw, &cwd, &config);
     let Some(canonical) = to_canonical(agent, event, &raw, &cwd) else {
         // A boundary-class caller reaching an event the lifecycle declines has
         // nothing to answer with, but the event may still be capture. This is
         // the path a registered-but-unmapped event takes when the async entry
         // point is used.
-        capture_pass(agent, event, &raw, &cwd, &config);
+        if let Some(output) = captured.output {
+            let request = Request::CaptureEvents {
+                cwd: cwd.clone(),
+                agent: agent.as_str().to_string(),
+                agent_session_key: captured.key,
+                output,
+            };
+            if let Err(e) = client::send_oneway(&request, capture_deadline(&config)).await {
+                log_drop(event, &e.message);
+            }
+        }
         return;
     };
 
@@ -281,6 +303,7 @@ pub async fn run(event: &str) {
         // acknowledged (D22, FR-240).
         wait_for_handoff: false,
         token_budget: None,
+        capture: captured.output,
     };
 
     if !boundary {

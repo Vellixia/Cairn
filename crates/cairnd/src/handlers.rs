@@ -40,7 +40,10 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             agent,
             agent_session_key,
             output,
-        } => capture_events(d, &cwd, &agent, &agent_session_key, &output).await,
+        } => {
+            spool_capture(d, &cwd, &agent, &agent_session_key, &output).await?;
+            Ok(json!({ "accepted": true }))
+        }
 
         Request::Init { cwd } => init(d, &cwd).await,
         Request::Status { cwd } => status(d, &cwd).await,
@@ -110,7 +113,11 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             event,
             wait_for_handoff,
             token_budget,
-        } => crate::integrations::canonical_event(d, event, wait_for_handoff, token_budget).await,
+            capture,
+        } => {
+            crate::integrations::canonical_event(d, event, wait_for_handoff, token_budget, capture)
+                .await
+        }
 
         Request::IntegrationSnapshot { cwd } => {
             d.resolve(&cwd).await?;
@@ -1341,7 +1348,7 @@ async fn capture_vocabulary(d: &Daemon, cwd: &str, agent: &str, key: &str) -> Re
 /// queueing one would be a silent black hole rather than a queued event
 /// (FR-790, FR-864a). Capture is fail-soft toward the *agent*, never toward the
 /// truth: the decline is counted rather than hidden.
-async fn capture_events(
+pub(crate) async fn spool_capture(
     d: &Daemon,
     cwd: &str,
     agent: &str,
