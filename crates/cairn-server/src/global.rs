@@ -682,27 +682,6 @@ fn team_visibility_predicate(is_admin: &str, actor: &str) -> String {
     format!("({is_admin} OR state <> 'proposed' OR proposed_by_user_id = {actor})")
 }
 
-/// The cursor a page hands back, or `None` when the feed is exhausted.
-///
-/// A short page means there is nothing behind it, and saying so is what lets a
-/// reader stop. Handing back a position on a short page would make every list
-/// look like it had one more page that turns out to be empty.
-fn view_cursor(rows: &[sqlx::postgres::PgRow], limit: i64) -> Option<String> {
-    if (rows.len() as i64) < limit {
-        return None;
-    }
-    let last = rows.last()?;
-    Some(
-        PageCursor {
-            at: last
-                .try_get::<chrono::DateTime<chrono::Utc>, _>("changed_at")
-                .ok()?,
-            id: last.try_get::<Uuid, _>("id").ok()?,
-        }
-        .encode(),
-    )
-}
-
 /// `GET /api/personal/knowledge` — the Domains screen's personal panel
 /// (FR-888).
 ///
@@ -777,7 +756,7 @@ pub async fn personal_knowledge_view(
 
     Ok(Json(json!({
         "items": items,
-        "cursor": view_cursor(&rows, limit),
+        "cursor": crate::api::view_cursor(&rows, limit, "changed_at", "id"),
         "limit": limit,
     })))
 }
@@ -858,7 +837,7 @@ pub async fn team_knowledge_view(
 
     Ok(Json(json!({
         "items": items,
-        "cursor": view_cursor(&rows, limit),
+        "cursor": crate::api::view_cursor(&rows, limit, "changed_at", "id"),
         "limit": limit,
         // Which caller's view this page reflects, for the reason
         // `sync_team_changes` states: the filter above is not the same filter

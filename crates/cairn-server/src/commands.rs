@@ -340,7 +340,12 @@ fn duplicate_reply(result_id: Uuid) -> Json<Value> {
 /// inconsistency. There the caller *named* the project, so `403` discloses
 /// nothing they did not already supply; here the caller names a record, and
 /// whether it exists is precisely what must not leak.
-async fn project_of_record(pool: &PgPool, table: &str, id: Uuid, user_id: Uuid) -> ApiResult<Uuid> {
+pub(crate) async fn project_of_record(
+    pool: &PgPool,
+    table: &str,
+    id: Uuid,
+    user_id: Uuid,
+) -> ApiResult<Uuid> {
     let hidden = || ApiError::not_found("no such memory");
     let sql = match table {
         "memories" => "SELECT project_id FROM memories WHERE id = $1",

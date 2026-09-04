@@ -20,7 +20,7 @@
 //! point is to catch the one nobody thought of.
 
 use cairn_e2e::feature005::Pg;
-use cairn_e2e::post_status_bearer;
+use cairn_e2e::{get_json_status_bearer, post_status_bearer};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -103,6 +103,48 @@ fn every_handler_reaching_project_data_carries_the_guard_that_fits_it() {
              which tells a non-member whether the record exists"
         );
     }
+}
+
+/// A record-addressed **read** gives one answer too.
+///
+/// The audit above scans `commands.rs`, because that is where the
+/// record-addressed mutations live. `GET /api/memories/{id}` is a read in
+/// `api.rs` and sat outside the scan — it used `require_member`, so a memory in
+/// somebody else's project answered `403` and a memory that does not exist
+/// answered `404`, which sorts ids into real and imaginary for anyone with an
+/// account. Asserted here by probing the live route rather than by widening the
+/// string scan, because the rule is about the answer and not about which
+/// function produced it.
+#[test]
+fn a_record_addressed_read_does_not_say_whether_the_record_exists() {
+    let pg = pg!();
+    let memory = seed_memory(&pg);
+    let imaginary = Uuid::now_v7();
+
+    let (real, real_status) = get_json_status_bearer(
+        &pg.server.base,
+        &format!("/api/memories/{memory}"),
+        &pg.outsider.token,
+    );
+    let (absent, absent_status) = get_json_status_bearer(
+        &pg.server.base,
+        &format!("/api/memories/{imaginary}"),
+        &pg.outsider.token,
+    );
+    assert_eq!(
+        real_status, absent_status,
+        "a non-member learns whether a memory exists from the status alone: \
+         {real_status} for a real one, {absent_status} for an invented one"
+    );
+    assert_eq!(
+        real["error"]["code"], absent["error"]["code"],
+        "the refusal codes differ, which is the same oracle in the body: \
+         {real} vs {absent}"
+    );
+    assert_eq!(
+        real_status, 404,
+        "the shared answer should be the blunt one"
+    );
 }
 
 #[test]

@@ -1919,8 +1919,25 @@ async fn memory_detail(
     .fetch_optional(&state.pool)
     .await?
     .ok_or_else(|| ApiError::not_found("no such memory"))?;
+
+    // **One answer to both questions**, and `require_member` was the wrong
+    // guard here (found while building US5's reads).
+    //
+    // This route is *record-addressed*: the caller names a memory, and whether
+    // it exists is precisely what must not leak. `require_member` refuses with
+    // `403`, and a missing row with `404` — so anyone with an account could sort
+    // memory ids into "real" and "not real", one guess at a time, without being
+    // a member of anything. That is the enumeration oracle FR-894a closes and
+    // that `feature005_authorization_audit` already states as a rule; the audit
+    // enforces it by scanning `commands.rs`, and this route sat outside the
+    // scan.
+    //
+    // `project_of_record` funnels both cases through one `404`, exactly as the
+    // record-addressed commands do. The asymmetry with the project-addressed
+    // reads is deliberate rather than an inconsistency: there the caller *named*
+    // the project, so a `403` discloses nothing they did not already supply.
     let project_id: Uuid = row.try_get("project_id")?;
-    auth::require_member(&state.pool, project_id, user.id()).await?;
+    crate::commands::project_of_record(&state.pool, "memories", id, user.id()).await?;
 
     // Provenance is references; evidence content is local to the machine that
     // captured it and does not exist here (FR-055, FR-061).
@@ -2401,10 +2418,12 @@ fn split_activity_kinds(raw: Option<&str>) -> ApiResult<(Vec<String>, Vec<String
 /// at its start if the run never finished. That is when the decision happened.
 ///
 /// `content` travels for safe events and is `NULL` for decisions. The event's
-/// content is the approved per-kind structure and nothing else (`safe_events`
-/// has no column a transcript could land in), so a feed that said `file_changed`
-/// without saying which file would be withholding the only part that is
-/// actually semantic. A candidate's `content` is a *claim*, which is the memory
+/// content is the approved per-kind structure and nothing else — `safe_events`
+/// has no column a transcript could land in, and every free-text field the
+/// structure does have was put through `events::screen_event_text` before the
+/// row existed. So this hands a project member exactly what the server accepted
+/// for their project, and a feed that said `file_changed` without saying which
+/// file would be withholding the only part that is actually semantic. A candidate's `content` is a *claim*, which is the memory
 /// explorer's business and carries a domain this feed would have to authorize
 /// per row; the reference to it travels instead.
 const ACTIVITY_SQL: &str = "\
@@ -2563,15 +2582,21 @@ fn reference_json(reference: cairn_core::domain::Reference) -> Value {
 }
 
 /// The cursor a descending page hands back, or `None` at the end of the feed.
-///
-/// Mirrors `global::view_cursor` and takes the two column names because these
-/// lists order on `(at, id)`, `(started_at, run_id)` and `(created_at,
-/// trace_id)` — three spellings of one convention, which is a reason to pass
-/// the names rather than to write the function three times.
+/// Takes the two column names because these lists order on `(at, id)`,
+/// `(started_at, run_id)`, `(created_at, trace_id)` and `(changed_at, id)` —
+/// four spellings of one convention, which is a reason to pass the names rather
+/// than to write the function four times. The encoding is
+/// `global::PageCursor`'s own, so a cursor from any of these lists is read back
+/// by the same parser.
 ///
 /// A short page ends the feed. Handing a position back on one would make every
 /// list appear to have one more page that turns out to be empty.
-fn view_cursor(rows: &[sqlx::postgres::PgRow], limit: i64, at: &str, id: &str) -> Option<String> {
+pub(crate) fn view_cursor(
+    rows: &[sqlx::postgres::PgRow],
+    limit: i64,
+    at: &str,
+    id: &str,
+) -> Option<String> {
     if (rows.len() as i64) < limit {
         return None;
     }

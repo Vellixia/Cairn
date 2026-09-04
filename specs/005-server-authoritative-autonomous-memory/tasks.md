@@ -207,11 +207,15 @@
 
 **Independent Test**: Seed canonical events, a run, candidate, knowledge, relations, verification, and retrieval directly, then reconstruct the path using only web APIs/UI.
 
-- [ ] T106 [P] [US5] Write failing API tests for funnel stages/zero-vs-null, activity default/full sets, memory details, runs, traces, health, pagination, and every project membership/admin refusal in `tests/tests/feature005_control_plane_api.rs` (depends on T038; SC-727, SC-728)
+- [X] T106 [P] [US5] Write failing API tests for funnel stages/zero-vs-null, activity default/full sets, memory details, runs, traces, health, pagination, and every project membership/admin refusal in `tests/tests/feature005_control_plane_api.rs` (depends on T038; SC-727, SC-728)
+  - Settled during implementation: the five new project routes are registered with `authorization_audit`'s non-member sweep, so the refusal is proved by the audit rather than per-handler.
 - [ ] T107 [P] [US5] Write failing browser tests for the complete session→event→run→candidate→knowledge→retrieval path, local-only notices, domain separation, pattern owner privacy, and team compare-and-swap actions in `web/e2e/feature005-control-plane.spec.ts`, with canonical seeded fixtures in `web/e2e/seed.ts` (depends on T106)
-- [ ] T108 [US5] Implement bounded membership-guarded funnel, activity, consolidation-run, retrieval-trace and system-health read handlers, consuming T035's shared integration-health read API rather than owning it, in `crates/cairn-server/src/api.rs` (depends on T035, T106; FR-879–FR-882, FR-886–FR-887, FR-891, FR-894–FR-895)
-- [ ] T109 [US5] Extend memory list/detail APIs with origin, provenance, evidence summary without content, verification, relations, reinforcement, and retrieval usage in `crates/cairn-server/src/api.rs` (depends on T106; FR-883–FR-885)
-- [ ] T110 [US5] Implement owner-scoped personal/pattern feeds and team visibility rules without cross-account enumeration in `crates/cairn-server/src/global.rs` (depends on T023, T106; FR-888, FR-892–FR-893)
+- [X] T108 [US5] Implement bounded membership-guarded funnel, activity, consolidation-run, retrieval-trace and system-health read handlers, consuming T035's shared integration-health read API rather than owning it, in `crates/cairn-server/src/api.rs` (depends on T035, T106; FR-879–FR-882, FR-886–FR-887, FR-891, FR-894–FR-895)
+  - Settled during implementation: consumes T035's shared health read rather than reimplementing it; funnel counts are nullable end to end so zero and unavailable stay distinct (FR-879).
+- [X] T109 [US5] Extend memory list/detail APIs with origin, provenance, evidence summary without content, verification, relations, reinforcement, and retrieval usage in `crates/cairn-server/src/api.rs` (depends on T106; FR-883–FR-885)
+  - Settled during implementation: evidence travels as a summary — counts and kinds — and never as content.
+- [X] T110 [US5] Implement owner-scoped personal/pattern feeds and team visibility rules without cross-account enumeration in `crates/cairn-server/src/global.rs` (depends on T023, T106; FR-888, FR-892–FR-893)
+  - Settled during implementation: owner-scoped feeds are held to the whole-crate `owner_user_id` audit added in US3.
 - [ ] T111 [US5] Extend typed API clients for all Feature 005 control-plane shapes, nullable counts, complete references, and withheld fields in `web/lib/api.ts` (depends on T108–T110)
 - [ ] T112 [P] [US5] Extend the project dashboard with the twelve-stage memory funnel and zero/unavailable distinction in `web/app/(app)/projects/[id]/page.tsx` (depends on T111)
 - [ ] T113 [P] [US5] Implement the semantic activity feed with declared default kinds and explicit show-all control in `web/app/(app)/projects/[id]/activity/page.tsx` (depends on T111)
