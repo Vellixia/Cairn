@@ -1138,18 +1138,45 @@ fn a_session_crossing_a_batch_boundary_recovers_from_a_crash_after_its_first_bat
     // have re-elected the session — and `claimed` is that, not a defect. What
     // §4 actually forbids is the state this replaced: `done` with work
     // outstanding, which is the stall the `CASE` exists to prevent.
-    let state = session_state_of(&pg, session);
-    assert_ne!(
-        state, "done",
+    // **The state and the outstanding count have to be read together**, and
+    // reading them as two queries is what made this flake.
+    //
+    // The rule §4 states is a *combination*: `done` while work remains. Asserted
+    // as `state != "done"` alone it also forbids a state that is perfectly
+    // correct — the worker is still alive when the settle succeeds, so between
+    // the two-hundredth `done` row and being killed it may legitimately finish
+    // the remaining five, and a session with nothing outstanding is supposed to
+    // be `done`. Under a loaded machine that is exactly what happened.
+    //
+    // One query, so the pair cannot be observed at two different instants and
+    // reported as a contradiction that never existed at either of them.
+    let stall = pg.server.count(&format!(
+        "SELECT count(*) FROM consolidation_session s
+          WHERE s.session_id = '{session}' AND s.state = 'done'
+            AND EXISTS (SELECT 1 FROM consolidation_work w
+                         WHERE w.session_id = s.session_id AND w.state = 'pending')"
+    ));
+    assert_eq!(
+        stall, 0,
         "the session was finished with work still pending, which is the stall \
          the close transaction's CASE exists to prevent"
     );
-    assert!(
-        pg.server.count(&format!(
-            "SELECT count(*) FROM consolidation_work
-              WHERE session_id = '{session}' AND state = 'pending'"
-        )) > 0,
-        "the tail of the batch was not left for a second pass"
+    // And the tail was left for a second pass — unless the worker already ran
+    // it, which the settle above cannot rule out. Either outcome is correct;
+    // what would not be is the tail vanishing without ever being done.
+    let pending = pg.server.count(&format!(
+        "SELECT count(*) FROM consolidation_work
+          WHERE session_id = '{session}' AND state = 'pending'"
+    ));
+    let done = pg.server.count(&format!(
+        "SELECT count(*) FROM consolidation_work
+          WHERE session_id = '{session}' AND state = 'done'"
+    ));
+    assert_eq!(
+        pending + done,
+        205,
+        "the tail of the batch was neither left for a second pass nor completed: \
+         {pending} pending and {done} done, of 205"
     );
 
     with_worker(&pg, || {
