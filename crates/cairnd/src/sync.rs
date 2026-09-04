@@ -194,6 +194,42 @@ impl NamespaceTarget {
 const SPOOL_DRAIN_BATCH: i64 = 128;
 
 pub async fn run_worker(daemon: std::sync::Arc<Daemon>) {
+    // **Claims a previous process took to the grave, released before anything
+    // else runs** (T096).
+    //
+    // A row is claimed by setting `state = 'in_flight'` and stamping
+    // `claimed_at`, and a drainer that dies between the claim and the settle
+    // leaves it there. `claim_events` does reclaim an expired lease, so nothing
+    // is lost — but the lease is `CLAIM_LEASE_SECONDS`, and until it expires the
+    // row counts as in flight, which reads as "delivery is progressing" when no
+    // process is delivering anything. A daemon that has just started knows
+    // better than any lease can: it holds no claims, so any claim it finds is
+    // stranded by definition.
+    //
+    // Deliberately once, at start, and not on every tick. On a tick this would
+    // race the drain running beside it and release a claim whose drainer is
+    // mid-send, turning a delivery in progress into a redelivery.
+    for (kind, released) in [
+        (
+            "events",
+            cairn_store::spool::release_event_claims(&daemon.store).await,
+        ),
+        (
+            "commands",
+            cairn_store::spool::release_command_claims(&daemon.store).await,
+        ),
+    ] {
+        match released {
+            Ok(n) if n > 0 => tracing::info!(
+                spool = kind,
+                rows = n,
+                "released claims a previous daemon left in flight"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(spool = kind, error = %e, "could not release stale claims"),
+        }
+    }
+
     let mut clocks: HashMap<String, NamespaceClock> = HashMap::new();
     let mut establish_clock = NamespaceClock::due_now(Instant::now());
     loop {
