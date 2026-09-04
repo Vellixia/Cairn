@@ -51,30 +51,60 @@ requirement touches them.
 | `GET /api/projects/{id}/funnel` | `SettledUser` | `require_member` — refusal, not empty (FR-894a) | `{ stages: [{ stage, count: int\|null }] }` — §3 |
 | `GET /api/projects/{id}/activity` | `SettledUser` | `require_member` | `{ items: [...], cursor }`, paginated (§7) |
 | `GET /api/projects/{id}/memories` | `SettledUser` | `require_member` (unchanged) | Existing shape + `importance`, `verification`, `verification_authority`, `origin_kind`, `reinforcement_count`, `relation_count` |
-| `GET /api/memories/{id}` | `SettledUser` | `require_member` on the row's `project_id` (unchanged) | Existing shape + `relations[]`, `evidence_summary` (counts/ids, never content), `verification{state,authority,last_verified_at,stale}`, `reinforcement_count`, `retrieval_usage[]` (bounded, §7), `origin_kind` |
+| `GET /api/memories/{id}` | `SettledUser` | **`project_of_record`** — one opaque `404` for both "no such memory" and "not your project" (§2.2) | Existing shape + `relations[]`, `evidence_summary` (counts/kinds, never content), `verification{state,authority,last_verified_at,stale}`, `reinforcement_count`, `retrieval_usage[]` (bounded, §7), `origin_kind`. Note `verification` is an **object** here and a **string** on the list route above; the two routes answer different questions and the client types both |
 | `GET /api/projects/{id}/retrieval-traces` | `SettledUser` | `require_member` | `{ traces: [{trace_id, trigger, delivery_point, degradation_level, delivery_state, acknowledgement_state, created_at}], cursor }` |
-| `GET /api/retrieval-traces/{id}` | `SettledUser` | `require_member` on the trace's `project_id`, **plus** §6 withholding | `{ trigger, items: [{ref_kind, domain, knowledge_id, status, rank}], budget_tokens, budget_spent, latency_ms, delivery_state, acknowledgement_state, failure_reason }` — `knowledge` requires a domain; `pattern` requires `domain: null`; no briefing text field exists |
-| `GET /api/projects/{id}/integration-health` | `SettledUser` | `require_member` | `{ rows: [{agent, capability, stage, status, evidence_kind, observed_at, stale}] }` |
+| `GET /api/retrieval-traces/{id}` | `SettledUser` | `require_member` on the trace's `project_id`, **plus** §6 withholding | `{ trigger, items: [{ref_kind, domain, knowledge_id, status, rank}], budget: {tokens, spent}, latency_ms, delivery_state, acknowledgement_state, failure_reason }` — `knowledge` requires a domain; `pattern` requires `domain: null`; no briefing text field exists. **`budget` and `latency_ms` are omitted entirely** — absent, not null — for a caller who is not the trace's own account: what a retrieval cost is a fact about that account's session, and a co-member is entitled to know the trace happened without knowing its shape |
+| `GET /api/projects/{id}/integration-health` | `SettledUser` | `require_member` | `{ rows: [{writer_id, agent, capability, stage, status, evidence_kind, observed_at, degraded}] }` — **no `stale` field**, deliberately: §5 makes staleness a client-side derivation from `observed_at`, and a server that also computed it would be a second opinion the two could disagree about. Served by the same query as `GET /api/projects/{id}/health`; only the envelope key differs, because each audience already depends on its own |
 | `GET /api/personal/knowledge` | `SettledUser` | none (owner-scoped by construction — `owner_user_id = caller`, not a project concept) | `{ items: [...], cursor }` |
-| `GET /api/patterns` | `SettledUser` | none (personal-domain patterns; `owner_user_id = caller`) | `{ items: [{pattern_id, domain: "personal", type: "pattern", ...}], cursor }` |
+| `GET /api/patterns` | `SettledUser` | none (personal-domain patterns; `owner_user_id = caller`) | `{ total, returned, limit, patterns: [{pattern_id, domain: "personal", trust: "sanitized", ...}] }` — **pre-existing** (T085), not added here. Deliberately **cursorless**: the order is `updated_at`, which a promotion moves, so a resumed page could skip or repeat; following changes is `GET /api/sync/changes/patterns`'s job, and it is cursored precisely because its ordering is stable. `limit` is **opt-in and absent means all**, because the daemon's pattern cache refills from this route and a default page would silently truncate a durability guarantee to its first page. `total` is the owner's full count, so a caller can tell "that is all of them" from "there are more" |
 | `GET /api/team/knowledge` | `SettledUser` | none (server-global); visibility filtered per `sync-namespaces.md` §1a (`proposed` visible to author + admin only) | `{ items: [...], cursor }` |
 | `GET /api/projects/{id}/consolidation-runs` | `SettledUser` | `require_member` | `{ runs: [{ run_id, started_at, finished_at, events_claimed, candidates_proposed, candidates_accepted, candidates_refused, refusal_reasons, extractor_kind }] }`, paginated (FR-894a) |
 | `GET /api/system/health` | `AdminUser` | none — admin, not membership | `{ ingest: {...}, consolidation: {...}, retrieval: {...} }` — §5 |
 
-Every row above is new **except** `ratify_team`/`retire_team` and the three admin-user
-routes, which pre-exist and are reused unchanged (FR-894's "no view specified that no
-endpoint can serve" is satisfied by citing exactly which routes exist today versus which this
-feature adds).
+Every row above is new **except** `GET /api/patterns` (T085),
+`GET /api/retrieval-traces/{id}` (T066), `ratify_team`/`retire_team`, and the three
+admin-user routes, which pre-exist and are reused unchanged (FR-894's "no view specified
+that no endpoint can serve" is satisfied by citing exactly which routes exist today versus
+which this feature adds).
+
+`GET /api/projects/{id}/consolidation-runs` is served and typed, and **no screen consumes
+it**: §1 specifies no consolidation-run view, and the browser acceptance test reaches the
+run and candidate hops through this route rather than through a page invented to give it a
+home. That is the intended shape, not a gap — SC-728 asks that the lifecycle be followable
+without database or log access, which an API satisfies.
 
 ### 2.1 FR-894a — refusal, never an empty list
 
-Every project-scoped row above calls `auth::require_member(&state.pool, project_id,
-user.id())` **before** its query, exactly as `project_memories`/`memory_detail` already do
-(`api.rs:1246-1330`). A non-member gets `403 forbidden` (`error.rs:46-48`), not `{ "items":
-[] }` — an empty list would tell a non-member the project exists and is simply empty for
-them, which is indistinguishable from a missing guard. This is the same rule §2's table
-states per-row; it is restated here because it is the one rule FR-892 (web matches API) is
-vacuous without.
+Every **project-addressed** row above calls `auth::require_member(&state.pool, project_id,
+user.id())` **before** its query, exactly as `project_memories` already does. A non-member
+gets `403 forbidden`, not `{ "items": [] }` — an empty list would tell a non-member the
+project exists and is simply empty for them, which is indistinguishable from a missing
+guard. This is the same rule §2's table states per-row; it is restated here because it is
+the one rule FR-892 (web matches API) is vacuous without.
+
+Each of these routes is also registered in `authorization_audit`'s non-member sweep, so the
+refusal is proved by an audit that enumerates the routes rather than by each handler having
+remembered.
+
+### 2.2 Record-addressed reads answer `404`, not `403`
+
+`GET /api/memories/{id}` is the exception, and the difference is not an inconsistency.
+
+A **project-addressed** route takes the project id from the caller, so `403` discloses
+nothing they did not already supply: they named the project, and they are being told they
+are not in it.
+
+A **record-addressed** route takes a record id, and whether that record exists is precisely
+what must not leak. `require_member` refuses with `403` while a missing row answers `404`,
+so anyone with an account could sort memory ids into real and imaginary, one guess at a
+time, without being a member of anything. That is the enumeration oracle FR-894a closes.
+
+So this route resolves through `commands::project_of_record`, which funnels both cases —
+"no such memory" and "not your project" — through one opaque `404`. The same rule already
+governs the record-addressed *mutations* in `commands.rs` (`supersede`, `reinforce`, `pin`,
+`forget`); this read sat outside the audit that enforces it there, and now has its own,
+which probes the live route rather than scanning a file, because the rule is about the
+answer and not about which function produced it.
 
 ---
 

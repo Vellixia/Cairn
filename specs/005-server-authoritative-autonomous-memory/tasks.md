@@ -173,17 +173,46 @@
 - [X] T093 [P] [US4] Write failing outage tests for agent deadlines, event spooling/replay, duplicate responses as success, zero local durable knowledge, and backlog visibility in `tests/tests/feature005_outage.rs` (depends on T022, T029; SC-715–SC-717)
   - Settled during implementation: the outage is created by editing `config.json`'s `server_url` and restarting, not by `auth token set --server` — the endpoint is part of the identity, so re-pointing through the CLI correctly forgets the account and turns an outage test into a sign-out test.
 - [X] T094 [P] [US4] Write failing credential/server-switch tests for event and command account binding and exact server-instance refusal in `tests/tests/feature005_identity_outage.rs` (depends on T022; FR-790–FR-791)
-  - Settled during implementation: FR-790a's read-direction rule was already implemented by US2's account-keyed outage cache; the test asserts it rather than adding it.
+  - Settled during implementation: FR-790a's read-direction rule was already
+    implemented by US2's account-keyed outage cache; the test asserts it rather
+    than adding it. What this file established is **FR-790**, the account rule,
+    in both directions and for both spools.
+  - **Corrected after US5.** Its replacement-deployment test did not establish
+    FR-791 and could not: `Server::replaced_at_same_address` gives the new
+    process a database of its own, so the old account does not exist in it and
+    the account check alone refuses everything that test asserts. Delete every
+    instance check and it still passes. FR-791 is established instead by
+    `tests/tests/feature005_spool_instance_binding.rs`, which holds account,
+    token, project, session, spooled rows, URL, port and process image identical
+    and changes only the value in `server_instance`.
 - [X] T095 [P] [US4] Write failing capacity tests for oldest capture-class shedding, boundary-row preservation, fully-boundary saturation, content-free drop records, and automatic recovery in `tests/tests/feature005_spool_capacity.rs` (depends on T022; FR-785)
   - Settled during implementation: a seventh test was added for the shape the first six could not falsify — a shed that actually deleted rows followed by a refusal, which is the only case where the saturation rollback is load-bearing.
 - [X] T096 [US4] Extend the T039 shared event/command drain primitive with bounded outage loops, exponential backoff, reconnect scheduling and stale-claim recovery in `crates/cairnd/src/sync.rs` (depends on T039, T093)
   - Settled during implementation: `release_event_claims`/`release_command_claims` had no production caller; they now run once at daemon start and deliberately not per tick, which would race a live drain. The drain also translates the local project id to the server's — without it every project-scoped queued command was undeliverable.
+  - **Extended after US5.** The claim additionally binds the server instance
+    (see T099). The drain passes `context.peer_instance` alongside the account,
+    so both halves of the identity come from the one credential read the drain
+    already performs.
 - [X] T097 [US4] Queue explicit remember/supersede/relate/pattern/verification commands as accepted-for-delivery—not durable—when unreachable in `crates/cairnd/src/handlers.rs` (depends on T027, T096; FR-815a)
   - Settled during implementation: only 4 of 13 command kinds were routed. `pin`'s `reason` and `reinforce`'s `from_memory_id` deliberately do not travel, because the server's handlers do not read them and a field that crosses and is dropped is worse than one that never left.
 - [X] T098 [US4] Enforce spool capacity, boundary protection, saturation, and disposition accounting atomically in `crates/cairn-store/src/spool.rs` (depends on T095)
   - Settled during implementation: capacity, boundary protection and saturation were already correct from Foundations; US4 added falsification rather than behaviour.
 - [X] T099 [US4] Preserve exact credential and server-instance bindings across drain, sign-out, and re-authentication in `crates/cairnd/src/sync.rs` (depends on T094, T096)
-  - Settled during implementation: the bindings were already exact — one credential read per drain, no fallback identity, exact `account_id` on the claim. US4 proves them end to end.
+  - Settled during implementation: the **credential** binding was already exact —
+    one credential read per drain, no fallback identity, exact `account_id` on
+    the claim — and US4 proved that end to end.
+  - **Corrected after US5.** The original note also claimed the server-instance
+    binding was already exact. It was not: spool rows carried no instance at
+    all, so a deployment replaced or restored from backup at a familiar address
+    would have inherited its predecessor's backlog. Local schema **v10** adds
+    `server_instance_id` to `event_spool` and `command_spool`, and the claim
+    predicate now requires **both** an exact `account_id` and an exact
+    `server_instance_id`. A row bound elsewhere is held — not claimed, not
+    refused, no attempt spent — and reported as `other_instance` with
+    `blocked_reason: server_instance_mismatch`. `NULL` means "queued before this
+    store knew an instance" and is adopted once, over `NULL` only, inside the
+    claim transaction; the sole rebinding is provisional → reported for a peer
+    upgraded in place, keyed on the provisional id and never on the URL.
 - [X] T100 [US4] Surface event/command depth, oldest entry, retry blocker, saturation, permanent refusals, and fresh-knowledge-unavailable state in `crates/cairnd/src/handlers.rs` (depends on T097–T099; FR-788–FR-792)
   - Settled during implementation: FR-792 was two thirds unimplemented. `oldest_at` and `blocked_reason` added, with `server_unreachable` and `no_account` supplied by the caller because the rows cannot show either.
 - [X] T101 [US4] Make T093 outage/replay/no-local-authority tests pass in `tests/tests/feature005_outage.rs` (depends on T096–T100)
@@ -209,7 +238,20 @@
 
 - [X] T106 [P] [US5] Write failing API tests for funnel stages/zero-vs-null, activity default/full sets, memory details, runs, traces, health, pagination, and every project membership/admin refusal in `tests/tests/feature005_control_plane_api.rs` (depends on T038; SC-727, SC-728)
   - Settled during implementation: the five new project routes are registered with `authorization_audit`'s non-member sweep, so the refusal is proved by the audit rather than per-handler.
-- [ ] T107 [P] [US5] Write failing browser tests for the complete session→event→run→candidate→knowledge→retrieval path, local-only notices, domain separation, pattern owner privacy, and team compare-and-swap actions in `web/e2e/feature005-control-plane.spec.ts`, with canonical seeded fixtures in `web/e2e/seed.ts` (depends on T106)
+- [X] T107 [P] [US5] Write failing browser tests for the complete session→event→run→candidate→knowledge→retrieval path, local-only notices, domain separation, pattern owner privacy, and team compare-and-swap actions in `web/e2e/feature005-control-plane.spec.ts`, with canonical seeded fixtures in `web/e2e/seed.ts` (depends on T106)
+  - Settled during implementation: the acceptance is deliberately split. Browser
+    navigation exercises the screens `web-control-plane.md` actually specifies —
+    funnel, activity, memory list and detail, retrieval list and detail, agents,
+    domains, team, system, admin users — while the **run and candidate hops are
+    reconstructed through the public control-plane APIs** in the same Playwright
+    suite. That is not a shortcut around a missing page: the contract specifies
+    no consolidation-run screen, and inventing one to make a browser hop
+    available would have been adding UI the contract does not ask for in order
+    to satisfy a test. What SC-728 requires is that the path be followable
+    without database or log access, and the API half satisfies that exactly.
+  - Settled during implementation: privacy assertions are written as *absences*
+    of distinctive seeded strings, because asserting that an evidence summary
+    renders passes equally on a page that also prints the content beneath it.
 - [X] T108 [US5] Implement bounded membership-guarded funnel, activity, consolidation-run, retrieval-trace and system-health read handlers, consuming T035's shared integration-health read API rather than owning it, in `crates/cairn-server/src/api.rs` (depends on T035, T106; FR-879–FR-882, FR-886–FR-887, FR-891, FR-894–FR-895)
   - Settled during implementation: consumes T035's shared health read rather than reimplementing it; funnel counts are nullable end to end so zero and unavailable stay distinct (FR-879).
 - [X] T109 [US5] Extend memory list/detail APIs with origin, provenance, evidence summary without content, verification, relations, reinforcement, and retrieval usage in `crates/cairn-server/src/api.rs` (depends on T106; FR-883–FR-885)
@@ -242,7 +284,20 @@
   - Settled during implementation: built on the existing admin endpoints only.
 - [X] T123 [US5] Add role/feature-aware navigation for activity, memory, retrievals, agents, domains, team, system, and admin users in `web/components/app-sidebar.tsx` (depends on T112–T122)
   - Settled during implementation: admin entries are hidden for non-admins as a convenience, never as the control — the API refuses regardless.
-- [ ] T124 [US5] Make API and browser acceptance paths pass without database/log access in `web/e2e/feature005-control-plane.spec.ts` (depends on T108–T123; SC-727, SC-728)
+- [X] T124 [US5] Make API and browser acceptance paths pass without database/log access in `web/e2e/feature005-control-plane.spec.ts` (depends on T108–T123; SC-727, SC-728)
+  - Settled during implementation: `npx playwright test` runs against a release
+    `cairn-server` on real PostgreSQL and a production `next build`, and passes
+    51 tests across desktop and mobile with 1 skipped. Ten of those are this
+    story's: the walked lifecycle, the zero-versus-unavailable funnel, the two
+    raw-material absences, complete references, domain separation, co-member
+    pattern privacy, the team transition and its refusal, the admin-only
+    screens, and the API-only reconstruction. No test reads the database or a
+    log.
+  - Settled during implementation: running it found two real defects — the typed
+    client sent `content-type: application/json` with no body on ratify and
+    retire, so both were rejected while the UI reported nothing wrong; and
+    `us7.spec.ts` asserted the old generic error wording for a non-member, which
+    US5 replaced with an explicit refusal carrying the server's own words.
 
 **Checkpoint**: User Story 5 passes independently from seeded server data; the web tells the whole authorized story and never becomes an authority boundary.
 
