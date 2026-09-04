@@ -369,14 +369,25 @@ fn events_spooled_by_one_account_are_never_delivered_under_another() {
         .map(|id| format!("'{id}'"))
         .collect::<Vec<_>>()
         .join(",");
-    assert_eq!(
-        server.count(&format!(
-            "SELECT COUNT(*) FROM safe_events
-              WHERE session_id = '{session}' AND event_id IN ({outage_ids})"
-        )),
-        0,
-        "the events reached the server while the account that authored them was \
-         not the one signed in"
+    // **Which account owns the row is what makes this an accusation or not.**
+    // `safe_events.account_id` is bound from the authenticated caller, so a row
+    // stamped A was delivered while A held the machine — early, but by its own
+    // author, which is FR-790 working. A row stamped B is the leak. Reporting
+    // both, because a bare count cannot tell them apart and a failure that says
+    // "delivered under the wrong account" had better be able to prove it.
+    let leaked = server.query_column(&format!(
+        "SELECT event_id::text || ' owned by ' ||
+                CASE WHEN account_id = '{}' THEN 'A (its author)'
+                     WHEN account_id = '{b_account}' THEN 'B (NOT its author)'
+                     ELSE account_id::text END
+           FROM safe_events
+          WHERE session_id = '{session}' AND event_id IN ({outage_ids})",
+        a.account
+    ));
+    assert!(
+        leaked.is_empty(),
+        "events queued during the outage reached the server after the machine \
+         changed hands: {leaked:?}"
     );
     assert_eq!(
         server.count(&format!(
