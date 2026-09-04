@@ -517,7 +517,24 @@ async fn persist(
              (event_id, project_id, session_id, account_id, agent, kind, vendor_event,
               session_seq, contract_version, content, occurred_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-         ON CONFLICT (event_id) DO NOTHING",
+         -- **Unqualified, and it has to be.** `safe_events` has two unique
+         -- constraints stating the same fact: `event_id PRIMARY KEY` and
+         -- `UNIQUE (session_id, session_seq)`. Naming one of them as the arbiter
+         -- means a racing duplicate that slips past the primary key's check
+         -- still meets the other index during insertion — and that is not an
+         -- `ON CONFLICT` path, it raises. The row is correctly not written
+         -- either way, so no data was ever at risk; what broke is the *answer*.
+         -- The request failed with `500 internal` instead of reporting
+         -- `duplicate`, and it took the per-item outcomes of every event in that
+         -- batch that had committed down with it. A retry being told the server
+         -- broke, when the retry did exactly what it was for, is the opposite of
+         -- what this module promises (FR-771).
+         --
+         -- Safe precisely here: step 5 re-derives `event_id` from
+         -- `(session_id, session_seq)` and refuses a mismatch, so any row that
+         -- conflicts on the pair necessarily carries the same id. There is no
+         -- genuinely different event an unqualified arbiter could mask.
+         ON CONFLICT DO NOTHING",
     )
     .bind(event.event_id)
     .bind(binding.project_id)
