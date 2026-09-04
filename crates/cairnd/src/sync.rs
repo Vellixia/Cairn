@@ -1517,7 +1517,7 @@ async fn merge_pulled_pattern(d: &Daemon, owner: Uuid, row: &serde_json::Value) 
 /// deployment, and blending two servers' ratification histories is exactly what
 /// must not happen silently (`sync-namespaces.md` §10). It is logged and the row
 /// is skipped, so the lane keeps working for everything else.
-async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) -> bool {
+pub(crate) async fn merge_pulled_team(d: &Daemon, instance: Uuid, row: &serde_json::Value) -> bool {
     let Some(id) = pulled_uuid(row, "id") else {
         return false;
     };
@@ -2202,6 +2202,37 @@ async fn stale_if_changed(
 /// `POST /api/team/{id}/retire` (T121, T133). Same admin gate and
 /// compare-and-swap shape as [`team_ratify_remote`].
 /// As [`team_ratify_remote`], for retirement, and for the same reason (FR-606).
+/// Take the server's answer for a team entry the local CAS could not apply.
+///
+/// **The gap this closes.** `ratify` and `retire` write locally with a
+/// compare-and-swap on the state they expect, and when that swap loses they
+/// return the server's answer and leave the local row exactly as it was. The
+/// caller is told the transition happened — it did, on the server — while this
+/// device goes on showing `proposed` for guidance the whole deployment is now
+/// following, and `retired_by_user_id` stays empty on the very machine that
+/// retired it.
+///
+/// The swap loses for ordinary reasons: the ratification that made the row
+/// authoritative had not landed locally yet, or a pull re-merged it in between.
+/// Neither is an error, and neither is a reason to keep a stale copy — under
+/// FR-712a the local row is a cache and the server's answer is the correct
+/// content for it. This is that rule applied to the one path that predates it.
+///
+/// Failure is logged and swallowed. The transition already happened on the
+/// server, so refusing the caller now would report a failure that did not occur;
+/// the next pull repairs the row.
+pub(crate) async fn adopt_team_answer(d: &Daemon, reply: &serde_json::Value) {
+    let Some(row) = reply.get("entry").or(Some(reply)) else {
+        return;
+    };
+    let Ok(context) = AuthenticatedContext::acquire(d).await else {
+        return;
+    };
+    if !merge_pulled_team(d, context.peer_instance, row).await {
+        tracing::debug!("the server's team answer did not merge; the next pull will repair it");
+    }
+}
+
 pub async fn team_retire_remote(
     d: &Daemon,
     id: Uuid,

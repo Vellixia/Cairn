@@ -3637,6 +3637,12 @@ async fn team_ratify(d: &Daemon, id: Uuid, supersedes: Option<Uuid>) -> Reply {
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
         {
+            // The swap lost, which is ordinary — the row was not in the state
+            // this device expected. The server still decided, so its answer is
+            // the correct content for a local copy that is a cache (FR-712a),
+            // and leaving the stale one would show `proposed` for guidance the
+            // whole deployment now follows.
+            crate::sync::adopt_team_answer(d, &remote).await;
             Ok(remote)
         }
         Err(e) => Err(storage_err(e)),
@@ -3686,6 +3692,10 @@ async fn team_retire(d: &Daemon, id: Uuid) -> Reply {
         Err(cairn_store::StoreError::Refused { code, .. })
             if code == cairn_store::global::STATE_CONFLICT =>
         {
+            // Same reasoning as `team_ratify`, and the symptom that found it:
+            // the acting device recorded a retirement with no actor and no
+            // timestamp, because the swap it expected to make never applied.
+            crate::sync::adopt_team_answer(d, &remote).await;
             Ok(remote)
         }
         Err(e) => Err(storage_err(e)),
