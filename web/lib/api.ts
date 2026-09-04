@@ -207,8 +207,16 @@ export const api = {
     request<PersonalKnowledgePage>(
       `/api/personal/knowledge${queryString({ ...params })}`,
     ),
-  /** Owner-scoped for the same reason, and unpaginated: the server returns the lot. */
-  patterns: () => request<{ total: number; patterns: Pattern[] }>("/api/patterns"),
+  /**
+   * Owner-scoped for the same reason, and bounded only when asked.
+   *
+   * The bound is opt-in on this route alone, because the daemon's pattern cache
+   * refills from it: a default page would silently truncate that cache. A screen
+   * asks for a page and compares `returned` against `total` to know whether it
+   * saw everything; omitting `limit` still returns the lot.
+   */
+  patterns: (limit?: number) =>
+    request<PatternList>(`/api/patterns${queryString({ limit })}`),
   teamKnowledge: (params: PageQuery = {}) =>
     request<TeamKnowledgePage>(`/api/team/knowledge${queryString({ ...params })}`),
 
@@ -722,6 +730,15 @@ export interface Pattern {
   content_key: string;
   created_at: string;
   updated_at: string;
+}
+
+export interface PatternList {
+  /** How many the owner holds, which is not how many arrived. */
+  total: number;
+  returned: number;
+  /** The bound applied, or null when none was asked for. */
+  limit: number | null;
+  patterns: Pattern[];
 }
 
 export interface ConsolidationRun {

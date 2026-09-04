@@ -43,9 +43,12 @@ export default function DomainsPage({
     queryKey: ["domain-personal"],
     queryFn: () => api.personalKnowledge({ limit: PAGE }),
   });
+  // A bound is asked for explicitly here. The route serves every pattern when
+  // none is given, because the daemon's cache refills from it — but a panel is
+  // not a cache, and an unbounded list on a screen is the thing FR-895 forbids.
   const patterns = useQuery({
     queryKey: ["domain-patterns"],
-    queryFn: () => api.patterns(),
+    queryFn: () => api.patterns(PAGE),
   });
   const team = useQuery({
     queryKey: ["domain-team"],
@@ -190,6 +193,15 @@ export default function DomainsPage({
               <Nothing when={patterns.data.patterns.length === 0}>
                 You have promoted no patterns.
               </Nothing>
+              {patterns.data.returned < patterns.data.total && (
+                <p
+                  className="text-muted-foreground mt-3 text-xs"
+                  data-testid="domain-patterns-truncated"
+                >
+                  Showing {patterns.data.returned} of {patterns.data.total}. The
+                  rest are reachable through the CLI.
+                </p>
+              )}
             </>
           )}
         </Panel>

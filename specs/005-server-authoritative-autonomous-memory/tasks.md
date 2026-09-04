@@ -216,19 +216,32 @@
   - Settled during implementation: evidence travels as a summary — counts and kinds — and never as content.
 - [X] T110 [US5] Implement owner-scoped personal/pattern feeds and team visibility rules without cross-account enumeration in `crates/cairn-server/src/global.rs` (depends on T023, T106; FR-888, FR-892–FR-893)
   - Settled during implementation: owner-scoped feeds are held to the whole-crate `owner_user_id` audit added in US3.
-- [ ] T111 [US5] Extend typed API clients for all Feature 005 control-plane shapes, nullable counts, complete references, and withheld fields in `web/lib/api.ts` (depends on T108–T110)
-- [ ] T112 [P] [US5] Extend the project dashboard with the twelve-stage memory funnel and zero/unavailable distinction in `web/app/(app)/projects/[id]/page.tsx` (depends on T111)
-- [ ] T113 [P] [US5] Implement the semantic activity feed with declared default kinds and explicit show-all control in `web/app/(app)/projects/[id]/activity/page.tsx` (depends on T111)
-- [ ] T114 [P] [US5] Implement the bounded memory explorer in `web/app/(app)/projects/[id]/memory/page.tsx` (depends on T111)
-- [ ] T115 [P] [US5] Implement memory detail with provenance, evidence-local notice, verification, relations, reinforcement, origin, and retrieval usage in `web/app/(app)/projects/[id]/memory/[memoryId]/page.tsx` (depends on T111)
-- [ ] T116 [P] [US5] Implement retrieval trace list and filtering in `web/app/(app)/projects/[id]/retrievals/page.tsx` (depends on T111)
-- [ ] T117 [P] [US5] Implement retrieval detail without briefing text, preserving complete refs and scoped budgets in `web/app/(app)/projects/[id]/retrievals/[traceId]/page.tsx` (depends on T111)
-- [ ] T118 [P] [US5] Implement per-agent/per-machine integration health with evidence-kind, staleness, decline, failure, and no-evidence distinctions in `web/app/(app)/projects/[id]/agents/page.tsx` (depends on T111)
-- [ ] T119 [P] [US5] Implement visibly separate project/personal/pattern/team panels with owner-only patterns in `web/app/(app)/projects/[id]/domains/page.tsx` (depends on T111)
-- [ ] T120 [P] [US5] Implement admin-only team proposal review using only existing atomic ratify/retire routes in `web/app/(app)/team/page.tsx` (depends on T111)
-- [ ] T121 [P] [US5] Implement admin-only ingest/consolidation/retrieval system health in `web/app/(app)/system/page.tsx` (depends on T111)
-- [ ] T122 [P] [US5] Implement bounded admin user management using existing endpoints in `web/app/(app)/admin/users/page.tsx` (depends on T111)
-- [ ] T123 [US5] Add role/feature-aware navigation for activity, memory, retrievals, agents, domains, team, system, and admin users in `web/components/app-sidebar.tsx` (depends on T112–T122)
+- [X] T111 [US5] Extend typed API clients for all Feature 005 control-plane shapes, nullable counts, complete references, and withheld fields in `web/lib/api.ts` (depends on T108–T110)
+  - Settled during implementation: `verification` is a string on the memory list and an object on the detail, which is what `web-control-plane.md` §2 specifies; the client types both rather than reconciling them silently.
+- [X] T112 [P] [US5] Extend the project dashboard with the twelve-stage memory funnel and zero/unavailable distinction in `web/app/(app)/projects/[id]/page.tsx` (depends on T111)
+  - Settled during implementation: no `?? 0` anywhere in the funnel path — a null stage renders as unavailable, never as zero (FR-879).
+- [X] T113 [P] [US5] Implement the semantic activity feed with declared default kinds and explicit show-all control in `web/app/(app)/projects/[id]/activity/page.tsx` (depends on T111)
+  - Settled during implementation: the response echoes the kinds it applied, so the UI shows what it is filtering by rather than what it asked for.
+- [X] T114 [P] [US5] Implement the bounded memory explorer in `web/app/(app)/projects/[id]/memory/page.tsx` (depends on T111)
+  - Settled during implementation: `?domain=` is now honoured or refused by the API rather than silently ignored.
+- [X] T115 [P] [US5] Implement memory detail with provenance, evidence-local notice, verification, relations, reinforcement, origin, and retrieval usage in `web/app/(app)/projects/[id]/memory/[memoryId]/page.tsx` (depends on T111)
+  - Settled during implementation: evidence is summarised by count and kind; the page asserts no content path exists to render.
+- [X] T116 [P] [US5] Implement retrieval trace list and filtering in `web/app/(app)/projects/[id]/retrievals/page.tsx` (depends on T111)
+  - Settled during implementation: budget and latency stay out of the trace list — they are per-account and belong to the detail.
+- [X] T117 [P] [US5] Implement retrieval detail without briefing text, preserving complete refs and scoped budgets in `web/app/(app)/projects/[id]/retrievals/[traceId]/page.tsx` (depends on T111)
+  - Settled during implementation: the server never stores the briefing, so there is nothing for the detail to withhold; the page renders references and costs only.
+- [X] T118 [P] [US5] Implement per-agent/per-machine integration health with evidence-kind, staleness, decline, failure, and no-evidence distinctions in `web/app/(app)/projects/[id]/agents/page.tsx` (depends on T111)
+  - Settled during implementation: staleness is computed client-side per §5, so the API does not send a `stale` flag.
+- [X] T119 [P] [US5] Implement visibly separate project/personal/pattern/team panels with owner-only patterns in `web/app/(app)/projects/[id]/domains/page.tsx` (depends on T111)
+  - Settled during implementation: the patterns panel calls the owner-scoped `GET /api/patterns` rather than a second read of the same table.
+- [X] T120 [P] [US5] Implement admin-only team proposal review using only existing atomic ratify/retire routes in `web/app/(app)/team/page.tsx` (depends on T111)
+  - Settled during implementation: ratify and retire use the existing atomic routes with their compare-and-swap; no client-side read-modify-write and no edit affordance.
+- [X] T121 [P] [US5] Implement admin-only ingest/consolidation/retrieval system health in `web/app/(app)/system/page.tsx` (depends on T111)
+  - Settled during implementation: sections report `null` rather than zero below server schema 4.
+- [X] T122 [P] [US5] Implement bounded admin user management using existing endpoints in `web/app/(app)/admin/users/page.tsx` (depends on T111)
+  - Settled during implementation: built on the existing admin endpoints only.
+- [X] T123 [US5] Add role/feature-aware navigation for activity, memory, retrievals, agents, domains, team, system, and admin users in `web/components/app-sidebar.tsx` (depends on T112–T122)
+  - Settled during implementation: admin entries are hidden for non-admins as a convenience, never as the control — the API refuses regardless.
 - [ ] T124 [US5] Make API and browser acceptance paths pass without database/log access in `web/e2e/feature005-control-plane.spec.ts` (depends on T108–T123; SC-727, SC-728)
 
 **Checkpoint**: User Story 5 passes independently from seeded server data; the web tells the whole authorized story and never becomes an authority boundary.
