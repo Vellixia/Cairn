@@ -1292,20 +1292,22 @@ pub async fn pattern_changes(
 /// account comes from the credential (Principle XI). The daemon cannot invent
 /// authorization information because there is no field in which to put it.
 ///
-/// ## Kinds this route does not carry yet
+/// ## Kinds this route does not carry yet — currently none
 ///
-/// The two verification report shapes answer a **deferral** rather than a
-/// success: their owning phase is US5 (T106+). A deferral is a recognisable,
-/// non-terminal refusal — the drain leaves the row durable and retries after an
-/// upgrade — so a queued command waits rather than being silently marked
-/// delivered. That distinction is the whole point of answering deferral instead
-/// of `404`.
+/// Every kind in `CommandKind` now dispatches to a real handler: pattern
+/// promotion and forgetting since US3 (T085), and the two verification report
+/// shapes since US6 (T128). The `deferred` helper that answered the rest is gone
+/// with its last caller rather than kept against a future need — an unused
+/// mechanism is one nobody is exercising, and this one would be re-derived in a
+/// paragraph.
 ///
-/// Pattern promotion and forgetting were deferred here until US3 supplied their
-/// repository (T085). They are not deferred any more: both dispatch to the real
-/// handlers, so a spool row queued against an older server lands the moment the
-/// upgrade it was waiting for arrives, which is exactly what the deferral was
-/// protecting.
+/// The *rule* it implemented still binds, and a kind added later must follow it:
+/// answer `409 unsupported_kind`, never `404`. A `404` is read by the drain as
+/// permanent, which marks the row terminal and loses the user's instruction; a
+/// deferral is recognisable and non-terminal, so the row stays durable and lands
+/// the moment the upgrade it was waiting for arrives. The same code the
+/// capability mechanism already uses for an entity type a server cannot hold yet
+/// (FR-774, FR-775), so the drain needs no second rule.
 pub async fn command_envelope(
     state: State<AppState>,
     user: CurrentUser,
@@ -1373,35 +1375,20 @@ pub async fn command_envelope(
         // after the phase that owns it ships, which is what stops a queued
         // verification report being marked delivered by a server that cannot
         // record one.
-        "verification_run" | "verification_attestation" => {
-            Err(deferred(&kind, "US5 (T106 onward)"))
+        // Dispatched to the same handlers the direct routes call, so a queued
+        // report and a live one are the same code and the same authority. The
+        // envelope carries no field that could change either.
+        "verification_run" => {
+            crate::verifysummary::report_run(state, SettledUser(user), Json(body)).await
+        }
+        "verification_attestation" => {
+            crate::verifysummary::report_attestation(state, SettledUser(user), Json(body)).await
         }
 
         other => Err(ApiError::invalid(format!(
             "`{other}` is not a command kind"
         ))),
     }
-}
-
-/// A command kind this build understands but cannot yet carry out.
-///
-/// `409` with the code the drain recognises as a deferral. Deliberately not
-/// `404`, which the drain would read as a permanent refusal and mark the row
-/// terminal — losing the user's instruction — and deliberately not `501`, which
-/// says nothing about whether retrying will ever help.
-///
-/// The same shape and the same code the capability mechanism already uses for
-/// an entity type a server cannot hold yet (FR-774, FR-775), so the drain needs
-/// no second rule.
-fn deferred(kind: &str, owner: &str) -> ApiError {
-    ApiError::new(
-        axum::http::StatusCode::CONFLICT,
-        "unsupported_kind",
-        format!(
-            "`{kind}` is not carried by this build yet; it is owned by {owner}. \
-             The command remains queued and will be retried."
-        ),
-    )
 }
 
 #[cfg(test)]

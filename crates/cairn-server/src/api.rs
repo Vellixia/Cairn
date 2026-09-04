@@ -228,6 +228,20 @@ pub fn routes() -> Router<AppState> {
         // and not a membership. `AdminUser` in the parameter list is the
         // authorization: a member reaching this route would be reading across
         // every project on the server (FR-891).
+        // **Two routes, one authority** (`verification-summary.md` §4). The
+        // names describe the shape of the check being reported; neither is a
+        // stronger trust boundary than the other, because a URL is caller-
+        // selected input and bearer authentication establishes who is reporting
+        // rather than what ran. Both assign `remote_attested`, and `cairn` is
+        // reachable from neither.
+        .route(
+            "/api/verification/runs",
+            post(crate::verifysummary::report_run),
+        )
+        .route(
+            "/api/verification/attestations",
+            post(crate::verifysummary::report_attestation),
+        )
         .route("/api/system/health", get(system_health))
         // Consolidation's own backlog, readable while a pass is running and
         // immediately after a restart, because every field behind it is a

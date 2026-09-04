@@ -14,6 +14,7 @@ mod extract;
 mod global;
 mod retrieve;
 mod sync;
+mod verifysummary;
 mod version;
 
 use axum::http::{header, Method};

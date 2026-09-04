@@ -238,40 +238,24 @@ fn every_foundation_command_kind_is_delivered_and_has_an_observable_effect() {
     );
 }
 
+/// Every command kind this build declares actually dispatches.
+///
+/// **This replaces a pair of tests about deferral, and the replacement is the
+/// point.** One asserted that four kinds answered `409 unsupported_kind`; the
+/// other, added in US3, asserted that two of them had stopped. US6 shipped the
+/// last two, so `CommandKind::ALL` is now fully served and the `deferred` helper
+/// is gone with its final caller.
+///
+/// The rule it implemented still binds and is stated on `command_envelope`: a
+/// kind added later answers `409`, never `404`, because the drain reads a `404`
+/// as permanent and marks the row terminal, losing the user's instruction. What
+/// this test guards is the other direction — a kind that stays deferred after
+/// its repository ships is a spool row waiting for an upgrade that already
+/// happened, and nothing else in the suite would notice.
 #[test]
-fn a_deferred_kind_answers_a_recognisable_deferral_and_not_a_refusal() {
+fn no_command_kind_is_still_waiting_for_a_phase_that_has_shipped() {
     let pg = pg!();
-    // Verification is US5's. What matters is that the answer is a **deferral**:
-    // the drain leaves the row durable and retries after an upgrade. A `404`
-    // would be read as permanent, and the user's queued instruction would be
-    // marked terminal and lost.
-    //
-    // The pattern kinds were here too until US3 shipped their repository
-    // (T085). They are asserted below instead — a deferral that outlives the
-    // phase it was waiting for is a queued instruction that never lands, so the
-    // list shrinking is the mechanism working rather than coverage being lost.
-    for kind in ["verification_run", "verification_attestation"] {
-        let (body, code) = deliver(
-            &pg,
-            &pg.owner,
-            &envelope(kind, Uuid::now_v7(), None, Some(Uuid::now_v7()), json!({})),
-        );
-        assert_eq!(code, 409, "`{kind}` answered {code}: {body}");
-        assert_eq!(
-            body["error"]["code"], "unsupported_kind",
-            "`{kind}` did not answer with the code the drain reads as a deferral"
-        );
-    }
-}
-
-#[test]
-fn a_deferral_ends_when_the_phase_that_owned_it_ships() {
-    let pg = pg!();
-    // The other half of the deferral contract, and the half that is easy to
-    // leave untested: a kind that stays deferred after its repository exists is
-    // a spool row that waits forever. `pattern_promote` and `pattern_forget`
-    // answered `409 unsupported_kind` until T085; they must not any more.
-    for (kind, payload) in [
+    let payloads: Vec<(&str, Value)> = vec![
         (
             "pattern_promote",
             json!({
@@ -282,7 +266,27 @@ fn a_deferral_ends_when_the_phase_that_owned_it_ships() {
             }),
         ),
         ("pattern_forget", json!({})),
-    ] {
+        (
+            "verification_run",
+            json!({
+                "memory_ref": { "domain": "project", "knowledge_id": Uuid::now_v7() },
+                "verdict": "passed",
+                "verifier_kind": "test_outcome",
+                "run_at": "2026-09-04T09:00:00Z",
+            }),
+        ),
+        (
+            "verification_attestation",
+            json!({
+                "memory_ref": { "domain": "project", "knowledge_id": Uuid::now_v7() },
+                "verdict": "passed",
+                "verifier_kind": "test_outcome",
+                "run_at": "2026-09-04T09:00:00Z",
+                "agent": "claude_code",
+            }),
+        ),
+    ];
+    for (kind, payload) in payloads {
         let (body, code) = deliver(
             &pg,
             &pg.owner,
@@ -290,8 +294,8 @@ fn a_deferral_ends_when_the_phase_that_owned_it_ships() {
         );
         assert_ne!(
             code, 409,
-            "`{kind}` is still deferred after US3 shipped its repository, so a \
-             queued row would wait for an upgrade that already happened: {body}"
+            "`{kind}` is still deferred after its phase shipped, so a queued row \
+             would wait for an upgrade that already happened: {body}"
         );
         assert_ne!(
             body["error"]["code"], "unsupported_kind",
