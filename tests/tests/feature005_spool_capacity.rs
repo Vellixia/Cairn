@@ -49,6 +49,17 @@ use cairn_store::Store;
 use chrono::{Duration, Utc};
 use uuid::Uuid;
 
+/// The server instance every fixture in this file queues for and drains as.
+///
+/// A constant rather than a fresh id per test, because the property under test
+/// here is capacity and ordering, not identity — the instance binding has its
+/// own file (`feature005_spool_instance_binding.rs`), and it is the one place
+/// that varies this value. Fixing it here keeps every claim addressing the same
+/// deployment, which is what these tests were written assuming before the
+/// binding existed.
+const FIXTURE_INSTANCE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x0005_0004_0000_0000_0000_0000_0000_0001);
+
 // ---------------------------------------------------------------------------
 // Fixture
 // ---------------------------------------------------------------------------
@@ -105,6 +116,9 @@ impl Fixture {
             NewEvent {
                 project_id: self.local.project,
                 account_id: self.account,
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 event,
             },
         )
@@ -491,7 +505,7 @@ async fn a_boundary_only_spool_at_its_bound_refuses_new_work_and_disturbs_nothin
     // its bound and every row in it is one the policy may not touch.
     f.admit(tight, compacted(f.session)).await;
     let before = f.every_value_in("event_spool").await;
-    let breakdown = spool::event_spool_breakdown(f.store(), tight)
+    let breakdown = spool::event_spool_breakdown(f.store(), tight, Some(FIXTURE_INSTANCE))
         .await
         .expect("breakdown");
     assert!(
@@ -758,6 +772,9 @@ async fn spool_one(f: &Fixture, capacity: SpoolCapacity, scope: CommandScope) ->
             scope,
             project_id: Some(f.local.project),
             account_id: f.account,
+            // Unbound: these fixtures predate any established instance, which is
+            // the state the first-binding rule adopts on the first claim.
+            server_instance_id: None,
             kind: CommandKind::Remember,
             payload: &payload,
         },
@@ -830,7 +847,7 @@ async fn the_command_spool_refuses_at_its_bound_and_sheds_nothing() {
         "a refusal changed the queue: no explicit command is droppable"
     );
     assert!(
-        spool::command_spool_breakdown(f.store(), tight)
+        spool::command_spool_breakdown(f.store(), tight, Some(FIXTURE_INSTANCE))
             .await
             .expect("breakdown")
             .saturated,
@@ -881,7 +898,7 @@ async fn command_saturation_clears_when_delivery_drains_a_row() {
         .await
         .expect("delivered");
     assert!(
-        !spool::command_spool_breakdown(f.store(), tight)
+        !spool::command_spool_breakdown(f.store(), tight, Some(FIXTURE_INSTANCE))
             .await
             .expect("breakdown")
             .saturated,

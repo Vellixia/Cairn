@@ -441,6 +441,91 @@ neither side has evidence for them and neither may store one.
 
 ---
 
+## 5b. Local schema v10 (SQLite) — the spool binds to a server instance
+
+`event_spool` and `command_spool` were account-bound and nothing else. That
+closes the identity half of FR-790 — one account's queued work is never
+delivered under another's credential — and left the deployment half of FR-791
+open.
+
+```sql
+ALTER TABLE event_spool   ADD COLUMN server_instance_id TEXT;
+ALTER TABLE command_spool ADD COLUMN server_instance_id TEXT;
+
+DROP INDEX IF EXISTS event_spool_claim;
+CREATE INDEX event_spool_claim
+    ON event_spool (state, account_id, server_instance_id, next_attempt_at);
+DROP INDEX IF EXISTS command_spool_claim;
+CREATE INDEX command_spool_claim
+    ON command_spool (state, account_id, server_instance_id, next_attempt_at);
+```
+
+### An endpoint is not an identity
+
+Two different servers can be reachable at one address. A deployment restored
+from backup onto a fresh database, or a new one stood up where another used to
+be, both present as "the same URL" and both mint their own `server_instance_id`.
+Work queued for the first must never be delivered to the second — the blend
+FR-495 and FR-496 already forbid for team knowledge, enforced there by
+`bind_team_server_instance_tx`, and which nothing enforced for the spool.
+
+So the claim predicate matches **both** identities exactly:
+
+```sql
+WHERE account_id = ?account AND server_instance_id = ?instance
+```
+
+A row bound elsewhere is simply not claimed. It is not refused, not discarded,
+and spends no attempt — the operator's remedy is to point the store back at its
+own server, and rows driven to `retry_exhausted` while the wrong deployment was
+answering would not be there when they did. The count of such rows is reported
+as `other_instance`, and `blocked_reason` becomes `server_instance_mismatch`, so
+a stranded backlog is visible rather than a queue that mysteriously stopped
+(FR-792).
+
+### `NULL` is a state, not a wildcard
+
+A row queued before this store had ever established a lane carries `NULL`. That
+is a real state — a machine that captured something before its first successful
+sync — and it means "queued before there was an instance to name", never "any
+instance will do".
+
+**The safe first-binding rule**: the first drain that runs against an
+established instance adopts every unbound row *of that account*, once, inside
+the claim's own transaction. Three properties make it safe, and each is why a
+simpler rule is wrong:
+
+- it only ever writes over `NULL`, so a row that already names an instance is
+  never rebound and a second deployment cannot inherit the first's backlog;
+- it is scoped to the draining account, so one identity's first contact does not
+  bind another identity's unsent work;
+- it happens inside the claim transaction, so a row cannot be adopted by one
+  drainer and claimed by another in between.
+
+Treating `NULL` as matching anything would be the pre-binding behaviour
+restated, and would hand that work to whichever server answered first.
+
+### The one rebinding, and why it is not one
+
+A lane opened against a server below schema 3 is keyed by an id derived from the
+endpoint, because such a server reports none; when that peer is upgraded in
+place it begins reporting a real id and the lane re-keys
+(`contracts/sync-namespaces.md` §11a). `rebind_provisional_instance` moves the
+spooled rows with it, keyed on the **provisional id** and never on the URL. A
+different deployment at the same address reports its own id and carries no row
+bearing that provisional one, so it cannot be reached by that statement. This is
+the same server finally able to say its own name, not a second one.
+
+### Where the binding comes from
+
+`cursor::established_instance` reads it off the lane keys — `team:<instance>`,
+`personal:<instance>:<user>`, `patterns:<instance>:<user>` — rather than from a
+column of its own, because the lanes already are the record and a second place
+to keep one fact is a second place for it to go stale. It is read once when a
+row is written and never re-decided.
+
+---
+
 ## 6. Server schema v4 (PostgreSQL)
 
 ```sql

@@ -697,6 +697,32 @@ async fn establish_global_namespaces(d: &Daemon) -> Option<Uuid> {
     // in flight across the re-key is still recognised as the same entry and
     // applies exactly once (FR-562).
     if reported.is_some() {
+        // The spools move with the lane, and only here.
+        //
+        // A row is bound to the instance it was queued for and is never
+        // rebound — that binding is what stops a replacement deployment
+        // inheriting its predecessor's backlog (FR-791). This is the one
+        // exception, and it is not an exception to the rule so much as the
+        // same server finally able to say its own name: a peer below schema
+        // 3 reports no instance, so its lane is keyed by an id derived from
+        // the endpoint, and an in-place upgrade makes it start reporting a
+        // real one (`sync-namespaces.md` §11a).
+        //
+        // Keyed on the *provisional* id, never on the URL. A different
+        // deployment at the same address reports its own id and carries no
+        // row bearing this provisional one, so it cannot be reached by this
+        // statement.
+        match cairn_store::spool::rebind_provisional_instance(&d.store, provisional, instance).await
+        {
+            Ok(n) if n > 0 => tracing::info!(
+                rows = n,
+                from = %provisional, to = %instance,
+                "re-keyed spooled work from the provisional instance id to the reported one"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::debug!(error = %e, "could not re-key spooled work"),
+        }
+
         for (from, to) in [
             (
                 SyncNamespace::Personal(provisional, owner),
@@ -3108,7 +3134,7 @@ pub(crate) async fn drain_event_spool(d: &Daemon, limit: i64) -> Result<DrainRep
         }
     };
 
-    let claimed = spool::claim_events(&d.store, context.account, limit)
+    let claimed = spool::claim_events(&d.store, context.account, context.peer_instance, limit)
         .await
         .map_err(storage_err)?;
     let mut report = DrainReport::default();
@@ -3179,7 +3205,7 @@ pub(crate) async fn drain_command_spool(d: &Daemon, limit: i64) -> Result<DrainR
     let _drain_guard = d.sync_drain.lock().await;
     let context = AuthenticatedContext::acquire(d).await?;
 
-    let claimed = spool::claim_commands(&d.store, context.account, limit)
+    let claimed = spool::claim_commands(&d.store, context.account, context.peer_instance, limit)
         .await
         .map_err(storage_err)?;
     let mut report = DrainReport::default();

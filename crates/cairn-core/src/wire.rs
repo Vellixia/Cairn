@@ -1501,6 +1501,13 @@ pub struct SpoolHealth {
     pub undelivered: i64,
     /// Whether the spool is at its bound and refusing new work.
     pub saturated: bool,
+    /// Undelivered rows queued for a different server instance (FR-791).
+    ///
+    /// Intact, visible, and undeliverable under the deployment this store is
+    /// talking to now. Zero on any ordinary machine; a non-zero value means the
+    /// endpoint now answers as a server that did not queue this work.
+    #[serde(default)]
+    pub other_instance: i64,
     /// When the oldest undelivered row was created (FR-792), RFC 3339, or
     /// absent when nothing is waiting.
     ///
@@ -1511,9 +1518,9 @@ pub struct SpoolHealth {
     pub oldest_at: Option<String>,
     /// Why delivery is not progressing (FR-792), or absent when it is.
     ///
-    /// One of `no_account`, `server_unreachable`, `saturated`,
-    /// `retry_exhausted`, `refused_by_server`, `awaiting_capability`,
-    /// `backing_off` — most severe first,
+    /// One of `no_account`, `server_unreachable`, `server_instance_mismatch`,
+    /// `saturated`, `retry_exhausted`, `refused_by_server`,
+    /// `awaiting_capability`, `backing_off` — most severe first,
     /// because a spool can be several at once and this reports one. A closed
     /// vocabulary rather than a message, so a caller can branch on it and a
     /// reader is not asked to parse prose.

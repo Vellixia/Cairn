@@ -18,6 +18,17 @@ use cairn_store::authority::{self, AuthorityMode};
 use cairn_store::spool;
 use uuid::Uuid;
 
+/// The server instance every fixture in this file queues for and drains as.
+///
+/// A constant rather than a fresh id per test, because the property under test
+/// here is capacity and ordering, not identity — the instance binding has its
+/// own file (`feature005_spool_instance_binding.rs`), and it is the one place
+/// that varies this value. Fixing it here keeps every claim addressing the same
+/// deployment, which is what these tests were written assuming before the
+/// binding existed.
+const FIXTURE_INSTANCE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x0005_0004_0000_0000_0000_0000_0000_0001);
+
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -89,6 +100,9 @@ fn after_cutover_a_command_is_queued_account_bound_and_in_scope_order() {
                     scope,
                     project_id: None,
                     account_id: account,
+                    // Unbound: these fixtures predate any established instance, which is
+                    // the state the first-binding rule adopts on the first claim.
+                    server_instance_id: None,
                     kind,
                     payload: &payload,
                 },
@@ -107,12 +121,14 @@ fn after_cutover_a_command_is_queued_account_bound_and_in_scope_order() {
         }
 
         // Account-bound: another account's drain claims none of it.
-        assert!(spool::claim_commands(&db.store, Uuid::now_v7(), 10)
-            .await
-            .expect("claim")
-            .is_empty());
+        assert!(
+            spool::claim_commands(&db.store, Uuid::now_v7(), FIXTURE_INSTANCE, 10)
+                .await
+                .expect("claim")
+                .is_empty()
+        );
         assert_eq!(
-            spool::claim_commands(&db.store, account, 10)
+            spool::claim_commands(&db.store, account, FIXTURE_INSTANCE, 10)
                 .await
                 .expect("claim")
                 .len(),
@@ -142,6 +158,9 @@ fn nothing_local_becomes_authoritative_because_a_command_is_waiting() {
                 scope: spool::store_scope(&db.store).await.unwrap(),
                 project_id: None,
                 account_id: Uuid::now_v7(),
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 kind: spool::CommandKind::Remember,
                 payload: &payload,
             },

@@ -283,6 +283,9 @@ fn age_of(rfc3339: &str) -> String {
 fn blocked_phrase(reason: &str) -> String {
     match reason {
         "server_unreachable" => "the server cannot be reached".to_string(),
+        "server_instance_mismatch" => {
+            "this work was queued for a different server than the one now answering".to_string()
+        }
         "saturated" => "the queue is full and new work is being refused".to_string(),
         "retry_exhausted" => "some rows ran out of attempts and will not retry".to_string(),
         "refused_by_server" => "the server refused some rows permanently".to_string(),

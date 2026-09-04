@@ -460,6 +460,14 @@ pub struct NewEvent {
     pub project_id: Uuid,
     pub account_id: Uuid,
     pub event: SafeCanonicalEvent,
+    /// The server instance this row is queued **for** (FR-791), or `None` when
+    /// this store has never established one.
+    ///
+    /// `None` is not a wildcard. It means "queued before there was an instance
+    /// to name", and the claim never treats it as matching — the first drain
+    /// against an established instance binds it, once. See
+    /// [`claim_events`] for that rule and why it is the only safe one.
+    pub server_instance_id: Option<Uuid>,
 }
 
 /// What the spool did with an event.
@@ -515,6 +523,7 @@ pub async fn spool_event(
         project_id,
         account_id,
         mut event,
+        server_instance_id,
     } = new;
     let session_id = event.session_id;
     let agent = event.agent.as_str();
@@ -576,8 +585,8 @@ pub async fn spool_event(
         "INSERT INTO event_spool
             (event_id, session_id, project_id, account_id, session_seq, kind, payload,
              payload_bytes, boundary_class, state, attempts, claimed_at, next_attempt_at,
-             last_error_kind, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 0, NULL, ?10, NULL, ?10)",
+             last_error_kind, created_at, server_instance_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 0, NULL, ?10, NULL, ?10, ?11)",
     )
     .bind(event.event_id.to_string())
     .bind(session_id.to_string())
@@ -594,6 +603,7 @@ pub async fn spool_event(
     // claim predicate compares two timestamps and never has to decide what a
     // missing schedule means.
     .bind(&now)
+    .bind(server_instance_id.map(|i| i.to_string()))
     .execute(&mut *tx)
     .await?;
 
@@ -688,6 +698,86 @@ async fn shed_oldest_capture_row(conn: &mut sqlx::SqliteConnection) -> Result<Op
         kind: row.try_get("kind")?,
     }))
 }
+/// Bind rows that predate this store ever knowing a server instance.
+///
+/// **The safe first-binding rule** (FR-791). A row queued before any instance
+/// was established carries `NULL`, and `NULL` is not a wildcard — the claim
+/// below matches the instance exactly, so such a row is delivered to nobody
+/// until it is bound. This is where it is bound: the first drain that runs
+/// against an established instance adopts every unbound row of that account,
+/// once, inside the claim's own transaction.
+///
+/// Three properties make it safe, and each is the reason a simpler rule is
+/// wrong:
+///
+/// - **It only ever writes over `NULL`.** A row that already names an instance
+///   is untouched, so a second deployment cannot inherit the first's backlog by
+///   draining it — which is the whole defect this column exists to close.
+/// - **It is scoped to the account** whose drain is running, so one identity's
+///   first contact does not bind another identity's unsent work.
+/// - **It happens in the claim transaction**, so a row cannot be adopted by one
+///   drainer and claimed by another between the two statements.
+///
+/// The alternative — treating `NULL` as "matches anything" — is the behaviour
+/// that existed before this column, restated. It would deliver pre-binding work
+/// to whichever server happened to answer first, which for a restored-from-
+/// backup deployment at a familiar address is precisely the wrong one.
+async fn adopt_unbound_rows(
+    tx: &mut sqlx::SqliteConnection,
+    table: &str,
+    account_id: Uuid,
+    server_instance_id: Uuid,
+) -> Result<u64> {
+    let done = sqlx::query(&format!(
+        "UPDATE {table} SET server_instance_id = ?1
+          WHERE account_id = ?2 AND server_instance_id IS NULL
+            AND state IN {UNDELIVERED}"
+    ))
+    .bind(server_instance_id.to_string())
+    .bind(account_id.to_string())
+    .execute(&mut *tx)
+    .await?;
+    Ok(done.rows_affected())
+}
+
+/// Re-key rows queued under a provisional instance id to the reported one.
+///
+/// **The only rebinding in this module, and it is not a rebinding of identity.**
+/// A lane opened against a server below schema 3 is keyed by an id derived from
+/// the endpoint, because such a server reports none; when that peer is upgraded
+/// in place it begins reporting a real id and the lane re-keys
+/// (`sync-namespaces.md` §11a). The rows queued while it could not speak for
+/// itself belong to that same server, so they move with the lane.
+///
+/// This is emphatically **not** a licence to re-key on a URL match. The caller
+/// supplies the provisional id it derived from the endpoint and the id the peer
+/// has now reported, and only rows carrying the first are touched. A second
+/// deployment at the same address reports its own id, and no row of the first
+/// carries a provisional id matching it.
+pub async fn rebind_provisional_instance(
+    store: &Store,
+    from_provisional: Uuid,
+    to_reported: Uuid,
+) -> Result<u64> {
+    if from_provisional == to_reported {
+        return Ok(0);
+    }
+    let mut tx = tx::begin(store, "rebind_provisional_instance").await?;
+    let mut moved = 0;
+    for table in ["event_spool", "command_spool"] {
+        let done = sqlx::query(&format!(
+            "UPDATE {table} SET server_instance_id = ?2
+              WHERE server_instance_id = ?1 AND state IN {UNDELIVERED}"
+        ))
+        .bind(from_provisional.to_string())
+        .bind(to_reported.to_string())
+        .execute(&mut *tx)
+        .await?;
+        moved += done.rows_affected();
+    }
+    tx::commit(tx, "rebind_provisional_instance").await?;
+    Ok(moved)
+}
 
 /// Claim up to `limit` deliverable events for this account, oldest first.
 ///
@@ -709,6 +799,7 @@ async fn shed_oldest_capture_row(conn: &mut sqlx::SqliteConnection) -> Result<Op
 pub async fn claim_events(
     store: &Store,
     account_id: Uuid,
+    server_instance_id: Uuid,
     limit: i64,
 ) -> Result<Vec<SpooledEvent>> {
     let now = chrono::Utc::now();
@@ -720,6 +811,11 @@ pub async fn claim_events(
     // writing that down. Two statements outside a transaction would leave
     // exactly that window, and the window is the whole defect.
     let mut tx = tx::begin(store, "claim_events").await?;
+
+    // First binding, before anything is terminalized or claimed. Rows queued
+    // before this store knew a server instance become this one's; rows already
+    // naming an instance are untouched.
+    adopt_unbound_rows(&mut tx, "event_spool", account_id, server_instance_id).await?;
 
     // The bound has to be enforced *here*, not only where a failure is
     // recorded. `mark_event_failed` is never reached by a drainer that dies
@@ -737,6 +833,11 @@ pub async fn claim_events(
             SET state = 'refused', claimed_at = NULL, next_attempt_at = NULL,
                 last_error_kind = ?4
           WHERE account_id = ?2
+            -- Scoped to this instance for the same reason the claim is: another
+            -- deployment's backlog is not this drainer's to give up on, and
+            -- exhausting somebody else's attempts is a durable verdict about
+            -- work it was never asked to deliver.
+            AND server_instance_id = ?6
             AND attempts >= ?5
             AND ( (state IN ('pending','failed')
                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
@@ -748,6 +849,7 @@ pub async fn claim_events(
     .bind(&stale_before)
     .bind(TERMINAL_RETRY_EXHAUSTED)
     .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(server_instance_id.to_string())
     .execute(&mut *tx)
     .await?;
 
@@ -779,6 +881,14 @@ pub async fn claim_events(
                   -- another account is not this drainer's to deliver
                   -- (FR-790, FR-864a).
                WHERE account_id = ?2
+                 -- **And the exact server instance** (FR-791). Same rule and
+                 -- same reasoning as the account: an endpoint is not an
+                 -- identity, so a deployment replaced or restored from backup
+                 -- at a familiar address must not inherit the backlog queued
+                 -- for its predecessor. `IS NULL` is deliberately not accepted
+                 -- here — an unbound row is adopted above, explicitly, or it
+                 -- waits.
+                 AND server_instance_id = ?6
                  -- Under the bound, checked on the claim itself. The statement
                  -- above has already refused every eligible row at or over it,
                  -- so this is belt and braces — and it is the brace that holds
@@ -801,6 +911,7 @@ pub async fn claim_events(
     .bind(&stale_before)
     .bind(limit)
     .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(server_instance_id.to_string())
     .fetch_all(&mut *tx)
     .await?;
 
@@ -1099,6 +1210,16 @@ pub struct SpoolBreakdown {
     /// capture-class is left to shed; for commands, the bound is reached, full
     /// stop.
     pub saturated: bool,
+    /// Undelivered rows bound to a server instance other than the one this
+    /// store is now talking to (FR-791).
+    ///
+    /// Counted and reported rather than silently skipped, because the rows are
+    /// intact and invisible otherwise: the claim will not touch them, no
+    /// attempt is spent, nothing is refused, and a depth that included them
+    /// with no explanation would look like a queue that had simply stopped.
+    /// This is the number that says "this work belongs to a different
+    /// deployment", which is a thing an operator can act on.
+    pub other_instance: i64,
     /// When the oldest undelivered row was created, or `None` when there is
     /// none (FR-792).
     ///
@@ -1156,6 +1277,14 @@ impl SpoolBreakdown {
     /// left to the caller, which is the only side that knows whether anybody is
     /// signed in.
     pub fn blocked_reason(&self) -> Option<&'static str> {
+        // Ahead of saturation: work bound to another deployment is not merely
+        // delayed, it will never move under this one, and no amount of draining
+        // will change that. An operator told "the queue is full" would go
+        // looking for capacity; the actual news is that this store is pointed at
+        // a different server than the one its backlog belongs to (FR-791).
+        if self.other_instance > 0 && self.undelivered() == self.other_instance {
+            return Some("server_instance_mismatch");
+        }
         if self.saturated {
             return Some("saturated");
         }
@@ -1170,6 +1299,13 @@ impl SpoolBreakdown {
         }
         if self.retrying > 0 {
             return Some("backing_off");
+        }
+        // Some of the backlog belongs elsewhere and some of it is simply
+        // waiting. Reported last, because the deliverable part is moving and a
+        // reason implying otherwise would be wrong — but reported, because the
+        // rest never will be.
+        if self.other_instance > 0 {
+            return Some("server_instance_mismatch");
         }
         None
     }
@@ -1210,8 +1346,9 @@ pub async fn session_events(store: &Store, session_id: Uuid) -> Result<Vec<SafeC
 pub async fn event_spool_breakdown(
     store: &Store,
     capacity: SpoolCapacity,
+    current_instance: Option<Uuid>,
 ) -> Result<SpoolBreakdown> {
-    breakdown(store, SpoolTable::Events, capacity).await
+    breakdown(store, SpoolTable::Events, capacity, current_instance).await
 }
 
 /// The command spool's health.
@@ -1222,8 +1359,9 @@ pub async fn event_spool_breakdown(
 pub async fn command_spool_breakdown(
     store: &Store,
     capacity: SpoolCapacity,
+    current_instance: Option<Uuid>,
 ) -> Result<SpoolBreakdown> {
-    breakdown(store, SpoolTable::Commands, capacity).await
+    breakdown(store, SpoolTable::Commands, capacity, current_instance).await
 }
 
 /// Which spool a status query is about.
@@ -1249,6 +1387,11 @@ async fn breakdown(
     store: &Store,
     which: SpoolTable,
     capacity: SpoolCapacity,
+    // The instance this store is talking to now, when it has one. Only used to
+    // count what belongs to a *different* one — the breakdown does not filter
+    // by it, because a row stranded by a mismatch is still occupying the spool
+    // and still counts toward the bound.
+    current_instance: Option<Uuid>,
 ) -> Result<SpoolBreakdown> {
     let table = which.name();
     // One connection and one clock reading for all of it, so the breakdown is a
@@ -1400,6 +1543,27 @@ async fn breakdown(
         SpoolTable::Commands => at_bound,
     };
 
+    // Bound to a different deployment. `IS NOT NULL` matters: an unbound row is
+    // waiting for its first binding, not stranded by a mismatch, and reporting
+    // the two together would tell an operator to investigate a store that has
+    // simply never synchronized.
+    let other_instance: i64 = match current_instance {
+        Some(current) => {
+            sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table}
+                  WHERE state IN {UNDELIVERED}
+                    AND server_instance_id IS NOT NULL
+                    AND server_instance_id <> ?1"
+            ))
+            .bind(current.to_string())
+            .fetch_one(&mut *conn)
+            .await?
+        }
+        // Nothing to be mismatched against. A store that has not established an
+        // instance cannot say any row belongs to another one.
+        None => 0,
+    };
+
     // Oldest by creation, not by `next_attempt_at`: the question FR-792 asks is
     // how long something has been waiting, and a row's backoff moving forward
     // does not make it younger.
@@ -1419,6 +1583,7 @@ async fn breakdown(
         terminal_retry_exhausted,
         bytes,
         saturated,
+        other_instance,
         oldest_at,
     })
 }
@@ -1442,6 +1607,9 @@ pub struct NewCommand<'a> {
     /// `cairn remember` issued outside a repository.
     pub project_id: Option<Uuid>,
     pub account_id: Uuid,
+    /// The server instance this command is queued **for** (FR-791). `None`
+    /// carries the same meaning it does on [`NewEvent`], and the same rule.
+    pub server_instance_id: Option<Uuid>,
     pub kind: CommandKind,
     pub payload: &'a serde_json::Value,
 }
@@ -1544,8 +1712,8 @@ pub async fn spool_command(
         "INSERT INTO command_spool
             (command_id, scope_kind, scope_key, session_id, project_id, account_id,
              command_seq, kind, payload, state, attempts, claimed_at, next_attempt_at,
-             last_error_kind, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 0, NULL, ?10, NULL, ?10)",
+             last_error_kind, created_at, server_instance_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'pending', 0, NULL, ?10, NULL, ?10, ?11)",
     )
     .bind(id.to_string())
     .bind(scope_kind)
@@ -1557,6 +1725,7 @@ pub async fn spool_command(
     .bind(new.kind.as_str())
     .bind(&payload)
     .bind(&now)
+    .bind(new.server_instance_id.map(|i| i.to_string()))
     .execute(&mut *tx)
     .await?;
     tx::commit(tx, "spool_command").await?;
@@ -1623,6 +1792,7 @@ async fn allocate_command_seq(
 pub async fn claim_commands(
     store: &Store,
     account_id: Uuid,
+    server_instance_id: Uuid,
     limit: i64,
 ) -> Result<Vec<SpooledCommand>> {
     let now = chrono::Utc::now();
@@ -1630,6 +1800,10 @@ pub async fn claim_commands(
     let stale_before = rows::ts_text(now - chrono::Duration::seconds(CLAIM_LEASE_SECONDS));
 
     let mut tx = tx::begin(store, "claim_commands").await?;
+
+    // First binding, on the same terms as the event spool's: only over `NULL`,
+    // only this account's, and inside the claim transaction.
+    adopt_unbound_rows(&mut tx, "command_spool", account_id, server_instance_id).await?;
 
     // The same claim-side bound as `claim_events`, for the same reason: a
     // drainer that crashes after claiming never reaches `mark_command_failed`,
@@ -1645,6 +1819,9 @@ pub async fn claim_commands(
             SET state = 'refused', claimed_at = NULL, next_attempt_at = NULL,
                 last_error_kind = ?4
           WHERE account_id = ?2
+            -- This deployment's rows only; see `claim_events` for why giving up
+            -- on another's is a verdict nobody asked for.
+            AND server_instance_id = ?6
             AND attempts >= ?5
             AND ( (state IN ('pending','failed')
                    AND (next_attempt_at IS NULL OR next_attempt_at <= ?1))
@@ -1656,6 +1833,7 @@ pub async fn claim_commands(
     .bind(&stale_before)
     .bind(TERMINAL_RETRY_EXHAUSTED)
     .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(server_instance_id.to_string())
     .execute(&mut *tx)
     .await?;
 
@@ -1671,6 +1849,9 @@ pub async fn claim_commands(
                   -- Exactly equal, as in `claim_events` and for the same
                   -- reason (FR-790, FR-864a).
                WHERE c.account_id = ?2
+                 -- **And the exact server instance** (FR-791), never `IS NULL`:
+                 -- an unbound row is adopted above or it waits.
+                 AND c.server_instance_id = ?6
                  AND c.attempts < ?5
                  AND ( (c.state IN ('pending','failed')
                         AND (c.next_attempt_at IS NULL OR c.next_attempt_at <= ?1))
@@ -1695,6 +1876,7 @@ pub async fn claim_commands(
     .bind(&stale_before)
     .bind(limit)
     .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(server_instance_id.to_string())
     .fetch_all(&mut *tx)
     .await?;
 

@@ -541,6 +541,16 @@ pub async fn spool_safe_events(
     let capacity = SpoolCapacity::default();
     let mut summary = SpoolSummary::default();
 
+    // **Which server this work is queued for** (FR-791). Read here, once, and
+    // stamped on every row this call spools: a row's binding is decided when it
+    // is written and never re-decided, so a deployment replaced later cannot
+    // acquire work that was queued for its predecessor.
+    //
+    // `None` when this store has never established a lane — the honest answer,
+    // and the one the spool's first-binding rule is written for. Guessing an
+    // instance here would be the endpoint-as-identity mistake in a new place.
+    let server_instance_id = cairn_store::cursor::established_instance(store).await?;
+
     let declined_events: Vec<SafeEventDraft> = output
         .declines
         .iter()
@@ -598,6 +608,7 @@ pub async fn spool_safe_events(
                 project_id,
                 account_id,
                 event,
+                server_instance_id,
             },
         )
         .await?

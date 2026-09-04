@@ -1348,10 +1348,17 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
     let counts = cairn_store::spool::disposition_counts(&d.store, project_id)
         .await
         .ok()?;
-    let events = cairn_store::spool::event_spool_breakdown(&d.store, capacity)
+    // Reported against the instance this store is bound to, so a backlog that
+    // belongs to a different deployment is counted as exactly that rather than
+    // as a queue that mysteriously stopped.
+    let instance = cairn_store::cursor::established_instance(&d.store)
+        .await
+        .ok()
+        .flatten();
+    let events = cairn_store::spool::event_spool_breakdown(&d.store, capacity, instance)
         .await
         .ok()?;
-    let commands = cairn_store::spool::command_spool_breakdown(&d.store, capacity)
+    let commands = cairn_store::spool::command_spool_breakdown(&d.store, capacity, instance)
         .await
         .ok()?;
     // Read once for both spools, so the two halves of one report cannot
@@ -1402,6 +1409,7 @@ fn spool_health(
         // cannot drift apart.
         undelivered: b.undelivered(),
         saturated: b.saturated,
+        other_instance: b.other_instance,
         oldest_at: b.oldest_at.map(|t| t.to_rfc3339()),
         // No account outranks every other reason: nothing at all can be claimed
         // — the claim predicate matches an account exactly — so a `backing_off`
@@ -3020,6 +3028,11 @@ pub(crate) async fn queue_knowledge_command(
     let admission = cairn_store::spool::spool_command(
         &d.store,
         cairn_store::spool::NewCommand {
+            // Bound to the server this store has established a lane with, at the
+            // moment the command is written (FR-791). Never re-decided later.
+            server_instance_id: cairn_store::cursor::established_instance(&d.store)
+                .await
+                .map_err(storage_err)?,
             scope,
             project_id,
             account_id,

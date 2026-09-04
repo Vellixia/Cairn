@@ -30,6 +30,17 @@ use cairn_store::Store;
 use chrono::Utc;
 use uuid::Uuid;
 
+/// The server instance every fixture in this file queues for and drains as.
+///
+/// A constant rather than a fresh id per test, because the property under test
+/// here is capacity and ordering, not identity — the instance binding has its
+/// own file (`feature005_spool_instance_binding.rs`), and it is the one place
+/// that varies this value. Fixing it here keeps every claim addressing the same
+/// deployment, which is what these tests were written assuming before the
+/// binding existed.
+const FIXTURE_INSTANCE: uuid::Uuid =
+    uuid::Uuid::from_u128(0x0005_0004_0000_0000_0000_0000_0000_0001);
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -148,6 +159,9 @@ async fn spool_with(
         NewEvent {
             project_id: f.project_id,
             account_id: account,
+            // Unbound: these fixtures predate any established instance, which is
+            // the state the first-binding rule adopts on the first claim.
+            server_instance_id: None,
             event,
         },
     )
@@ -266,6 +280,9 @@ async fn concurrent_writers_on_one_session_each_get_their_own_ordinal() {
                 NewEvent {
                     project_id,
                     account_id: account,
+                    // Unbound: these fixtures predate any established instance, which is
+                    // the state the first-binding rule adopts on the first claim.
+                    server_instance_id: None,
                     event: capture_event(session_id),
                 },
             )
@@ -381,7 +398,7 @@ async fn a_claim_returns_only_the_signed_in_accounts_own_rows() {
     let a = spooled(spool(&f, mine, capture_event(f.session_id)).await);
     let b = spooled(spool(&f, theirs, capture_event(f.session_id)).await);
 
-    let claimed = spool::claim_events(&f.store, mine, 10)
+    let claimed = spool::claim_events(&f.store, mine, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(claimed.len(), 1, "claimed something that was not mine");
@@ -411,12 +428,12 @@ async fn a_stale_row_belonging_to_another_account_is_still_not_claimable() {
     let mine = Uuid::now_v7();
     let row = spooled(spool(&f, theirs, capture_event(f.session_id)).await);
 
-    spool::claim_events(&f.store, theirs, 10)
+    spool::claim_events(&f.store, theirs, FIXTURE_INSTANCE, 10)
         .await
         .expect("their claim");
     age_claim(&f, row.event_id).await;
 
-    let mine_claimed = spool::claim_events(&f.store, mine, 10)
+    let mine_claimed = spool::claim_events(&f.store, mine, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert!(
@@ -433,14 +450,14 @@ async fn an_abandoned_claim_is_reclaimed_once_its_lease_expires() {
     let account = Uuid::now_v7();
     let row = spooled(spool(&f, account, capture_event(f.session_id)).await);
 
-    let first = spool::claim_events(&f.store, account, 10)
+    let first = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(first.len(), 1);
     assert_eq!(first[0].attempts, 1);
 
     assert!(
-        spool::claim_events(&f.store, account, 10)
+        spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .is_empty(),
@@ -448,7 +465,7 @@ async fn an_abandoned_claim_is_reclaimed_once_its_lease_expires() {
     );
 
     age_claim(&f, row.event_id).await;
-    let reclaimed = spool::claim_events(&f.store, account, 10)
+    let reclaimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(reclaimed.len(), 1, "an abandoned claim stranded its row");
@@ -473,7 +490,7 @@ async fn two_drainers_never_claim_the_same_row() {
         drainers.push(tokio::spawn(async move {
             let mut got = Vec::new();
             for _ in 0..5 {
-                let batch = spool::claim_events(&store, account, 7)
+                let batch = spool::claim_events(&store, account, FIXTURE_INSTANCE, 7)
                     .await
                     .expect("claim");
                 got.extend(batch.into_iter().map(|e| e.event_id));
@@ -504,7 +521,7 @@ async fn a_failed_row_waits_out_its_backoff_before_it_is_claimable_again() {
     let f = fixture().await;
     let account = Uuid::now_v7();
     let row = spooled(spool(&f, account, capture_event(f.session_id)).await);
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_failed(&f.store, row.event_id, "unreachable")
@@ -512,7 +529,7 @@ async fn a_failed_row_waits_out_its_backoff_before_it_is_claimable_again() {
         .expect("failed");
 
     assert!(
-        spool::claim_events(&f.store, account, 10)
+        spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .is_empty(),
@@ -525,7 +542,7 @@ async fn a_failed_row_waits_out_its_backoff_before_it_is_claimable_again() {
         .execute(f.store.pool())
         .await
         .expect("elapse the backoff");
-    let again = spool::claim_events(&f.store, account, 10)
+    let again = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(again.len(), 1, "an elapsed backoff did not return the row");
@@ -539,7 +556,7 @@ async fn the_backoff_is_bounded_between_one_second_and_five_minutes() {
     let f = fixture().await;
     let account = Uuid::now_v7();
     let row = spooled(spool(&f, account, capture_event(f.session_id)).await);
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
 
@@ -596,7 +613,7 @@ async fn a_rejected_event_is_refused_permanently_and_stays_visible() {
     let f = fixture().await;
     let account = Uuid::now_v7();
     let row = spooled(spool(&f, account, capture_event(f.session_id)).await);
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_refused(&f.store, row.event_id, "event_id_mismatch")
@@ -605,15 +622,16 @@ async fn a_rejected_event_is_refused_permanently_and_stays_visible() {
 
     age_claim(&f, row.event_id).await;
     assert!(
-        spool::claim_events(&f.store, account, 10)
+        spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .is_empty(),
         "a permanently refused row was retried"
     );
-    let status = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("status");
+    let status =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("status");
     assert_eq!(status.refused(), 1, "the refusal is not reportable");
     assert_eq!(
         status.undelivered(),
@@ -632,7 +650,7 @@ async fn releasing_claims_returns_in_flight_rows_to_the_queue() {
     for _ in 0..3 {
         spool(&f, account, capture_event(f.session_id)).await;
     }
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(
@@ -642,7 +660,7 @@ async fn releasing_claims_returns_in_flight_rows_to_the_queue() {
         3
     );
     assert_eq!(
-        spool::claim_events(&f.store, account, 10)
+        spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .len(),
@@ -745,7 +763,7 @@ async fn saturation_refuses_new_events_rather_than_shedding_a_boundary_row() {
         .push(spooled(spool_with(&f, tight, account, boundary_event(f.session_id)).await).event_id);
     spool_with(&f, tight, account, capture_event(f.session_id)).await;
     assert!(
-        !spool::event_spool_breakdown(&f.store, tight)
+        !spool::event_spool_breakdown(&f.store, tight, Some(FIXTURE_INSTANCE))
             .await
             .expect("status")
             .saturated,
@@ -801,7 +819,7 @@ async fn saturation_refuses_new_events_rather_than_shedding_a_boundary_row() {
         assert_eq!(present, 1, "a boundary row was dropped");
     }
     assert!(
-        spool::event_spool_breakdown(&f.store, tight)
+        spool::event_spool_breakdown(&f.store, tight, Some(FIXTURE_INSTANCE))
             .await
             .expect("status")
             .saturated
@@ -838,7 +856,7 @@ async fn saturation_clears_when_delivery_drains_the_spool() {
         .await
         .expect("delivered");
     assert!(
-        !spool::event_spool_breakdown(&f.store, tight)
+        !spool::event_spool_breakdown(&f.store, tight, Some(FIXTURE_INSTANCE))
             .await
             .expect("status")
             .saturated,
@@ -881,6 +899,9 @@ async fn spool_command(f: &Fixture, scope: CommandScope, account: Uuid, kind: Co
                 scope,
                 project_id: Some(f.project_id),
                 account_id: account,
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 kind,
                 payload: &payload,
             },
@@ -902,7 +923,7 @@ async fn commands_drain_in_sequence_order_within_their_scope() {
         spool_command(&f, scope, account, CommandKind::Remember).await;
     }
 
-    let claimed = spool::claim_commands(&f.store, account, 10)
+    let claimed = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(
@@ -932,14 +953,14 @@ async fn a_command_in_flight_blocks_the_rest_of_its_scope_until_it_settles() {
         spool_command(&f, scope, account, CommandKind::Remember).await;
     }
 
-    let head = spool::claim_commands(&f.store, account, 1)
+    let head = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 1)
         .await
         .expect("claim");
     assert_eq!(head.len(), 1);
     assert_eq!(head[0].command_seq, 1);
 
     assert!(
-        spool::claim_commands(&f.store, account, 10)
+        spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .is_empty(),
@@ -949,7 +970,7 @@ async fn a_command_in_flight_blocks_the_rest_of_its_scope_until_it_settles() {
     spool::mark_command_delivered(&f.store, head[0].command_id)
         .await
         .expect("delivered");
-    let rest = spool::claim_commands(&f.store, account, 10)
+    let rest = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(
@@ -968,7 +989,7 @@ async fn a_command_in_backoff_holds_its_scope() {
     for _ in 0..2 {
         spool_command(&f, scope, account, CommandKind::Remember).await;
     }
-    let head = spool::claim_commands(&f.store, account, 1)
+    let head = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 1)
         .await
         .expect("claim");
     spool::mark_command_failed(&f.store, head[0].command_id, "unreachable")
@@ -976,7 +997,7 @@ async fn a_command_in_backoff_holds_its_scope() {
         .expect("failed");
 
     assert!(
-        spool::claim_commands(&f.store, account, 10)
+        spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .is_empty(),
@@ -996,13 +1017,13 @@ async fn one_blocked_scope_does_not_stall_another() {
     spool_command(&f, session_scope, account, CommandKind::Supersede).await;
     spool_command(&f, store_scope, account, CommandKind::PersonalCreate).await;
 
-    let head = spool::claim_commands(&f.store, account, 1)
+    let head = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 1)
         .await
         .expect("claim");
     assert_eq!(head.len(), 1);
     let blocked_scope = head[0].scope;
 
-    let next = spool::claim_commands(&f.store, account, 10)
+    let next = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert!(
@@ -1035,6 +1056,9 @@ async fn a_sessionless_command_is_scoped_to_the_store_and_names_no_session() {
                 scope,
                 project_id: None,
                 account_id: account,
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 kind: CommandKind::PersonalCreate,
                 payload: &payload,
             },
@@ -1069,6 +1093,9 @@ async fn a_sessionless_command_is_scoped_to_the_store_and_names_no_session() {
                 scope: spool::store_scope(&f.store).await.expect("store scope"),
                 project_id: None,
                 account_id: account,
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 kind: CommandKind::PersonalForget,
                 payload: &payload,
             },
@@ -1095,14 +1122,14 @@ async fn a_command_claim_returns_only_the_signed_in_accounts_own_rows() {
     .await;
 
     assert!(
-        spool::claim_commands(&f.store, mine, 10)
+        spool::claim_commands(&f.store, mine, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .is_empty(),
         "another account's command was claimed under my credential"
     );
     assert_eq!(
-        spool::claim_commands(&f.store, theirs, 10)
+        spool::claim_commands(&f.store, theirs, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .len(),
@@ -1119,18 +1146,18 @@ async fn a_refused_command_is_never_retried_and_does_not_wedge_its_scope() {
     let first = spool_command(&f, scope, account, CommandKind::Remember).await;
     spool_command(&f, scope, account, CommandKind::Supersede).await;
 
-    spool::claim_commands(&f.store, account, 1)
+    spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 1)
         .await
         .expect("claim");
     spool::mark_command_refused(&f.store, first, "not_permitted")
         .await
         .expect("refused");
 
-    let status = spool::command_spool_breakdown(&f.store, roomy())
+    let status = spool::command_spool_breakdown(&f.store, roomy(), Some(FIXTURE_INSTANCE))
         .await
         .expect("status");
     assert_eq!(status.refused(), 1);
-    let next = spool::claim_commands(&f.store, account, 10)
+    let next = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(
@@ -1346,7 +1373,7 @@ async fn a_transient_failure_is_retryable_and_a_refusal_is_not() {
     let transient = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
     let permanent = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
 
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_failed(&f.store, transient, "connection_refused")
@@ -1358,7 +1385,7 @@ async fn a_transient_failure_is_retryable_and_a_refusal_is_not() {
 
     // The transient row is claimable again once its backoff elapses.
     expire_backoff(&f, transient).await;
-    let again = spool::claim_events(&f.store, account, 10)
+    let again = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     let ids: Vec<Uuid> = again.iter().map(|e| e.event_id).collect();
@@ -1413,7 +1440,7 @@ async fn retry_stops_at_the_bound_and_the_row_becomes_visible() {
 
     // And it never becomes claimable again.
     expire_backoff(&f, id).await;
-    let claimed = spool::claim_events(&f.store, account, 10)
+    let claimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert!(claimed.is_empty(), "an exhausted row was claimed again");
@@ -1440,9 +1467,10 @@ async fn an_exhausted_row_is_distinguishable_from_a_server_refusal() {
         .await
         .expect("mark refused");
 
-    let breakdown = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let breakdown =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_eq!(breakdown.terminal, 2);
     assert_eq!(
         breakdown.terminal_retry_exhausted, 1,
@@ -1456,7 +1484,7 @@ async fn a_duplicate_answer_settles_the_row_as_delivered() {
     let f = fixture().await;
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     // The drainer maps `accepted` and `duplicate` alike: at most one canonical
@@ -1466,9 +1494,10 @@ async fn a_duplicate_answer_settles_the_row_as_delivered() {
         .expect("delivered");
     assert_eq!(state_of(&f, id).await, "delivered");
 
-    let breakdown = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let breakdown =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_eq!(
         breakdown.waiting + breakdown.retrying + breakdown.in_flight,
         0
@@ -1489,7 +1518,7 @@ async fn health_distinguishes_waiting_retrying_in_flight_and_terminal() {
     for _ in 0..4 {
         spooled(spool(&f, account, capture_event(f.session_id)).await);
     }
-    let claimed = spool::claim_events(&f.store, account, 10)
+    let claimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(claimed.len(), 4);
@@ -1505,14 +1534,15 @@ async fn health_distinguishes_waiting_retrying_in_flight_and_terminal() {
     spool::release_event_claims(&f.store)
         .await
         .expect("release");
-    let reclaimed = spool::claim_events(&f.store, account, 1)
+    let reclaimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 1)
         .await
         .expect("reclaim");
     assert_eq!(reclaimed.len(), 1);
 
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_eq!(b.waiting, 1, "{b:?}");
     assert_eq!(b.in_flight, 1, "{b:?}");
     assert_eq!(b.retrying, 1, "{b:?}");
@@ -1547,6 +1577,9 @@ async fn a_full_command_spool_refuses_rather_than_discarding_earlier_intent() {
                 scope: CommandScope::Session(f.session_id),
                 project_id: Some(f.project_id),
                 account_id: account,
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 kind,
                 payload: &payload,
             },
@@ -1600,6 +1633,9 @@ async fn a_refused_command_leaves_the_scope_sequence_intact() {
                 scope: CommandScope::Session(f.session_id),
                 project_id: Some(f.project_id),
                 account_id: account,
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 kind,
                 payload: &payload,
             },
@@ -1648,6 +1684,9 @@ async fn admission_and_status_agree_about_a_full_command_spool() {
                 scope: CommandScope::Session(f.session_id),
                 project_id: Some(f.project_id),
                 account_id: account,
+                // Unbound: these fixtures predate any established instance, which is
+                // the state the first-binding rule adopts on the first claim.
+                server_instance_id: None,
                 kind: CommandKind::Remember,
                 payload: &payload,
             },
@@ -1662,7 +1701,7 @@ async fn admission_and_status_agree_about_a_full_command_spool() {
         offer(one).await.expect("second"),
         spool::CommandAdmission::Saturated { .. }
     ));
-    let b = spool::command_spool_breakdown(&f.store, one)
+    let b = spool::command_spool_breakdown(&f.store, one, Some(FIXTURE_INSTANCE))
         .await
         .expect("breakdown");
     assert!(b.saturated, "admission refused while status reported room");
@@ -1671,14 +1710,14 @@ async fn admission_and_status_agree_about_a_full_command_spool() {
     assert_eq!(b.bytes, 0, "the byte bound applies to events only");
 
     // Drained: admission accepts again, and status agrees.
-    spool::claim_commands(&f.store, account, 10)
+    spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_command_delivered(&f.store, first.command_id)
         .await
         .expect("delivered");
 
-    let b = spool::command_spool_breakdown(&f.store, one)
+    let b = spool::command_spool_breakdown(&f.store, one, Some(FIXTURE_INSTANCE))
         .await
         .expect("breakdown");
     assert!(
@@ -1749,7 +1788,7 @@ async fn a_crash_loop_cannot_retry_an_event_past_the_bound() {
 
     // The claim that begins the last permitted attempt. Note what does *not*
     // happen next: no `mark_event_failed`, because the drainer died.
-    let claimed = spool::claim_events(&f.store, account, 10)
+    let claimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(claimed.len(), 1, "the row should still have been claimable");
@@ -1758,7 +1797,7 @@ async fn a_crash_loop_cannot_retry_an_event_past_the_bound() {
 
     // The lease expires and another drain comes along.
     age_claim(&f, id).await;
-    let next = spool::claim_events(&f.store, account, 10)
+    let next = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
 
@@ -1782,7 +1821,7 @@ async fn a_crash_loop_cannot_retry_an_event_past_the_bound() {
     for _ in 0..3 {
         age_claim(&f, id).await;
         assert!(
-            spool::claim_events(&f.store, account, 10)
+            spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
                 .await
                 .expect("claim")
                 .is_empty(),
@@ -1806,14 +1845,14 @@ async fn a_crash_loop_cannot_retry_a_command_past_the_bound() {
     .await;
 
     set_command_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS - 1).await;
-    let claimed = spool::claim_commands(&f.store, account, 10)
+    let claimed = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(claimed.len(), 1);
     assert_eq!(command_state(&f, id).await, "in_flight");
 
     age_command_claim(&f, id).await;
-    let next = spool::claim_commands(&f.store, account, 10)
+    let next = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert!(
@@ -1846,7 +1885,7 @@ async fn an_exhausted_command_releases_its_scope_rather_than_wedging_it() {
     // holding it. Claiming both would leave `second` in flight under a lease
     // this test never expires, and the assertion below would be about the lease
     // rather than about the barrier.
-    let taken = spool::claim_commands(&f.store, account, 1)
+    let taken = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 1)
         .await
         .expect("claim");
     assert_eq!(
@@ -1855,7 +1894,7 @@ async fn an_exhausted_command_releases_its_scope_rather_than_wedging_it() {
     );
     age_command_claim(&f, first).await;
 
-    let next = spool::claim_commands(&f.store, account, 10)
+    let next = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(command_state(&f, first).await, "refused");
@@ -1877,12 +1916,12 @@ async fn a_live_claim_at_the_bound_is_not_terminalized_under_its_drainer() {
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
     set_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS - 1).await;
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
 
     // A second drainer runs while the first still holds a valid lease.
-    assert!(spool::claim_events(&f.store, account, 10)
+    assert!(spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim")
         .is_empty());
@@ -1911,7 +1950,7 @@ async fn one_accounts_drain_does_not_terminalize_anothers_rows() {
         set_attempts(&f, id, spool::MAX_DELIVERY_ATTEMPTS).await;
     }
 
-    spool::claim_events(&f.store, mine, 10)
+    spool::claim_events(&f.store, mine, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
 
@@ -1947,7 +1986,7 @@ async fn deferring_a_row_forever_never_exhausts_it() {
     let cycles = spool::MAX_DELIVERY_ATTEMPTS + 50;
     for cycle in 0..cycles {
         expire_backoff(&f, id).await;
-        let claimed = spool::claim_events(&f.store, account, 10)
+        let claimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim");
         assert_eq!(
@@ -1976,7 +2015,7 @@ async fn deferring_a_row_forever_never_exhausts_it() {
     // The capability appears. The same row, with the same identity it was
     // spooled with, is delivered exactly once.
     expire_backoff(&f, id).await;
-    let claimed = spool::claim_events(&f.store, account, 10)
+    let claimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(claimed.len(), 1);
@@ -1991,7 +2030,7 @@ async fn deferring_a_row_forever_never_exhausts_it() {
 
     expire_backoff(&f, id).await;
     assert!(
-        spool::claim_events(&f.store, account, 10)
+        spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim")
             .is_empty(),
@@ -2007,7 +2046,7 @@ async fn a_transient_failure_still_costs_an_attempt() {
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
 
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(attempts_of(&f, id).await, 1);
@@ -2030,7 +2069,7 @@ async fn a_deferred_row_and_a_refused_row_are_reported_apart() {
     let waiting = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
     let refused = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
 
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_deferred(&f.store, waiting, spool::DEFERRED_AWAITING_CAPABILITY)
@@ -2040,9 +2079,10 @@ async fn a_deferred_row_and_a_refused_row_are_reported_apart() {
         .await
         .expect("refuse");
 
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     // "The server is old" and "the server is failing" call for different
     // actions, so they are different numbers.
     assert_eq!(b.deferred, 1, "{b:?}");
@@ -2070,7 +2110,7 @@ async fn deferring_a_command_forever_never_exhausts_it() {
             .execute(f.store.pool())
             .await
             .expect("expire backoff");
-        let claimed = spool::claim_commands(&f.store, account, 10)
+        let claimed = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
             .await
             .expect("claim");
         assert_eq!(
@@ -2123,16 +2163,17 @@ async fn a_deferred_row_is_counted_once_and_not_as_retrying() {
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
 
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
         .await
         .expect("defer");
 
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_partition(&b, 1, "one deferred row");
     assert_eq!(b.deferred, 1, "{b:?}");
     // Nothing is wrong and Cairn is not "still trying" in the sense `retrying`
@@ -2151,7 +2192,7 @@ async fn a_deferred_row_whose_probe_is_due_is_still_only_deferred() {
     let f = fixture().await;
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
@@ -2161,9 +2202,10 @@ async fn a_deferred_row_whose_probe_is_due_is_still_only_deferred() {
     // The probe interval elapses. The row becomes claimable again, which is
     // the point — but it is still waiting on a capability, not on a drainer.
     expire_backoff(&f, id).await;
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_partition(&b, 1, "one due deferred row");
     assert_eq!(b.deferred, 1, "{b:?}");
     assert_eq!(
@@ -2180,7 +2222,7 @@ async fn every_condition_at_once_still_partitions_the_spool() {
     for _ in 0..5 {
         ids.push(spooled(spool(&f, account, capture_event(f.session_id)).await).event_id);
     }
-    let claimed = spool::claim_events(&f.store, account, 10)
+    let claimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     assert_eq!(claimed.len(), 5);
@@ -2201,9 +2243,10 @@ async fn every_condition_at_once_still_partitions_the_spool() {
         .await
         .expect("release one");
 
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_partition(&b, 5, "one row in each condition");
     assert_eq!(b.retrying, 1, "{b:?}");
     assert_eq!(b.deferred, 1, "{b:?}");
@@ -2220,16 +2263,17 @@ async fn a_delivered_row_leaves_every_condition() {
     let f = fixture().await;
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_delivered(&f.store, id)
         .await
         .expect("delivered");
 
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     // Exhaustive over *queued* rows: a delivered row is no longer queued, which
     // is what lets saturation clear itself.
     assert_partition(&b, 0, "one delivered row");
@@ -2244,14 +2288,14 @@ async fn the_command_spool_partitions_the_same_way() {
     let a = spool_command(&f, scope, account, CommandKind::Remember).await;
     let b_id = spool_command(&f, scope, account, CommandKind::Supersede).await;
 
-    spool::claim_commands(&f.store, account, 1)
+    spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 1)
         .await
         .expect("claim");
     spool::mark_command_deferred(&f.store, a, spool::DEFERRED_AWAITING_CAPABILITY)
         .await
         .expect("defer");
 
-    let b = spool::command_spool_breakdown(&f.store, roomy())
+    let b = spool::command_spool_breakdown(&f.store, roomy(), Some(FIXTURE_INSTANCE))
         .await
         .expect("breakdown");
     assert_partition(&b, 2, "a deferred and a waiting command");
@@ -2285,7 +2329,7 @@ async fn re_claiming_a_deferred_event_makes_it_in_flight_and_nothing_else() {
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
 
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
@@ -2294,14 +2338,15 @@ async fn re_claiming_a_deferred_event_makes_it_in_flight_and_nothing_else() {
     expire_backoff(&f, id).await;
 
     // The probe. This is the step the earlier tests did not take.
-    let claimed = spool::claim_events(&f.store, account, 10)
+    let claimed = spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("re-claim");
     assert_eq!(claimed.len(), 1, "a due deferred row was not re-claimable");
 
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_partition(&b, 1, "a re-claimed deferred row");
     assert_eq!(b.in_flight, 1, "{b:?}");
     assert_eq!(
@@ -2336,7 +2381,7 @@ async fn re_claiming_a_deferred_command_makes_it_in_flight_and_nothing_else() {
     )
     .await;
 
-    spool::claim_commands(&f.store, account, 10)
+    spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_command_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
@@ -2349,12 +2394,12 @@ async fn re_claiming_a_deferred_command_makes_it_in_flight_and_nothing_else() {
         .await
         .expect("expire the probe");
 
-    let claimed = spool::claim_commands(&f.store, account, 10)
+    let claimed = spool::claim_commands(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("re-claim");
     assert_eq!(claimed.len(), 1);
 
-    let b = spool::command_spool_breakdown(&f.store, roomy())
+    let b = spool::command_spool_breakdown(&f.store, roomy(), Some(FIXTURE_INSTANCE))
         .await
         .expect("breakdown");
     assert_partition(&b, 1, "a re-claimed deferred command");
@@ -2369,14 +2414,14 @@ async fn a_stale_re_claim_of_a_deferred_row_is_classified_only_as_stale() {
     let account = Uuid::now_v7();
     let id = spooled(spool(&f, account, capture_event(f.session_id)).await).event_id;
 
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
         .await
         .expect("defer");
     expire_backoff(&f, id).await;
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("re-claim");
 
@@ -2385,9 +2430,10 @@ async fn a_stale_re_claim_of_a_deferred_row_is_classified_only_as_stale() {
     // still attached it would be `waiting` and `deferred` at once.
     age_claim(&f, id).await;
 
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_partition(&b, 1, "a stale re-claim of a deferred row");
     assert_eq!(
         b.waiting, 1,
@@ -2410,25 +2456,33 @@ async fn a_row_deferred_twice_reports_deferred_each_time_it_rests() {
     for round in 0..3 {
         expire_backoff(&f, id).await;
         assert_eq!(
-            spool::claim_events(&f.store, account, 10)
+            spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
                 .await
                 .expect("claim")
                 .len(),
             1,
             "round {round}"
         );
-        let mid = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-            .await
-            .expect("breakdown");
+        let mid = spool::event_spool_breakdown(
+            &f.store,
+            SpoolCapacity::default(),
+            Some(FIXTURE_INSTANCE),
+        )
+        .await
+        .expect("breakdown");
         assert_eq!(mid.in_flight, 1, "round {round}: {mid:?}");
         assert_eq!(mid.deferred, 0, "round {round}: {mid:?}");
 
         spool::mark_event_deferred(&f.store, id, spool::DEFERRED_AWAITING_CAPABILITY)
             .await
             .expect("defer");
-        let resting = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-            .await
-            .expect("breakdown");
+        let resting = spool::event_spool_breakdown(
+            &f.store,
+            SpoolCapacity::default(),
+            Some(FIXTURE_INSTANCE),
+        )
+        .await
+        .expect("breakdown");
         assert_partition(&resting, 1, "a re-deferred row");
         assert_eq!(
             resting.deferred, 1,
@@ -2448,7 +2502,7 @@ async fn a_claim_clears_a_transient_reason_too() {
     // Not a deferral-specific rule. Any previous attempt's reason is history
     // once a new send begins, and leaving a transient one attached would make
     // a row in flight look like a row that had just failed.
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("claim");
     spool::mark_event_failed(&f.store, id, "connection_refused")
@@ -2460,7 +2514,7 @@ async fn a_claim_clears_a_transient_reason_too() {
     );
 
     expire_backoff(&f, id).await;
-    spool::claim_events(&f.store, account, 10)
+    spool::claim_events(&f.store, account, FIXTURE_INSTANCE, 10)
         .await
         .expect("re-claim");
     assert_eq!(
@@ -2468,10 +2522,97 @@ async fn a_claim_clears_a_transient_reason_too() {
         None,
         "a transient reason survived into the attempt that followed it"
     );
-    let b = spool::event_spool_breakdown(&f.store, SpoolCapacity::default())
-        .await
-        .expect("breakdown");
+    let b =
+        spool::event_spool_breakdown(&f.store, SpoolCapacity::default(), Some(FIXTURE_INSTANCE))
+            .await
+            .expect("breakdown");
     assert_partition(&b, 1, "a re-claimed transiently-failed row");
     assert_eq!(b.in_flight, 1, "{b:?}");
     assert_eq!(b.retrying, 0, "{b:?}");
+}
+
+// ---------------------------------------------------------------------------
+// First binding (FR-791)
+// ---------------------------------------------------------------------------
+
+/// A row queued before any instance was established is adopted by the first
+/// drain that names one, and claimed in the same call.
+///
+/// The store-level statement of the rule the daemon depends on. Isolated here
+/// because an end-to-end failure cannot tell "adoption did not run" from "the
+/// drain never got that far".
+#[tokio::test]
+async fn an_unbound_row_is_adopted_and_claimed_by_the_first_named_instance() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+
+    // Queued before this store had ever spoken to a server: `spool_with` binds
+    // `None`, which is exactly that state.
+    spool(&f, account, capture_event(f.session_id)).await;
+
+    let instance = Uuid::now_v7();
+    let claimed = spool::claim_events(&f.store, account, instance, 10)
+        .await
+        .expect("claim");
+    assert_eq!(
+        claimed.len(),
+        1,
+        "the unbound row was not adopted, so nobody could ever deliver it"
+    );
+
+    let bound: Vec<String> = sqlx::query_scalar(
+        "SELECT server_instance_id FROM event_spool WHERE server_instance_id IS NOT NULL",
+    )
+    .fetch_all(f.store.pool())
+    .await
+    .expect("read back");
+    assert_eq!(
+        bound,
+        vec![instance.to_string()],
+        "adoption bound the row to something other than the instance that claimed it"
+    );
+}
+
+/// Adoption never touches a row that already names an instance.
+///
+/// The half that makes the rule safe. If adoption overwrote an existing
+/// binding, a replacement deployment would acquire its predecessor's backlog on
+/// its very first drain — which is the defect the binding exists to prevent.
+#[tokio::test]
+async fn adoption_never_rebinds_a_row_that_already_names_an_instance() {
+    let f = fixture().await;
+    let account = Uuid::now_v7();
+    let s1 = Uuid::now_v7();
+
+    spool::spool_event(
+        &f.store,
+        SpoolCapacity::default(),
+        NewEvent {
+            project_id: f.project_id,
+            account_id: account,
+            server_instance_id: Some(s1),
+            event: capture_event(f.session_id),
+        },
+    )
+    .await
+    .expect("spool");
+
+    let s2 = Uuid::now_v7();
+    let claimed = spool::claim_events(&f.store, account, s2, 10)
+        .await
+        .expect("claim");
+    assert!(
+        claimed.is_empty(),
+        "a second deployment claimed work queued for the first"
+    );
+
+    let bound: Vec<String> = sqlx::query_scalar("SELECT server_instance_id FROM event_spool")
+        .fetch_all(f.store.pool())
+        .await
+        .expect("read back");
+    assert_eq!(
+        bound,
+        vec![s1.to_string()],
+        "the row was rebound to a deployment that did not queue it"
+    );
 }

@@ -106,6 +106,41 @@ pub async fn established(store: &Store) -> Result<Vec<SyncNamespace>> {
     Ok(keys.iter().filter_map(|k| parse(k)).collect())
 }
 
+/// The server instance this store has established a lane with, if any.
+///
+/// **Read from the lane keys rather than from a column of its own**, because
+/// the lanes already are the record: `establish` writes `team:<instance>`,
+/// `personal:<instance>:<user>` and `patterns:<instance>:<user>`, and a second
+/// place to keep the same fact is a second place for it to go stale. The one
+/// existing reader of this — `recorded_team_instance`, which enforces FR-496
+/// for team knowledge — reads it the same way.
+///
+/// A store may legitimately hold lanes for two identities on one server, and
+/// they carry the same instance, so any lane answers. It may not hold lanes for
+/// two *servers*: `establish_global_lanes` refuses to open a second `team:*`
+/// lane, which is what makes "the instance" singular. If a store somehow held
+/// two, this returns the lowest by key rather than an arbitrary one, so the
+/// answer is at least stable across calls.
+///
+/// `None` means no lane has ever been established — a store that has not
+/// synchronized yet. That is the state the spool's first-binding rule exists
+/// for, and it is deliberately not an error.
+pub async fn established_instance(store: &Store) -> Result<Option<Uuid>> {
+    let keys: Vec<String> =
+        sqlx::query_scalar("SELECT namespace FROM sync_cursor ORDER BY namespace")
+            .fetch_all(store.pool())
+            .await?;
+    Ok(keys
+        .iter()
+        .filter_map(|k| parse(k))
+        .find_map(|ns| match ns {
+            SyncNamespace::Team(instance)
+            | SyncNamespace::Personal(instance, _)
+            | SyncNamespace::Patterns(instance, _) => Some(instance),
+            SyncNamespace::Project(_) => None,
+        }))
+}
+
 /// Recover a [`SyncNamespace`] from its own [`SyncNamespace::key`].
 ///
 /// `key()` is one-way by intent — it is a cursor key, not a wire format — but

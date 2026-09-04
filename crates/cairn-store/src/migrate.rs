@@ -48,6 +48,11 @@ pub const MIGRATIONS: &[(i64, &str, &str)] = &[
         "pattern_cache",
         include_str!("../migrations/0009_pattern_cache.sql"),
     ),
+    (
+        10,
+        "spool_server_instance",
+        include_str!("../migrations/0010_spool_server_instance.sql"),
+    ),
 ];
 
 /// The schema version this build knows how to use.
