@@ -72,6 +72,18 @@ fn project_scoped_paths(project: Uuid) -> Vec<String> {
         // capture health says which machines its members work from and which
         // of their agents are failing.
         format!("/api/projects/{project}/health"),
+        // Feature 005's web control plane (T108). Five reads that each describe
+        // what a project has been doing — which agents are active, which files
+        // changed, what consolidation decided, what was retrieved and which of
+        // its members' machines are failing. Every one is member-only for the
+        // same reason the matrix above is, and they are listed here so the
+        // non-member sweep actually probes them rather than trusting the
+        // handlers to have remembered (FR-894a).
+        format!("/api/projects/{project}/funnel"),
+        format!("/api/projects/{project}/activity"),
+        format!("/api/projects/{project}/consolidation-runs"),
+        format!("/api/projects/{project}/retrieval-traces"),
+        format!("/api/projects/{project}/integration-health"),
         format!("/api/sync/changes?project_id={project}"),
     ]
 }

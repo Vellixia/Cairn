@@ -624,6 +624,250 @@ pub async fn sync_team_changes(
     })))
 }
 
+// ---------------------------------------------------------------------------
+// The control plane's two domain feeds (T110, FR-888, FR-892, FR-893)
+// ---------------------------------------------------------------------------
+
+/// How many rows one control-plane page carries, and the most it will carry.
+///
+/// `web-control-plane.md` §7: twenty-five by default, a hundred at the most,
+/// clamped rather than refused. Separate from `sync::PAGE`, which is the pull
+/// feeds' bound: a machine draining a namespace wants the largest page the
+/// server will give it, and a person reading a panel wants the first screenful.
+pub(crate) const VIEW_PAGE_DEFAULT: i64 = 25;
+pub(crate) const VIEW_PAGE_MAX: i64 = 100;
+
+/// The bound and the cursor a control-plane list takes.
+///
+/// `cursor` rather than `since` because the direction is the opposite one. The
+/// pull feeds resume forward from a position they have already passed; these
+/// pages walk backward from the newest row, and calling both of them `since`
+/// would invite a client to hand one route the other's saved position and get a
+/// silently empty answer.
+#[derive(Deserialize)]
+pub struct DomainViewQuery {
+    #[serde(default)]
+    pub cursor: Option<String>,
+    #[serde(default)]
+    pub limit: Option<i64>,
+}
+
+impl DomainViewQuery {
+    fn page(&self) -> i64 {
+        self.limit
+            .unwrap_or(VIEW_PAGE_DEFAULT)
+            .clamp(1, VIEW_PAGE_MAX)
+    }
+}
+
+/// Which `team_knowledge` rows a caller may see, as one SQL fragment.
+///
+/// **One statement of the rule, used by both readers.** `team_changes` above
+/// pages this table forward for a machine and the view below pages it backward
+/// for a person; they differ in ordering and in nothing else, and the thing
+/// they must not differ in is this. Written as a function taking its own
+/// placeholder numbers rather than as a constant, because the two queries bind
+/// their parameters in different positions and a constant would have had to be
+/// string-patched at each call site — which is the same duplication with an
+/// extra step.
+///
+/// The rule itself is `sync-namespaces.md` §1a and FR-464: a proposal is not
+/// yet guidance, so it reaches its author and any administrator and nobody
+/// else, while everything that has been through ratification — including a
+/// retirement — reaches every authenticated account.
+///
+/// What would falsify it: a caller who is neither the author nor an
+/// administrator seeing a `proposed` row through either reader.
+fn team_visibility_predicate(is_admin: &str, actor: &str) -> String {
+    format!("({is_admin} OR state <> 'proposed' OR proposed_by_user_id = {actor})")
+}
+
+/// The cursor a page hands back, or `None` when the feed is exhausted.
+///
+/// A short page means there is nothing behind it, and saying so is what lets a
+/// reader stop. Handing back a position on a short page would make every list
+/// look like it had one more page that turns out to be empty.
+fn view_cursor(rows: &[sqlx::postgres::PgRow], limit: i64) -> Option<String> {
+    if (rows.len() as i64) < limit {
+        return None;
+    }
+    let last = rows.last()?;
+    Some(
+        PageCursor {
+            at: last
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("changed_at")
+                .ok()?,
+            id: last.try_get::<Uuid, _>("id").ok()?,
+        }
+        .encode(),
+    )
+}
+
+/// `GET /api/personal/knowledge` — the Domains screen's personal panel
+/// (FR-888).
+///
+/// **The owner is the credential, and there is no parameter that could be
+/// anything else.** This is the read half of the guarantee
+/// [`sync_personal_changes`] already makes on the pull path, and it is made the
+/// same way: not by checking an owner argument but by having none. A route with
+/// an owner argument and a check is one edit away from a route with an owner
+/// argument; a route with no argument is not.
+///
+/// **Tombstones are excluded here and included there**, and the asymmetry is
+/// the point. A cache learns that a record was forgotten only from the row
+/// itself, so the pull feed carries it one last time with no content. A person
+/// reading a panel is not a cache: a forgotten record has nothing left to show,
+/// and listing it would be an empty row whose only content is that something
+/// used to be there.
+pub async fn personal_knowledge_view(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Query(q): Query<DomainViewQuery>,
+) -> ApiResult<Json<Value>> {
+    require_capability(state.schema_version, PERSONAL_CAPABILITY)?;
+    let limit = q.page();
+    let (at, id) = PageCursor::descending_bound(PageCursor::decode_opt(q.cursor.as_deref()));
+
+    let rows = sqlx::query(
+        "WITH visible AS (
+             SELECT id, knowledge_type, content, topic_key, value_key,
+                    writer_id, writer_seq, created_at, superseded_by_id, forgotten_at,
+                    created_at AS changed_at
+               FROM personal_knowledge
+              WHERE owner_user_id = $1 AND forgotten_at IS NULL
+         )
+         SELECT * FROM visible
+          WHERE ($2::timestamptz IS NULL OR (changed_at, id) < ($2, $3::uuid))
+          ORDER BY changed_at DESC, id DESC LIMIT $4",
+    )
+    .bind(user.id())
+    .bind(at)
+    .bind(id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
+    let mut facts = applicability_by_id(&state.pool, PERSONAL_APPLICABILITY_READ, &ids).await?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let id: Uuid = row.get("id");
+            personal_row_json(
+                id,
+                row.get("knowledge_type"),
+                row.get("content"),
+                row.try_get::<Option<String>, _>("topic_key")
+                    .ok()
+                    .flatten()
+                    .as_deref(),
+                row.try_get::<Option<String>, _>("value_key")
+                    .ok()
+                    .flatten()
+                    .as_deref(),
+                row.get("writer_id"),
+                row.get("writer_seq"),
+                row.get("created_at"),
+                row.try_get("superseded_by_id").ok().flatten(),
+                row.try_get("forgotten_at").ok().flatten(),
+                &facts.remove(&id).unwrap_or_default(),
+            )
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "items": items,
+        "cursor": view_cursor(&rows, limit),
+        "limit": limit,
+    })))
+}
+
+/// `GET /api/team/knowledge` — the Domains screen's team panel and the team
+/// curation screen's worklist (FR-888, FR-889).
+///
+/// **A read path only.** `web-control-plane.md` §8 is explicit that no new
+/// mutation endpoint is introduced for team curation: ratify and retire already
+/// exist as single compare-and-swap statements, and a web-specific handler that
+/// read the state, checked it and then updated it would reopen the
+/// double-ratification race those statements close and would make "un-retire"
+/// expressible (FR-889a). So this route adds a list in front of actions that
+/// already exist, and nothing else.
+///
+/// Visibility is [`team_visibility_predicate`], the same rule the pull feed
+/// applies, so a proposal cannot be visible in one reader and not the other.
+pub async fn team_knowledge_view(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Query(q): Query<DomainViewQuery>,
+) -> ApiResult<Json<Value>> {
+    require_capability(state.schema_version, TEAM_CAPABILITY)?;
+    let limit = q.page();
+    let (at, id) = PageCursor::descending_bound(PageCursor::decode_opt(q.cursor.as_deref()));
+
+    let rows = sqlx::query(&format!(
+        "WITH visible AS (
+             SELECT id, knowledge_type, content, topic_key, value_key, state,
+                    proposed_by_user_id, ratified_by_user_id, ratified_at,
+                    writer_id, writer_seq, created_at, superseded_by_id,
+                    retired_by_user_id, retired_at,
+                    GREATEST(created_at, ratified_at, retired_at, superseded_at)
+                        AS changed_at
+               FROM team_knowledge
+              WHERE {}
+         )
+         SELECT * FROM visible
+          WHERE ($3::timestamptz IS NULL OR (changed_at, id) < ($3, $4::uuid))
+          ORDER BY changed_at DESC, id DESC LIMIT $5",
+        team_visibility_predicate("$1", "$2")
+    ))
+    .bind(user.role() == ServerRole::Admin)
+    .bind(user.id())
+    .bind(at)
+    .bind(id)
+    .bind(limit)
+    .fetch_all(&state.pool)
+    .await?;
+
+    let ids: Vec<Uuid> = rows.iter().map(|r| r.get("id")).collect();
+    let mut facts = applicability_by_id(&state.pool, TEAM_APPLICABILITY_READ, &ids).await?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let id: Uuid = row.get("id");
+            TeamWireRow {
+                id,
+                knowledge_type: row.get("knowledge_type"),
+                content: row.get("content"),
+                topic_key: row.try_get::<Option<String>, _>("topic_key").ok().flatten(),
+                value_key: row.try_get::<Option<String>, _>("value_key").ok().flatten(),
+                state: row.get("state"),
+                proposed_by_user_id: row.get("proposed_by_user_id"),
+                ratified_by_user_id: row.try_get("ratified_by_user_id").ok().flatten(),
+                ratified_at: row.try_get("ratified_at").ok().flatten(),
+                writer_id: row.get("writer_id"),
+                writer_seq: row.get("writer_seq"),
+                created_at: row.get("created_at"),
+                superseded_by_id: row.try_get("superseded_by_id").ok().flatten(),
+                retired_by_user_id: row.try_get("retired_by_user_id").ok().flatten(),
+                retired_at: row.try_get("retired_at").ok().flatten(),
+                applicability: facts.remove(&id).unwrap_or_default(),
+            }
+            .to_json()
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "items": items,
+        "cursor": view_cursor(&rows, limit),
+        "limit": limit,
+        // Which caller's view this page reflects, for the reason
+        // `sync_team_changes` states: the filter above is not the same filter
+        // for every caller, so a position in it belongs to one caller's feed
+        // and stops being a position the moment that caller's view widens.
+        "visibility": visibility_fingerprint(user.id(), user.role()),
+    })))
+}
+
 /// A resume position: a timestamp **and** the last id at it.
 ///
 /// **The id is what makes a page boundary safe.** With a timestamp alone, a group
@@ -681,6 +925,51 @@ impl PageCursor {
             // verbatim: refusing would strand a client whose stored cursor was
             // written by a version that formatted it differently.
             Err(_) => Self::start(),
+        }
+    }
+
+    /// The same encoding, parsed as **absent** rather than as the beginning of
+    /// time (T108, T110).
+    ///
+    /// [`Self::decode`] exists for the pull feeds, which walk *forward* from a
+    /// position: for them the beginning of time is the right answer to "no
+    /// cursor" and also the right answer to "a cursor I cannot read", because
+    /// both mean "start again and re-deliver". The control plane's lists walk
+    /// **backward** from the newest row, and for them those two answers are
+    /// opposites — the beginning of time is the far end of the feed, so
+    /// resolving an unreadable cursor to it would hand the reader an empty page
+    /// and a dashboard that looks like nothing ever happened.
+    ///
+    /// So this returns `None` for both absent and unreadable, and a descending
+    /// query applies no lower bound at all when it gets `None`. Strict about
+    /// the *shape*, for the same reason: a timestamp with no id half cannot
+    /// break a tie, and a descending page that re-delivered a tie group would
+    /// repeat rows in a list a person is reading rather than in an importer
+    /// that is idempotent by id.
+    pub(crate) fn decode_opt(raw: Option<&str>) -> Option<Self> {
+        let (ts, id) = raw?.split_once('|')?;
+        Some(Self {
+            at: chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()?
+                .with_timezone(&chrono::Utc),
+            id: Uuid::parse_str(id).ok()?,
+        })
+    }
+
+    /// The two halves a descending keyset binds, or two `NULL`s when there is
+    /// no cursor.
+    ///
+    /// Returned as a pair so a query can say `($n::timestamptz IS NULL OR
+    /// (at, id) < ($n, $n+1))` and have one code path for the first page and
+    /// every page after it. A sentinel "end of time" value would work too and
+    /// is worse: it puts a magic timestamp into the query plan, and it is wrong
+    /// the day a row is written with a clock further ahead than the sentinel.
+    pub(crate) fn descending_bound(
+        cursor: Option<Self>,
+    ) -> (Option<chrono::DateTime<chrono::Utc>>, Option<Uuid>) {
+        match cursor {
+            Some(c) => (Some(c.at), Some(c.id)),
+            None => (None, None),
         }
     }
 }
@@ -805,7 +1094,7 @@ pub async fn team_changes(
     since: PageCursor,
     limit: i64,
 ) -> ApiResult<ChangePage> {
-    let rows = sqlx::query(
+    let rows = sqlx::query(&format!(
         "WITH changed AS (
              SELECT id, knowledge_type, content, topic_key, value_key, state,
                     proposed_by_user_id, ratified_by_user_id, ratified_at,
@@ -817,9 +1106,10 @@ pub async fn team_changes(
          )
          SELECT * FROM changed
           WHERE (changed_at, id) > ($1, $2)
-            AND ($3 OR state <> 'proposed' OR proposed_by_user_id = $4)
+            AND {}
           ORDER BY changed_at ASC, id ASC LIMIT $5",
-    )
+        team_visibility_predicate("$3", "$4")
+    ))
     .bind(since.at)
     .bind(since.id)
     .bind(caller_is_admin)
