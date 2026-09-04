@@ -16,9 +16,21 @@ import {
 const SECTION_LABELS: Record<string, string> = {
   tasks: "Tasks",
   sessions: "Sessions",
+  activity: "Activity",
   memory: "Memory",
+  retrievals: "Retrievals",
+  agents: "Agents",
+  domains: "Domains",
   sync: "Sync",
   tokens: "API tokens",
+};
+
+/** The deployment-wide screens, which hang off the root rather than a project. */
+const TOP_LEVEL_LABELS: Record<string, string> = {
+  tokens: "API tokens",
+  team: "Team knowledge",
+  system: "System health",
+  admin: "Accounts",
 };
 
 type Crumb = { label: string; href?: string };
@@ -40,8 +52,8 @@ export function AppBreadcrumb() {
   const segments = pathname.split("/").filter(Boolean);
   const crumbs: Crumb[] = [{ label: "Projects", href: "/" }];
 
-  if (segments[0] === "tokens") {
-    crumbs.push({ label: SECTION_LABELS.tokens });
+  if (segments[0] && TOP_LEVEL_LABELS[segments[0]]) {
+    crumbs.push({ label: TOP_LEVEL_LABELS[segments[0]] });
   } else if (segments[0] === "projects" && segments[1]) {
     const id = segments[1];
     const name =
@@ -53,9 +65,17 @@ export function AppBreadcrumb() {
         : { label: name },
     );
 
-    if (section === "sessions" && segments[3]) {
-      crumbs.push({ label: "Sessions", href: `/projects/${id}/sessions` });
-      crumbs.push({ label: "Handoff" });
+    // A third segment is a record inside a section, so the section stays in the
+    // trail as a link rather than being replaced by the record.
+    if (section && segments[3]) {
+      const label = SECTION_LABELS[section] ?? section;
+      crumbs.push({ label, href: `/projects/${id}/${section}` });
+      crumbs.push({
+        label:
+          section === "sessions"
+            ? "Handoff"
+            : `${label.replace(/s$/, "")} detail`,
+      });
     } else if (section) {
       crumbs.push({ label: SECTION_LABELS[section] ?? section });
     }
