@@ -1688,6 +1688,15 @@ impl MatrixStatus {
         match self {
             MatrixStatus::Supported => "supported",
             MatrixStatus::UnsupportedByVendor => "unsupported_by_vendor",
+            // Its own name, which it did not have. This returned
+            // `unsupported_by_vendor`, so every decline Cairn made was written
+            // down as a vendor absence — the exact confusion the doc comment
+            // above spends a paragraph forbidding, and the one that blames
+            // OpenCode for a choice Cairn made about OpenCode's beta surfaces.
+            //
+            // `parse` searches by `as_str`, so the collision also made
+            // `declined_by_cairn` unparseable and silently resolved every
+            // `unsupported_by_vendor` to whichever variant came first.
             MatrixStatus::DeclinedByCairn => "declined_by_cairn",
             MatrixStatus::AdapterUnimplemented => "adapter_unimplemented",
             MatrixStatus::RuntimeFailure => "runtime_failure",
@@ -1861,6 +1870,20 @@ impl MatrixCell {
     /// confidence.
     pub fn is_coherent(&self) -> bool {
         match self.status {
+            // **Both behavioural claims need an observation, and need it to be
+            // one.** `supported` checked only that a timestamp was present, so a
+            // configuration file read back and stamped with a time was accepted
+            // as a capability working — which is precisely the collapse FR-852
+            // draws the `evidence_kind` distinction to prevent. Configured is not
+            // working.
+            //
+            // `runtime_failure` checked nothing at all, so anything could be
+            // declared failing with no evidence whatever. That is the same
+            // overclaim pointing the other way: it turns silence into a fault,
+            // sends somebody to debug an integration nobody has exercised, and
+            // makes `no_evidence` — the honest answer — indistinguishable from a
+            // real failure. A failure is a claim that something *ran and did not
+            // work*, and it is owed evidence exactly as a success is.
             MatrixStatus::Supported | MatrixStatus::RuntimeFailure => {
                 self.evidence_kind == Some(EvidenceKind::Observation) && self.observed_at.is_some()
             }

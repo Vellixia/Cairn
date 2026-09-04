@@ -335,6 +335,23 @@ async fn report_health(
                 cell.capability
             )));
         }
+        // **The stage is a closed vocabulary too, and it was not being checked.**
+        //
+        // A stage matters most exactly when something failed: "capture is
+        // broken" and "the server refused what capture produced" call for
+        // different actions, and the stage is what tells them apart (FR-853). A
+        // cell carrying an unrecognized stage — an empty string, most easily —
+        // renders as a failure at nowhere in particular, which is the conflation
+        // the vocabulary exists to prevent. It is also part of the row's primary
+        // key, so an unconstrained value silently forks the cell it should have
+        // replaced.
+        if cairn_core::event::PipelineStage::from_str(&cell.stage).is_err() {
+            return Err(ApiError::invalid(format!(
+                "`{}` is not a pipeline stage; a failure has to name where it \
+                 failed, and a stage nobody declared names nowhere",
+                cell.stage
+            )));
+        }
         if !cell.is_coherent() {
             // Named rather than silently downgraded: a client reporting
             // `supported` on configuration evidence has a bug worth knowing
@@ -409,11 +426,11 @@ async fn read_health(
 /// filling the gap here would erase the distinction FR-855 draws.
 async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiResult<Vec<Value>> {
     let rows = sqlx::query(
-        "SELECT writer_id, agent, capability, stage, status, evidence_kind,
+        "SELECT account_id, writer_id, agent, capability, stage, status, evidence_kind,
                 observed_at, degraded
            FROM integration_health
           WHERE project_id = $1
-          ORDER BY agent, capability, stage",
+          ORDER BY agent, capability, stage, writer_id, account_id",
     )
     .bind(project_id)
     .fetch_all(pool)
@@ -423,6 +440,15 @@ async fn integration_health_rows(pool: &sqlx::PgPool, project_id: Uuid) -> ApiRe
         .iter()
         .map(|r| {
             json!({
+                // **Attribution needs both halves.** `writer_id` names the
+                // machine and is supplied by the reporting client, so two
+                // accounts can pick the same label — a shared CI name is the
+                // obvious case. The row is already keyed on the account, so the
+                // two are stored apart; without the account in the *read* a
+                // reader sees two contradictory cells for one machine and no way
+                // to tell whose observation is whose, which is FR-857 satisfied
+                // in the table and lost on the way out.
+                "account_id": r.get::<Uuid, _>("account_id"),
                 "writer_id": r.get::<String, _>("writer_id"),
                 "agent": r.get::<String, _>("agent"),
                 "capability": r.get::<String, _>("capability"),
