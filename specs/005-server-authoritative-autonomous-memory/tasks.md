@@ -170,19 +170,32 @@
 
 **Independent Test**: Seed a session, remove server connectivity, continue capture/commands/retrieval, restore connectivity, and inspect spools plus canonical rows.
 
-- [ ] T093 [P] [US4] Write failing outage tests for agent deadlines, event spooling/replay, duplicate responses as success, zero local durable knowledge, and backlog visibility in `tests/tests/feature005_outage.rs` (depends on T022, T029; SC-715–SC-717)
-- [ ] T094 [P] [US4] Write failing credential/server-switch tests for event and command account binding and exact server-instance refusal in `tests/tests/feature005_identity_outage.rs` (depends on T022; FR-790–FR-791)
-- [ ] T095 [P] [US4] Write failing capacity tests for oldest capture-class shedding, boundary-row preservation, fully-boundary saturation, content-free drop records, and automatic recovery in `tests/tests/feature005_spool_capacity.rs` (depends on T022; FR-785)
-- [ ] T096 [US4] Extend the T039 shared event/command drain primitive with bounded outage loops, exponential backoff, reconnect scheduling and stale-claim recovery in `crates/cairnd/src/sync.rs` (depends on T039, T093)
-- [ ] T097 [US4] Queue explicit remember/supersede/relate/pattern/verification commands as accepted-for-delivery—not durable—when unreachable in `crates/cairnd/src/handlers.rs` (depends on T027, T096; FR-815a)
-- [ ] T098 [US4] Enforce spool capacity, boundary protection, saturation, and disposition accounting atomically in `crates/cairn-store/src/spool.rs` (depends on T095)
-- [ ] T099 [US4] Preserve exact credential and server-instance bindings across drain, sign-out, and re-authentication in `crates/cairnd/src/sync.rs` (depends on T094, T096)
-- [ ] T100 [US4] Surface event/command depth, oldest entry, retry blocker, saturation, permanent refusals, and fresh-knowledge-unavailable state in `crates/cairnd/src/handlers.rs` (depends on T097–T099; FR-788–FR-792)
-- [ ] T101 [US4] Make T093 outage/replay/no-local-authority tests pass in `tests/tests/feature005_outage.rs` (depends on T096–T100)
-- [ ] T102 [US4] Make T094 credential/cache/server-instance isolation tests pass in `tests/tests/feature005_identity_outage.rs` (depends on T099–T100)
-- [ ] T103 [US4] Make T095 capacity and content-free drop tests pass in `tests/tests/feature005_spool_capacity.rs` (depends on T098–T100; SC-752, SC-753)
-- [ ] T104 [US4] Add repeated response-loss replay trials proving one canonical event, one consolidation input, and one durable effect in `tests/tests/feature005_replay_idempotency.rs` (depends on T096, T101; SC-716)
-- [ ] T105 [US4] Implement the story-level mid-session outage/recovery acceptance test in `tests/tests/feature005_us4_fail_soft.rs` (depends on T101–T104)
+- [X] T093 [P] [US4] Write failing outage tests for agent deadlines, event spooling/replay, duplicate responses as success, zero local durable knowledge, and backlog visibility in `tests/tests/feature005_outage.rs` (depends on T022, T029; SC-715–SC-717)
+  - Settled during implementation: the outage is created by editing `config.json`'s `server_url` and restarting, not by `auth token set --server` — the endpoint is part of the identity, so re-pointing through the CLI correctly forgets the account and turns an outage test into a sign-out test.
+- [X] T094 [P] [US4] Write failing credential/server-switch tests for event and command account binding and exact server-instance refusal in `tests/tests/feature005_identity_outage.rs` (depends on T022; FR-790–FR-791)
+  - Settled during implementation: FR-790a's read-direction rule was already implemented by US2's account-keyed outage cache; the test asserts it rather than adding it.
+- [X] T095 [P] [US4] Write failing capacity tests for oldest capture-class shedding, boundary-row preservation, fully-boundary saturation, content-free drop records, and automatic recovery in `tests/tests/feature005_spool_capacity.rs` (depends on T022; FR-785)
+  - Settled during implementation: a seventh test was added for the shape the first six could not falsify — a shed that actually deleted rows followed by a refusal, which is the only case where the saturation rollback is load-bearing.
+- [X] T096 [US4] Extend the T039 shared event/command drain primitive with bounded outage loops, exponential backoff, reconnect scheduling and stale-claim recovery in `crates/cairnd/src/sync.rs` (depends on T039, T093)
+  - Settled during implementation: `release_event_claims`/`release_command_claims` had no production caller; they now run once at daemon start and deliberately not per tick, which would race a live drain. The drain also translates the local project id to the server's — without it every project-scoped queued command was undeliverable.
+- [X] T097 [US4] Queue explicit remember/supersede/relate/pattern/verification commands as accepted-for-delivery—not durable—when unreachable in `crates/cairnd/src/handlers.rs` (depends on T027, T096; FR-815a)
+  - Settled during implementation: only 4 of 13 command kinds were routed. `pin`'s `reason` and `reinforce`'s `from_memory_id` deliberately do not travel, because the server's handlers do not read them and a field that crosses and is dropped is worse than one that never left.
+- [X] T098 [US4] Enforce spool capacity, boundary protection, saturation, and disposition accounting atomically in `crates/cairn-store/src/spool.rs` (depends on T095)
+  - Settled during implementation: capacity, boundary protection and saturation were already correct from Foundations; US4 added falsification rather than behaviour.
+- [X] T099 [US4] Preserve exact credential and server-instance bindings across drain, sign-out, and re-authentication in `crates/cairnd/src/sync.rs` (depends on T094, T096)
+  - Settled during implementation: the bindings were already exact — one credential read per drain, no fallback identity, exact `account_id` on the claim. US4 proves them end to end.
+- [X] T100 [US4] Surface event/command depth, oldest entry, retry blocker, saturation, permanent refusals, and fresh-knowledge-unavailable state in `crates/cairnd/src/handlers.rs` (depends on T097–T099; FR-788–FR-792)
+  - Settled during implementation: FR-792 was two thirds unimplemented. `oldest_at` and `blocked_reason` added, with `server_unreachable` and `no_account` supplied by the caller because the rows cannot show either.
+- [X] T101 [US4] Make T093 outage/replay/no-local-authority tests pass in `tests/tests/feature005_outage.rs` (depends on T096–T100)
+  - Settled during implementation: found that `cairn memory add` printed "Remembered ?" for a queued command, which claims a durability it does not have.
+- [X] T102 [US4] Make T094 credential/cache/server-instance isolation tests pass in `tests/tests/feature005_identity_outage.rs` (depends on T099–T100)
+  - Settled during implementation: passed once the account and instance bindings were exercised end to end; no production change needed.
+- [X] T103 [US4] Make T095 capacity and content-free drop tests pass in `tests/tests/feature005_spool_capacity.rs` (depends on T098–T100; SC-752, SC-753)
+  - Settled during implementation: falsified by four mutations, three caught by the original six tests and the fourth only by the seventh.
+- [X] T104 [US4] Add repeated response-loss replay trials proving one canonical event, one consolidation input, and one durable effect in `tests/tests/feature005_replay_idempotency.rs` (depends on T096, T101; SC-716)
+  - Settled during implementation: found that `ON CONFLICT (event_id)` named only one of two equivalent unique constraints, so a racing replay answered 500 instead of `duplicate`. Data was never at risk; the answer was.
+- [X] T105 [US4] Implement the story-level mid-session outage/recovery acceptance test in `tests/tests/feature005_us4_fail_soft.rs` (depends on T101–T104)
+  - Settled during implementation: the harness gained `Server::go_offline`/`come_back`, because stopping the process is the only mechanism that keeps the address, the data and the credential and removes only reachability.
 
 **Checkpoint**: User Story 4 passes independently; outage changes freshness and queue state, never agent usability or knowledge authority.
 
