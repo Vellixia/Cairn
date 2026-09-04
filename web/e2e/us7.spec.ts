@@ -146,7 +146,15 @@ test("a non-member is refused rather than shown an empty page", async ({
   // `.first()`: the page may carry more than one alert region, and a strict
   // locator would fail on the count rather than on the behaviour.
   await expect(page.getByRole("alert").first()).toBeVisible();
-  await expect(page.getByText(/something went wrong/i).first()).toBeVisible();
+  // A *refusal*, not a generic failure. This asserted "something went wrong"
+  // until US5 gave the control plane an explicit refusal state carrying the
+  // server's own words — which is strictly better for the reader this test
+  // exists to protect, and no longer matches the old wording. The behaviour
+  // being asserted is unchanged: told, rather than shown an empty project.
+  await expect(page.getByTestId("refusal").first()).toBeVisible();
+  await expect(
+    page.getByText(/do not have access|something went wrong/i).first(),
+  ).toBeVisible();
 });
 
 test("the projects list shows an empty state when there are none", async ({

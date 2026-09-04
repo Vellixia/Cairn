@@ -154,13 +154,36 @@ fn a_superseded_team_entry_stops_competing_in_every_canonical_read() {
     );
 
     // Search: the replacement is there, the replaced entry is not.
+    //
+    // Given a moment to become true rather than sampled once. `team ratify
+    // --supersedes` is a server decision followed by a local write, and the
+    // search reads the local copy — so an immediate read can catch the instant
+    // between them and see the entry this test just replaced. That is the
+    // transition working, observed too early, and asserting on the first sample
+    // turned it into a failure about supersession roughly one run in four.
+    //
+    // The assertion itself is unchanged and still both-sided: waiting for the
+    // replacement to appear would prove nothing on its own, so the superseded
+    // entry must be gone *at the same observation*.
     let mut mcp = Mcp::start(&a.sandbox);
-    let searched = mcp.tool_result("cairn_search", json!({ "query": run.clone() }), &cwd);
-    let team = searched["content"][0]["text"]["team"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let ids: Vec<&str> = team.iter().filter_map(|t| t["id"].as_str()).collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let mut searched;
+    let mut ids: Vec<String>;
+    loop {
+        searched = mcp.tool_result("cairn_search", json!({ "query": run.clone() }), &cwd);
+        ids = searched["content"][0]["text"]["team"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|t| t["id"].as_str().map(str::to_string))
+            .collect();
+        if ids.iter().any(|i| i == &new) || std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
     assert!(
         ids.contains(&new.as_str()),
         "the replacement guidance is not in search: {searched}"

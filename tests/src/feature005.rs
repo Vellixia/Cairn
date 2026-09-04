@@ -39,6 +39,9 @@ pub const LOCAL_SCHEMA_V8: i64 = 8;
 /// boundary refuses, so a server row has nothing to put in them. Hence
 /// `cached_patterns`, and hence a ninth migration.
 pub const LOCAL_SCHEMA_V9: i64 = 9;
+/// The version US4's repair adds, binding each spooled row to the server
+/// instance it was queued for (FR-791).
+pub const LOCAL_SCHEMA_V10: i64 = 10;
 /// The local schema version Feature 005 upgrades *from*.
 pub const LOCAL_SCHEMA_V7: i64 = 7;
 /// The server schema version Feature 005 introduces (`data-model.md` §6).

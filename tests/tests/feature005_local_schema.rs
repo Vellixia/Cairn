@@ -15,7 +15,9 @@
 //!   promoting a pattern twice yield one record while two people's identical
 //!   patterns stay two.
 
-use cairn_e2e::feature005::{Local, LocalAt, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9};
+use cairn_e2e::feature005::{
+    Local, LocalAt, LOCAL_SCHEMA_V10, LOCAL_SCHEMA_V7, LOCAL_SCHEMA_V8, LOCAL_SCHEMA_V9,
+};
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
@@ -61,12 +63,45 @@ fn v7_migrates_to_v8_and_gains_every_table() {
     rt().block_on(async {
         let db = LocalAt::new(LOCAL_SCHEMA_V7).await;
         let db = db.migrate_to_latest().await;
-        // Migrating to *latest* now lands past v8, so the assertion is that v8's
+        // Migrating to *latest* lands past v8, so the assertion is that v8's
         // tables all arrived and not that the store stopped there. Pinning this
-        // to v8 would mean every future migration failed a test about v8.
-        assert_eq!(db.schema_version().await, LOCAL_SCHEMA_V9);
+        // to a particular later version is what made it fail twice already —
+        // once at v9 and once at v10 — so it now asserts only that latest is at
+        // least v8, and the table check below is what carries the rule.
+        assert!(db.schema_version().await >= LOCAL_SCHEMA_V8);
         for table in V8_TABLES {
             assert!(db.table_exists(table).await, "v8 did not create {table}");
+        }
+    });
+}
+
+/// The spool's server-instance binding arrives in v10.
+///
+/// Both columns and both re-created claim indexes, because the binding is only
+/// enforceable if the claim predicate can use it: a column nothing indexes
+/// means a claim that scans another deployment's backlog to discard it.
+#[test]
+fn v9_migrates_to_v10_and_binds_the_spools_to_a_server_instance() {
+    rt().block_on(async {
+        let db = LocalAt::new(LOCAL_SCHEMA_V9).await;
+        for table in ["event_spool", "command_spool"] {
+            assert_eq!(
+                db.count(&format!(
+                    "SELECT count(*) FROM pragma_table_info('{table}')
+                      WHERE name = 'server_instance_id'"
+                ))
+                .await,
+                0,
+                "v9 already binds {table}, so v10 is not what introduces it"
+            );
+        }
+        let db = db.migrate_to_latest().await;
+        assert!(db.schema_version().await >= LOCAL_SCHEMA_V10);
+        for table in ["event_spool", "command_spool"] {
+            assert!(
+                db.column_exists(table, "server_instance_id").await,
+                "v10 did not bind {table}"
+            );
         }
     });
 }
@@ -90,7 +125,7 @@ fn v8_migrates_to_v9_and_gains_the_pattern_cache() {
             "v8 already has cached_patterns, so v9 is not what introduces it"
         );
         let db = db.migrate_to_latest().await;
-        assert_eq!(db.schema_version().await, LOCAL_SCHEMA_V9);
+        assert!(db.schema_version().await >= LOCAL_SCHEMA_V9);
         assert!(db.table_exists("cached_patterns").await);
         for refused in [
             "signals",

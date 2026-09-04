@@ -231,10 +231,27 @@ export const api = {
    * that race back in the browser, where it cannot be resolved (FR-889a). So
    * these send the id and nothing about the state they expect to find.
    */
+  /**
+   * Ratify a proposal. Admin-only, and refused server-side for anyone else.
+   *
+   * **The empty object is not decoration.** `request` sets
+   * `content-type: application/json` on every call, and a request that declares
+   * a JSON body and sends none is a request the server's extractor rejects —
+   * these two routes take an optional body, and "absent" means no content-type,
+   * not a content-type with nothing behind it. Sending `{}` says what the header
+   * already claimed. Without it both transitions answered 400 and the row stayed
+   * `proposed` while the UI reported nothing wrong.
+   */
   ratifyTeam: (id: string) =>
-    request<TeamTransition>(`/api/team/${id}/ratify`, { method: "POST" }),
+    request<TeamTransition>(`/api/team/${id}/ratify`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
   retireTeam: (id: string) =>
-    request<TeamTransition>(`/api/team/${id}/retire`, { method: "POST" }),
+    request<TeamTransition>(`/api/team/${id}/retire`, {
+      method: "POST",
+      body: JSON.stringify({}),
+    }),
 
   /** Admin-only on the server: a member is refused before the handler runs. */
   systemHealth: () => request<SystemHealth>("/api/system/health"),
