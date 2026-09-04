@@ -43,7 +43,13 @@ pub fn opt_ts(row: &SqliteRow, col: &str) -> Result<Option<DateTime<Utc>>> {
     }
 }
 
-fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
+/// Parse a stored timestamp, or `None` when it is not one.
+///
+/// `pub` because a column read outside a row decoder needs it too — an
+/// aggregate like `MIN(created_at)` comes back as a bare string with no
+/// `SqliteRow` to hand to [`ts`], and a second parser for the same text format
+/// is how two readers of one column end up disagreeing about it.
+pub fn parse_ts(raw: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(raw)
         .ok()
         .map(|d| d.with_timezone(&Utc))

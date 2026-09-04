@@ -62,6 +62,7 @@
 use crate::{rows, tx, Result, Store, StoreError};
 use cairn_core::event::{Disposition, EventKind, SafeCanonicalEvent};
 use cairn_core::eventid::{command_id, event_id};
+use chrono::{DateTime, Utc};
 use sqlx::Row;
 use std::fmt;
 use std::str::FromStr;
@@ -1098,6 +1099,19 @@ pub struct SpoolBreakdown {
     /// capture-class is left to shed; for commands, the bound is reached, full
     /// stop.
     pub saturated: bool,
+    /// When the oldest undelivered row was created, or `None` when there is
+    /// none (FR-792).
+    ///
+    /// A depth on its own does not say whether anything is wrong: fifty rows
+    /// spooled in the last second is a busy minute, and one row spooled last
+    /// Tuesday is an outage nobody noticed. The age is what separates them, and
+    /// it is the one number a person actually acts on.
+    ///
+    /// Terminal rows are excluded, deliberately. They are not waiting for
+    /// anything, so counting them here would make an unattended permanent
+    /// refusal look like an ever-worsening delay and hide a genuine one behind
+    /// it.
+    pub oldest_at: Option<DateTime<Utc>>,
 }
 
 impl SpoolBreakdown {
@@ -1117,6 +1131,47 @@ impl SpoolBreakdown {
     /// Rows in a terminal state, which stay visible rather than being deleted.
     pub fn refused(&self) -> i64 {
         self.terminal
+    }
+
+    /// Why delivery is not progressing, or `None` when it is (FR-792).
+    ///
+    /// **The third thing FR-792 asks for**, after the depth and the oldest
+    /// entry, and the only one that is a judgement rather than a number. A user
+    /// looking at a spool that is not draining needs the reason, and the states
+    /// that produce it call for different actions: a saturated store is losing
+    /// new work *now*; a retry-exhausted row will never move again without
+    /// intervention; a deferred row is fine and merely waiting for a server
+    /// upgrade. Collapsing those into "stuck" would tell someone to act on the
+    /// harmless one and ignore the harmful one.
+    ///
+    /// Ordered by severity and the first match wins, because a spool can be
+    /// several of these at once and a status line reports one thing. Saturation
+    /// leads: it is the only state in which work is being *lost* rather than
+    /// delayed.
+    ///
+    /// An empty spool is never blocked, and neither is one whose rows are all
+    /// simply waiting for the next tick — reporting a reason there would make
+    /// "blocked" mean "has work", and a signal that is always on is not a
+    /// signal. `no_account` is not decidable from the breakdown alone and is
+    /// left to the caller, which is the only side that knows whether anybody is
+    /// signed in.
+    pub fn blocked_reason(&self) -> Option<&'static str> {
+        if self.saturated {
+            return Some("saturated");
+        }
+        if self.terminal_retry_exhausted > 0 {
+            return Some("retry_exhausted");
+        }
+        if self.terminal > self.terminal_retry_exhausted {
+            return Some("refused_by_server");
+        }
+        if self.deferred > 0 {
+            return Some("awaiting_capability");
+        }
+        if self.retrying > 0 {
+            return Some("backing_off");
+        }
+        None
     }
 }
 
@@ -1345,6 +1400,16 @@ async fn breakdown(
         SpoolTable::Commands => at_bound,
     };
 
+    // Oldest by creation, not by `next_attempt_at`: the question FR-792 asks is
+    // how long something has been waiting, and a row's backoff moving forward
+    // does not make it younger.
+    let oldest_at: Option<String> = sqlx::query_scalar(&format!(
+        "SELECT MIN(created_at) FROM {table} WHERE state IN {UNDELIVERED}"
+    ))
+    .fetch_one(&mut *conn)
+    .await?;
+    let oldest_at = oldest_at.as_deref().and_then(rows::parse_ts);
+
     Ok(SpoolBreakdown {
         waiting,
         in_flight,
@@ -1354,6 +1419,7 @@ async fn breakdown(
         terminal_retry_exhausted,
         bytes,
         saturated,
+        oldest_at,
     })
 }
 

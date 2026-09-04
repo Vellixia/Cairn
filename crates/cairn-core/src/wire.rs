@@ -1485,7 +1485,10 @@ pub struct CaptureHealth {
 /// derived from the four non-terminal ones rather than counted separately, so
 /// it cannot disagree with them, and `terminal_retry_exhausted` is a subset of
 /// `terminal` rather than a sixth condition.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+/// No longer `Copy`: FR-792's two additions are an instant and a reason, and
+/// both are text on the wire. A status type that had to stay `Copy` would be a
+/// type that could never carry a reason.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SpoolHealth {
     pub waiting: i64,
     pub in_flight: i64,
@@ -1498,6 +1501,23 @@ pub struct SpoolHealth {
     pub undelivered: i64,
     /// Whether the spool is at its bound and refusing new work.
     pub saturated: bool,
+    /// When the oldest undelivered row was created (FR-792), RFC 3339, or
+    /// absent when nothing is waiting.
+    ///
+    /// A depth on its own does not say whether anything is wrong. Fifty rows
+    /// spooled in the last second is a busy minute; one row spooled last week is
+    /// an outage nobody noticed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_at: Option<String>,
+    /// Why delivery is not progressing (FR-792), or absent when it is.
+    ///
+    /// One of `saturated`, `retry_exhausted`, `refused_by_server`,
+    /// `awaiting_capability`, `backing_off`, `no_account` — most severe first,
+    /// because a spool can be several at once and this reports one. A closed
+    /// vocabulary rather than a message, so a caller can branch on it and a
+    /// reader is not asked to parse prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
 }
 
 /// One boundary still owing a handoff, and why (FR-240 clause 3).

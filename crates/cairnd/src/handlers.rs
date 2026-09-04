@@ -643,6 +643,27 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             reason,
         } => {
             let r = d.resolve(&cwd).await?;
+            if server_owns_knowledge(d).await {
+                // A pin is derived state the server computes and enforces its
+                // own budget for, so under server authority it is a request
+                // (FR-712).
+                //
+                // `reason` is deliberately not sent. The server's `pin` command
+                // reads `pinned` and nothing else, so a `reason` in the payload
+                // would be accepted and dropped — and a field that travels and
+                // vanishes is worse than one that never left, because the caller
+                // believes it arrived. It stays a local annotation until the
+                // server has somewhere to put it.
+                let _ = &reason;
+                return queue_knowledge_command(
+                    d,
+                    Some(r.project.id),
+                    session_id,
+                    cairn_store::spool::CommandKind::Pin,
+                    &json!({ "target_id": memory_id, "pinned": pinned }),
+                )
+                .await;
+            }
             let s = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
             let config = d.config.read().await.clone();
             repo::set_pinned(
@@ -972,6 +993,21 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
                  use `cairn team retire` (admin only)",
             )),
             Some(KnowledgeDomain::Personal) => {
+                // A tombstone on a record the server owns is a request like any
+                // other mutation (FR-712). Forgetting locally and telling the
+                // server later is the shape FR-709 forbids: for as long as the
+                // command is queued the two sides disagree about whether the
+                // record exists, and the local side is not the authority.
+                if server_owns_knowledge(d).await {
+                    return queue_knowledge_command(
+                        d,
+                        None,
+                        None,
+                        cairn_store::spool::CommandKind::PersonalForget,
+                        &json!({ "target_id": memory_id }),
+                    )
+                    .await;
+                }
                 cairn_store::global::forget_personal(&d.store, memory_id, d.owner_identity().await)
                     .await
                     .map_err(storage_err)?;
@@ -979,6 +1015,16 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             }
             None | Some(KnowledgeDomain::Project) => {
                 let r = d.resolve(&cwd).await?;
+                if server_owns_knowledge(d).await {
+                    return queue_knowledge_command(
+                        d,
+                        Some(r.project.id),
+                        None,
+                        cairn_store::spool::CommandKind::Forget,
+                        &json!({ "target_id": memory_id }),
+                    )
+                    .await;
+                }
                 repo::delete_memory(&d.store, memory_id, r.policy)
                     .await
                     .map_err(storage_err)?;
@@ -1308,6 +1354,9 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
     let commands = cairn_store::spool::command_spool_breakdown(&d.store, capacity)
         .await
         .ok()?;
+    // Read once for both spools, so the two halves of one report cannot
+    // disagree about whether anybody is signed in.
+    let signed_in = d.account_identity().await.is_some();
 
     let mut dispositions: std::collections::BTreeMap<String, i64> =
         std::collections::BTreeMap::new();
@@ -1319,12 +1368,18 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
 
     Some(CaptureHealth {
         dispositions,
-        events: spool_health(&events),
-        commands: spool_health(&commands),
+        events: spool_health(&events, signed_in),
+        commands: spool_health(&commands, signed_in),
     })
 }
 
-fn spool_health(b: &cairn_store::spool::SpoolBreakdown) -> SpoolHealth {
+/// One spool's health on the wire.
+///
+/// `signed_in` is passed rather than read here because the breakdown cannot know
+/// it: a spool full of rows and nobody authenticated is not backing off, it is
+/// undeliverable until someone signs in, and that is the one blocking reason
+/// the rows themselves do not show (FR-792).
+fn spool_health(b: &cairn_store::spool::SpoolBreakdown, signed_in: bool) -> SpoolHealth {
     SpoolHealth {
         waiting: b.waiting,
         in_flight: b.in_flight,
@@ -1336,6 +1391,14 @@ fn spool_health(b: &cairn_store::spool::SpoolBreakdown) -> SpoolHealth {
         // cannot drift apart.
         undelivered: b.undelivered(),
         saturated: b.saturated,
+        oldest_at: b.oldest_at.map(|t| t.to_rfc3339()),
+        // No account outranks every other reason: nothing at all can be claimed
+        // — the claim predicate matches an account exactly — so a `backing_off`
+        // here would describe a retry that is not being attempted.
+        blocked_reason: match (signed_in, b.undelivered() > 0) {
+            (false, true) => Some("no_account".to_string()),
+            _ => b.blocked_reason().map(str::to_string),
+        },
     }
 }
 
@@ -2597,6 +2660,32 @@ async fn memory_reinforce(
     from_memory_id: Option<Uuid>,
 ) -> Reply {
     let r = d.resolve(cwd).await?;
+    if server_owns_knowledge(d).await {
+        // `reinforcement_count` is derived, and a client that could send it
+        // could assert it (`knowledge-commands.md` §3.1). So the intent travels
+        // and the server does the counting.
+        //
+        // The `from` endpoint is still required, and still refused here rather
+        // than server-side, because this is where the caller finds out. It does
+        // **not** travel: the server's `reinforce` command increments the count
+        // and records no edge — recording one is `relate`, a command of its own
+        // (`knowledge-commands.md` §3). Sending a field the handler does not read
+        // would look like the edge had crossed when it had not.
+        let from = from_memory_id.ok_or_else(|| {
+            WireError::invalid(
+                "reinforcement needs the memory that carries the confirming statement",
+            )
+        })?;
+        let _ = from;
+        return queue_knowledge_command(
+            d,
+            Some(r.project.id),
+            session_id,
+            cairn_store::spool::CommandKind::Reinforce,
+            &json!({ "target_id": memory_id }),
+        )
+        .await;
+    }
     let session = ensure_session_for_memory(d, &r, session_id, agent_session_key).await?;
     let target = repo::memory(&d.store, memory_id)
         .await
@@ -2778,6 +2867,35 @@ async fn personal_create(
     let content = cairn_core::redact::redact(&content);
     let identities = current_project_identities(&r.project);
 
+    // Once the server owns durable knowledge this is a request, not a write
+    // (FR-712). Screening still happens here and not only server-side: a
+    // command carrying content the boundary refuses should be refused before it
+    // is queued, so the user learns now rather than when the drain reports it.
+    cairn_core::validate::validate_global_content(
+        &content,
+        topic_key.as_deref(),
+        value_key.as_deref(),
+        &[],
+        &identities,
+    )
+    .map_err(|e| WireError::new(codes::INVALID_REQUEST, e.to_string()))?;
+    if server_owns_knowledge(d).await {
+        let payload = json!({
+            "knowledge_type": kind.as_str(),
+            "content": content,
+            "topic_key": topic_key,
+            "value_key": value_key,
+        });
+        return queue_knowledge_command(
+            d,
+            None,
+            None,
+            cairn_store::spool::CommandKind::PersonalCreate,
+            &payload,
+        )
+        .await;
+    }
+
     let new = cairn_store::global::NewPersonalKnowledge::direct(
         d.owner_identity().await,
         kind,
@@ -2830,6 +2948,23 @@ async fn personal_create(
 /// The caller is told the command was **accepted for delivery**, never that it
 /// is durable. Nothing local becomes authoritative because a command is
 /// waiting (FR-709, FR-787).
+/// Whether an explicit mutation must become a request rather than a local write.
+///
+/// **Read on every explicit mutation, and the reason it is a function rather
+/// than a flag captured once is that the answer changes under a running
+/// daemon**: cutover flips it, and a handler holding a stale copy would keep
+/// writing local durable rows after the server took ownership.
+///
+/// A store that cannot answer is treated as not authoritative. The local path is
+/// the one that works without a server, and guessing the other way would queue
+/// commands nothing will ever apply.
+async fn server_owns_knowledge(d: &Daemon) -> bool {
+    cairn_store::authority::mode(&d.store)
+        .await
+        .map(|m| m.commands_are_authoritative())
+        .unwrap_or(false)
+}
+
 pub(crate) async fn queue_knowledge_command(
     d: &Daemon,
     project_id: Option<Uuid>,
@@ -3353,6 +3488,38 @@ async fn team_propose(
     let content = cairn_core::redact::redact(&content);
     let r = d.resolve(cwd).await?;
     let identities = current_project_identities(&r.project);
+
+    // A proposal is an intent, and under server authority it travels as one
+    // (FR-712). The proposer is bound from the credential on the far side; there
+    // is no field for it here, which is the point.
+    cairn_core::validate::validate_global_content(
+        &content,
+        topic_key.as_deref(),
+        value_key.as_deref(),
+        &applicability,
+        &identities,
+    )
+    .map_err(|e| WireError::new(codes::INVALID_REQUEST, e.to_string()))?;
+    if server_owns_knowledge(d).await {
+        let payload = json!({
+            "knowledge_type": knowledge_type.unwrap_or(MemoryType::Fact).as_str(),
+            "content": content,
+            "topic_key": topic_key,
+            "value_key": value_key,
+            "applicability": applicability
+                .iter()
+                .map(|f| json!({ "kind": f.kind.as_str(), "value": f.value }))
+                .collect::<Vec<_>>(),
+        });
+        return queue_knowledge_command(
+            d,
+            None,
+            None,
+            cairn_store::spool::CommandKind::TeamPropose,
+            &payload,
+        )
+        .await;
+    }
 
     let new = cairn_store::global::NewTeamKnowledge::direct(
         require_account(d).await?,
