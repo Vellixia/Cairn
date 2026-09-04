@@ -1153,20 +1153,62 @@ fn pattern_row_json(row: &sqlx::postgres::PgRow, with_tombstone: bool) -> Value 
 pub async fn list_patterns(
     State(state): State<AppState>,
     user: SettledUser,
+    Query(q): Query<PatternListQuery>,
 ) -> ApiResult<Json<Value>> {
+    // **Opt-in, and absent means all** (FR-895).
+    //
+    // Every other list here defaults to a page, and this one cannot: the
+    // daemon's pattern cache refills from this route (`cairnd/src/patterns.rs`),
+    // and a default page size would silently truncate that cache to the first
+    // page — a durability guarantee quietly turned into "your first twenty-five
+    // patterns". So a caller that wants a bound asks for one, and the reply says
+    // which bound was applied and whether anything was left out, which is what
+    // lets a UI page without the server having to guess on its behalf.
+    let limit = q.limit.map(|n| n.clamp(1, PATTERN_PAGE_MAX));
     let rows = sqlx::query(&format!(
         "SELECT {PATTERN_WIRE_COLUMNS}
            FROM shared_patterns
           WHERE owner_user_id = $1 AND forgotten_at IS NULL
-          ORDER BY updated_at DESC, pattern_id"
+          ORDER BY updated_at DESC, pattern_id
+          LIMIT $2"
     ))
+    // `NULL` is "no limit" to PostgreSQL's `LIMIT`, which is exactly the
+    // absent-means-all rule without a second statement to keep in step.
     .bind(user.id())
+    .bind(limit)
     .fetch_all(&state.pool)
     .await?;
+    let held: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM shared_patterns
+          WHERE owner_user_id = $1 AND forgotten_at IS NULL",
+    )
+    .bind(user.id())
+    .fetch_one(&state.pool)
+    .await?;
     let patterns: Vec<Value> = rows.iter().map(|r| pattern_row_json(r, false)).collect();
-    Ok(Json(
-        json!({ "total": patterns.len(), "patterns": patterns }),
-    ))
+    Ok(Json(json!({
+        // What this page holds, and what the owner has. Equal unless a bound was
+        // asked for and reached — which is how a caller knows to ask for more
+        // rather than concluding it has seen everything.
+        "total": held,
+        "returned": patterns.len(),
+        "limit": limit,
+        "patterns": patterns,
+    })))
+}
+
+/// The largest page `GET /api/patterns` will serve when a bound is asked for.
+const PATTERN_PAGE_MAX: i64 = 200;
+
+/// The one optional parameter the pattern list takes.
+///
+/// Deliberately not a cursor. A cursor implies a stable order to resume from,
+/// and this list is ordered by `updated_at` — which a promotion moves, so a
+/// resumed page could skip or repeat. A caller that needs to follow changes has
+/// the changes feed, which is cursored precisely because its ordering is stable.
+#[derive(serde::Deserialize)]
+pub struct PatternListQuery {
+    limit: Option<i64>,
 }
 
 /// `GET /api/sync/changes/patterns` — the feed a local pattern cache refills
