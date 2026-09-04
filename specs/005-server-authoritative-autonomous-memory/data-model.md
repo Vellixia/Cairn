@@ -249,6 +249,10 @@ drop. A disposition record carries no payload content (FR-749d, FR-741).
 
 Additive. No existing table changes meaning.
 
+Feature 005 ships **two** local migrations. v8 is the Foundation one described in this
+section and is what every phase from Foundations through US2 is built on. v9 is US3's, and
+is documented separately in §5a — it adds one table and changes nothing here.
+
 ```sql
 CREATE TABLE event_spool (
   event_id        TEXT PRIMARY KEY,
@@ -374,6 +378,66 @@ Spool overflow (FR-785), in order:
 
 This is the one place the capacity policy can lose a boundary event, and it is resolved by
 refusing new work rather than by corrupting queued work.
+
+---
+
+## 5a. Local schema v9 (SQLite) — the owner's pattern cache
+
+US3 makes a reusable pattern durable on the server (FR-708). The local side of that needs
+somewhere to hold a pulled pattern, and v8 has no table that can.
+
+```sql
+CREATE TABLE cached_patterns (
+  pattern_id    TEXT PRIMARY KEY,          -- UUIDv5(owner_user_id || content_key), §6.2
+  owner_user_id TEXT NOT NULL,             -- from the lane, never from the pulled row
+  title         TEXT NOT NULL,
+  problem       TEXT NOT NULL,
+  root_cause    TEXT NOT NULL,
+  approach      TEXT NOT NULL,
+  constraints   TEXT NOT NULL DEFAULT '[]',
+  applicability TEXT NOT NULL DEFAULT '[]',
+  trust         TEXT NOT NULL DEFAULT 'sanitized' CHECK (trust = 'sanitized'),
+  content_key   TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL,
+  forgotten_at  TEXT,                      -- tombstone; content is cleared with it
+  cached_at     TEXT NOT NULL,
+  UNIQUE (owner_user_id, content_key)
+);
+CREATE INDEX cached_patterns_owner ON cached_patterns (owner_user_id, forgotten_at);
+```
+
+### Why this is not `reusable_patterns`
+
+The obvious move is to reuse the local pattern table Feature 002 already has. It cannot hold a
+server row, and the reason is the privacy boundary rather than convenience.
+
+`reusable_patterns` declares `signals`, `signal_digest` and `origin_ref` **NOT NULL**, with a
+CHECK requiring between 2 and 16 signals. Those are three of the six field names §3.3 of
+`contracts/knowledge-commands.md` refuses at the boundary — along with `sanitization_report`,
+`source_memory_id` and `origin_deleted` — so the server never sends them and never could. A
+pulled pattern therefore has nothing to put in three NOT NULL columns, and the only ways to
+store it there are to fabricate signals, which is inventing content the record does not have,
+or to relax the constraints, which would reopen the refused names on a table a pull writes.
+FR-708b is explicit that the refusal may be lifted **only** for a redefined representation
+carrying none of them; a relaxed `reusable_patterns` is not that.
+
+So the two tables hold different things, and the split is the design rather than duplication:
+
+| | `reusable_patterns` (v5) | `cached_patterns` (v9) |
+|---|---|---|
+| Holds | this machine's evidence: signals, salted origin, sanitization report | the server's safe shape |
+| Trust | `candidate \| sanitized \| validated \| contested`, derived from applications | `sanitized` only, CHECKed |
+| Durability | local-only (FR-707); deleting the store deletes it | cache; refills from the server |
+| Written by | promotion on this machine | a pull |
+
+That also makes FR-710's requirement structural instead of a convention: which table a pattern
+is in *is* the answer to whether losing this store loses it, so the durability inventory reads
+the classification off the schema rather than forming a second opinion about it.
+
+`trust` is CHECKed to the one value for the same reason the server's column is: `validated` and
+`contested` are derived from `pattern_applications`, which stay local (FR-707, FR-708g), so
+neither side has evidence for them and neither may store one.
 
 ---
 
