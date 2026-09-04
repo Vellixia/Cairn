@@ -3160,7 +3160,36 @@ pub(crate) async fn drain_command_spool(d: &Daemon, limit: i64) -> Result<DrainR
     // One at a time, in the order claimed. Batching would deliver a scope's
     // commands concurrently and lose the ordering the claim just established.
     for c in &claimed {
-        let envelope = command_envelope(c);
+        // **The local project id is not the server's, and only the server's
+        // means anything on the wire.**
+        //
+        // `projects.id` is this store's own identifier and `server_project_id`
+        // is the shared one; linking records the second without adopting it,
+        // because a project can be re-linked and the local rows must keep
+        // pointing at something stable. A command spooled with the local id and
+        // posted verbatim named a project the server has never heard of, so
+        // every project-scoped command queued under server authority was
+        // undeliverable — and the refusal it drew was classified as permanent,
+        // which turned an addressing mistake into the user's instruction being
+        // dropped.
+        //
+        // Translated here rather than at the point the command is queued: at
+        // queue time the project may not be linked yet, and burning the wrong id
+        // into a durable row would outlive the mistake.
+        let envelope = match resolve_command_project(d, c).await {
+            CommandRoute::Ready(envelope) => envelope,
+            CommandRoute::NotLinked => {
+                // Deferred, not refused. An unlinked project sends nothing
+                // (FR-053), but linking it later is an ordinary thing to do and
+                // the command should survive to be delivered then. A deferral
+                // spends no attempt budget, which is what stops a long unlinked
+                // period driving the row to `retry_exhausted`.
+                settle_command(d, c.command_id, ItemOutcome::Deferred, "project_not_linked")
+                    .await?;
+                report.record(ItemOutcome::Deferred);
+                continue;
+            }
+        };
         let (outcome, reason) = match context
             .client
             .post_for_outcome(COMMAND_ENVELOPE_PATH, &envelope)
@@ -3187,6 +3216,42 @@ pub(crate) async fn drain_command_spool(d: &Daemon, limit: i64) -> Result<DrainR
     Ok(report)
 }
 
+/// A claimed command's envelope, or the reason it cannot be addressed yet.
+enum CommandRoute {
+    Ready(serde_json::Value),
+    /// The command names a project this store has not linked, so there is no
+    /// server identifier to address it by.
+    NotLinked,
+}
+
+/// Build one command's envelope, translating the project it names.
+///
+/// The only place a local project id becomes a server project id. A command
+/// naming no project needs no translation and is always `Ready`.
+async fn resolve_command_project(
+    d: &Daemon,
+    command: &cairn_store::spool::SpooledCommand,
+) -> CommandRoute {
+    let Some(local) = command.project_id else {
+        return CommandRoute::Ready(command_envelope(command, None));
+    };
+    match repo::project(&d.store, local).await {
+        Ok(project) => match project.server_project_id {
+            Some(server_project_id) if project.linked => {
+                CommandRoute::Ready(command_envelope(command, Some(server_project_id)))
+            }
+            _ => CommandRoute::NotLinked,
+        },
+        // A project row that is gone cannot be linked either, and the answer is
+        // the same: hold the command rather than refuse it. Deleting a project
+        // locally is not the user withdrawing an instruction about it.
+        Err(e) => {
+            tracing::debug!(project = %local, error = %e, "a queued command names an unknown project");
+            CommandRoute::NotLinked
+        }
+    }
+}
+
 /// What one queued command needs to say on the wire.
 ///
 /// Everything a command is, in one object: its deterministic identity, its
@@ -3200,21 +3265,24 @@ pub(crate) async fn drain_command_spool(d: &Daemon, limit: i64) -> Result<DrainR
 /// made with, and there is deliberately no field for it: a daemon that could
 /// name an account could attribute one identity's writes to another
 /// (Principle XI).
-fn command_envelope(command: &cairn_store::spool::SpooledCommand) -> serde_json::Value {
+fn command_envelope(
+    command: &cairn_store::spool::SpooledCommand,
+    server_project_id: Option<uuid::Uuid>,
+) -> serde_json::Value {
     use cairn_store::spool::CommandKind;
     // What the command applies to. A project for the commands that create
     // within one, a record for the commands that act on one, neither for the
     // account-scoped domains — which is why both are optional rather than one
     // widened field that means different things per kind.
     let (project_id, target_id) = match command.kind {
-        CommandKind::Remember | CommandKind::Relate => (command.project_id, None),
+        CommandKind::Remember | CommandKind::Relate => (server_project_id, None),
         CommandKind::Supersede
         | CommandKind::Reinforce
         | CommandKind::Pin
         | CommandKind::Forget
         | CommandKind::PersonalForget
         | CommandKind::PatternForget => (
-            command.project_id,
+            server_project_id,
             command
                 .payload
                 .get("target_id")
@@ -4354,7 +4422,12 @@ mod tests {
                 payload: payload.clone(),
                 attempts: 0,
             };
-            let envelope = super::command_envelope(&command);
+            // The server's id, not the local one — which is the whole reason
+            // this argument exists. A local `project_id` on the row and a
+            // different id on the wire is the correct pairing, and passing the
+            // same value for both would let the translation regress unnoticed.
+            let server_project_id = uuid::Uuid::now_v7();
+            let envelope = super::command_envelope(&command, Some(server_project_id));
             // The four things the wire form has to carry.
             assert_eq!(
                 envelope["command_id"],
@@ -4363,6 +4436,17 @@ mod tests {
             assert_eq!(envelope["kind"], kind.as_str());
             assert_eq!(envelope["payload"], payload);
             assert!(envelope.get("target_id").is_some());
+            // **Never the local id.** A project-scoped kind carries the
+            // server's; an account-scoped one carries none. Either way the row's
+            // own `project_id` must not appear, because the server cannot
+            // resolve it — that mistake made every queued project command
+            // undeliverable and its refusal terminal.
+            assert_ne!(
+                envelope["project_id"],
+                serde_json::json!(command.project_id),
+                "`{}` put the local project id on the wire",
+                kind.as_str()
+            );
             // And the one thing it must not: nothing that decides who is
             // acting. The account travels as the credential, not as a field.
             for forbidden in ["account_id", "owner_user_id", "verification_authority"] {

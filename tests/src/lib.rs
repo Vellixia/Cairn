@@ -1301,6 +1301,48 @@ impl Server {
         Self::spawn_at(&url, i64::MAX, true, None, Some(addr))
     }
 
+    /// Take this server off the air, keeping its address and its data.
+    ///
+    /// **What an outage actually is**, and the distinction matters for US4. The
+    /// alternatives both test something else: re-pointing a client at a dead
+    /// port is a *credential transition* — the endpoint is part of the identity,
+    /// so the client correctly forgets which account it was, and the test then
+    /// measures sign-out rather than unreachability. Dropping the whole `Server`
+    /// destroys the database, which measures data loss.
+    ///
+    /// Here the process stops, the address stays claimable, and the accepted
+    /// rows stay where they are. The client keeps its token, its endpoint and
+    /// its account, and simply cannot reach anything — which is the situation
+    /// FR-781 and FR-787 are written about.
+    ///
+    /// Nothing binds the port while it is down, so in principle another process
+    /// could take it. [`Self::come_back`] retries, which is the same remedy
+    /// `spawn_at` already applies for the same reason.
+    pub fn go_offline(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Put it back at the same address, serving the same data.
+    pub fn come_back(&mut self) {
+        let addr = self
+            .base
+            .strip_prefix("http://")
+            .unwrap_or(&self.base)
+            .to_string();
+        // Taken before the replacement is built, so dropping the old value does
+        // not drop the database out from under the new one.
+        let owned = std::mem::take(&mut self.owns_database);
+        let fresh = Self::spawn_at(
+            &self.database_url,
+            self.max_schema_version,
+            owned,
+            None,
+            Some(addr),
+        );
+        *self = fresh;
+    }
+
     pub fn upgraded_in_place(&mut self) -> Self {
         let addr = self
             .base
