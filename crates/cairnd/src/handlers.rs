@@ -1357,6 +1357,9 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
     // Read once for both spools, so the two halves of one report cannot
     // disagree about whether anybody is signed in.
     let signed_in = d.account_identity().await.is_some();
+    let unreachable = d
+        .server_unreachable
+        .load(std::sync::atomic::Ordering::Relaxed);
 
     let mut dispositions: std::collections::BTreeMap<String, i64> =
         std::collections::BTreeMap::new();
@@ -1368,18 +1371,26 @@ async fn capture_health(d: &Daemon, project_id: Uuid) -> Option<CaptureHealth> {
 
     Some(CaptureHealth {
         dispositions,
-        events: spool_health(&events, signed_in),
-        commands: spool_health(&commands, signed_in),
+        events: spool_health(&events, signed_in, unreachable),
+        commands: spool_health(&commands, signed_in, unreachable),
     })
 }
 
 /// One spool's health on the wire.
 ///
-/// `signed_in` is passed rather than read here because the breakdown cannot know
-/// it: a spool full of rows and nobody authenticated is not backing off, it is
-/// undeliverable until someone signs in, and that is the one blocking reason
-/// the rows themselves do not show (FR-792).
-fn spool_health(b: &cairn_store::spool::SpoolBreakdown, signed_in: bool) -> SpoolHealth {
+/// `signed_in` and `unreachable` are passed rather than read from the breakdown,
+/// because the rows cannot know either one — and they are the two blocking
+/// reasons that leave no trace in the spool at all (FR-792).
+///
+/// A drain with no account never claims, and a drain that cannot reach the
+/// server fails before claiming, so in both cases every row sits `waiting` and
+/// looks identical to work that was queued a second ago and is about to go. A
+/// user staring at a queue that is not moving is owed the difference.
+fn spool_health(
+    b: &cairn_store::spool::SpoolBreakdown,
+    signed_in: bool,
+    unreachable: bool,
+) -> SpoolHealth {
     SpoolHealth {
         waiting: b.waiting,
         in_flight: b.in_flight,
@@ -1395,9 +1406,18 @@ fn spool_health(b: &cairn_store::spool::SpoolBreakdown, signed_in: bool) -> Spoo
         // No account outranks every other reason: nothing at all can be claimed
         // — the claim predicate matches an account exactly — so a `backing_off`
         // here would describe a retry that is not being attempted.
-        blocked_reason: match (signed_in, b.undelivered() > 0) {
-            (false, true) => Some("no_account".to_string()),
-            _ => b.blocked_reason().map(str::to_string),
+        blocked_reason: match (signed_in, unreachable, b.undelivered() > 0) {
+            // Nothing waiting is never blocked, whatever the network is doing.
+            (_, _, false) => b.blocked_reason().map(str::to_string),
+            // No account outranks everything: nothing at all can be claimed —
+            // the claim predicate matches an account exactly — so `backing_off`
+            // would describe a retry that is not being attempted.
+            (false, _, true) => Some("no_account".to_string()),
+            // Then reachability, which outranks the row-derived reasons for the
+            // same kind of reason: `backing_off` says Cairn is retrying and
+            // failing, and `server_unreachable` says it cannot even ask.
+            (true, true, true) => Some("server_unreachable".to_string()),
+            (true, false, true) => b.blocked_reason().map(str::to_string),
         },
     }
 }

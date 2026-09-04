@@ -75,6 +75,21 @@ pub struct Daemon {
     /// door for sign-out, credential change and account change alike
     /// (FR-790a).
     pub outage_cache: Arc<tokio::sync::Mutex<crate::deliver::OutageCache>>,
+    /// Whether the last attempt to reach the server failed (FR-792).
+    ///
+    /// **The one blocking reason the spool rows cannot show.** A drain that
+    /// cannot reach the server fails while acquiring its authenticated context,
+    /// before it claims anything — deliberately, because claiming a row and then
+    /// discovering the server is gone spends an attempt for nothing. The
+    /// consequence is that during an outage every row stays `waiting`, which is
+    /// indistinguishable from "queued a moment ago and about to go". A user
+    /// looking at eleven rows sitting still deserves to be told the server is
+    /// unreachable rather than left to infer it.
+    ///
+    /// In memory and per process, like the rest of the reachability state: it
+    /// describes what this daemon just experienced, not a fact about the world
+    /// worth persisting. A restart correctly starts out not knowing.
+    pub server_unreachable: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Increments the in-flight capture count and decrements it on drop, whatever

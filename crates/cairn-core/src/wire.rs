@@ -1511,8 +1511,9 @@ pub struct SpoolHealth {
     pub oldest_at: Option<String>,
     /// Why delivery is not progressing (FR-792), or absent when it is.
     ///
-    /// One of `saturated`, `retry_exhausted`, `refused_by_server`,
-    /// `awaiting_capability`, `backing_off`, `no_account` — most severe first,
+    /// One of `no_account`, `server_unreachable`, `saturated`,
+    /// `retry_exhausted`, `refused_by_server`, `awaiting_capability`,
+    /// `backing_off` — most severe first,
     /// because a spool can be several at once and this reports one. A closed
     /// vocabulary rather than a message, so a caller can branch on it and a
     /// reader is not asked to parse prose.

@@ -3066,6 +3066,18 @@ async fn settle_command(
     .map_err(storage_err)
 }
 
+/// Record what the last attempt to reach the server discovered.
+///
+/// Only two callers set it — the two places a drain actually touches the network
+/// — because a reachability flag written from everywhere is a flag nobody can
+/// reason about. Successes clear it as readily as failures set it, so a recovered
+/// server stops being reported as down on the very next drain rather than
+/// waiting for the queue to empty.
+fn note_reachability(d: &Daemon, reachable: bool) {
+    d.server_unreachable
+        .store(!reachable, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Drain the event spool once, in claim order, settling every claimed row.
 ///
 /// **Every claimed row is settled before this returns, including on the error
@@ -3080,7 +3092,21 @@ async fn settle_command(
 pub(crate) async fn drain_event_spool(d: &Daemon, limit: i64) -> Result<DrainReport, WireError> {
     use cairn_store::spool;
     let _drain_guard = d.sync_drain.lock().await;
-    let context = AuthenticatedContext::acquire(d).await?;
+    // **Acquiring the context is itself the reachability probe** — it reads
+    // `/api/version` — so its failure is where an outage first becomes known.
+    // Recorded rather than only returned, because the rows say nothing about it:
+    // a drain that fails here has claimed nothing, so every row stays `waiting`
+    // and looks exactly like work queued a moment ago (FR-792).
+    let context = match AuthenticatedContext::acquire(d).await {
+        Ok(context) => {
+            note_reachability(d, true);
+            context
+        }
+        Err(e) => {
+            note_reachability(d, false);
+            return Err(e);
+        }
+    };
 
     let claimed = spool::claim_events(&d.store, context.account, limit)
         .await
@@ -3105,6 +3131,7 @@ pub(crate) async fn drain_event_spool(d: &Daemon, limit: i64) -> Result<DrainRep
             // Transport. Every claimed row is released with a backoff rather
             // than left in flight, because the alternative is a minute of
             // apparent progress after a failure that already happened.
+            note_reachability(d, false);
             for c in &claimed {
                 settle_event(d, c.event_id, ItemOutcome::Transient, "transport").await?;
                 report.record(ItemOutcome::Transient);

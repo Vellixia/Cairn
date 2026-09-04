@@ -282,6 +282,7 @@ fn age_of(rfc3339: &str) -> String {
 /// "unknown" would hide the very state that was added.
 fn blocked_phrase(reason: &str) -> String {
     match reason {
+        "server_unreachable" => "the server cannot be reached".to_string(),
         "saturated" => "the queue is full and new work is being refused".to_string(),
         "retry_exhausted" => "some rows ran out of attempts and will not retry".to_string(),
         "refused_by_server" => "the server refused some rows permanently".to_string(),
@@ -290,6 +291,33 @@ fn blocked_phrase(reason: &str) -> String {
         "no_account" => "nobody is signed in, so nothing can be delivered".to_string(),
         other => other.to_string(),
     }
+}
+
+/// What a knowledge mutation actually achieved, said honestly.
+///
+/// **`Remembered <id>` is a claim of durability, and after cutover it is often
+/// false.** Under server authority the write is a command the server will accept
+/// or refuse, and the caller must be told it was *accepted for delivery* rather
+/// than stored (FR-709, FR-815a). Printing "Remembered" over a queued command —
+/// worse, "Remembered ?" once there is no local record to name — tells a user
+/// their knowledge is safe while it is sitting in a queue the server may still
+/// turn down.
+///
+/// Returns `None` when the reply describes a durable local record, so the
+/// caller keeps its own wording for the case that has not changed.
+pub fn queued_instead_of_stored(v: &serde_json::Value) -> Option<String> {
+    if v.get("accepted_for_delivery").and_then(|b| b.as_bool()) != Some(true) {
+        return None;
+    }
+    let id = v
+        .get("command_id")
+        .and_then(|c| c.as_str())
+        .unwrap_or("(no id)");
+    Some(format!(
+        "Accepted for delivery as command {id}.\n           The server owns durable knowledge now, so this is a request it will \
+         accept or refuse — not a stored record yet. `cairn status` shows the \
+         queue.\n"
+    ))
 }
 
 pub fn status(s: &StatusPayload) -> String {

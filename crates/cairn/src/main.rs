@@ -1864,11 +1864,13 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 domain: None,
             })
             .await?;
-            let text = format!(
-                "Remembered {}.\n{}",
-                render::id_of(&v["memory"]),
-                render::reconciliation(&v)
-            );
+            let text = render::queued_instead_of_stored(&v).unwrap_or_else(|| {
+                format!(
+                    "Remembered {}.\n{}",
+                    render::id_of(&v["memory"]),
+                    render::reconciliation(&v)
+                )
+            });
             Ok(Output::with(v, text))
         }
         MemoryAction::Supersede {
@@ -1909,11 +1911,13 @@ async fn memory(action: &MemoryAction) -> Result<Output, WireError> {
                 local_only: *local_only,
             })
             .await?;
-            let text = format!(
-                "Remembered {}.\n  supersedes {}\n",
-                render::id_of(&v["memory"]),
-                v["superseded"].as_str().unwrap_or("?")
-            );
+            let text = render::queued_instead_of_stored(&v).unwrap_or_else(|| {
+                format!(
+                    "Remembered {}.\n  supersedes {}\n",
+                    render::id_of(&v["memory"]),
+                    v["superseded"].as_str().unwrap_or("?")
+                )
+            });
             Ok(Output::with(v, text))
         }
         MemoryAction::Subject {
