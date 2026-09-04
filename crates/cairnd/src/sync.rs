@@ -4991,10 +4991,36 @@ mod tests {
     ///
     /// Deterministic because it does not race: the lookup's commit is replayed
     /// **after** the switch has completed, which is precisely the interleaving
+    /// Serialize the tests that touch this process's **shared** credential
+    /// files.
+    ///
+    /// `cairn_core::paths::config_path()` and `token_path()` are process-global:
+    /// every test in this binary reads and writes the same two files, however
+    /// many `Daemon` fixtures they build. Run in parallel they interfere —
+    /// `a_credential_change_that_cannot_be_persisted_changes_nothing` makes the
+    /// config read-only for a window, and its neighbours rewrite it — so the
+    /// failures land wherever the scheduler happens to put them and look like
+    /// credential defects rather than test interference.
+    ///
+    /// A mutex rather than one merged test, because the tests are about
+    /// genuinely different transitions and merging them would lose the names
+    /// that say which one broke.
+    ///
+    /// `tokio`'s mutex and not `std`'s: the guard is held across the `await`s
+    /// that do the work, and a `std` guard held across an await can park the
+    /// whole runtime thread with the lock still taken.
+    async fn credentials_serially() -> tokio::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+            .lock()
+            .await
+    }
+
     /// the gap allowed. It is refused because the generation it was taken under
     /// is gone.
     #[tokio::test]
     async fn a_lookup_from_the_old_credential_cannot_restore_the_old_account() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         let account_a = Uuid::now_v7();
         d.mutate_credentials(|c| {
@@ -5047,6 +5073,7 @@ mod tests {
     /// concurrency at all (FR-610).
     #[tokio::test]
     async fn a_token_switch_leaves_the_token_file_and_the_account_agreeing() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         let account_a = Uuid::now_v7();
         d.mutate_credentials(|c| {
@@ -5086,6 +5113,7 @@ mod tests {
     /// finds neither.
     #[tokio::test]
     async fn a_logout_leaves_no_token_and_no_account_for_a_restart_to_find() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -5126,6 +5154,7 @@ mod tests {
     /// credential commits as though it were still current.
     #[tokio::test]
     async fn a_credential_switched_away_and_back_is_not_the_same_credential() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -5171,6 +5200,7 @@ mod tests {
     /// of failure this mechanism exists to prevent.
     #[tokio::test]
     async fn learning_an_account_does_not_advance_the_credential_generation() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -5198,6 +5228,7 @@ mod tests {
     /// Re-applying an unchanged credential does not advance the generation.
     #[tokio::test]
     async fn rewriting_the_same_credential_does_not_advance_the_generation() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
@@ -5225,6 +5256,7 @@ mod tests {
     /// whether the daemon had restarted since (FR-605).
     #[tokio::test]
     async fn a_credential_change_that_cannot_be_persisted_changes_nothing() {
+        let _serial = credentials_serially().await;
         let d = fx::daemon().await;
         d.mutate_credentials(|c| {
             c.url = Some("https://one.example".into());
