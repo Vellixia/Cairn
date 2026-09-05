@@ -422,6 +422,13 @@ still bind:
   the missing authorization, so the fallback is built by a function that is given no store to
   read (`briefing::unavailable`) rather than by one that reads carefully (FR-790a).
 
+  **This is the outage behaviour of a server-side briefing, and only that.** A
+  project that is not linked to a server has no server authority to defer to and
+  never had one: its local store is the only authority there is, and answering
+  "unavailable" to a developer who never asked for a server would be withholding
+  their own knowledge from them. The rule above applies where the briefing is
+  server-side; an unlinked project assembles locally, as it always has.
+
   A cache *hit* is different in exactly the way that matters: it is evidence the server
   already authorized this account for this session, which is why the same account's cached
   briefing is still served in full, still labelled cached.

@@ -270,7 +270,15 @@ pub async fn deliver(
     //
     // `briefing::unavailable` is given no `Daemon` and no store to read, so
     // this is a structural answer rather than a careful one.
-    let payload_result = if response.is_none() {
+    //
+    // **Only for a project whose briefing is server-side.** An unlinked project
+    // has no server authority to defer to and never had one: its local store is
+    // the only authority there is, and withholding it would answer "unavailable"
+    // to a developer who never asked for a server. §12.3 is the outage
+    // behaviour of a *server-side* briefing, and this is the line that keeps it
+    // to that.
+    let server_side = resolved.project.linked && resolved.project.server_project_id.is_some();
+    let payload_result = if response.is_none() && server_side {
         let git = crate::state::git_status(resolved.repo.worktree_path.clone()).await;
         let config = d.config.read().await.clone();
         git.map(|git| {
@@ -289,6 +297,14 @@ pub async fn deliver(
         })
     } else {
         let session = cairn_store::repo::session(&d.store, session_id).await.ok();
+        // `FromServer` when the server answered — it already selected and paid
+        // for the durable sections. `Local` only for an unlinked project, whose
+        // store is its own authority.
+        let durable = if response.is_some() {
+            crate::briefing::Durable::FromServer
+        } else {
+            crate::briefing::Durable::Local
+        };
         // When the server answered, it already selected and already paid for
         // the durable sections — so this build must not read them. Assembling
         // them here and letting the merge overwrite them would spend budget on
@@ -301,7 +317,7 @@ pub async fn deliver(
             resolved,
             session.as_ref(),
             crate::briefing::Assembly::local(local_budget, ContextDepth::Standard)
-                .with_durable(crate::briefing::Durable::FromServer),
+                .with_durable(durable),
         )
         .await
     };
