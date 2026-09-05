@@ -2081,6 +2081,63 @@ pub async fn ratify_team(
 /// `retired` or still-`proposed` row refuse, naming that actual state,
 /// rather than silently doing nothing or half-applying. Content is never
 /// touched (FR-461): the `UPDATE` names only `state` and `retired_at`.
+/// Write the transition the server has already made, without the guard.
+///
+/// **The CAS is a concurrency control, not an authorization one**, and once the
+/// server has decided there is nothing left for it to protect. `ratify_team` and
+/// `retire_team` each swap on the state this device expected to find; when that
+/// swap loses — because the ratification that made the row authoritative had not
+/// landed locally yet, or a pull re-merged it in between — the transition has
+/// still happened on the server, and a local row left at its old state is simply
+/// wrong. Under FR-712a that row is a cache, and this is the correction.
+///
+/// Narrow on purpose. It applies only the four values the server's own reply
+/// carries: the new state, who acted and when. It does not touch content, keys,
+/// applicability or writer provenance, because the reply says nothing about
+/// those and a merge that invented them would be worse than the staleness it
+/// was fixing. A full row arriving later by pull overwrites this the ordinary
+/// way.
+pub async fn adopt_team_transition(
+    store: &Store,
+    id: Uuid,
+    state: TeamState,
+    actor: Option<Uuid>,
+    at: Option<&str>,
+) -> Result<()> {
+    let mut tx = tx::begin(store, "adopt_team_transition").await?;
+    match state {
+        TeamState::Authoritative => {
+            sqlx::query(
+                "UPDATE team_knowledge
+                    SET state = 'authoritative', ratified_by_user_id = ?2, ratified_at = ?3
+                  WHERE id = ?1",
+            )
+            .bind(id.to_string())
+            .bind(actor.map(|a| a.to_string()))
+            .bind(at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        TeamState::Retired => {
+            sqlx::query(
+                "UPDATE team_knowledge
+                    SET state = 'retired', retired_by_user_id = ?2, retired_at = ?3
+                  WHERE id = ?1",
+            )
+            .bind(id.to_string())
+            .bind(actor.map(|a| a.to_string()))
+            .bind(at)
+            .execute(&mut *tx)
+            .await?;
+        }
+        // Nothing on the server moves a row *back* to proposed, so a reply
+        // saying so is not a transition this function knows how to trust.
+        TeamState::Proposed => {}
+    }
+    tx::commit(tx, "adopt_team_transition").await?;
+    Ok(())
+}
+
 pub async fn retire_team(
     store: &Store,
     id: Uuid,

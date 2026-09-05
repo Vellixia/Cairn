@@ -2222,15 +2222,40 @@ async fn stale_if_changed(
 /// server, so refusing the caller now would report a failure that did not occur;
 /// the next pull repairs the row.
 pub(crate) async fn adopt_team_answer(d: &Daemon, reply: &serde_json::Value) {
-    let Some(row) = reply.get("entry").or(Some(reply)) else {
+    let row = reply.get("entry").unwrap_or(reply);
+    // **Not `merge_pulled_team`**, which was the first attempt and could never
+    // have worked. That function builds a whole `SyncedTeamKnowledge` and needs
+    // `writer_id`, `created_at` and the content; a transition reply carries the
+    // id, the new state, who acted and when, and nothing else. So the merge
+    // failed on every call, logged a line nobody read, and left exactly the
+    // stale row this function exists to repair.
+    let Some(state) = row
+        .get("state")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<cairn_core::domain::TeamState>().ok())
+    else {
         return;
     };
-    let Ok(context) = AuthenticatedContext::acquire(d).await else {
-        return;
-    };
-    if !merge_pulled_team(d, context.peer_instance, row).await {
-        tracing::debug!("the server's team answer did not merge; the next pull will repair it");
+    let actor = ["retired_by_user_id", "ratified_by_user_id"]
+        .iter()
+        .find_map(|k| row.get(k).and_then(|v| v.as_str()))
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let at = ["retired_at", "ratified_at"]
+        .iter()
+        .find_map(|k| row.get(k).and_then(|v| v.as_str()));
+    if let Err(e) =
+        cairn_store::global::adopt_team_transition(&d.store, id_of(row), state, actor, at).await
+    {
+        tracing::debug!(error = %e, "the server's team answer did not apply; the next pull repairs it");
     }
+}
+
+/// The id a transition reply names.
+fn id_of(row: &serde_json::Value) -> Uuid {
+    row.get("id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_else(Uuid::nil)
 }
 
 pub async fn team_retire_remote(
