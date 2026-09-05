@@ -504,8 +504,8 @@ async fn ingest(
     let inserted: Option<(Uuid,)> = sqlx::query_as(
         "INSERT INTO verification_reports
             (report_id, ref_kind, domain, knowledge_id, project_id, owner_user_id,
-             account_id, verdict, verifier_kind, authority, run_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             account_id, verdict, verifier_kind, attesting_agent, authority, run_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (reference_key, account_id, verifier_kind, run_at) DO NOTHING
          RETURNING report_id",
     )
@@ -518,6 +518,7 @@ async fn ingest(
     .bind(user.id())
     .bind(verdict)
     .bind(verifier_kind)
+    .bind(attesting_agent.as_deref())
     .bind(authority)
     .bind(run_at)
     .fetch_optional(&mut *tx)
@@ -545,19 +546,6 @@ async fn ingest(
             "applied": "duplicate",
             "authority": authority,
         })));
-    }
-
-    if let Some(agent) = &attesting_agent {
-        // Recorded as part of the report's own shape. It says which agent
-        // attested; it does not say anything stronger happened.
-        sqlx::query(
-            "UPDATE verification_reports SET verifier_kind = verifier_kind
-              WHERE report_id = $1",
-        )
-        .bind(report_id)
-        .execute(&mut *tx)
-        .await?;
-        tracing::debug!(agent = %agent, report = %report_id, "attestation relayed");
     }
 
     // 8 — re-derive, in this same transaction, so a reader can never see a

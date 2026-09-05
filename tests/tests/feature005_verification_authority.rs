@@ -1584,3 +1584,192 @@ fn a_reference_that_names_no_domain_is_refused_over_http() {
         "a refused reference still produced a report"
     );
 }
+
+/// What `/attestations` requires, it also records — and recording it changes
+/// nothing about how much the report is worth.
+///
+/// # Why this exists
+///
+/// `/attestations` demanded `attesting_agent`, refused the request without it,
+/// and then dropped it: the insert never carried the column and a placeholder
+/// `UPDATE` set `verifier_kind = verifier_kind`. So the server enforced a field
+/// it could not afterwards answer for. "Which agent attested this?" had no
+/// answer, and the one route whose whole purpose is to relay somebody else's
+/// claim kept no record of whose claim it was.
+///
+/// The fix is a nullable column, and the two halves of this test are the two
+/// things that could go wrong with it:
+///
+/// 1. The name is stored for `/attestations` and **NULL** for `/runs`. A run
+///    report relays nobody's attestation, and writing the caller's own agent
+///    there would invent a relay that never happened.
+/// 2. The name is **not** identity. It is deliberately outside the natural key
+///    (`reference_key, account_id, verifier_kind, run_at`), so renaming the
+///    agent cannot file the same logical run twice — and cannot buy authority.
+///
+/// **Falsified by** putting `attesting_agent` in the UNIQUE, by defaulting it
+/// on `/runs`, or by letting any agent name reach `assign_authority`.
+#[test]
+fn an_attestation_records_the_agent_it_relays_without_that_agent_buying_anything() {
+    let pg = pg!();
+    let refs = seed_refs(&pg);
+
+    // A run report. Nobody's attestation is being relayed.
+    let (reply, status) = post(
+        &pg,
+        &pg.owner,
+        RUNS,
+        &report_body(
+            RUNS,
+            knowledge_ref("project", refs.project),
+            "passed",
+            "test_outcome",
+            &run_at(210),
+        ),
+    );
+    assert_eq!(status, 200, "a legal run report: {reply}");
+
+    // An attestation, naming the agent.
+    let (reply, status) = post(
+        &pg,
+        &pg.owner,
+        ATTESTATIONS,
+        &report_body(
+            ATTESTATIONS,
+            knowledge_ref("personal", refs.personal),
+            "passed",
+            "runtime_state",
+            &run_at(211),
+        ),
+    );
+    assert_eq!(status, 200, "a legal attestation: {reply}");
+
+    assert_eq!(
+        reports_where(
+            &pg,
+            &format!(
+                "knowledge_id = '{}' AND attesting_agent IS NULL",
+                refs.project
+            )
+        ),
+        1,
+        "`/runs` stored an attesting agent. It relays no attestation, so naming \
+         one would record a relay that did not happen"
+    );
+    assert_eq!(
+        reports_where(
+            &pg,
+            &format!(
+                "knowledge_id = '{}' AND attesting_agent = '{ATTESTING_AGENT}'",
+                refs.personal
+            )
+        ),
+        1,
+        "`/attestations` required `attesting_agent` and then did not keep it, so \
+         the server cannot say whose attestation it relayed"
+    );
+
+    // The same logical run, re-filed under a different agent name. If the name
+    // were identity this would be a second report, and a caller could multiply
+    // one run into as many as they had names for.
+    let mut renamed = report_body(
+        ATTESTATIONS,
+        knowledge_ref("personal", refs.personal),
+        "passed",
+        "runtime_state",
+        &run_at(211),
+    );
+    renamed["attesting_agent"] = json!("a-different-agent");
+    let (reply, status) = post(&pg, &pg.owner, ATTESTATIONS, &renamed);
+    assert_eq!(status, 200, "a retry is answered, not refused: {reply}");
+    assert_eq!(
+        reply["applied"],
+        json!("duplicate"),
+        "renaming the agent produced a second report of one run: {reply}"
+    );
+    assert_eq!(
+        reports_where(&pg, &format!("knowledge_id = '{}'", refs.personal)),
+        1,
+        "the same run, re-filed under another agent name, became two reports"
+    );
+    assert_eq!(
+        reports_where(
+            &pg,
+            &format!(
+                "knowledge_id = '{}' AND attesting_agent = '{ATTESTING_AGENT}'",
+                refs.personal
+            )
+        ),
+        1,
+        "the duplicate overwrote the agent the first report recorded. A repeat \
+         changes no state, and that includes this column"
+    );
+
+    // Neither route, and no agent name, moved authority.
+    assert_eq!(
+        stored_authorities(&pg),
+        vec!["remote_attested".to_string()],
+        "an agent name or a route choice reached `assign_authority`"
+    );
+    assert_eq!(
+        reports_where(&pg, "authority <> 'remote_attested'"),
+        0,
+        "a report carries an authority no HTTP route may assign"
+    );
+}
+
+/// An agent name is not a channel for the authority the payload may not carry.
+///
+/// `attesting_agent` is now persisted, which makes it the newest caller-supplied
+/// string on the report. So it gets the same treatment every other one gets:
+/// spelling `cairn` into it — as the agent, or as an agent that sounds like the
+/// server itself — buys nothing.
+///
+/// **Falsified by** deriving any part of authority from the relayed name.
+#[test]
+fn naming_the_agent_cairn_does_not_make_the_report_cairns() {
+    let pg = pg!();
+    let refs = seed_refs(&pg);
+
+    for (n, name) in [
+        "cairn",
+        "remote_cairn",
+        "cairn-server",
+        "deterministic_check",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut body = report_body(
+            ATTESTATIONS,
+            knowledge_ref("team", refs.team),
+            "passed",
+            "runtime_state",
+            &run_at(220 + n as u32),
+        );
+        body["attesting_agent"] = json!(name);
+        let (reply, status) = post(&pg, &pg.owner, ATTESTATIONS, &body);
+        assert_eq!(status, 200, "`{name}` is a legal agent name: {reply}");
+        assert_eq!(
+            reply["authority"],
+            json!("remote_attested"),
+            "an attestation naming `{name}` came back with a stronger authority: {reply}"
+        );
+    }
+
+    assert_eq!(
+        stored_authorities(&pg),
+        vec!["remote_attested".to_string()],
+        "one authority exists over HTTP, and it is the weak one"
+    );
+    assert_eq!(
+        pg.server.count(
+            "SELECT count(*) FROM knowledge_verification
+              WHERE verification_authority IS NOT NULL
+                AND verification_authority <> 'remote_attested'"
+        ),
+        0,
+        "a summary derived from a suggestively named agent claims more than the \
+         reports behind it"
+    );
+}

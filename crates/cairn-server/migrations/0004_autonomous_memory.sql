@@ -324,6 +324,12 @@ CREATE TABLE verification_reports (
   account_id    UUID NOT NULL,
   verdict       TEXT NOT NULL CHECK (verdict IN ('passed','failed','inconclusive')),
   verifier_kind TEXT NOT NULL,
+  -- The agent whose attestation `/api/verification/attestations` relayed. NULL
+  -- for `/api/verification/runs`, which relays nobody's attestation. It is
+  -- deliberately absent from the UNIQUE below: it describes what the report
+  -- says, not which report it is, and putting it in identity would let one
+  -- account file the same logical run twice by renaming the agent.
+  attesting_agent TEXT,
   authority     TEXT NOT NULL,
   run_at        TIMESTAMPTZ NOT NULL,
   received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),

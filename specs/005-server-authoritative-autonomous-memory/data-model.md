@@ -691,6 +691,9 @@ CREATE TABLE verification_reports (        -- runs reported, never states assert
   account_id    UUID NOT NULL,               -- the reporting account, from the credential
   verdict       TEXT NOT NULL CHECK (verdict IN ('passed','failed','inconclusive')),
   verifier_kind TEXT NOT NULL,
+  attesting_agent TEXT,                      -- the agent an attestation relays; NULL for /runs.
+                                             -- Deliberately NOT in the UNIQUE below: it says what
+                                             -- the report claims, not which report it is.
   authority     TEXT NOT NULL,               -- SERVER-assigned; never from the payload
   run_at        TIMESTAMPTZ NOT NULL,
   received_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
