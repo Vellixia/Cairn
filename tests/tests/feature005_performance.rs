@@ -296,6 +296,16 @@ fn session_open_retrieval_meets_its_250ms_soft_target() {
     );
 }
 
+/// This is the one measurement in this file that ran close to its budget on
+/// this machine: a single early run (before repeated confirmation) recorded a
+/// 102.98 ms median against the 100 ms target, while every isolated re-run and
+/// every subsequent full-file run landed at 41-46 ms — roughly 40% of budget.
+/// The one high run coincided with heavy unrelated load on this checkout
+/// (several other Feature 005 test lanes compiling and running at once, plus
+/// background commit/signing activity); it was not reproduced. See
+/// `tests/feature005/performance-measurements.md` §3 for the full run table
+/// and the reasoning for leaving this assertion at the stated 100 ms rather
+/// than widening it.
 #[test]
 fn prompt_time_retrieval_meets_its_tighter_100ms_soft_target() {
     let pg = pg!();
