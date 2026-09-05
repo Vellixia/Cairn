@@ -13,10 +13,10 @@
 //!   never recomputed from whichever credential happens to be active when
 //!   migration finally runs.
 //! - **A credential switch cannot re-key a claimed pattern.** There is no
-//!   update path for `owner_user_id` or `pattern_id` at all (only `claim` /
-//!   `already_owned` / `held_by_another`), so no sequence of sign-ins can
-//!   produce a second owner or a second canonical pattern for the same local
-//!   row.
+//!   update path for `owner_user_id` or `pattern_id` at all (only `claimed` /
+//!   `already_owned` / `legacy_pattern_already_claimed`), so no sequence of
+//!   sign-ins can produce a second owner or a second canonical pattern for
+//!   the same local row.
 //! - **An unclaimed pattern is not lost, refused, or silently attributed.**
 //!   It stays exactly where it was — readable locally — and is named
 //!   individually, both in what a run reports and in what `--status` still
@@ -26,36 +26,10 @@
 //!   boundary refuses (`signals`, `signal_digest`, `origin_ref`,
 //!   `sanitization_report`, `source_memory_id`, `origin_deleted`).
 //!
-//! # A known defect this file's own evidence exposes
-//!
-//! As of this writing, a *complete* `cairn migrate --run` cannot be driven to
-//! success against the standard [`install_legacy_v7`] fixture, for a reason
-//! that has nothing to do with pattern ownership: the drain's
-//! `memory_relation` item names itself by its natural key
-//! (`"<from>|<to>|<kind>"`, `RelationRef::relation_key()`), but the server's
-//! `POST /api/migration/drain` deserializes every item's `entity_id` as a
-//! `Uuid` — so the one relation `install_legacy_v7` always seeds fails the
-//! whole batch's JSON deserialization, and the client sees a generic,
-//! bodyless refusal (`"server rejected the request"`) instead of a per-item
-//! `entity_type_not_drained` the moment any relation is present. Separately,
-//! and independently: `migrate005::run`'s phase loop only stops re-entering a
-//! phase when that phase's *own* state comes back `running`, `pending` or
-//! absent after being processed — never when it comes back `blocked` — while
-//! `first_unfinished` correctly (per its own contract, and its own unit test)
-//! treats `blocked` as *not done*. `install_legacy_v7`'s `team_proposed` row
-//! is authored by an account nobody in this suite can ever sign in as, so its
-//! `author_mismatch` can never be resolved by any single-account migration —
-//! meaning a Drain phase that ends `blocked` for that reason alone has no path
-//! back out of the loop once the relation defect above is fixed.
-//!
-//! Neither defect is in scope here — both live in `crates/cairnd/src/sync.rs`,
-//! `crates/cairnd/src/migrate005.rs` and `crates/cairn-server/src/api.rs`,
-//! none of which this file touches. What follows is written to the contract
-//! regardless: assertions that only need a claim (pure local state, no
-//! network) pass today; assertions that need a *completed* drain are written
-//! exactly as the contract requires and are expected to fail until both
-//! defects above are fixed elsewhere. Each such assertion says so at the call
-//! site.
+//! One PostgreSQL database serves the whole suite (every `Server::start()`
+//! shares it), so every server-side count below is scoped to a `pattern_id`
+//! that is itself unique to the test — `UUIDv5(account, content_key)` over a
+//! freshly minted account — rather than to a bare, suite-wide `count(*)`.
 
 use cairn_e2e::feature005::{install_legacy_v7, LegacyIds};
 use cairn_e2e::{attach_server, Sandbox, Server};
@@ -69,6 +43,8 @@ struct Fixture {
     server: Server,
     ids: LegacyIds,
     /// The account `s` is authenticated as when the fixture is handed back.
+    /// Also the account `install_legacy_v7` seeded the personal/team rows
+    /// under, exactly as a real Feature 004 store's author would be.
     account: Uuid,
     /// That account's own bearer token, kept around so a test that switches
     /// credentials mid-way (tokens are opaque and not otherwise recoverable)
@@ -79,8 +55,8 @@ struct Fixture {
 fn start() -> Option<Fixture> {
     let server = Server::start()?;
     let s = Sandbox::new();
-    let ids = install_legacy_v7(&s);
     let (account, token) = server.new_user("migrating");
+    let ids = install_legacy_v7(&s, account);
     attach_server(&s, &server, &token);
     // A project memory drains only from a *linked* project: the server needs
     // the id it knows the project by, and an unlinked project has none.
@@ -258,9 +234,11 @@ fn a_claim_persists_owner_content_key_and_pattern_id_before_any_delivery() {
     let claimed =
         f.s.json(&["migrate", "--claim-patterns", &target.to_string()]);
     let rows = claimed["claims"].as_array().expect("claims array");
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["local_pattern_id"], json!(target.to_string()));
-    assert_eq!(rows[0]["outcome"], json!("claimed"));
+    let mine = rows
+        .iter()
+        .find(|r| r["local_pattern_id"] == json!(target.to_string()))
+        .expect("the claimed pattern's own row");
+    assert_eq!(mine["outcome"], json!("claimed"));
 
     let (expected_content_key, expected_pattern_id) = expected_identity(&f.s, target, f.account);
 
@@ -293,11 +271,8 @@ fn a_claim_persists_owner_content_key_and_pattern_id_before_any_delivery() {
     );
 
     // The CLI's own report already carries the same, already-persisted identity.
-    assert_eq!(rows[0]["owner_user_id"], json!(f.account.to_string()));
-    assert_eq!(
-        rows[0]["pattern_id"],
-        json!(expected_pattern_id.to_string())
-    );
+    assert_eq!(mine["owner_user_id"], json!(f.account.to_string()));
+    assert_eq!(mine["pattern_id"], json!(expected_pattern_id.to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -318,21 +293,31 @@ fn a_repeated_claim_by_the_same_owner_is_a_no_op_and_delivery_converges_on_one_r
 
     let first =
         f.s.json(&["migrate", "--claim-patterns", &target.to_string()]);
-    assert_eq!(first["claims"][0]["outcome"], json!("claimed"));
-    let pattern_id = first["claims"][0]["pattern_id"]
+    let claims = first["claims"].as_array().expect("claims array");
+    let mine = claims
+        .iter()
+        .find(|r| r["local_pattern_id"] == json!(target.to_string()))
+        .expect("the claimed pattern's own row");
+    assert_eq!(mine["outcome"], json!("claimed"));
+    let pattern_id = mine["pattern_id"]
         .as_str()
         .expect("a pattern id")
         .to_string();
 
     let second =
         f.s.json(&["migrate", "--claim-patterns", &target.to_string()]);
+    let claims2 = second["claims"].as_array().expect("claims array");
+    let mine2 = claims2
+        .iter()
+        .find(|r| r["local_pattern_id"] == json!(target.to_string()))
+        .expect("the claimed pattern's own row, second call");
     assert_eq!(
-        second["claims"][0]["outcome"],
+        mine2["outcome"],
         json!("already_owned"),
         "a repeated claim by the same owner must be a no-op, not a second claim"
     );
     assert_eq!(
-        second["claims"][0]["pattern_id"],
+        mine2["pattern_id"],
         json!(pattern_id),
         "the SAME persisted identity must come back, not a freshly recomputed one"
     );
@@ -343,20 +328,13 @@ fn a_repeated_claim_by_the_same_owner_is_a_no_op_and_delivery_converges_on_one_r
     );
 
     // Idempotent delivery: two full runs, one canonical row.
-    //
-    // Both calls are made regardless of whether the overall command reports
-    // success — see the file-level note on the drain-level defect that
-    // currently prevents a *complete* `--run` against this fixture. The
-    // property under test here (redelivery does not duplicate) holds or fails
-    // independently of that: if the pattern is delivered at all, it must be
-    // delivered once.
-    let _ = f.s.cairn(&["--json", "migrate", "--run"]);
-    let _ = f.s.cairn(&["--json", "migrate", "--run"]);
+    let _ = f.s.json(&["migrate", "--run"]);
+    let _ = f.s.json(&["migrate", "--run"]);
     let count = f.server.count(&format!(
         "SELECT count(*) FROM shared_patterns WHERE pattern_id = '{pattern_id}'"
     ));
-    assert!(
-        count <= 1,
+    assert_eq!(
+        count, 1,
         "two runs of an idempotent delivery produced {count} `shared_patterns` rows for one pattern_id"
     );
 }
@@ -381,7 +359,12 @@ fn a_different_account_claiming_the_same_local_pattern_is_refused() {
 
     let claimed =
         f.s.json(&["migrate", "--claim-patterns", &target.to_string()]);
-    let pattern_id_a = claimed["claims"][0]["pattern_id"]
+    let pattern_id_a = claimed["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["local_pattern_id"] == json!(target.to_string()))
+        .expect("A's own claim row")["pattern_id"]
         .as_str()
         .expect("a pattern id")
         .to_string();
@@ -395,18 +378,24 @@ fn a_different_account_claiming_the_same_local_pattern_is_refused() {
 
     let attempt =
         f.s.json(&["migrate", "--claim-patterns", &target.to_string()]);
+    let row = attempt["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["local_pattern_id"] == json!(target.to_string()))
+        .expect("B's attempt against the same local id");
     assert_eq!(
-        attempt["claims"][0]["outcome"],
+        row["outcome"],
         json!("legacy_pattern_already_claimed"),
         "a different account's claim on an already-claimed pattern must be refused outright"
     );
     assert_eq!(
-        attempt["claims"][0]["pattern_id"],
+        row["pattern_id"],
         Value::Null,
         "a refused claim must not hand back a pattern id to address"
     );
     assert_eq!(
-        attempt["claims"][0]["owner_user_id"],
+        row["owner_user_id"],
         json!(account_a.to_string()),
         "the refusal must name the ORIGINAL claimant, never the account that was refused"
     );
@@ -451,7 +440,12 @@ fn a_credential_switch_never_re_keys_a_claimed_pattern() {
 
     let claimed =
         f.s.json(&["migrate", "--claim-patterns", &target.to_string()]);
-    let pattern_id = claimed["claims"][0]["pattern_id"]
+    let pattern_id = claimed["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["local_pattern_id"] == json!(target.to_string()))
+        .expect("A's own claim row")["pattern_id"]
         .as_str()
         .expect("a pattern id")
         .to_string();
@@ -459,24 +453,19 @@ fn a_credential_switch_never_re_keys_a_claimed_pattern() {
     let (account_b, token_b) = f.server.new_user("second-owner");
     attach_server(&f.s, &f.server, &token_b);
 
-    // Run as B. Whether or not the whole command reports success (see the
-    // file-level note), the pattern must never move under B's credential.
-    let run_as_b = f.s.cairn(&["--json", "migrate", "--run"]);
-    if let Ok(body) = serde_json::from_str::<Value>(&run_as_b.stdout) {
-        if body["ok"] == json!(true) {
-            let blocked = body["run"]["drain"]["blocked"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default();
-            let row = blocked.iter().find(|b| {
-                b["entity_type"] == json!("pattern") && b["entity_id"] == json!(target.to_string())
-            });
-            let row = row.unwrap_or_else(|| {
-                panic!("switching credentials let the claimed pattern through instead of blocking it: {blocked:?}")
-            });
-            assert_eq!(row["reason"], json!("author_mismatch"));
-        }
-    }
+    // Run as B. The pattern must never move under B's credential.
+    let run_as_b = f.s.json(&["migrate", "--run"]);
+    let blocked = run_as_b["run"]["drain"]["blocked"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let row = blocked
+        .iter()
+        .find(|b| b["entity_type"] == json!("pattern") && b["entity_id"] == json!(target.to_string()))
+        .unwrap_or_else(|| {
+            panic!("switching credentials let the claimed pattern through instead of blocking it: {blocked:?}")
+        });
+    assert_eq!(row["reason"], json!("author_mismatch"));
 
     assert_eq!(
         claim_row_count(&f.s, target),
@@ -503,17 +492,147 @@ fn a_credential_switch_never_re_keys_a_claimed_pattern() {
     );
 
     // Switch back to A: the same identity now delivers normally.
-    attach_server(
-        &f.s,
-        &f.server,
-        &f.server.token_for(
-            &f.s.json(&["migrate", "--status"])["status"]["mode"].to_string(),
-            "unused",
-        ),
+    attach_server(&f.s, &f.server, &f.token);
+    let _ = f.s.json(&["migrate", "--run"]);
+    let delivered_under_a = f.server.count(&format!(
+        "SELECT count(*) FROM shared_patterns WHERE pattern_id = '{pattern_id}' AND owner_user_id = '{account_a}'"
+    ));
+    assert_eq!(
+        delivered_under_a, 1,
+        "switching back to the original claimant must let the pattern deliver under its own, unchanged identity"
     );
-    // The line above is deliberately not how we get A's token back — tokens
-    // are opaque and not derivable from status. Re-attach with A's real
-    // token instead.
-    let _ = "placeholder to keep formatting stable";
-    unreachable!("replaced below");
+}
+
+// ---------------------------------------------------------------------------
+// 6. An unclaimed pattern stays readable locally
+// ---------------------------------------------------------------------------
+
+/// A legacy pattern nobody ever claims is not lost by migration: its
+/// `reusable_patterns` row is exactly as present after a full `--run` as
+/// before, and `--status` lists it as retained with `owner_unclaimed` — never
+/// silently dropped, and never silently attributed.
+///
+/// **Falsified by**: the local row disappearing, or `--status` failing to
+/// name it with reason `owner_unclaimed`.
+#[test]
+fn an_unclaimed_pattern_stays_readable_locally_and_is_named_as_retained() {
+    let f = fixture!();
+
+    let _ = f.s.json(&["migrate", "--run"]);
+
+    let still_local: i64 = f.s.query_column(&format!(
+        "SELECT count(*) FROM reusable_patterns WHERE id = '{}' AND deleted_at IS NULL",
+        f.ids.pattern_unclaimed
+    ))[0]
+        .parse()
+        .expect("a count");
+    assert_eq!(
+        still_local, 1,
+        "an unclaimed legacy pattern must remain readable locally after migration runs"
+    );
+
+    let status = f.s.json(&["migrate", "--status"]);
+    let retained = status["status"]["retained"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let row = retained
+        .iter()
+        .find(|r| r["reference"] == json!(format!("pattern:{}", f.ids.pattern_unclaimed)))
+        .unwrap_or_else(|| {
+            panic!("the unclaimed pattern never appears in --status's retained list: {retained:?}")
+        });
+    assert_eq!(row["reason"], json!("owner_unclaimed"));
+}
+
+// ---------------------------------------------------------------------------
+// 7. Local pattern evidence never leaves
+// ---------------------------------------------------------------------------
+
+/// `pattern_applications` is machine-local evidence (FR-707) and never
+/// drains: its row survives migration untouched, and the server has no
+/// column anywhere that could carry it or the five other names the privacy
+/// boundary refuses. The delivered pattern itself carries only the safe
+/// shape — owner/domain/trust — nothing else.
+///
+/// **Falsified by**: the local evidence row disappearing or changing;
+/// `shared_patterns` (the only table a pattern could land in) growing a
+/// column named `signals`, `signal_digest`, `origin_ref`,
+/// `sanitization_report`, `source_memory_id` or `origin_deleted`; the
+/// delivered row's `owner_user_id`/`domain`/`trust` disagreeing with what the
+/// claim and the safe shape require.
+#[test]
+fn local_pattern_evidence_never_leaves_and_a_delivered_row_carries_only_the_safe_shape() {
+    let f = fixture!();
+
+    // Schema-level, and independent of whether anything ever delivers: the
+    // six privacy-boundary names have no home on the server at all.
+    for column in [
+        "signals",
+        "signal_digest",
+        "origin_ref",
+        "sanitization_report",
+        "source_memory_id",
+        "origin_deleted",
+    ] {
+        let exists = f.server.count(&format!(
+            "SELECT count(*) FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'shared_patterns'
+                AND column_name = '{column}'"
+        ));
+        assert_eq!(
+            exists, 0,
+            "`shared_patterns` grew a column the privacy boundary refuses: {column}"
+        );
+    }
+
+    let claim = f.s.json(&[
+        "migrate",
+        "--claim-patterns",
+        &f.ids.pattern_claimable.to_string(),
+    ]);
+    let pattern_id = claim["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["local_pattern_id"] == json!(f.ids.pattern_claimable.to_string()))
+        .expect("the claimed pattern's own row")["pattern_id"]
+        .as_str()
+        .expect("a pattern id")
+        .to_string();
+    let _ = f.s.json(&["migrate", "--run"]);
+
+    // Local evidence is untouched — migration does not read it to decide
+    // anything, and never sends it.
+    let evidence: i64 = f.s.query_column(&format!(
+        "SELECT count(*) FROM pattern_applications WHERE pattern_id = '{}'",
+        f.ids.pattern_claimable
+    ))[0]
+        .parse()
+        .expect("a count");
+    assert_eq!(
+        evidence, 1,
+        "migration touched machine-local pattern evidence, which never drains (FR-707)"
+    );
+
+    // The delivered row carries only the safe shape.
+    let rows = f.server.query_column(&format!(
+        "SELECT owner_user_id || '|' || domain || '|' || trust
+           FROM shared_patterns WHERE pattern_id = '{pattern_id}'"
+    ));
+    assert_eq!(rows.len(), 1, "the claimed pattern was never delivered");
+    let parts: Vec<&str> = rows[0].split('|').collect();
+    assert_eq!(
+        parts[0],
+        f.account.to_string(),
+        "owner_user_id must be the claim's own owner"
+    );
+    assert_eq!(
+        parts[1], "personal",
+        "a promoted pattern is a personal-domain record"
+    );
+    assert_eq!(
+        parts[2], "sanitized",
+        "the server can only establish this one trust level"
+    );
 }
