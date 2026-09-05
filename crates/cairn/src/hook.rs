@@ -612,12 +612,19 @@ fn cached_context_notice() -> String {
 
 /// §12.3's closing bullet: no cache entry exists for this session and
 /// account, so fresh knowledge is reported unavailable rather than silently
-/// served as though there were nothing to say. Local project state (Level 0)
-/// is unaffected and is not what this notice is about.
+/// served as though there were nothing to say.
+///
+/// **It used to say "Local project state below is current", and that was the
+/// misleading half.** Level 0 was assembled from the local store on this path,
+/// and the local store is one machine's store: on a cache miss it was the
+/// previous account's pulled knowledge being described as this caller's
+/// current local state (FR-790a). Nothing but the repository is served here
+/// now, and the notice says which.
 fn unavailable_context_notice() -> String {
     "_Cairn could not reach the server this turn and has no cached briefing for this \
-     session; durable memory (task/branch/project memory, patterns, personal notes, team \
-     guidance) is unavailable this turn. Local project state below is current._\n\n"
+     session and account; durable memory (task/branch/project memory, handoffs, \
+     patterns, personal notes, team guidance) is unavailable this turn. Only this \
+     repository's own state is shown below._\n\n"
         .to_string()
 }
 

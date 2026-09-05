@@ -221,3 +221,344 @@ fn a_briefing_assembled_for_one_account_is_never_served_to_another() {
         "the second account was served the first account's cached briefing: {after}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// FR-790a: what a cache miss may not serve
+//
+// The three tests above are about the cache. These are about the *fallback*
+// when there is no cache entry for this account — the path that used to
+// assemble Level 0 from the local store and hand it to whoever was asking.
+// ---------------------------------------------------------------------------
+
+/// Seed one distinctive value into every local source a briefing can draw on.
+///
+/// Written straight into the store, because the point is to prove that a
+/// **local** row of each kind stays local; going through the surfaces would
+/// test the surfaces instead, and some of these have no surface that would put
+/// a row here without a reachable server.
+///
+/// Every marker shares one prefix so a single scan can assert that none of them
+/// crossed, and so a source added later that is *not* seeded here shows up as a
+/// gap in this list rather than as a silent hole in the assertion.
+fn seed_every_local_source(device: &Device, marker: &str) {
+    // The **local** project id, not `device.project`, which is the id the
+    // server knows this project by. Foreign keys in the local store point at
+    // the local row.
+    let project = device
+        .sandbox
+        .query_column("SELECT id FROM projects WHERE deleted_at IS NULL ORDER BY created_at")
+        .first()
+        .cloned()
+        .expect("the sandbox's own project row");
+    let user = device
+        .sandbox
+        .query_column("SELECT id FROM users ORDER BY created_at LIMIT 1")
+        .first()
+        .cloned()
+        .expect("this machine's local user");
+    let session = Uuid::now_v7();
+    let task = Uuid::now_v7();
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO sessions (id, project_id, task_id, user_id, agent, branch,
+                               worktree_path, agent_session_key, status, started_at,
+                               last_event_at, daemon_run_id)
+         VALUES ('{session}', '{project}', NULL, '{user}', 'claude_code', 'main', '{}',
+                 'marker-key-{marker}', 'completed', '2026-09-01T09:00:00Z',
+                 '2026-09-01T09:00:00Z', '{}')",
+        device.sandbox.repo_path().display(),
+        Uuid::now_v7(),
+    ));
+    // A task, its criterion and its blocker — Level 0, all three.
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO tasks (id, project_id, title, goal, status, created_at, updated_at)
+         VALUES ('{task}', '{project}', '{marker}-task-title', '{marker}-task-goal',
+                 'in_progress', '2026-09-01T09:00:00Z', '2026-09-01T09:00:00Z')"
+    ));
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO task_criteria (id, task_id, ordinal, label, text, state,
+                                    created_at, updated_at)
+         VALUES ('{}', '{task}', 1, '{marker}-criterion',
+                 '{marker}-criterion-text', 'pending', '2026-09-01T09:00:00Z',
+                 '2026-09-01T09:00:00Z')",
+        Uuid::now_v7()
+    ));
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO task_blockers (id, task_id, description, opened_by_session,
+                                    opened_at)
+         VALUES ('{}', '{task}', '{marker}-blocker', '{session}',
+                 '2026-09-01T09:00:00Z')",
+        Uuid::now_v7()
+    ));
+    // A handoff, which is where a briefing's decisions and known failures come
+    // from — the Level 0 source most likely to be forgotten.
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO handoffs (id, session_id, trigger, goal, progress, next_step,
+                               decisions, failures, created_at)
+         VALUES ('{}', '{session}', 'session_end', '{marker}-handoff-goal',
+                 '{marker}-progress', '{marker}-next-step',
+                 '[\"{marker}-decision\"]', '[\"{marker}-failure\"]',
+                 '2026-09-01T09:00:00Z')",
+        Uuid::now_v7()
+    ));
+    // Project memory, a pinned constraint, and a reusable pattern.
+    let pinned = Uuid::now_v7();
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state,
+                               origin_session_id, created_at, updated_at)
+         VALUES ('{}', '{project}', 'fact', 'project', '{project}', '{marker}-memory',
+                 'active', '{session}', '2026-09-01T09:00:00Z', '2026-09-01T09:00:00Z')",
+        Uuid::now_v7()
+    ));
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state,
+                               origin_session_id, pinned, pin_reason, created_at, updated_at)
+         VALUES ('{pinned}', '{project}', 'convention', 'project', '{project}',
+                 '{marker}-pin', 'active', '{session}', 1, '{marker}-pin-reason',
+                 '2026-09-01T09:00:00Z', '2026-09-01T09:00:00Z')"
+    ));
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO reusable_patterns (id, title, problem, signals, signal_digest,
+                                        applicability, root_cause, root_cause_digest,
+                                        approach, constraints, trust, origin_ref,
+                                        sanitization_report, created_at, updated_at)
+         VALUES ('{}', '{marker}-pattern', '{marker}-pattern-problem',
+                 '[\"{marker}-signal\",\"second\"]', 'digest-{marker}', '[]',
+                 '{marker}-root-cause', 'rc-{marker}', '{marker}-approach', '[]',
+                 'sanitized', 'salted-{marker}', '{{}}', '2026-09-01T09:00:00Z',
+                 '2026-09-01T09:00:00Z')",
+        Uuid::now_v7()
+    ));
+    // Personal and team knowledge — the two domains that belong to an account
+    // rather than to a project.
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO personal_knowledge (id, owner_user_id, knowledge_type, content,
+                                         topic_key, value_key, writer_id, writer_seq,
+                                         created_at)
+         VALUES ('{}', '{}', 'fact', '{marker}-personal', 'marker.personal', 'value',
+                 '{}', 1, '2026-09-01T09:00:00Z')",
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7()
+    ));
+    device.sandbox.exec_sql(&format!(
+        "INSERT INTO team_knowledge (id, knowledge_type, content, topic_key, value_key,
+                                     state, proposed_by_user_id, ratified_by_user_id,
+                                     ratified_at, writer_id, writer_seq, created_at)
+         VALUES ('{}', 'convention', '{marker}-team', 'marker.team', 'value',
+                 'authoritative', '{}', '{}', '2026-09-01T09:00:00Z', '{}', 2,
+                 '2026-09-01T09:00:00Z')",
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7()
+    ));
+}
+
+/// Every marker seeded above, so one assertion can name the one that leaked.
+fn markers(marker: &str) -> Vec<String> {
+    [
+        "task-title",
+        "task-goal",
+        "criterion",
+        "criterion-text",
+        "blocker",
+        "handoff-goal",
+        "progress",
+        "next-step",
+        "decision",
+        "failure",
+        "memory",
+        "pin",
+        "pin-reason",
+        "pattern",
+        "pattern-problem",
+        "root-cause",
+        "approach",
+        "personal",
+        "team",
+    ]
+    .iter()
+    .map(|suffix| format!("{marker}-{suffix}"))
+    .collect()
+}
+
+fn assert_no_marker_crossed(context: &str, marker: &str, who: &str) {
+    for m in markers(marker) {
+        assert!(
+            !context.contains(&m),
+            "{who} was served `{m}` from this machine's local store. On a cache \
+             miss the server has not established what this caller may see — it \
+             has not been reached at all — so nothing derived from the store may \
+             be in this briefing:\n{context}"
+        );
+    }
+}
+
+/// The markers really are in this machine's store.
+///
+/// The positive control, and it has to be this rather than "the first account
+/// saw them in its briefing": once retrieval is server-side a reachable server
+/// supplies the durable sections, so an account with the server up does *not*
+/// see its own locally seeded rows. What makes the assertions below meaningful
+/// is that the rows exist here at all — and the mutation test at the end of
+/// this file is what proves the old fallback would have served them.
+fn assert_markers_are_in_the_local_store(device: &Device, marker: &str) {
+    for (what, sql) in [
+        ("the memory", format!(
+            "SELECT CAST(count(*) AS TEXT) FROM memories WHERE content = '{marker}-memory'"
+        )),
+        ("the handoff", format!(
+            "SELECT CAST(count(*) AS TEXT) FROM handoffs WHERE goal = '{marker}-handoff-goal'"
+        )),
+        ("the task", format!(
+            "SELECT CAST(count(*) AS TEXT) FROM tasks WHERE title = '{marker}-task-title'"
+        )),
+        ("the pattern", format!(
+            "SELECT CAST(count(*) AS TEXT) FROM reusable_patterns WHERE title = '{marker}-pattern'"
+        )),
+        ("the personal note", format!(
+            "SELECT CAST(count(*) AS TEXT) FROM personal_knowledge WHERE content = '{marker}-personal'"
+        )),
+        ("the team entry", format!(
+            "SELECT CAST(count(*) AS TEXT) FROM team_knowledge WHERE content = '{marker}-team'"
+        )),
+    ] {
+        assert_eq!(
+            device.sandbox.query_column(&sql),
+            vec!["1".to_string()],
+            "{what} was never written locally, so the assertion that it does not \
+             cross would pass against an empty store"
+        );
+    }
+}
+
+/// A second account on the same machine is served no part of the first
+/// account's local state (FR-790a).
+///
+/// **The load-bearing test for the repair.** Everything a briefing can draw on
+/// is seeded locally under account A — Level 0 included, not project memory
+/// alone — then the credential is switched and the server is taken away. The
+/// old fallback assembled all of it from the local store and handed it over.
+///
+/// **Falsified by** returning a locally assembled briefing on a cache miss.
+#[test]
+fn a_cache_miss_serves_a_second_account_nothing_from_this_machines_store() {
+    let Some(server) = server() else { return };
+    let device = device(&server, "miss-account-a");
+
+    let key = format!("miss-{}", Uuid::now_v7());
+    let _ = open_session(&device, &key);
+    settle("the session reaches the server", || {
+        synced_sessions(&server, device.project) > 0
+    });
+    let marker = format!("m{}", Uuid::now_v7().simple());
+    seed_every_local_source(&device, &marker);
+
+    assert_markers_are_in_the_local_store(&device, &marker);
+
+    let second = server.new_user_token("miss-account-b");
+    let switched =
+        device
+            .sandbox
+            .cairn(&["auth", "token", "set", &second, "--server", &server.base]);
+    assert!(switched.ok(), "auth token set: {}", switched.stderr);
+    drop(server);
+
+    let after = open_session(&device, &key);
+    assert_no_marker_crossed(&after, &marker, "a second account");
+    assert!(
+        after.contains("unavailable"),
+        "the second account was not told that durable knowledge is missing; a \
+         briefing that is quietly smaller is indistinguishable from one that is \
+         complete: {after}"
+    );
+}
+
+/// A signed-out caller is served no part of the signed-in account's local
+/// state.
+///
+/// The same boundary from the other side. There is no account at all here, so
+/// there is not even a cache key to miss on — and the old fallback answered
+/// with the local store regardless.
+///
+/// **Falsified by** returning a locally assembled briefing when no account is
+/// authenticated.
+#[test]
+fn a_cache_miss_serves_a_signed_out_caller_nothing_from_this_machines_store() {
+    let Some(server) = server() else { return };
+    let device = device(&server, "miss-signed-out");
+
+    let key = format!("signed-out-{}", Uuid::now_v7());
+    let _ = open_session(&device, &key);
+    settle("the session reaches the server", || {
+        synced_sessions(&server, device.project) > 0
+    });
+    let marker = format!("m{}", Uuid::now_v7().simple());
+    seed_every_local_source(&device, &marker);
+    assert_markers_are_in_the_local_store(&device, &marker);
+
+    let out = device.sandbox.cairn(&["auth", "logout"]);
+    assert!(out.ok(), "signing out: {}", out.stderr);
+    drop(server);
+
+    let after = open_session(&device, &key);
+    assert_no_marker_crossed(&after, &marker, "a signed-out caller");
+}
+
+/// The same account's cached briefing still works, still carries its content,
+/// and still says it is cached.
+///
+/// The repair narrows one path and must not narrow this one: a cache hit is
+/// evidence the server already authorized *this* account for *this* session,
+/// which is exactly what a miss does not have.
+///
+/// **Falsified by** treating a cache hit as a miss, or by serving a cached
+/// briefing without saying so.
+#[test]
+fn the_same_accounts_cached_briefing_still_carries_its_content_and_says_it_is_cached() {
+    let Some(server) = server() else { return };
+    let device = device(&server, "miss-same-account");
+
+    let key = format!("same-{}", Uuid::now_v7());
+    let _ = open_session(&device, &key);
+    settle("the session reaches the server", || {
+        synced_sessions(&server, device.project) > 0
+    });
+    let session: Uuid = server
+        .query_column(&format!(
+            "SELECT id::text FROM sessions WHERE project_id = '{}' LIMIT 1",
+            device.project
+        ))
+        .first()
+        .and_then(|s| s.parse().ok())
+        .expect("a synced session");
+    let marker = format!("m{}", Uuid::now_v7().simple());
+    seed(
+        &server,
+        device.project,
+        session,
+        &format!("{marker}-server-memory"),
+    );
+
+    // Fill the cache from a reachable server, then take it away.
+    let warm = open_session(&device, &key);
+    assert!(
+        warm.contains(&format!("{marker}-server-memory")),
+        "the cache was never filled, so the outage below proves nothing: {warm}"
+    );
+    drop(server);
+
+    let cached = open_session(&device, &key);
+    assert!(
+        cached.contains(&format!("{marker}-server-memory")),
+        "the same account's cached briefing lost its content. A cache hit is \
+         evidence the server authorized this account for this session, and it \
+         is exactly what a miss does not have: {cached}"
+    );
+    assert!(
+        cached.contains("cache"),
+        "a cached briefing was served without saying it is cached, which is \
+         worse than no briefing because it cannot be told from a fresh one: \
+         {cached}"
+    );
+}

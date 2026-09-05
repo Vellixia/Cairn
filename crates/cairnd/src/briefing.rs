@@ -22,6 +22,69 @@ const GLOBAL_PER_BRIEFING: i64 = 12;
 ///
 /// `degraded` is set by the caller when assembly had to proceed without part of
 /// its inputs — the agent session still starts (FR-046).
+/// The briefing served when the server did not answer and this account has no
+/// cached briefing for this session (`retrieval-delivery.md` §12.3).
+///
+/// # Why this is a separate function and not a flag
+///
+/// **It takes no `Daemon` and no `Store`.** On a cache miss the server has not
+/// established what this caller may see — it has not been reached at all — and
+/// the local store is one machine's store, shared by every account that signs
+/// in on it. The old fallback assembled Level 0 from that store and served it,
+/// so a second account, or a signed-out caller, was handed whatever the first
+/// account's session had pulled down: project memory, the previous handoff and
+/// its decisions and failures, the bound task's criteria and blockers, pins,
+/// patterns, personal notes and team guidance.
+///
+/// A per-table owner filter would not fix it, because there is nothing to
+/// filter against: authorization is a server fact and the server is the thing
+/// that is missing. So this function is given no way to read the store at all,
+/// which is the same "the function cannot see the thing that would violate it"
+/// argument the reserve already makes — a filter can be forgotten, an absent
+/// parameter cannot.
+///
+/// What it does carry is what the caller can already see for themselves: which
+/// repository they are standing in, and its branch, commit and working tree.
+/// `has_history` is `true` rather than `false` — this machine does not know
+/// whether the project has history, and answering `no_prior_history` would
+/// greet a long-running project as a new one every outage (FR-031).
+pub fn unavailable(
+    project: &Project,
+    repository: RepositoryState,
+    caps: cairn_core::context::Caps,
+    budget: usize,
+) -> ContextPayload {
+    assemble(
+        &ContextInputs {
+            project,
+            repository,
+            task: None,
+            previous_handoff: None,
+            decisions: &[],
+            known_failures: &[],
+            task_memory: &[],
+            branch_memory: &[],
+            project_memory: &[],
+            patterns: &[],
+            has_history: true,
+            degraded: false,
+            level0: cairn_core::context::Level0 {
+                criteria: &[],
+                blockers: &[],
+                blocker_text: &[],
+                warnings: &[],
+                pins: &[],
+                previous_next_action: None,
+                explain: false,
+                caps,
+            },
+            personal_notes: &[],
+            team_guidance: &[],
+        },
+        budget,
+    )
+}
+
 /// Who is supplying the durable sections this briefing needs.
 ///
 /// One budget is shared by two assemblers once retrieval is server-side, and

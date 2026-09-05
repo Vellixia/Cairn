@@ -408,7 +408,23 @@ still bind:
 - It is served only when the server is unreachable, and is labelled cached and possibly stale
   (FR-789, FR-837).
 - If no cache entry exists for the session and account, Cairn reports fresh knowledge as
-  unavailable rather than serving nothing silently.
+  unavailable rather than serving nothing silently — and serves **nothing derived from the
+  local store**: no project, task, memory, handoff, decision, failure, criterion, blocker,
+  pin, pattern, personal or team content. Only the repository's own state (branch, commit,
+  working tree), which the caller can already see, and the notice itself.
+
+  **Why the fallback is not "assemble Level 0 locally".** Authorization for a project is a
+  fact the server establishes, and on this path the server has not been reached at all —
+  there is nothing to check the caller against. The local store is one machine's store,
+  shared by every account that signs in on it, so a locally assembled Level 0 hands the
+  previous account's pulled knowledge to whoever is asking now: a second account on a shared
+  workstation, or a caller who has signed out. A per-table owner filter cannot stand in for
+  the missing authorization, so the fallback is built by a function that is given no store to
+  read (`briefing::unavailable`) rather than by one that reads carefully (FR-790a).
+
+  A cache *hit* is different in exactly the way that matters: it is evidence the server
+  already authorized this account for this session, which is why the same account's cached
+  briefing is still served in full, still labelled cached.
 
 This is the cache Principle II permits, and its bound, refill and invalidation policy is
 stated here as that principle requires.

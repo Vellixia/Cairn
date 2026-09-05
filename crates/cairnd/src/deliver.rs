@@ -259,27 +259,53 @@ pub async fn deliver(
     // (FR-029, SC-709).
     let local_budget = meta.local_budget(budget_tokens);
 
-    let session = cairn_store::repo::session(&d.store, session_id).await.ok();
-    // When the server answered, it already selected and already paid for the
-    // durable sections — so this build must not read them. Assembling them here
-    // and letting the merge overwrite them would spend budget on content that
-    // is thrown away, and the replacement costs its own amount on top: the
-    // briefing then exceeds the budget it states, which is what FR-029 forbids
-    // and what a merged answer of 357 tokens against a stated 300 looked like.
-    let durable = if response.is_some() {
-        crate::briefing::Durable::FromServer
+    // **Nothing fresh and nothing cached for this account is not a local
+    // briefing** (FR-790a). The old fallback assembled Level 0 from the local
+    // store and served it, which on a cache miss means serving whatever the
+    // *previous* account's session had pulled onto this machine — to a second
+    // account, or to a caller who has signed out. Authorization for a project
+    // is a fact the server establishes, and on this path the server has not
+    // been reached at all, so there is nothing to check the caller against and
+    // no filter that could stand in for one.
+    //
+    // `briefing::unavailable` is given no `Daemon` and no store to read, so
+    // this is a structural answer rather than a careful one.
+    let payload_result = if response.is_none() {
+        let git = crate::state::git_status(resolved.repo.worktree_path.clone()).await;
+        let config = d.config.read().await.clone();
+        git.map(|git| {
+            crate::briefing::unavailable(
+                &resolved.project,
+                crate::state::repo_state(&git),
+                cairn_core::context::Caps {
+                    goal_max_tokens: config.goal_max_tokens,
+                    warnings_in_context_max: config.warnings_in_context_max,
+                    pins_in_context_max: config.pins_in_context_max,
+                    reserve_fraction: config.min_safe_context_fraction,
+                    global_share_max: cairn_core::context::GLOBAL_SHARE_MAX,
+                },
+                local_budget,
+            )
+        })
     } else {
-        crate::briefing::Durable::Local
+        let session = cairn_store::repo::session(&d.store, session_id).await.ok();
+        // When the server answered, it already selected and already paid for
+        // the durable sections — so this build must not read them. Assembling
+        // them here and letting the merge overwrite them would spend budget on
+        // content that is thrown away, and the replacement costs its own amount
+        // on top: the briefing then exceeds the budget it states, which is what
+        // FR-029 forbids and what a merged answer of 357 tokens against a
+        // stated 300 looked like.
+        crate::briefing::build(
+            d,
+            resolved,
+            session.as_ref(),
+            crate::briefing::Assembly::local(local_budget, ContextDepth::Standard)
+                .with_durable(crate::briefing::Durable::FromServer),
+        )
+        .await
     };
-    let local = crate::briefing::build(
-        d,
-        resolved,
-        session.as_ref(),
-        crate::briefing::Assembly::local(local_budget, ContextDepth::Standard)
-            .with_durable(durable),
-    )
-    .await;
-    let mut payload = match local {
+    let mut payload = match payload_result {
         Ok(built) => serde_json::to_value(built).unwrap_or_else(|_| json!({})),
         Err(e) => json!({ "error": e.message }),
     };
