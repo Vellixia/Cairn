@@ -19,8 +19,8 @@
 //! deliberate: a live probe can only test the routes it thinks of, and the
 //! point is to catch the one nobody thought of.
 
-use cairn_e2e::feature005::Pg;
-use cairn_e2e::{get_json_status_bearer, post_status_bearer};
+use cairn_e2e::feature005::{Account, Pg};
+use cairn_e2e::{get_json_status_bearer, post_json_status_bearer, post_status_bearer};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
@@ -540,4 +540,427 @@ fn personal_and_team_routes_are_account_scoped_rather_than_project_scoped() {
             "{path} is reachable without authentication"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// The migration and cutover routes (T161, `contracts/migration-cutover.md`)
+// ---------------------------------------------------------------------------
+
+// `POST /api/migration/register`, `/drain`, `/possession`, `/complete` and
+// `POST /api/admin/cutover` are new surfaces this feature adds after the rest
+// of the audit above was written, and every property the sweeps above exist
+// to protect applies to them just as much:
+//
+// - **Migration is per-account, not per-project.** A drain call authenticated
+//   as one account must not be able to deliver a record into a project that
+//   account does not belong to merely by naming it in the payload, and a
+//   migration token minted for one account must not authenticate a drain or
+//   completion for another (`migration-cutover.md` §12.1) — the same
+//   enumeration-oracle reasoning FR-894a applies to a record id applies here
+//   to a token: a distinguishable "wrong account" answer would let a caller
+//   learn which tokens exist.
+// - **`indeterminate` is not `missing`.** §12.5 is explicit that a caller who
+//   cannot see a team proposal must never be told the record does not exist,
+//   because a client would act on `missing` by retaining a writable copy of
+//   something the server may actually hold. Collapsing the third answer into
+//   the second is a privacy leak that also corrupts the client's own state.
+// - **Cutover is `AdminUser`-gated**, the same shape as every other
+//   administrator action.
+//
+// None of these five routes is called anywhere in `web/` — there is no
+// button that hides them from a member and no page that filters what a
+// non-admin sees. The refusals below are produced by the routes themselves,
+// probed directly over HTTP with no client in front of them, which is what
+// "no API relies on web-side filtering" means in practice: there is no web
+// side to rely on, and the guarantee has to come from the route.
+//
+// What would falsify this section: any one of these five routes answering
+// `200` to a caller these tests deny it to, or `/possession` answering
+// `missing` for a record `classify_possession` should have called
+// `indeterminate`.
+
+/// Promote an already-seeded account to administrator, directly — mirrors
+/// `feature005_cutover.rs`'s own `make_admin`. Routing this through an admin
+/// route would make the assertion depend on an admin already existing.
+fn make_admin(pg: &Pg, who: &Account) {
+    pg.server.execute(&format!(
+        "UPDATE users SET role = 'admin' WHERE id = '{}'",
+        who.id
+    ));
+}
+
+/// Register a migration for `who`, returning its token.
+fn register_migration(pg: &Pg, who: &Account, writer_id: &str) -> String {
+    let (body, status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/register",
+        &json!({ "writer_id": writer_id }),
+        &who.token,
+    );
+    assert_eq!(status, 200, "registering a migration: {body}");
+    body["migration_token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no migration_token in {body}"))
+        .to_string()
+}
+
+/// A `team_knowledge` row still `proposed`, authored by `proposer` — the shape
+/// `classify_possession` answers `indeterminate` for when the caller is
+/// neither the author nor an admin (§5, §12.5).
+fn seed_proposed_team_knowledge(pg: &Pg, proposer: &Account) -> Uuid {
+    let id = Uuid::now_v7();
+    pg.server.execute(&format!(
+        "INSERT INTO team_knowledge (id, knowledge_type, content, state,
+                                      proposed_by_user_id, writer_id, writer_seq)
+         VALUES ('{id}', 'convention', 'a proposal only its author can see',
+                 'proposed', '{}', 'audit-fixture-{id}', 1)",
+        proposer.id
+    ));
+    id
+}
+
+/// Every route unauthenticated traffic can reach with nothing but a fake
+/// bearer token, none of them 200 — the same sweep the personal/team/pattern
+/// routes above already get, extended to the five routes this section adds.
+///
+/// A request body shaped to *succeed* for a real account, deliberately: the
+/// point is that authentication is checked before anything about the body is,
+/// so an invalid token is refused the same way whether the body is perfect or
+/// garbage. `SettledUser`/`AdminUser` are `axum` extractors that run ahead of
+/// `Json<_>` in the handler's parameter list, so none of these bodies is ever
+/// parsed for this call.
+#[test]
+fn migration_and_cutover_routes_are_never_reachable_without_authentication() {
+    let pg = pg!();
+    let real_memory = seed_memory(&pg);
+    for (path, body) in [
+        (
+            "/api/migration/register".to_string(),
+            json!({ "writer_id": "audit-unauth" }),
+        ),
+        (
+            "/api/migration/drain".to_string(),
+            json!({ "migration_token": "whatever", "items": [] }),
+        ),
+        (
+            "/api/migration/possession".to_string(),
+            json!({ "records": [{ "ref_kind": "knowledge", "domain": "project", "id": real_memory }] }),
+        ),
+        (
+            "/api/migration/complete".to_string(),
+            json!({ "migration_token": "whatever" }),
+        ),
+        ("/api/admin/cutover".to_string(), json!({})),
+    ] {
+        assert_eq!(
+            post_status_bearer(&pg.server.base, &path, &body, "not-a-real-token"),
+            401,
+            "{path} is reachable without authentication"
+        );
+    }
+}
+
+/// A registered migration token authenticates the **account** it was
+/// registered for, and nobody else's (`migration-cutover.md` §12.1).
+///
+/// Without this, one account's migration token would double as a bearer of
+/// somebody else's authority: any account that could get hold of a token —
+/// logged, guessed, or simply reused from a shared fixture — could drain
+/// records under a different identity than the one that registered it. The
+/// answer is the refusal `require_registered_migration` already gives an
+/// unknown token, on purpose (see its own doc comment): distinguishing "your
+/// token" from "a valid token, just not yours" would let a caller enumerate
+/// which tokens exist for other accounts.
+#[test]
+fn drain_refuses_a_migration_token_registered_to_another_account() {
+    let pg = pg!();
+    let token = register_migration(&pg, &pg.owner, "audit-owner-store");
+
+    for impostor in [&pg.member, &pg.outsider] {
+        let (body, status) = post_json_status_bearer(
+            &pg.server.base,
+            "/api/migration/drain",
+            &json!({
+                "migration_token": token,
+                "items": [],
+            }),
+            &impostor.token,
+        );
+        assert_eq!(
+            status, 403,
+            "{} drained using a token registered to a different account: {body}",
+            impostor.email
+        );
+        assert_eq!(
+            body["error"]["code"], "migration_not_registered",
+            "the refusal for a token belonging to another account must be the \
+             same one an unknown token gets, or a caller could tell the two \
+             apart and enumerate live tokens: {body}"
+        );
+    }
+
+    // The same token, presented by the account that actually registered it,
+    // still works — the refusal above is about identity, not about the token
+    // having gone bad.
+    let (body, status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/drain",
+        &json!({ "migration_token": token, "items": [] }),
+        &pg.owner.token,
+    );
+    assert_eq!(status, 200, "the registering account's own drain: {body}");
+}
+
+/// The same cross-account refusal, for `/api/migration/complete`
+/// (`migration-cutover.md` §12.1: the token "closes when the migration
+/// completes", which only means anything if closing it is also bound to the
+/// account that opened it).
+#[test]
+fn complete_refuses_a_migration_token_registered_to_another_account() {
+    let pg = pg!();
+    let token = register_migration(&pg, &pg.owner, "audit-owner-store-2");
+
+    let (body, status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/complete",
+        &json!({ "migration_token": token }),
+        &pg.outsider.token,
+    );
+    assert_eq!(
+        status, 403,
+        "an outsider completed a migration token registered to another account: {body}"
+    );
+    assert_eq!(body["error"]["code"], "migration_not_registered", "{body}");
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM client_migrations
+              WHERE migration_token = '{token}' AND completed_at IS NOT NULL"
+        )),
+        0,
+        "a refused completion closed the token anyway"
+    );
+}
+
+/// A non-member cannot deliver a record into a project it does not belong to
+/// through `/api/migration/drain`, merely by naming that project's id in the
+/// item payload (`migration-cutover.md` §4.2, FR-769's reasoning applied to
+/// the migration-scoped ingest route rather than the ordinary one).
+///
+/// `drain_one` checks `auth::require_member` before either reused upsert
+/// runs, for both `memory` and `memory_relation` — this asserts both, because
+/// the two branches call the guard from two different match arms and a defect
+/// in one would not show up testing only the other.
+#[test]
+fn a_non_member_cannot_drain_a_record_into_a_project_it_does_not_belong_to() {
+    let pg = pg!();
+    let token = register_migration(&pg, &pg.outsider, "audit-outsider-store");
+    let memory_id = Uuid::now_v7();
+    let relation_from = Uuid::now_v7();
+    let relation_to = Uuid::now_v7();
+
+    let (body, status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/drain",
+        &json!({
+            "migration_token": token,
+            "items": [
+                {
+                    "entity_type": "memory",
+                    "entity_id": memory_id,
+                    "operation": "upsert",
+                    "payload": { "project_id": pg.project },
+                },
+                {
+                    "entity_type": "memory_relation",
+                    "entity_id": Uuid::now_v7(),
+                    "operation": "upsert",
+                    "payload": {
+                        "project_id": pg.project,
+                        "from_memory_id": relation_from,
+                        "to_memory_id": relation_to,
+                        "kind": "reinforces",
+                    },
+                },
+            ],
+        }),
+        &pg.outsider.token,
+    );
+    assert_eq!(
+        status, 200,
+        "a drain call answers per item, not as a batch: {body}"
+    );
+
+    let results = body["results"].as_array().cloned().unwrap_or_default();
+    assert_eq!(results.len(), 2, "{body}");
+    for result in &results {
+        assert_eq!(
+            result["accepted"],
+            json!(false),
+            "an outsider drained a record into a project it does not belong \
+             to: {result}"
+        );
+    }
+
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM memories WHERE id = '{memory_id}'"
+        )),
+        0,
+        "the drain reported the memory refused but wrote it anyway"
+    );
+    assert_eq!(
+        pg.server.count(&format!(
+            "SELECT count(*) FROM memory_relations
+              WHERE from_memory_id = '{relation_from}' AND to_memory_id = '{relation_to}'"
+        )),
+        0,
+        "the drain reported the relation refused but wrote it anyway"
+    );
+}
+
+/// The same non-membership, asked of `/api/migration/possession` instead of
+/// `/drain`: a project record the caller is not a member of is answered
+/// `missing`, never `held` (`migration-cutover.md` §5).
+///
+/// This is the possession half of the same non-member boundary the test above
+/// checks for drain — the two routes reach project data through different
+/// code paths (`classify_possession` vs. `require_member` in `drain_one`), so
+/// a defect in either is invisible to a test of only the other.
+#[test]
+fn possession_answers_missing_not_held_for_a_project_record_the_caller_is_not_a_member_of() {
+    let pg = pg!();
+    let memory = seed_memory(&pg);
+
+    let (body, status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/possession",
+        &json!({
+            "records": [
+                { "ref_kind": "knowledge", "domain": "project", "id": memory },
+            ],
+        }),
+        &pg.outsider.token,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["held"].as_array().map(Vec::len).unwrap_or(0),
+        0,
+        "a non-member's possession check reported a project record it does \
+         not belong to as held: {body}"
+    );
+    assert_eq!(
+        body["missing"].as_array().map(Vec::len).unwrap_or(0),
+        1,
+        "a project record the caller cannot see must answer `missing`, not \
+         `indeterminate` — that answer is reserved for a proposed team entry, \
+         where the caller genuinely cannot tell whether the server holds it \
+         (§5): {body}"
+    );
+}
+
+/// A team proposal the caller may not see answers `indeterminate`, never
+/// `missing` (`migration-cutover.md` §5, §12.5).
+///
+/// §12.5 is explicit about why the distinction matters: `missing` is a claim
+/// the server does not hold the record, and a client acting on that claim
+/// would keep a writable local copy of something the server actually has —
+/// two disagreeing "truths" for the same record. Collapsing `indeterminate`
+/// into `missing` is not a smaller lie than collapsing it into `held`; it is
+/// the specific lie this contract calls out by name.
+#[test]
+fn possession_answers_indeterminate_not_missing_for_a_team_proposal_the_caller_may_not_see() {
+    let pg = pg!();
+    let proposal = seed_proposed_team_knowledge(&pg, &pg.owner);
+    let record = json!({ "ref_kind": "knowledge", "domain": "team", "id": proposal });
+
+    // Neither the proposal's author nor an administrator: `member` is a
+    // project peer of `owner` but has no standing over a team proposal it did
+    // not author.
+    let (body, status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/possession",
+        &json!({ "records": [record] }),
+        &pg.member.token,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        body["missing"].as_array().map(Vec::len).unwrap_or(0),
+        0,
+        "a proposed team entry the caller may not see was reported `missing`, \
+         which is the one answer §12.5 forbids for this exact case: {body}"
+    );
+    assert_eq!(
+        body["held"].as_array().map(Vec::len).unwrap_or(0),
+        0,
+        "a proposal this caller did not author and is not an admin over was \
+         reported `held`: {body}"
+    );
+    assert_eq!(
+        body["indeterminate"],
+        json!([record]),
+        "an unreadable team proposal must answer `indeterminate`, with the \
+         same reference object the caller sent: {body}"
+    );
+
+    // The control: the proposal's own author sees it as held.
+    let (author_body, author_status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/possession",
+        &json!({ "records": [record] }),
+        &pg.owner.token,
+    );
+    assert_eq!(author_status, 200, "{author_body}");
+    assert_eq!(
+        author_body["held"],
+        json!([record]),
+        "the proposal's own author must see it as held: {author_body}"
+    );
+
+    // The other control: an administrator sees it as held too, even though
+    // they neither authored it nor are a member of any project it might be
+    // scoped to — team knowledge has no project at all (§5's own table).
+    make_admin(&pg, &pg.outsider);
+    let (admin_body, admin_status) = post_json_status_bearer(
+        &pg.server.base,
+        "/api/migration/possession",
+        &json!({ "records": [record] }),
+        &pg.outsider.token,
+    );
+    assert_eq!(admin_status, 200, "{admin_body}");
+    assert_eq!(
+        admin_body["held"],
+        json!([record]),
+        "an administrator must be able to confirm possession of a proposal \
+         they did not author: {admin_body}"
+    );
+}
+
+/// `POST /api/admin/cutover` refuses a non-admin, which the rest of this file
+/// already establishes as the shape every administrator action takes
+/// (`AdminUser`) — restated here so this route appears in the same enumerated
+/// audit as the rest of migration and cutover, rather than living only in
+/// `feature005_cutover.rs`'s dedicated mode-transition coverage.
+#[test]
+fn admin_cutover_refuses_every_non_admin_account() {
+    let pg = pg!();
+    for who in [&pg.owner, &pg.member, &pg.outsider] {
+        let (body, status) = post_json_status_bearer(
+            &pg.server.base,
+            "/api/admin/cutover",
+            &json!({}),
+            &who.token,
+        );
+        assert_eq!(
+            status, 403,
+            "{} was allowed to cut this deployment over without being an \
+             administrator: {body}",
+            who.email
+        );
+    }
+    assert_eq!(
+        pg.server
+            .text("SELECT mode FROM server_authority WHERE id = 1"),
+        "pre_cutover",
+        "a refused cutover attempt changed `server_authority.mode` anyway"
+    );
 }
