@@ -15,14 +15,15 @@ cargo build --workspace          # NOT --tests: the harness spawns prebuilt bina
 cairn-server migrate             # server schema v3 → v4
 cairn init                       # local schema v7 → v8
 cairn link --server https://<host>
-cairn integrate claude-code      # or codex
+cairn connect claude-code --yes  # or codex, opencode
 ```
 
 Confirm the starting state:
 
 ```bash
-cairn status                     # authority mode, spool depth, server reachability
-cairn memory list                # expect: empty
+cairn status                     # project, repository, sessions, daemon
+cairn sync status                # authority mode, spool depth, server reachability
+cairn memory search              # expect: empty
 ```
 
 ## 1. Agent A does real work
@@ -34,8 +35,12 @@ passes. Do not mention Cairn.
 **Watch the events arrive:**
 
 ```bash
-cairn events tail                # local spool, live
+cairn sync status --json | jq '.namespaces'              # local spool depth
 curl -s $SERVER/api/projects/$PID/activity?limit=20 | jq  # server side
+
+# There is no `cairn events` surface: safe events are not a thing a developer
+# reads locally one by one. The spool depth and the server's activity feed are
+# what the product actually offers, and they are what the tests assert.
 ```
 
 Expect `session_opened`, `file_read`, `file_changed`, `test_executed`, `test_result(failed)`,
@@ -53,7 +58,7 @@ A run appears within 10 minutes of the first event, or immediately when the sess
 failed → changed → passed shape:
 
 ```bash
-cairn memory list --origin consolidated
+cairn memory search --json | jq '[.memories[] | select(.origin_kind == "consolidated")]'
 ```
 
 A **FAILURE** record naming the tests that were failing and the files whose change fixed them,
@@ -66,14 +71,15 @@ words must already be in the session's vocabulary — `postgres` from a command 
 designed behaviour rather than a failure.
 
 ```bash
-cairn memory list --type decision --origin consolidated
+cairn memory search --type decision --json \
+  | jq '[.memories[] | select(.origin_kind == "consolidated")]'
 ```
 
 Expect a DECISION whose `topic_key` is `decision.storage_authority` and whose `value_key` is
 `postgresql`. Then confirm what it does **not** contain:
 
 ```bash
-cairn memory show <id> | grep -i "because\|wanted\|think"    # expect: no match
+cairn memory show <id> --json | grep -i "because\|wanted\|think"    # expect: no match
 ```
 
 The reasoning is not learned, by design (`contracts/extraction.md` §13.9). The record states
@@ -82,13 +88,13 @@ that the project adopted something, for what subject — never why.
 Check the declines are visible rather than silent:
 
 ```bash
-cairn status --capture | grep no_safe_semantic_mapping
+cairn doctor --json | jq '.dispositions'   # declined signals, counted by reason
 ```
 
 **Verify provenance is real, not decorative:**
 
 ```bash
-cairn memory show <id> --provenance     # lists the source event ids
+cairn memory show <id> --json | jq '.provenance'     # lists the source event ids
 curl -s $SERVER/api/projects/$PID/activity?event=<event_id>  # each one resolves
 ```
 
@@ -156,7 +162,7 @@ curl -s $SERVER/api/projects/$PID/activity?limit=5 | jq  # each event present on
 **Prove replay is idempotent** — force a redelivery:
 
 ```bash
-cairn events replay --session $SID --force
+cairn sync now                   # drains the spool; redelivery is idempotent
 ```
 
 Every result is `duplicate`, and the server event count is unchanged. `duplicate` is a success:
@@ -181,11 +187,11 @@ Re-execution after an abandoned claim is expected; a second durable effect from 
 With canonical data confirmed server-side:
 
 ```bash
-cairn memory list > /tmp/before.txt
+cairn memory search --json > /tmp/before.json
 rm -rf ~/.cairn/cairn.db*
 cairn init
 cairn link --server https://<host>
-cairn memory list > /tmp/after.txt
+cairn memory search --json > /tmp/after.json
 diff /tmp/before.txt /tmp/after.txt      # durable knowledge: identical
 cairn pattern list                       # reusable patterns survive too (SC-738)
 ```
@@ -195,7 +201,7 @@ this feature, and visible only to the account that owns them. What does **not** 
 rather than hiding:
 
 ```bash
-cairn status --durability
+cairn doctor --durability
 ```
 
 - events spooled but not yet accepted
@@ -215,9 +221,11 @@ session is not re-briefed with everything it already received.
 On an installation still at Feature 004:
 
 ```bash
-cairn migrate --dry-run          # inspect: what exists, what will move, what cannot
-cairn migrate                    # drain → verify possession → switch → demote
-cairn migrate --status
+cairn migrate --inspect          # what exists, what will move, what cannot. Writes nothing
+cairn migrate --claim-patterns   # ownership of legacy patterns, claimed explicitly
+cairn migrate --run              # drain → possession → switch → recheck → demote
+cairn migrate --status           # phases, and every retained record with its reason
+cairn migrate --retry-retained   # re-attempt what stayed local, on demand
 ```
 
 Nothing is demoted before canonical possession is confirmed for the records concerned. Records
@@ -226,15 +234,18 @@ the server cannot accept are retained locally and reported individually.
 After the admin cuts the server over:
 
 ```bash
-cairn-server authority cutover
+curl -sX POST $SERVER/api/admin/cutover -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+# Admin only, and one compare-and-swap: a second call returns the same
+# `cutover_at` and reports `already: true`. There is no `cairn-server` CLI
+# subcommand for it — the server's only CLI is `users`.
 ```
 
 A legacy client's knowledge sync is refused with `upgrade_required`, and its local data is
 untouched:
 
 ```bash
-cairn sync                       # → upgrade_required
-cairn memory list                # → unchanged, still readable
+cairn sync now                   # → upgrade_required, and nothing local is touched
+cairn memory search              # → unchanged, still readable
 ```
 
 ## 8. Success gates

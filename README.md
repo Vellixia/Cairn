@@ -121,6 +121,10 @@ first: a fact about *this task* beats an unrelated one, however well it matches.
 | `cairn delete session <id>` | Remove a session; its memories survive |
 | `cairn link --create` | Opt this project into server sharing |
 | `cairn sync status` | Pending, failed, last successful sync |
+| `cairn doctor --durability` | What losing this machine would cost, category by category |
+| `cairn migrate --inspect` | What a Feature 004 store holds, and what would move. Writes nothing |
+| `cairn migrate --run` | Hand durable knowledge over to the server, resumably |
+| `cairn migrate --status` | Migration phases, and every record that stayed local, with its reason |
 
 Every command takes `--json` and prints a stable envelope.
 
@@ -212,6 +216,108 @@ refusal names the class it tripped and never echoes the content back.
 They never displace project context: personal and team sections come last, are
 capped at 15% of the budget, cannot touch the reserved level, and are excluded
 entirely at `depth: "minimum"`.
+
+## When the server holds your memory
+
+Connect a server and it becomes the authority for durable knowledge: project
+memory, personal notes, team guidance and reusable patterns. Your machine keeps
+a copy, but the copy is a cache.
+
+**A queued command is not a durable one.** `cairn memory add`, `pattern promote`,
+`personal add`, `team propose` and the rest state an *intent*; the server decides
+the consequence. Until the server has accepted it, the change is queued, and
+Cairn says so rather than showing you a record that does not exist yet:
+
+```bash
+cairn sync status                # pending, failed, blocked, per namespace
+```
+
+A command that is queued behind an unreachable server is not lost and is not
+applied. It goes out when the server comes back.
+
+**Verification says only what was established.** A check Cairn ran on this
+machine reads `cairn`; a check a client reported over the network reads
+`remote_attested`, whichever route carried it and whatever the report was called.
+There is no way to assert a stronger one, because the server assigns it and the
+payload has no field for it. `unverified` means nothing has been established —
+not that something failed.
+
+**Health reports evidence, not configuration.** A hook Cairn wrote and read back
+is *introspection*; a hook that fired is an *observation*. A capability is
+`supported` only on an observation, so "configured" never reads as "working" and
+silence never reads as a failure.
+
+## What losing this machine costs
+
+`cairn doctor --durability` answers it in four groups, and prints a category
+even when it is empty, so an omission is never read as an assurance:
+
+- **lost for good** — this machine's writer identity, its migration and
+  authority state, its observations and evidence facts, its verification runs,
+  continuity checkpoints, pattern applications, local-only memory, task change
+  history, and any events still spooled at the moment of loss;
+- **restored from the server on the next pull** — projects, accounts, and every
+  durable record the server has accepted;
+- **queued, accepted for delivery, not yet durable** — the spool, which is the
+  one category whose loss is silent unless you look;
+- **caches** — project memory, personal knowledge, team guidance and cached
+  patterns, which refill.
+
+Destroying the local store is safe for everything in the second and fourth
+groups and only those. Cairn names the difference rather than reporting an
+unqualified success.
+
+## Migrating a Feature 004 store
+
+A store that predates server authority migrates explicitly, and resumably:
+
+```bash
+cairn migrate --inspect          # counts and reports. Changes nothing
+cairn migrate --claim-patterns   # legacy patterns have no recorded owner
+cairn migrate --run              # drain → possession → switch → recheck → demote
+cairn migrate --status           # phases, and what stayed local, record by record
+cairn migrate --retry-retained   # re-attempt the leftovers, on demand
+```
+
+Nothing local is demoted before the server is confirmed to hold it, and
+possession is re-checked again at the moment of demotion. A record the server
+cannot accept stays local, stays readable, and is reported individually rather
+than being dropped.
+
+Legacy patterns are the one thing migration cannot work out for itself: the old
+table has no owner column and a store may have been used with several accounts,
+so ownership is claimed once, explicitly, and never inferred from whoever
+happens to be signed in.
+
+When an operator cuts a server over (`POST /api/admin/cutover`, admin only), the
+old synchronization path closes for knowledge with `upgrade_required`. Reads
+keep working, non-knowledge sync keeps working, and a refused client's local
+store is not touched — it is out of date, not wrong.
+
+## What each agent actually does
+
+| Agent | Capture | Context delivery |
+|---|---|---|
+| Claude Code | hooks, automatic | session start and prompt |
+| Codex CLI | hooks, automatic | session start |
+| OpenCode | **capture only** | none |
+
+OpenCode's context hooks exist but are beta, and Cairn declines to rest an
+automatic guarantee on them. That is a Cairn decision, not a missing vendor
+feature, and the health matrix says `declined_by_cairn` rather than blaming
+OpenCode for something it does offer.
+
+## Privacy
+
+Cairn captures structured observations, never transcripts. What crosses to a
+server is narrower still: no prompt or assistant text, no tool output, no
+absolute paths, no credentials, no vendor JSON. A signal Cairn cannot map to a
+safe shape is declined and counted, not guessed at.
+
+```bash
+cairn privacy exclude --path "secrets/**"   # never captured at all
+cairn doctor --json | jq '.dispositions'    # what was declined, and why
+```
 
 ## Principles
 
