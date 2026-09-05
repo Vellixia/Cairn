@@ -539,11 +539,19 @@ fn running_the_migration_three_times_leaves_row_counts_unchanged_after_the_first
         )
     };
 
+    // `--inspect` first, and not only for the report: it is phase 1, its
+    // postcondition is `migrating`, and that is what closes the pre-005 write
+    // path for knowledge. Until it runs the store is still `feature_004` and
+    // the ordinary sync worker may legitimately deliver a queued row of its
+    // own — so a "nothing is on the server yet" precondition asserted before
+    // it is a race against a daemon doing exactly what it should.
+    let _ = l.s.json(&["migrate", "--inspect"]);
     let zero = counts(&l, &pattern_id);
     assert_eq!(
         zero,
         (0, 0, 0, 0, 0),
-        "the fixture's rows must not already exist on the server before any run: {zero:?}"
+        "the fixture's rows must not already exist on the server once the store \
+         is migrating: {zero:?}"
     );
 
     let _ = l.s.json(&["migrate", "--run"]);

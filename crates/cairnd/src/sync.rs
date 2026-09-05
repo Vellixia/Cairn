@@ -2831,8 +2831,18 @@ async fn drain(
     let (mut applied, mut duplicate, mut rejected, mut blocked) = (0, 0, 0, 0);
     let mut connection: Option<Client> = None;
 
+    // Once this store has begun migrating, its project *knowledge* belongs to
+    // the migration's transfer path and stops going out through this one. Work
+    // tracking and continuity — tasks, sessions, handoffs, criteria, blockers —
+    // are untouched and keep syncing exactly as before (FR-877).
+    let excluded: &[&str] = if legacy_writes_are_open(d).await {
+        &[]
+    } else {
+        KNOWLEDGE_BEARING
+    };
+
     loop {
-        let batch = outbox::claim(&d.store, project_id, BATCH)
+        let batch = outbox::claim_excluding(&d.store, project_id, excluded, BATCH)
             .await
             .map_err(storage_err)?;
         if batch.is_empty() {
@@ -3429,10 +3439,55 @@ const COMMAND_ENVELOPE_PATH: &str = "/api/commands";
 /// namespace's backoff, because the outcome only ever reads as
 /// [`NamespaceOutcome::Transient`] when the *request itself* failed, never
 /// when an item in a successful response was refused.
+/// Whether the pre-005 dual-authority write path may still carry knowledge
+/// from this store.
+///
+/// **Only while the store has not begun migrating.** Once `authority_mode`
+/// leaves `feature_004`, the migration owns the transfer of durable knowledge
+/// and this path must stop competing with it. Two things go wrong when it does
+/// not, and both were observed rather than imagined: the worker delivers a
+/// legacy row with its un-normalized keys while the migration is re-keying,
+/// and the pull then merges that server copy back over the corrected local
+/// row — so `topic_key` reverts and the collision detection SC-750 measures
+/// silently stops working against exactly the corpus it is about.
+///
+/// It is also what the server will say anyway once the fleet cuts over: these
+/// same shapes are refused with `upgrade_required`, and a store that has
+/// migrated has no business asking. Stopping here means a migrated store stops
+/// emitting them rather than learning not to from a refusal.
+///
+/// A store that cannot answer is treated as still `feature_004`: that is the
+/// path that works without a server, and guessing the other way would strand
+/// queued work on a store that never migrates.
+async fn legacy_writes_are_open(d: &Daemon) -> bool {
+    cairn_store::authority::mode(&d.store)
+        .await
+        .map(|m| m == cairn_store::authority::AuthorityMode::Feature004)
+        .unwrap_or(true)
+}
+
+/// The entity types the migration owns once it has begun (`migration-cutover.md`
+/// §3.1, §4.2). The same list the server refuses after cutover, and
+/// deliberately so: the two must not diverge.
+const KNOWLEDGE_BEARING: &[&str] = &[
+    "memory",
+    "memory_relation",
+    "personal_knowledge",
+    "personal_knowledge_relation",
+    "team_knowledge",
+    "team_knowledge_relation",
+];
+
 async fn drain_global(
     d: &Daemon,
     namespace: &SyncNamespace,
 ) -> Result<(usize, usize, usize), WireError> {
+    // A `personal:*` or `team:*` lane carries nothing but knowledge, so the
+    // whole lane stops once this store has begun migrating.
+    if !legacy_writes_are_open(d).await {
+        return Ok((0, 0, 0));
+    }
+
     // Same single-drainer discipline `drain` uses, and the same lock: claiming
     // is what makes two concurrent drains correct, this is what keeps them
     // orderly, and there is no reason a project drain and a global drain

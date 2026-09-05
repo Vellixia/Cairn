@@ -230,10 +230,47 @@ pub const CLAIM_TIMEOUT_SECONDS: i64 = 60;
 /// stale: an interrupted send returns to the queue rather than stranding a row
 /// forever.
 pub async fn claim(store: &Store, project_id: Uuid, limit: i64) -> Result<Vec<(Uuid, SyncItem)>> {
+    claim_excluding(store, project_id, &[], limit).await
+}
+
+/// [`claim`], leaving rows of the named entity types where they are.
+///
+/// **Held, not claimed** — the same discipline the per-author filter uses, and
+/// for the same reason. A row filtered out *after* claiming has already had
+/// `attempts` incremented and its state moved to `in_flight`, so every drain
+/// cycle takes another attempt against a row it was never going to send and
+/// the row eventually looks like a failing delivery instead of a waiting one.
+/// Worse here: the drain loop would claim the same rows again on the next
+/// iteration and never terminate.
+///
+/// Its caller is the migration gate — once a store has begun migrating, the
+/// knowledge-bearing types belong to the migration's own transfer path and
+/// must stop going out through the pre-005 one, while tasks, sessions and
+/// handoffs carry on untouched.
+pub async fn claim_excluding(
+    store: &Store,
+    project_id: Uuid,
+    excluded: &[&str],
+    limit: i64,
+) -> Result<Vec<(Uuid, SyncItem)>> {
     let now = chrono::Utc::now();
     let stale_before = rows::ts_text(now - chrono::Duration::seconds(CLAIM_TIMEOUT_SECONDS));
 
-    let rs = sqlx::query(
+    // Built rather than bound, because SQLite has no array parameter and the
+    // alternative — a fixed number of placeholders — would silently truncate a
+    // longer list. The values are `&'static str` literals from one const in
+    // `cairnd`, never user input.
+    let exclusion = if excluded.is_empty() {
+        String::new()
+    } else {
+        let names = excluded
+            .iter()
+            .map(|t| format!("'{t}'"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(" AND entity_type NOT IN ({names})")
+    };
+    let rs = sqlx::query(&format!(
         "UPDATE outbox
             SET state = 'in_flight', claimed_at = ?1, attempts = attempts + 1
           WHERE id IN (
@@ -247,11 +284,12 @@ pub async fn claim(store: &Store, project_id: Uuid, limit: i64) -> Result<Vec<(U
                  AND (state = 'pending'
                       OR (state = 'in_flight'
                           AND (claimed_at IS NULL OR claimed_at < ?3)))
+                 {exclusion}
                ORDER BY created_at, id
                LIMIT ?4
           )
-          RETURNING *",
-    )
+          RETURNING *"
+    ))
     .bind(rows::ts_text(now))
     .bind(project_id.to_string())
     .bind(stale_before)
