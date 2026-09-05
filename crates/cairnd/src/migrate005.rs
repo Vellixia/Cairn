@@ -1335,14 +1335,29 @@ pub async fn run<R: Remote>(
             }
             Phase::SwitchAuthority => switch_authority(store).await?,
             Phase::Demote => {
-                // Only records confirmed held at phase 3, minus anything that
-                // has since been retained.
+                // The candidate set is recomputed from the store, not carried
+                // over from phase 3's reply.
+                //
+                // A resumed run is a **different process**: phase 3 committed
+                // `done` hours ago and its `held` list died with the process
+                // that received it. Depending on that list meant a resumed
+                // migration reached phase 5 with nothing to demote and reported
+                // success, which is the one outcome worse than failing — the
+                // switch had happened, so the store believed the server owned
+                // records it had never confirmed demoting.
+                //
+                // Everything this store believes canonical, minus what is
+                // already named as an exception, is the honest candidate set,
+                // and `demote` re-checks possession of every one of them before
+                // touching it (§12.3). The re-check is what makes recomputing
+                // safe rather than optimistic.
                 let mut candidates = Vec::new();
-                for r in &held {
+                for r in believed_canonical(store, account).await? {
                     if mig::is_retained(store, &r.retained()).await?.is_none() {
-                        candidates.push(r.clone());
+                        candidates.push(r);
                     }
                 }
+                let _ = &held;
                 let (demoted, withheld) = demote(store, remote, &candidates).await?;
                 report.demoted = demoted;
                 report.withheld_from_demotion = withheld;

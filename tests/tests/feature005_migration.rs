@@ -421,3 +421,141 @@ fn a_populated_store_migrates_with_every_shape_accounted_for() {
         );
     }
 }
+
+/// Possession answers for every reference shape, and the third answer is a real
+/// answer (§5, §12.5).
+///
+/// # Why `indeterminate` is not a rounding error
+///
+/// A `proposed` team record the caller may not see must not be answered
+/// `missing`. `missing` means the server does not hold it, and a client acts on
+/// that by keeping a **writable** copy — which is a second truth for a record
+/// the server does own. So the third answer exists, and the record it names is
+/// retained read-only.
+///
+/// **Falsified by** collapsing `indeterminate` into `missing`, or by making a
+/// retained-indeterminate record writable.
+#[test]
+fn a_record_the_server_will_not_talk_about_is_retained_read_only() {
+    let m = migrating!();
+    let ids = &m.ids;
+
+    // The proposal exists on the server, written by somebody else, and this
+    // account is not its proposer and not an admin. The local store holds a row
+    // with the same id, which is the situation a Feature 004 device is in.
+    let stranger = m.server.new_user_token("stranger");
+    let (stranger_id, _) = m.server.new_user("stranger-owner");
+    let _ = stranger;
+    m.server.execute(&format!(
+        "INSERT INTO team_knowledge
+             (id, knowledge_type, content, state, proposed_by_user_id, writer_id, writer_seq)
+         VALUES ('{}', 'decision', 'a proposal only its author can see yet',
+                 'proposed', '{stranger_id}', 'stranger-writer-{}', 1)",
+        ids.team_proposed, ids.team_proposed
+    ));
+
+    m.s.json(&["migrate", "--run"]);
+
+    let status = m.s.json(&["migrate", "--status"]);
+    let retained = status["status"]["retained"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let row = retained
+        .iter()
+        .find(|r| r["reference"] == format!("knowledge:team:{}", ids.team_proposed))
+        .unwrap_or_else(|| panic!("the proposal is not reported at all: {retained:?}"));
+    assert_eq!(
+        row["reason"], "possession_indeterminate",
+        "a record the server holds but will not confirm was reported as \
+         something else. `missing` here would be a lie the client acts on: {row}"
+    );
+    assert_eq!(
+        row["writable"], false,
+        "a record the server may own was left writable locally, which is how \
+         one record becomes two truths: {row}"
+    );
+
+    // And the answers for the shapes it *can* confirm are still confirmations.
+    let run = m.s.json(&["migrate", "--status"]);
+    assert_eq!(
+        run["status"]["mode"], "server_authoritative",
+        "one unconfirmable record held the whole store hostage: {run}"
+    );
+}
+
+/// A record the server stops holding between the possession check and the
+/// demotion is retained, not demoted (§12.3, FR-872).
+///
+/// # The window this closes
+///
+/// Phase 3 confirms possession; phase 4 switches authority; phase 5 demotes.
+/// The gap between 3 and 5 is real wall-clock time — an interrupted run resumes
+/// hours later — and a server-side loss inside it would otherwise demote the
+/// last copy of a record on the strength of a check that had gone stale.
+///
+/// The test forces exactly that: a completed run, then the record removed
+/// server-side, then `demote` re-entered. The re-check is what has to notice.
+///
+/// **Falsified by** demoting the phase-3 set without re-checking it.
+#[test]
+fn a_record_lost_between_the_check_and_the_demotion_is_not_demoted() {
+    let m = migrating!();
+    let ids = &m.ids;
+
+    m.s.json(&["migrate", "--run"]);
+    assert_eq!(
+        m.server.count(&format!(
+            "SELECT count(*) FROM personal_knowledge WHERE id = '{}'",
+            ids.personal_queued
+        )),
+        1,
+        "the record has to be held before it can be lost"
+    );
+
+    // The server loses it, and the migration is asked to demote again.
+    m.server.execute(&format!(
+        "DELETE FROM personal_knowledge WHERE id = '{}'",
+        ids.personal_queued
+    ));
+    // The store is put in exactly the state an interruption between the switch
+    // and the demotion leaves: everything before phase 5 finished, phase 5 not
+    // yet run. `drain` is marked done as well as pending-demote, because a
+    // re-entered drain would re-deliver the record and there would be nothing
+    // lost to notice.
+    m.s.exec_sql(
+        "UPDATE migration_state SET state = 'done', finished_at = '2026-08-02T09:00:00Z'
+          WHERE phase IN ('drain', 'verify_possession')",
+    );
+    m.s.exec_sql(
+        "UPDATE migration_state SET state = 'pending', finished_at = NULL
+          WHERE phase = 'demote'",
+    );
+    let again = m.s.json(&["migrate", "--run"]);
+
+    assert!(
+        again["run"]["withheld_from_demotion"].as_i64().unwrap_or(0) > 0,
+        "the demotion did not notice that the server had stopped holding \
+         something. Re-checking at the moment of demotion is the point: {again}"
+    );
+    let status = m.s.json(&["migrate", "--status"]);
+    let retained = status["status"]["retained"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        retained
+            .iter()
+            .any(|r| r["reference"] == format!("knowledge:personal:{}", ids.personal_queued)),
+        "the record the server lost is not retained, so the local copy is the \
+         only copy and nothing says so: {retained:?}"
+    );
+    assert_eq!(
+        m.s.query_column(&format!(
+            "SELECT CAST(count(*) AS TEXT) FROM personal_knowledge WHERE id = '{}'",
+            ids.personal_queued
+        )),
+        vec!["1".to_string()],
+        "the local copy of a record the server no longer holds was deleted"
+    );
+}
