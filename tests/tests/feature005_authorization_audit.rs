@@ -232,6 +232,26 @@ fn no_feature_005_handler_reads_identity_out_of_a_request_body() {
     );
 }
 
+/// The source with its Rust comment lines removed.
+///
+/// The scan below finds the SQL statement around an occurrence by walking out
+/// to the surrounding quotes, which works on code and not on prose: a doc
+/// comment that *mentions* `shared_patterns` sits between two string literals,
+/// so the walk swallows the next constant and the audit reports a statement
+/// that never contained the word. Removing comment lines first means every
+/// remaining occurrence is one the compiler sees too.
+///
+/// This narrows what the audit reads, not what it requires. A comment cannot
+/// reach a row, and the `found >= 5` floor below is what proves the narrowing
+/// did not also hide a real statement.
+fn strip_rust_comments(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// A pattern is owner-only, and every route that can reach one says so in the
 /// query (T090, FR-708d, SC-761).
 ///
@@ -256,7 +276,7 @@ fn every_pattern_query_is_bound_to_the_owning_account() {
     .filter_map(|e| e.ok())
     .map(|e| e.path())
     .filter(|p| p.extension().is_some_and(|x| x == "rs"))
-    .map(|p| std::fs::read_to_string(&p).expect("read"))
+    .map(|p| strip_rust_comments(&std::fs::read_to_string(&p).expect("read")))
     .collect();
     let commands = sources.join("\n");
     let mut found = 0;
