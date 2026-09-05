@@ -375,19 +375,33 @@ fn events_spooled_by_one_account_are_never_delivered_under_another() {
     // author, which is FR-790 working. A row stamped B is the leak. Reporting
     // both, because a bare count cannot tell them apart and a failure that says
     // "delivered under the wrong account" had better be able to prove it.
+    //
+    // **The assertion is about B, not about delivery.** It read "no outage row
+    // reached the server at all" until the diagnostic above caught it failing
+    // with a row stamped *A* — delivered by its own author, through a window in
+    // `sign_in_as`: restoring the endpoint and switching the account are two
+    // writes, and a drain that runs between them is A, reachable, delivering A's
+    // own work. That is FR-790 working, observed at an unlucky moment, and the
+    // old assertion called it a leak.
+    //
+    // What FR-790 actually forbids is a row of A's carrying B's account, and
+    // that is what this now says. The depth and refusal assertions above are
+    // what hold the rest: whatever did not deliver is still queued, intact, and
+    // unrefused.
     let leaked = server.query_column(&format!(
         "SELECT event_id::text || ' owned by ' ||
                 CASE WHEN account_id = '{}' THEN 'A (its author)'
                      WHEN account_id = '{b_account}' THEN 'B (NOT its author)'
                      ELSE account_id::text END
            FROM safe_events
-          WHERE session_id = '{session}' AND event_id IN ({outage_ids})",
-        a.account
+          WHERE session_id = '{session}' AND event_id IN ({outage_ids})
+            AND account_id <> '{}'",
+        a.account, a.account
     ));
     assert!(
         leaked.is_empty(),
-        "events queued during the outage reached the server after the machine \
-         changed hands: {leaked:?}"
+        "an event authored by one account reached the server under another's \
+         credential (FR-790): {leaked:?}"
     );
     assert_eq!(
         server.count(&format!(
