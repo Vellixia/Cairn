@@ -75,18 +75,30 @@ const REFUSED_FIELDS: &[&str] = &[
     "observed_value",
     "source_locator",
     "content_digest",
+    "content_norm_digest",
+    "value_digest",
     "digest",
+    "fingerprint",
     "evidence",
     "evidence_facts",
     "evidence_id",
+    "observations",
     "command",
     "command_output",
     "output",
     "stdout",
     "stderr",
+    "exit_code",
     "path",
     "file_path",
     "absolute_path",
+    "relevant_paths",
+    // Free text is evidence wearing a friendly name. A `detail` or a `summary`
+    // is where an observed value goes when somebody wanted to be helpful, and
+    // the local run row already has both — they stay there.
+    "detail",
+    "details",
+    "summary",
     // Derived state is the server's, exactly as it is for a knowledge command.
     "verification",
     "verification_basis",
@@ -163,13 +175,22 @@ impl Reference {
             .get("memory_ref")
             .or_else(|| body.get("reference"))
             .ok_or_else(|| ApiError::invalid("a report must name what it is about"))?;
+        let named_pattern = r.get("pattern_id").is_some();
         let id = r
             .get("knowledge_id")
             .or_else(|| r.get("pattern_id"))
             .and_then(Value::as_str)
             .and_then(|s| Uuid::parse_str(s).ok())
             .ok_or_else(|| ApiError::invalid("`knowledge_id` is required and must be a uuid"))?;
-        let kind = r.get("ref_kind").and_then(Value::as_str);
+        // **`pattern_id` is itself the discriminator.** `PatternRef(pattern_id)`
+        // is the reference's whole shape (`data-model.md` §6.1), so a body that
+        // names the field has already said which kind it means and should not
+        // have to say it twice. A domain alongside it is still contradictory and
+        // still refused below.
+        let kind = r
+            .get("ref_kind")
+            .and_then(Value::as_str)
+            .or(named_pattern.then_some("pattern"));
         let domain = r.get("domain").and_then(Value::as_str);
 
         match (kind, domain) {
@@ -284,14 +305,25 @@ async fn resolve(pool: &PgPool, reference: Reference, user: Uuid) -> ApiResult<B
             domain: KnowledgeDomain::Team,
             id,
         } => {
-            // Team knowledge is server-global: any authenticated account may
-            // report a check against guidance it is expected to follow.
-            let exists: Option<Uuid> =
-                sqlx::query_scalar("SELECT id FROM team_knowledge WHERE id = $1")
-                    .bind(id)
-                    .fetch_optional(pool)
-                    .await?;
-            exists.ok_or_else(hidden)?;
+            // Ratified team knowledge is server-global: any authenticated
+            // account may report a check against guidance it is expected to
+            // follow. A **proposed** entry is not — it reaches its author and
+            // any administrator and nobody else (`sync-namespaces.md` §1a) — so
+            // reporting about somebody else's proposal is refused with the same
+            // `404` a record that does not exist gets. The alternative turns
+            // this route into a way to discover which proposals exist, and to
+            // attach verification history to one before its author has decided
+            // whether to keep it.
+            let row: Option<(String, Uuid)> = sqlx::query_as(
+                "SELECT state, proposed_by_user_id FROM team_knowledge WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+            let (state, proposer) = row.ok_or_else(hidden)?;
+            if state == "proposed" && proposer != user && !is_admin(pool, user).await? {
+                return Err(hidden());
+            }
             Ok(Binding {
                 project_id: None,
                 owner_user_id: None,
@@ -315,6 +347,21 @@ async fn resolve(pool: &PgPool, reference: Reference, user: Uuid) -> ApiResult<B
             })
         }
     }
+}
+
+/// Whether this account administers the server.
+///
+/// Read here rather than taken from the extractor's `SettledUser`, because the
+/// only caller is the team branch above and threading a role through every
+/// domain's resolution would put an authorization input in front of three
+/// checks that must not consult it — a personal record is its owner's, and an
+/// administrator is not its owner.
+async fn is_admin(pool: &PgPool, user: Uuid) -> ApiResult<bool> {
+    let role: Option<String> = sqlx::query_scalar("SELECT role::text FROM users WHERE id = $1")
+        .bind(user)
+        .fetch_optional(pool)
+        .await?;
+    Ok(role.as_deref() == Some("admin"))
 }
 
 /// The authority assigned to a report that arrived over HTTP.
@@ -342,7 +389,7 @@ pub async fn report_run(
     user: SettledUser,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
-    ingest(state, user, body, None).await
+    ingest(state, user, body, Attestation::NotApplicable).await
 }
 
 /// `POST /api/verification/attestations` — an agent attestation relayed by a client.
@@ -356,14 +403,34 @@ pub async fn report_attestation(
     user: SettledUser,
     Json(body): Json<Value>,
 ) -> ApiResult<Json<Value>> {
+    // **Read here, required inside.** This route does require it — §4 says an
+    // attestation records the agent whose attestation it relays — but requiring
+    // it *at this point* would judge the payload before deciding whether the
+    // caller may see the record at all, and an outsider would learn from a
+    // "malformed attestation" that the id they guessed was real. So the check
+    // travels into `ingest` and runs after authorization, with every other
+    // payload rule.
+    //
+    // `attesting_agent` and not `agent`: this payload already concerns a check,
+    // and a bare `agent` beside a `verifier_kind` reads as the agent that *ran*
+    // it, which is the one thing an attestation does not establish.
     let agent = body
-        .get("agent")
+        .get("attesting_agent")
         .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ApiError::invalid("an attestation names the agent that attested; `agent` is required")
-        })?
-        .to_string();
-    ingest(state, user, body, Some(agent)).await
+        .map(str::to_string);
+    ingest(state, user, body, Attestation::Relaying(agent)).await
+}
+
+/// Which route a report arrived on, and what it named.
+///
+/// A two-state type rather than an `Option<String>`, because `None` was doing
+/// two jobs — "a run report, no attesting agent applies" and "an attestation
+/// that failed to name one" — and only the second is an error.
+enum Attestation {
+    /// `/api/verification/runs`. No attesting agent applies.
+    NotApplicable,
+    /// `/api/verification/attestations`, carrying whatever it named.
+    Relaying(Option<String>),
 }
 
 /// One report, from either route (§10's ordered checks).
@@ -371,16 +438,33 @@ async fn ingest(
     State(state): State<AppState>,
     user: SettledUser,
     body: Value,
-    attesting_agent: Option<String>,
+    attesting: Attestation,
 ) -> ApiResult<Json<Value>> {
-    // 5 — refused names first, before anything is resolved. A payload asserting
-    // authority is refused even when it names a record that does not exist,
-    // because the refusal is about the request's shape rather than its subject.
-    reject_refused_fields(&body)?;
-
-    // 2, 3 — resolve and authorize.
+    // **§10's order, and the order is the point.**
+    //
+    // 2, 3 — resolve and authorize *before* the payload is judged. A caller who
+    // may not see the record gets the same `404` whether their payload was
+    // pristine or asserted authority, because the alternative leaks: a `400`
+    // saying "authority is not yours to name" tells an outsider that the id they
+    // guessed was real, and a refusal meant to protect the authority boundary
+    // becomes an oracle against the existence boundary. Refusing a caller
+    // everything about a record they cannot see includes refusing to grade their
+    // request.
     let reference = Reference::parse(&body)?;
     let binding = resolve(&state.pool, reference, user.id()).await?;
+
+    // 5 — only now, for a caller entitled to be here, is the payload judged.
+    reject_refused_fields(&body)?;
+    let attesting_agent = match attesting {
+        Attestation::NotApplicable => None,
+        Attestation::Relaying(Some(agent)) => Some(agent),
+        Attestation::Relaying(None) => {
+            return Err(ApiError::invalid(
+                "an attestation names the agent whose attestation it relays; \
+                 `attesting_agent` is required",
+            ))
+        }
+    };
 
     // 4 — closed vocabularies.
     let verdict = body
