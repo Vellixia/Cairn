@@ -8,9 +8,10 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, patch, post};
 use axum::{Json, Router};
+use cairn_core::domain::KnowledgeDomain;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use sqlx::Row;
+use sqlx::{PgPool, Postgres, Row, Transaction};
 use std::str::FromStr;
 use uuid::Uuid;
 
@@ -188,6 +189,17 @@ pub fn routes() -> Router<AppState> {
         // them would be a second place for the transition rule to live.
         .route("/api/team/{id}/ratify", post(ratify_team))
         .route("/api/team/{id}/retire", post(retire_team))
+        // Migration and cutover (`contracts/migration-cutover.md`). The first
+        // four are the client's own migration path (§4-§9) and stay reachable
+        // whatever `server_authority.mode` says — a store migrating *after*
+        // cutover is exactly what FR-876d requires. The fifth is the server's
+        // one-way switch and takes `AdminUser` for the same reason ratify and
+        // retire do: this is not a tool action an agent has, ever.
+        .route("/api/migration/register", post(migration_register))
+        .route("/api/migration/drain", post(migration_drain))
+        .route("/api/migration/possession", post(migration_possession))
+        .route("/api/migration/complete", post(migration_complete))
+        .route("/api/admin/cutover", post(admin_cutover))
         // Read API for the web UI
         .route("/api/projects/{id}", get(project_overview))
         .route("/api/projects/{id}/tasks", get(project_tasks))
@@ -1544,6 +1556,829 @@ async fn list_members(
 
 pub use crate::global::{ratify_team, retire_team, sync_personal_changes, sync_team_changes};
 pub use crate::sync::{sync_batch, sync_changes};
+
+// ---------------------------------------------------------------------------
+// Migration and cutover (`contracts/migration-cutover.md`)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/migration/register` — open or reopen this store's migration
+/// (`migration-cutover.md` §4, §12.1).
+///
+/// **One statement decides it**, the same compare-and-swap shape `ratify_team`
+/// and `retire_team` already establish. `ON CONFLICT (account_id, writer_id) DO
+/// UPDATE SET completed_at = NULL` covers every case in the contract at once:
+/// a fresh `(account_id, writer_id)` inserts a new token; re-registering while
+/// still open touches nothing but reports the same row back; and re-registering
+/// after completion clears `completed_at` and reopens it — which is exactly
+/// what `--retry-retained` running after completion needs (FR-876d). What the
+/// `DO UPDATE` clause never names is `migration_token` itself, so an existing
+/// row's token survives untouched in every branch; only a genuine insert uses
+/// the freshly generated one.
+///
+/// Deliberately **not** gated by `server_authority.mode`: a client migrating
+/// after its server has already cut over must still be able to register
+/// (FR-876d), and this route is the mechanism, not a bypass of it — see
+/// [`migration_drain`].
+#[derive(Debug, Deserialize)]
+struct MigrationRegisterBody {
+    writer_id: String,
+}
+
+async fn migration_register(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<MigrationRegisterBody>,
+) -> ApiResult<Json<Value>> {
+    if body.writer_id.trim().is_empty() {
+        return Err(ApiError::invalid("`writer_id` is required"));
+    }
+    let token = auth::random_token();
+    let row: (String, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
+        "INSERT INTO client_migrations
+            (migration_token, account_id, writer_id, registered_at, completed_at)
+         VALUES ($1, $2, $3, now(), NULL)
+         ON CONFLICT (account_id, writer_id) DO UPDATE SET completed_at = NULL
+         RETURNING migration_token, registered_at",
+    )
+    .bind(&token)
+    .bind(user.id())
+    .bind(&body.writer_id)
+    .fetch_one(&state.pool)
+    .await?;
+    Ok(Json(json!({
+        "migration_token": row.0,
+        "registered_at": row.1.to_rfc3339(),
+    })))
+}
+
+/// Refuse a drain call whose token is unknown, belongs to another account, or
+/// has already completed (`migration-cutover.md` §12.1).
+///
+/// **One answer for all three**, deliberately: distinguishing "unknown token"
+/// from "somebody else's token" would let a caller enumerate other accounts'
+/// migrations one guess at a time, and distinguishing "completed" from
+/// "unknown" tells an attacker nothing they could not learn by trying to
+/// register their own token and comparing (FR-894a's enumeration-oracle
+/// reasoning, applied here to a token rather than a record id).
+async fn require_registered_migration(
+    pool: &PgPool,
+    user_id: Uuid,
+    migration_token: &str,
+) -> ApiResult<()> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT migration_token FROM client_migrations
+          WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NULL",
+    )
+    .bind(migration_token)
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    if row.is_some() {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "migration_not_registered",
+            "this migration token is unknown, belongs to another account, or has \
+             already completed; register before draining",
+        ))
+    }
+}
+
+/// One drained record, in the migration-scoped wire shape (`migration-cutover.md`
+/// §4.2). Distinct from `sync::SyncItem`: a drain item carries no
+/// `idempotency_key` of its own — every entity type this route accepts is
+/// already idempotent on redelivery by its own natural key, which is the same
+/// property `sync::SyncItem`'s upsert functions already have and exactly why
+/// they are reused rather than reimplemented.
+#[derive(Debug, Deserialize, Clone)]
+struct DrainItem {
+    entity_type: String,
+    /// A **string**, because not every drained record is named by a UUID: a
+    /// relation has no id of its own and travels as its `from|to|kind` natural
+    /// key (`migration-cutover.md` §4.2). Typing this as a `Uuid` rejected the
+    /// whole request body with a `422` and no error object, so a client
+    /// draining a relation could not tell a malformed request from an
+    /// unreachable server.
+    entity_id: String,
+    operation: String,
+    #[serde(default)]
+    payload: Value,
+}
+
+impl DrainItem {
+    /// The item's id, for the four record types that have one.
+    fn uuid(&self) -> ApiResult<Uuid> {
+        self.entity_id.parse().map_err(|_| {
+            ApiError::invalid(format!(
+                "`{}` is not an id a {} can be named by",
+                self.entity_id, self.entity_type
+            ))
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct DrainBody {
+    migration_token: String,
+    #[serde(default)]
+    items: Vec<DrainItem>,
+}
+
+/// The entity types the drain route accepts (`migration-cutover.md` §4.2,
+/// §12.0). The authoritative list, and it is deliberately the same five rows
+/// that table names — anything else answers `entity_type_not_drained` rather
+/// than being silently ignored, so a client can tell "this record type will
+/// never drain through this route" from "this one did, but was refused".
+const DRAINED_ENTITY_TYPES: &[&str] = &[
+    "memory",
+    "memory_relation",
+    "personal_knowledge",
+    "team_knowledge",
+    "pattern",
+];
+
+/// Matches `possession`'s own bound and `safe-events.md` §7's batch-bounding
+/// discipline — one number for "how big is one call allowed to be" rather than
+/// a fresh limit invented per route.
+const MAX_DRAIN_ITEMS: usize = 500;
+
+fn uuid_field(payload: &Value, key: &str) -> Option<Uuid> {
+    payload
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+}
+
+/// `POST /api/migration/drain` — the migration-scoped ingest route
+/// (`migration-cutover.md` §12.1, FR-864, FR-864a).
+///
+/// **Exempt from the cutover refusal, by construction rather than by a
+/// bypass flag.** This handler never calls `sync::sync_batch` or consults
+/// `server_authority.mode` at all — it is a wholly separate route, gated only
+/// by an open migration registration, which is what keeps it from being a
+/// general escape hatch around `upgrade_required` (§12.1: "refused for a store
+/// that has not registered a migration").
+///
+/// **Reuses the same upserts `sync.rs` already has for project memory and
+/// relations** (`sync::upsert_memory`, `sync::upsert_relation`), by
+/// constructing the same `sync::SyncItem` those functions already take. A
+/// drained `memory`/`memory_relation` item carries its own `project_id` in the
+/// payload — unlike a `sync/batch` item, this request has no batch-level
+/// project — and membership is checked before the reused upsert runs, so a
+/// migrating store cannot deliver a record into a project it does not belong
+/// to merely by naming one in the payload.
+///
+/// Personal and team knowledge reuse `global::upsert_personal` /
+/// `global::upsert_team` **and** the same `global::screen_global_item` privacy
+/// screen `sync/batch` runs before them: the module doc on `global.rs` is
+/// explicit that this boundary must hold "wherever the client chooses to
+/// enforce it" or not at all, and a migration ingest path is exactly the kind
+/// of second entry point that guarantee has to cover.
+///
+/// A `pattern` item is not upserted through any existing function: its
+/// identity was already decided client-side, before delivery, by the local
+/// `legacy_pattern_claims` row this drain call has no visibility into
+/// (§4.1a) — `pattern_id` is the item's own `entity_id`, taken verbatim, and
+/// `owner_user_id` is the credential. Recomputing either here would be a
+/// second, possibly different, answer to a question migration already
+/// answered once.
+async fn migration_drain(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<DrainBody>,
+) -> ApiResult<Json<Value>> {
+    if body.items.len() > MAX_DRAIN_ITEMS {
+        return Err(ApiError::invalid(format!(
+            "a drain call carries at most {MAX_DRAIN_ITEMS} items"
+        )));
+    }
+    require_registered_migration(&state.pool, user.id(), &body.migration_token).await?;
+
+    // Computed once for the whole call rather than once per item: the
+    // identity set depends only on the caller, not on any one record
+    // (`global::identities_for`).
+    let identities = crate::global::identities_for(&state.pool, user.id()).await?;
+
+    let mut results = Vec::with_capacity(body.items.len());
+    for it in &body.items {
+        match drain_one(&state, user.id(), &identities, it).await {
+            Ok(()) => results.push(json!({
+                "entity_id": it.entity_id,
+                "entity_type": it.entity_type,
+                "accepted": true,
+            })),
+            // Every item is answered, never failed as a batch: one record this
+            // store cannot deliver must not strand the rest (§4.3's
+            // blocked-row reporting is what a client does with this per item).
+            Err(e) => results.push(json!({
+                "entity_id": it.entity_id,
+                "entity_type": it.entity_type,
+                "accepted": false,
+                "reason": e.message,
+            })),
+        }
+    }
+    Ok(Json(json!({ "results": results })))
+}
+
+async fn drain_one(
+    state: &AppState,
+    user_id: Uuid,
+    identities: &[cairn_core::validate::ProjectIdentity],
+    it: &DrainItem,
+) -> ApiResult<()> {
+    if !DRAINED_ENTITY_TYPES.contains(&it.entity_type.as_str()) {
+        return Err(ApiError::invalid("entity_type_not_drained"));
+    }
+    if it.operation != "upsert" {
+        return Err(ApiError::invalid(format!(
+            "`{}` is not a drained operation; drain transfers records, it does not delete them",
+            it.operation
+        )));
+    }
+
+    // One transaction per item. A failure partway through — an unmet
+    // membership check, a privacy refusal — drops `tx` without committing, and
+    // a dropped `sqlx::Transaction` rolls back on its own; there is no path on
+    // which a partially-applied item is left committed.
+    let mut tx = state.pool.begin().await?;
+    match it.entity_type.as_str() {
+        "memory" => {
+            let project_id = uuid_field(&it.payload, "project_id")
+                .ok_or_else(|| ApiError::invalid("a drained memory must carry its `project_id`"))?;
+            auth::require_member(&state.pool, project_id, user_id).await?;
+            let sync_item = crate::sync::SyncItem {
+                idempotency_key: String::new(),
+                entity_type: it.entity_type.clone(),
+                entity_id: it.uuid()?,
+                operation: it.operation.clone(),
+                payload: it.payload.clone(),
+            };
+            crate::sync::upsert_memory(&mut tx, state.schema_version, project_id, &sync_item)
+                .await?;
+        }
+        "memory_relation" => {
+            let project_id = uuid_field(&it.payload, "project_id").ok_or_else(|| {
+                ApiError::invalid("a drained relation must carry its `project_id`")
+            })?;
+            auth::require_member(&state.pool, project_id, user_id).await?;
+            let sync_item = crate::sync::SyncItem {
+                idempotency_key: String::new(),
+                entity_type: it.entity_type.clone(),
+                // `upsert_relation` reads the triple out of the payload and
+                // never looks at this field, because a relation *is* its
+                // triple. Nil rather than a parsed endpoint id, so nothing
+                // downstream can start treating one endpoint as the edge's id.
+                entity_id: Uuid::nil(),
+                operation: it.operation.clone(),
+                payload: it.payload.clone(),
+            };
+            crate::sync::upsert_relation(&mut tx, project_id, &sync_item).await?;
+        }
+        "personal_knowledge" => {
+            crate::global::screen_global_item(&it.payload, identities)
+                .map_err(|refusal| refusal.into_api_error())?;
+            crate::global::upsert_personal(&mut tx, user_id, it.uuid()?, &it.payload).await?;
+        }
+        "team_knowledge" => {
+            crate::global::screen_global_item(&it.payload, identities)
+                .map_err(|refusal| refusal.into_api_error())?;
+            crate::global::upsert_team(&mut tx, user_id, it.uuid()?, &it.payload).await?;
+        }
+        "pattern" => drain_pattern(&mut tx, user_id, it).await?,
+        _ => unreachable!("checked by DRAINED_ENTITY_TYPES above"),
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Promote one legacy pattern into `shared_patterns`, keyed exactly as
+/// `migration-cutover.md` §4.1a and §4.2 describe: `pattern_id` is the item's
+/// own `entity_id`, and `owner_user_id` is the credential — never recomputed,
+/// never anyone but the caller.
+///
+/// Conflict target is `(owner_user_id, content_key)` — the identity migration
+/// actually claimed — rather than `pattern_id`, so a redelivery is recognized
+/// by the same key its ownership claim was made against; `DO NOTHING` because a
+/// drained pattern is transferred once, not edited through this path.
+async fn drain_pattern(
+    tx: &mut Transaction<'_, Postgres>,
+    owner_user_id: Uuid,
+    it: &DrainItem,
+) -> ApiResult<()> {
+    let title = it
+        .payload
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let problem = it
+        .payload
+        .get("problem")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let root_cause = it
+        .payload
+        .get("root_cause")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let approach = it
+        .payload
+        .get("approach")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if title.is_empty() || problem.is_empty() || root_cause.is_empty() || approach.is_empty() {
+        return Err(ApiError::invalid(
+            "a drained pattern must carry title, problem, root_cause and approach",
+        ));
+    }
+    let content_key = it
+        .payload
+        .get("content_key")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid("a drained pattern must carry its `content_key`"))?;
+    let constraints = it
+        .payload
+        .get("constraints")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+    let applicability = it
+        .payload
+        .get("applicability")
+        .cloned()
+        .unwrap_or_else(|| json!([]));
+
+    sqlx::query(
+        "INSERT INTO shared_patterns
+            (pattern_id, domain, owner_user_id, title, problem, root_cause, approach,
+             constraints, applicability, trust, content_key)
+         VALUES ($1, 'personal', $2, $3, $4, $5, $6, $7, $8, 'sanitized', $9)
+         ON CONFLICT (owner_user_id, content_key) DO NOTHING",
+    )
+    .bind(it.uuid()?)
+    .bind(owner_user_id)
+    .bind(title)
+    .bind(problem)
+    .bind(root_cause)
+    .bind(approach)
+    .bind(&constraints)
+    .bind(&applicability)
+    .bind(content_key)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// One record `POST /api/migration/possession` was asked about, resolved from
+/// its own reference shape (`migration-cutover.md` §5, §12.5) rather than
+/// coerced into another domain's.
+#[derive(Debug, Clone)]
+enum PossessionRef {
+    Knowledge { domain: KnowledgeDomain, id: Uuid },
+    Pattern { id: Uuid },
+    Relation { from: Uuid, to: Uuid, kind: String },
+}
+
+/// Parse one possession record, or refuse the whole call (§5, §12.5).
+///
+/// **A malformed record is a `400` for the call, not a per-record answer** —
+/// unlike drain's per-item reporting, `held`/`missing`/`indeterminate` are the
+/// only three things this route says about a record it understood, and a
+/// malformed one is not one of those three. A `knowledge` record with no
+/// `domain` is malformed for the same reason `verifysummary.rs`'s
+/// `Reference::parse` refuses one: a bare id names a project memory, a
+/// personal note and a team entry at once, so on its own it names none of
+/// them.
+fn parse_possession_record(v: &Value) -> ApiResult<PossessionRef> {
+    let ref_kind = v
+        .get("ref_kind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| ApiError::invalid("a possession record must name its `ref_kind`"))?;
+    match ref_kind {
+        "knowledge" => {
+            let named = v.get("domain").and_then(Value::as_str).ok_or_else(|| {
+                ApiError::invalid(
+                    "a knowledge record needs its `domain`: the same id can name a \
+                         project memory, a personal note and a team entry at once",
+                )
+            })?;
+            let domain = KnowledgeDomain::from_str(named)
+                .map_err(|_| ApiError::invalid(format!("`{named}` is not a domain")))?;
+            let id = v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a knowledge record needs a uuid `id`"))?;
+            Ok(PossessionRef::Knowledge { domain, id })
+        }
+        "pattern" => {
+            let id = v
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a pattern record needs a uuid `id`"))?;
+            Ok(PossessionRef::Pattern { id })
+        }
+        "relation" => {
+            let from = v
+                .get("from")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a relation record needs a uuid `from`"))?;
+            let to = v
+                .get("to")
+                .and_then(Value::as_str)
+                .and_then(|s| Uuid::parse_str(s).ok())
+                .ok_or_else(|| ApiError::invalid("a relation record needs a uuid `to`"))?;
+            let kind = v
+                .get("kind")
+                .and_then(Value::as_str)
+                .ok_or_else(|| ApiError::invalid("a relation record needs its `kind`"))?
+                .to_string();
+            Ok(PossessionRef::Relation { from, to, kind })
+        }
+        other => Err(ApiError::invalid(format!("`{other}` is not a ref_kind"))),
+    }
+}
+
+/// The three answers `migration-cutover.md` §5 allows, and no fourth.
+enum Possession {
+    Held,
+    Missing,
+    Indeterminate,
+}
+
+/// Resolve one record's possession, per the table in §5 and §12.5.
+///
+/// **`indeterminate` exists only for team knowledge.** Every other domain's
+/// visibility question collapses cleanly into "held" or "missing" — a personal
+/// or pattern record either belongs to the caller or it does not, a project
+/// record either sits in a project the caller is a member of or it does not —
+/// and the contract's own table names no `indeterminate` condition for any of
+/// them. Team is different because a `proposed` row is visible to its author
+/// and to an administrator and to nobody else (`sync-namespaces.md` §1a): a
+/// caller who is neither must not be told `missing`, which the caller could
+/// act on by retaining a writable copy of a record the server may actually
+/// hold (§12.5).
+async fn classify_possession(
+    pool: &PgPool,
+    user_id: Uuid,
+    is_admin: bool,
+    r: &PossessionRef,
+) -> ApiResult<Possession> {
+    match r {
+        PossessionRef::Knowledge {
+            domain: KnowledgeDomain::Personal,
+            id,
+        } => {
+            let owner: Option<(Uuid,)> =
+                sqlx::query_as("SELECT owner_user_id FROM personal_knowledge WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+            Ok(match owner {
+                Some((owner,)) if owner == user_id => Possession::Held,
+                _ => Possession::Missing,
+            })
+        }
+        PossessionRef::Knowledge {
+            domain: KnowledgeDomain::Project,
+            id,
+        } => {
+            let row: Option<(Uuid,)> =
+                sqlx::query_as("SELECT project_id FROM memories WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(pool)
+                    .await?;
+            match row {
+                None => Ok(Possession::Missing),
+                Some((project_id,)) => {
+                    let member: Option<(Uuid,)> = sqlx::query_as(
+                        "SELECT user_id FROM project_members
+                          WHERE project_id = $1 AND user_id = $2",
+                    )
+                    .bind(project_id)
+                    .bind(user_id)
+                    .fetch_optional(pool)
+                    .await?;
+                    Ok(if member.is_some() {
+                        Possession::Held
+                    } else {
+                        Possession::Missing
+                    })
+                }
+            }
+        }
+        PossessionRef::Knowledge {
+            domain: KnowledgeDomain::Team,
+            id,
+        } => {
+            let row: Option<(String, Uuid)> = sqlx::query_as(
+                "SELECT state, proposed_by_user_id FROM team_knowledge WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(match row {
+                None => Possession::Missing,
+                Some((state, _)) if state != "proposed" => Possession::Held,
+                Some((_, proposer)) if proposer == user_id || is_admin => Possession::Held,
+                Some(_) => Possession::Indeterminate,
+            })
+        }
+        PossessionRef::Pattern { id } => {
+            let owner: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT owner_user_id FROM shared_patterns
+                  WHERE pattern_id = $1 AND forgotten_at IS NULL",
+            )
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+            Ok(match owner {
+                Some((owner,)) if owner == user_id => Possession::Held,
+                _ => Possession::Missing,
+            })
+        }
+        PossessionRef::Relation { from, to, kind } => {
+            // `memory_relations` carries its own `project_id`, stamped at
+            // `upsert_relation` time from a call that already checked both
+            // endpoints belonged to it (`sync::all_in_project`) — so this one
+            // membership check is equivalent to checking both endpoints
+            // separately, without a second join to restate that guarantee.
+            let row: Option<(Uuid,)> = sqlx::query_as(
+                "SELECT project_id FROM memory_relations
+                  WHERE from_memory_id = $1 AND to_memory_id = $2 AND kind = $3",
+            )
+            .bind(from)
+            .bind(to)
+            .bind(kind)
+            .fetch_optional(pool)
+            .await?;
+            match row {
+                None => Ok(Possession::Missing),
+                Some((project_id,)) => {
+                    let member: Option<(Uuid,)> = sqlx::query_as(
+                        "SELECT user_id FROM project_members
+                          WHERE project_id = $1 AND user_id = $2",
+                    )
+                    .bind(project_id)
+                    .bind(user_id)
+                    .fetch_optional(pool)
+                    .await?;
+                    Ok(if member.is_some() {
+                        Possession::Held
+                    } else {
+                        Possession::Missing
+                    })
+                }
+            }
+        }
+    }
+}
+
+const MAX_POSSESSION_RECORDS: usize = 500;
+
+#[derive(Debug, Deserialize)]
+struct PossessionBody {
+    #[serde(default)]
+    records: Vec<Value>,
+}
+
+/// `POST /api/migration/possession` — "delivered" and "durably held" are
+/// different facts, and only the second authorizes demotion (`migration-cutover.md`
+/// §5, FR-865).
+///
+/// Registration is **not** required here, unlike `migration_drain`: a store
+/// may verify possession of records it already believed canonical, independent
+/// of whether it is mid-migration right now (§5's own wording).
+async fn migration_possession(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<PossessionBody>,
+) -> ApiResult<Json<Value>> {
+    if body.records.is_empty() {
+        return Err(ApiError::invalid("`records` must name at least one record"));
+    }
+    if body.records.len() > MAX_POSSESSION_RECORDS {
+        return Err(ApiError::invalid(format!(
+            "a possession call carries at most {MAX_POSSESSION_RECORDS} records"
+        )));
+    }
+    // Parsed up front, entirely: one malformed record refuses the whole call
+    // rather than leaving a partially-answered response (see
+    // `parse_possession_record`).
+    let parsed: Vec<(Value, PossessionRef)> = body
+        .records
+        .iter()
+        .map(|v| parse_possession_record(v).map(|r| (v.clone(), r)))
+        .collect::<ApiResult<Vec<_>>>()?;
+
+    let is_admin = user.role() == cairn_core::domain::ServerRole::Admin;
+    let mut held = Vec::new();
+    let mut missing = Vec::new();
+    let mut indeterminate = Vec::new();
+    for (raw, r) in &parsed {
+        // The same reference object that was sent is what comes back — never
+        // reconstructed from the parsed fields — so a caller's own request
+        // shape round-trips exactly (§5).
+        match classify_possession(&state.pool, user.id(), is_admin, r).await? {
+            Possession::Held => held.push(raw.clone()),
+            Possession::Missing => missing.push(raw.clone()),
+            Possession::Indeterminate => indeterminate.push(raw.clone()),
+        }
+    }
+    Ok(Json(json!({
+        "held": held,
+        "missing": missing,
+        "indeterminate": indeterminate,
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+struct MigrationTokenBody {
+    migration_token: String,
+}
+
+/// `POST /api/migration/complete` — closes a migration token (`migration-cutover.md`
+/// §12.1: "closes when the migration completes, so a migrated store cannot
+/// keep using it").
+///
+/// Idempotent: completing an already-completed token answers with the
+/// `completed_at` already on record rather than refusing a caller that is
+/// simply retrying a response it never saw.
+async fn migration_complete(
+    State(state): State<AppState>,
+    user: SettledUser,
+    Json(body): Json<MigrationTokenBody>,
+) -> ApiResult<Json<Value>> {
+    let completed: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "UPDATE client_migrations SET completed_at = now()
+          WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NULL
+        RETURNING completed_at",
+    )
+    .bind(&body.migration_token)
+    .bind(user.id())
+    .fetch_optional(&state.pool)
+    .await?;
+
+    let completed_at = match completed {
+        Some((at,)) => at,
+        None => {
+            let existing: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+                "SELECT completed_at FROM client_migrations
+                  WHERE migration_token = $1 AND account_id = $2 AND completed_at IS NOT NULL",
+            )
+            .bind(&body.migration_token)
+            .bind(user.id())
+            .fetch_optional(&state.pool)
+            .await?;
+            match existing {
+                Some((at,)) => at,
+                None => {
+                    return Err(ApiError::new(
+                        StatusCode::FORBIDDEN,
+                        "migration_not_registered",
+                        "this migration token is unknown or belongs to another account",
+                    ))
+                }
+            }
+        }
+    };
+    Ok(Json(json!({ "completed_at": completed_at.to_rfc3339() })))
+}
+
+/// Every `memories` row whose asserted verification the new authority model
+/// cannot substantiate, audited then demoted in one statement
+/// (`migration-cutover.md` §2 steps 2-3).
+///
+/// The audit insert and the demotion read the **same** `orphaned` CTE, which
+/// is what makes them agree on exactly which rows: the demotion cannot drift
+/// from what was audited, because there is only one computation of "orphaned"
+/// in this statement, not two that could disagree after being edited
+/// separately.
+const CUTOVER_DEMOTE_MEMORIES_SQL: &str = "
+WITH orphaned AS (
+    SELECT id, verification, verification_authority, last_verified_at
+      FROM memories
+     WHERE verification <> 'unverified'
+       AND NOT EXISTS (
+             SELECT 1 FROM verification_reports vr
+              WHERE vr.reference_key = 'knowledge:project:' || memories.id::text
+           )
+),
+audited AS (
+    INSERT INTO legacy_verification_audit
+        (domain, knowledge_id, legacy_state, legacy_authority, legacy_last_verified_at)
+    SELECT 'project', id, verification, verification_authority, last_verified_at
+      FROM orphaned
+    ON CONFLICT (domain, knowledge_id) DO NOTHING
+    RETURNING knowledge_id
+),
+demoted AS (
+    UPDATE memories
+       SET verification = 'unverified', verification_authority = NULL,
+           verification_basis = '[]'::jsonb, evidence_fact_count = 0,
+           last_verified_at = NULL
+     WHERE id IN (SELECT id FROM orphaned)
+    RETURNING id
+)
+SELECT (SELECT count(*) FROM audited), (SELECT count(*) FROM demoted)
+";
+
+/// The same operation as [`CUTOVER_DEMOTE_MEMORIES_SQL`], over
+/// `knowledge_verification` (`migration-cutover.md` §2 step 4).
+///
+/// `ref_kind = 'knowledge'` excludes pattern rows on purpose: `shared_patterns`
+/// is new in this same schema (server schema v4), so no pattern verification
+/// predates the cutover for there to be anything "legacy" about — and
+/// `legacy_verification_audit.domain` is `NOT NULL`, which a pattern row's
+/// null domain slot could never satisfy in the first place.
+const CUTOVER_DEMOTE_KNOWLEDGE_VERIFICATION_SQL: &str = "
+WITH orphaned AS (
+    SELECT reference_key, domain, knowledge_id, verification,
+           verification_authority, last_verified_at
+      FROM knowledge_verification
+     WHERE ref_kind = 'knowledge'
+       AND verification <> 'unverified'
+       AND NOT EXISTS (
+             SELECT 1 FROM verification_reports vr
+              WHERE vr.reference_key = knowledge_verification.reference_key
+           )
+),
+audited AS (
+    INSERT INTO legacy_verification_audit
+        (domain, knowledge_id, legacy_state, legacy_authority, legacy_last_verified_at)
+    SELECT domain, knowledge_id, verification, verification_authority, last_verified_at
+      FROM orphaned
+    ON CONFLICT (domain, knowledge_id) DO NOTHING
+    RETURNING knowledge_id
+),
+demoted AS (
+    UPDATE knowledge_verification
+       SET verification = 'unverified', verification_authority = NULL,
+           verification_basis = '[]'::jsonb, evidence_fact_count = 0,
+           last_verified_at = NULL
+     WHERE reference_key IN (SELECT reference_key FROM orphaned)
+    RETURNING reference_key
+)
+SELECT (SELECT count(*) FROM audited), (SELECT count(*) FROM demoted)
+";
+
+/// `POST /api/admin/cutover` — the one-way switch (`migration-cutover.md` §2,
+/// FR-876).
+///
+/// **One transaction, the compare-and-swap first.** Same shape as `ratify_team`
+/// / `retire_team`: the `UPDATE ... WHERE mode = 'pre_cutover'` decides whether
+/// this call is the one that flips the switch before anything else runs, so
+/// two concurrent calls race inside PostgreSQL rather than in this handler.
+/// Zero rows means already cut over — FR-876 gives no route back, so that is
+/// the existing decision restated, not an error, and steps 2-4 do not run at
+/// all: nothing is re-audited and nothing is re-demoted on a repeat call.
+async fn admin_cutover(State(state): State<AppState>, _admin: AdminUser) -> ApiResult<Json<Value>> {
+    let mut tx = state.pool.begin().await?;
+    let cas: Option<(chrono::DateTime<chrono::Utc>,)> = sqlx::query_as(
+        "UPDATE server_authority SET mode = 'server_authoritative', cutover_at = now()
+          WHERE id = 1 AND mode = 'pre_cutover'
+        RETURNING cutover_at",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let Some((cutover_at,)) = cas else {
+        // Nothing was written by the failed CAS, so there is nothing to
+        // commit — the transaction is simply dropped.
+        drop(tx);
+        let existing: (Option<chrono::DateTime<chrono::Utc>>,) =
+            sqlx::query_as("SELECT cutover_at FROM server_authority WHERE id = 1")
+                .fetch_one(&state.pool)
+                .await?;
+        return Ok(Json(json!({
+            "mode": "server_authoritative",
+            "cutover_at": existing.0.map(|t| t.to_rfc3339()),
+            "already": true,
+            "demoted": 0,
+            "audited": 0,
+        })));
+    };
+
+    let (memories_audited, memories_demoted): (i64, i64) =
+        sqlx::query_as(CUTOVER_DEMOTE_MEMORIES_SQL)
+            .fetch_one(&mut *tx)
+            .await?;
+    let (kv_audited, kv_demoted): (i64, i64) =
+        sqlx::query_as(CUTOVER_DEMOTE_KNOWLEDGE_VERIFICATION_SQL)
+            .fetch_one(&mut *tx)
+            .await?;
+    tx.commit().await?;
+
+    Ok(Json(json!({
+        "mode": "server_authoritative",
+        "cutover_at": cutover_at.to_rfc3339(),
+        "already": false,
+        "demoted": memories_demoted + kv_demoted,
+        "audited": memories_audited + kv_audited,
+    })))
+}
 
 // ---------------------------------------------------------------------------
 // Read API for the web UI

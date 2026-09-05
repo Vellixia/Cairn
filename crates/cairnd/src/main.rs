@@ -12,6 +12,7 @@ mod drift;
 mod handlers;
 mod handoffs;
 mod integrations;
+mod migrate005;
 mod patterns;
 mod promote;
 mod recover;

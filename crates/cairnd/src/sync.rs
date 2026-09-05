@@ -1639,7 +1639,7 @@ pub(crate) async fn client(d: &Daemon) -> Result<Client, WireError> {
 }
 
 impl Client {
-    async fn post(
+    pub(crate) async fn post(
         &self,
         path: &str,
         body: &serde_json::Value,
@@ -4380,6 +4380,100 @@ async fn import_task(d: &Daemon, project_id: Uuid, value: &serde_json::Value) ->
     )
     .await
     .is_ok()
+}
+
+// ---------------------------------------------------------------------------
+// Migration eligibility (T141; FR-864a, FR-867b)
+//
+// Who is allowed to hand a legacy row to the server, decided as two pure
+// functions so the rule can be read, tested and mutated on its own rather than
+// inferred from a `WHERE` clause several call sites away.
+//
+// This is not a second claim path. `outbox::claim_namespace_for_author` still
+// does the claiming; these say which claim a namespace calls for, and name the
+// reason when a row is not eligible so `--status` can report it individually
+// (contract §4.3) instead of leaving it silently pending.
+// ---------------------------------------------------------------------------
+
+/// Why a queued legacy row is, or is not, this account's to drain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Eligibility {
+    /// Claimable by this account, through the claim its namespace calls for.
+    Eligible,
+    /// A global row with no author recorded against it.
+    ///
+    /// Drained by **no one's** migration. A missing author is not a wildcard:
+    /// treating it as one would deliver the row under whichever account happens
+    /// to be signed in during migration, which is the misattribution
+    /// `outbox.rs` records as introduced and fixed twice already. The row stays
+    /// pending and is reported.
+    NoRecordedAuthor,
+    /// A global row authored by somebody else. Held, not refused — it goes out
+    /// unchanged the moment its own author resumes their migration.
+    AuthorMismatch { recorded: Uuid },
+}
+
+/// Whether `account` may drain a queued row in `namespace` authored by
+/// `authored_by`.
+///
+/// **A `project:*` row carries no author and needs none.** Its authorization is
+/// membership of the project, which the server checks on arrival; the local
+/// CHECK on `outbox` requires exactly that split, so a project row with an
+/// author is as impossible as a global row without one. Reading the namespace
+/// rather than the entity type is deliberate: the namespace is the column the
+/// claim itself keys on, so this cannot disagree with what the claim will do.
+pub fn legacy_row_eligibility(
+    namespace: &str,
+    authored_by: Option<Uuid>,
+    account: Uuid,
+) -> Eligibility {
+    if namespace.starts_with("project:") {
+        return Eligibility::Eligible;
+    }
+    match authored_by {
+        Some(a) if a == account => Eligibility::Eligible,
+        Some(recorded) => Eligibility::AuthorMismatch { recorded },
+        None => Eligibility::NoRecordedAuthor,
+    }
+}
+
+/// Why a legacy pattern is, or is not, deliverable by this account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PatternEligibility {
+    /// A persisted claim by this account exists. Both values come from the
+    /// claim, never recomputed from the credential active at retry time.
+    Eligible {
+        pattern_id: Uuid,
+        content_key: String,
+    },
+    /// Nobody has claimed it. It stays local and is reported individually;
+    /// the active account can never substitute for a missing claim.
+    OwnerUnclaimed,
+    /// Claimed by a different account. Reported until that account resumes its
+    /// own migration, and never re-keyed to this one.
+    AuthorMismatch { owner: Uuid },
+}
+
+/// Whether `account` may deliver the pattern behind `claim`.
+///
+/// The whole point of taking the persisted claim rather than the local pattern
+/// is that a credential switch must not change the answer's *identity*: a
+/// claimed row keeps the `pattern_id` its claim recorded, so no sequence of
+/// sign-ins can produce a second owner or a second canonical pattern.
+pub fn pattern_eligibility(
+    claim: Option<&cairn_store::migrate::PatternClaim>,
+    account: Uuid,
+) -> PatternEligibility {
+    match claim {
+        None => PatternEligibility::OwnerUnclaimed,
+        Some(c) if c.owner_user_id == account => PatternEligibility::Eligible {
+            pattern_id: c.pattern_id,
+            content_key: c.content_key.clone(),
+        },
+        Some(c) => PatternEligibility::AuthorMismatch {
+            owner: c.owner_user_id,
+        },
+    }
 }
 
 #[cfg(test)]

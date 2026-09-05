@@ -651,3 +651,28 @@ CREATE TABLE server_authority (
 INSERT INTO server_authority (id, mode, cutover_at)
 VALUES (1, 'pre_cutover', NULL)
 ON CONFLICT (id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- Step 10 — client migration registration
+-- ---------------------------------------------------------------------------
+
+-- A client store that has registered a migration (`migration-cutover.md`
+-- §12.1). The migration-scoped drain route is open only to a registered,
+-- uncompleted migration, so it is not a general bypass of the cutover
+-- refusal — a store that has not registered here gets `upgrade_required`
+-- exactly as any other pre-005 caller does.
+--
+-- `UNIQUE (account_id, writer_id)` is what makes registration idempotent
+-- per store: re-registering while `completed_at IS NULL` finds the same row
+-- and returns the same token, and re-registering after completion reopens it
+-- by clearing `completed_at` rather than minting a second row for the same
+-- machine — which is what `--retry-retained` running after completion
+-- depends on (FR-876d).
+CREATE TABLE client_migrations (
+  migration_token TEXT PRIMARY KEY,
+  account_id      UUID NOT NULL REFERENCES users(id),
+  writer_id       TEXT NOT NULL,
+  registered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at    TIMESTAMPTZ,
+  UNIQUE (account_id, writer_id)
+);

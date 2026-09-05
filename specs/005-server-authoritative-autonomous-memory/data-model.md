@@ -863,6 +863,22 @@ CREATE TABLE server_authority (
   mode TEXT NOT NULL CHECK (mode IN ('pre_cutover','server_authoritative')),
   cutover_at TIMESTAMPTZ
 );
+
+-- A client store that has registered a migration (`migration-cutover.md` §12.1). The
+-- migration-scoped drain route is open only to a registered, uncompleted migration, so it is
+-- not a general bypass of the cutover refusal.
+CREATE TABLE client_migrations (
+  migration_token TEXT PRIMARY KEY,
+  account_id      UUID NOT NULL REFERENCES users(id),
+  writer_id       TEXT NOT NULL,
+  registered_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completed_at    TIMESTAMPTZ,
+  -- Idempotent registration per store: re-registering while still open returns the same row;
+  -- re-registering after completion reopens it (clears `completed_at`) rather than minting a
+  -- second row for the same machine, which is what `--retry-retained` running after
+  -- completion depends on (FR-876d).
+  UNIQUE (account_id, writer_id)
+);
 ```
 
 `integration_health.status` is the FR-855 vocabulary, and `evidence_kind` is what keeps

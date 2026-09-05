@@ -1041,6 +1041,37 @@ pub enum Request {
         cwd: String,
         id: Uuid,
     },
+
+    // -----------------------------------------------------------------------
+    // Migration from Feature 004 (`contracts/migration-cutover.md` §4–§9)
+    // -----------------------------------------------------------------------
+    /// Count what the store holds, change nothing else (§4.1).
+    MigrateInspect {
+        cwd: String,
+    },
+    /// Claim ownership of legacy patterns for the authenticated account (§4.1a).
+    ///
+    /// `patterns` empty means "every eligible one": the surface still requires
+    /// an explicit `--claim-patterns`, so nothing is claimed by simply running
+    /// the migration, but a user who has read the inspect report and wants all
+    /// of them should not have to retype fourteen ids.
+    MigrateClaimPatterns {
+        cwd: String,
+        #[serde(default)]
+        patterns: Vec<Uuid>,
+    },
+    /// Run the migration, entering at the first phase that is not done (§7).
+    MigrateRun {
+        cwd: String,
+    },
+    /// Phases, and every retained record with its reason (§12.2).
+    MigrateStatus {
+        cwd: String,
+    },
+    /// Re-attempt every retained record, on demand.
+    MigrateRetryRetained {
+        cwd: String,
+    },
     /// Propose a promotion. Runs the ten-check gate; `dry_run` reports the
     /// outcome without writing (FR-395).
     PatternPromote {

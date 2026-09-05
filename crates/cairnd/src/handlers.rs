@@ -784,6 +784,13 @@ pub(crate) async fn handle(d: &Daemon, request: Request) -> Reply {
             crate::patterns::list(d, &cwd, trust, signal).await
         }
         Request::PatternShow { cwd, id } => crate::patterns::show(d, &cwd, id).await,
+        Request::MigrateInspect { cwd } => migrate_inspect(d, &cwd).await,
+        Request::MigrateClaimPatterns { cwd, patterns } => {
+            migrate_claim_patterns(d, &cwd, patterns).await
+        }
+        Request::MigrateRun { cwd } => migrate_run(d, &cwd).await,
+        Request::MigrateStatus { cwd } => migrate_status(d, &cwd).await,
+        Request::MigrateRetryRetained { cwd } => migrate_retry_retained(d, &cwd).await,
         Request::PatternPromote {
             cwd,
             memory_id,
@@ -4127,6 +4134,104 @@ async fn restore_checkpoint(
         .await
         .ok()?;
     serde_json::to_value(restored).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Migration from Feature 004 (T143, T151)
+//
+// Thin: every decision lives in `migrate005`, and these five do the two things
+// a handler is for — resolve the repository, and turn a report into a reply.
+// ---------------------------------------------------------------------------
+
+/// The authenticated account, which is what a migration is scoped to.
+///
+/// Not this machine's local user id: ownership of personal knowledge and of a
+/// legacy pattern claim is an account fact, and a store used with two accounts
+/// has one local user and two migrations' worth of eligible rows
+/// (`migration-cutover.md` §4.1a).
+async fn migrating_account(d: &Daemon) -> Result<uuid::Uuid, WireError> {
+    d.server.read().await.account_id.ok_or_else(|| {
+        WireError::new(
+            codes::UNAUTHORIZED,
+            "migration needs an authenticated account; run `cairn auth token set`",
+        )
+    })
+}
+
+async fn remote_for(d: &Daemon) -> Result<crate::migrate005::HttpRemote, WireError> {
+    Ok(crate::migrate005::HttpRemote::new(
+        crate::sync::client(d).await?,
+    ))
+}
+
+fn store_failure(e: cairn_store::StoreError) -> WireError {
+    match e {
+        cairn_store::StoreError::Refused { code, message } => WireError::new(code, message),
+        other => storage_err(other),
+    }
+}
+
+async fn migrate_inspect(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let report = crate::migrate005::inspect(&d.store)
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "inspect": report }))
+}
+
+async fn migrate_claim_patterns(d: &Daemon, cwd: &str, patterns: Vec<uuid::Uuid>) -> Reply {
+    d.resolve(cwd).await?;
+    let account = migrating_account(d).await?;
+    let selection = if patterns.is_empty() {
+        cairn_store::migrate::unclaimed_patterns(&d.store)
+            .await
+            .map_err(store_failure)?
+    } else {
+        patterns
+    };
+    let rows = crate::migrate005::claim_patterns(&d.store, account, &selection)
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "claims": rows }))
+}
+
+async fn migrate_run(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let account = migrating_account(d).await?;
+    let writer = cairn_store::repo::writer_identity(&d.store)
+        .await
+        .map_err(storage_err)?;
+    let remote = remote_for(d).await?;
+    let report = crate::migrate005::run(&d.store, &remote, account, &writer.to_string())
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "run": report }))
+}
+
+async fn migrate_status(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let report = crate::migrate005::status(&d.store)
+        .await
+        .map_err(store_failure)?;
+    Ok(json!({ "ok": true, "status": report }))
+}
+
+async fn migrate_retry_retained(d: &Daemon, cwd: &str) -> Reply {
+    d.resolve(cwd).await?;
+    let account = migrating_account(d).await?;
+    let writer = cairn_store::repo::writer_identity(&d.store)
+        .await
+        .map_err(storage_err)?;
+    let remote = remote_for(d).await?;
+    let (released, still_retained) =
+        crate::migrate005::retry_retained(&d.store, &remote, account, &writer.to_string())
+            .await
+            .map_err(store_failure)?;
+    Ok(json!({
+        "ok": true,
+        "released": released,
+        "still_retained": still_retained,
+    }))
 }
 
 #[cfg(test)]

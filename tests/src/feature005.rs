@@ -638,3 +638,408 @@ async fn open_pool(path: &std::path::Path) -> sqlx::SqlitePool {
         .await
         .expect("open a pinned-version store")
 }
+
+// ---------------------------------------------------------------------------
+// A populated Feature 004 store, at the real v7 schema
+// ---------------------------------------------------------------------------
+
+/// The identifiers a [`LegacyV7`] fixture seeded, so a test can name the rows
+/// it is about to migrate.
+///
+/// Public fields rather than accessors because every one of them appears in an
+/// assertion, and a failure that says `ids.team_proposed` is easier to read
+/// than one that says "the third team row".
+#[derive(Debug, Clone)]
+pub struct LegacyIds {
+    pub project: Uuid,
+    pub session: Uuid,
+    /// A project memory that was queued for sync and never delivered. Drains.
+    pub memory_queued: Uuid,
+    /// A project memory marked `local_only`: never eligible to move, so it is
+    /// retained rather than transferred (contract §6, first row).
+    pub memory_local_only: Uuid,
+    /// A memory whose un-normalized `topic_key` normalizes onto
+    /// `memory_queued`'s with a **different** `value_key`, so re-keying
+    /// produces a collision that has to become a conflict rather than a
+    /// deletion (contract §8).
+    pub memory_collides: Uuid,
+    /// `(from, to, kind)` — a relation has no id of its own.
+    pub relation: (Uuid, Uuid, &'static str),
+    pub personal_queued: Uuid,
+    /// Un-normalized keys, so §12.4's re-keying has something to correct.
+    pub personal_unnormalized: Uuid,
+    pub team_authoritative: Uuid,
+    /// Proposed by somebody else. Possession must answer `indeterminate` for
+    /// this one rather than `missing` (contract §12.5).
+    pub team_proposed: Uuid,
+    /// A local pattern the migrating account will claim.
+    pub pattern_claimable: Uuid,
+    /// A local pattern nobody claims: stays local, reported `owner_unclaimed`.
+    pub pattern_unclaimed: Uuid,
+    /// The account that authored the queued global rows.
+    pub author: Uuid,
+    /// A different account, which authored nothing here.
+    pub other_author: Uuid,
+    /// The server instance the legacy namespaces name.
+    pub instance: Uuid,
+}
+
+/// A local store at the **real** v7 schema, populated with what a Feature 004
+/// store in use actually carries.
+///
+/// Built by running the shipped migrations up to v7 and stopping — never by
+/// hand-writing the DDL somebody remembers v7 having. `migration-cutover.md`
+/// §11 requires the migration to be proved against the real prior schema, and
+/// an approximation would prove it against a schema no user has.
+///
+/// The rows are chosen so that every disposition the contract names is
+/// reachable: something that drains, something local-only, something whose keys
+/// need normalizing, a collision, a relation, a team row the caller may not
+/// see, a claimable pattern and an unclaimed one.
+pub struct LegacyV7 {
+    dir: TempDir,
+    pool: sqlx::SqlitePool,
+    pub ids: LegacyIds,
+}
+
+impl LegacyV7 {
+    /// Build the fixture. `git_common_dir` must be the value the sandbox's own
+    /// `projects` row carries, or the daemon will not recognize the repository
+    /// after the file is swapped in.
+    pub async fn build(project: Uuid, git_common_dir: &str, account: Uuid) -> Self {
+        let dir = TempDir::new().expect("a directory for the legacy store");
+        let path = dir.path().join("cairn.sqlite3");
+        let pool = open_pool(&path).await;
+        cairn_store::migrate::run_to(&pool, LOCAL_SCHEMA_V7)
+            .await
+            .unwrap_or_else(|e| panic!("migrating the legacy fixture to v7: {e}"));
+
+        let ids = seed_legacy_rows(&pool, project, git_common_dir, account).await;
+        Self { dir, pool, ids }
+    }
+
+    pub fn path(&self) -> PathBuf {
+        self.dir.path().join("cairn.sqlite3")
+    }
+
+    /// Close the fixture and copy it over `target`.
+    ///
+    /// The write-ahead log is checkpointed and truncated **before** the pool
+    /// closes. Without that the seeded rows are still sitting in the fixture's
+    /// own `-wal`, copying the main database alone carries none of them, and
+    /// the failure surfaces much later as an upgraded store that is
+    /// mysteriously empty. The target's sidecars are removed for the mirror
+    /// image of the same reason: a swapped-in database with somebody else's
+    /// `-wal` beside it is a corrupt store.
+    pub async fn install_over(self, target: &std::path::Path) {
+        let Self { dir, pool, ids } = self;
+        sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+            .execute(&pool)
+            .await
+            .expect("checkpointing the legacy fixture");
+        pool.close().await;
+        let _ = ids;
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = target.as_os_str().to_owned();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
+        }
+        std::fs::copy(dir.path().join("cairn.sqlite3"), target)
+            .unwrap_or_else(|e| panic!("installing the legacy store over {target:?}: {e}"));
+    }
+}
+
+/// Everything a populated Feature 004 store holds that migration has to deal
+/// with, written as SQL against the v7 schema.
+async fn seed_legacy_rows(
+    pool: &sqlx::SqlitePool,
+    project: Uuid,
+    git_common_dir: &str,
+    account: Uuid,
+) -> LegacyIds {
+    let now = "2026-08-01T09:00:00Z";
+    // The account that will run the migration. A Feature 004 store's personal
+    // rows are owned by the account that wrote them, and seeding a stranger's
+    // id here would make every one of them correctly report `author_mismatch`
+    // — a fixture that proved the eligibility rule and nothing else.
+    let author = account;
+    let other_author = Uuid::now_v7();
+    let instance = Uuid::now_v7();
+    let session = Uuid::now_v7();
+    // Both are UUID-shaped columns in every version of this schema, and the
+    // store parses them as such on read; a readable placeholder like
+    // `legacy-run` loads fine and then fails three commands later.
+    let daemon_run = Uuid::now_v7();
+    let writer = Uuid::now_v7();
+
+    let ids = LegacyIds {
+        project,
+        session,
+        memory_queued: Uuid::now_v7(),
+        memory_local_only: Uuid::now_v7(),
+        memory_collides: Uuid::now_v7(),
+        relation: (Uuid::now_v7(), Uuid::now_v7(), "supersedes"),
+        personal_queued: Uuid::now_v7(),
+        personal_unnormalized: Uuid::now_v7(),
+        team_authoritative: Uuid::now_v7(),
+        team_proposed: Uuid::now_v7(),
+        pattern_claimable: Uuid::now_v7(),
+        pattern_unclaimed: Uuid::now_v7(),
+        author,
+        other_author,
+        instance,
+    };
+
+    let run = |sql: String| async move {
+        sqlx::query(&sql)
+            .execute(pool)
+            .await
+            .unwrap_or_else(|e| panic!("seeding the legacy store: {e}\n{sql}"));
+    };
+
+    // The project the sandbox already believes it is in. Same id, same
+    // `git_common_dir`, so the daemon that reopens this file resolves the
+    // repository to the same project rather than creating a second one.
+    run(format!(
+        "INSERT INTO projects (id, name, git_common_dir, repository_remote, linked,
+                               server_project_id, created_at, updated_at, deleted_at)
+         VALUES ('{project}', 'legacy-fixture', '{git_common_dir}', NULL, 1,
+                 NULL, '{now}', '{now}', NULL)"
+    ))
+    .await;
+
+    run(format!(
+        "INSERT INTO sessions (id, project_id, user_id, agent, branch, worktree_path,
+                               agent_session_key, status, started_at, last_event_at,
+                               daemon_run_id)
+         VALUES ('{session}', '{project}', '{author}', 'claude_code', 'main',
+                 '{git_common_dir}', 'legacy-key', 'completed', '{now}', '{now}',
+                 '{daemon_run}')"
+    ))
+    .await;
+
+    // Three project memories. The keys are deliberately un-normalized — a
+    // trailing space, mixed case, a separator the shipped normalizer folds —
+    // because SC-750 is about the corpus users already have, and a fixture
+    // written with normalized keys would assert nothing.
+    run(format!(
+        "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state,
+                               origin_session_id, local_only, created_at, updated_at,
+                               topic_key, value_key)
+         VALUES
+           ('{}', '{project}', 'fact', 'project', '{project}',
+            'the release job signs images', 'active', '{session}', 0, '{now}', '{now}',
+            'Release.Signing ', 'Cosign'),
+           ('{}', '{project}', 'decision', 'project', '{project}',
+            'this laptop keeps the scratch notes', 'active', '{session}', 1,
+            '{now}', '{now}', 'Local.Notes', 'Kept'),
+           ('{}', '{project}', 'fact', 'project', '{project}',
+            'the release job signs images with notation', 'active', '{session}', 0,
+            '{now}', '{now}', 'release.SIGNING', 'Notation')",
+        ids.memory_queued, ids.memory_local_only, ids.memory_collides
+    ))
+    .await;
+
+    // A relation, named by its triple. Both endpoints are memories of their
+    // own so possession can answer for it honestly.
+    let (from, to, kind) = ids.relation;
+    run(format!(
+        "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state,
+                               origin_session_id, local_only, created_at, updated_at)
+         VALUES ('{from}', '{project}', 'fact', 'project', '{project}',
+                 'the old signer was gpg', 'superseded', '{session}', 0, '{now}', '{now}'),
+                ('{to}', '{project}', 'fact', 'project', '{project}',
+                 'the signer is cosign', 'active', '{session}', 0, '{now}', '{now}')"
+    ))
+    .await;
+    run(format!(
+        "INSERT INTO memory_relations (from_memory_id, to_memory_id, kind, project_id,
+                                       decided_by_session, decided_at, basis)
+         VALUES ('{from}', '{to}', '{kind}', '{project}', '{session}', '{now}',
+                 'deterministic_rule')"
+    ))
+    .await;
+
+    run(format!(
+        "INSERT INTO personal_knowledge (id, owner_user_id, knowledge_type, content,
+                                         topic_key, value_key, writer_id, writer_seq,
+                                         created_at)
+         VALUES
+           ('{}', '{author}', 'fact', 'the owner prefers one signer',
+            'signing.preference', 'one_signer', '{writer}', 1, '{now}'),
+           ('{}', '{author}', 'convention', 'notes go in the day file',
+            'Notes.Layout  ', 'Day File', '{writer}', 2, '{now}')",
+        ids.personal_queued, ids.personal_unnormalized
+    ))
+    .await;
+
+    run(format!(
+        "INSERT INTO team_knowledge (id, knowledge_type, content, topic_key, value_key,
+                                     state, proposed_by_user_id, ratified_by_user_id,
+                                     ratified_at, writer_id, writer_seq, created_at)
+         VALUES
+           ('{}', 'convention', 'the team signs every release image',
+            'release.signing', 'signed', 'authoritative', '{author}', '{author}',
+            '{now}', '{writer}', 3, '{now}'),
+           ('{}', 'decision', 'a proposal only its author can see yet',
+            'Proposal.Draft', 'Pending', 'proposed', '{other_author}', NULL, NULL,
+            '{writer}', 4, '{now}')",
+        ids.team_authoritative, ids.team_proposed
+    ))
+    .await;
+
+    // Two local patterns. `reusable_patterns` has no owner column at all — that
+    // absence is the whole reason ownership has to be claimed explicitly rather
+    // than inferred (contract §4.1a).
+    for (id, title, signal) in [
+        (
+            ids.pattern_claimable,
+            "signing fails on a fresh runner",
+            "no-keyring",
+        ),
+        (
+            ids.pattern_unclaimed,
+            "the cache misses after a rebase",
+            "stale-index",
+        ),
+    ] {
+        run(format!(
+            "INSERT INTO reusable_patterns (id, title, problem, signals, signal_digest,
+                                            applicability, root_cause, root_cause_digest,
+                                            approach, constraints, trust, origin_ref,
+                                            source_memory_id, sanitization_report,
+                                            created_at, updated_at)
+             VALUES ('{id}', '{title}', 'the problem: {title}',
+                     '[\"{signal}\",\"second-signal\"]', 'digest-{signal}', '[]',
+                     'the root cause of {signal}', 'rc-digest-{signal}',
+                     'the approach for {signal}', '[]', 'sanitized',
+                     'salted-origin-{signal}', NULL, '{{}}', '{now}', '{now}')"
+        ))
+        .await;
+    }
+
+    // Machine-local evidence for the claimable pattern. It never drains
+    // (FR-707), and a migration that pushed it would be pushing the six names
+    // the privacy boundary refuses.
+    run(format!(
+        "INSERT INTO pattern_applications (id, pattern_id, project_id, session_id,
+                                           signal_digest, outcome, discovery, applied_at)
+         VALUES ('{}', '{}', '{project}', '{session}', 'digest-no-keyring', 'resolved',
+                 'independent', '{now}')",
+        Uuid::now_v7(),
+        ids.pattern_claimable
+    ))
+    .await;
+
+    // The outbox as a Feature 004 store leaves it: global rows carrying their
+    // author, project rows carrying none (the v7 CHECK requires exactly that
+    // split), and one row already delivered so a re-drain has something it must
+    // not send twice.
+    let queued: [(&str, String, String, Option<Uuid>); 4] = [
+        (
+            "personal_knowledge",
+            ids.personal_queued.to_string(),
+            format!("personal:{instance}:{author}"),
+            Some(author),
+        ),
+        (
+            "team_knowledge",
+            ids.team_authoritative.to_string(),
+            format!("team:{instance}"),
+            Some(author),
+        ),
+        (
+            "memory",
+            ids.memory_queued.to_string(),
+            format!("project:{project}"),
+            None,
+        ),
+        (
+            "memory_relation",
+            format!("{from}|{to}|{kind}"),
+            format!("project:{project}"),
+            None,
+        ),
+    ];
+    for (entity_type, entity_id, namespace, row_author) in queued {
+        let project_column = match row_author {
+            Some(_) => "NULL".to_string(),
+            None => format!("'{project}'"),
+        };
+        let author_column = match row_author {
+            Some(a) => format!("'{a}'"),
+            None => "NULL".to_string(),
+        };
+        run(format!(
+            "INSERT INTO outbox (id, project_id, server_project_id, entity_type,
+                                 entity_id, operation, idempotency_key, payload, state,
+                                 attempts, created_at, namespace, authored_by_user_id)
+             VALUES ('{}', {project_column}, NULL, '{entity_type}', '{entity_id}',
+                     'upsert', 'legacy-{entity_type}-{entity_id}', '{{}}', 'pending', 0,
+                     '{now}', '{namespace}', {author_column})",
+            Uuid::now_v7()
+        ))
+        .await;
+    }
+    run(format!(
+        "INSERT INTO outbox (id, project_id, server_project_id, entity_type, entity_id,
+                             operation, idempotency_key, payload, state, attempts,
+                             created_at, delivered_at, namespace, authored_by_user_id)
+         VALUES ('{}', NULL, NULL, 'personal_knowledge', '{}', 'upsert',
+                 'legacy-delivered', '{{}}', 'delivered', 1, '{now}', '{now}',
+                 'personal:{instance}:{author}', '{author}')",
+        Uuid::now_v7(),
+        ids.personal_unnormalized
+    ))
+    .await;
+
+    ids
+}
+
+/// Replace a sandbox's store with a populated v7 one, and let the daemon
+/// migrate it on reopen.
+///
+/// This is the fixture the migration tests actually drive: a real Feature 004
+/// installation, upgraded in place by the current build, with the repository
+/// still resolving to the same project. The project id and `git_common_dir` are
+/// read out of the sandbox's own store first, so the swapped-in file names the
+/// repository the sandbox is sitting in rather than a path from a temporary
+/// directory that no longer exists.
+///
+/// `account` is the server account that will run the migration; it owns the
+/// seeded personal rows and authored the queued global ones, exactly as the
+/// account that wrote them would in a real store.
+///
+/// The daemon is stopped for the swap and started again afterwards, because
+/// replacing a SQLite file under a live connection is how you get a corrupt
+/// store and a failure three assertions later.
+pub fn install_legacy_v7(s: &crate::Sandbox, account: Uuid) -> LegacyIds {
+    let project: Uuid = s
+        .query_column("SELECT id FROM projects WHERE deleted_at IS NULL ORDER BY created_at")
+        .first()
+        .expect("the sandbox has a project")
+        .parse()
+        .expect("a project id");
+    let git_common_dir = s
+        .query_column(&format!(
+            "SELECT git_common_dir FROM projects WHERE id = '{project}'"
+        ))
+        .first()
+        .cloned()
+        .expect("the project's git_common_dir");
+
+    s.stop_daemon();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime for the legacy fixture");
+    let ids = rt.block_on(async {
+        let legacy = LegacyV7::build(project, &git_common_dir, account).await;
+        let ids = legacy.ids.clone();
+        legacy.install_over(&s.db_path()).await;
+        ids
+    });
+    // Reopened by the current build, which runs v8, v9 and v10 against it.
+    s.restart_daemon();
+    ids
+}
