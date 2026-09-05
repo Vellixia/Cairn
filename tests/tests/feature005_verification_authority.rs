@@ -1376,3 +1376,205 @@ fn the_report_row_binds_to_the_referenced_record_not_the_reporters_context() {
 // it for an adversary — and a regression that lives inside a matrix loop stops
 // being findable by the name of the thing it protects.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// T136 — the hostile route choice (SC-765)
+// ---------------------------------------------------------------------------
+
+/// A caller who wants stronger provenance cannot get it by picking the
+/// stronger-sounding URL, or by dressing the payload to match it.
+///
+/// # Why this is its own test
+///
+/// The tests above prove each rule separately: both routes assign
+/// `remote_attested`, an `authority` field is refused, a `verifier_kind` of
+/// `cairn` is not a kind. This one plays the adversary — somebody who has read
+/// the contract, understands that `cairn` is the authority they want, and tries
+/// every combination the surface offers to reach it.
+///
+/// The distinction it is built around is the one SC-765 turns on: **`/runs`
+/// sounds like Cairn ran a check, and it is not.** It is an authenticated client
+/// *saying* one ran. Both routes are equally strong precisely because neither
+/// establishes execution, and a build that quietly made `/runs` mean more would
+/// pass every test above while failing this one.
+///
+/// **Falsified by** returning anything but `remote_attested` from
+/// `assign_authority`, by giving it an argument to branch on, or by mapping
+/// `verifier_kind` onto authority anywhere.
+#[test]
+fn no_combination_of_route_payload_and_kind_reaches_cairn() {
+    let pg = pg!();
+    let refs = seed_refs(&pg);
+
+    // Every shape an adversary has to work with: the two routes, the four
+    // references, and payloads that variously assert the authority outright,
+    // spell it as a verifier kind, bury it one level down, or name the sibling
+    // value that has no producer at all.
+    let references = [
+        ("project", knowledge_ref("project", refs.project)),
+        ("personal", knowledge_ref("personal", refs.personal)),
+        ("team", knowledge_ref("team", refs.team)),
+        ("pattern", pattern_ref(refs.pattern)),
+    ];
+    let dressings: [(&str, fn(&mut Value)); 6] = [
+        ("plain", |_| {}),
+        ("authority=cairn", |b| b["authority"] = json!("cairn")),
+        ("authority=remote_cairn", |b| {
+            b["authority"] = json!("remote_cairn")
+        }),
+        ("verification_authority=cairn", |b| {
+            b["verification_authority"] = json!("cairn")
+        }),
+        ("nested authority", |b| {
+            b["provenance"] = json!({ "verification_authority": "cairn" })
+        }),
+        // The subtlest one: no refused field anywhere, just a verifier kind
+        // named after the authority. Nothing here is a lie the screen can catch
+        // — it is a legal-looking payload whose only hope is that the server
+        // maps kind onto authority.
+        ("verifier_kind=cairn", |b| {
+            b["verifier_kind"] = json!("cairn")
+        }),
+    ];
+
+    let mut accepted = 0;
+    let mut minute = 0;
+    for (which, reference) in &references {
+        for route in [RUNS, ATTESTATIONS] {
+            for (label, dress) in &dressings {
+                let mut body = report_body(
+                    route,
+                    reference.clone(),
+                    "passed",
+                    "test_outcome",
+                    &run_at(120 + minute),
+                );
+                minute += 1;
+                dress(&mut body);
+                let (reply, status) = post(&pg, &pg.owner, route, &body);
+
+                // A dressed payload is refused; a plain one is accepted. Either
+                // way the interesting assertion is the same one, made below over
+                // everything the server actually stored.
+                if *label == "plain" {
+                    assert_eq!(
+                        status, 200,
+                        "{route} {which} {label}: a legal report must still be \
+                         accepted, or the negative assertion below is vacuous — \
+                         got {reply}"
+                    );
+                    assert_eq!(
+                        reply["authority"],
+                        json!("remote_attested"),
+                        "{route} {which}: the stronger-sounding route assigned a \
+                         stronger authority — a URL is caller-selected input and \
+                         cannot establish what ran (§4)"
+                    );
+                    accepted += 1;
+                } else {
+                    assert_ne!(
+                        status, 200,
+                        "{route} {which} {label}: accepted a payload reaching for \
+                         an authority the caller cannot establish — got {reply}"
+                    );
+                }
+            }
+        }
+    }
+    assert_eq!(
+        accepted, 8,
+        "the eight legal reports (two routes, four references) must all have \
+         landed, or this test proves nothing about what the server stores"
+    );
+
+    // The whole of it, read off the server's own rows rather than its replies:
+    // one authority exists, and it is the weak one.
+    assert_eq!(
+        stored_authorities(&pg),
+        vec!["remote_attested".to_string()],
+        "an authority other than `remote_attested` reached the database. \
+         `cairn` is assignable only by a deterministic check the server itself \
+         ran, and `remote_cairn` has no producer in baseline Feature 005 \
+         (SC-765)"
+    );
+    assert_eq!(
+        reports_where(&pg, "authority IN ('cairn', 'remote_cairn', 'attested')"),
+        0,
+        "a report carries an authority no HTTP route may produce"
+    );
+
+    // And the summaries derived from them say the same thing. An authority that
+    // could not be stored on a report but appeared on the record it produced
+    // would be the same overclaim one derivation later.
+    assert_eq!(
+        pg.server.count(
+            "SELECT count(*) FROM memories
+              WHERE verification_authority IS NOT NULL
+                AND verification_authority <> 'remote_attested'"
+        ),
+        0,
+        "a project summary carries an authority no report established"
+    );
+    assert_eq!(
+        pg.server.count(
+            "SELECT count(*) FROM knowledge_verification
+              WHERE verification_authority IS NOT NULL
+                AND verification_authority <> 'remote_attested'"
+        ),
+        0,
+        "a non-project summary carries an authority no report established"
+    );
+}
+
+/// A knowledge reference arriving without its domain is refused, over HTTP.
+///
+/// # Why this exists separately from the unit test
+///
+/// `Reference::parse` has a unit test for exactly this, and a mutation that
+/// made a domainless reference default to `project` was caught by it — and by
+/// **nothing in this file or in the summaries file**. Both suites always send a
+/// domain, because both were written to exercise what a correct client does, so
+/// a server that quietly guessed would have shipped with two full e2e suites
+/// green.
+///
+/// The guess is not a small thing to get wrong. The same UUID can name a
+/// project memory, a personal note, a team entry and a pattern at once, so
+/// defaulting to `project` files one record's verification against another's —
+/// and does it silently, because the caller asked about *a* record and got a
+/// `200` about a different one.
+///
+/// **Falsified by** giving `Reference::parse` any default for a missing domain.
+#[test]
+fn a_reference_that_names_no_domain_is_refused_over_http() {
+    let pg = pg!();
+    let refs = seed_refs(&pg);
+
+    for route in [RUNS, ATTESTATIONS] {
+        let mut body = report_body(
+            route,
+            // Deliberately malformed: the id of a real project memory, with the
+            // domain left out. A server that defaults would accept this and
+            // verify the project record — which is the *plausible* wrong answer,
+            // and the reason a bare id must be refused rather than resolved.
+            json!({ "knowledge_id": refs.project }),
+            "passed",
+            "test_outcome",
+            &run_at(200),
+        );
+        body["run_at"] = json!(run_at(200));
+        let (reply, status) = post(&pg, &pg.owner, route, &body);
+        assert_eq!(
+            status, 400,
+            "{route} accepted a knowledge reference with no domain. A bare id \
+             names a project memory, a personal note, a team entry and a pattern \
+             at once, so it names none of them: {reply}"
+        );
+    }
+
+    // And nothing was written on the way to refusing.
+    assert_eq!(
+        reports_where(&pg, &format!("knowledge_id = '{}'", refs.project)),
+        0,
+        "a refused reference still produced a report"
+    );
+}
