@@ -109,7 +109,7 @@ fn expected_identity(s: &Sandbox, local_id: Uuid, owner: Uuid) -> (String, Uuid)
 
 fn claim_row_count(s: &Sandbox, local_id: Uuid) -> i64 {
     s.query_column(&format!(
-        "SELECT count(*) FROM legacy_pattern_claims WHERE local_pattern_id = '{local_id}'"
+        "SELECT CAST(count(*) AS TEXT) FROM legacy_pattern_claims WHERE local_pattern_id = '{local_id}'"
     ))[0]
         .parse()
         .expect("a count")
@@ -521,7 +521,7 @@ fn an_unclaimed_pattern_stays_readable_locally_and_is_named_as_retained() {
     let _ = f.s.json(&["migrate", "--run"]);
 
     let still_local: i64 = f.s.query_column(&format!(
-        "SELECT count(*) FROM reusable_patterns WHERE id = '{}' AND deleted_at IS NULL",
+        "SELECT CAST(count(*) AS TEXT) FROM reusable_patterns WHERE id = '{}' AND deleted_at IS NULL",
         f.ids.pattern_unclaimed
     ))[0]
         .parse()
@@ -605,7 +605,7 @@ fn local_pattern_evidence_never_leaves_and_a_delivered_row_carries_only_the_safe
     // Local evidence is untouched — migration does not read it to decide
     // anything, and never sends it.
     let evidence: i64 = f.s.query_column(&format!(
-        "SELECT count(*) FROM pattern_applications WHERE pattern_id = '{}'",
+        "SELECT CAST(count(*) AS TEXT) FROM pattern_applications WHERE pattern_id = '{}'",
         f.ids.pattern_claimable
     ))[0]
         .parse()
