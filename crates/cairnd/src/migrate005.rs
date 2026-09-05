@@ -631,30 +631,45 @@ pub async fn drain<R: Remote>(
     // decide who may drain it.
     let queued = queued_rows(store).await?;
 
+    /// The recorded author's verdict on one record, or `Eligible` when no row
+    /// is queued for it.
+    ///
+    /// Consulted for **every** record type, not only project memories. A team
+    /// record is shared — every account may read it, so nothing about the
+    /// record itself refuses anybody — and the author recorded against the
+    /// queued write is the only thing that says whose row it is to hand over.
+    /// Checking it for memories alone left that whole class unguarded, and a
+    /// mutation widening the author filter changed nothing any test could see.
+    fn recorded_author_verdict(
+        queued: &BTreeMap<String, (String, Option<Uuid>)>,
+        entity_id: &str,
+        account: Uuid,
+    ) -> Eligibility {
+        match queued.get(entity_id) {
+            Some((namespace, author)) => legacy_row_eligibility(namespace, *author, account),
+            None => Eligibility::Eligible,
+        }
+    }
+
     for (id, project_id, payload, reference) in project_memories(store).await? {
-        match queued.get(&id) {
-            Some((namespace, author)) => {
-                match legacy_row_eligibility(namespace, *author, account) {
-                    Eligibility::Eligible => {}
-                    Eligibility::NoRecordedAuthor => {
-                        report.blocked.push(BlockedRow {
-                            entity_type: "memory".into(),
-                            entity_id: id.clone(),
-                            reason: "no_recorded_author".into(),
-                        });
-                        continue;
-                    }
-                    Eligibility::AuthorMismatch { .. } => {
-                        report.blocked.push(BlockedRow {
-                            entity_type: "memory".into(),
-                            entity_id: id.clone(),
-                            reason: "author_mismatch".into(),
-                        });
-                        continue;
-                    }
-                }
+        match recorded_author_verdict(&queued, &id, account) {
+            Eligibility::Eligible => {}
+            Eligibility::NoRecordedAuthor => {
+                report.blocked.push(BlockedRow {
+                    entity_type: "memory".into(),
+                    entity_id: id.clone(),
+                    reason: "no_recorded_author".into(),
+                });
+                continue;
             }
-            None => {}
+            Eligibility::AuthorMismatch { .. } => {
+                report.blocked.push(BlockedRow {
+                    entity_type: "memory".into(),
+                    entity_id: id.clone(),
+                    reason: "author_mismatch".into(),
+                });
+                continue;
+            }
         }
         let _ = project_id;
         items.push(DrainItem {
@@ -675,11 +690,15 @@ pub async fn drain<R: Remote>(
     }
 
     for (id, owner, payload, reference) in personal_rows(store).await? {
-        if owner != account {
+        let recorded = recorded_author_verdict(&queued, &id, account);
+        if owner != account || recorded != Eligibility::Eligible {
             report.blocked.push(BlockedRow {
                 entity_type: "personal_knowledge".into(),
                 entity_id: id,
-                reason: "author_mismatch".into(),
+                reason: match recorded {
+                    Eligibility::NoRecordedAuthor => "no_recorded_author".into(),
+                    _ => "author_mismatch".into(),
+                },
             });
             continue;
         }
@@ -693,12 +712,18 @@ pub async fn drain<R: Remote>(
 
     for (id, proposer, state, payload, reference) in team_rows(store).await? {
         // A proposal is its author's to hand over. An authoritative or retired
-        // entry belongs to the corpus every account on the server shares.
-        if state == "proposed" && proposer != account {
+        // entry belongs to the corpus every account on the server shares — and
+        // for exactly that reason the record grants nobody the right to move
+        // it, so a queued row's recorded author decides instead.
+        let recorded = recorded_author_verdict(&queued, &id, account);
+        if (state == "proposed" && proposer != account) || recorded != Eligibility::Eligible {
             report.blocked.push(BlockedRow {
                 entity_type: "team_knowledge".into(),
                 entity_id: id,
-                reason: "author_mismatch".into(),
+                reason: match recorded {
+                    Eligibility::NoRecordedAuthor => "no_recorded_author".into(),
+                    _ => "author_mismatch".into(),
+                },
             });
             continue;
         }

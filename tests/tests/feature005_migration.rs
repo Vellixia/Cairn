@@ -559,3 +559,75 @@ fn a_record_lost_between_the_check_and_the_demotion_is_not_demoted() {
         "the local copy of a record the server no longer holds was deleted"
     );
 }
+
+/// A queued row authored by another account is held, not delivered — and a
+/// missing author is not a wildcard (§4.2, FR-602, FR-864a).
+///
+/// # The misattribution this forbids
+///
+/// A team record is shared: every account on the server may read it, so nothing
+/// about the record itself refuses anybody. The only thing that says whose row
+/// it is to hand over is the author recorded against the queued write. A
+/// migration that swept a namespace with the author filter removed would
+/// deliver that row under whichever account happened to be signed in — the
+/// exact misattribution `outbox.rs` records as introduced and fixed twice
+/// already, arriving a third time through a migration phase.
+///
+/// "Held, not refused" is the shape: the row stays queued, is reported, and
+/// goes out unchanged the moment its own author resumes their migration.
+///
+/// **Falsified by** treating a missing author as claimable-by-anyone, or a
+/// recorded author as advisory.
+#[test]
+fn a_queued_row_someone_else_authored_is_not_delivered_under_this_account() {
+    let m = migrating!();
+    let ids = &m.ids;
+
+    let run = m.s.json(&["migrate", "--run"])["run"].clone();
+    let blocked = run["drain"]["blocked"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let reason = blocked
+        .iter()
+        .find(|b| b["entity_id"] == ids.team_authored_elsewhere.to_string())
+        .map(|b| b["reason"].as_str().unwrap_or("").to_string())
+        .unwrap_or_else(|| format!("(not reported at all: {blocked:?})"));
+    assert_eq!(
+        reason, "author_mismatch",
+        "a row another account authored was not held. Nothing about an \
+         authoritative team record refuses a reader, so the recorded author is \
+         the only thing that can, and it has to be read rather than widened"
+    );
+
+    // And it did not arrive. Reported *and* not delivered — a report that named
+    // it while the row went out anyway would be worse than silence.
+    assert_eq!(
+        m.server.count(&format!(
+            "SELECT count(*) FROM team_knowledge WHERE id = '{}'",
+            ids.team_authored_elsewhere
+        )),
+        0,
+        "the row another account authored reached the server under this one"
+    );
+
+    // Held, not refused: still queued, ready for its own author.
+    assert_eq!(
+        m.s.query_column(&format!(
+            "SELECT state FROM outbox WHERE entity_id = '{}'",
+            ids.team_authored_elsewhere
+        )),
+        vec!["pending".to_string()],
+        "the row was consumed rather than held. A claimed-then-skipped row \
+         spends a delivery attempt every cycle and eventually looks like a \
+         failure instead of a wait"
+    );
+    assert_eq!(
+        m.s.query_column(&format!(
+            "SELECT CAST(attempts AS TEXT) FROM outbox WHERE entity_id = '{}'",
+            ids.team_authored_elsewhere
+        )),
+        vec!["0".to_string()],
+        "holding a row cost it a delivery attempt"
+    );
+}

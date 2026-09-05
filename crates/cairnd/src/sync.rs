@@ -4477,6 +4477,98 @@ pub fn pattern_eligibility(
 }
 
 #[cfg(test)]
+mod migration_eligibility_tests {
+    use super::*;
+    use cairn_store::migrate::PatternClaim;
+
+    fn claim(owner: Uuid, pattern: Uuid) -> PatternClaim {
+        PatternClaim {
+            local_pattern_id: Uuid::now_v7(),
+            owner_user_id: owner,
+            content_key: "ck".into(),
+            pattern_id: pattern,
+            claimed_at: "2026-08-01T09:00:00Z".into(),
+        }
+    }
+
+    /// A project row's authorization is membership of the project, which the
+    /// server checks on arrival, so it carries no author and needs none.
+    #[test]
+    fn a_project_row_is_eligible_without_an_author() {
+        let account = Uuid::now_v7();
+        assert_eq!(
+            legacy_row_eligibility("project:0191", None, account),
+            Eligibility::Eligible
+        );
+    }
+
+    /// **A missing author is not a wildcard.**
+    ///
+    /// The filter once read `authored_by_user_id IS NULL OR = ?`, on the
+    /// reasonable-looking ground that a row predating the column should keep
+    /// working. "No recorded author" then meant "deliverable under whichever
+    /// account is logged in", which is the misattribution the filter exists to
+    /// prevent, spelled as backward compatibility.
+    #[test]
+    fn a_global_row_with_no_author_is_nobodys_to_drain() {
+        let account = Uuid::now_v7();
+        for namespace in ["personal:0191:abc", "team:0191"] {
+            assert_eq!(
+                legacy_row_eligibility(namespace, None, account),
+                Eligibility::NoRecordedAuthor,
+                "{namespace} treated a missing author as permission"
+            );
+        }
+    }
+
+    /// Held, not refused: the row is simply not this account's to send.
+    #[test]
+    fn a_global_row_someone_else_authored_is_held() {
+        let account = Uuid::now_v7();
+        let other = Uuid::now_v7();
+        assert_eq!(
+            legacy_row_eligibility("team:0191", Some(other), account),
+            Eligibility::AuthorMismatch { recorded: other }
+        );
+        assert_eq!(
+            legacy_row_eligibility("team:0191", Some(account), account),
+            Eligibility::Eligible
+        );
+    }
+
+    /// The active account can never substitute for a missing claim.
+    #[test]
+    fn an_unclaimed_pattern_belongs_to_no_account() {
+        assert_eq!(
+            pattern_eligibility(None, Uuid::now_v7()),
+            PatternEligibility::OwnerUnclaimed
+        );
+    }
+
+    /// Identity comes from the **persisted** claim, so a credential change
+    /// cannot produce a second owner or a second canonical pattern.
+    #[test]
+    fn a_claimed_pattern_keeps_the_identity_its_claim_recorded() {
+        let owner = Uuid::now_v7();
+        let pattern = Uuid::now_v7();
+        let c = claim(owner, pattern);
+        assert_eq!(
+            pattern_eligibility(Some(&c), owner),
+            PatternEligibility::Eligible {
+                pattern_id: pattern,
+                content_key: "ck".into()
+            }
+        );
+        let someone_else = Uuid::now_v7();
+        assert_eq!(
+            pattern_eligibility(Some(&c), someone_else),
+            PatternEligibility::AuthorMismatch { owner },
+            "a different account signing in re-keyed a claimed pattern"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::state::ServerCredentials;

@@ -669,6 +669,15 @@ pub struct LegacyIds {
     /// Un-normalized keys, so §12.4's re-keying has something to correct.
     pub personal_unnormalized: Uuid,
     pub team_authoritative: Uuid,
+    /// Authoritative — so every account may *read* it — but its queued outbox
+    /// row records a different author.
+    ///
+    /// The case FR-602 exists for: a row written while signed in as one
+    /// account and still queued when another signs in. Nothing about the
+    /// record itself refuses it, so only the recorded author can, and a
+    /// migration that widened its author filter would deliver it under
+    /// whoever happened to be migrating.
+    pub team_authored_elsewhere: Uuid,
     /// Proposed by somebody else. Possession must answer `indeterminate` for
     /// this one rather than `missing` (contract §12.5).
     pub team_proposed: Uuid,
@@ -782,6 +791,7 @@ async fn seed_legacy_rows(
         personal_queued: Uuid::now_v7(),
         personal_unnormalized: Uuid::now_v7(),
         team_authoritative: Uuid::now_v7(),
+        team_authored_elsewhere: Uuid::now_v7(),
         team_proposed: Uuid::now_v7(),
         pattern_claimable: Uuid::now_v7(),
         pattern_unclaimed: Uuid::now_v7(),
@@ -881,10 +891,13 @@ async fn seed_legacy_rows(
            ('{}', 'convention', 'the team signs every release image',
             'release.signing', 'signed', 'authoritative', '{author}', '{author}',
             '{now}', '{writer}', 3, '{now}'),
+           ('{}', 'convention', 'somebody else queued this one',
+            'release.tagging', 'annotated', 'authoritative', '{other_author}',
+            '{other_author}', '{now}', '{writer}', 5, '{now}'),
            ('{}', 'decision', 'a proposal only its author can see yet',
             'Proposal.Draft', 'Pending', 'proposed', '{other_author}', NULL, NULL,
             '{writer}', 4, '{now}')",
-        ids.team_authoritative, ids.team_proposed
+        ids.team_authoritative, ids.team_authored_elsewhere, ids.team_proposed
     ))
     .await;
 
@@ -935,7 +948,7 @@ async fn seed_legacy_rows(
     // author, project rows carrying none (the v7 CHECK requires exactly that
     // split), and one row already delivered so a re-drain has something it must
     // not send twice.
-    let queued: [(&str, String, String, Option<Uuid>); 4] = [
+    let queued: [(&str, String, String, Option<Uuid>); 5] = [
         (
             "personal_knowledge",
             ids.personal_queued.to_string(),
@@ -947,6 +960,15 @@ async fn seed_legacy_rows(
             ids.team_authoritative.to_string(),
             format!("team:{instance}"),
             Some(author),
+        ),
+        (
+            // Authored by another account, and still queued. The record itself
+            // is readable by anyone; only the recorded author says whose it is
+            // to hand over.
+            "team_knowledge",
+            ids.team_authored_elsewhere.to_string(),
+            format!("team:{instance}"),
+            Some(other_author),
         ),
         (
             "memory",
