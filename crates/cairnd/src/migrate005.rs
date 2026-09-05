@@ -467,7 +467,7 @@ pub async fn normalize_keys(store: &Store) -> Result<KeyReport> {
         .map_err(StoreError::Sqlx)?;
 
         // scope + normalized topic → the rows already seen there
-        let mut seen: BTreeMap<(String, String), Vec<(String, Option<String>)>> = BTreeMap::new();
+        let mut seen: SeenKeys = BTreeMap::new();
 
         for (id, topic, value, scope) in rows {
             let Some(topic) = topic else { continue };
@@ -871,6 +871,52 @@ async fn queued_rows(store: &Store) -> Result<BTreeMap<String, (String, Option<U
 
 type MemoryRow = (String, String, Value, RecordRef);
 
+/// One `memories` row as the drain selects it: id, the server's project id,
+/// type, scope, scope key, content, state, both keys, and the origin session.
+type MemorySelect = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+);
+
+/// One `personal_knowledge` row: id, owner, type, content, both keys, writer
+/// and sequence.
+type PersonalSelect = (
+    String,
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    i64,
+);
+
+/// One `team_knowledge` row: id, type, content, both keys, state, proposer,
+/// writer and sequence.
+type TeamSelect = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    String,
+    String,
+    String,
+    i64,
+);
+
+/// The rows already seen under one scope and normalized topic key, as
+/// `(id, normalized value key)` — what a collision is detected against.
+type SeenKeys = BTreeMap<(String, String), Vec<(String, Option<String>)>>;
+
 /// Project memories in linked projects, with the **server's** project id.
 ///
 /// The server needs the id it knows the project by, and an unlinked project has
@@ -879,18 +925,7 @@ type MemoryRow = (String, String, Value, RecordRef);
 /// it, which is the honest disposition for a record with nothing canonical to
 /// defer to (§6, first row).
 async fn project_memories(store: &Store) -> Result<Vec<MemoryRow>> {
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-    )> = sqlx::query_as(
+    let rows: Vec<MemorySelect> = sqlx::query_as(
         "SELECT m.id, p.server_project_id, m.type, m.scope, m.scope_key, m.content,
                     m.state, m.topic_key, m.value_key, m.origin_session_id
                FROM memories m
@@ -984,16 +1019,7 @@ async fn relations(store: &Store) -> Result<Vec<(String, Value, RecordRef)>> {
 }
 
 async fn personal_rows(store: &Store) -> Result<Vec<(String, Uuid, Value, RecordRef)>> {
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        i64,
-    )> = sqlx::query_as(
+    let rows: Vec<PersonalSelect> = sqlx::query_as(
         "SELECT id, owner_user_id, knowledge_type, content, topic_key, value_key,
                     writer_id, writer_seq
                FROM personal_knowledge WHERE forgotten_at IS NULL ORDER BY created_at, id",
@@ -1025,17 +1051,7 @@ async fn personal_rows(store: &Store) -> Result<Vec<(String, Uuid, Value, Record
 type TeamRow = (String, Uuid, String, Value, RecordRef);
 
 async fn team_rows(store: &Store) -> Result<Vec<TeamRow>> {
-    let rows: Vec<(
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-        String,
-        String,
-        String,
-        i64,
-    )> = sqlx::query_as(
+    let rows: Vec<TeamSelect> = sqlx::query_as(
         "SELECT id, knowledge_type, content, topic_key, value_key, state,
                     proposed_by_user_id, writer_id, writer_seq
                FROM team_knowledge ORDER BY created_at, id",
@@ -1298,10 +1314,12 @@ pub async fn run<R: Remote>(
     account: Uuid,
     writer_id: &str,
 ) -> Result<RunReport> {
-    let mut report = RunReport::default();
-    report.resumed_at = mig::first_unfinished(store)
-        .await?
-        .map(|p| p.as_str().to_string());
+    let mut report = RunReport {
+        resumed_at: mig::first_unfinished(store)
+            .await?
+            .map(|p| p.as_str().to_string()),
+        ..RunReport::default()
+    };
 
     // Registration is what opens the migration-scoped drain route, and it is
     // deliberately not gated by the server's authority mode: a store upgrading
@@ -1501,10 +1519,10 @@ pub async fn retry_retained<R: Remote>(
 
     let refs: Vec<RecordRef> = retained
         .iter()
-        .filter_map(|r| match r.reference {
-            RetainedRef::Knowledge { domain, id } => Some(RecordRef::Knowledge { domain, id }),
-            RetainedRef::Pattern(id) => Some(RecordRef::Pattern(id)),
-            RetainedRef::Relation(rel) => Some(RecordRef::Relation(rel)),
+        .map(|r| match r.reference {
+            RetainedRef::Knowledge { domain, id } => RecordRef::Knowledge { domain, id },
+            RetainedRef::Pattern(id) => RecordRef::Pattern(id),
+            RetainedRef::Relation(rel) => RecordRef::Relation(rel),
         })
         .collect();
     for chunk in refs.chunks(POSSESSION_BATCH) {
