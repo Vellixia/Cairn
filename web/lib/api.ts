@@ -655,6 +655,14 @@ export interface TraceDetail {
 }
 
 export interface HealthRow {
+  /**
+   * Who reported it. Both halves of the attribution are needed, because
+   * `writer_id` is a label the reporting client chooses and two accounts can
+   * pick the same one — a shared CI name is the obvious case. Without this a
+   * reader sees two contradictory cells for one machine and no way to tell
+   * whose observation is whose (FR-857).
+   */
+  account_id: string;
   /** The machine. A capability verified on one machine is not verified everywhere. */
   writer_id: string;
   agent: string;

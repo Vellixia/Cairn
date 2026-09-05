@@ -1381,6 +1381,12 @@ fn the_report_row_binds_to_the_referenced_record_not_the_reporters_context() {
 // T136 — the hostile route choice (SC-765)
 // ---------------------------------------------------------------------------
 
+/// One way of dressing a payload to reach for an authority, and its label.
+///
+/// Named because the tuple is otherwise a type nobody can read at a glance, and
+/// the label is what a failure quotes to say which attempt got through.
+type Dressing = (&'static str, fn(&mut Value));
+
 /// A caller who wants stronger provenance cannot get it by picking the
 /// stronger-sounding URL, or by dressing the payload to match it.
 ///
@@ -1416,7 +1422,7 @@ fn no_combination_of_route_payload_and_kind_reaches_cairn() {
         ("team", knowledge_ref("team", refs.team)),
         ("pattern", pattern_ref(refs.pattern)),
     ];
-    let dressings: [(&str, fn(&mut Value)); 6] = [
+    let dressings: [Dressing; 6] = [
         ("plain", |_| {}),
         ("authority=cairn", |b| b["authority"] = json!("cairn")),
         ("authority=remote_cairn", |b| {

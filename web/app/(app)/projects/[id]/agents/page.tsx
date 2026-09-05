@@ -105,12 +105,27 @@ export default function AgentsPage({
   // and split back out: an agent name is free text and could contain whatever
   // separator a key format chose, and a group whose heading was split in the
   // wrong place would attribute a machine's rows to the wrong machine.
-  const groups = new Map<string, { agent: string; writer: string; rows: HealthRow[] }>();
+  //
+  // Grouped by account as well as machine. `writer_id` is a label the reporting
+  // client chooses, so two accounts can pick the same one — a shared CI name is
+  // the obvious case — and grouping on the machine alone would put two people's
+  // contradictory observations in one card with no way to tell them apart
+  // (FR-857).
+  const groups = new Map<
+    string,
+    { agent: string; writer: string; account: string; rows: HealthRow[] }
+  >();
   for (const row of rows) {
-    const key = JSON.stringify([row.agent, row.writer_id]);
+    const key = JSON.stringify([row.agent, row.writer_id, row.account_id]);
     const existing = groups.get(key);
     if (existing) existing.rows.push(row);
-    else groups.set(key, { agent: row.agent, writer: row.writer_id, rows: [row] });
+    else
+      groups.set(key, {
+        agent: row.agent,
+        writer: row.writer_id,
+        account: row.account_id,
+        rows: [row],
+      });
   }
 
   return (
@@ -133,7 +148,7 @@ export default function AgentsPage({
       <div className="space-y-6" data-testid="agent-groups">
         {[...groups.entries()].map(([key, group]) => {
           return (
-            <Card key={key} data-testid="agent-group" data-agent={group.agent}>
+            <Card key={key} data-testid="agent-group" data-agent={group.agent} data-account={group.account}>
               <CardHeader>
                 <CardTitle className="text-sm font-medium">
                   {group.agent}
