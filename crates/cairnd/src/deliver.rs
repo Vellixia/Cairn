@@ -25,10 +25,19 @@
 //! # The outage cache (§12.3, FR-789, FR-790a, SC-718)
 //!
 //! Retrieval moved server-side, so an outage means no fresh *durable*
-//! knowledge — Level 0 is always current, because it never left the local
-//! store. The cache below holds the server's last answer per session, bound
-//! to the account it was assembled for, and is consulted only when the server
-//! cannot be reached at all this call.
+//! knowledge. The cache below holds the server's last answer per session,
+//! bound to the account it was assembled for, and is consulted only when the
+//! server cannot be reached at all this call.
+//!
+//! **Level 0 is not always current, and saying so was the FR-790a defect.**
+//! For a project whose briefing is server-side, a call with no fresh response
+//! and no cache entry *for this account* serves nothing derived from the local
+//! store — not Level 0, not the previous handoff, not the bound task's state.
+//! On a cache miss the server has not established what this caller may see, so
+//! there is nothing to check them against, and the local store is one machine's
+//! store shared by every account that signs in on it. An **unlinked** project
+//! is the other case and keeps its local assembly: there is no server authority
+//! to defer to, so its own store is the only authority there is.
 
 use crate::state::{Daemon, Resolved};
 use cairn_core::wire::ContextDepth;
@@ -96,9 +105,10 @@ struct CachedResponse {
 ///
 /// A cache, not durable state (Principle II): in-memory, lost on restart, and
 /// rebuilt by the next successful retrieval. It exists solely so a server
-/// outage degrades the durable half of a briefing rather than blanking it —
-/// Level 0 is unaffected either way, because it is always assembled fresh
-/// from the local store.
+/// outage degrades the durable half of a briefing rather than blanking it.
+/// A *hit* is also the evidence that the server authorized this account for
+/// this session, which is exactly what a miss does not have — see the module
+/// header for what a miss may therefore serve.
 #[derive(Default)]
 pub struct OutageCache {
     /// Most-recently-used session id first.

@@ -13,7 +13,7 @@ of the run.
 
 ## Corrections made to `quickstart.md`
 
-The walkthrough named eight commands the shipped CLI does not have. Each was
+The walkthrough named 10 commands the shipped CLI does not have. Each was
 replaced with the surface that exists, and the walkthrough now matches
 `cairn --help`.
 

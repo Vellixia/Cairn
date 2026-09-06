@@ -393,11 +393,17 @@ fn at_least_fourteen_of_twenty_sessions_produce_the_durable_record_they_declared
                          AND e.kind IN ('decision_signal','user_instruction_signal'))",
             s.durable_type, s.topic_key, s.value_key
         ));
-        // Acted on, and *after* the signal. Sequence, not mere presence.
+        // Acted on, and *after* the signal. Sequence, not mere presence — and
+        // an **action**, not merely a later event.
+        //
+        // "any event after the signal" is the weaker check and it passes when
+        // the action is moved *before* the signal, because a session close is
+        // also an event after the signal. The corpus's action is a command, so
+        // the kinds a command produces are what this counts.
         let acted_after = server.count(&format!(
             "SELECT count(*) FROM safe_events act
               WHERE act.session_id = '{session_id}'
-                AND act.kind NOT IN ('decision_signal','user_instruction_signal')
+                AND act.kind IN ('command_executed','test_executed','test_result')
                 AND act.session_seq > (
                       SELECT MIN(sig.session_seq) FROM safe_events sig
                        WHERE sig.session_id = act.session_id
@@ -423,6 +429,20 @@ fn at_least_fourteen_of_twenty_sessions_produce_the_durable_record_they_declared
         "SC-701a: {}/{} durable matches — {decisions} decisions, {conventions} conventions",
         hits.len(),
         QUALIFYING_SESSIONS
+    );
+    // **Both mechanisms have to have fired.** SC-701a already says a run whose
+    // records are all structural fails it even if SC-701 passes; the same
+    // reasoning applies one level down. The corpus is fourteen decisions and
+    // six standing instructions precisely so that R7 and R8 are both exercised,
+    // and fourteen decisions alone land exactly on the floor — so breaking R8
+    // entirely would otherwise pass this test at 14/20 while contributing
+    // nothing. A population built to test two rules has not tested them if one
+    // of them produced nothing.
+    assert!(
+        decisions > 0 && conventions > 0,
+        "SC-701a: {decisions} decisions and {conventions} conventions. Both R7 \
+         and R8 have to have produced something, or half the corpus is proving \
+         nothing"
     );
     assert!(
         hits.len() >= MINIMUM_DURABLE_MATCHES,

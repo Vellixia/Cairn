@@ -10,7 +10,13 @@ than one being assumed from the other.
 
 **Created**: 2026-08-29
 
-**Status**: Draft
+**Status**: Implemented — awaiting independent review
+
+Every task in `tasks.md` is closed and every acceptance gate named in the Success Criteria
+has a passing test, including the repaired SC-701a proof on durable knowledge. What is not
+done is the part that is deliberately not automatable: SC-701's two `by_review` accuracy
+criteria are judged by an independent reviewer, and the state above says so rather than
+calling the feature finished.
 
 **Input**: Cairn becomes a server-authoritative autonomous memory system for AI coding
 agents. It captures useful work richly and vendor-natively, transforms it through a local
