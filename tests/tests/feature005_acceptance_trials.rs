@@ -19,7 +19,7 @@
 //!
 //! # What this test can and cannot assert
 //!
-//! Exactly as in the US1 story: the five criteria the pre-registered rubric
+//! Exactly as in the US1 story: the five criteria the rubric
 //! (`tests/feature005/us1-accuracy-rubric.json`) marks `mechanically` are
 //! evaluated and asserted here, per record, across all ten trials. The two
 //! it marks `by_review` — whether the claim is actually true of the project,
@@ -355,14 +355,14 @@ fn drive(device: &Device, server: &Server, session: Session) -> Uuid {
     id.parse().expect("uuid")
 }
 
-/// Every criterion the pre-registered rubric names, loaded once so this file
+/// Every criterion the rubric names, loaded once so this file
 /// fails loudly if the rubric it depends on ever drifts out from under it.
 fn rubric() -> Value {
     let path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/feature005/us1-accuracy-rubric.json"
     );
-    let text = std::fs::read_to_string(path).expect("the rubric is pre-registered");
+    let text = std::fs::read_to_string(path).expect("the rubric was fixed before this run");
     serde_json::from_str(&text).expect("the rubric parses")
 }
 
@@ -653,7 +653,7 @@ fn report(r: &AgentReport) {
 }
 
 /// This file's mechanical checks are not free to drift from what the
-/// pre-registered rubric actually names — SC-701's rubric-completion half
+/// rubric actually names — SC-701's rubric-completion half
 /// means the set evaluated here must equal the set the rubric marks
 /// `mechanically`, not a superset or subset a later edit quietly grew or
 /// shrank.
@@ -680,7 +680,7 @@ fn this_files_mechanical_criteria_match_the_pre_registered_rubric() {
 
     assert_eq!(
         mechanical, checked,
-        "this file's mechanical criteria have drifted from the pre-registered rubric"
+        "this file's mechanical criteria have drifted from the rubric"
     );
 
     let by_review: Vec<&str> = rubric["criteria"]

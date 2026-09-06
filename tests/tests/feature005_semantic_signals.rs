@@ -1,6 +1,10 @@
-//! Vocabulary-justified semantic signals, as a contract (T041,
-//! `contracts/extraction.md` §13.3, §13.7, §13.10; `spec.md` SC-701a,
-//! SC-701b).
+//! Vocabulary-justified semantic signals, as a capture-layer contract (T041,
+//! `contracts/extraction.md` §13.3, §13.7, §13.10).
+//!
+//! SC-701a and SC-701b are **not** measured here — they are measured on durable
+//! knowledge in `feature005_semantic_durable.rs`, against the frozen holdout
+//! corpus. This file is the layer underneath: what the vendor field map does
+//! with transient text, and what it refuses.
 //!
 //! Every scenario here is driven through the **real** per-vendor field map
 //! and routing table — `cairn_integrate::capture` — exactly as a hook
@@ -38,7 +42,7 @@ use serde_json::json;
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
-// The pre-registered scenario set
+// The capture-layer scenario set
 // ---------------------------------------------------------------------------
 
 /// What a scenario declares it expects: a produced signal with exact subject
@@ -413,7 +417,7 @@ fn the_pre_registered_scenario_set_has_at_least_twenty_sessions_drawn_only_from_
     // corpus, not this one.)
     assert!(
         SCENARIOS.len() >= 20,
-        "the pre-registered set must have at least twenty sessions"
+        "the capture-layer set must have at least twenty cases"
     );
     for s in SCENARIOS {
         assert!(
@@ -664,7 +668,7 @@ fn no_emitted_token_contains_a_segment_that_is_not_independently_in_the_sessions
 #[test]
 fn a_scenario_whose_text_names_nothing_the_session_established_declines_without_emitting_a_token() {
     // The vocabulary-only guarantee, isolated: every scenario declared
-    // `InsufficientVocabulary` in the pre-registered set must decline, and
+    // `InsufficientVocabulary` in the table above must decline, and
     // must never emit a token built from prose alone.
     let cases: Vec<&Scenario> = SCENARIOS
         .iter()
