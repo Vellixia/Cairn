@@ -231,16 +231,16 @@ pub async fn deliver(
     // unreachable server — which is a worse briefing, never a wrong one.
     let _ = tokio::time::timeout(deadline / 2, crate::sync::push_pending(d, resolved)).await;
 
+    // A timeout is silence, exactly as a transport failure is.
     let remote = tokio::time::timeout(
         deadline,
         retrieve_remote(d, session_id, trigger, open_trigger, budget_tokens),
     )
     .await
-    .ok()
-    .flatten();
+    .unwrap_or(Answer::Unreachable);
 
     let (response, served_from_cache) = match remote {
-        Some(response) => {
+        Answer::Answered(response) => {
             if let Some(account_id) = account_id {
                 d.outage_cache
                     .lock()
@@ -249,7 +249,10 @@ pub async fn deliver(
             }
             (Some(response), false)
         }
-        None => {
+        // Refused, by something that was there to refuse. No cache, because a
+        // hit would claim an authorization this very call was denied.
+        Answer::Refused => (None, false),
+        Answer::Unreachable => {
             let cached = match account_id {
                 Some(account_id) => d.outage_cache.lock().await.get(session_id, account_id),
                 None => None,
@@ -407,11 +410,14 @@ async fn retrieve_remote(
     trigger: Trigger,
     open_trigger: Option<&str>,
     budget_tokens: usize,
-) -> Option<Value> {
+) -> Answer {
     let creds = d.server.read().await.clone();
-    let base = creds.url?;
-    let token = creds.token?;
-    let http = reqwest::Client::builder().build().ok()?;
+    let (Some(base), Some(token)) = (creds.url, creds.token) else {
+        return Answer::Unreachable;
+    };
+    let Ok(http) = reqwest::Client::builder().build() else {
+        return Answer::Unreachable;
+    };
 
     let mut body = json!({
         "session_id": session_id,
@@ -429,17 +435,40 @@ async fn retrieve_remote(
     }
 
     let url = format!("{}/api/retrieve", base.trim_end_matches('/'));
-    let response = http
-        .post(url)
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .await
-        .ok()?;
+    let Ok(response) = http.post(url).bearer_auth(token).json(&body).send().await else {
+        // Nothing answered. This is the outage the cache exists for.
+        return Answer::Unreachable;
+    };
     if !response.status().is_success() {
-        return None;
+        // **Something answered, and it refused.**
+        //
+        // This used to be folded into "unreachable", and the fold was a
+        // cross-deployment leak: replace the server at the same address and the
+        // old token authenticates against nothing there, so every retrieval
+        // came back `401` — which looked exactly like silence, so the daemon
+        // served the *predecessor's* cached briefing and labelled it cached, as
+        // though the new deployment had authorized it. A cache hit is supposed
+        // to be evidence that the server authorized this account for this
+        // session; a live refusal is evidence of the opposite, and it cannot be
+        // allowed to produce one.
+        return Answer::Refused;
     }
-    response.json::<Value>().await.ok()
+    match response.json::<Value>().await {
+        Ok(value) => Answer::Answered(value),
+        // A 2xx whose body will not parse is a server that answered
+        // incomprehensibly, not one that declined. Treated as silence.
+        Err(_) => Answer::Unreachable,
+    }
+}
+
+/// What `/api/retrieve` did, distinguished because the cache turns on it.
+enum Answer {
+    Answered(Value),
+    /// Reachable, and it declined — a wrong deployment, a revoked token, a
+    /// session it does not hold. The outage cache must not answer for it.
+    Refused,
+    /// Nothing answered at all.
+    Unreachable,
 }
 
 // ---------------------------------------------------------------------------
