@@ -748,3 +748,77 @@ fn signal_overlap_is_present_only_where_a_signal_comparison_actually_ran() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// 14 — the local assembly spends no budget on patterns it will not render
+// ---------------------------------------------------------------------------
+
+/// A linked project's *local* assembly holds no patterns at all, so it can
+/// never report the `patterns` section omitted for budget — there is nothing
+/// there to omit. The canonical section is merged in afterwards, against the
+/// budget the server already spent and reported.
+///
+/// This is the half of budget truthfulness test 7 cannot see. Test 7 proves
+/// the server's own selected-item cost was computed from the content that
+/// was rendered; this proves the daemon does not *also* charge its local
+/// budget for a pattern nobody will ever read. Running `level1_patterns` for
+/// a linked project is invisible in the rendered text — the merge overwrites
+/// whatever it produced — but it is not free: it spends the local budget on
+/// a candidate that is then thrown away, and the briefing then costs more
+/// than it says it does (FR-029).
+///
+/// The bait is deliberately far too large to fit the local budget below, so
+/// a local matcher that ran at all must report `patterns` omitted.
+///
+/// **Falsified by** `omitted_sections` naming `patterns` for a linked
+/// briefing, which can only mean the local matcher offered one.
+#[test]
+fn a_linked_briefings_local_assembly_spends_no_budget_on_local_patterns() {
+    let pg = pg!();
+    let sandbox = linked_device(&pg, "no-local-pattern-spend");
+    let key = format!("localspend-{}", Uuid::now_v7());
+    let session = established_session(&pg, &sandbox, &key);
+
+    let marker = format!("spend-x-{}", Uuid::now_v7().simple());
+    seed_pattern(&pg, &marker);
+
+    let local_project = local_project_id(&sandbox);
+    let local_session = session.to_string();
+    let fat = "z".repeat(8000);
+    seed_local_pattern(
+        &sandbox,
+        Uuid::now_v7(),
+        "LOCAL-FAT-TITLE",
+        &fat,
+        &["budgeteater5501", "spendtrap5501"],
+    );
+    seed_local_failure_signals(
+        &sandbox,
+        &local_project,
+        &local_session,
+        &[
+            "a budgeteater5501 was recorded again this morning",
+            "a spendtrap5501 followed immediately after",
+        ],
+    );
+
+    let payload = sandbox.json(&["context", "--session", &local_session, "--budget", "150"]);
+    let omitted: Vec<String> = payload["omitted_sections"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !omitted.contains(&"patterns".to_string()),
+        "a linked briefing reported the `patterns` section omitted for \
+         budget, which it can only do if the local matcher offered one and \
+         was charged for it: {payload}"
+    );
+    assert!(
+        !payload.to_string().contains("LOCAL-FAT-TITLE"),
+        "the local bait reached a linked briefing: {payload}"
+    );
+}

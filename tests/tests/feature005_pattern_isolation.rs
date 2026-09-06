@@ -145,12 +145,50 @@ fn seed_local_pattern(sandbox: &Sandbox, marker: &str) {
                                         approach, constraints, trust, origin_ref,
                                         sanitization_report, created_at, updated_at)
          VALUES ('{}', '{marker}', '{marker}-problem',
-                 '[\"{marker}-signal\",\"second\"]', 'digest-{marker}', '[]',
+                 '[\"{marker}sigone\",\"{marker}sigtwo\"]', 'digest-{marker}', '[]',
                  '{marker}-root-cause', 'rc-{marker}', '{marker}-approach', '[]',
                  'sanitized', 'salted-{marker}', '{{}}', '2026-09-01T09:00:00Z',
                  '2026-09-01T09:00:00Z')",
         Uuid::now_v7()
     ));
+}
+
+/// Give the bait above something to be matched *against*.
+///
+/// `briefing::level1_patterns` returns early when `project_signals` is empty,
+/// and `project_signals` is built from this project's recorded errors and
+/// `failure` memories. A bait pattern seeded without them can never be
+/// selected by the local matcher, which would make every "the bait did not
+/// leak" assertion below true for the wrong reason — the local matcher was
+/// never in a position to offer it. These memories carry the bait's own
+/// signal tokens, so the matcher would offer it the moment it ran.
+fn seed_matching_local_signals(sandbox: &Sandbox, marker: &str) {
+    let project_id = sandbox
+        .query_column("SELECT id FROM projects WHERE deleted_at IS NULL ORDER BY created_at")
+        .first()
+        .cloned()
+        .expect("the sandbox's own project row");
+    let session_id = sandbox
+        .query_column("SELECT id FROM sessions ORDER BY started_at DESC LIMIT 1")
+        .first()
+        .cloned()
+        .expect("a local session to attribute the failure memories to");
+    for (i, text) in [
+        format!("a {marker}sigone was recorded again this morning"),
+        format!("a {marker}sigtwo followed immediately after"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        sandbox.exec_sql(&format!(
+            "INSERT INTO memories (id, project_id, type, scope, scope_key, content, state,
+                                   origin_session_id, created_at, updated_at)
+             VALUES ('{}', '{project_id}', 'failure', 'project', '{project_id}', '{text}',
+                     'active', '{session_id}', '2026-09-01T09:0{i}:00Z',
+                     '2026-09-01T09:0{i}:00Z')",
+            Uuid::now_v7()
+        ));
+    }
 }
 
 /// Open (or reopen) a session through the real hook entry point and return
@@ -296,6 +334,9 @@ fn an_outage_cache_hit_reuses_only_the_accounts_own_authorized_pattern() {
 
     let key = format!("cache-{}", Uuid::now_v7());
     let warm = open_session_text(&d, &key);
+    // Only now — the bait's matching signals need a local session to be
+    // attributed to, and this is the first one that exists.
+    seed_matching_local_signals(&d.sandbox, &bait);
     assert!(
         warm.contains(&title) && warm.contains(&approach),
         "the first, reachable-server answer never carried the canonical \
@@ -359,6 +400,10 @@ fn an_outage_cache_miss_carries_no_pattern_at_all() {
 
     let key = format!("miss-{}", Uuid::now_v7());
     let warm = open_session_text(&d, &key);
+    // See `seed_matching_local_signals`: without these the local matcher
+    // could never have offered the bait, and its absence below would prove
+    // nothing about the fallback FR-790a forbids.
+    seed_matching_local_signals(&d.sandbox, &bait);
     assert!(
         warm.contains(&title),
         "the authorized answer never carried the canonical pattern, so the \

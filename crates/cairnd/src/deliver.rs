@@ -14,13 +14,24 @@
 //! `reserved_for_level0` — and never recomputes that fraction itself: a
 //! second place computing it is a second place for it to drift.
 //!
-//! `patterns` is the one durable section this module does **not** take from
-//! the server. The server's `patterns` candidates are this account's own
-//! patterns, most-recent-first (`cairn-server/src/retrieve.rs::gather`); the
-//! daemon's own `crate::briefing::level1_patterns` matches them against
-//! *this project's* recorded signals instead — a materially richer selection
-//! the server's bare content string cannot reconstruct. Local patterns are
-//! kept as they were before Feature 005 US2.
+//! `patterns` is taken from the server like every other durable section, and
+//! for a stricter reason than the others. The server selects a canonical
+//! `shared_patterns` row, budgets it, and traces its `pattern_id` as
+//! *selected*; on the transmission report it copies that same id into
+//! `delivered_context`. So the id the server will record as delivered is
+//! fixed before this module runs, and the only way that record can be true is
+//! for the content rendered here to be that exact canonical pattern. The
+//! server therefore sends the pattern's own fields alongside its id
+//! (`cairn-server/src/retrieve.rs::SectionPattern`) and the merge below
+//! renders those fields under that id.
+//!
+//! The daemon's own `crate::briefing::level1_patterns` reads local
+//! `reusable_patterns` — this machine's promotions, matched against this
+//! project's recorded signals. That is a different universe of rows with
+//! different ids, so substituting one of them for a canonical selection would
+//! make the server's `delivered_context` a record of something the agent never
+//! saw. `briefing::build` runs it only under `Durable::Local`, for an unlinked
+//! project that has no server selection to be faithful to.
 //!
 //! # The outage cache (§12.3, FR-789, FR-790a, SC-718)
 //!
@@ -579,8 +590,9 @@ fn section_contents(sections: &Value, name: &str) -> Vec<String> {
 /// server-side against `delivered_context`, which the daemon's own read of
 /// the same tables never sees (`contracts/retrieval-delivery.md` §4) — so the
 /// server's answer, not the daemon's own read, is what a caller must be
-/// shown. `patterns` is deliberately left as `crate::briefing::build` left
-/// it; see the module docs.
+/// shown. `patterns` is rendered from the canonical fields the server sent
+/// with its selection, under the very id the server traced; see the module
+/// docs for why that one is not merely a preference.
 fn merge_durable_sections(payload: &mut Value, sections: &Value) {
     let Some(briefing) = payload.get_mut("briefing").and_then(|b| b.as_object_mut()) else {
         return;
