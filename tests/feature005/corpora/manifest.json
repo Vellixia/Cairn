@@ -212,13 +212,14 @@
         "author_mismatch",
         "capability_blocked"
       ],
-      "location": "tests/src/feature005.rs::LegacyV7 (a real v7 store, built by the shipped migrations and populated), driven by tests/tests/feature005_migration.rs, feature005_pattern_migration.rs and feature005_migration_restart.rs",
+      "location": "tests/src/feature005.rs::LegacyV7",
       "status": "present",
       "notes": [
         "Completed by T138-T155. The fixture runs the shipped migrations to v7,",
         "populates the store, and swaps it under a stopped daemon so the current",
         "build migrates it in place -- a real prior schema rather than a hand-written",
-        "approximation of one."
+        "approximation of one. Driven by tests/tests/feature005_migration.rs,",
+        "feature005_pattern_migration.rs and feature005_migration_restart.rs."
       ]
     },
     "sc701a_holdout": {
