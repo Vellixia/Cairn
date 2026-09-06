@@ -569,6 +569,21 @@ privacy boundary has already approved, and is specified under Consolidation.
   before any write, exactly as they are today.
 - **FR-753**: Absolute local filesystem paths, machine identifiers and machine configuration
   MUST NOT be persisted centrally.
+
+  **"Machine identifier" means a value that identifies the actual machine.** The ambiguity is
+  worth closing, because one machine-scoped value *is* persisted centrally and must not be read
+  as a violation. Forbidden: a hostname, a hardware serial, an OS machine or installation id, a
+  MAC address, a user account name, a local filesystem path, and any other value that would let
+  a reader of the server's tables identify the device or the person at it.
+  Permitted: Cairn's own `writer_id` — a UUID minted once per local store, from nothing but a
+  random generator, carrying no host, hardware, OS, path or account material at all. It is a
+  pseudonymous attribution token, and attribution is what health and evidence need: "these two
+  rows came from the same writer" and "this writer's stream has a gap" are answerable from it,
+  while "which machine is this" is not. It is never compared across writers to decide anything
+  (§9 of `contracts/global-memory.md`), so it cannot become a ranking of devices either.
+
+  This records what the implementation already does — `seed_writer_identity` inserts
+  `Uuid::now_v7()` and reads no environment — rather than describing an intended change.
 - **FR-754**: Arbitrary vendor JSON MUST NOT be persisted centrally.
 - **FR-755**: The privacy boundary MUST be deterministic and fail closed wherever a
   deterministic check is applicable. Given the same input it MUST produce the same decision.

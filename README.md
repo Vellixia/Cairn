@@ -298,9 +298,9 @@ store is not touched — it is out of date, not wrong.
 
 | Agent | Capture | Context delivery |
 |---|---|---|
-| Claude Code | hooks, automatic | session start and prompt |
-| Codex CLI | hooks, automatic | session start |
-| OpenCode | **capture only** | none |
+| Claude Code | hooks, automatic | session start **and** prompt time |
+| Codex CLI | hooks, automatic | session start **and** prompt time |
+| OpenCode | **capture only** | none — declined by Cairn |
 
 OpenCode's context hooks exist but are beta, and Cairn declines to rest an
 automatic guarantee on them. That is a Cairn decision, not a missing vendor
@@ -319,11 +319,35 @@ cairn privacy exclude --path "secrets/**"   # never captured at all
 cairn doctor --json | jq '.dispositions'    # what was declined, and why
 ```
 
+One machine-scoped value does reach the server, and it is worth naming because
+it is the exception that proves the rule. Cairn mints a `writer_id` once per
+local store — a UUID from a random generator, with no hostname, hardware serial,
+OS machine id, MAC address, account name or filesystem path in it. It answers
+"did these two records come from the same writer" and "is there a gap in this
+writer's stream", which is what health and evidence need; it does not answer
+"which machine is this", and nothing compares one writer's stream against
+another's to decide anything.
+
 ## Principles
 
-- **Local-first.** Everything works offline. Capture, recall, briefing, handoff, and search
-  never need a network. Cairn never blocks the agent it is attached to: capture hooks have a
-  250 ms deadline, always exit 0, and drop work rather than wait.
+- **Fail-soft, not offline-authoritative.** Cairn never blocks the agent it is attached to:
+  capture hooks have a 250 ms deadline, always exit 0, and drop work rather than wait. An
+  unlinked project *is* fully local — its own store is the only authority there is, and
+  capture, recall, briefing, handoff and search need no network at all.
+
+  A **linked** project is different, and the difference is the point of the feature. Durable
+  knowledge belongs to the server, and what happens when the server cannot be reached is
+  spelled out rather than glossed:
+
+  - the agent keeps working, and every hook still exits 0;
+  - safe capture and knowledge commands queue as specified and go out when the server returns;
+  - a briefing already authorized for **this account and this session** may be served from the
+    bounded local cache, labelled cached;
+  - a cache miss, or a cache belonging to another account, does **not** promote local copies of
+    server-owned knowledge into authority — the briefing says durable memory is unavailable this
+    turn rather than serving something it cannot check the caller against;
+  - canonical knowledge the server has accepted survives losing this machine entirely, which is
+    the guarantee the arrangement buys.
 - **Private by default.** No conversation transcripts. No unbounded command output. Secrets
   redacted before anything is written. **Raw observations never leave your machine** — a
   shared memory carries evidence identifiers and a count, never the observation rows behind
