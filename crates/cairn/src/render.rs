@@ -154,13 +154,18 @@ pub fn briefing(payload: &ContextPayload) -> String {
     if !b.patterns.is_empty() {
         out.push_str("\n## Patterns from other projects (unverified here)\n");
         for p in &b.patterns {
+            // The overlap clause appears only when a comparison actually
+            // ran. A server-selected canonical pattern carries no count, and
+            // printing "0 signals matched" would assert a comparison that
+            // never happened.
+            let matched = match p.signal_overlap {
+                Some(1) => " (1 signal matched)".to_string(),
+                Some(n) => format!(" ({n} signals matched)"),
+                None => String::new(),
+            };
             out.push_str(&format!(
-                "- **{}** ({}, {} signal{} matched): {}\n",
-                p.title,
-                p.trust,
-                p.signal_overlap,
-                if p.signal_overlap == 1 { "" } else { "s" },
-                p.approach
+                "- **{}** ({}{}): {}\n",
+                p.title, p.trust, matched, p.approach
             ));
             if let Some(cause) = &p.alternative_cause {
                 out.push_str(&format!("  - another cause found behind this: {cause}\n"));

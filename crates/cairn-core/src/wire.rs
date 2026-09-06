@@ -1955,7 +1955,14 @@ pub struct BriefingPattern {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_this_first: Option<String>,
     /// How many of this project's own signals matched.
-    pub signal_overlap: usize,
+    ///
+    /// **Absent when nothing matched signals.** A server-selected canonical
+    /// pattern is chosen by the retrieval budget, not by comparing this
+    /// project's error signals against anything, so there is no overlap count
+    /// to report — and `0` would be a claim about a comparison that never
+    /// ran. The local matcher, which does compare, still reports its number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signal_overlap: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

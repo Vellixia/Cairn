@@ -584,6 +584,49 @@ fn merge_durable_sections(payload: &mut Value, sections: &Value) {
             briefing.insert(key.into(), json!(items));
         }
     }
+
+    // **The server's canonical patterns, and only those.**
+    //
+    // This section used not to be merged at all, and the omission was the
+    // canonical pattern-delivery defect. The server selected a `PatternRef`,
+    // spent budget on it and recorded it as selected; the daemon then rendered
+    // whatever its *local* matcher found in `reusable_patterns` — a different
+    // store, with different identities — and reported the transmission
+    // successful, at which point the server copied its selected refs into
+    // `delivered_context`. A reference could be recorded as delivered without
+    // the pattern behind it ever having been rendered.
+    //
+    // Each item is rendered under the id the server traced, from the canonical
+    // fields the server sent with it, so the reference, the budgeted content
+    // and the text the agent reads are one record. `signal_overlap` is absent
+    // because no signal comparison ran: the server selected by budget.
+    let patterns: Vec<Value> = sections
+        .get("patterns")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| {
+                    let id = item.get("knowledge_id")?.as_str()?;
+                    let p = item.get("pattern")?;
+                    Some(json!({
+                        "id": id,
+                        "title": p.get("title").and_then(Value::as_str).unwrap_or_default(),
+                        "trust": p.get("trust").and_then(Value::as_str).unwrap_or("sanitized"),
+                        "verified_in_this_project": false,
+                        "applicability": p.get("applicability").cloned().unwrap_or(json!([])),
+                        "approach": p.get("approach").and_then(Value::as_str).unwrap_or_default(),
+                        "constraints": p.get("constraints").cloned().unwrap_or(json!([])),
+                    }))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if patterns.is_empty() {
+        briefing.remove("patterns");
+    } else {
+        briefing.insert("patterns".into(), json!(patterns));
+    }
 }
 
 /// Add what a caller needs beyond the rendered briefing itself: whether this

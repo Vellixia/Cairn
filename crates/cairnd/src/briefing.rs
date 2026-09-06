@@ -237,7 +237,24 @@ pub async fn build(
     let pins = level0_pins(daemon, project.id, &git.branch, task.as_ref()).await;
 
     let config = daemon.config.read().await.clone();
-    let patterns = level1_patterns(daemon, project.id, session, &git.branch, &config).await;
+    // **Only a local build selects patterns locally** (FR-895a, the canonical
+    // pattern-delivery invariant).
+    //
+    // Under `FromServer` the server has already selected, budgeted and traced
+    // the canonical `PatternRef`s this briefing is answering with, and a second
+    // selection here reads a different store — `reusable_patterns`, this
+    // machine's own promoted rows, which share no identity with the server's
+    // `shared_patterns`. Running it anyway produced the defect this gate
+    // closes: the server traced pattern X, the daemon rendered local pattern Y
+    // or nothing, and the transmission report then let X be recorded as
+    // delivered. The server's own section is merged in afterwards by
+    // `deliver::merge_durable_sections`, which is the only path a canonical
+    // pattern reaches a linked project's briefing by.
+    let patterns = if local_durable {
+        level1_patterns(daemon, project.id, session, &git.branch, &config).await
+    } else {
+        Vec::new()
+    };
     let caps = cairn_core::context::Caps {
         goal_max_tokens: config.goal_max_tokens,
         warnings_in_context_max: config.warnings_in_context_max,
@@ -432,7 +449,7 @@ async fn level1_patterns(
             constraints: p.constraints,
             alternative_cause,
             check_this_first,
-            signal_overlap: overlap,
+            signal_overlap: Some(overlap),
         });
     }
     out

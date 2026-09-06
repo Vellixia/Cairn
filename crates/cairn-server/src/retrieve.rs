@@ -200,6 +200,20 @@ pub struct RetrieveRequest {
 /// remained at that point**, sufficient to redo the selection by hand. Both
 /// travel per item rather than as a summary, because a total cannot be
 /// unwound into the sequence that produced it.
+/// A canonical pattern, as the briefing renders one.
+///
+/// Owner-scoped and server-owned. It travels with the selection so that the
+/// reference the trace records, the content the budget paid for and the text
+/// the agent reads are one record rather than three.
+#[derive(Debug, Clone, Serialize)]
+pub struct SectionPattern {
+    pub title: String,
+    pub approach: String,
+    pub constraints: Vec<String>,
+    pub applicability: Vec<String>,
+    pub trust: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct SectionItem {
     pub reference_key: String,
@@ -208,6 +222,16 @@ pub struct SectionItem {
     pub domain: Option<&'static str>,
     pub knowledge_id: Uuid,
     pub content: String,
+    /// The canonical record's own fields, for the sections whose rendered
+    /// shape is more than a line of text.
+    ///
+    /// Only `patterns` populates it, and it exists because the daemon must
+    /// render **this** pattern — the one the server selected, budgeted and
+    /// traced — rather than run a second selection of its own against a
+    /// different local store. `content` above is what the budget was spent on;
+    /// this is the same record, in the fields the briefing's own type has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<SectionPattern>,
     pub selection_rule: &'static str,
     pub rank: i32,
     pub cost: usize,
@@ -253,6 +277,10 @@ struct Candidate {
     section: &'static str,
     content: String,
     source_updated_at: DateTime<Utc>,
+    /// Set for `patterns` only. Carried from the candidate read all the way to
+    /// the section item, so the record that was budgeted is the record that is
+    /// rendered.
+    pattern: Option<SectionPattern>,
 }
 
 impl Candidate {
@@ -516,6 +544,7 @@ async fn generate(
                     domain: candidate.domain(),
                     knowledge_id: candidate.reference.record_id(),
                     content: candidate.content.clone(),
+                    pattern: candidate.pattern.clone(),
                     selection_rule: rule,
                     rank,
                     cost,
@@ -718,7 +747,7 @@ async fn gather(
     // Patterns are owner-only. `shared_patterns` describes where a pattern is
     // stored, not who may see it (data-model.md §6.2).
     let patterns = sqlx::query(
-        "SELECT pattern_id, title, problem, approach, updated_at
+        "SELECT pattern_id, title, approach, updated_at, constraints, applicability, trust
            FROM shared_patterns
           WHERE owner_user_id = $1 AND forgotten_at IS NULL
           ORDER BY updated_at DESC, pattern_id
@@ -729,16 +758,38 @@ async fn gather(
     .fetch_all(pool)
     .await?;
     for row in patterns {
+        let strings = |v: Value| -> Vec<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let pattern = SectionPattern {
+            title: row.get::<String, _>(1),
+            approach: row.get::<String, _>(2),
+            constraints: strings(row.get::<Value, _>(4)),
+            applicability: strings(row.get::<Value, _>(5)),
+            trust: row.get::<String, _>(6),
+        };
         out.push(Candidate {
             reference: Reference::Pattern(PatternRef(row.get::<Uuid, _>(0))),
             section: "patterns",
-            content: format!(
-                "{} — {} Approach: {}",
-                row.get::<String, _>(1),
-                row.get::<String, _>(2),
-                row.get::<String, _>(3)
-            ),
-            source_updated_at: row.get::<DateTime<Utc>, _>(4),
+            // **The budgeted content is what the briefing renders**, which is
+            // the title and the approach. It used to include `problem` as
+            // well, so the budget paid for a sentence the agent never saw —
+            // over-charging rather than leaking, but still an accounting that
+            // did not describe the answer.
+            content: format!("{} — Approach: {}", pattern.title, pattern.approach),
+            // Index 3, because the select list changed when the canonical
+            // fields were added. It stayed at 4 through one build and cost a
+            // whole suite: `row.get` panics on a decode mismatch, the panic
+            // took the connection with it, and the failure surfaced as a
+            // request that got no reply rather than as a wrong column.
+            source_updated_at: row.get::<DateTime<Utc>, _>(3),
+            pattern: Some(pattern),
         });
     }
 
@@ -764,6 +815,7 @@ async fn gather(
             section: "personal_notes",
             content: row.get::<String, _>(1),
             source_updated_at: row.get::<DateTime<Utc>, _>(2),
+            pattern: None,
         });
     }
 
@@ -785,6 +837,7 @@ async fn gather(
             section: "team_guidance",
             content: row.get::<String, _>(1),
             source_updated_at: row.get::<DateTime<Utc>, _>(2),
+            pattern: None,
         });
     }
 
@@ -820,6 +873,7 @@ async fn project_memory(
             section,
             content: row.get::<String, _>(1),
             source_updated_at: row.get::<DateTime<Utc>, _>(2),
+            pattern: None,
         })
         .collect())
 }
